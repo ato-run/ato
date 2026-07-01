@@ -67,11 +67,13 @@ Existing Store listing, **additive** fields per capsule:
 ```
 
 ### `POST /v1/capsules/:capsule_id/snapshot-jobs`
-Enqueue a snapshot build. **admin/staging only.**
+Enqueue a snapshot build. **admin/staging only** (see §2.5 Auth). **Idempotent**
+(see §2.6): pass `Idempotency-Key: <uuid>` (or body `client_request_id`).
 ```jsonc
 // request (optional; defaults from the capsule's default web target)
-{ "target_label": "web", "profile": "default", "source_ref": "…" }
-// 202 Accepted
+{ "target_label": "web", "profile": "default", "source_ref": "…",
+  "client_request_id": "uuid" }         // or the Idempotency-Key header
+// 202 Accepted (new)  |  200 OK (idempotent replay of an existing job)
 { "job_id": "job_…", "status": "queued" }
 // 409 if not eligible → { "error": "CAPSULE_NOT_READY_STATE_ELIGIBLE", "blockers": [...] }
 ```
@@ -104,47 +106,86 @@ Latest **sealed** snapshot (404 if none).
 }
 ```
 
+## 2.5 Auth / ownership
+
+- **Snapshot enqueue** (`POST snapshot-jobs`) and job/build reads are **admin +
+  staging** only. A public capsule does **not** grant public snapshot-build access.
+- **Runs are user-scoped.** `POST /v1/runs` requires an authenticated user;
+  `runs.user_id` is the creator. Only the **run owner** (or an admin) may
+  `GET /v1/runs/:id` or `POST /v1/runs/:id/stop` — a non-owner gets `403`
+  (`RUN_FORBIDDEN`), never another user's `app_url`/receipt.
+- A capsule being **publicly runnable** (`public_run_eligible`) governs *whether*
+  a signed-in user may start a run — it does **not** make run control endpoints
+  public or another user's run visible.
+
+## 2.6 Idempotency
+
+`POST snapshot-jobs` and `POST /v1/runs` accept an `Idempotency-Key` header (or
+`client_request_id` in the body). A repeat with the **same key + same
+(user, capsule, snapshot, provider)** returns the **existing** job/run (`200`),
+never a duplicate builder/runner — this defends against PWA double-clicks,
+retries, and network resends (which otherwise cause VM double-charge, runner
+exhaustion, and orphans). Keys are retained long enough to cover client retry
+windows.
+
 ## 3. Run Control API
 
 ### `POST /v1/runs`
 ```jsonc
-// request
+// request  (Idempotency-Key header or client_request_id; user-scoped)
 {
   "capsule_id": "…",
   "snapshot_id": "snap_… | null",         // null ⇒ latest sealed
   "target": "web",
   "provider": "managed_cloud | desktop",
-  "mem_backend_policy": "file | uffd_preview | auto_preview"   // optional, default "file"
+  "mem_backend_policy": "file | uffd_preview | auto_preview",  // optional, default "file"
+  "client_request_id": "uuid"             // or the Idempotency-Key header
 }
-// 201
+// 201 (new)  |  200 (idempotent replay)
 {
   "run_id": "run_…",
-  "status": "restoring",
-  "app_url": null,                        // filled when ready (managed_cloud)
+  "status": "queued",                     // see the run state machine (§4)
   "provider": "managed_cloud",
   "selected_snapshot_id": "snap_…",
-  "receipt_id": "rcpt_…"
+  "receipt_id": "rcpt_…",
+  // provider-specific handoff (see §3.1) — filled as the run progresses:
+  "app_url": null,                        // managed_cloud, when ready
+  "handoff_url": null,                    // desktop deeplink, when dispatched
+  "desktop_session_id": null,             // desktop, when dispatched
+  "unsupported_reason": null              // set instead if the provider can't run it
 }
 ```
 Rejections (fail-closed, with reason): `SNAPSHOT_NOT_READY`, `CAPSULE_REQUIRES_*`,
-`RUNNER_UNSUPPORTED`, `UFFD_PREVIEW_DISABLED`, `UFFD_UNSUPPORTED`.
+`RUNNER_UNSUPPORTED`, `UFFD_PREVIEW_DISABLED`, `UFFD_UNSUPPORTED`, `RUN_FORBIDDEN`.
+
+### 3.1 Provider handoff model
+
+| provider | ready response | how it runs |
+|---|---|---|
+| `managed_cloud` | `app_url` (`https://<session>.app.ato.run`) | Run Control restores on a managed runner and exposes the URL directly. |
+| `desktop` | `handoff_url` + `desktop_session_id`, **or** `unsupported_reason` | Run Control does **not** restore Desktop itself. It records the run + the sealed-snapshot **metadata** (the Desktop reuses the Registry, it is not re-implemented) and returns a handoff the local Desktop Companion consumes (deeplink). Desktop pulls the artifact and restores locally, or reports `unsupported_reason` (no local restore support). `app_url` is null for `desktop`. |
 
 ### `GET /v1/runs/:run_id`
+Owner or admin only.
 ```jsonc
 {
   "run_id": "run_…",
-  "status": "restoring | binding | ready | failed | stopped",
-  "app_url": "https://<session>.app.ato.run | null",
+  "status": "queued | dispatching | restoring | binding | ready | failed | stopped",
+  "app_url": "https://<session>.app.ato.run | null",     // managed_cloud
+  "handoff_url": "… | null",                             // desktop
+  "desktop_session_id": "… | null",
+  "unsupported_reason": "… | null",
   "receipt": { … },
-  "failure_reason": "RUNNER_CLASS_MISMATCH | SNAPSHOT_RESTORE_FAILED | HEALTHCHECK_FAILED | …"
+  "failure_reason": "RUNNER_CLASS_MISMATCH | SNAPSHOT_RESTORE_FAILED | HEALTHCHECK_FAILED | RUNNER_UNSUPPORTED | …"
 }
 ```
 > `binding` is a reserved lifecycle state for Phase 8; in this initiative a
-> no-binding run goes `restoring → ready` and never enters `binding`.
+> no-binding run goes `… → restoring → ready` and never enters `binding`.
 
 ### `POST /v1/runs/:run_id/stop`
-Stops the session; runner tears down VM/tap/overlay. `200 { "status": "stopped" }`.
-Idempotent (double-stop safe). On teardown error → `TEARDOWN_FAILED` (logged, best-effort).
+Owner or admin only. Stops the session; runner tears down VM/tap/overlay.
+`200 { "status": "stopped" }`. Idempotent (double-stop safe). On teardown error →
+`TEARDOWN_FAILED` (logged, best-effort).
 
 ## 4. State machines
 
@@ -158,19 +199,49 @@ queued ──▶ building ──▶ verifying ──▶ sealed
 
 ### Run
 ```text
-(POST /v1/runs) ─▶ restoring ─▶ ready ─▶ stopped
-                      │            ▲
-                      └──▶ failed  │  (POST /stop from ready|restoring)
+(POST /v1/runs) ─▶ queued ─▶ dispatching ─▶ restoring ─▶ ready ─▶ stopped
+                     │           │              │           ▲
+                     └───────────┴──────────────┴──▶ failed  │  (POST /stop)
               [binding] reserved (Phase 8; unused for no-binding runs)
 ```
+- `queued` — accepted; no runner slot yet (runner capacity may be full).
+- `dispatching` — a runner/slot is claimed; artifact being fetched/verified.
+- `restoring` — snapshot restore in progress on the runner.
+- `ready` — healthcheck passed; `app_url`/`handoff_url` available.
+
+`queued`/`dispatching` are first-class so Run Control composes cleanly with
+managed Cloud Slots / runner capacity (a run is never silently dropped when no
+slot is free).
 
 ## 5. Artifact metadata (what a runner needs to restore)
 
 A runner (managed cloud or desktop) restores from the `capsule_snapshots` record
-+ the artifact at `artifact_location`. The restore gate is fail-closed on
-`runner_class_id` (exact match) — a `RUNNER_CLASS_MISMATCH` is surfaced, never a
-silent wrong-class restore. `execution_id` ties the run to a reproducible
-identity. `no_binding_required` MUST be `true` for any run in this initiative.
++ the artifact at `artifact_location`. `execution_id` ties the run to a
+reproducible identity. `no_binding_required` MUST be `true` for any run in this
+initiative.
+
+### 5.1 Integrity verification (runner MUST, before restore)
+
+`artifact_location` is a hint, **not trusted on its own**. Before restoring, the
+runner MUST verify, fail-closed:
+
+1. the fetched artifact's **`artifact_manifest_hash`** matches the record;
+2. every **CAS chunk hash** matches (content-addressed; a corrupt/substituted
+   chunk is rejected);
+3. the record's **`snapshot_backend`** is one this runner can drive;
+4. the host **`runner_class_id`** exactly matches the snapshot's (the existing
+   restore Prepare gate) — no silent wrong-class restore;
+5. **`execution_id`** is consistent with the manifest.
+
+On any mismatch the run fails closed with the specific reason — never a
+best-effort restore of unverified bytes:
+
+| check fails | error |
+|---|---|
+| artifact absent / location unreachable | `SNAPSHOT_ARTIFACT_MISSING` |
+| manifest hash / CAS chunk hash mismatch | `SNAPSHOT_RESTORE_FAILED` |
+| backend not drivable here | `RUNNER_UNSUPPORTED` |
+| runner class mismatch | `RUNNER_CLASS_MISMATCH` |
 
 ## 6. DB schema (minimal)
 
@@ -178,7 +249,8 @@ identity. `no_binding_required` MUST be `true` for any run in this initiative.
 capsule_snapshot_jobs(
   id, capsule_id, source_ref, target_label, profile,
   status,                         -- queued|building|verifying|sealed|failed
-  requested_by, created_at, started_at, finished_at,
+  requested_by, idempotency_key,  -- unique(capsule_id, idempotency_key) → dedup enqueue
+  created_at, started_at, finished_at,
   error_summary,                  -- no secrets
   receipt_json
 );
@@ -193,8 +265,11 @@ capsule_snapshots(
 
 runs(
   id, capsule_id, snapshot_id, user_id, provider,
-  status,                         -- restoring|binding|ready|failed|stopped
-  app_url, selected_mem_backend,  -- file|uffd_preview
+  idempotency_key,                -- unique(user_id, idempotency_key) → dedup run
+  status,                         -- queued|dispatching|restoring|binding|ready|failed|stopped
+  app_url,                        -- managed_cloud
+  handoff_url, desktop_session_id, unsupported_reason,  -- desktop
+  selected_mem_backend,           -- file|uffd_preview
   created_at, ready_at, stopped_at,
   receipt_json, failure_reason
 );
@@ -214,6 +289,7 @@ numbers migrations — renumber past the current head at implementation time.)
 | `CAPSULE_REQUIRES_EXTERNAL_CAPABILITY` | required `[external.*]` present | eligibility / run |
 | `RUNNER_UNSUPPORTED` | selected provider can't restore this class | run |
 | `RUNNER_CLASS_MISMATCH` | host runner class ≠ snapshot's | run/restore |
+| `RUN_FORBIDDEN` | caller is not the run owner (nor admin) | run get/stop |
 | `SNAPSHOT_ARTIFACT_MISSING` | artifact not found at location | restore |
 | `SNAPSHOT_RESTORE_FAILED` | restore failed on the runner | run |
 | `HEALTHCHECK_FAILED` | app didn't become healthy | build / run |
