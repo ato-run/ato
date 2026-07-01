@@ -1084,4 +1084,24 @@ mod tests {
             assert!(store.load(&k).is_none(), "any identity change ⇒ miss");
         }
     }
+
+    /// U13 (#880): a corrupt profile file is IGNORED (load ⇒ None), never a bad
+    /// profile applied — a garbage prefetch list must not reach the page-server.
+    #[test]
+    fn hotset_profile_store_ignores_corrupt_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("h");
+        let store = HotsetProfileStore::open(&root);
+        let key = HotsetKey {
+            capsule_manifest_hash: "blake3:cap".into(),
+            runner_class_id: String::new(),
+            memory_image_hash: "blake3:mem".into(),
+            backend_id: "firecracker".into(),
+            page_size: 4096,
+            memory_size: 1 << 20,
+        };
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(format!("{}.json", key.id())), b"}{ not json at all").unwrap();
+        assert!(store.load(&key).is_none(), "corrupt profile file ⇒ None (never a bad profile)");
+    }
 }
