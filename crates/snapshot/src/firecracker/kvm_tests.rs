@@ -967,3 +967,72 @@ fn fc_kvm_binding_lease_live_e2e() {
     assert!(scan_for_secret(&after, secret.as_bytes()).is_empty(), "secret in host artifacts after stop");
     eprintln!("### PRC-E2E-DONE bound=true nosecret=true teardown=clean");
 }
+
+/// PR D3 (#912): binding negative paths in a real restored microVM — missing delivery,
+/// expired lease, and revoke all leave the session NOT bound-ready with `/health`
+/// failing (the app never sees a binding). Complements the positive live E2E.
+#[test]
+#[ignore]
+fn fc_kvm_binding_negative_paths() {
+    if !FirecrackerBackend::kvm_present() { eprintln!("SKIP: no kvm"); return; }
+    let rootfs = match std::env::var("ATO_FC_BINDING_ROOTFS") {
+        Ok(p) if !p.is_empty() => std::fs::read(p).expect("read ATO_FC_BINDING_ROOTFS"),
+        _ => { eprintln!("SKIP: ATO_FC_BINDING_ROOTFS not set"); return; }
+    };
+    let b = FirecrackerBackend::new();
+    if !b.probe().available { eprintln!("SKIP: fc unavailable"); return; }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let input = BuildReadyStateInput {
+        store: &store,
+        capsule_manifest_hash: "blake3:fc-kvm-test".to_string(),
+        runner_class: None,
+        layers: BuildLayers { rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
+        restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/ready".to_string()), expected_ready_ms: Some(5000) },
+        sanitizer_contract: SanitizerContract::default(),
+        declared_secret_markers: vec![],
+    };
+    unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
+    let m = b.build_ready_state(input).expect("build").manifest;
+    let overlay = dir.path().join("ov");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
+    unsafe { std::env::remove_var("ATO_FC_VSOCK") };
+    let r = r.expect("restore");
+    let uds = r.session.vsock_uds.clone().expect("vsock uds");
+    let port = r.session.guest_port.unwrap_or(8080);
+    let gip = FirecrackerConfig::default().guest_ip;
+    let deliver = |ttl: u64| {
+        let lease = protocol::binding_lease::BindingLease::issue(
+            protocol::binding_lease::BindingLeaseId::new("l-neg"),
+            protocol::binding_lease::BindingName::parse("api_key").unwrap(),
+            protocol::binding_lease::SecretValue::new("sk-neg-secret"),
+            0, ttl,
+        );
+        serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(lease.to_delivery())).unwrap()
+    };
+    let health_ok = |g: &str, p: u16| http_get(g, p, "/health").contains("ok");
+
+    // 1. Missing delivery: not bound-ready, /health fails.
+    let q = vsock_exchange(&uds, 1025, &["{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(q[0].contains("\"ready\":false"), "missing delivery ⇒ not ready: {q:?}");
+    assert!(!health_ok(&gip, port), "missing delivery ⇒ /health fails");
+
+    // 2. Expired lease (expires in the past): QueryBoundReady scrubs ⇒ not ready.
+    let e = vsock_exchange(&uds, 1025, &[deliver(1), "{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(e[0].contains("\"kind\":\"ack\""), "expired lease still acked on deliver: {e:?}");
+    assert!(e[1].contains("\"ready\":false"), "expired lease scrubbed ⇒ not ready: {e:?}");
+
+    // 3. Revoke before health: deliver (valid) ⇒ ready, then revoke ⇒ not ready + /health fails.
+    let d = vsock_exchange(&uds, 1025, &[deliver(3_600_000_000), "{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(d[1].contains("\"ready\":true"), "valid lease ⇒ ready: {d:?}");
+    let rv = vsock_exchange(&uds, 1025, &["{\"kind\":\"revoke\",\"id\":\"l-neg\"}".into(), "{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(rv[0].contains("scrubbed"), "revoke ⇒ scrubbed: {rv:?}");
+    assert!(rv[1].contains("\"ready\":false"), "revoke ⇒ not ready: {rv:?}");
+    let mut health_gone = false;
+    for _ in 0..20 { if !health_ok(&gip, port) { health_gone = true; break; } std::thread::sleep(Duration::from_millis(200)); }
+    assert!(health_gone, "after revoke /health must fail (binding scrubbed)");
+    eprintln!("### PRD3-NEG missing+expired+revoke all not-ready, /health gated");
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
