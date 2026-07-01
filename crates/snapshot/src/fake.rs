@@ -129,6 +129,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
         let manifest = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),
             capsule_manifest_hash: input.capsule_manifest_hash,
+            has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
             execution_id: None,
             layers,

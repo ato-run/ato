@@ -135,6 +135,7 @@ mod tests {
         let m = ReadyStateManifest {
             schema: crate::manifest::READY_STATE_SCHEMA.to_string(),
             capsule_manifest_hash: "blake3:x".to_string(),
+            has_vsock: false,
             runner_class_id: None,
             execution_id: None,
             layers: crate::manifest::ReadyStateLayers::default(),

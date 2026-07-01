@@ -747,6 +747,7 @@ impl SnapshotBackend for FirecrackerBackend {
         let manifest = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),
             capsule_manifest_hash: input.capsule_manifest_hash,
+            has_vsock: vsock_enabled(),
             runner_class_id,
             execution_id: None,
             layers,
@@ -955,7 +956,9 @@ impl SnapshotBackend for FirecrackerBackend {
             })?;
             // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
             // uds_path; FC re-creates that socket on load, so its directory must exist.
-            let vsock_uds = if vsock_enabled() {
+            // The artifact self-describes vsock (manifest.has_vsock) so restore preps it
+            // without an env flag; ATO_FC_VSOCK still forces it for the smokes.
+            let vsock_uds = if vsock_enabled() || input.manifest.has_vsock {
                 let uds = vsock_uds_path(&input.manifest.capsule_manifest_hash);
                 if let Some(d) = uds.parent() {
                     std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
@@ -1319,6 +1322,7 @@ mod tests {
         ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),
             capsule_manifest_hash: "blake3:x".to_string(),
+            has_vsock: false,
             runner_class_id: None,
             execution_id: None,
             layers: ReadyStateLayers::default(),
