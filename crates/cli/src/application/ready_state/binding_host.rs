@@ -6,7 +6,7 @@
 //! transport is a trait so this is testable in-process now; PR 7 supplies a real vsock
 //! channel. No-binding sessions have no leases, so the gate returns immediately.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::BindingLease;
 
