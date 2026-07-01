@@ -293,6 +293,58 @@ fn fc_kvm_uffd_preview_input_reaches_health() {
     assert_clean_teardown(&overlay);
 }
 
+/// U12 (#879): the keyed hotset-profile store persists a profile across restores.
+/// Restore #1 (cold profile store) runs demand-only and SAVES its pre-health hotset;
+/// restore #2 auto-LOADS the profile for the same identity and prefetches it, cutting
+/// demand faults sharply. Proves persistence + the identity keying end-to-end.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_hotset_persistence_round_trip() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd hotset persistence needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let profile_store = dir.path().join("hotset-store");
+    // SAFETY: KVM suite runs --test-threads=1; vars removed before returning.
+    unsafe {
+        std::env::set_var("ATO_FC_UFFD", "cas");
+        std::env::set_var("ATO_FC_UFFD_HOTSET_STORE", &profile_store);
+    }
+    // Restore #1: cold store → demand-only, saves the profile.
+    let ov1 = dir.path().join("ov1");
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov1.clone(), host_runner_class: None, uffd_preview: false }).expect("restore 1");
+    let rec1 = read_uffd_receipt(&ov1);
+    b.stop(r1.session).expect("stop 1");
+    // The profile file now exists (one .json under the store).
+    let saved = std::fs::read_dir(&profile_store).map(|d| d.count()).unwrap_or(0);
+    // Restore #2: warm store → auto-loads the profile, prefetches.
+    let ov2 = dir.path().join("ov2");
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: ov2.clone(), host_runner_class: None, uffd_preview: false }).expect("restore 2");
+    let rec2 = read_uffd_receipt(&ov2);
+    b.stop(r2.session).expect("stop 2");
+    unsafe {
+        std::env::remove_var("ATO_FC_UFFD");
+        std::env::remove_var("ATO_FC_UFFD_HOTSET_STORE");
+    }
+
+    assert_eq!(saved, 1, "restore #1 persisted exactly one keyed profile");
+    assert!(rec1.vm_reaches_health && rec2.vm_reaches_health);
+    assert_eq!(rec1.prefetch_pages, 0, "restore #1 is demand-only");
+    assert!(rec2.prefetch_pages > 0, "restore #2 loaded + prefetched the persisted profile");
+    assert!(
+        rec2.page_fault_count < rec1.page_fault_count / 2,
+        "persisted hotset cut demand faults: {} → {}",
+        rec1.page_fault_count,
+        rec2.page_fault_count
+    );
+    eprintln!("### U12-PERSIST faults {} → {} (prefetched {})", rec1.page_fault_count, rec2.page_fault_count, rec2.prefetch_pages);
+    assert_clean_teardown(&ov2);
+}
+
 fn read_hotset_trace(overlay: &std::path::Path) -> crate::uffd_page_server::HotsetTrace {
     let text = std::fs::read_to_string(overlay.join(".hotset-trace.json")).expect("hotset trace written");
     serde_json::from_str(&text).expect("parse hotset trace")
