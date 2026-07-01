@@ -26,6 +26,9 @@ pub(crate) struct BindingPreviewReceipt {
     pub bound_ready: bool,
     pub traffic_exposed_after_bound_ready: bool,
     pub binding_failure_reason: Option<String>,
+    /// L3 (#912): which SecretResolver would supply the values (`env` in preview) —
+    /// resolver id only, never a value. `None` when no binding delivery is planned.
+    pub resolver_kind: Option<String>,
 }
 
 impl BindingPreviewReceipt {
@@ -40,6 +43,7 @@ impl BindingPreviewReceipt {
             bound_ready: false,
             traffic_exposed_after_bound_ready: false,
             binding_failure_reason: None,
+            resolver_kind: None,
         }
     }
 
@@ -173,25 +177,27 @@ pub(crate) fn ensure_pre_bind_before_seal(session_is_bound: bool) -> Result<()> 
     Ok(())
 }
 
-/// Phase 8a-RunGate PR D2 (#912): resolve declared binding names to leases from the
-/// preview secret source — `ATO_BINDING_<name>` env vars. A required binding with no
-/// value **fails closed** (the run must not expose an unbound session). Values are read
-/// here and handed straight to the wire; they are never logged or recorded.
-pub(crate) fn resolve_binding_leases(names: &[String], now_ms: u64, ttl_ms: u64) -> Result<Vec<BindingLease>> {
-    use protocol::binding_lease::{BindingLeaseId, BindingName, SecretValue};
+/// Phase 8a-RunGate PR D2 (#912) / L3: resolve declared binding names to leases via a
+/// [`SecretResolver`](super::secret_resolver::SecretResolver) (the preview uses
+/// `EnvSecretResolver`; Vault/cloud/config resolvers slot in later). A binding the
+/// resolver cannot resolve **fails closed** (the run must not expose an unbound
+/// session). Values go straight to the wire; never logged or recorded.
+pub(crate) fn resolve_binding_leases(
+    resolver: &dyn super::secret_resolver::SecretResolver,
+    names: &[String],
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Result<Vec<BindingLease>> {
+    use protocol::binding_lease::{BindingLeaseId, BindingName};
     let mut leases = Vec::with_capacity(names.len());
     for name in names {
-        let env = format!("ATO_BINDING_{name}");
-        let value = std::env::var(&env)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("binding '{name}' has no value; set {env} (preview secret source)"))?;
+        let value = resolver.resolve(name)?; // fail-closed on missing/unresolvable
         let bname = BindingName::parse(name.as_str())
             .map_err(|e| anyhow::anyhow!("invalid binding name '{name}': {e}"))?;
         leases.push(BindingLease::issue(
             BindingLeaseId::new(format!("lease-{name}")),
             bname,
-            SecretValue::new(value),
+            value,
             now_ms,
             ttl_ms,
         ));
@@ -397,14 +403,15 @@ mod tests {
         set("ATO_BINDING_api_key", Some("sk-secret-xyz"));
         set("ATO_BINDING_db_url", None);
 
+        let resolver = super::super::secret_resolver::EnvSecretResolver;
         // present ⇒ a lease carrying the value (only on the wire payload).
-        let ok = resolve_binding_leases(&["api_key".into()], 1000, 60_000).unwrap();
+        let ok = resolve_binding_leases(&resolver, &["api_key".into()], 1000, 60_000).unwrap();
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].to_delivery().value.expose(), "sk-secret-xyz");
         assert!(!format!("{:?}", ok[0]).contains("sk-secret-xyz"), "lease Debug must redact");
 
         // missing ⇒ FAIL CLOSED (never expose an unbound session).
-        let err = resolve_binding_leases(&["db_url".into()], 1000, 60_000).unwrap_err().to_string();
+        let err = resolve_binding_leases(&resolver, &["db_url".into()], 1000, 60_000).unwrap_err().to_string();
         assert!(err.contains("db_url") && err.contains("ATO_BINDING_db_url"), "{err}");
 
         set("ATO_BINDING_api_key", None);
