@@ -3776,6 +3776,17 @@ where
                 )?;
             }
             let backend = ready_state::backend::select_backend()?;
+            // L2 (#912): placement capability gate. A binding-required preview must
+            // fail closed BEFORE restore if this backend/host cannot deliver bindings
+            // (no vsock / not firecracker / not x86_64) — never silently fall back.
+            if binding_gate_active {
+                let caps = backend.probe();
+                if !caps.binding.supports_binding_lease {
+                    let reason = caps.binding.unavailable_reason().unwrap_or_else(|| "binding-lease unsupported".into());
+                    tracing::warn!(target: "ato::ready_state", %reason, "binding preview fail-closed (placement)");
+                    anyhow::bail!("Ready-State binding preview requested but this host cannot deliver bindings: {reason}");
+                }
+            }
             // Orphan Ready-State overlays from crashed prior serving runs are
             // reaped/quarantined by the canonical startup sweep
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no

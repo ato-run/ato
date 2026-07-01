@@ -71,6 +71,7 @@ impl SnapshotBackend for KataBackend {
             // UFFD mem_backend is a Firecracker snapshot feature; Kata is not it.
             supports_uffd_mem_backend: false,
             uffd_reason: Some("kata is not a Firecracker UFFD mem-backend".to_string()),
+            binding: Default::default(),
         }
     }
 
