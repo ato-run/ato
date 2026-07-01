@@ -94,7 +94,7 @@ fn fc_engine_smoke_build_restore_stop() {
     let cas = store::open_store(state_root, &hash).unwrap();
     let sealed = store::load_manifest(state_root, &hash).unwrap().expect("sealed manifest present");
     let overlay = dir.path().join("ov");
-    let restored = restore::restore_and_expose(be.as_ref(), &cas, sealed, overlay.clone(), None)
+    let restored = restore::restore_and_expose(be.as_ref(), &cas, sealed, overlay.clone(), None, false)
         .expect("engine restore failed");
     assert_eq!(restored.session.guest_port, Some(8080), "restored session exposes the app port");
     assert!(restored.session.restored_bytes > 0);

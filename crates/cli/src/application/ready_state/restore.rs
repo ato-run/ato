@@ -83,7 +83,7 @@ mod tests {
             .manifest;
 
         let overlay = dir.path().join("ov");
-        let receipt = restore_and_expose(&backend, &store, manifest, overlay.clone(), None).unwrap();
+        let receipt = restore_and_expose(&backend, &store, manifest, overlay.clone(), None, false).unwrap();
         assert_eq!(receipt.session.guest_port, Some(8080));
         assert!(overlay.exists());
 
