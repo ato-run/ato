@@ -1022,8 +1022,9 @@ fn fc_kvm_binding_negative_paths() {
     assert!(e[0].contains("\"kind\":\"ack\""), "expired lease still acked on deliver: {e:?}");
     assert!(e[1].contains("\"ready\":false"), "expired lease scrubbed ⇒ not ready: {e:?}");
 
-    // 3. Revoke before health: deliver (valid) ⇒ ready, then revoke ⇒ not ready + /health fails.
-    let d = vsock_exchange(&uds, 1025, &[deliver(3_600_000_000), "{\"kind\":\"query_bound_ready\"}".into()]);
+    // 3. Revoke before health: deliver (valid, far-future expiry vs the guest's real
+    // clock) ⇒ ready, then revoke ⇒ not ready + /health fails.
+    let d = vsock_exchange(&uds, 1025, &[deliver(100_000_000_000_000), "{\"kind\":\"query_bound_ready\"}".into()]);
     assert!(d[1].contains("\"ready\":true"), "valid lease ⇒ ready: {d:?}");
     let rv = vsock_exchange(&uds, 1025, &["{\"kind\":\"revoke\",\"id\":\"l-neg\"}".into(), "{\"kind\":\"query_bound_ready\"}".into()]);
     assert!(rv[0].contains("scrubbed"), "revoke ⇒ scrubbed: {rv:?}");
