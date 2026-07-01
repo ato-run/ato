@@ -89,8 +89,11 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
     if m.secrets.values().any(|s| s.required) {
         return Err("capsule requires secrets (secrets.*.required)".into());
     }
-    if m.bindings.values().any(|b| b.required) {
-        return Err("capsule requires bindings (bindings.*.required)".into());
+    // Any binding disqualifies a v1 no-binding snapshot — this is also how user-files
+    // and oauth are declared (BindingKind::UserFiles / ::Oauth), so it rejects those too.
+    if !m.bindings.is_empty() {
+        let kinds: Vec<String> = m.bindings.values().map(|b| format!("{:?}", b.kind).to_ascii_lowercase()).collect();
+        return Err(format!("capsule declares bindings ({}) — v1 is no-binding only", kinds.join(", ")));
     }
     if !m.external.is_empty() {
         return Err("capsule requires external services (external.*)".into());
@@ -160,13 +163,60 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
     Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, port, healthcheck })
 }
 
+/// A conservative GitHub **owner** login: 1–39 chars, alphanumeric or single hyphens,
+/// not starting/ending with a hyphen. Anything else (empty, `/`, `..`, path-like) fails.
+pub fn valid_github_owner(owner: &str) -> bool {
+    let ok_len = (1..=39).contains(&owner.len());
+    let ok_chars = owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let ends = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_alphanumeric());
+    ok_len && ok_chars && ends(owner.bytes().next()) && ends(owner.bytes().next_back())
+}
+
+/// A conservative GitHub **repo** name: 1–100 chars of `[A-Za-z0-9._-]`, excluding the
+/// pathological `.` / `..`.
+pub fn valid_github_repo(repo: &str) -> bool {
+    let ok_len = (1..=100).contains(&repo.len());
+    let ok_chars = repo.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    ok_len && ok_chars && repo != "." && repo != ".."
+}
+
+/// Validate a relative `subdir` **before** it is joined to the checkout: reject absolute
+/// paths, any `..` component, and non-normal components (root/prefix). The canonical
+/// containment check after checkout closes symlink traversal.
+fn validate_subdir(subdir: &str) -> Result<(), String> {
+    use std::path::Component;
+    let p = Path::new(subdir);
+    if p.is_absolute() {
+        return Err(format!("subdir {subdir:?} must be relative"));
+    }
+    for c in p.components() {
+        match c {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => return Err(format!("subdir {subdir:?} may not contain '..'")),
+            Component::RootDir | Component::Prefix(_) => return Err(format!("subdir {subdir:?} has an illegal prefix")),
+        }
+    }
+    Ok(())
+}
+
 /// Materialize the **server-resolved** source: shallow-clone `owner/repo`, check out the
 /// pinned `commit`, and return the (optionally sub-directoried) source root. Never trusts
 /// a client-provided ref — the caller passes the identity resolved from the approved
-/// store record.
+/// store record — and treats even that record as an input boundary: `owner`/`repo` are
+/// validated as GitHub identities, `commit` must be a pinned 40-hex sha, and `subdir`
+/// cannot escape the checkout (lexical + canonical containment).
 pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<&str>, dest: &Path) -> Result<PathBuf, String> {
+    if !valid_github_owner(owner) {
+        return Err(format!("invalid github owner {owner:?}"));
+    }
+    if !valid_github_repo(repo) {
+        return Err(format!("invalid github repo {repo:?}"));
+    }
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("refusing non-pinned commit {commit:?} (need a full 40-char sha)"));
+    }
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
     }
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
@@ -186,14 +236,31 @@ pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<
     run(&["remote", "add", "origin", &url], Some(dest))?;
     run(&["fetch", "-q", "--depth", "1", "origin", commit], Some(dest))?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
+
+    contained_source_root(dest, subdir)
+}
+
+/// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout, with
+/// a `capsule.toml`. Validates the subdir lexically, then canonicalizes both paths and
+/// requires containment (closing symlink traversal). Split out so the containment logic is
+/// unit-testable without a network clone.
+pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
     let root = match subdir.filter(|s| !s.is_empty()) {
         Some(s) => dest.join(s),
         None => dest.to_path_buf(),
     };
-    if !root.join("capsule.toml").exists() {
-        return Err(format!("no capsule.toml at resolved source root {}", root.display()));
+    let dest_canon = dest.canonicalize().map_err(|e| format!("canonicalize checkout: {e}"))?;
+    let root_canon = root.canonicalize().map_err(|e| format!("resolved source root {} not found: {e}", root.display()))?;
+    if !root_canon.starts_with(&dest_canon) {
+        return Err(format!("subdir escapes the checkout: {} is outside {}", root_canon.display(), dest_canon.display()));
     }
-    Ok(root)
+    if !root_canon.join("capsule.toml").exists() {
+        return Err(format!("no capsule.toml at resolved source root {}", root_canon.display()));
+    }
+    Ok(root_canon)
 }
 
 /// Build a bootable ext4 rootfs from a materialized `source_dir` + a resolved `spec`,
@@ -230,7 +297,19 @@ fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
     format!(
         r#"set -euo pipefail
 TAG="ato-rootfs-$$"
+CID=""
+MNT=""
 BUILD=$(mktemp -d)
+# Failure-safe cleanup: on ANY exit (success or a failed build/export/mount/cp) leave no
+# container, image, mount, or temp dir behind (Phase 8 orphan-hardening parity).
+cleanup() {{
+  [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1 || true
+  docker rmi -f "$TAG" >/dev/null 2>&1 || true
+  if [ -n "$MNT" ] && mountpoint -q "$MNT" 2>/dev/null; then umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null || true; fi
+  [ -n "$MNT" ] && rmdir "$MNT" 2>/dev/null || true
+  [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
+}}
+trap cleanup EXIT
 cp -a "$ATO_SRC/." "$BUILD/"
 cat > "$BUILD/Dockerfile" <<DOCKER
 FROM {base}
@@ -243,7 +322,7 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
 CID=$(docker create "$TAG")
 mkdir -p "$BUILD/rootfs"
 docker export "$CID" | tar -x -C "$BUILD/rootfs"
-docker rm -f "$CID" >/dev/null; docker rmi -f "$TAG" >/dev/null 2>&1 || true
+docker rm -f "$CID" >/dev/null; CID=""
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port} + healthcheck {hc}) and keep PID 1 alive.
@@ -269,7 +348,8 @@ mkfs.ext4 -q -F "$ATO_OUT"
 MNT=$(mktemp -d)
 mount -o loop "$ATO_OUT" "$MNT"
 cp -a "$BUILD/rootfs/." "$MNT/"
-sync; umount "$MNT"; rmdir "$MNT"; rm -rf "$BUILD"
+sync; umount "$MNT"
+# MNT/BUILD are removed by the EXIT trap (also on any failure above).
 "#,
         base = spec.base_image,
         install = install,
@@ -368,7 +448,71 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn materialize_rejects_a_non_pinned_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let err = materialize_source("acme", "app", "main", None, dir.path()).unwrap_err();
-        assert!(err.contains("non-pinned"));
+        let sha = "a".repeat(40);
+        assert!(materialize_source("acme", "app", "main", None, dir.path()).unwrap_err().contains("non-pinned"));
+        // path-like / invalid owner + repo are rejected before any network use.
+        assert!(materialize_source("../evil", "app", &sha, None, dir.path()).unwrap_err().contains("owner"));
+        assert!(materialize_source("acme/x", "app", &sha, None, dir.path()).unwrap_err().contains("owner"));
+        assert!(materialize_source("acme", "a/b", &sha, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(materialize_source("acme", "..", &sha, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(materialize_source("acme", "", &sha, None, dir.path()).unwrap_err().contains("repo"));
+    }
+
+    #[test]
+    fn github_identity_validation() {
+        assert!(valid_github_owner("acme") && valid_github_owner("a-b-1") && valid_github_owner("A9"));
+        assert!(!valid_github_owner("") && !valid_github_owner("-a") && !valid_github_owner("a-") && !valid_github_owner("a/b") && !valid_github_owner(".."));
+        assert!(valid_github_repo("my.app_1-x") && valid_github_repo("a"));
+        assert!(!valid_github_repo("") && !valid_github_repo(".") && !valid_github_repo("..") && !valid_github_repo("a/b") && !valid_github_repo("a b"));
+    }
+
+    #[test]
+    fn subdir_escape_is_rejected_lexically_and_canonically() {
+        // Lexical: absolute + parent-dir rejected before any fs access.
+        assert!(validate_subdir("/etc").unwrap_err().contains("relative"));
+        assert!(validate_subdir("../x").unwrap_err().contains(".."));
+        assert!(validate_subdir("a/../../b").unwrap_err().contains(".."));
+        assert!(validate_subdir("sub/dir").is_ok());
+
+        // Canonical: a symlinked subdir that resolves OUTSIDE the checkout is rejected.
+        let checkout = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("capsule.toml"), b"x").unwrap();
+        // in-checkout subdir with a capsule.toml is accepted.
+        std::fs::create_dir_all(checkout.path().join("app")).unwrap();
+        std::fs::write(checkout.path().join("app").join("capsule.toml"), b"x").unwrap();
+        assert!(contained_source_root(checkout.path(), Some("app")).is_ok());
+        // a symlink pointing outside ⇒ containment fails.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), checkout.path().join("evil")).unwrap();
+            let err = contained_source_root(checkout.path(), Some("evil")).unwrap_err();
+            assert!(err.contains("escapes the checkout"), "{err}");
+        }
+    }
+
+    #[test]
+    fn non_required_binding_is_also_rejected() {
+        // user-files / oauth are BindingKinds; any binding (even required=false) is out.
+        let uf = format!("{}\n[bindings.user_files]\nkind = \"user_files\"\nrequired = false\nscope = \"user\"\n", base_toml());
+        assert!(derive_build_spec(&parse(&uf), &probe_python()).unwrap_err().contains("binding"));
+        let oauth = format!("{}\n[bindings.login]\nkind = \"oauth\"\nrequired = false\nscope = \"user\"\n", base_toml());
+        assert!(derive_build_spec(&parse(&oauth), &probe_python()).unwrap_err().contains("binding"));
+    }
+
+    #[test]
+    fn build_script_has_a_failure_cleanup_trap() {
+        let spec = RootfsBuildSpec {
+            runtime: RuntimeKind::Python,
+            base_image: "python:3.11-slim".into(),
+            install_cmd: Some("true".into()),
+            build_cmd: None,
+            start_cmd: "python3 app.py".into(),
+            port: 8080,
+            healthcheck: "/health".into(),
+        };
+        let script = build_rootfs_script(&spec, 512);
+        assert!(script.contains("trap cleanup EXIT"), "script must install an EXIT cleanup trap");
+        assert!(script.contains("docker rm -f") && script.contains("docker rmi -f") && script.contains("umount"), "cleanup must reap container/image/mount");
     }
 }

@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use capsule::foundation::types::manifest::CapsuleManifest;
-use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec, materialize_source};
+use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec, materialize_source, valid_github_owner, valid_github_repo};
 
 fn arg(flags: &[&str]) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
@@ -45,6 +45,14 @@ fn main() {
         let repo = arg(&["--repo"]).unwrap_or_else(|| fail("args", "--repo required".into()));
         let commit = arg(&["--commit"]).unwrap_or_else(|| fail("args", "--commit (40-hex) required".into()));
         let subdir = arg(&["--subdir"]);
+        // Validate identity BEFORE it is used to build a filesystem path (belt + suspenders;
+        // materialize_source re-validates). A path-like repo must never shape the work dir.
+        if !valid_github_owner(&owner) {
+            fail("source", format!("invalid github owner {owner:?}"));
+        }
+        if !valid_github_repo(&repo) {
+            fail("source", format!("invalid github repo {repo:?}"));
+        }
         let work = std::env::temp_dir().join(format!("rootfs-build-{repo}"));
         let _ = std::fs::remove_dir_all(&work);
         materialize_source(&owner, &repo, &commit, subdir.as_deref(), &work).unwrap_or_else(|e| fail("source", e))
