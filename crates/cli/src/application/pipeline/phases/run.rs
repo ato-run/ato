@@ -3793,11 +3793,55 @@ where
             }
             let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
                 .join(format!("ready-state-{}", std::process::id()));
-            // U11 (#878): opt-in local UFFD preview. No-binding capsules only (the
-            // binding guard above already failed closed otherwise); local CAS only;
-            // FAIL CLOSED on an unsupported host (never silently File-fallback when
-            // the preview was explicitly requested).
-            let uffd_preview = if ready_state::flags::uffd_preview_enabled() {
+            // U15 (#882): opt-in AUTO-selection preview — the pure selector chooses
+            // File vs UFFD from the real facts (no-binding only, local CAS, remote
+            // off), gracefully falling back to File on an unsupported host. Takes
+            // precedence over the U11 forced preview.
+            let uffd_preview = if ready_state::flags::uffd_auto_preview_enabled() {
+                let caps = backend.probe();
+                let no_bindings = !ready_state::bindings::requires_runtime_bindings(&rs_manifest)
+                    .requires_bindings();
+                let has_mem = plan
+                    .manifest
+                    .layers
+                    .memory
+                    .as_ref()
+                    .and_then(|m| m.chunks.first())
+                    .map(|c| store.has_chunk(&c.hash))
+                    .unwrap_or(false);
+                let inputs = snapshot::mem_backend_selector::MemBackendInputs {
+                    host_supports_uffd: caps.supports_uffd_mem_backend,
+                    runner_class_compatible: true,
+                    capsule_no_bindings: no_bindings,
+                    local_cas_has_memory: has_mem,
+                    // The engine auto-loads a persisted hotset profile (U12) when
+                    // present; the selector only decides File vs UFFD here.
+                    hotset_profile_available: false,
+                    remote_preview_enabled: false,
+                    remote_available: false,
+                    validation_mode: ready_state::flags::ready_state_enabled(),
+                    fallback_allowed: true,
+                };
+                let decision = snapshot::mem_backend_selector::decide_mem_backend(&inputs);
+                use snapshot::mem_backend_selector::MemBackendChoice::*;
+                let engage = matches!(decision.choice, UffdLocal | UffdHotset | UffdRemote);
+                tracing::info!(
+                    target: "ato::ready_state",
+                    choice = ?decision.choice,
+                    engage,
+                    reasons = ?decision.reasons,
+                    "READY-STATE auto-select mem_backend (preview)"
+                );
+                let _ = request
+                    .reporter
+                    .notify(format!(
+                        "Ready-State auto-select: {:?} — {}",
+                        decision.choice,
+                        decision.reasons.last().map(String::as_str).unwrap_or("")
+                    ))
+                    .await;
+                engage
+            } else if ready_state::flags::uffd_preview_enabled() {
                 let caps = backend.probe();
                 if !caps.supports_uffd_mem_backend {
                     anyhow::bail!(

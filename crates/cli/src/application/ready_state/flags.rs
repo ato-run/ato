@@ -10,6 +10,7 @@ const BACKEND_VAR: &str = "ATO_SNAPSHOT_BACKEND";
 const FOREGROUND_VAR: &str = "ATO_READY_STATE_FOREGROUND";
 const UFFD_DIAGNOSTICS_VAR: &str = "ATO_READY_STATE_UFFD_DIAGNOSTICS";
 const UFFD_PREVIEW_VAR: &str = "ATO_READY_STATE_UFFD_PREVIEW";
+const UFFD_AUTO_PREVIEW_VAR: &str = "ATO_READY_STATE_UFFD_AUTO_PREVIEW";
 
 /// Parse a bool env value with the same accept-set as the capsule crate's
 /// `parse_bool_env` (`1/true/yes/on` → true, `0/false/no/off`/empty → false).
@@ -59,6 +60,18 @@ pub(crate) fn uffd_diagnostics_enabled() -> bool {
 /// unsupported host. Off by default → the File path is unchanged.
 pub(crate) fn uffd_preview_enabled() -> bool {
     std::env::var(UFFD_PREVIEW_VAR)
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
+/// U15 (#882): opt-in **auto-selection preview**. `ATO_READY_STATE_UFFD_AUTO_PREVIEW=1`
+/// lets the pure selector ([`snapshot::mem_backend_selector`]) CHOOSE File vs UFFD
+/// from the real facts (no-binding only, local CAS, remote off), instead of the U11
+/// forced-on preview. On an unsupported host it gracefully falls back to File. Off by
+/// default → the File path is unchanged.
+pub(crate) fn uffd_auto_preview_enabled() -> bool {
+    std::env::var(UFFD_AUTO_PREVIEW_VAR)
         .ok()
         .and_then(|v| parse_bool_env(&v))
         .unwrap_or(false)
@@ -141,6 +154,25 @@ mod tests {
         assert!(uffd_preview_enabled());
         set(Some("0"));
         assert!(!uffd_preview_enabled());
+        set(prev.as_deref());
+    }
+
+    #[test]
+    fn uffd_auto_preview_off_by_default_on_when_truthy() {
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var(UFFD_AUTO_PREVIEW_VAR).ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var(UFFD_AUTO_PREVIEW_VAR, v),
+                None => std::env::remove_var(UFFD_AUTO_PREVIEW_VAR),
+            }
+        };
+        set(None);
+        assert!(!uffd_auto_preview_enabled(), "off by default");
+        set(Some("1"));
+        assert!(uffd_auto_preview_enabled());
+        set(Some("0"));
+        assert!(!uffd_auto_preview_enabled());
         set(prev.as_deref());
     }
 }
