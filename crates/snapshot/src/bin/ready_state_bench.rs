@@ -235,7 +235,7 @@ fn main() {
             // prime the cache once (not counted)
             clear_layer_cache();
             let ov = keep_dir.join("prime");
-            if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None }) {
+            if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
                 let _ = backend.stop(r.session);
             }
             let _ = bench::drain();
@@ -247,7 +247,7 @@ fn main() {
             let ov = keep_dir.join(format!("ov-{mode}-{i}"));
             let _ = bench::drain();
             let t = Instant::now();
-            let r = match backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None }) {
+            let r = match backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
                 Ok(r) => r,
                 Err(e) => { raw.push(json!({"phase":"restore","mode":mode,"run":i,"error": e.to_string()})); continue; }
             };

@@ -204,6 +204,12 @@ pub struct RestoreReadyStateInput<'a> {
     /// manifest pins no class (e.g. host detection has not landed yet), the gate
     /// is a no-op.
     pub host_runner_class: Option<RunnerClassId>,
+    /// U11 (#878): opt-in UFFD **local** preview. When `true`, a backend that
+    /// supports it restores memory via the UFFD local-CAS demand path instead of
+    /// the eager File rehydrate. Default `false` = the unchanged File path. The
+    /// caller only sets this on a supported host for a no-binding capsule (else
+    /// the backend fails closed).
+    pub uffd_preview: bool,
 }
 
 /// A restored, running (or restorable) session. The data a later adapter wraps

@@ -9,6 +9,7 @@ const ENABLE_VAR: &str = "ATO_READY_STATE_ENABLED";
 const BACKEND_VAR: &str = "ATO_SNAPSHOT_BACKEND";
 const FOREGROUND_VAR: &str = "ATO_READY_STATE_FOREGROUND";
 const UFFD_DIAGNOSTICS_VAR: &str = "ATO_READY_STATE_UFFD_DIAGNOSTICS";
+const UFFD_PREVIEW_VAR: &str = "ATO_READY_STATE_UFFD_PREVIEW";
 
 /// Parse a bool env value with the same accept-set as the capsule crate's
 /// `parse_bool_env` (`1/true/yes/on` → true, `0/false/no/off`/empty → false).
@@ -47,6 +48,17 @@ pub(crate) fn foreground_serve_enabled() -> bool {
 /// as before** — a pure observation with no behavior change. Off by default.
 pub(crate) fn uffd_diagnostics_enabled() -> bool {
     std::env::var(UFFD_DIAGNOSTICS_VAR)
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
+/// U11 (#878): opt-in **local UFFD preview**. `ATO_READY_STATE_UFFD_PREVIEW=1` makes
+/// `ato run` restore a no-binding capsule via the UFFD local-CAS demand path (instead
+/// of the eager File rehydrate) on a supported host — and **fail closed** on an
+/// unsupported host. Off by default → the File path is unchanged.
+pub(crate) fn uffd_preview_enabled() -> bool {
+    std::env::var(UFFD_PREVIEW_VAR)
         .ok()
         .and_then(|v| parse_bool_env(&v))
         .unwrap_or(false)
@@ -110,6 +122,25 @@ mod tests {
         assert!(uffd_diagnostics_enabled());
         set(Some("0"));
         assert!(!uffd_diagnostics_enabled());
+        set(prev.as_deref());
+    }
+
+    #[test]
+    fn uffd_preview_off_by_default_on_when_truthy() {
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var(UFFD_PREVIEW_VAR).ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var(UFFD_PREVIEW_VAR, v),
+                None => std::env::remove_var(UFFD_PREVIEW_VAR),
+            }
+        };
+        set(None);
+        assert!(!uffd_preview_enabled(), "off by default");
+        set(Some("1"));
+        assert!(uffd_preview_enabled());
+        set(Some("0"));
+        assert!(!uffd_preview_enabled());
         set(prev.as_deref());
     }
 }
