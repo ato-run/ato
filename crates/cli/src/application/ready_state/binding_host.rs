@@ -47,6 +47,35 @@ pub(crate) fn establish_bindings(
     bail!("bound-ready gate not satisfied; pending bindings: {last_pending:?}");
 }
 
+/// PR 5: revoke a single lease by id — the agent scrubs that binding's tmpfs file
+/// immediately (e.g. a TTL that was not renewed). Returns the agent's `Scrubbed` ack.
+#[allow(dead_code)] // wired into lease renewal in a later PR
+pub(crate) fn revoke_binding(
+    channel: &mut dyn AgentChannel,
+    id: protocol::binding_lease::BindingLeaseId,
+) -> Result<()> {
+    match channel.request(HostToAgent::Revoke { id })? {
+        AgentToHost::Scrubbed { .. } => Ok(()),
+        AgentToHost::Error { message } => bail!("revoke failed: {message}"),
+        other => bail!("unexpected agent response to Revoke: {other:?}"),
+    }
+}
+
+/// PR 5: stop-scrub — on `ato stop`, ask the agent to revoke + scrub **all** bindings
+/// (tmpfs wipe) BEFORE the host tears the VM/tap/overlay down. **Never re-seals.** This
+/// is best-effort: the VM teardown destroys the tmpfs regardless, so a channel error is
+/// logged, not fatal.
+#[allow(dead_code)] // wired into ato stop in PR 6
+pub(crate) fn stop_scrub(channel: &mut dyn AgentChannel) -> Result<()> {
+    match channel.request(HostToAgent::Stop) {
+        // The agent scrubs all and reports the (now-unbound) state back.
+        Ok(AgentToHost::BoundReady { .. }) | Ok(AgentToHost::Scrubbed { .. }) => Ok(()),
+        Ok(AgentToHost::Error { message }) => bail!("stop-scrub reported error: {message}"),
+        Ok(other) => bail!("unexpected agent response to Stop: {other:?}"),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +135,35 @@ mod tests {
         let err = establish_bindings(&mut ch, &leases, 3).unwrap_err().to_string();
         assert!(err.contains("api_key"), "should report the missing binding: {err}");
         assert!(err.contains("pending"), "should fail closed: {err}");
+    }
+
+    #[test]
+    fn revoke_scrubs_the_binding_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ch = MockChannel {
+            session: BindingSession::new(vec![BindingName::parse("db_url").unwrap()], TmpfsBindingSink::new(dir.path())),
+            now_ms: 1_000,
+        };
+        establish_bindings(&mut ch, &[lease("db_url", "l1")], 2).unwrap();
+        assert!(dir.path().join("db_url").exists());
+        revoke_binding(&mut ch, BindingLeaseId::new("l1")).unwrap();
+        assert!(!dir.path().join("db_url").exists(), "revoke scrubbed the tmpfs file");
+    }
+
+    #[test]
+    fn stop_scrub_wipes_all_bindings_before_teardown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ch = MockChannel {
+            session: BindingSession::new(
+                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                TmpfsBindingSink::new(dir.path()),
+            ),
+            now_ms: 1_000,
+        };
+        establish_bindings(&mut ch, &[lease("db_url", "l1"), lease("api_key", "l2")], 2).unwrap();
+        assert!(dir.path().join("db_url").exists() && dir.path().join("api_key").exists());
+        stop_scrub(&mut ch).unwrap();
+        assert!(!dir.path().join("db_url").exists(), "stop-scrub wiped db_url");
+        assert!(!dir.path().join("api_key").exists(), "stop-scrub wiped api_key");
     }
 }
