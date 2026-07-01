@@ -99,7 +99,7 @@ impl FirecrackerAgentChannel {
         stream.set_read_timeout(Some(timeout))?;
         stream.set_write_timeout(Some(timeout))?;
         // Firecracker host→guest CONNECT handshake.
-        write!(stream, "CONNECT {guest_port}\n")?;
+        writeln!(stream, "CONNECT {guest_port}")?;
         stream.flush()?;
         let mut reader = BufReader::new(stream.try_clone()?);
         let mut line = String::new();
@@ -171,6 +171,45 @@ pub(crate) fn ensure_pre_bind_before_seal(session_is_bound: bool) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Phase 8a-RunGate PR D2 (#912): resolve declared binding names to leases from the
+/// preview secret source — `ATO_BINDING_<name>` env vars. A required binding with no
+/// value **fails closed** (the run must not expose an unbound session). Values are read
+/// here and handed straight to the wire; they are never logged or recorded.
+pub(crate) fn resolve_binding_leases(names: &[String], now_ms: u64, ttl_ms: u64) -> Result<Vec<BindingLease>> {
+    use protocol::binding_lease::{BindingLeaseId, BindingName, SecretValue};
+    let mut leases = Vec::with_capacity(names.len());
+    for name in names {
+        let env = format!("ATO_BINDING_{name}");
+        let value = std::env::var(&env)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("binding '{name}' has no value; set {env} (preview secret source)"))?;
+        let bname = BindingName::parse(name.as_str())
+            .map_err(|e| anyhow::anyhow!("invalid binding name '{name}': {e}"))?;
+        leases.push(BindingLease::issue(
+            BindingLeaseId::new(format!("lease-{name}")),
+            bname,
+            SecretValue::new(value),
+            now_ms,
+            ttl_ms,
+        ));
+    }
+    Ok(leases)
+}
+
+/// PR D2: connect the guest-agent over the restored session's vsock UDS, deliver the
+/// leases, and block until bound-ready — **fail closed** on any failure. The caller
+/// must NOT expose traffic unless this returns `Ok`.
+pub(crate) fn bind_before_expose(
+    vsock_uds: &std::path::Path,
+    leases: &[BindingLease],
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, timeout)
+        .context("connect guest-agent over vsock")?;
+    establish_bindings(&mut channel, leases, 10)
 }
 
 /// PR 5: revoke a single lease by id — the agent scrubs that binding's tmpfs file
@@ -331,6 +370,28 @@ mod tests {
         // 4. stop-scrub wipes tmpfs.
         stop_scrub(&mut ch).unwrap();
         assert!(!dir.path().join("db_url").exists(), "tmpfs scrubbed after stop");
+    }
+
+    #[test]
+    fn resolve_binding_leases_from_env_fails_closed_on_missing() {
+        // SAFETY: single-threaded test; vars restored at the end.
+        let set = |k: &str, v: Option<&str>| unsafe {
+            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+        };
+        set("ATO_BINDING_api_key", Some("sk-secret-xyz"));
+        set("ATO_BINDING_db_url", None);
+
+        // present ⇒ a lease carrying the value (only on the wire payload).
+        let ok = resolve_binding_leases(&["api_key".into()], 1000, 60_000).unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].to_delivery().value.expose(), "sk-secret-xyz");
+        assert!(!format!("{:?}", ok[0]).contains("sk-secret-xyz"), "lease Debug must redact");
+
+        // missing ⇒ FAIL CLOSED (never expose an unbound session).
+        let err = resolve_binding_leases(&["db_url".into()], 1000, 60_000).unwrap_err().to_string();
+        assert!(err.contains("db_url") && err.contains("ATO_BINDING_db_url"), "{err}");
+
+        set("ATO_BINDING_api_key", None);
     }
 
     #[test]
