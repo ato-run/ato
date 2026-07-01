@@ -7,6 +7,11 @@ description = "Ready-State guest-agent — Phase 8a binding-lease control plane 
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 
+# The guest-agent binary runs INSIDE the guest (built into the rootfs), not a
+# distributed host CLI — cargo-dist must not try to package/MSI it.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 serde_json = "1.0"
 protocol = { path = "../protocol" }
