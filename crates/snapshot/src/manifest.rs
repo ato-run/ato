@@ -26,6 +26,12 @@ pub struct ReadyStateManifest {
     /// `blake3:<hex>` of the originating capsule manifest (opaque here — the
     /// caller computes it from `capsule.toml`).
     pub capsule_manifest_hash: String,
+    /// Phase 8a-HW (#912): whether the snapshot was built with a Firecracker vsock
+    /// device (the guest-agent binding channel). The artifact self-describes this so
+    /// restore preps the vsock UDS without an env flag. `false` for artifacts built
+    /// without vsock (the default).
+    #[serde(default)]
+    pub has_vsock: bool,
     /// Restore-compatibility class the snapshot was built for (plan §5). `None`
     /// until host detection lands.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,6 +250,7 @@ mod tests {
         let m = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.into(),
             capsule_manifest_hash: "blake3:cap".into(),
+            has_vsock: false,
             runner_class_id: None,
             execution_id: None,
             layers: ReadyStateLayers {
