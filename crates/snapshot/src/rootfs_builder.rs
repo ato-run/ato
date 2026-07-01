@@ -230,24 +230,32 @@ CID=$(docker create "$TAG")
 mkdir -p "$BUILD/rootfs"
 docker export "$CID" | tar -x -C "$BUILD/rootfs"
 docker rm -f "$CID" >/dev/null; docker rmi -f "$TAG" >/dev/null 2>&1 || true
-# init: exec the capsule start command as PID 1's child (serves port {port} + {hc}).
-mkdir -p "$BUILD/rootfs/sbin"
-cat > "$BUILD/rootfs/sbin/ato-init" <<'INIT'
+# Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
+# pseudo + tmpfs filesystems, then run the capsule start command in the background
+# (serves port {port} + healthcheck {hc}) and keep PID 1 alive.
+rm -f "$BUILD/rootfs/sbin/init"
+cat > "$BUILD/rootfs/sbin/init" <<INIT
 #!/bin/sh
-mount -t proc proc /proc 2>/dev/null || true
-mount -t sysfs sys /sys 2>/dev/null || true
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 cd /app
-exec {start}
+( {start} ) >/tmp/app.log 2>&1 &
+while true; do sleep 1000; done
 INIT
-chmod +x "$BUILD/rootfs/sbin/ato-init"
-ln -sf /sbin/ato-init "$BUILD/rootfs/sbin/init" 2>/dev/null || true
+chmod +x "$BUILD/rootfs/sbin/init"
 rm -f "$ATO_OUT"
 dd if=/dev/zero of="$ATO_OUT" bs=1M count={size} status=none
 mkfs.ext4 -q -F "$ATO_OUT"
 MNT=$(mktemp -d)
 mount -o loop "$ATO_OUT" "$MNT"
 cp -a "$BUILD/rootfs/." "$MNT/"
-umount "$MNT"; rmdir "$MNT"; rm -rf "$BUILD"
+sync; umount "$MNT"; rmdir "$MNT"; rm -rf "$BUILD"
 "#,
         base = spec.base_image,
         install = install,
