@@ -90,7 +90,7 @@ fn fc_kvm_build_restore_roundtrip() {
     assert!(receipt.manifest.layers.memory.is_some());
     assert!(receipt.manifest.runner_class_id.is_some());
     let m = receipt.manifest.clone();
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None }).expect("restore");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None, uffd_preview: false }).expect("restore");
     assert_eq!(r.session.guest_port, Some(8080));
     assert!(r.session.restored_bytes > 0);
     let overlay = r.session.overlay_root.clone();
@@ -149,7 +149,7 @@ fn fc_kvm_uffd_zero_pages_plumbing() {
     let overlay = dir.path().join("ov");
     // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
     unsafe { std::env::set_var("ATO_FC_UFFD", "zero") };
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
     let r = r.expect("restore (uffd zero)");
 
@@ -184,7 +184,7 @@ fn fc_kvm_uffd_real_pages_reaches_health() {
     let overlay = dir.path().join("ov");
     // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
     unsafe { std::env::set_var("ATO_FC_UFFD", "mem") };
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
     let r = r.expect("restore (uffd mem)");
     let port = r.session.guest_port.unwrap_or(8080);
@@ -224,7 +224,7 @@ fn fc_kvm_uffd_cas_demand_serves_from_local_cas() {
     let overlay = dir.path().join("ov");
     // SAFETY: KVM suite runs --test-threads=1; gate is removed before returning.
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
     let r = r.expect("restore (uffd cas)");
     let port = r.session.guest_port.unwrap_or(8080);
@@ -244,6 +244,50 @@ fn fc_kvm_uffd_cas_demand_serves_from_local_cas() {
     let gip = FirecrackerConfig::default().guest_ip;
     assert!(!http_get(&gip, port, "/health").is_empty(), "guest /health reachable over CAS-UFFD restore");
     eprintln!("### U2-RECEIPT mem_total={mem_total} {}", serde_json::to_string(&rec).unwrap());
+
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
+/// U11 (#878): the **product preview** drives UFFD local-CAS demand via the
+/// `RestoreReadyStateInput.uffd_preview` INPUT flag (not the test-only `ATO_FC_UFFD`
+/// env gate). With the env unset and `uffd_preview: true`, the restore must take the
+/// UFFD local-CAS path and reach `/health` — proving the input-driven wiring the CLI
+/// preview flag uses. Clean teardown.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_preview_input_reaches_health() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd preview needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let mem_total = m.layers.memory.as_ref().expect("memory layer").total_len;
+    let overlay = dir.path().join("ov");
+    // No ATO_FC_UFFD env — the INPUT flag alone drives the UFFD path.
+    assert!(std::env::var("ATO_FC_UFFD").is_err(), "env gate must be unset for this test");
+    let r = b
+        .restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: m,
+            overlay_root: overlay.clone(),
+            host_runner_class: None,
+            uffd_preview: true,
+        })
+        .expect("restore (uffd_preview input)");
+    let port = r.session.guest_port.unwrap_or(8080);
+
+    let rec = read_uffd_receipt(&overlay);
+    assert!(rec.vm_reaches_health, "input-driven preview must reach health");
+    assert!(rec.page_fault_count > 0, "faults served on demand");
+    assert!(rec.bytes_copied < mem_total / 2, "demand-only, not full materialization");
+    assert_eq!(rec.mem_backend, "uffd", "receipt records uffd mem_backend");
+    let gip = FirecrackerConfig::default().guest_ip;
+    assert!(!http_get(&gip, port, "/health").is_empty(), "guest /health reachable via input-driven UFFD");
+    eprintln!("### U11-RECEIPT {}", serde_json::to_string(&rec).unwrap());
 
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
@@ -271,7 +315,7 @@ fn fc_kvm_uffd_fault_trace_records_hotset() {
     let overlay = dir.path().join("ov");
     // SAFETY: KVM suite runs --test-threads=1; gate removed before returning.
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
     let r = r.expect("restore (uffd cas, trace)");
 
@@ -314,7 +358,7 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
     // Run 1: demand-only (cas) → trace → profile.
     let ov1 = dir.path().join("ov1");
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
-    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov1.clone(), host_runner_class: None });
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov1.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
     let r1 = r1.expect("restore1 (demand)");
     let rec1 = read_uffd_receipt(&ov1);
@@ -331,7 +375,7 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
         std::env::set_var("ATO_FC_UFFD", "cas");
         std::env::set_var("ATO_FC_UFFD_HOTSET", &profile_path);
     }
-    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: ov2.clone(), host_runner_class: None });
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: ov2.clone(), host_runner_class: None, uffd_preview: false });
     unsafe {
         std::env::remove_var("ATO_FC_UFFD");
         std::env::remove_var("ATO_FC_UFFD_HOTSET");
@@ -383,7 +427,7 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
     let overlay = dir.path().join("ov");
     let started = std::time::Instant::now();
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
 
     assert!(r.is_err(), "corrupt CAS memory chunk must fail closed, got Ok");
@@ -433,7 +477,7 @@ fn fc_kvm_uffd_remote_readthrough_reaches_health() {
         std::env::set_var("ATO_FC_UFFD", "cas");
         std::env::set_var("ATO_FC_UFFD_REMOTE", dir.path().join("remote"));
     }
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None });
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
     unsafe {
         std::env::remove_var("ATO_FC_UFFD");
         std::env::remove_var("ATO_FC_UFFD_REMOTE");
@@ -474,10 +518,10 @@ fn fc_kvm_rootfs_is_read_only_shared_across_restores() {
     let m = b.build_ready_state(build_input(&store, rootfs.clone(), vec![])).expect("build").manifest;
     let id_hex = m.layers.rootfs.as_ref().unwrap().id().hex().to_string();
     let stable = FirecrackerConfig::default().work_root.join("rootfs").join(format!("{id_hex}.ext4"));
-    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None }).expect("restore1");
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None, uffd_preview: false }).expect("restore1");
     let mtime1 = std::fs::metadata(&stable).unwrap().modified().unwrap();
     b.stop(r1.session).expect("stop1");
-    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov2"), host_runner_class: None }).expect("restore2");
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov2"), host_runner_class: None, uffd_preview: false }).expect("restore2");
     let mtime2 = std::fs::metadata(&stable).unwrap().modified().unwrap();
     b.stop(r2.session).expect("stop2");
     assert_eq!(mtime1, mtime2, "read-only rootfs was rewritten between restores (should be shared immutable)");
@@ -494,7 +538,7 @@ fn fc_kvm_restore_latency_20x() {
     for i in 0..20 {
         let ov = dir.path().join(format!("ov{i}"));
         let start = std::time::Instant::now();
-        let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov, host_runner_class: None }).expect("restore");
+        let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }).expect("restore");
         lat.push(start.elapsed().as_millis());
         b.stop(r.session).expect("stop");
     }
@@ -512,7 +556,7 @@ fn fc_kvm_runner_class_mismatch_fails_closed() {
     let store = CasStore::open(dir.path().join("cas")).unwrap();
     let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
     let wrong = capsule::foundation::install_lifecycle::RunnerClassId::from_hash("blake3:deliberately-wrong-class");
-    let err = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: Some(wrong) }).unwrap_err();
+    let err = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: Some(wrong), uffd_preview: false }).unwrap_err();
     assert!(matches!(err, SnapshotError::RunnerClassMismatch(_)), "expected mismatch, got {err:?}");
 }
 
@@ -526,13 +570,13 @@ fn fc_kvm_state_leak_regression() {
     let gip = FirecrackerConfig::default().guest_ip;
     let port = FirecrackerConfig::default().healthcheck_port;
     // restore #1: marker empty, then set it
-    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None }).expect("restore1");
+    let r1 = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov1"), host_runner_class: None, uffd_preview: false }).expect("restore1");
     let before = http_get(&gip, port, "/marker");
     http_post(&gip, port, "/marker", "leak-sentinel-12345");
     let after = http_get(&gip, port, "/marker");
     b.stop(r1.session).expect("stop1");
     // restore #2 fresh from same snapshot: marker must be empty again
-    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov2"), host_runner_class: None }).expect("restore2");
+    let r2 = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov2"), host_runner_class: None, uffd_preview: false }).expect("restore2");
     let fresh = http_get(&gip, port, "/marker");
     b.stop(r2.session).expect("stop2");
     assert_eq!(before, "", "fresh restore #1 marker not empty");
@@ -551,7 +595,7 @@ fn fc_kvm_no_secret_invariant() {
     let gip = FirecrackerConfig::default().guest_ip;
     let port = FirecrackerConfig::default().healthcheck_port;
     let sentinel = format!("FC-RUNTIME-SECRET-{}", std::process::id());
-    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov"), host_runner_class: None }).expect("restore");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: dir.path().join("ov"), host_runner_class: None, uffd_preview: false }).expect("restore");
     http_post(&gip, port, "/secret", &sentinel);
     assert_eq!(http_get(&gip, port, "/secret"), sentinel, "post-restore injection did not take");
     b.stop(r.session).expect("stop");
@@ -583,7 +627,7 @@ fn fc_kvm_cross_process_stop_via_record() {
     let session = {
         let backend_a = FirecrackerBackend::new();
         let r = backend_a
-            .restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None })
+            .restore(RestoreReadyStateInput { store: &store, manifest: m.clone(), overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false })
             .expect("restore");
         r.session
     };

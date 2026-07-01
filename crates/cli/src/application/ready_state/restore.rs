@@ -24,6 +24,7 @@ pub(crate) fn restore_and_expose(
     manifest: ReadyStateManifest,
     overlay_root: PathBuf,
     host_runner_class: Option<RunnerClassId>,
+    uffd_preview: bool,
 ) -> Result<RestoreReceipt> {
     let receipt = backend
         .restore(RestoreReadyStateInput {
@@ -31,6 +32,7 @@ pub(crate) fn restore_and_expose(
             manifest,
             overlay_root,
             host_runner_class,
+            uffd_preview,
         })
         .context("snapshot backend restore failed")?;
     Ok(receipt)
