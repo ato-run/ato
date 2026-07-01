@@ -3983,6 +3983,9 @@ where
                 ready_state_overlay_root: Some(session.overlay_root.clone()),
                 ready_state_session_id: Some(session.session_id.clone()),
                 ready_state_tap_dev: None,
+                // D3: record the vsock UDS for a bound session so `ato stop` can
+                // scrub the guest bindings before teardown.
+                ready_state_vsock_uds: if binding_gate_active { session.vsock_uds.clone() } else { None },
             };
             crate::runtime::process::ProcessManager::new()?.write_pid(&info)?;
             tracing::info!(
@@ -4102,6 +4105,7 @@ where
                 ready_state_overlay_root: None,
                 ready_state_session_id: None,
                 ready_state_tap_dev: None,
+                ready_state_vsock_uds: None,
             };
 
             let process_manager = crate::runtime::process::ProcessManager::new()?;
@@ -4620,6 +4624,7 @@ where
                     ready_state_overlay_root: None,
                     ready_state_session_id: None,
                     ready_state_tap_dev: None,
+                ready_state_vsock_uds: None,
                 };
 
                 let process_manager = crate::runtime::process::ProcessManager::new()?;
