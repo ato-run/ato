@@ -135,6 +135,7 @@ mod tests {
             supports_disposable_overlay: true,
             supports_uffd_mem_backend: false,
             uffd_reason: Some("test fixture".to_string()),
+            binding: Default::default(),
         }
     }
 
@@ -158,6 +159,7 @@ mod tests {
             supports_disposable_overlay: true,
             supports_uffd_mem_backend: false,
             uffd_reason: Some("test fixture".to_string()),
+            binding: Default::default(),
         }
     }
 

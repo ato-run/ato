@@ -81,6 +81,7 @@ impl SnapshotBackend for QemuBackend {
             // UFFD mem_backend is a Firecracker snapshot feature; QEMU is not it.
             supports_uffd_mem_backend: false,
             uffd_reason: Some("qemu is not a Firecracker UFFD mem-backend".to_string()),
+            binding: Default::default(),
         }
     }
 
