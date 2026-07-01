@@ -24,6 +24,20 @@ fn now_ms() -> u64 {
 }
 
 fn main() -> std::io::Result<()> {
+    // Transport mode selector (PR A). `stdio` (default) frames control messages as
+    // newline-delimited JSON over stdin/stdout. `vsock` (the production guest transport,
+    // same framing over an AF_VSOCK connection) is wired in PR B — until then it is a
+    // clear, fail-closed error rather than a silent fallback.
+    let mode = std::env::var("ATO_GUEST_AGENT_MODE").unwrap_or_else(|_| "stdio".to_string());
+    if mode == "vsock" {
+        eprintln!("ato-guest-agent: vsock transport is not wired yet (Phase 8a-HW PR B); use stdio");
+        std::process::exit(2);
+    }
+    if mode != "stdio" {
+        eprintln!("ato-guest-agent: unknown ATO_GUEST_AGENT_MODE={mode:?} (expected stdio|vsock)");
+        std::process::exit(2);
+    }
+
     // Required binding names from argv; secrets are delivered to the default tmpfs root
     // (`/run/ato/bindings`), or `ATO_BINDINGS_ROOT` when set (tests point it at a tmp dir).
     let required: Vec<BindingName> =
