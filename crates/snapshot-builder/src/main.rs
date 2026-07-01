@@ -83,9 +83,11 @@ struct ClaimResponse {
 #[derive(Debug, Clone, Serialize)]
 struct Artifact {
     capsule_manifest_hash: String,
+    execution_id: String,
     artifact_manifest_hash: String,
     runner_class_id: String,
     snapshot_backend: String,
+    artifact_location: String,
     healthcheck_url_path: String,
     no_secret_scan_clean: bool,
     rootfs_bytes: u64,
@@ -180,11 +182,30 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         return Err(fail("no_secret_scan", "sealed artifact failed the no-secret scan".into()));
     }
 
+    // Registry identity/location fields (capsule_snapshots contract, #154/#157). All must
+    // be real — never a placeholder. runner_class_id is REQUIRED (fail closed if the build
+    // did not pin one). execution_id comes from the sealed manifest, else a deterministic
+    // build-execution id. artifact_location is the CAS URI PR 3 records (the artifact lives
+    // in this job's content-addressed store).
+    let artifact_manifest_hash = manifest_out.id();
+    let runner_class_id = match manifest_out.runner_class_id.as_ref().map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) {
+        Some(rc) => rc,
+        None => return Err(fail("artifact_metadata", "missing runner_class_id (build did not pin a runner class)".into())),
+    };
+    let execution_id = manifest_out
+        .execution_id
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("exec-{}", &blake3::hash(format!("{}:{}", job.id, artifact_manifest_hash).as_bytes()).to_hex()[..24]));
+    let artifact_location = format!("cas://{}/{}", job.id, artifact_manifest_hash);
+
     Ok(Artifact {
         capsule_manifest_hash,
-        artifact_manifest_hash: manifest_out.id(),
-        runner_class_id: manifest_out.runner_class_id.as_ref().map(|c| c.to_string()).unwrap_or_else(|| "unknown".into()),
+        execution_id,
+        artifact_manifest_hash,
+        runner_class_id,
         snapshot_backend: manifest_out.snapshot_backend.kind.clone(),
+        artifact_location,
         healthcheck_url_path: spec.healthcheck,
         no_secret_scan_clean: true,
         rootfs_bytes: manifest_out.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
@@ -238,9 +259,11 @@ mod tests {
         // exactly these keys and nothing else.
         let a = Artifact {
             capsule_manifest_hash: "blake3:c".into(),
+            execution_id: "exec-1".into(),
             artifact_manifest_hash: "blake3:a".into(),
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/health".into(),
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
@@ -253,9 +276,16 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["artifact_manifest_hash", "capsule_manifest_hash", "healthcheck_url_path", "mem_bytes", "no_secret_scan_clean", "rootfs_bytes", "runner_class_id", "snapshot_backend", "vmstate_bytes"]
+            [
+                "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "execution_id", "healthcheck_url_path",
+                "mem_bytes", "no_secret_scan_clean", "rootfs_bytes", "runner_class_id", "snapshot_backend", "vmstate_bytes"
+            ]
         );
         assert_eq!(obj["no_secret_scan_clean"], serde_json::json!(true));
+        // No placeholder identity/location fields.
+        for k in ["execution_id", "runner_class_id", "artifact_location"] {
+            assert_ne!(obj[k].as_str().unwrap(), "unknown");
+        }
     }
 }
 
