@@ -9,3 +9,6 @@ repository = "https://github.com/ato-run/ato"
 
 [dependencies]
 protocol = { path = "../protocol" }
+
+[dev-dependencies]
+tempfile = "3"
