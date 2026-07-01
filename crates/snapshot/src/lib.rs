@@ -36,6 +36,7 @@ mod scan_cache;
 mod seal;
 mod manifest;
 pub mod mem_backend_selector;
+pub mod no_secret_scan;
 mod placement;
 mod qemu;
 mod scanner;
