@@ -6,6 +6,7 @@ members = [
     "crates/capsulefs",
     "crates/snapshot",
     "crates/protocol",
+    "crates/guest-agent",
     "crates/cli/lock-draft-engine",
     "crates/nacelle",
     "crates/netd",

@@ -1,0 +1,11 @@
+[package]
+name = "guest-agent"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Ready-State guest-agent — Phase 8a binding-lease control plane (skeleton)."
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+[dependencies]
+protocol = { path = "../protocol" }
