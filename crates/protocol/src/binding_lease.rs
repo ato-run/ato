@@ -93,10 +93,12 @@ impl BindingLeaseId {
     }
 }
 
-/// Redacted secret material. Serializes to the wire (delivery to the guest-agent) but
-/// `Debug`/`Display` are redacted, so it can never leak into a log; the raw value is
-/// reachable only via [`SecretValue::expose`].
-#[derive(Clone, Serialize, Deserialize)]
+/// Redacted secret material for the **internal host-side model**. It deliberately does
+/// **not** implement `Serialize`/`Deserialize` and its `Debug`/`Display` are redacted,
+/// so a [`BindingLease`] can never leak its value into a log OR a JSON dump. The raw
+/// value is reachable only via [`SecretValue::expose`] — used solely to build the
+/// explicit [`BindingLeaseDelivery`] wire payload.
+#[derive(Clone)]
 pub struct SecretValue(String);
 
 impl SecretValue {
@@ -129,10 +131,14 @@ pub enum BindingLeaseStatus {
     Revoked,
 }
 
-/// A session-scoped binding lease: name + secret value + TTL window. Delivered to the
-/// guest-agent over vsock (a later PR). Times are unix-millis (the caller supplies the
-/// clock, so the model is deterministic + testable). `Debug` redacts the value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A session-scoped binding lease: name + secret value + TTL window — the **internal
+/// host-side model**. It deliberately does **not** derive `Serialize`/`Deserialize`:
+/// the raw value must never reach a log/trace/JSON dump by accident. The wire form is
+/// the explicit [`BindingLeaseDelivery`] (built via [`BindingLease::to_delivery`]); the
+/// loggable form is [`BindingLeaseReceipt`] (no value). Times are unix-millis (the
+/// caller supplies the clock, so the model is deterministic + testable). `Debug`
+/// redacts the value.
+#[derive(Debug, Clone)]
 pub struct BindingLease {
     pub schema_version: u32,
     pub id: BindingLeaseId,
@@ -141,7 +147,6 @@ pub struct BindingLease {
     pub issued_at_ms: u64,
     pub expires_at_ms: u64,
     /// Set when revoked; `None` while the lease has never been revoked.
-    #[serde(default)]
     pub revoked_at_ms: Option<u64>,
 }
 
@@ -201,6 +206,20 @@ impl BindingLease {
             revoked_at_ms: self.revoked_at_ms,
         }
     }
+
+    /// Build the **explicit wire-only** delivery payload for the guest-agent. This is
+    /// the ONLY path that exposes the raw value, and the ONLY type whose serialization
+    /// carries it. Call at the vsock-delivery point (a later PR).
+    pub fn to_delivery(&self) -> BindingLeaseDelivery {
+        BindingLeaseDelivery {
+            schema_version: self.schema_version,
+            id: self.id.clone(),
+            name: self.name.clone(),
+            value: WireSecret(self.value.expose().to_string()),
+            issued_at_ms: self.issued_at_ms,
+            expires_at_ms: self.expires_at_ms,
+        }
+    }
 }
 
 /// The loggable / recordable record of a lease — carries **no** secret value, so it is
@@ -215,6 +234,40 @@ pub struct BindingLeaseReceipt {
     pub expires_at_ms: u64,
     #[serde(default)]
     pub revoked_at_ms: Option<u64>,
+}
+
+/// The raw secret **only** inside a [`BindingLeaseDelivery`]. It serializes
+/// transparently (the value must cross to the guest-agent) but its `Debug` is still
+/// redacted, so even the delivery payload cannot leak the secret into a log — only an
+/// explicit `serde_json::to_string(&delivery)` at the wire boundary carries it.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WireSecret(String);
+
+impl WireSecret {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WireSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WireSecret(***redacted***)")
+    }
+}
+
+/// The **explicit, wire-only** delivery payload handed to the guest-agent over vsock.
+/// This is the single type whose JSON serialization contains the raw binding value;
+/// build it only via [`BindingLease::to_delivery`] at the delivery point. Carries no
+/// revocation state (revoke/scrub is a separate control message in a later PR).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BindingLeaseDelivery {
+    pub schema_version: u32,
+    pub id: BindingLeaseId,
+    pub name: BindingName,
+    pub value: WireSecret,
+    pub issued_at_ms: u64,
+    pub expires_at_ms: u64,
 }
 
 #[cfg(test)]
@@ -285,14 +338,35 @@ mod tests {
     }
 
     #[test]
-    fn lease_wire_round_trips_including_value() {
-        // The lease serializes WITH the value (wire delivery to the guest-agent).
+    fn only_explicit_delivery_payload_serializes_the_secret() {
+        // `BindingLease` does NOT implement Serialize (compile-time guarantee), so
+        // `serde_json::to_string(&lease)` cannot be written — the secret can't leak by
+        // an accidental JSON dump. The ONLY value-carrying serialization is the
+        // explicit delivery payload.
         let l = lease(1000, 5000);
-        let json = serde_json::to_string(&l).unwrap();
-        assert!(json.contains(SECRET), "wire lease must carry the value for delivery");
-        let back: BindingLease = serde_json::from_str(&json).unwrap();
+        let delivery = l.to_delivery();
+        let json = serde_json::to_string(&delivery).unwrap();
+        assert!(json.contains(SECRET), "delivery payload must carry the value for wire");
+        // Even the delivery payload's Debug redacts the secret.
+        assert!(!format!("{delivery:?}").contains(SECRET), "delivery Debug leaked the secret");
+        // round-trip the wire payload.
+        let back: BindingLeaseDelivery = serde_json::from_str(&json).unwrap();
         assert_eq!(back.value.expose(), SECRET);
         assert_eq!(back.name.as_str(), "database_url");
         assert_eq!(back.schema_version, BINDING_LEASE_SCHEMA_VERSION);
+    }
+
+    /// Static guard: only the value-free/wire types are `Serialize`; `BindingLease` and
+    /// `SecretValue` are intentionally NOT (so they can't be JSON-dumped by accident).
+    #[test]
+    fn serialize_impls_are_restricted_to_safe_types() {
+        fn assert_serialize<T: serde::Serialize>() {}
+        assert_serialize::<BindingLeaseReceipt>();
+        assert_serialize::<BindingLeaseDelivery>();
+        assert_serialize::<BindingName>();
+        assert_serialize::<BindingLeaseStatus>();
+        // The following would FAIL to compile if uncommented (by design):
+        //   assert_serialize::<BindingLease>();
+        //   assert_serialize::<SecretValue>();
     }
 }
