@@ -231,6 +231,11 @@ pub struct RestoredSession {
     /// long-lived-serving run gate stamps this into the on-disk session record so
     /// a later `ato stop` (fresh backend, empty in-memory registry) can reap it.
     pub vmm_pid: Option<i32>,
+    /// Phase 8a-HW (#912): the Firecracker vsock host UDS for this restored session,
+    /// when the vsock device is enabled (`ATO_FC_VSOCK`). The host reaches the guest-
+    /// agent by connecting here (`CONNECT <port>`). `None` when vsock is off (the
+    /// default) — no binding delivery path.
+    pub vsock_uds: Option<PathBuf>,
 }
 
 impl RestoredSession {
