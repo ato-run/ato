@@ -119,7 +119,8 @@ fn run_mode(
     unsafe {
         std::env::remove_var("ATO_FC_UFFD");
         std::env::remove_var("ATO_FC_UFFD_HOTSET");
-        std::env::remove_var("ATO_FC_UFFD_REMOTE");
+        // NOTE: ATO_FC_UFFD_REMOTE is owned by main() (set only around uffd-remote);
+        // run_mode must NOT clear it or the remote read-through never engages.
         match mode {
             "file-cold" | "file-warm" => {}
             "uffd-local" => std::env::set_var("ATO_FC_UFFD", "cas"),
