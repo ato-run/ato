@@ -2762,6 +2762,7 @@ name = "guest-agent"
 version = "0.1.0"
 dependencies = [
  "protocol",
+ "serde_json",
  "tempfile",
 ]
 

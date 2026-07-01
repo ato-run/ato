@@ -8,6 +8,7 @@ homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
 
 [dependencies]
+serde_json = "1.0"
 protocol = { path = "../protocol" }
 
 [dev-dependencies]
