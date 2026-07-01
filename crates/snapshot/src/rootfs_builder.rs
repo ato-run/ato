@@ -37,16 +37,23 @@ pub struct SourceProbe {
     pub has_requirements_txt: bool,
     pub has_pyproject: bool,
     pub has_index_html: bool,
+    /// Any top-level `*.py` file — a python signal for stdlib-only apps that ship no
+    /// requirements.txt / pyproject.toml and declare no driver.
+    pub has_py_files: bool,
 }
 
 impl SourceProbe {
     pub fn scan(dir: &Path) -> Self {
         let has = |f: &str| dir.join(f).exists();
+        let has_py_files = std::fs::read_dir(dir)
+            .map(|rd| rd.flatten().any(|e| e.path().extension().is_some_and(|x| x == "py")))
+            .unwrap_or(false);
         SourceProbe {
             has_package_json: has("package.json"),
             has_requirements_txt: has("requirements.txt"),
             has_pyproject: has("pyproject.toml"),
             has_index_html: has("index.html") || dir.join("public").join("index.html").exists(),
+            has_py_files,
         }
     }
 }
@@ -118,7 +125,7 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         RuntimeType::Source => {
             if driver == "node" || lang == "javascript" || lang == "typescript" || probe.has_package_json {
                 RuntimeKind::Node
-            } else if driver == "python" || lang == "python" || probe.has_requirements_txt || probe.has_pyproject {
+            } else if driver == "python" || lang == "python" || probe.has_requirements_txt || probe.has_pyproject || probe.has_py_files {
                 RuntimeKind::Python
             } else if driver == "static" || probe.has_index_html {
                 RuntimeKind::StaticWeb
@@ -139,7 +146,14 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         ),
         RuntimeKind::Python => (
             "python:3.11-slim".to_string(),
-            Some(if probe.has_requirements_txt { "pip install --no-cache-dir -r requirements.txt".to_string() } else { "pip install --no-cache-dir .".to_string() }),
+            Some(if probe.has_requirements_txt {
+                "pip install --no-cache-dir -r requirements.txt".to_string()
+            } else if probe.has_pyproject {
+                "pip install --no-cache-dir .".to_string()
+            } else {
+                // stdlib-only app — nothing to install.
+                "true".to_string()
+            }),
         ),
     };
 
@@ -322,6 +336,15 @@ readiness_probe = { http_get = "/health" }
         let m = parse(&base_toml());
         let err = derive_build_spec(&m, &SourceProbe::default()).unwrap_err();
         assert!(err.contains("no node") && err.contains("python"), "{err}");
+    }
+
+    #[test]
+    fn stdlib_python_detected_from_py_files_with_no_install() {
+        // A python app that ships only *.py (no requirements/pyproject, no driver).
+        let m = parse(&base_toml());
+        let spec = derive_build_spec(&m, &SourceProbe { has_py_files: true, ..Default::default() }).unwrap();
+        assert_eq!(spec.runtime, RuntimeKind::Python);
+        assert_eq!(spec.install_cmd.as_deref(), Some("true")); // nothing to install
     }
 
     #[test]
