@@ -21,6 +21,7 @@ use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::{BindingLeaseId, BindingName};
 
 pub mod tmpfs;
+pub mod vsock;
 pub use tmpfs::TmpfsBindingSink;
 
 /// Where the guest-agent materializes a binding **inside the guest**. Implementations
