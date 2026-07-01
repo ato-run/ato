@@ -59,12 +59,13 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
     }
 }
 
-/// Clear the materialized-layer cache so the next restore is cold.
-fn clear_cache() {
+/// Clear ONLY the materialized memory cache so a File restore re-rehydrates the
+/// image (the mem_backend cost we compare); the ro-shared rootfs + small vmstate
+/// stay warm so the comparison isolates the memory path, not rootfs I/O. UFFD modes
+/// never materialize `.mem`, so this is a no-op for them.
+fn clear_mem_cache() {
     let work = std::env::var("ATO_FC_WORK").unwrap_or_else(|_| "/tmp/ato-fc".into());
-    for kind in ["mem", "vmstate", "rootfs"] {
-        let _ = std::fs::remove_dir_all(Path::new(&work).join(kind));
-    }
+    let _ = std::fs::remove_dir_all(Path::new(&work).join("mem"));
 }
 
 fn stats(v: &[f64]) -> Value {
@@ -138,7 +139,7 @@ fn run_mode(
     let mut remote = Vec::new();
     let mut raw = Vec::new();
     for i in 0..iterations {
-        if mode != "file-warm" { clear_cache(); }
+        if mode != "file-warm" { clear_mem_cache(); }
         let ov = dir.join(format!("ov-{mode}-{i}"));
         let t = Instant::now();
         let r = backend.restore(RestoreReadyStateInput { store, manifest: manifest.clone(), overlay_root: ov.clone(), host_runner_class: None });
@@ -202,7 +203,7 @@ fn main() {
     // Build a hotset profile from one demand run.
     let profile_path = dir.join("hotset.json");
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas"); }
-    clear_cache();
+    clear_mem_cache();
     let prof_ov = dir.join("ov-profile");
     let mut has_profile = false;
     if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: prof_ov.clone(), host_runner_class: None }) {
@@ -226,7 +227,7 @@ fn main() {
             r
         } else if mode == "file-warm" {
             // prime the cache once, then warm runs.
-            clear_cache();
+            clear_mem_cache();
             if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: dir.join("ov-warm-prime"), host_runner_class: None }) { let _ = backend.stop(r.session); }
             run_mode(&backend, &store, &manifest, mode, args.iterations, &dir, None)
         } else {
