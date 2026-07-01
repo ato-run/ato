@@ -192,9 +192,8 @@ impl HotsetProfile {
     /// Build a profile from a trace: the pre-health page **file offsets**,
     /// de-duplicated, in first-touch order (earliest fault first). File offsets are
     /// portable across restores; host addresses are not. (U4 derives the next
-    /// restore's prefetch list from a prior restore's trace; exercised by the KVM
-    /// smoke — a product path that persists profiles per capsule is later.)
-    #[allow(dead_code)]
+    /// restore's prefetch list from a prior restore's trace; U12 persists it per
+    /// identity via [`HotsetProfileStore`].)
     pub(crate) fn from_trace(trace: &HotsetTrace) -> HotsetProfile {
         let mut seen = std::collections::HashSet::new();
         let mut offsets = Vec::new();
@@ -206,6 +205,76 @@ impl HotsetProfile {
             }
         }
         HotsetProfile { offsets }
+    }
+}
+
+/// U12 (#879): the identity a hotset profile is valid for. A profile prefetches
+/// file-offsets into ONE specific memory image on ONE runner/backend; applying it to
+/// any other identity could prefetch offsets that do not exist in this image.
+/// Persistence is keyed by ALL of these, so a mismatch is a cache **miss** (the
+/// profile is never loaded), never a wrong-image prefetch.
+#[derive(Debug, Clone)]
+pub(crate) struct HotsetKey {
+    pub capsule_manifest_hash: String,
+    /// `""` when the manifest pins no runner class.
+    pub runner_class_id: String,
+    /// Content hash of the memory image (the memory blob id) — the field that makes a
+    /// profile image-specific.
+    pub memory_image_hash: String,
+    pub backend_id: String,
+    pub page_size: u64,
+    pub memory_size: u64,
+}
+
+impl HotsetKey {
+    /// Stable, filesystem-safe id: blake3 over every field (any field differing ⇒ a
+    /// different id ⇒ a different file ⇒ no cross-identity reuse).
+    pub(crate) fn id(&self) -> String {
+        let mut h = blake3::Hasher::new();
+        for f in [
+            self.capsule_manifest_hash.as_str(),
+            self.runner_class_id.as_str(),
+            self.memory_image_hash.as_str(),
+            self.backend_id.as_str(),
+        ] {
+            h.update(f.as_bytes());
+            h.update(b"\0");
+        }
+        h.update(&self.page_size.to_le_bytes());
+        h.update(&self.memory_size.to_le_bytes());
+        h.finalize().to_hex().to_string()
+    }
+}
+
+/// U12 (#879): a keyed, persistent hotset-profile store. `load` returns a profile
+/// ONLY for an exact identity match; a different memory image / runner / backend /
+/// page-size / memory-size is a miss, so a stale profile is never applied to the
+/// wrong image (the U12 safety invariant). `save` is atomic (tmp + rename).
+pub(crate) struct HotsetProfileStore {
+    root: std::path::PathBuf,
+}
+
+impl HotsetProfileStore {
+    pub(crate) fn open(root: impl Into<std::path::PathBuf>) -> HotsetProfileStore {
+        HotsetProfileStore { root: root.into() }
+    }
+
+    fn path(&self, key: &HotsetKey) -> std::path::PathBuf {
+        self.root.join(format!("{}.json", key.id()))
+    }
+
+    pub(crate) fn save(&self, key: &HotsetKey, profile: &HotsetProfile) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        let final_path = self.path(key);
+        let tmp = final_path.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(profile).map_err(std::io::Error::other)?)?;
+        std::fs::rename(tmp, final_path)
+    }
+
+    /// Load the profile for `key`, or `None` on absence / mismatch / parse error.
+    pub(crate) fn load(&self, key: &HotsetKey) -> Option<HotsetProfile> {
+        let text = std::fs::read(self.path(key)).ok()?;
+        serde_json::from_slice(&text).ok()
     }
 }
 
@@ -975,5 +1044,44 @@ mod tests {
         assert_eq!(old.schema_version, 0, "legacy receipt ⇒ schema_version 0");
         assert_eq!(old.page_fault_count, 5);
         assert!(old.backend.is_empty() && old.source.is_empty(), "legacy has no context");
+    }
+
+    /// U12 (#879): a persisted hotset profile round-trips for an EXACT identity, and a
+    /// key that differs in ANY field (here the memory image hash) is a miss — a stale
+    /// profile is never applied to a different image.
+    #[test]
+    fn hotset_profile_store_keys_by_identity_and_never_mismatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = HotsetProfileStore::open(dir.path().join("hotset"));
+        let key = HotsetKey {
+            capsule_manifest_hash: "blake3:cap".into(),
+            runner_class_id: "blake3:runner".into(),
+            memory_image_hash: "blake3:mem-A".into(),
+            backend_id: "firecracker".into(),
+            page_size: 4096,
+            memory_size: 536870912,
+        };
+        let profile = HotsetProfile { offsets: vec![0, 2 << 20, 4 << 20] };
+        store.save(&key, &profile).unwrap();
+
+        // exact identity ⇒ hit.
+        assert_eq!(store.load(&key).unwrap().offsets, profile.offsets);
+
+        // different memory image ⇒ MISS (never the wrong-image profile).
+        let mut other = key.clone();
+        other.memory_image_hash = "blake3:mem-B".into();
+        assert!(store.load(&other).is_none(), "different image must not load the profile");
+
+        // different runner / backend / page-size / mem-size ⇒ all misses.
+        for mutate in [
+            |k: &mut HotsetKey| k.runner_class_id = "blake3:other".into(),
+            |k: &mut HotsetKey| k.backend_id = "qemu".into(),
+            |k: &mut HotsetKey| k.page_size = 2 << 20,
+            |k: &mut HotsetKey| k.memory_size = 1 << 30,
+        ] {
+            let mut k = key.clone();
+            mutate(&mut k);
+            assert!(store.load(&k).is_none(), "any identity change ⇒ miss");
+        }
     }
 }
