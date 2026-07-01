@@ -51,16 +51,54 @@ pub(crate) fn region_for(regions: &[Region], fault_page: u64) -> Option<&Region>
     regions.iter().find(|r| r.contains(fault_page))
 }
 
-/// U1 measurement receipt (written to `<overlay>/.uffd-receipt.json` by `restore()`
-/// so the KVM smoke can read it back). Shape is a subset of the documented
-/// `UffdRestoreReceipt` (`docs/ready-state/uffd-mem-backend.md`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct U1Receipt {
+/// Current `UffdRestoreReceipt` schema version. Bump on any breaking field change.
+pub(crate) const UFFD_RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+/// U8 (#875): the **stable, versioned Ready-State restore receipt** — the single
+/// schema a File-vs-UFFD benchmark compares across, written to
+/// `<overlay>/.uffd-receipt.json`. Page-server-measured fields (fault counts,
+/// latencies) are set by [`PageServerHandle::receipt`]; restore-level context
+/// (backend, source, hashes, sizes, timing) is filled by `restore()`. All
+/// context/measurement fields are `#[serde(default)]` so older receipts still
+/// deserialize (legacy receipts default `schema_version = 0`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct UffdRestoreReceipt {
+    /// Schema version (see [`UFFD_RECEIPT_SCHEMA_VERSION`]). `0` = a legacy receipt.
+    #[serde(default)]
+    pub schema_version: u32,
+    // ── restore-level context (filled by restore(); File backend fills the shared
+    // subset so the two are comparable) ──────────────────────────────────────────
+    /// Snapshot backend id (`firecracker`).
+    #[serde(default)]
+    pub backend: String,
+    /// `mem_backend` used: `file` | `uffd`.
+    #[serde(default)]
+    pub mem_backend: String,
+    /// Where memory pages came from: `file` | `local_cas` | `remote_cas`.
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub capsule_manifest_hash: String,
+    #[serde(default)]
+    pub runner_class_id: Option<String>,
+    /// Content hash of the memory image (the memory blob id) — a hotset profile is
+    /// only valid for a matching image (U12).
+    #[serde(default)]
+    pub memory_image_hash: String,
+    #[serde(default)]
+    pub memory_bytes_total: u64,
+    /// Bytes of the memory image materialized to disk before `LoadSnapshot` (File:
+    /// the whole image; UFFD: 0 — served on demand).
+    #[serde(default)]
+    pub memory_bytes_materialized: u64,
+    #[serde(default)]
+    pub pages_total: u64,
+    // ── page-server measurement (set by PageServerHandle::receipt) ────────────────
     /// Userfault fd extracted from the `SCM_RIGHTS` handshake message.
     pub fd_received: bool,
     /// Guest memory regions parsed from the handshake JSON body.
     pub region_count: u32,
-    /// `UFFD_EVENT_PAGEFAULT` events served.
+    /// `UFFD_EVENT_PAGEFAULT` events served on demand (a.k.a. pages faulted).
     pub page_fault_count: u64,
     /// Sum of `page_size` per served fault (`UFFDIO_COPY`/`UFFDIO_ZEROPAGE` len).
     pub bytes_copied: u64,
@@ -70,20 +108,33 @@ pub(crate) struct U1Receipt {
     pub p50_fault_service_us: Option<u128>,
     /// p95 per-fault ioctl service time (µs).
     pub p95_fault_service_us: Option<u128>,
-    /// True only for U1b (real pages); false for U1a (zero pages).
+    /// True only when real pages were served (U1b/U2/U6); false for U1a zero pages.
     pub vm_reaches_health: bool,
-    /// `wait_health` elapsed (ms); `None` for U1a.
+    /// `wait_health` elapsed (ms); `None` when health is not reached.
     pub time_to_health_ms: Option<u128>,
-    /// `Some(pid)` — the U1 page-server is local/in-process (a thread).
+    /// `Some(pid)` — the page-server is local/in-process (a thread).
     pub page_server_pid: Option<i32>,
-    /// U3 (#856): distinct guest pages faulted in BEFORE `/health` (the hotset the
-    /// U4 prefetch will target). `None` for modes that never reach health (U1a zero).
+    /// U3 (#856): distinct guest pages faulted BEFORE `/health` (the hotset).
     #[serde(default)]
     pub pre_health_pages: Option<u64>,
-    /// U4 (#857): pages prefetched proactively from the hotset profile (0 when no
-    /// profile was supplied — the demand-only baseline).
+    /// U4 (#857): pages prefetched proactively from the hotset profile (0 = demand-only).
     #[serde(default)]
     pub prefetch_pages: u64,
+    /// U6 (#859): memory chunks fetched from the remote CAS via read-through.
+    #[serde(default)]
+    pub remote_chunks_fetched: u64,
+    // ── outcome (filled by restore()) ────────────────────────────────────────────
+    /// Total restore wall time (ms), rehydrate + LoadSnapshot + health.
+    #[serde(default)]
+    pub restore_total_ms: Option<u128>,
+    /// U5 (#858): set when the restore failed closed (CAS miss/corrupt, page-server
+    /// crash); `None` on success.
+    #[serde(default)]
+    pub fail_closed_reason: Option<String>,
+    /// Whether teardown left no orphan VM/tap/overlay/socket (set by the caller when
+    /// known).
+    #[serde(default)]
+    pub teardown_clean: Option<bool>,
 }
 
 /// U3 (#856): one recorded page fault — the raw signal a [`HotsetProfile`] is built
@@ -172,7 +223,7 @@ pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use super::{file_offset_for, host_page_for_offset, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, U1Receipt};
+    use super::{file_offset_for, host_page_for_offset, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, UffdRestoreReceipt};
     use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
     use std::collections::HashMap;
     use std::io;
@@ -302,6 +353,9 @@ mod linux_impl {
         /// miss (fetch the chunk from remote, cache it local, then serve). Demand-
         /// only — only the working set crosses the "network".
         remote: Option<CasStore>,
+        /// U8 (#875): chunks fetched from remote (shared with restore() for the
+        /// receipt's `remote_chunks_fetched`).
+        remote_fetches: Arc<AtomicU64>,
         mem_blob: BlobManifest,
         chunk_size: u64,
         total_len: u64,
@@ -329,6 +383,7 @@ mod linux_impl {
                     self.store
                         .put_chunk(&bytes)
                         .map_err(|e| io::Error::other(format!("cache read-through chunk: {e}")))?;
+                    self.remote_fetches.fetch_add(1, Ordering::SeqCst);
                 }
             }
             Ok(())
@@ -357,11 +412,17 @@ mod linux_impl {
             Ok(PageSource::MemFile(MemMap::open(mem_path)?))
         }
 
-        pub(crate) fn cas(store: CasStore, mem_blob: BlobManifest, remote: Option<CasStore>) -> PageSource {
+        pub(crate) fn cas(
+            store: CasStore,
+            mem_blob: BlobManifest,
+            remote: Option<CasStore>,
+            remote_fetches: Arc<AtomicU64>,
+        ) -> PageSource {
             let total_len = mem_blob.total_len;
             PageSource::Cas(CasSource {
                 store,
                 remote,
+                remote_fetches,
                 mem_blob,
                 chunk_size: MEMORY_PAGE_CHUNK_SIZE as u64,
                 total_len,
@@ -733,7 +794,7 @@ mod linux_impl {
         }
 
         /// Snapshot the counters into a receipt WITHOUT stopping the thread.
-        pub(crate) fn receipt(&self, vm_reaches_health: bool, time_to_health_ms: Option<u128>) -> U1Receipt {
+        pub(crate) fn receipt(&self, vm_reaches_health: bool, time_to_health_ms: Option<u128>) -> UffdRestoreReceipt {
             let faults = self.shared.page_fault_count.load(Ordering::SeqCst);
             let mut svc = self.shared.service_us.lock().map(|v| v.clone()).unwrap_or_default();
             svc.sort_unstable();
@@ -745,7 +806,8 @@ mod linux_impl {
                 Some(svc[idx] as u128)
             };
             let first = self.shared.first_fault_us.load(Ordering::SeqCst);
-            U1Receipt {
+            UffdRestoreReceipt {
+                schema_version: super::UFFD_RECEIPT_SCHEMA_VERSION,
                 fd_received: self.shared.fd_received.load(Ordering::SeqCst),
                 region_count: self.shared.region_count.load(Ordering::SeqCst),
                 page_fault_count: faults,
@@ -762,6 +824,8 @@ mod linux_impl {
                     None
                 },
                 prefetch_pages: self.shared.prefetch_count.load(Ordering::SeqCst),
+                // restore() fills the context (backend/source/hashes/sizes/timing).
+                ..Default::default()
             }
         }
 
@@ -783,7 +847,7 @@ pub(crate) use stub::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(not(target_os = "linux"))]
 mod stub {
-    use super::U1Receipt;
+    use super::UffdRestoreReceipt;
     use std::io;
     use std::path::Path;
     use std::time::Duration;
@@ -801,6 +865,7 @@ mod stub {
             _store: capsulefs::CasStore,
             _mem_blob: capsulefs::BlobManifest,
             _remote: Option<capsulefs::CasStore>,
+            _remote_fetches: std::sync::Arc<std::sync::atomic::AtomicU64>,
         ) -> PageSource {
             PageSource::Zero // unreachable: bind() fails closed on non-linux
         }
@@ -827,7 +892,7 @@ mod stub {
         pub(crate) fn trace(&self) -> super::HotsetTrace {
             super::HotsetTrace::default()
         }
-        pub(crate) fn receipt(&self, _h: bool, _t: Option<u128>) -> U1Receipt {
+        pub(crate) fn receipt(&self, _h: bool, _t: Option<u128>) -> UffdRestoreReceipt {
             unreachable!("uffd page-server is linux-only")
         }
         pub(crate) fn stop_and_join(self) -> io::Result<()> {
@@ -875,5 +940,40 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].base_host_virt_addr, 4096);
         assert_eq!(regions[0].size, 8192);
+    }
+
+    /// U8 (#875): the receipt schema round-trips and a legacy receipt (pre-U8, no
+    /// context/version) still deserializes with `schema_version = 0`.
+    #[test]
+    fn uffd_receipt_schema_round_trips_and_legacy_defaults() {
+        let r = UffdRestoreReceipt {
+            schema_version: UFFD_RECEIPT_SCHEMA_VERSION,
+            backend: "firecracker".into(),
+            mem_backend: "uffd".into(),
+            source: "remote_cas".into(),
+            capsule_manifest_hash: "blake3:cap".into(),
+            memory_bytes_total: 512 * 1024 * 1024,
+            pages_total: 131072,
+            page_fault_count: 42,
+            prefetch_pages: 40,
+            remote_chunks_fetched: 7,
+            restore_total_ms: Some(489),
+            ..Default::default()
+        };
+        let back: UffdRestoreReceipt = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back.schema_version, UFFD_RECEIPT_SCHEMA_VERSION);
+        assert_eq!(back.source, "remote_cas");
+        assert_eq!(back.page_fault_count, 42);
+        assert_eq!(back.remote_chunks_fetched, 7);
+
+        // A legacy receipt (only the pre-U8 measured fields) still parses.
+        let legacy = r#"{"fd_received":true,"region_count":1,"page_fault_count":5,
+          "bytes_copied":20480,"first_fault_us":100,"p50_fault_service_us":5,
+          "p95_fault_service_us":15,"vm_reaches_health":false,"time_to_health_ms":null,
+          "page_server_pid":123}"#;
+        let old: UffdRestoreReceipt = serde_json::from_str(legacy).unwrap();
+        assert_eq!(old.schema_version, 0, "legacy receipt ⇒ schema_version 0");
+        assert_eq!(old.page_fault_count, 5);
+        assert!(old.backend.is_empty() && old.source.is_empty(), "legacy has no context");
     }
 }

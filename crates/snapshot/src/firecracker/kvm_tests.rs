@@ -113,7 +113,7 @@ fn fc_kvm_build_restore_roundtrip() {
 // These set the process-global ATO_FC_UFFD gate, so run the KVM suite with
 // --test-threads=1 (as documented for the fc_kvm_* tests).
 
-fn read_uffd_receipt(overlay: &std::path::Path) -> crate::uffd_page_server::U1Receipt {
+fn read_uffd_receipt(overlay: &std::path::Path) -> crate::uffd_page_server::UffdRestoreReceipt {
     let text = std::fs::read_to_string(overlay.join(".uffd-receipt.json")).expect("uffd receipt written");
     serde_json::from_str(&text).expect("parse uffd receipt")
 }
