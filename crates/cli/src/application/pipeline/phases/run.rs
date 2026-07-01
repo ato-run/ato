@@ -3757,26 +3757,24 @@ where
         let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
         if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
-            // Phase 8a-RunGate PR D1 (#912): record the binding-preview decision (names
-            // only, never values). D1 is plumbing only — no live delivery, no change to
-            // the fail-closed behavior below; D2 wires bind-before-expose under the flag.
-            {
-                let req = ready_state::bindings::requires_runtime_bindings(&rs_manifest);
-                let names: Vec<String> = req.secrets.iter().chain(req.bindings.iter()).chain(req.external.iter()).cloned().collect();
-                let receipt = ready_state::binding_host::BindingPreviewReceipt::decide(
-                    ready_state::flags::bindings_preview_enabled(),
-                    names,
-                );
-                receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            // Phase 8a-RunGate (#912): the binding-preview decision (names only, never
+            // values). D2 routes a binding-required capsule through the post-restore
+            // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
+            // the #837 pre-restore guard fail-closes exactly as today.
+            let binding_req = ready_state::bindings::requires_runtime_bindings(&rs_manifest);
+            let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
+            let binding_preview = ready_state::flags::bindings_preview_enabled();
+            let binding_gate_active = binding_preview && !binding_names.is_empty();
+            ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone())
+                .record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            if !binding_gate_active {
+                // flag off, OR no bindings required → unchanged: the #837 guard
+                // fail-closes any binding-required capsule before restore.
+                ready_state::bindings::ensure_no_unwired_runtime_bindings(
+                    &rs_manifest,
+                    ready_state::bindings::BindingGuardMode::VerifyOnly,
+                )?;
             }
-            // Fail closed BEFORE any restore/expose if the capsule requires runtime
-            // bindings (BindingLease injection is not wired yet — a restored session
-            // would serve without its credentials). The artifact stays pre-bind /
-            // secret-free; no binding values are injected here.
-            ready_state::bindings::ensure_no_unwired_runtime_bindings(
-                &rs_manifest,
-                ready_state::bindings::BindingGuardMode::VerifyOnly,
-            )?;
             let backend = ready_state::backend::select_backend()?;
             // Orphan Ready-State overlays from crashed prior serving runs are
             // reaped/quarantined by the canonical startup sweep
@@ -3892,6 +3890,38 @@ where
                 uffd_preview,
             )?;
             let session = receipt.session;
+            // Phase 8a-RunGate PR D2 (#912): BIND BEFORE EXPOSE. For a binding-required
+            // capsule under the preview flag, connect the guest-agent over vsock,
+            // deliver the leases, and block until bound-ready — BEFORE any traffic is
+            // exposed. Any failure (no vsock channel / missing secret / connect timeout /
+            // agent Error / not bound-ready) FAILS CLOSED: tear the restored VM down and
+            // never expose. The secret is delivered only over vsock, never recorded.
+            if binding_gate_active {
+                let bind = (|| -> anyhow::Result<()> {
+                    let uds = session.vsock_uds.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "binding preview: the restored session has no vsock channel \
+                             (the artifact was not built with vsock) — cannot deliver bindings"
+                        )
+                    })?;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let leases = ready_state::binding_host::resolve_binding_leases(&binding_names, now_ms, 3_600_000)?;
+                    ready_state::binding_host::bind_before_expose(uds, &leases, std::time::Duration::from_secs(10))
+                })();
+                if let Err(e) = bind {
+                    // Fail closed: no unbound session is ever exposed.
+                    let _ = backend.stop(session.clone());
+                    anyhow::bail!("Ready-State binding preview failed closed (no traffic exposed): {e}");
+                }
+                tracing::info!(
+                    target: "ato::ready_state",
+                    bindings = ?binding_names,
+                    "READY-STATE binding preview: bound-ready — exposing traffic"
+                );
+            }
             // Surface RuntimeMetadata::MicroVm through the restored-session handle.
             let handle =
                 ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
