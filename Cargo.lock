@@ -6505,6 +6505,7 @@ dependencies = [
  "capsule",
  "capsulefs",
  "libc",
+ "protocol",
  "serde",
  "serde_jcs",
  "serde_json",
