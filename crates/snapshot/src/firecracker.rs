@@ -867,6 +867,21 @@ impl SnapshotBackend for FirecrackerBackend {
             // U8 (#875): shared with the cas source so the receipt can report
             // remote_chunks_fetched.
             let remote_fetches = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            // U12 (#879): identity + keyed store for hotset-profile persistence.
+            // ATO_FC_UFFD_HOTSET_STORE=<dir> enables load-before-serve + save-after-
+            // health, keyed so a mismatched image/runner/backend is a miss.
+            let hotset_key = crate::uffd_page_server::HotsetKey {
+                capsule_manifest_hash: input.manifest.capsule_manifest_hash.clone(),
+                runner_class_id: input.manifest.runner_class_id.as_ref().map(|r| r.to_string()).unwrap_or_default(),
+                memory_image_hash: memory.id().hex().to_string(),
+                backend_id: FIRECRACKER_BACKEND_ID.to_string(),
+                page_size: 4096,
+                memory_size: memory.total_len,
+            };
+            let hotset_store = std::env::var("ATO_FC_UFFD_HOTSET_STORE")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(crate::uffd_page_server::HotsetProfileStore::open);
             if let Some(mode) = uffd {
                 let source = match mode {
                     UffdMode::Zero => crate::uffd_page_server::PageSource::Zero,
@@ -886,12 +901,20 @@ impl SnapshotBackend for FirecrackerBackend {
                 };
                 let server = crate::uffd_page_server::PageServer::bind(&sock, source)
                     .map_err(|e| self.backend_err(format!("uffd page-server bind: {e}")))?;
-                // U4 (#857): ATO_FC_UFFD_HOTSET=<profile.json> → prefetch the hotset.
-                let hotset = std::env::var("ATO_FC_UFFD_HOTSET").ok().and_then(|p| {
-                    std::fs::read_to_string(&p)
-                        .ok()
-                        .and_then(|t| serde_json::from_str::<crate::uffd_page_server::HotsetProfile>(&t).ok())
-                });
+                // U12 (#879): load a persisted hotset profile from the keyed store
+                // first (product path; a mismatched identity is a miss, never a
+                // wrong-image prefetch), falling back to the explicit
+                // ATO_FC_UFFD_HOTSET file (U4 smokes).
+                let hotset = hotset_store
+                    .as_ref()
+                    .and_then(|s| s.load(&hotset_key))
+                    .or_else(|| {
+                        std::env::var("ATO_FC_UFFD_HOTSET").ok().and_then(|p| {
+                            std::fs::read_to_string(&p)
+                                .ok()
+                                .and_then(|t| serde_json::from_str::<crate::uffd_page_server::HotsetProfile>(&t).ok())
+                        })
+                    });
                 page_handle = Some(server.serve(hotset));
             }
 
@@ -962,6 +985,17 @@ impl SnapshotBackend for FirecrackerBackend {
                     input.overlay_root.join(".hotset-trace.json"),
                     serde_json::to_string(&h.trace()).unwrap_or_default(),
                 );
+                // U12 (#879): persist this run's pre-health hotset as the profile for
+                // this exact identity, so the NEXT restore prefetches it. Only when a
+                // profile store is configured and the VM actually reached health.
+                if let Some(store) = &hotset_store
+                    && r.vm_reaches_health
+                {
+                    let profile = crate::uffd_page_server::HotsetProfile::from_trace(&h.trace());
+                    if !profile.offsets.is_empty() {
+                        let _ = store.save(&hotset_key, &profile);
+                    }
+                }
             }
 
             let session_id = format!("fc-{}-{}", manifest_short(&input.manifest), std::process::id());
