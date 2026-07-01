@@ -496,6 +496,50 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
     );
 }
 
+/// U13 (#880): the **product preview path** (`uffd_preview: true`, no env gate) must
+/// fail closed on corrupt CAS exactly like U5 — restore returns Err, no orphan
+/// firecracker/tap. Promotes the U5 fail-closed invariant to the path `ato run
+/// --experimental-uffd` actually takes.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd preview fail-closed needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b.build_ready_state(build_input(&store, rootfs, vec![])).expect("build").manifest;
+    let mem = m.layers.memory.as_ref().expect("memory layer");
+    let blobs = dir.path().join("cas").join("blobs").join("blake3");
+    for c in &mem.chunks {
+        std::fs::write(blobs.join(c.hash.hex()), b"CORRUPT").unwrap();
+    }
+    let overlay = dir.path().join("ov");
+    // No ATO_FC_UFFD env — the INPUT preview flag drives the UFFD path.
+    assert!(std::env::var("ATO_FC_UFFD").is_err());
+    let started = std::time::Instant::now();
+    let r = b.restore(RestoreReadyStateInput {
+        store: &store,
+        manifest: m,
+        overlay_root: overlay.clone(),
+        host_runner_class: None,
+        uffd_preview: true,
+    });
+    assert!(r.is_err(), "preview path must fail closed on corrupt CAS, got Ok");
+    eprintln!("### U13 preview fail-closed in {}ms: {}", started.elapsed().as_millis(), r.unwrap_err());
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip").args(["link", "show", &tap]).output().unwrap();
+    assert!(!taps.status.success(), "tap {tap} leaked after failed preview restore");
+    let out = std::process::Command::new("pgrep").args(["-af", "firecracker --api-sock"]).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).count(),
+        0,
+        "orphan firecracker after failed preview restore"
+    );
+}
+
 /// U6 (#859): the page-server reads memory chunks **through a remote CAS** on a local
 /// miss (fetch + cache local, then serve) — demand-only, so only the working set
 /// crosses the "network". Local store starts WITHOUT the memory chunks; the VM still
