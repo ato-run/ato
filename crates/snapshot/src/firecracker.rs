@@ -446,6 +446,12 @@ fn uffd_mode() -> Option<UffdMode> {
     }
 }
 
+/// L2 (#912): whether the host has an AF_VSOCK transport (`/dev/vhost-vsock`, i.e. the
+/// `vhost_vsock` module is loaded). Cheap + side-effect-free.
+fn host_vhost_vsock_present() -> bool {
+    std::path::Path::new("/dev/vhost-vsock").exists()
+}
+
 /// Whether to attach a Firecracker vsock device (for the guest-agent binding channel).
 /// Off by default → the restore path is unchanged.
 fn vsock_enabled() -> bool {
@@ -588,6 +594,19 @@ impl SnapshotBackend for FirecrackerBackend {
             version.as_deref(),
             crate::uffd::host_userfaultfd_present(),
         );
+        // L2 (#912): binding-lease placement capabilities. The full flow needs the
+        // Firecracker backend, host vsock, a guest-agent, and x86_64 (the guest-agent +
+        // vsock plumbing are x86_64). stop-scrub + the no-secret scanner ship with it.
+        let supports_vsock = host_vhost_vsock_present();
+        let supports_binding_lease = available && supports_vsock && std::env::consts::ARCH == "x86_64";
+        let binding = crate::backend::BindingCapabilities {
+            supports_firecracker: true,
+            supports_vsock,
+            supports_guest_agent: true,
+            supports_binding_lease,
+            supports_stop_scrub: supports_binding_lease,
+            supports_no_secret_scan: true,
+        };
         BackendCapabilities {
             backend_id: FIRECRACKER_BACKEND_ID.to_string(),
             available,
@@ -606,6 +625,7 @@ impl SnapshotBackend for FirecrackerBackend {
             supports_disposable_overlay: true,
             supports_uffd_mem_backend,
             uffd_reason,
+            binding,
         }
     }
 

@@ -145,6 +145,51 @@ pub struct BackendCapabilities {
     /// reason, e.g. `"aarch64 not in U0 scope (x86_64 only)"`, `"firecracker
     /// 0.25.2 < 1.0.0"`, `"userfaultfd disabled on host"`).
     pub uffd_reason: Option<String>,
+    /// L2 (#912): whether this backend/host can run the BindingLease preview flow
+    /// (vsock guest-agent + tmpfs delivery + stop-scrub + no-secret scan). The run gate
+    /// fails a binding-required preview closed when `supports_binding_lease` is false.
+    pub binding: BindingCapabilities,
+}
+
+/// L2 (#912): the placement capabilities a binding-required Ready-State restore needs.
+/// All `false` by default (the safe baseline); a backend's probe fills the ones it
+/// truthfully supports on this host. `supports_binding_lease` is the gate boolean.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BindingCapabilities {
+    /// The backend is Firecracker (the only microVM backend with the binding flow).
+    pub supports_firecracker: bool,
+    /// The host has an AF_VSOCK transport (`/dev/vhost-vsock`).
+    pub supports_vsock: bool,
+    /// A guest-agent can be packaged into the rootfs + reached over vsock.
+    pub supports_guest_agent: bool,
+    /// The full binding-lease delivery flow is available (vsock + guest-agent, x86_64).
+    /// This is the gate the run path checks.
+    pub supports_binding_lease: bool,
+    /// `ato stop` can scrub guest bindings over vsock before teardown.
+    pub supports_stop_scrub: bool,
+    /// The reusable no-secret scanner is available as a release gate (L4).
+    pub supports_no_secret_scan: bool,
+}
+
+impl BindingCapabilities {
+    /// A human-readable reason the binding-lease flow is unavailable, or `None` when
+    /// `supports_binding_lease` is true.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        if self.supports_binding_lease {
+            return None;
+        }
+        let mut missing = Vec::new();
+        if !self.supports_firecracker {
+            missing.push("firecracker backend");
+        }
+        if !self.supports_vsock {
+            missing.push("host vsock (/dev/vhost-vsock)");
+        }
+        if !self.supports_guest_agent {
+            missing.push("guest-agent");
+        }
+        Some(format!("binding-lease unsupported on this host: missing {}", missing.join(", ")))
+    }
 }
 
 /// Raw layer bytes handed to a build. The caller assembles these from the
@@ -446,5 +491,29 @@ path = "/health"
         ))
         .expect("parse");
         assert!(ensure_gpu_not_in_snapshot(external.gpu_mode()).is_ok());
+    }
+
+    #[test]
+    fn binding_capabilities_reason_names_the_missing_piece() {
+        // default (all false) ⇒ unsupported, reason lists the missing pieces.
+        let none = BindingCapabilities::default();
+        let r = none.unavailable_reason().unwrap();
+        assert!(r.contains("firecracker") && r.contains("vsock") && r.contains("guest-agent"), "{r}");
+
+        // supported ⇒ no reason.
+        let ok = BindingCapabilities {
+            supports_firecracker: true,
+            supports_vsock: true,
+            supports_guest_agent: true,
+            supports_binding_lease: true,
+            supports_stop_scrub: true,
+            supports_no_secret_scan: true,
+        };
+        assert!(ok.unavailable_reason().is_none());
+
+        // firecracker + guest-agent but NO host vsock ⇒ unsupported, names vsock only.
+        let no_vsock = BindingCapabilities { supports_firecracker: true, supports_guest_agent: true, ..Default::default() };
+        let r = no_vsock.unavailable_reason().unwrap();
+        assert!(r.contains("vsock") && !r.contains("firecracker backend"), "{r}");
     }
 }
