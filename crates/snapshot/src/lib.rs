@@ -44,7 +44,7 @@ mod uffd;
 mod uffd_page_server;
 
 pub use backend::{
-    BackendCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
+    BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
     TeardownReceipt, ensure_gpu_not_in_snapshot,

@@ -65,6 +65,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             // The Fake backend never boots a VMM, so it has no UFFD mem-backend.
             supports_uffd_mem_backend: false,
             uffd_reason: Some("fake backend has no Firecracker UFFD mem-backend".to_string()),
+            binding: Default::default(),
         }
     }
 
