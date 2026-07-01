@@ -68,6 +68,11 @@ pub struct ProcessInfo {
     /// TAP device (informational; the authoritative tap is in `.fc-session.json`).
     #[serde(default)]
     pub ready_state_tap_dev: Option<String>,
+    /// Phase 8a-RunGate PR D3 (#912): the guest-agent vsock UDS for a bound binding
+    /// session. `ato stop` sends `Stop` (revoke + scrub) here BEFORE teardown.
+    /// `None` for no-binding sessions.
+    #[serde(default)]
+    pub ready_state_vsock_uds: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -623,6 +628,17 @@ impl ProcessManager {
     /// failed) is quarantined so it is never reused.
     fn teardown_ready_state_session(&self, info: &ProcessInfo) {
         let Some(backend_id) = info.ready_state_backend_id.as_deref() else { return };
+        // Phase 8a-RunGate PR D3 (#912): stop-scrub. If this is a bound binding session,
+        // ask the guest-agent to revoke + scrub its tmpfs bindings over vsock BEFORE the
+        // VM is torn down. Best-effort defense-in-depth (the teardown destroys the guest
+        // RAM + tmpfs regardless); a scrub failure is logged, never blocks teardown, and
+        // NEVER re-seals.
+        if let Some(uds) = info.ready_state_vsock_uds.as_deref() {
+            match crate::application::ready_state::binding_host::stop_scrub_over_vsock(uds) {
+                Ok(()) => tracing::info!(target: "ato::ready_state", "stop-scrub: guest bindings scrubbed before teardown"),
+                Err(e) => tracing::warn!(target: "ato::ready_state", "stop-scrub failed (teardown proceeds): {e}"),
+            }
+        }
         let overlay = info.ready_state_overlay_root.clone().unwrap_or_default();
         let session_id = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
         let _ = self.teardown_ready_state(backend_id, session_id, &overlay, Some(info.pid), info.requested_port);
