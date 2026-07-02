@@ -809,6 +809,28 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                         },
                     ))
                 }
+                crate::cli::RunnerCommands::Enroll {
+                    api_url,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                    enrollment_token,
+                    start,
+                } => rt.block_on(crate::application::runner_enroll::run_enroll(
+                    crate::application::runner_enroll::EnrollOptions {
+                        api_url,
+                        site_base,
+                        display_name,
+                        public_base_url,
+                        headless,
+                        enrollment_token,
+                        start,
+                    },
+                )),
+                crate::cli::RunnerCommands::Status { json } => {
+                    rt.block_on(crate::application::runner_enroll::run_status(json))
+                }
             }
         }
 
