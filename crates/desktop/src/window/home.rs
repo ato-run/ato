@@ -21,8 +21,6 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::App;
 
-use crate::state::GuestRoute;
-
 /// Connection-probe budget. Kept short so an offline launch falls back to the
 /// native landing quickly rather than hanging on a dead network.
 const HOME_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -83,14 +81,15 @@ pub fn probe_home_reachable(url: &str, timeout: Duration) -> bool {
 /// spawning a duplicate; otherwise a fresh Home window opens via
 /// [`open_home_window`].
 pub fn show_ato_home(cx: &mut App) -> Result<()> {
-    use crate::window::content_windows::OpenContentWindows;
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
 
-    let app_base_url = crate::config::load_config().desktop.app_base_url;
+    // Prefer the dedicated PWA Home window; the native Start landing is
+    // only a fallback surface, so don't let it shadow a fresh PWA open.
     let existing = cx
         .global::<OpenContentWindows>()
         .mru_order()
         .into_iter()
-        .find(|entry| crate::window::shell_tabs::is_ato_home_entry(&entry.kind, &app_base_url));
+        .find(|entry| matches!(entry.kind, ContentWindowKind::Home));
     if let Some(entry) = existing {
         let window_id = entry.handle.window_id().as_u64();
         if entry
@@ -99,9 +98,11 @@ pub fn show_ato_home(cx: &mut App) -> Result<()> {
             .is_ok()
         {
             cx.global_mut::<OpenContentWindows>().focus(window_id);
+            tracing::info!(window_id, "show_ato_home: raised existing Home window");
             return Ok(());
         }
     }
+    tracing::info!("show_ato_home: no live Home window — opening a new one");
     open_home_window(cx)
 }
 
@@ -141,9 +142,9 @@ pub fn open_home_window(cx: &mut App) -> Result<()> {
                         };
                         let _ = aa.update(|cx| {
                             let result = if reachable {
-                                crate::window::open_app_window(
+                                crate::window::ato_home_shell::open_ato_home_window(
                                     cx,
-                                    GuestRoute::ExternalUrl(url.clone()),
+                                    url.clone(),
                                 )
                                 .map(|_| ())
                             } else {

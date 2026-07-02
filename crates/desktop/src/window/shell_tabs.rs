@@ -52,6 +52,7 @@ pub struct ShellTab {
 /// `ato-start` fallback landing.
 pub fn is_ato_home_entry(kind: &ContentWindowKind, app_base_url: &str) -> bool {
     match kind {
+        ContentWindowKind::Home => true,
         ContentWindowKind::AppWindow {
             route: GuestRoute::ExternalUrl(url),
         } => same_origin(url.as_str(), app_base_url),
@@ -195,6 +196,14 @@ mod tests {
         ));
         assert!(!is_ato_home_entry(
             &external("https://ato.run/"),
+            "https://app.ato.run"
+        ));
+    }
+
+    #[test]
+    fn dedicated_home_window_counts_as_home() {
+        assert!(is_ato_home_entry(
+            &ContentWindowKind::Home,
             "https://app.ato.run"
         ));
     }

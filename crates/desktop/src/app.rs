@@ -581,6 +581,9 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the currently-open Store window (Wry WebView
         // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
+        // Slot tracking the dedicated Ato PWA Home window (the Shell
+        // Icon Bar's fixed Ato icon opens/raises it).
+        cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
@@ -1251,6 +1254,7 @@ pub fn run(skip_onboarding: bool) {
         // Shell Icon Bar — the fixed Ato icon opens/raises the Ato PWA
         // Home control surface.
         cx.on_action(|_: &ShowAtoHome, cx: &mut App| {
+            tracing::info!("ShowAtoHome action received");
             crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::home::show_ato_home(cx) {
                 tracing::error!(error = %err, "ShowAtoHome: failed to open Home surface");

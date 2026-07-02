@@ -23,7 +23,7 @@ use gpui::{
     AnyWindowHandle, App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity,
     FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels,
     Render, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb, size, svg,
+    WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb, size,
     transparent_black,
 };
 use gpui_component::{Icon, IconName};
@@ -592,13 +592,15 @@ fn tab_slot(id: SharedString, is_active: bool) -> gpui::Stateful<gpui::Div> {
 }
 
 /// The fixed leading Ato icon — opens/raises the Ato PWA Home surface.
-/// White circular tile with the brand mark also in white, sized to
-/// match the capsule letter avatars; a hairline border keeps the tile
-/// legible on the white pill.
+/// Renders the brand PNG (black mark, transparent background) directly
+/// via `img` — the GPUI svg path renders this particular asset inverted,
+/// so the raster source is authoritative here. White borderless wrapper
+/// keeps the slot aligned with the capsule avatars.
 fn ato_home_button(is_active: bool) -> impl IntoElement {
     tab_slot(SharedString::from("shell-tab-ato-home"), is_active)
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
             cx.stop_propagation();
+            tracing::info!("shell icon bar: Ato tile clicked");
             window.dispatch_action(Box::new(ShowAtoHome), cx);
         })
         .child(
@@ -610,14 +612,7 @@ fn ato_home_button(is_active: bool) -> impl IntoElement {
                 .justify_center()
                 .rounded_full()
                 .bg(rgb(0xffffff))
-                .border_1()
-                .border_color(hsla(0.0, 0.0, 0.0, 0.08))
-                .child(
-                    svg()
-                        .path(SharedString::from("icons/ato.svg"))
-                        .size(px(17.0))
-                        .text_color(rgb(0x000000)),
-                ),
+                .child(gpui::img("icons/ato.png").w(px(20.0)).h(px(20.0))),
         )
 }
 
