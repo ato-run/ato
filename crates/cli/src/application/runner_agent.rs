@@ -999,7 +999,7 @@ fn native_inference_ready() -> bool {
 /// Pure: the lease kinds/runtimes to advertise given the host's native-inference
 /// readiness. Split from the cached host probe so the conditional `native-inference`
 /// append is unit-testable.
-fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
+fn advertised_lease_kinds_for(native_inference_ready: bool, restore_ready: bool) -> Vec<String> {
     let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS
         .iter()
         .map(|s| s.to_string())
@@ -1007,11 +1007,24 @@ fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
     if native_inference_ready {
         kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
     }
+    // Track E (#912): only advertise restore_snapshot where this host can actually
+    // restore + SERVE a sealed microVM (KVM + a firecracker binary). The control plane
+    // capability-gates dispatch on this, so a KVM-free host is never handed a restore.
+    if restore_ready {
+        kinds.push(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND.to_string());
+    }
     kinds
 }
 
+/// This host can restore + serve a sealed Ready-State snapshot iff a real VMM backend
+/// probes available (KVM present + the backend binary). Mirrors `select_backend`'s
+/// fail-closed probe without materializing a backend.
+fn ready_state_restore_ready() -> bool {
+    snapshot::FirecrackerBackend::kvm_present()
+}
+
 fn advertised_lease_kinds() -> Vec<String> {
-    advertised_lease_kinds_for(native_inference_ready())
+    advertised_lease_kinds_for(native_inference_ready(), ready_state_restore_ready())
 }
 
 /// Fail-closed dispatch guard. The control plane already gates native-inference
@@ -1796,11 +1809,23 @@ pub async fn start_root_proxy(
     listen: &str,
     workload_port: u16,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    start_root_proxy_to(listen, format!("127.0.0.1:{workload_port}")).await
+}
+
+/// Core of [`start_root_proxy`] with an explicit upstream address. The child-run
+/// path pipes to host loopback; a restored microVM serves on its TAP guest IP
+/// (e.g. `172.16.0.2:8080`), which the snapshot backend reports as the session's
+/// `workload_addr` — the upstream is always a fixed, session-derived address,
+/// never caller/request-controlled, so this still cannot be an open proxy.
+pub async fn start_root_proxy_to(
+    listen: &str,
+    upstream_addr: String,
+) -> Result<tokio::task::JoinHandle<()>> {
     // Refuse to come up if the upstream is not actually accepting — a proxy
     // in front of nothing would make ready_url a lie.
-    tokio::net::TcpStream::connect(("127.0.0.1", workload_port))
+    tokio::net::TcpStream::connect(&upstream_addr)
         .await
-        .with_context(|| format!("workload 127.0.0.1:{workload_port} is not accepting"))?;
+        .with_context(|| format!("workload {upstream_addr} is not accepting"))?;
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -1810,10 +1835,9 @@ pub async fn start_root_proxy(
             let Ok((mut inbound, _)) = listener.accept().await else {
                 break;
             };
+            let upstream_addr = upstream_addr.clone();
             tokio::spawn(async move {
-                let Ok(mut upstream) =
-                    tokio::net::TcpStream::connect(("127.0.0.1", workload_port)).await
-                else {
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
                     return;
                 };
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
@@ -3203,6 +3227,307 @@ async fn run_lease_child(
     }
 }
 
+/// True while the restored VMM process is still alive (`kill(pid, 0)` probes without
+/// delivering a signal). Unlike the child-run path this is a single process pid, not a
+/// process group.
+#[cfg(unix)]
+fn vmm_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+#[cfg(not(unix))]
+fn vmm_alive(_pid: i32) -> bool {
+    true
+}
+
+/// How often the restore hold-loop polls `/control` for a stop + checks the VMM is alive.
+const RESTORE_HOLD_POLL_SECS: u64 = 2;
+
+/// Track E (#912): restore a sealed Ready-State snapshot for a `restore_snapshot` lease
+/// (Track D dispatch, ato-api#159) and expose it — owning the full
+/// fetch → VERIFY → restore → proxy → ready → hold → teardown lifecycle.
+///
+/// The lease is REFERENCE-ONLY: `artifact_location` is a hint, and the identity fields
+/// are verified against the fetched manifest by `load_and_verify_manifest` (incl. the
+/// `manifest.id() == artifact_manifest_hash` gate that `backend.restore` does not
+/// provide) BEFORE anything is restored. Every failure reports a typed `Failed` and
+/// releases the slot; no secret is ever consumed (a no-binding artifact only).
+#[allow(clippy::too_many_arguments)]
+async fn handle_restore_snapshot_lease(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease: LeaseDto,
+    slot: SlotLease,
+    public_base_url: Option<String>,
+    public_url_template: Option<String>,
+) {
+    use crate::application::ready_state::backend::select_backend;
+    use crate::application::ready_state::restore::{restore_and_expose, teardown};
+    use crate::application::ready_state::restore_lease::{
+        load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
+    };
+    use capsulefs::CasStore;
+
+    let lease_id = lease.id.clone();
+
+    // Report a typed failure and release the slot (fail-closed on every reject path).
+    async fn fail(
+        client: &reqwest::Client,
+        api_base: &str,
+        runner_token: &str,
+        lease_id: &str,
+        slot: SlotLease,
+        code: &str,
+        message: String,
+    ) {
+        eprintln!("⚠️  restore lease {lease_id} rejected: {}", scrub_secrets(&message));
+        let report = LeaseReport::Failed { code: code.to_string(), message };
+        if let Err(err) = report_lease_status(client, api_base, runner_token, lease_id, &report).await
+        {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: failure report failed: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+        }
+        slot.release();
+    }
+
+    // 1. Parse the reference-only command (every identity field required + non-empty).
+    let cmd = match parse_restore_snapshot_command(&lease.command) {
+        Ok(c) => c,
+        Err((code, message)) => {
+            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+            return;
+        }
+    };
+    println!(
+        "📦 restore lease {lease_id}: snapshot {} (capsule {}, {}/{})",
+        cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
+    );
+    let _ = report_lease_status(client, api_base, runner_token, &lease_id, &LeaseReport::Preparing)
+        .await;
+
+    // 2. Locate the fetched artifact on this host (v1 same-host CAS, ato#928 layout).
+    let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
+        Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
+        _ => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "artifact_unavailable",
+                "ATO_SNAPSHOT_ARTIFACT_ROOT is not configured on this runner".to_string(),
+            )
+            .await;
+            return;
+        }
+    };
+    let paths = match locate_artifact(&cmd.artifact_location, &artifact_root) {
+        Ok(p) => p,
+        Err((code, message)) => {
+            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+            return;
+        }
+    };
+
+    // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate).
+    let manifest = match load_and_verify_manifest(&paths.manifest_json, &cmd) {
+        Ok(m) => m,
+        Err((code, message)) => {
+            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+            return;
+        }
+    };
+
+    // 4. Open the artifact's CAS + select the host backend (both fail-closed).
+    let store = match CasStore::open(&paths.cas_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "artifact_unavailable",
+                format!("open CAS: {e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let backend = match select_backend() {
+        Ok(b) => b,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "backend_unavailable",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+
+    // 5. Restore + expose. The disposable overlay is destroyed on teardown. host_runner
+    // class stays None so `backend.restore` re-gates the manifest's runner class against
+    // THIS host (fail-closed, defence in depth over the pre-restore verify).
+    let overlay_root = std::env::temp_dir()
+        .join("ato-restore-overlays")
+        .join(&lease_id);
+    let receipt =
+        match restore_and_expose(backend.as_ref(), &store, manifest, overlay_root, None, false) {
+            Ok(r) => r,
+            Err(e) => {
+                fail(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    slot,
+                    "restore_failed",
+                    format!("{e:#}"),
+                )
+                .await;
+                return;
+            }
+        };
+    let session = receipt.session;
+
+    let Some(guest_port) = session.guest_port else {
+        // Nothing to expose (e.g. a Fake/KVM-free backend) — a public run needs a served
+        // port. Tear the session down and fail rather than report a portless ready.
+        let _ = teardown(backend.as_ref(), session);
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "restore_no_port",
+            "restored session exposed no guest port; this runner cannot serve it".to_string(),
+        )
+        .await;
+        return;
+    };
+    // Where the restored workload ACTUALLY accepts connections — backend-authoritative
+    // (Firecracker serves on the TAP guest IP, e.g. 172.16.0.2:8080, not host loopback).
+    // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
+    let workload_addr = session.workload_addr.clone();
+
+    // 6. Bring the per-slot root proxy up BEFORE claiming a URL — a proxy that failed (or
+    // a slot with no URL to claim, or a session with no dialable workload address)
+    // reports ready WITHOUT a fabricated ready_url.
+    let candidate = public_ready_url(
+        public_base_url.as_deref(),
+        public_url_template.as_deref(),
+        &slot,
+    );
+    let (proxy_handle, proxy_started) = match (candidate.as_deref(), workload_addr.as_deref()) {
+        (Some(_), Some(addr)) => match start_root_proxy_to(&slot.proxy_listen, addr.to_string()).await {
+            Ok(handle) => {
+                println!(
+                    "🔀 restore lease {lease_id}: slot {} proxy {} -> {}",
+                    slot.index, slot.proxy_listen, addr
+                );
+                (Some(handle), Some(true))
+            }
+            Err(err) => {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: proxy failed; reporting ready WITHOUT ready_url: {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+                (None, Some(false))
+            }
+        },
+        (Some(_), None) => {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
+            );
+            (None, Some(false))
+        }
+        _ => (None, None),
+    };
+    let payload = decide_ready_payload(
+        cmd.execution_id.clone(),
+        candidate.as_deref(),
+        Some(guest_port),
+        proxy_started,
+    );
+    println!(
+        "📨 restore lease {lease_id}: ready ({}, ready_url={})",
+        payload.execution_id,
+        payload.ready_url.as_deref().unwrap_or("none")
+    );
+    if let Err(err) = report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: ready report failed: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+
+    // 7. Hold until the owner stops the run (/control) or the VMM exits.
+    let control_url = format!(
+        "{}/v1/runner-leases/{}/control",
+        api_base.trim_end_matches('/'),
+        &lease_id
+    );
+    let reason = loop {
+        tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
+        if let Some(pid) = session.vmm_pid
+            && !vmm_alive(pid)
+        {
+            break "workload_exited";
+        }
+        match poll_control_once(client, &control_url, runner_token).await {
+            ControlOutcome::Stop => break "user_requested",
+            ControlOutcome::Done => break "lease_gone",
+            ControlOutcome::Continue => {}
+        }
+    };
+    println!("🛑 restore lease {lease_id}: {reason}; tearing down");
+
+    // 8. Teardown: stop the VM + destroy the overlay, stop the proxy, ack /stopped, and
+    // free the slot ONLY on a fully confirmed teardown (fail closed — a slot held is
+    // safer than one offered while a VM may still be up).
+    let vm_stopped = match teardown(backend.as_ref(), session) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: backend stop failed: {}",
+                scrub_secrets(&format!("{e:#}"))
+            );
+            false
+        }
+    };
+    let proxy_stopped = stop_proxy(proxy_handle).await;
+    let cleanup = StopCleanup::from_teardown(vm_stopped, proxy_stopped);
+    if let Err(err) =
+        report_lease_stopped_with_reason(client, api_base, runner_token, &lease_id, &cleanup, reason)
+            .await
+    {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: stopped ack failed: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+    if cleanup.slot_released {
+        slot.release();
+        println!("🔓 restore lease {lease_id}: VM stopped, proxy down, slot released");
+    } else {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: teardown incomplete (vm_stopped={}, proxy_stopped={}); slot held",
+            cleanup.process_terminated, cleanup.proxy_stopped
+        );
+    }
+}
+
 async fn handle_claimed_lease(
     client: &reqwest::Client,
     api_base: &str,
@@ -3213,6 +3538,25 @@ async fn handle_claimed_lease(
     public_url_template: Option<String>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
+    // Track E (#912): a restore_snapshot lease restores a sealed Ready-State snapshot
+    // (Track D dispatch, ato-api#159). It is NOT a child-process sandbox run, so it owns
+    // its own fetch → verify → restore → expose → teardown lifecycle — routed here,
+    // before the run_source/run_capsule machinery that would reject the kind.
+    if lease.command.get("kind").and_then(|v| v.as_str())
+        == Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND)
+    {
+        handle_restore_snapshot_lease(
+            client,
+            api_base,
+            runner_token,
+            lease,
+            slot,
+            public_base_url,
+            public_url_template,
+        )
+        .await;
+        return;
+    }
     // Fail closed FIRST — before resolving/materializing the lease or reporting
     // Preparing: a native-inference lease must only run where this host can
     // actually run native-inference. The control plane already capability-gates
@@ -4162,7 +4506,7 @@ mod tests {
         // Not ready: base kinds only, NO native-inference advertised — so the
         // control plane will not dispatch native-inference here (the slice-1 gate
         // requires the capability).
-        let base = advertised_lease_kinds_for(false);
+        let base = advertised_lease_kinds_for(false, false);
         assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
         assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
@@ -4170,12 +4514,29 @@ mod tests {
             "must NOT advertise native-inference when the host is not ready"
         );
         // Ready: base kinds preserved + native-inference appended.
-        let ready = advertised_lease_kinds_for(true);
+        let ready = advertised_lease_kinds_for(true, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
             ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
             "must advertise native-inference when the host is ready"
         );
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_restore_snapshot_only_when_ready() {
+        use crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND;
+        // KVM-free host: restore_snapshot is NOT advertised, so the control plane will
+        // not dispatch a restore here (a Fake/KVM-free host cannot serve a real app_url).
+        assert!(
+            !advertised_lease_kinds_for(false, false)
+                .iter()
+                .any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND),
+            "must NOT advertise restore_snapshot when the host cannot restore+serve"
+        );
+        // Restore-ready host: base kinds preserved + restore_snapshot appended.
+        let ready = advertised_lease_kinds_for(false, true);
+        assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(ready.iter().any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND));
     }
 
     fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {

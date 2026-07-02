@@ -74,6 +74,7 @@ mod tests {
             restored_bytes: 123,
             vmm_pid: None,
             vsock_uds: None,
+            workload_addr: None,
         }
     }
 
