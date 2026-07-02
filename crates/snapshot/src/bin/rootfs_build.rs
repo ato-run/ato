@@ -55,7 +55,9 @@ fn main() {
         }
         let work = std::env::temp_dir().join(format!("rootfs-build-{repo}"));
         let _ = std::fs::remove_dir_all(&work);
-        materialize_source(&owner, &repo, &commit, subdir.as_deref(), &work).unwrap_or_else(|e| fail("source", e))
+        // Dev tool: no recipe manifest override (#932) — the checkout must carry its own
+        // capsule.toml, matching the raw-GitHub builder path.
+        materialize_source(&owner, &repo, &commit, subdir.as_deref(), None, &work).unwrap_or_else(|e| fail("source", e))
     };
 
     let toml_path = src.join("capsule.toml");
