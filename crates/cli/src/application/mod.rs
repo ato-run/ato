@@ -43,6 +43,7 @@ pub(crate) mod ready_state;
 pub(crate) mod receipt_boundary;
 pub(crate) mod runner_agent;
 pub(crate) mod runner_bootstrap;
+pub(crate) mod runner_enroll;
 pub(crate) mod runtime_observation;
 pub(crate) mod runtime_prepare;
 pub(crate) mod runtime_setup;

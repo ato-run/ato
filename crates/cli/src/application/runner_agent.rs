@@ -111,6 +111,39 @@ pub fn load_credentials(path: &std::path::Path) -> Result<RunnerCredentials> {
     })
 }
 
+/// Env var names the systemd EnvironmentFile (`/etc/ato/runner.env`, written by
+/// `ato runner enroll`) can supply. Used only as a fallback when there is no
+/// `credentials.json` — e.g. the operator ran `ato runner enroll` as themselves but
+/// `ato-runner-agent.service` runs as root, so the two do not share a home.
+pub const ENV_RUNNER_API_URL: &str = "ATO_API_URL";
+pub const ENV_RUNNER_TOKEN: &str = "ATO_RUNNER_TOKEN";
+pub const ENV_RUNNER_ID: &str = "ATO_RUNNER_ID";
+pub const ENV_RUNNER_DISPLAY_NAME: &str = "ATO_RUNNER_DISPLAY_NAME";
+
+/// Resolve runner credentials from `credentials.json` (authoritative), else
+/// reconstruct them from the environment (systemd EnvironmentFile). Fail-closed with
+/// the same guidance when neither is available.
+pub fn load_runner_credentials() -> Result<RunnerCredentials> {
+    let path = credentials_path();
+    if path.exists() {
+        return load_credentials(&path);
+    }
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let (Some(api_base), Some(token), Some(id)) =
+        (env(ENV_RUNNER_API_URL), env(ENV_RUNNER_TOKEN), env(ENV_RUNNER_ID))
+    {
+        return Ok(RunnerCredentials {
+            api_base: api_base.trim_end_matches('/').to_string(),
+            runner_id: id,
+            runner_token: token,
+            display_name: env(ENV_RUNNER_DISPLAY_NAME).unwrap_or_else(default_display_name),
+            heartbeat_interval_seconds: default_heartbeat_interval(),
+        });
+    }
+    // Neither source available — surface the credentials.json guidance.
+    load_credentials(&path)
+}
+
 // ─────────────────────────────────────────────
 // Capabilities
 // ─────────────────────────────────────────────
@@ -697,13 +730,20 @@ pub async fn run_serve(
         .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_URL_TEMPLATE").ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // The systemd unit runs `ato runner serve` with no flags, reading config from
+    // EnvironmentFile=/etc/ato/runner.env — so honor ATO_RUNNER_PUBLIC_BASE_URL (written
+    // by `ato runner enroll`) as the public base URL when the flag is absent. Without
+    // this the service would advertise no URL and never be dispatchable.
+    let public_base_url = public_base_url
+        .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_BASE_URL").ok())
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
     // Fail fast at startup on configurations that would violate the
     // no-port-collision / no-fabricated-URL invariants, rather than discovering
     // them per-slot at ready time.
     validate_slot_port_range(proxy_base_port, capacity)?;
     validate_public_url_template(public_url_template.as_deref())?;
-    let path = credentials_path();
-    let creds = load_credentials(&path)?;
+    let creds = load_runner_credentials()?;
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or(creds.api_base.clone());
@@ -1023,7 +1063,7 @@ fn ready_state_restore_ready() -> bool {
     snapshot::FirecrackerBackend::kvm_present()
 }
 
-fn advertised_lease_kinds() -> Vec<String> {
+pub(crate) fn advertised_lease_kinds() -> Vec<String> {
     advertised_lease_kinds_for(native_inference_ready(), ready_state_restore_ready())
 }
 
