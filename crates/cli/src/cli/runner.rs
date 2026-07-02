@@ -145,6 +145,54 @@ pub(crate) enum RunnerCommands {
         #[arg(long, default_value_t = false)]
         dry_run: bool,
     },
+
+    /// Prepare this Ubuntu host as an all-in-one Ato snapshot builder + capsule
+    /// runner. Without `--fix`: prints the derived plan and changes nothing. With
+    /// `--fix` (root + explicit confirmation): installs the missing pieces —
+    /// Docker, the pinned Firecracker release and guest kernel (both
+    /// sha256-verified), kvm/docker group grants, the artifact root, the
+    /// /etc/ato/runner.env file (append-only) and the two systemd units (existing
+    /// files are backed up, never clobbered). BIOS virtualization and a non-Ubuntu
+    /// OS cannot be fixed from software — those are printed as manual steps.
+    #[command(name = "setup", about = "Prepare this Ubuntu host as a snapshot builder + capsule runner")]
+    Setup {
+        /// Apply the fixes (host mutation, root only). Without it: dry-run plan.
+        #[arg(long, default_value_t = false)]
+        fix: bool,
+
+        /// Skip the interactive confirmation (for provisioning scripts).
+        #[arg(long, default_value_t = false)]
+        yes: bool,
+
+        /// Artifact root for sealed snapshots (default: /var/lib/ato/snapshots).
+        #[arg(long, value_name = "DIR")]
+        artifact_root: Option<String>,
+
+        /// Control-plane API base URL written into /etc/ato/runner.env.
+        #[arg(long, value_name = "URL")]
+        api_url: Option<String>,
+    },
+
+    /// Minimal local Ready-State smoke, no control plane involved: Docker→ext4
+    /// rootfs from a built-in fixture → build_ready_state (boot + healthcheck +
+    /// seal) → restore → root-proxy HTTP probe → stop/teardown → orphan diff
+    /// (firecracker pids, tap devices, loop devices, ato docker containers).
+    /// Requires root + KVM + Docker. A green smoke means this host can actually
+    /// build AND serve capsule snapshots.
+    #[command(name = "smoke", about = "Local build→restore→proxy→teardown smoke for this runner host")]
+    Smoke {
+        /// Local address the probe proxy listens on (default: 127.0.0.1:8431).
+        #[arg(long, value_name = "ADDR:PORT")]
+        proxy_listen: Option<String>,
+
+        /// Keep the smoke work directory for debugging.
+        #[arg(long, default_value_t = false)]
+        keep: bool,
+
+        /// Emit machine-readable JSON on stdout instead of the human report.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]

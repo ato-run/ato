@@ -51,7 +51,7 @@ pub use backend::{
     TeardownReceipt, ensure_gpu_not_in_snapshot,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
-pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend};
+pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,

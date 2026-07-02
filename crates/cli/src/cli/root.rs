@@ -1233,4 +1233,17 @@ pub(crate) enum DoctorTarget {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Check this Ubuntu host's readiness as an all-in-one Ato snapshot builder +
+    /// capsule runner: KVM, Firecracker, guest kernel, Docker, groups, tun/tap,
+    /// artifact root, env file, runner token and the systemd services — plus the
+    /// derived Ready-State verdict (can it build_ready_state / restore_snapshot
+    /// today?). Read-only: never mutates host state; the fixable set is applied by
+    /// `ato runner setup --fix`.
+    #[command(name = "runner")]
+    Runner {
+        /// Emit machine-readable JSON on stdout instead of a human table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
