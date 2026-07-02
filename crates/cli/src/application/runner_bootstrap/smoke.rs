@@ -269,7 +269,11 @@ async fn smoke_pipeline(
     let built = backend.build_ready_state(BuildReadyStateInput {
         store: &store,
         capsule_manifest_hash: "blake3:runner-smoke".to_string(),
-        runner_class: Some(capsule::foundation::install_lifecycle::RunnerClassFacts::from_host().id()),
+        // None ⇒ build_ready_state stamps the BACKEND's runner class (from_host + the
+        // Firecracker-specific facts), which is exactly what restore's gate compares
+        // against — mirroring the real snapshot-builder. Passing the generic
+        // from_host() class here would seal an artifact this same host then refuses.
+        runner_class: None,
         layers: BuildLayers {
             rootfs: rootfs_bytes,
             runtime: None,
