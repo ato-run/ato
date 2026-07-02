@@ -65,9 +65,15 @@ pub(crate) async fn run_enroll(opts: EnrollOptions) -> Result<()> {
     if view.status != "active" {
         bail!("runner registered but status is {:?} (expected active)", view.status);
     }
-    if !view.supported_lease_kinds.iter().any(|k| k == "restore_snapshot") {
+    // Whether restore_snapshot will be advertised is a LOCAL host-capability question
+    // (KVM + Firecracker), decided by the serve loop's first heartbeat — not by /self,
+    // which is read here BEFORE that heartbeat and so still shows the registration
+    // default. Check the local advertisement instead of a stale control-plane view.
+    if advertised_lease_kinds().iter().any(|k| k == "restore_snapshot") {
+        println!("• this host advertises restore_snapshot (snapshot runs can dispatch here once serving)");
+    } else {
         eprintln!(
-            "⚠️  this runner does not yet advertise restore_snapshot (KVM not ready?). Run `ato doctor runner`; snapshot runs will not dispatch here until it does."
+            "⚠️  this host will NOT advertise restore_snapshot (KVM/Firecracker not ready). Run `ato doctor runner`; snapshot runs will not dispatch here until it does."
         );
     }
 
@@ -85,73 +91,81 @@ pub(crate) async fn run_enroll(opts: EnrollOptions) -> Result<()> {
 /// never overwriting an operator-set key. Non-fatal on permission failure (credentials
 /// .json already makes an interactive `ato runner serve` work; the env file only matters
 /// for the systemd service, which needs root anyway).
-/// The runner env lines to APPEND — only keys the operator has NOT already set. Pure,
-/// so the append-only invariant (never rewrite an operator value, always include the
-/// runner token/id) is tested without a filesystem.
-pub(crate) fn runner_env_missing_lines(
-    existing: &std::collections::BTreeMap<String, String>,
-    api_base: &str,
-    runner_id: &str,
-    runner_token: &str,
-    display_name: &str,
-    public_base_url: Option<&str>,
-    artifact_root: &str,
-) -> Vec<String> {
-    let mut wanted: Vec<(&str, String)> = vec![
-        (runner_agent::ENV_RUNNER_API_URL, api_base.to_string()),
-        (runner_agent::ENV_RUNNER_ID, runner_id.to_string()),
-        (runner_agent::ENV_RUNNER_TOKEN, runner_token.to_string()),
-        (runner_agent::ENV_RUNNER_DISPLAY_NAME, display_name.to_string()),
-    ];
-    if let Some(url) = public_base_url {
-        wanted.push(("ATO_RUNNER_PUBLIC_BASE_URL", url.to_string()));
+/// Produce the new env-file text: **UPSERT** the runner-identity keys enroll owns
+/// (replace in place if present, else append) and **append-only** the tuning keys
+/// (never clobber an operator/bootstrap value). Pure — comments, ordering, and unrelated
+/// keys are preserved.
+///
+/// The identity keys (`ATO_API_URL`/`ATO_RUNNER_*`) MUST be upserted: `ato runner setup`
+/// seeds `ATO_API_URL` with the production default, and enroll's `--api-url` is the
+/// authoritative endpoint for THIS enrollment — an append-only merge would leave the
+/// service pointed at the wrong control plane with a token it will reject.
+pub(crate) fn upsert_env_text(
+    existing: &str,
+    set: &[(&str, String)],
+    append_if_missing: &[(&str, String)],
+) -> String {
+    let mut out = String::new();
+    let mut replaced = vec![false; set.len()];
+    for line in existing.lines() {
+        let trimmed = line.trim_start();
+        let key = (!trimmed.starts_with('#'))
+            .then(|| trimmed.split_once('='))
+            .flatten()
+            .map(|(k, _)| k.trim());
+        if let Some(key) = key
+            && let Some(i) = set.iter().position(|(k, _)| *k == key)
+        {
+            out.push_str(&format!("{}={}\n", set[i].0, set[i].1));
+            replaced[i] = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
     }
-    // Only set the artifact root if the operator/bootstrap hasn't.
-    if !existing.contains_key("ATO_SNAPSHOT_ARTIFACT_ROOT") {
-        wanted.push(("ATO_SNAPSHOT_ARTIFACT_ROOT", artifact_root.to_string()));
+    for (i, (k, v)) in set.iter().enumerate() {
+        if !replaced[i] {
+            out.push_str(&format!("{k}={v}\n"));
+        }
     }
-    wanted
-        .into_iter()
-        .filter(|(k, _)| !existing.contains_key(*k))
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect()
+    let existing_keys = checks::env_file_values(existing);
+    for (k, v) in append_if_missing {
+        if !existing_keys.contains_key(*k) {
+            out.push_str(&format!("{k}={v}\n"));
+        }
+    }
+    out
 }
 
 fn write_runner_env(creds: &RunnerCredentials, public_base_url: Option<&str>) {
     let path = Path::new(ENV_FILE);
     let existing_text = std::fs::read_to_string(path).unwrap_or_default();
-    let existing = checks::env_file_values(&existing_text);
-    let missing = runner_env_missing_lines(
-        &existing,
-        &creds.api_base,
-        &creds.runner_id,
-        &creds.runner_token,
-        &creds.display_name,
-        public_base_url,
-        &checks::resolve_artifact_root(),
-    );
-    if missing.is_empty() {
-        println!("• {ENV_FILE}: all runner keys already present (operator values untouched)");
+
+    // Identity/endpoint keys enroll owns — upserted (its --api-url wins over setup's default).
+    let mut set: Vec<(&str, String)> = vec![
+        (runner_agent::ENV_RUNNER_API_URL, creds.api_base.clone()),
+        (runner_agent::ENV_RUNNER_ID, creds.runner_id.clone()),
+        (runner_agent::ENV_RUNNER_TOKEN, creds.runner_token.clone()),
+        (runner_agent::ENV_RUNNER_DISPLAY_NAME, creds.display_name.clone()),
+    ];
+    if let Some(url) = public_base_url {
+        set.push(("ATO_RUNNER_PUBLIC_BASE_URL", url.to_string()));
+    }
+    // Tuning keys — never clobber an operator/bootstrap value.
+    let append: Vec<(&str, String)> =
+        vec![("ATO_SNAPSHOT_ARTIFACT_ROOT", checks::resolve_artifact_root())];
+
+    let new_text = upsert_env_text(&existing_text, &set, &append);
+    if new_text == existing_text {
+        println!("• {ENV_FILE}: already up to date");
         return;
     }
-
-    let mut content = existing_text;
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
-    }
-    if content.is_empty() {
-        content.push_str("# Ato runner environment (written by `ato runner enroll`).\n");
-    }
-    for line in &missing {
-        content.push_str(line);
-        content.push('\n');
-    }
-    match write_env_secure(path, &content) {
+    match write_env_secure(path, &new_text) {
         Ok(backup) => {
             let note = backup
                 .map(|b| format!(" (previous backed up to {})", b.display()))
                 .unwrap_or_default();
-            println!("• wrote {} key(s) to {ENV_FILE} (0600){note}", missing.len());
+            println!("• updated {ENV_FILE} (0600){note}");
         }
         Err(e) => {
             eprintln!(
@@ -339,47 +353,52 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    #[test]
-    fn env_lines_include_token_and_id_on_a_fresh_file() {
-        let lines = runner_env_missing_lines(
-            &BTreeMap::new(),
-            "https://api.ato.run",
-            "runner_1",
-            "ato_rnr_secret",
-            "my-host",
-            Some("https://runner.example.com"),
-            "/var/lib/ato/snapshots",
-        );
-        assert!(lines.iter().any(|l| l == "ATO_API_URL=https://api.ato.run"));
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_ID=runner_1"));
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_TOKEN=ato_rnr_secret"));
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_DISPLAY_NAME=my-host"));
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_PUBLIC_BASE_URL=https://runner.example.com"));
-        assert!(lines.iter().any(|l| l == "ATO_SNAPSHOT_ARTIFACT_ROOT=/var/lib/ato/snapshots"));
+    /// Mirror write_runner_env's key split for the tests.
+    fn upsert(existing: &str, api: &str, id: &str, token: &str, name: &str, pub_url: Option<&str>, root: &str) -> String {
+        let mut set: Vec<(&str, String)> = vec![
+            (runner_agent::ENV_RUNNER_API_URL, api.into()),
+            (runner_agent::ENV_RUNNER_ID, id.into()),
+            (runner_agent::ENV_RUNNER_TOKEN, token.into()),
+            (runner_agent::ENV_RUNNER_DISPLAY_NAME, name.into()),
+        ];
+        if let Some(u) = pub_url { set.push(("ATO_RUNNER_PUBLIC_BASE_URL", u.into())); }
+        upsert_env_text(existing, &set, &[("ATO_SNAPSHOT_ARTIFACT_ROOT", root.into())])
     }
 
     #[test]
-    fn env_merge_is_append_only_and_never_rewrites_operator_keys() {
-        let mut existing = BTreeMap::new();
-        existing.insert("ATO_API_URL".into(), "https://staging-api.ato.run".into());
-        existing.insert("ATO_SNAPSHOT_ARTIFACT_ROOT".into(), "/srv/snap".into());
-        let lines = runner_env_missing_lines(
-            &existing,
-            "https://api.ato.run", // different — must NOT override the operator's
-            "runner_1",
-            "ato_rnr_secret",
-            "my-host",
-            None, // no public base url ⇒ not emitted
-            "/var/lib/ato/snapshots",
-        );
-        // Operator-set keys untouched.
-        assert!(lines.iter().all(|l| !l.starts_with("ATO_API_URL=")));
-        assert!(lines.iter().all(|l| !l.starts_with("ATO_SNAPSHOT_ARTIFACT_ROOT=")));
-        // Genuinely missing keys still appended (incl. the token).
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_ID=runner_1"));
-        assert!(lines.iter().any(|l| l == "ATO_RUNNER_TOKEN=ato_rnr_secret"));
-        // No public URL passed ⇒ that key is absent.
-        assert!(lines.iter().all(|l| !l.starts_with("ATO_RUNNER_PUBLIC_BASE_URL=")));
+    fn env_upsert_writes_identity_keys_on_a_fresh_file() {
+        let out = upsert("", "https://api.ato.run", "runner_1", "ato_rnr_secret", "my-host", Some("https://runner.example.com"), "/var/lib/ato/snapshots");
+        for want in [
+            "ATO_API_URL=https://api.ato.run",
+            "ATO_RUNNER_ID=runner_1",
+            "ATO_RUNNER_TOKEN=ato_rnr_secret",
+            "ATO_RUNNER_DISPLAY_NAME=my-host",
+            "ATO_RUNNER_PUBLIC_BASE_URL=https://runner.example.com",
+            "ATO_SNAPSHOT_ARTIFACT_ROOT=/var/lib/ato/snapshots",
+        ] {
+            assert!(out.lines().any(|l| l == want), "missing {want} in:\n{out}");
+        }
+    }
+
+    #[test]
+    fn env_upsert_overrides_the_endpoint_but_not_operator_tuning_keys() {
+        // setup seeded ATO_API_URL with the prod default + an operator artifact root +
+        // a builder token; enroll must OVERRIDE the endpoint it owns but leave the rest.
+        let existing = "# header\nATO_API_URL=https://api.ato.run\nSNAPSHOT_BUILDER_AGENT_TOKEN=builder-secret\nATO_SNAPSHOT_ARTIFACT_ROOT=/srv/snap\n";
+        let out = upsert(existing, "http://127.0.0.1:8787", "runner_1", "ato_rnr_secret", "my-host", None, "/var/lib/ato/snapshots");
+        // Endpoint replaced IN PLACE (exactly once) with enroll's --api-url.
+        assert_eq!(out.lines().filter(|l| l.starts_with("ATO_API_URL=")).count(), 1);
+        assert!(out.lines().any(|l| l == "ATO_API_URL=http://127.0.0.1:8787"));
+        assert!(!out.contains("ATO_API_URL=https://api.ato.run"));
+        // Operator tuning keys untouched.
+        assert!(out.lines().any(|l| l == "SNAPSHOT_BUILDER_AGENT_TOKEN=builder-secret"));
+        assert!(out.lines().any(|l| l == "ATO_SNAPSHOT_ARTIFACT_ROOT=/srv/snap"));
+        assert!(!out.contains("/var/lib/ato/snapshots")); // append-only key not re-added
+        // Comment preserved; token appended.
+        assert!(out.starts_with("# header\n"));
+        assert!(out.lines().any(|l| l == "ATO_RUNNER_TOKEN=ato_rnr_secret"));
+        // A re-run with the same values is idempotent (no further change).
+        assert_eq!(upsert(&out, "http://127.0.0.1:8787", "runner_1", "ato_rnr_secret", "my-host", None, "/var/lib/ato/snapshots"), out);
     }
 
     #[test]
