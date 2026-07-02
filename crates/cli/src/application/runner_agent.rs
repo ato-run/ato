@@ -730,6 +730,14 @@ pub async fn run_serve(
         .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_URL_TEMPLATE").ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // The systemd unit runs `ato runner serve` with no flags, reading config from
+    // EnvironmentFile=/etc/ato/runner.env — so honor ATO_RUNNER_PUBLIC_BASE_URL (written
+    // by `ato runner enroll`) as the public base URL when the flag is absent. Without
+    // this the service would advertise no URL and never be dispatchable.
+    let public_base_url = public_base_url
+        .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_BASE_URL").ok())
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
     // Fail fast at startup on configurations that would violate the
     // no-port-collision / no-fabricated-URL invariants, rather than discovering
     // them per-slot at ready time.
