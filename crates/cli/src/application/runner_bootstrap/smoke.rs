@@ -285,7 +285,10 @@ async fn smoke_pipeline(
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
-        execution_id: None, // local smoke: no declared identity — nothing registers this artifact
+        // A fixed synthetic identity (this artifact is never registered) so the
+        // restore-lease verify stage exercises the execution_id gate too, exactly as
+        // the runner does for a real sealed manifest.
+        execution_id: Some("sha256:runner-smoke".into()),
     });
     let sealed = match built {
         Ok(r) => {
