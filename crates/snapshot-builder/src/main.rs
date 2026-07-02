@@ -73,7 +73,34 @@ struct ClaimedSource {
 struct ClaimedJob {
     id: String,
     capsule_id: String,
+    /// The target/profile this snapshot job was enqueued FOR (Track A/B: both
+    /// `capsule_snapshot_jobs` and `capsule_snapshots` are target/profile-scoped).
+    /// v1 seals only `target_label == manifest.default_target` with
+    /// `profile == "default"` — anything else fails closed; the builder never
+    /// silently substitutes the manifest default for a different requested target.
+    target_label: String,
+    profile: String,
     source: ClaimedSource,
+}
+
+/// The narrow v1 target/profile gate: a job may only build when it requests the
+/// manifest's default target with the default profile. Otherwise the artifact identity
+/// (and the `capsule_snapshots` row PR 3 writes from it) would be registered under a
+/// target/profile that does NOT match what was actually built — fail closed instead.
+fn v1_target_profile_gate(
+    job_target_label: &str,
+    job_profile: &str,
+    manifest_default_target: &str,
+) -> std::result::Result<(), (String, String)> {
+    if job_profile != "default" || job_target_label != manifest_default_target {
+        return Err((
+            "eligibility".into(),
+            format!(
+                "requested target/profile is not supported by Ready-State builder v1 (requested {job_target_label}/{job_profile}; v1 builds only the manifest default target '{manifest_default_target}' with profile 'default')"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,6 +202,9 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     let toml_bytes = std::fs::read(src.join("capsule.toml")).map_err(|e| fail("manifest", e.to_string()))?;
     let toml_text = String::from_utf8_lossy(&toml_bytes).into_owned();
     let manifest = CapsuleManifest::from_toml(&toml_text).map_err(|e| fail("manifest", e.to_string()))?;
+    // v1 target/profile gate: only the manifest default target with profile "default"
+    // may seal (never silently substitute the default for a different requested target).
+    v1_target_profile_gate(&job.target_label, &job.profile, manifest.default_target.trim())?;
     let spec = derive_build_spec(&manifest, &SourceProbe::scan(&src)).map_err(|e| fail("eligibility", e))?;
 
     // 2b. The declared Ato Execution Identity for this build — computed from DECLARED,
@@ -190,7 +220,9 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
             &job.source.commit_sha,
             job.source.subdirectory.as_deref(),
         ),
-        target_label: manifest.default_target.trim().to_string(),
+        // The REQUESTED target (gate-validated == manifest.default_target): the identity
+        // is computed for the target actually being built, never a substituted one.
+        target_label: job.target_label.clone(),
         runtime: target.runtime.clone(),
         working_directory: target.working_dir.clone(),
         dependencies: declared_dependencies_from_manifest_toml(&toml_text).map_err(|e| fail("artifact_metadata", e))?,
@@ -331,6 +363,25 @@ mod tests {
         assert_eq!(resp.jobs[0].source.github_owner, "acme");
         assert_eq!(resp.jobs[0].source.commit_sha.len(), 40);
         assert!(resp.jobs[0].source.subdirectory.is_none());
+        // target_label/profile are REQUIRED claim fields (target/profile-scoped registry).
+        assert_eq!(resp.jobs[0].target_label, "web");
+        assert_eq!(resp.jobs[0].profile, "default");
+    }
+
+    #[test]
+    fn v1_seals_only_the_default_target_with_the_default_profile() {
+        // Match ⇒ Ok.
+        assert!(v1_target_profile_gate("app", "default", "app").is_ok());
+        // Requested target ≠ manifest default ⇒ fail closed at eligibility — the builder
+        // must NOT silently substitute the default target for the requested one.
+        let err = v1_target_profile_gate("web", "default", "app").unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("not supported by Ready-State builder v1"), "{}", err.1);
+        assert!(err.1.contains("web/default"), "{}", err.1);
+        // Non-default profile ⇒ fail closed.
+        let err = v1_target_profile_gate("app", "gpu", "app").unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("app/gpu"), "{}", err.1);
     }
 
     #[test]
