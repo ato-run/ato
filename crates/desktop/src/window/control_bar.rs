@@ -592,9 +592,9 @@ fn tab_slot(id: SharedString, is_active: bool) -> gpui::Stateful<gpui::Div> {
 }
 
 /// The fixed leading Ato icon — opens/raises the Ato PWA Home surface.
-/// White circular tile with the dark brand mark, sized to match the
-/// capsule letter avatars; a hairline border keeps the tile legible on
-/// the white pill.
+/// White circular tile with the brand mark also in white, sized to
+/// match the capsule letter avatars; a hairline border keeps the tile
+/// legible on the white pill.
 fn ato_home_button(is_active: bool) -> impl IntoElement {
     tab_slot(SharedString::from("shell-tab-ato-home"), is_active)
         .on_mouse_down(MouseButton::Left, |_, window, cx| {
@@ -616,7 +616,7 @@ fn ato_home_button(is_active: bool) -> impl IntoElement {
                     svg()
                         .path(SharedString::from("icons/ato.svg"))
                         .size(px(17.0))
-                        .text_color(rgb(0x18181b)),
+                        .text_color(rgb(0x000000)),
                 ),
         )
 }
