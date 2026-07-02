@@ -17,6 +17,7 @@ pub(crate) mod build;
 pub(crate) mod diagnostics;
 pub(crate) mod flags;
 pub(crate) mod restore;
+pub(crate) mod restore_lease;
 pub(crate) mod runtime_adapter;
 pub(crate) mod secret_resolver;
 pub(crate) mod store;
