@@ -239,6 +239,8 @@ impl SnapshotBackend for FakeSnapshotBackend {
             restored_bytes,
             vmm_pid: None, // Fake has no serving process.
             vsock_uds: None,
+            workload_addr: None, // Fake has no live listener — nothing to honestly expose.
+
         };
 
         Ok(RestoreReceipt {

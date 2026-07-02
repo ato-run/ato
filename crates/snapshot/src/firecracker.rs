@@ -1080,6 +1080,9 @@ impl SnapshotBackend for FirecrackerBackend {
                 restored_bytes,
                 vmm_pid: Some(child.id() as i32),
                 vsock_uds,
+                // The restored app answers on the TAP guest IP, not host loopback —
+                // any fronting proxy must dial this exact address.
+                workload_addr: Some(format!("{}:{}", self.config.guest_ip, port)),
             };
             Ok((session, child, page_handle))
         })();
