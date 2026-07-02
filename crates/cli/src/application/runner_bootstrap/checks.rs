@@ -138,13 +138,17 @@ pub(crate) fn ato_binary_source() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
-/// Source for `ato-snapshot-builder` setup would install: a sibling of the running
-/// `ato` binary (release builds place them together). `None` when not colocated —
-/// setup then cannot produce it, so no builder unit is written.
+/// Source for the snapshot-builder setup would install: a sibling of the running
+/// `ato` binary (a release/`target` layout places them together). The Cargo bin is
+/// named `snapshot-builder`; an already-namespaced `ato-snapshot-builder` is also
+/// accepted. `None` when not colocated — setup then cannot produce it, so no builder
+/// unit is written.
 pub(crate) fn snapshot_builder_source() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let sib = exe.parent()?.join("ato-snapshot-builder");
-    is_executable_file(&sib).then_some(sib)
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    ["ato-snapshot-builder", "snapshot-builder"]
+        .into_iter()
+        .map(|n| dir.join(n))
+        .find(|p| is_executable_file(p))
 }
 
 
