@@ -2716,6 +2716,7 @@ mod tests {
             ready_state_overlay_root: Some(overlay),
             ready_state_session_id: Some("sess-1".to_string()),
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         }
     }
 
@@ -2894,6 +2895,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2941,6 +2943,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2986,6 +2989,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -3070,6 +3074,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -3190,6 +3195,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -3302,6 +3308,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("serialize host fallback process info");
@@ -3343,6 +3350,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         let other = ProcessInfo {
             id: "other-1".to_string(),
@@ -3367,6 +3375,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         pm.write_pid(&matching).expect("write matching");
@@ -3455,6 +3464,7 @@ start_time = [0, 0]
             ready_state_overlay_root: None,
             ready_state_session_id: None,
             ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         pm.write_pid(&info).expect("write pid file");
