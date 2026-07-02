@@ -280,6 +280,18 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     )?;
     let artifact_location = format!("cas://{}/{}", job.id, artifact_manifest_hash);
 
+    // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
+    // names <work>/<job_id>/{manifest.json, cas/}, and a runner restores by loading
+    // manifest.json, verifying `manifest.id() == artifact_manifest_hash` (fail-closed),
+    // then restoring from the co-located CAS. The manifest is derived entirely from
+    // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
+    // it carries no layer bytes and no secrets.
+    let manifest_json = serde_json::to_vec_pretty(&manifest_out).map_err(|e| fail("artifact_metadata", format!("serialize sealed manifest: {e}")))?;
+    if !no_secret_scan::blob_is_clean(&manifest_json, &[b"BEGIN PRIVATE KEY", b"BEGIN RSA PRIVATE KEY", b"AKIA"]) {
+        return Err(fail("no_secret_scan", "sealed manifest json failed the no-secret scan".into()));
+    }
+    std::fs::write(jobdir.join("manifest.json"), &manifest_json).map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
+
     Ok(Artifact {
         capsule_manifest_hash,
         execution_id,
