@@ -34,6 +34,37 @@ pub(crate) struct SetupOptions {
     pub api_url: Option<String>,
 }
 
+/// Reject an artifact-root that is not a plain absolute path. These values are
+/// interpolated into root-run `sh -c` commands and written into a root-read env
+/// file, so a value containing shell metacharacters, whitespace, or a newline
+/// would be command / env-line injection under sudo. Restricting to an absolute
+/// path over `[A-Za-z0-9_/.-]` makes injection structurally impossible.
+pub(crate) fn validate_artifact_root(v: &str) -> Result<()> {
+    if !v.starts_with('/') {
+        bail!("--artifact-root must be an absolute path (got {v:?})");
+    }
+    if v.contains("..") {
+        bail!("--artifact-root must not contain '..' (got {v:?})");
+    }
+    if !v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+        bail!("--artifact-root may only contain [A-Za-z0-9_/.-] (got {v:?})");
+    }
+    Ok(())
+}
+
+/// Reject an api-url that is not a clean absolute http(s) URL. It is written into
+/// the root-read env file, so a newline/whitespace would inject an arbitrary env
+/// line (e.g. a second key a root service would then honor).
+pub(crate) fn validate_api_url(v: &str) -> Result<()> {
+    if !(v.starts_with("http://") || v.starts_with("https://")) {
+        bail!("--api-url must be an http(s) URL (got {v:?})");
+    }
+    if v.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        bail!("--api-url must not contain whitespace or control characters");
+    }
+    Ok(())
+}
+
 /// One host mutation the plan would apply. `commands` are what actually runs —
 /// shown verbatim in the plan so the operator confirms exactly what will execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,30 +141,35 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
         });
     }
     if failed("firecracker") {
+        // Download + extract in a fresh private (root-owned, 0700) tmp dir so a
+        // local user cannot pre-plant /tmp/release-*/… and have `install` copy an
+        // attacker file to a root path. The sha256 check gates the tarball; the
+        // private dir gates the extracted layout.
         plan.push(FixAction {
             id: "firecracker_install",
             title: format!("Install Firecracker {FC_VERSION} (sha256-verified) to {FC_INSTALL_PATH}"),
-            commands: vec![
-                format!("curl -fsSL -o /tmp/ato-fc.tgz {FC_TGZ_URL}"),
-                format!("echo '{FC_TGZ_SHA256}  /tmp/ato-fc.tgz' | sha256sum -c -"),
-                "tar -xzf /tmp/ato-fc.tgz -C /tmp".to_string(),
-                format!(
-                    "install -m 0755 /tmp/release-{FC_VERSION}-x86_64/firecracker-{FC_VERSION}-x86_64 {FC_INSTALL_PATH}"
-                ),
-                "rm -rf /tmp/ato-fc.tgz".to_string(),
-            ],
+            commands: vec![format!(
+                "d=$(mktemp -d) && curl -fsSL -o \"$d/fc.tgz\" {FC_TGZ_URL} && \
+                 echo '{FC_TGZ_SHA256}  '\"$d/fc.tgz\" | sha256sum -c - && \
+                 tar -xzf \"$d/fc.tgz\" -C \"$d\" && \
+                 install -m 0755 \"$d/release-{FC_VERSION}-x86_64/firecracker-{FC_VERSION}-x86_64\" {FC_INSTALL_PATH} && \
+                 rm -rf \"$d\""
+            )],
         });
     }
     if failed("guest_kernel") {
+        // GUEST_KERNEL_INSTALL_PATH is a compile-time const (not user input); the
+        // .tmp lives under its root-owned parent dir, and the final mv is atomic
+        // only after the sha256 check passes.
+        let parent = Path::new(GUEST_KERNEL_INSTALL_PATH).parent().unwrap().display();
         plan.push(FixAction {
             id: "kernel_install",
             title: format!("Install guest kernel vmlinux-5.10.223 (sha256-verified) to {GUEST_KERNEL_INSTALL_PATH}"),
-            commands: vec![
-                format!("mkdir -p {}", Path::new(GUEST_KERNEL_INSTALL_PATH).parent().unwrap().display()),
-                format!("curl -fsSL -o {GUEST_KERNEL_INSTALL_PATH}.tmp {GUEST_KERNEL_URL}"),
-                format!("echo '{GUEST_KERNEL_SHA256}  {GUEST_KERNEL_INSTALL_PATH}.tmp' | sha256sum -c -"),
-                format!("mv {GUEST_KERNEL_INSTALL_PATH}.tmp {GUEST_KERNEL_INSTALL_PATH}"),
-            ],
+            commands: vec![format!(
+                "mkdir -p {parent} && curl -fsSL -o {GUEST_KERNEL_INSTALL_PATH}.tmp {GUEST_KERNEL_URL} && \
+                 echo '{GUEST_KERNEL_SHA256}  {GUEST_KERNEL_INSTALL_PATH}.tmp' | sha256sum -c - && \
+                 mv {GUEST_KERNEL_INSTALL_PATH}.tmp {GUEST_KERNEL_INSTALL_PATH}"
+            )],
         });
     }
     if failed("tun_tap") {
@@ -266,6 +302,15 @@ fn run_shell(cmd: &str) -> Result<()> {
 }
 
 pub(crate) fn run(opts: SetupOptions) -> Result<()> {
+    // Validate operator-supplied values BEFORE they reach any plan command or the
+    // env file — even in dry-run, so a dangerous value is rejected up front rather
+    // than displayed as a command to be "confirmed".
+    if let Some(root) = &opts.artifact_root {
+        validate_artifact_root(root)?;
+    }
+    if let Some(url) = &opts.api_url {
+        validate_api_url(url)?;
+    }
     let checks = checks::gather();
     let blocked: Vec<&Check> =
         checks.iter().filter(|c| c.status == CheckStatus::Blocked).collect();
@@ -472,6 +517,51 @@ mod tests {
         }
         assert!(render_unit(BUILDER_UNIT).contains("ato-snapshot-builder"));
         assert!(render_unit(RUNNER_UNIT).contains("runner serve"));
+    }
+
+    #[test]
+    fn artifact_root_validation_blocks_injection() {
+        // Good.
+        assert!(validate_artifact_root("/var/lib/ato/snapshots").is_ok());
+        assert!(validate_artifact_root("/srv/ato_snap-1").is_ok());
+        // Injection / traversal / relative / metacharacters ⇒ rejected.
+        for bad in [
+            "/var/lib; rm -rf /",
+            "/var/$(reboot)",
+            "/var/`id`",
+            "relative/path",
+            "/var/../etc",
+            "/var/lib snapshots",
+            "/var/lib\nATO_X=1",
+            "/a|b",
+        ] {
+            assert!(validate_artifact_root(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn api_url_validation_blocks_env_line_injection() {
+        assert!(validate_api_url("https://api.ato.run").is_ok());
+        assert!(validate_api_url("http://127.0.0.1:8787").is_ok());
+        for bad in [
+            "ftp://x",
+            "api.ato.run",
+            "https://api.ato.run\nSNAPSHOT_BUILDER_AGENT_TOKEN=evil",
+            "https://api.ato.run token",
+            "https://api\t.run",
+        ] {
+            assert!(validate_api_url(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn firecracker_install_uses_private_tmp_and_pins_sha() {
+        let checks = vec![check("firecracker", CheckStatus::Missing)];
+        let plan = derive_plan(&checks, &opts());
+        let fc = &plan[0].commands[0];
+        assert!(fc.contains("mktemp -d"), "must download into a private tmp dir: {fc}");
+        assert!(fc.contains(FC_TGZ_SHA256) && fc.contains("sha256sum -c"), "must pin sha256");
+        assert!(!fc.contains("/tmp/ato-fc.tgz"), "must not use a predictable /tmp path");
     }
 
     #[test]
