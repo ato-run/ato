@@ -289,6 +289,13 @@ pub struct RestoredSession {
     /// agent by connecting here (`CONNECT <port>`). `None` when vsock is off (the
     /// default) — no binding delivery path.
     pub vsock_uds: Option<PathBuf>,
+    /// Track E (#912): the HOST-REACHABLE `ip:port` where the restored workload
+    /// accepts connections — backend-authoritative, because only the backend knows
+    /// its exposure topology (Firecracker serves on the tap guest IP, e.g.
+    /// `172.16.0.2:8080`, NOT host loopback). A proxy fronting this session must
+    /// dial exactly this address. `None` when the backend has no live listener
+    /// (Fake) — an honest caller then exposes nothing rather than guessing.
+    pub workload_addr: Option<String>,
 }
 
 impl RestoredSession {
