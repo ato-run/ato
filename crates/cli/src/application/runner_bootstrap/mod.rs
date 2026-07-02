@@ -28,6 +28,13 @@ pub(crate) mod smoke;
 pub(crate) const DEFAULT_ARTIFACT_ROOT: &str = "/var/lib/ato/snapshots";
 pub(crate) const ENV_FILE: &str = "/etc/ato/runner.env";
 pub(crate) const FC_INSTALL_PATH: &str = "/usr/local/bin/firecracker";
+/// Where the systemd units expect the Ato binaries; setup installs them here so the
+/// ExecStart paths it writes are ones it can actually make true.
+pub(crate) const ATO_CLI_INSTALL_PATH: &str = "/usr/local/bin/ato";
+pub(crate) const BUILDER_INSTALL_PATH: &str = "/usr/local/bin/ato-snapshot-builder";
+/// v0 is x86_64-only: the pinned Firecracker release + guest kernel are x86_64. A host
+/// on any other arch is Blocked (setup must not install the x86_64 stack there).
+pub(crate) const SUPPORTED_ARCH: &str = "x86_64";
 pub(crate) const GUEST_KERNEL_INSTALL_PATH: &str = "/var/lib/ato/kernel/vmlinux-5.10.223";
 pub(crate) const BUILDER_UNIT: &str = "ato-snapshot-builder.service";
 pub(crate) const RUNNER_UNIT: &str = "ato-runner-agent.service";
@@ -122,21 +129,32 @@ pub(crate) fn ready_state_summary(checks: &[Check]) -> ReadyStateSummary {
             .iter()
             .any(|c| c.id == id && matches!(c.status, CheckStatus::Missing | CheckStatus::Blocked))
     };
-    let vm_blockers: Vec<String> = ["cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap"]
-        .iter()
-        .filter(|id| failed(id))
-        .map(|id| id.to_string())
-        .collect();
+    // The microVM substrate both paths need (arch gates the whole x86_64 stack).
+    let vm_blockers: Vec<String> =
+        ["arch", "cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap"]
+            .iter()
+            .filter(|id| failed(id))
+            .map(|id| id.to_string())
+            .collect();
+    // Restoring/serving additionally needs the ato binary the runner unit runs.
+    let mut restore_blockers = vm_blockers.clone();
+    if failed("ato_cli_binary") {
+        restore_blockers.push("ato_cli_binary".to_string());
+    }
+    // Building additionally needs Docker (rootfs assembly) + the snapshot-builder binary.
     let mut build_blockers = vm_blockers.clone();
     if failed("docker") {
         build_blockers.push("docker".to_string());
+    }
+    if failed("snapshot_builder_binary") {
+        build_blockers.push("snapshot_builder_binary".to_string());
     }
     let verdict = |blockers: Vec<String>| {
         if blockers.is_empty() { ReadinessVerdict::Ok } else { ReadinessVerdict::Blocked(blockers) }
     };
     ReadyStateSummary {
         build_ready_state: verdict(build_blockers),
-        restore_snapshot: verdict(vm_blockers),
+        restore_snapshot: verdict(restore_blockers),
     }
 }
 
@@ -148,31 +166,51 @@ mod tests {
         Check { id, label: "x", status, detail: String::new(), fix: None }
     }
 
+    fn all_green() -> Vec<Check> {
+        [
+            "arch", "cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap", "docker",
+            "ato_cli_binary", "snapshot_builder_binary",
+        ]
+        .iter()
+        .map(|id| c(id, CheckStatus::Ok))
+        .collect()
+    }
+    fn set(checks: &mut [Check], id: &str, status: CheckStatus) {
+        checks.iter_mut().find(|c| c.id == id).unwrap().status = status;
+    }
+
     #[test]
     fn ready_state_summary_blocks_on_the_right_checks() {
         // All green ⇒ both paths Ok.
-        let all_ok: Vec<Check> =
-            ["cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap", "docker"]
-                .iter()
-                .map(|id| c(id, CheckStatus::Ok))
-                .collect();
-        let s = ready_state_summary(&all_ok);
+        let s = ready_state_summary(&all_green());
         assert!(matches!(s.build_ready_state, ReadinessVerdict::Ok));
         assert!(matches!(s.restore_snapshot, ReadinessVerdict::Ok));
 
-        // Docker missing blocks BUILD only — a restore-only host is still viable.
-        let mut docker_down = all_ok.clone();
-        docker_down[5] = c("docker", CheckStatus::Missing);
-        let s = ready_state_summary(&docker_down);
-        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(b) if b == &["docker"]));
+        // Docker + snapshot-builder block BUILD only — a restore-only host is still viable.
+        let mut b = all_green();
+        set(&mut b, "docker", CheckStatus::Missing);
+        let s = ready_state_summary(&b);
+        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(x) if x == &["docker"]));
+        assert!(matches!(s.restore_snapshot, ReadinessVerdict::Ok));
+        let mut b = all_green();
+        set(&mut b, "snapshot_builder_binary", CheckStatus::Missing);
+        let s = ready_state_summary(&b);
+        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(x) if x == &["snapshot_builder_binary"]));
         assert!(matches!(s.restore_snapshot, ReadinessVerdict::Ok));
 
-        // Firecracker missing blocks BOTH; a Warn does not block.
-        let mut fc_down = all_ok.clone();
-        fc_down[2] = c("firecracker", CheckStatus::Missing);
-        fc_down[4] = c("tun_tap", CheckStatus::Warn);
-        let s = ready_state_summary(&fc_down);
-        assert!(matches!(&s.restore_snapshot, ReadinessVerdict::Blocked(b) if b == &["firecracker"]));
-        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(b) if b == &["firecracker"]));
+        // The ato binary blocks RESTORE only (the runner unit runs it).
+        let mut b = all_green();
+        set(&mut b, "ato_cli_binary", CheckStatus::Missing);
+        let s = ready_state_summary(&b);
+        assert!(matches!(&s.restore_snapshot, ReadinessVerdict::Blocked(x) if x == &["ato_cli_binary"]));
+        assert!(matches!(s.build_ready_state, ReadinessVerdict::Ok));
+
+        // Arch blocks BOTH (the whole x86_64 stack); a Warn does not block.
+        let mut b = all_green();
+        set(&mut b, "arch", CheckStatus::Blocked);
+        set(&mut b, "tun_tap", CheckStatus::Warn);
+        let s = ready_state_summary(&b);
+        assert!(matches!(&s.restore_snapshot, ReadinessVerdict::Blocked(x) if x == &["arch"]));
+        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(x) if x == &["arch"]));
     }
 }
