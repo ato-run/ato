@@ -126,7 +126,11 @@ actions!(
         // Toggle the Control Bar info popup (anchor below URL bar)
         ToggleControlBarInfoPopup,
         // Toggle star/pin state for the current capsule URL
-        ToggleStarCapsule
+        ToggleStarCapsule,
+        // Shell Icon Bar: open/raise the Ato PWA Home — the fixed
+        // leading Ato icon in the top pill. The Home window is the
+        // control surface (login, Discover, Run, runner settings).
+        ShowAtoHome
     ]
 );
 
@@ -134,6 +138,13 @@ actions!(
 #[action(namespace = desktop, no_json)]
 pub struct NavigateToUrl {
     pub url: String,
+}
+
+/// Shell Icon Bar: raise the content window backing a capsule tab.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = desktop, no_json)]
+pub struct FocusContentWindow {
+    pub window_id: u64,
 }
 
 /// Parse an `ato://app/<install_profile_key>` URL into its install profile key.
@@ -1235,6 +1246,33 @@ pub fn run(skip_onboarding: bool) {
                     }
                 },
             );
+        });
+
+        // Shell Icon Bar — the fixed Ato icon opens/raises the Ato PWA
+        // Home control surface.
+        cx.on_action(|_: &ShowAtoHome, cx: &mut App| {
+            crate::window::control_bar::dismiss_info_popup(cx);
+            if let Err(err) = crate::window::home::show_ato_home(cx) {
+                tracing::error!(error = %err, "ShowAtoHome: failed to open Home surface");
+            }
+        });
+
+        // Shell Icon Bar — a capsule tab raises its content window.
+        cx.on_action(|action: &FocusContentWindow, cx: &mut App| {
+            use crate::window::content_windows::OpenContentWindows;
+            let target = cx
+                .global::<OpenContentWindows>()
+                .get(action.window_id)
+                .map(|entry| entry.handle);
+            let Some(handle) = target else {
+                tracing::warn!(
+                    window_id = action.window_id,
+                    "FocusContentWindow: window not tracked (already closed?)"
+                );
+                return;
+            };
+            cx.global_mut::<OpenContentWindows>().focus(action.window_id);
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
         });
 
         // #174 — cycle through open app windows in MRU order via

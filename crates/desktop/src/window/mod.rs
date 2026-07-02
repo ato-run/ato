@@ -36,6 +36,7 @@ pub mod macos;
 pub mod onboarding_window;
 pub mod orchestrator;
 pub mod settings_window;
+pub mod shell_tabs;
 pub mod start_window;
 pub mod store;
 #[cfg(target_os = "windows")]

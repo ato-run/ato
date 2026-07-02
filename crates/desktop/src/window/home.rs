@@ -77,6 +77,34 @@ pub fn probe_home_reachable(url: &str, timeout: Duration) -> bool {
     }
 }
 
+/// Raise the Ato Home surface — the fixed leading icon of the Shell
+/// Icon Bar routes here. If a Home window (remote PWA or the native
+/// `ato-start` fallback) is already open it is focused instead of
+/// spawning a duplicate; otherwise a fresh Home window opens via
+/// [`open_home_window`].
+pub fn show_ato_home(cx: &mut App) -> Result<()> {
+    use crate::window::content_windows::OpenContentWindows;
+
+    let app_base_url = crate::config::load_config().desktop.app_base_url;
+    let existing = cx
+        .global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .find(|entry| crate::window::shell_tabs::is_ato_home_entry(&entry.kind, &app_base_url));
+    if let Some(entry) = existing {
+        let window_id = entry.handle.window_id().as_u64();
+        if entry
+            .handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+        {
+            cx.global_mut::<OpenContentWindows>().focus(window_id);
+            return Ok(());
+        }
+    }
+    open_home_window(cx)
+}
+
 /// Open the Home surface.
 ///
 /// For the PWA target this probes reachability off the UI thread, then opens
