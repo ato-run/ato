@@ -175,9 +175,47 @@ fn write_runner_env(creds: &RunnerCredentials, public_base_url: Option<&str>) {
     }
 }
 
-/// Back up an existing file, write `content`, and restrict to 0600 (the file holds the
-/// runner token). Returns the backup path if one was made.
+#[cfg(unix)]
+fn chmod_0600(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod 0600 {} failed", path.display()))
+}
+#[cfg(not(unix))]
+fn chmod_0600(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Create `path` for writing at mode 0600 FROM CREATION (no umask window). On non-unix
+/// falls back to a plain create.
+fn create_0600(path: &Path) -> Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("create {} failed", path.display()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::File::create(path).with_context(|| format!("create {} failed", path.display()))
+    }
+}
+
+/// Back up an existing file (also holding a token), then atomically replace it with
+/// `content` at mode 0600. The file carries the runner token, so it must NEVER exist
+/// world/group-readable even momentarily: the new content is written to a 0600 temp file
+/// in the SAME directory (created 0600 — no umask window), fsync'd, then `rename`d over
+/// the target (atomic on one filesystem — a crash leaves either the old file or the new,
+/// never a partial or wrong-mode one). The backup copy is chmod'd 0600 too.
 fn write_env_secure(path: &Path, content: &str) -> Result<Option<std::path::PathBuf>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let mut backup = None;
     if path.exists() {
         let epoch = std::time::SystemTime::now()
@@ -189,17 +227,25 @@ fn write_env_secure(path: &Path, content: &str) -> Result<Option<std::path::Path
             path.file_name().unwrap_or_default().to_string_lossy()
         ));
         std::fs::copy(path, &bak).with_context(|| format!("backup {} failed", path.display()))?;
+        // std::fs::copy propagates the SOURCE mode (which may be 0644 if setup wrote it
+        // without a chmod) — force the backup to 0600 since it may contain a token.
+        chmod_0600(&bak)?;
         backup = Some(bak);
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, content).with_context(|| format!("write {} failed", path.display()))?;
-    #[cfg(unix)]
+    // Write to a 0600 temp beside the target, then atomically rename into place.
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let tmp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::io::Write as _;
+        let mut f = create_0600(&tmp)?;
+        f.write_all(content.as_bytes())
+            .and_then(|()| f.sync_all())
+            .with_context(|| format!("write {} failed", tmp.display()))?;
     }
+    std::fs::rename(&tmp, path).with_context(|| {
+        let _ = std::fs::remove_file(&tmp); // don't leak the temp (it holds the token)
+        format!("atomically replace {} failed", path.display())
+    })?;
     Ok(backup)
 }
 
@@ -402,21 +448,42 @@ mod tests {
     }
 
     #[test]
-    fn write_env_secure_backs_up_and_sets_0600() {
+    fn write_env_secure_is_atomic_0600_for_file_and_backup() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("runner.env");
-        // Fresh: no backup.
+
+        // Fresh write: no backup, content present, and 0600 FROM CREATION.
         assert!(write_env_secure(&path, "A=1\n").unwrap().is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\n");
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        // Existing: original content is backed up before the new write.
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // Simulate a pre-existing file left WORLD-READABLE by setup (0644) holding a
+        // token: enroll must back it up AND leave the backup 0600 (no token leak), and
+        // the replaced file is 0600.
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let bak = write_env_secure(&path, "A=1\nB=2\n").unwrap().expect("backup expected");
-        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "A=1\n");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "A=1\n"); // original preserved
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\nB=2\n");
+        #[cfg(unix)]
+        {
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&bak).unwrap().permissions().mode() & 0o077,
+                0,
+                "backup must not be group/world readable — it may hold a token"
+            );
+        }
+        // No leftover temp file beside the target.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "atomic write must leave no temp file");
     }
 
     #[test]
