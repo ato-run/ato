@@ -121,6 +121,7 @@ mod e2e_tests {
                 },
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
+                execution_id: None,
             })
             .expect("build");
         let manifest = receipt.manifest;

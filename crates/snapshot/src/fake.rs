@@ -132,7 +132,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             capsule_manifest_hash: input.capsule_manifest_hash,
             has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
-            execution_id: None,
+            execution_id: input.execution_id.clone(),
             layers,
             hotset_profile,
             snapshot_backend: SnapshotBackendInfo {
@@ -287,6 +287,7 @@ mod tests {
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: secret_markers,
+            execution_id: None,
         }
     }
 
@@ -295,6 +296,25 @@ mod tests {
         let p = FakeSnapshotBackend::new().probe();
         assert!(p.available);
         assert_eq!(p.backend_id, FAKE_BACKEND_ID);
+    }
+
+    /// Track C (#912): a caller-supplied declared execution id is stamped VERBATIM into
+    /// the sealed manifest — and absent when the caller passes `None` (a registry builder
+    /// then fails closed instead of synthesizing one).
+    #[test]
+    fn execution_id_is_stamped_verbatim_into_the_sealed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let mut input = build_input(&store, vec![]);
+        let id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        input.execution_id = Some(id.to_string());
+        let receipt = FakeSnapshotBackend::new().build_ready_state(input).expect("build");
+        assert_eq!(receipt.manifest.execution_id.as_deref(), Some(id));
+
+        // None ⇒ the sealed manifest carries no execution id (nothing is invented).
+        let store2 = CasStore::open(dir.path().join("cas2")).unwrap();
+        let receipt2 = FakeSnapshotBackend::new().build_ready_state(build_input(&store2, vec![])).expect("build");
+        assert_eq!(receipt2.manifest.execution_id, None);
     }
 
     #[test]

@@ -222,6 +222,14 @@ pub struct BuildReadyStateInput<'a> {
     pub sanitizer_contract: SanitizerContract,
     /// Declared secret names to scan the sealed layers for (the no-secret gate).
     pub declared_secret_markers: Vec<String>,
+    /// The declared Ato Execution Identity to stamp into the sealed manifest
+    /// (`manifest.execution_id`), verbatim. Compute it with
+    /// `capsule::engine::execution_graph::ReadyStateDeclaredEnvelope::declared_execution_id`
+    /// from declared, host-independent facts only — NEVER from a job id, artifact hash,
+    /// timestamp, or builder-host state (that would be a build-job identity, not an
+    /// execution identity). `None` ⇒ the sealed manifest carries no execution id and a
+    /// registry builder fails closed at `artifact_metadata`.
+    pub execution_id: Option<String>,
 }
 
 /// Result of a successful build.

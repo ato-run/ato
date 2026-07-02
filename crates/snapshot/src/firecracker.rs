@@ -769,7 +769,7 @@ impl SnapshotBackend for FirecrackerBackend {
             capsule_manifest_hash: input.capsule_manifest_hash,
             has_vsock: vsock_enabled(),
             runner_class_id,
-            execution_id: None,
+            execution_id: input.execution_id.clone(),
             layers,
             hotset_profile,
             snapshot_backend: self.backend_info(),
@@ -1222,6 +1222,7 @@ mod tests {
             restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
+            execution_id: None,
         };
         let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
         assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "preflight must reject before KVM/store: {err:?}");

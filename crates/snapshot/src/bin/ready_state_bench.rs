@@ -130,6 +130,7 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
         restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".into()), expected_ready_ms: Some(3000) },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
+        execution_id: None,
     }
 }
 
