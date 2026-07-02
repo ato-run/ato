@@ -123,6 +123,34 @@ fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<(
     Ok(())
 }
 
+/// Resolve the registry identity fields from a SEALED manifest — **never synthesized**.
+///
+/// `execution_id` must be the real Ato Execution Identity carried by the sealed manifest
+/// (docs/execution-identity.md): it identifies *launch conditions*, so a value fabricated
+/// from the job id / artifact hash would be a build-job identity, not an execution
+/// identity — the same capsule/source/target/profile rebuilt would get a different id,
+/// breaking runner-side verification against `capsule_snapshots.execution_id`. Until the
+/// Ready-State build path stamps the true declared execution id into the manifest, a
+/// missing value **fails closed** here (`failure_stage = artifact_metadata`).
+fn sealed_identity(
+    execution_id: Option<&str>,
+    runner_class_id: Option<String>,
+) -> std::result::Result<(String, String), (String, String)> {
+    let exec = match execution_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => {
+            return Err(("artifact_metadata".into(), "missing execution_id in sealed Ready-State manifest".into()));
+        }
+    };
+    let rc = match runner_class_id.filter(|s| !s.trim().is_empty()) {
+        Some(rc) => rc,
+        None => {
+            return Err(("artifact_metadata".into(), "missing runner_class_id (build did not pin a runner class)".into()));
+        }
+    };
+    Ok((exec, rc))
+}
+
 /// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
 /// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
 fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> std::result::Result<Artifact, (String, String)> {
@@ -183,20 +211,14 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     }
 
     // Registry identity/location fields (capsule_snapshots contract, #154/#157). All must
-    // be real — never a placeholder. runner_class_id is REQUIRED (fail closed if the build
-    // did not pin one). execution_id comes from the sealed manifest, else a deterministic
-    // build-execution id. artifact_location is the CAS URI PR 3 records (the artifact lives
-    // in this job's content-addressed store).
+    // be REAL — never synthesized (see sealed_identity). artifact_location is the CAS URI
+    // PR 3 records (the artifact lives in this job's content-addressed store; job-scoped
+    // storage, not identity).
     let artifact_manifest_hash = manifest_out.id();
-    let runner_class_id = match manifest_out.runner_class_id.as_ref().map(|c| c.to_string()).filter(|s| !s.trim().is_empty()) {
-        Some(rc) => rc,
-        None => return Err(fail("artifact_metadata", "missing runner_class_id (build did not pin a runner class)".into())),
-    };
-    let execution_id = manifest_out
-        .execution_id
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("exec-{}", &blake3::hash(format!("{}:{}", job.id, artifact_manifest_hash).as_bytes()).to_hex()[..24]));
+    let (execution_id, runner_class_id) = sealed_identity(
+        manifest_out.execution_id.as_deref(),
+        manifest_out.runner_class_id.as_ref().map(|c| c.to_string()),
+    )?;
     let artifact_location = format!("cas://{}/{}", job.id, artifact_manifest_hash);
 
     Ok(Artifact {
@@ -251,6 +273,28 @@ mod tests {
         assert_eq!(resp.jobs[0].source.github_owner, "acme");
         assert_eq!(resp.jobs[0].source.commit_sha.len(), 40);
         assert!(resp.jobs[0].source.subdirectory.is_none());
+    }
+
+    #[test]
+    fn execution_id_is_never_synthesized() {
+        // Missing / blank execution_id ⇒ fail closed at artifact_metadata — the builder
+        // must NOT fabricate an id from job/artifact hashes (review: a synthetic id is a
+        // build-job identity, not an Ato Execution Identity).
+        let err = sealed_identity(None, Some("rc".into())).unwrap_err();
+        assert_eq!(err.0, "artifact_metadata");
+        assert!(err.1.contains("missing execution_id"), "{}", err.1);
+        let err = sealed_identity(Some("   "), Some("rc".into())).unwrap_err();
+        assert_eq!(err.0, "artifact_metadata");
+
+        // Missing runner_class_id also fails closed (never "unknown").
+        let err = sealed_identity(Some("real-declared-id"), None).unwrap_err();
+        assert_eq!(err.0, "artifact_metadata");
+        assert!(err.1.contains("runner_class_id"), "{}", err.1);
+
+        // A real manifest identity passes through VERBATIM (no rewriting).
+        let (exec, rc) = sealed_identity(Some("real-declared-id"), Some("blake3:rc".into())).unwrap();
+        assert_eq!(exec, "real-declared-id");
+        assert_eq!(rc, "blake3:rc");
     }
 
     #[test]
