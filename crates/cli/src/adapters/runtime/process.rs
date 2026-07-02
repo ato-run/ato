@@ -669,6 +669,7 @@ impl ProcessManager {
             restored_bytes: 0,
             vmm_pid,
             vsock_uds: None, // stop path reconstructs from the pid record; no live vsock needed
+            workload_addr: None, // stop path never dials the workload
         };
         let backend: Box<dyn SnapshotBackend> = match backend_id {
             "firecracker" => Box::new(snapshot::FirecrackerBackend::new()),

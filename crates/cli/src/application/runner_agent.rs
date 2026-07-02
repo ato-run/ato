@@ -1809,11 +1809,23 @@ pub async fn start_root_proxy(
     listen: &str,
     workload_port: u16,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    start_root_proxy_to(listen, format!("127.0.0.1:{workload_port}")).await
+}
+
+/// Core of [`start_root_proxy`] with an explicit upstream address. The child-run
+/// path pipes to host loopback; a restored microVM serves on its TAP guest IP
+/// (e.g. `172.16.0.2:8080`), which the snapshot backend reports as the session's
+/// `workload_addr` — the upstream is always a fixed, session-derived address,
+/// never caller/request-controlled, so this still cannot be an open proxy.
+pub async fn start_root_proxy_to(
+    listen: &str,
+    upstream_addr: String,
+) -> Result<tokio::task::JoinHandle<()>> {
     // Refuse to come up if the upstream is not actually accepting — a proxy
     // in front of nothing would make ready_url a lie.
-    tokio::net::TcpStream::connect(("127.0.0.1", workload_port))
+    tokio::net::TcpStream::connect(&upstream_addr)
         .await
-        .with_context(|| format!("workload 127.0.0.1:{workload_port} is not accepting"))?;
+        .with_context(|| format!("workload {upstream_addr} is not accepting"))?;
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -1823,10 +1835,9 @@ pub async fn start_root_proxy(
             let Ok((mut inbound, _)) = listener.accept().await else {
                 break;
             };
+            let upstream_addr = upstream_addr.clone();
             tokio::spawn(async move {
-                let Ok(mut upstream) =
-                    tokio::net::TcpStream::connect(("127.0.0.1", workload_port)).await
-                else {
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
                     return;
                 };
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
@@ -3405,20 +3416,25 @@ async fn handle_restore_snapshot_lease(
         .await;
         return;
     };
+    // Where the restored workload ACTUALLY accepts connections — backend-authoritative
+    // (Firecracker serves on the TAP guest IP, e.g. 172.16.0.2:8080, not host loopback).
+    // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
+    let workload_addr = session.workload_addr.clone();
 
     // 6. Bring the per-slot root proxy up BEFORE claiming a URL — a proxy that failed (or
-    // a slot with no URL to claim) reports ready WITHOUT a fabricated ready_url.
+    // a slot with no URL to claim, or a session with no dialable workload address)
+    // reports ready WITHOUT a fabricated ready_url.
     let candidate = public_ready_url(
         public_base_url.as_deref(),
         public_url_template.as_deref(),
         &slot,
     );
-    let (proxy_handle, proxy_started) = match candidate.as_deref() {
-        Some(_) => match start_root_proxy(&slot.proxy_listen, guest_port).await {
+    let (proxy_handle, proxy_started) = match (candidate.as_deref(), workload_addr.as_deref()) {
+        (Some(_), Some(addr)) => match start_root_proxy_to(&slot.proxy_listen, addr.to_string()).await {
             Ok(handle) => {
                 println!(
-                    "🔀 restore lease {lease_id}: slot {} proxy {} -> 127.0.0.1:{}",
-                    slot.index, slot.proxy_listen, guest_port
+                    "🔀 restore lease {lease_id}: slot {} proxy {} -> {}",
+                    slot.index, slot.proxy_listen, addr
                 );
                 (Some(handle), Some(true))
             }
@@ -3430,7 +3446,13 @@ async fn handle_restore_snapshot_lease(
                 (None, Some(false))
             }
         },
-        None => (None, None),
+        (Some(_), None) => {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
+            );
+            (None, Some(false))
+        }
+        _ => (None, None),
     };
     let payload = decide_ready_payload(
         cmd.execution_id.clone(),
