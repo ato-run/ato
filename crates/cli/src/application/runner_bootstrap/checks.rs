@@ -62,6 +62,66 @@ fn cmd_stdout(bin: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Like [`cmd_stdout`] but returns stdout regardless of exit status — for probes
+/// whose useful answer rides on a non-zero exit (e.g. `systemctl is-active` exits
+/// non-zero for an installed-but-stopped unit while still printing its state).
+fn cmd_stdout_any(bin: &str, args: &[&str]) -> Option<String> {
+    let out = Command::new(bin).args(args).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Whether `path` is writable by `user` — evaluated from ownership + mode so the
+/// answer is the OPERATOR's, not the caller's. Under `sudo ... setup --fix` the
+/// caller is root (which can write anything), so a root probe write would falsely
+/// report the artifact root writable and setup would plan no chown. `None` user
+/// (genuine root) ⇒ always writable.
+#[cfg(unix)]
+pub(crate) fn dir_writable_by(path: &Path, user: Option<&str>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(user) = user else { return true }; // genuine root
+    let Ok(md) = std::fs::metadata(path) else { return false };
+    let mode = md.mode();
+    if mode & 0o002 != 0 {
+        return true; // world-writable
+    }
+    let uid: Option<u32> = cmd_stdout("id", &["-u", user]).and_then(|s| s.parse().ok());
+    let gids: std::collections::BTreeSet<u32> = cmd_stdout("id", &["-G", user])
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|g| g.parse().ok())
+        .collect();
+    if uid == Some(md.uid()) && mode & 0o200 != 0 {
+        return true; // owner + owner-write
+    }
+    if gids.contains(&md.gid()) && mode & 0o020 != 0 {
+        return true; // in the dir's group + group-write
+    }
+    false
+}
+
+/// Non-unix fallback (the runner is Linux-only; this keeps `cli` compiling on
+/// other targets). Treats an existing dir as writable — doctor there is advisory.
+#[cfg(not(unix))]
+pub(crate) fn dir_writable_by(path: &Path, _user: Option<&str>) -> bool {
+    std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
+}
+
+/// The user the runner will actually run AS: `SUDO_USER` when invoked via sudo
+/// (so `ato runner setup --fix` checks/repairs the OPERATOR's groups, not root's),
+/// else the current user. `None` means genuine root (no sudo) — groups don't apply.
+pub(crate) fn target_user() -> Option<String> {
+    if let Ok(u) = std::env::var("SUDO_USER")
+        && !u.trim().is_empty()
+        && u != "root"
+    {
+        return Some(u);
+    }
+    if is_root() {
+        return None; // genuine root — runner runs as root, no group needed
+    }
+    cmd_stdout("id", &["-un"])
+}
+
 fn which(bin: &str) -> Option<String> {
     cmd_stdout("sh", &["-c", &format!("command -v {bin}")]).filter(|s| !s.is_empty())
 }
@@ -85,16 +145,31 @@ pub(crate) fn resolve_fc_bin() -> Option<String> {
     which("firecracker")
 }
 
-/// Resolve the guest kernel: `ATO_FC_KERNEL` (explicit) → the setup install path.
+/// Resolve the guest kernel to an EXISTING file: `ATO_FC_KERNEL` (explicit) → the
+/// setup install path. A configured-but-absent path resolves to `None` (a typo'd
+/// `ATO_FC_KERNEL` must never read as ready) — existence is verified here so both
+/// the doctor check and the smoke preflight agree.
 pub(crate) fn resolve_guest_kernel() -> Option<String> {
     if let Ok(v) = std::env::var("ATO_FC_KERNEL")
         && !v.trim().is_empty()
+        && Path::new(&v).exists()
     {
         return Some(v);
     }
     Path::new(GUEST_KERNEL_INSTALL_PATH)
         .exists()
         .then(|| GUEST_KERNEL_INSTALL_PATH.to_string())
+}
+
+/// True iff `ATO_FC_KERNEL` names a path that does NOT exist — so the check can
+/// distinguish "unset" (install the pinned kernel) from "set to a typo" (fix the
+/// env var) instead of silently reporting Ok.
+pub(crate) fn guest_kernel_env_is_broken() -> bool {
+    std::env::var("ATO_FC_KERNEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| !Path::new(&v).exists())
+        .unwrap_or(false)
 }
 
 /// Resolve the artifact root: `ATO_SNAPSHOT_ARTIFACT_ROOT` → env file → default.
@@ -173,23 +248,30 @@ pub(crate) fn gather() -> Vec<Check> {
         )
     });
 
-    // Group membership (root bypasses groups; report honestly either way).
-    let root = is_root();
-    let groups = cmd_stdout("groups", &[]).unwrap_or_default();
+    // Group membership of the OPERATOR (SUDO_USER under sudo, else the current
+    // user). Checking root's groups when invoked via `sudo` would falsely pass —
+    // and then `setup --fix` would plan no usermod, so doctor's own suggested fix
+    // could never converge. Genuine root (no sudo) runs the runner as root, so the
+    // group is not required.
+    let operator = target_user();
+    let groups = match &operator {
+        Some(u) => cmd_stdout("id", &["-nG", u]).unwrap_or_default(),
+        None => String::new(),
+    };
     for (id, label, group) in
         [("kvm_group", "user in kvm group", "kvm"), ("docker_group", "user in docker group", "docker")]
     {
-        checks.push(if root {
-            Check::ok(id, label, "running as root (group not required)")
-        } else if groups_contain(&groups, group) {
-            Check::ok(id, label, format!("member of {group}"))
-        } else {
-            Check::missing(
+        checks.push(match &operator {
+            None => Check::ok(id, label, "running as root (group not required)"),
+            Some(u) if groups_contain(&groups, group) => {
+                Check::ok(id, label, format!("{u} is a member of {group}"))
+            }
+            Some(u) => Check::missing(
                 id,
                 label,
-                format!("not a member of {group}"),
-                format!("sudo usermod -aG {group} $USER (then re-login)"),
-            )
+                format!("{u} is not a member of {group}"),
+                format!("sudo usermod -aG {group} {u} (then re-login)"),
+            ),
         });
     }
 
@@ -208,7 +290,16 @@ pub(crate) fn gather() -> Vec<Check> {
     });
 
     // Firecracker: pinned version preferred; another version is Warn, not Ok —
-    // the KVM validations all ran on the pinned stack.
+    // the KVM validations all ran on the pinned stack. When the binary was resolved
+    // from an explicit ATO_FC_BIN, `setup --fix` (which installs to FC_INSTALL_PATH)
+    // would NOT change what this host uses — so the fix hint points at the env var.
+    let fc_from_env =
+        std::env::var("ATO_FC_BIN").ok().map(|v| !v.trim().is_empty()).unwrap_or(false);
+    let fc_fix_bad = if fc_from_env {
+        format!("ATO_FC_BIN overrides the binary — point it at Firecracker {FC_VERSION} or unset it and run `ato runner setup --fix`")
+    } else {
+        format!("ato runner setup --fix installs the pinned {FC_VERSION}")
+    };
     checks.push(match resolve_fc_bin() {
         Some(bin) => match cmd_stdout(&bin, &["--version"]) {
             Some(v) if v.contains(FC_VERSION.trim_start_matches('v')) => {
@@ -218,13 +309,13 @@ pub(crate) fn gather() -> Vec<Check> {
                 "firecracker",
                 "Firecracker",
                 format!("{bin}: {} (validated stack is {FC_VERSION})", v.lines().next().unwrap_or(&v)),
-                format!("ato runner setup --fix installs the pinned {FC_VERSION}"),
+                fc_fix_bad,
             ),
             None => Check::missing(
                 "firecracker",
                 "Firecracker",
                 format!("{bin} did not answer --version"),
-                "ato runner setup --fix reinstalls the pinned release",
+                fc_fix_bad,
             ),
         },
         None => Check::missing(
@@ -235,9 +326,20 @@ pub(crate) fn gather() -> Vec<Check> {
         ),
     });
 
-    // Guest kernel.
+    // Guest kernel — resolved to an EXISTING file. A configured-but-missing
+    // ATO_FC_KERNEL is called out specifically (fix the env var) rather than
+    // reported Ok on a path that isn't there.
     checks.push(match resolve_guest_kernel() {
         Some(k) => Check::ok("guest_kernel", "guest kernel", k),
+        None if guest_kernel_env_is_broken() => Check::missing(
+            "guest_kernel",
+            "guest kernel",
+            format!(
+                "ATO_FC_KERNEL={:?} does not exist",
+                std::env::var("ATO_FC_KERNEL").unwrap_or_default()
+            ),
+            "point ATO_FC_KERNEL at a real vmlinux, or unset it and run `ato runner setup --fix`",
+        ),
         None => Check::missing(
             "guest_kernel",
             "guest kernel",
@@ -283,22 +385,26 @@ pub(crate) fn gather() -> Vec<Check> {
         });
     }
 
-    // Artifact root: exists AND writable by this user.
+    // Artifact root: exists AND writable BY THE OPERATOR. Writability is evaluated
+    // from ownership+mode against the operator (target_user), not via a probe write
+    // as the caller — otherwise `sudo setup --fix` (caller=root) would report a
+    // root-owned dir "writable" and plan no chown, leaving the operator unable to
+    // write it (doctor's own fix hint would never converge).
     let root_dir = resolve_artifact_root();
     checks.push(match std::fs::metadata(&root_dir) {
         Ok(m) if m.is_dir() => {
-            let probe = Path::new(&root_dir).join(".ato-doctor-probe");
-            match std::fs::write(&probe, b"probe") {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(&probe);
-                    Check::ok("artifact_root", "artifact root", format!("{root_dir} (writable)"))
-                }
-                Err(e) => Check::missing(
+            if dir_writable_by(Path::new(&root_dir), operator.as_deref()) {
+                Check::ok("artifact_root", "artifact root", format!("{root_dir} (writable)"))
+            } else {
+                Check::missing(
                     "artifact_root",
                     "artifact root",
-                    format!("{root_dir} exists but is not writable: {e}"),
+                    format!(
+                        "{root_dir} exists but is not writable by {}",
+                        operator.as_deref().unwrap_or("the operator")
+                    ),
                     "ato runner setup --fix chowns it to the operating user",
-                ),
+                )
             }
         }
         _ => Check::missing(
@@ -368,25 +474,28 @@ pub(crate) fn gather() -> Vec<Check> {
         }
     });
 
-    // systemd units, when present (setup installs them; absent is Missing-with-fix).
+    // systemd units. Existence-FIRST: `systemctl is-active` exits non-zero for an
+    // installed-but-stopped unit, so keying off its exit status would misreport a
+    // written-but-not-started unit (the documented happy path after `setup --fix`)
+    // as "not installed". Check the unit file, THEN read its state (exit-agnostic).
     for (id, unit) in
         [("unit_builder", super::BUILDER_UNIT), ("unit_runner", super::RUNNER_UNIT)]
     {
-        let state = cmd_stdout("systemctl", &["is-active", unit]);
-        checks.push(match state.as_deref() {
-            Some("active") => Check::ok(id, unit_label(unit), "active"),
-            Some(other) if Path::new(super::SYSTEMD_DIR).join(unit).exists() => Check::warn(
-                id,
-                unit_label(unit),
-                format!("installed, {other}"),
-                format!("systemctl status {unit} (start it once its env/token is configured)"),
-            ),
-            _ => Check::missing(
-                id,
-                unit_label(unit),
-                "not installed",
-                "ato runner setup --fix writes the unit",
-            ),
+        let installed = Path::new(super::SYSTEMD_DIR).join(unit).exists();
+        checks.push(if !installed {
+            Check::missing(id, unit_label(unit), "not installed", "ato runner setup --fix writes the unit")
+        } else {
+            let state = cmd_stdout_any("systemctl", &["is-active", unit]).unwrap_or_default();
+            if state == "active" {
+                Check::ok(id, unit_label(unit), "active")
+            } else {
+                Check::warn(
+                    id,
+                    unit_label(unit),
+                    format!("installed, {}", if state.is_empty() { "inactive" } else { &state }),
+                    format!("systemctl enable --now {unit} (once its env/token is configured)"),
+                )
+            }
         });
     }
 

@@ -1238,8 +1238,9 @@ pub(crate) enum DoctorTarget {
     /// capsule runner: KVM, Firecracker, guest kernel, Docker, groups, tun/tap,
     /// artifact root, env file, runner token and the systemd services — plus the
     /// derived Ready-State verdict (can it build_ready_state / restore_snapshot
-    /// today?). Read-only: never mutates host state; the fixable set is applied by
-    /// `ato runner setup --fix`.
+    /// today?). Diagnostics only: it installs and reconfigures nothing (the sole
+    /// write is a transient probe file in the artifact root to test writability,
+    /// removed immediately). The fixable set is applied by `ato runner setup --fix`.
     #[command(name = "runner")]
     Runner {
         /// Emit machine-readable JSON on stdout instead of a human table.

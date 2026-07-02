@@ -140,7 +140,13 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
             )],
         });
     }
-    if failed("firecracker") {
+    // Firecracker is (re)installed when Missing OR when a non-pinned version is
+    // present (Warn) — otherwise the doctor's "setup --fix installs the pinned
+    // v1.16.0" hint on a version-mismatch would run and install nothing.
+    let firecracker_needs_install = checks.iter().any(|c| {
+        c.id == "firecracker" && matches!(c.status, CheckStatus::Missing | CheckStatus::Warn)
+    });
+    if firecracker_needs_install {
         // Download + extract in a fresh private (root-owned, 0700) tmp dir so a
         // local user cannot pre-plant /tmp/release-*/… and have `install` copy an
         // attacker file to a root path. The sha256 check gates the tarball; the
@@ -302,14 +308,21 @@ fn run_shell(cmd: &str) -> Result<()> {
 }
 
 pub(crate) fn run(opts: SetupOptions) -> Result<()> {
-    // Validate operator-supplied values BEFORE they reach any plan command or the
-    // env file — even in dry-run, so a dangerous value is rejected up front rather
-    // than displayed as a command to be "confirmed".
-    if let Some(root) = &opts.artifact_root {
-        validate_artifact_root(root)?;
-    }
     if let Some(url) = &opts.api_url {
         validate_api_url(url)?;
+    }
+    // Converge on the SAME artifact root the doctor probes (env → env-file →
+    // default) when the operator did not override it, so `setup --fix` repairs the
+    // directory doctor flagged rather than silently creating the default elsewhere.
+    let mut opts = opts;
+    if opts.artifact_root.is_none() {
+        opts.artifact_root = Some(checks::resolve_artifact_root());
+    }
+    // Validate the EFFECTIVE root (flag OR env/env-file resolved) BEFORE it reaches
+    // any plan command or the env file — even in dry-run, so a dangerous value is
+    // rejected up front rather than displayed as a command to be "confirmed".
+    if let Some(root) = &opts.artifact_root {
+        validate_artifact_root(root)?;
     }
     let checks = checks::gather();
     let blocked: Vec<&Check> =
