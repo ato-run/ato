@@ -6,7 +6,7 @@
 //! without a KVM/Docker host.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{
@@ -40,6 +40,16 @@ pub(crate) fn cpu_has_virt(cpuinfo: &str) -> bool {
 /// True when `groups_output` (space-separated group names) contains `group`.
 pub(crate) fn groups_contain(groups_output: &str, group: &str) -> bool {
     groups_output.split_whitespace().any(|g| g == group)
+}
+
+/// Normalize a `uname -m` value to the canonical arch, folding the known x86_64
+/// aliases. Pure.
+pub(crate) fn parse_arch(uname_m: &str) -> String {
+    match uname_m.trim() {
+        "x86_64" | "amd64" => "x86_64".to_string(),
+        "aarch64" | "arm64" => "aarch64".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Parse a KEY=VALUE env file (comments/blank lines ignored; later keys win).
@@ -105,6 +115,38 @@ pub(crate) fn dir_writable_by(path: &Path, user: Option<&str>) -> bool {
 pub(crate) fn dir_writable_by(path: &Path, _user: Option<&str>) -> bool {
     std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false)
 }
+
+/// True iff `path` is a regular file with an executable bit set.
+pub(crate) fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Source for the `ato` binary setup would install: the currently-running
+/// executable (always available — this IS `ato`). `None` only if the exe path
+/// cannot be resolved.
+pub(crate) fn ato_binary_source() -> Option<PathBuf> {
+    std::env::current_exe().ok()
+}
+
+/// Source for `ato-snapshot-builder` setup would install: a sibling of the running
+/// `ato` binary (release builds place them together). `None` when not colocated —
+/// setup then cannot produce it, so no builder unit is written.
+pub(crate) fn snapshot_builder_source() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let sib = exe.parent()?.join("ato-snapshot-builder");
+    is_executable_file(&sib).then_some(sib)
+}
+
 
 /// The user the runner will actually run AS: `SUDO_USER` when invoked via sudo
 /// (so `ato runner setup --fix` checks/repairs the OPERATOR's groups, not root's),
@@ -215,6 +257,21 @@ pub(crate) fn gather() -> Vec<Check> {
             }
         }
         Err(e) => Check::blocked("os_ubuntu", "Ubuntu", format!("cannot read /etc/os-release: {e}")),
+    });
+
+    // Architecture: v0's Firecracker + guest kernel are x86_64-pinned, so a
+    // non-x86_64 host is Blocked (software cannot change the CPU arch; setup must
+    // never install the x86_64 stack here). This gates the whole VM substrate.
+    checks.push(match cmd_stdout("uname", &["-m"]).map(|m| parse_arch(&m)) {
+        Some(arch) if arch == super::SUPPORTED_ARCH => {
+            Check::ok("arch", "CPU architecture", format!("{arch}"))
+        }
+        Some(arch) => Check::blocked(
+            "arch",
+            "CPU architecture",
+            format!("{arch} is not supported — Runner Bootstrap v0 is {}-only (the pinned Firecracker + guest kernel are {}); use an {}-based Ubuntu host", super::SUPPORTED_ARCH, super::SUPPORTED_ARCH, super::SUPPORTED_ARCH),
+        ),
+        None => Check::blocked("arch", "CPU architecture", "could not determine arch (uname -m failed)"),
     });
 
     // CPU virtualization: software cannot enable this — the one truly manual step.
@@ -346,6 +403,47 @@ pub(crate) fn gather() -> Vec<Check> {
             "vmlinux not found (ATO_FC_KERNEL unset, no installed kernel)",
             format!("ato runner setup --fix installs vmlinux-5.10.223 (sha256-verified) to {GUEST_KERNEL_INSTALL_PATH}"),
         ),
+    });
+
+    // Ato binaries the systemd units run. The runner unit runs /usr/local/bin/ato;
+    // the builder unit runs /usr/local/bin/ato-snapshot-builder. Setup must not write
+    // a unit whose ExecStart it cannot make exist — so these are checked and the fix
+    // hints reflect what setup can actually do.
+    checks.push(if is_executable_file(Path::new(super::ATO_CLI_INSTALL_PATH)) {
+        Check::ok("ato_cli_binary", "ato binary", format!("{} (executable)", super::ATO_CLI_INSTALL_PATH))
+    } else {
+        // The running executable IS ato, so setup can always install it.
+        Check::missing(
+            "ato_cli_binary",
+            "ato binary",
+            format!("{} not installed", super::ATO_CLI_INSTALL_PATH),
+            format!("ato runner setup --fix installs the running ato binary to {}", super::ATO_CLI_INSTALL_PATH),
+        )
+    });
+    checks.push(if is_executable_file(Path::new(super::BUILDER_INSTALL_PATH)) {
+        Check::ok(
+            "snapshot_builder_binary",
+            "snapshot-builder binary",
+            format!("{} (executable)", super::BUILDER_INSTALL_PATH),
+        )
+    } else if snapshot_builder_source().is_some() {
+        Check::missing(
+            "snapshot_builder_binary",
+            "snapshot-builder binary",
+            format!("{} not installed", super::BUILDER_INSTALL_PATH),
+            format!("ato runner setup --fix installs the snapshot-builder found beside ato to {}", super::BUILDER_INSTALL_PATH),
+        )
+    } else {
+        // Not installed and no colocated source — setup cannot produce it, so this is
+        // a manual step (build it) and the builder systemd unit is NOT written.
+        Check::blocked(
+            "snapshot_builder_binary",
+            "snapshot-builder binary",
+            format!(
+                "{} absent and no ato-snapshot-builder beside this ato binary — build it (cargo build --release -p snapshot-builder) and place it next to ato, then re-run setup --fix (or install it to {})",
+                super::BUILDER_INSTALL_PATH, super::BUILDER_INSTALL_PATH
+            ),
+        )
     });
 
     // tun/tap + cgroup v2 (Firecracker networking + jailer expectations).

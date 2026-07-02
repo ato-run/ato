@@ -16,15 +16,16 @@
 
 use std::collections::BTreeMap;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use super::{
-    BUILDER_UNIT, Check, CheckStatus, DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH,
-    FC_TGZ_SHA256, FC_TGZ_URL, FC_VERSION, GUEST_KERNEL_INSTALL_PATH, GUEST_KERNEL_SHA256,
-    GUEST_KERNEL_URL, RUNNER_UNIT, SYSTEMD_DIR, checks,
+    ATO_CLI_INSTALL_PATH, BUILDER_INSTALL_PATH, BUILDER_UNIT, Check, CheckStatus,
+    DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH, FC_TGZ_SHA256, FC_TGZ_URL, FC_VERSION,
+    GUEST_KERNEL_INSTALL_PATH, GUEST_KERNEL_SHA256, GUEST_KERNEL_URL, RUNNER_UNIT, SYSTEMD_DIR,
+    checks,
 };
 
 pub(crate) struct SetupOptions {
@@ -32,6 +33,26 @@ pub(crate) struct SetupOptions {
     pub yes: bool,
     pub artifact_root: Option<String>,
     pub api_url: Option<String>,
+}
+
+/// The on-disk sources setup would copy the Ato binaries FROM (None when none is
+/// available). Separated from [`derive_plan`] so the plan stays a pure function of
+/// (checks, opts, sources) and the tests are deterministic.
+pub(crate) struct BinaryPlan {
+    /// Source for `/usr/local/bin/ato` — the running executable (this IS ato).
+    pub ato_source: Option<PathBuf>,
+    /// Source for `/usr/local/bin/ato-snapshot-builder` — a colocated sibling, if any.
+    pub builder_source: Option<PathBuf>,
+}
+
+impl BinaryPlan {
+    /// Resolve from the running process (reads `current_exe` + the filesystem).
+    pub(crate) fn resolve() -> Self {
+        Self {
+            ato_source: checks::ato_binary_source(),
+            builder_source: checks::snapshot_builder_source(),
+        }
+    }
 }
 
 /// Reject an artifact-root that is not a plain absolute path. These values are
@@ -75,9 +96,13 @@ pub(crate) struct FixAction {
 }
 
 /// Derive the fix plan from failed checks. Pure — testable without a host.
-pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixAction> {
+pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPlan) -> Vec<FixAction> {
     let failed =
         |id: &str| checks.iter().any(|c| c.id == id && c.status == CheckStatus::Missing);
+    let is_ok = |id: &str| checks.iter().any(|c| c.id == id && c.status == CheckStatus::Ok);
+    // The x86_64 stack (Firecracker + guest kernel) must NOT be planned on a
+    // non-x86_64 host — the arch check is Blocked there, and Blocked is never fixed.
+    let arch_ok = !checks.iter().any(|c| c.id == "arch" && c.status == CheckStatus::Blocked);
     let artifact_root =
         opts.artifact_root.clone().unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
     let mut plan = Vec::new();
@@ -143,9 +168,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
     // Firecracker is (re)installed when Missing OR when a non-pinned version is
     // present (Warn) — otherwise the doctor's "setup --fix installs the pinned
     // v1.16.0" hint on a version-mismatch would run and install nothing.
-    let firecracker_needs_install = checks.iter().any(|c| {
-        c.id == "firecracker" && matches!(c.status, CheckStatus::Missing | CheckStatus::Warn)
-    });
+    let firecracker_needs_install = arch_ok
+        && checks.iter().any(|c| {
+            c.id == "firecracker" && matches!(c.status, CheckStatus::Missing | CheckStatus::Warn)
+        });
     if firecracker_needs_install {
         // Download + extract in a fresh private (root-owned, 0700) tmp dir so a
         // local user cannot pre-plant /tmp/release-*/… and have `install` copy an
@@ -163,7 +189,7 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
             )],
         });
     }
-    if failed("guest_kernel") {
+    if arch_ok && failed("guest_kernel") {
         // GUEST_KERNEL_INSTALL_PATH is a compile-time const (not user input); the
         // .tmp lives under its root-owned parent dir, and the final mv is atomic
         // only after the sha256 check passes.
@@ -198,6 +224,28 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
             ],
         });
     }
+    // Ato binaries the systemd units' ExecStart depends on. Install BEFORE writing
+    // the units, so a unit is only ever written when its binary exists (a fresh
+    // Ubuntu host would otherwise get a unit that dies on `No such file or
+    // directory`). The `<install> src -> dest` pseudo-command is executed by run().
+    if failed("ato_cli_binary") {
+        if let Some(src) = &bins.ato_source {
+            plan.push(FixAction {
+                id: "install_ato_cli",
+                title: format!("Install the ato binary to {ATO_CLI_INSTALL_PATH}"),
+                commands: vec![format!("<install> {} -> {ATO_CLI_INSTALL_PATH}", src.display())],
+            });
+        }
+    }
+    if failed("snapshot_builder_binary") {
+        if let Some(src) = &bins.builder_source {
+            plan.push(FixAction {
+                id: "install_snapshot_builder",
+                title: format!("Install ato-snapshot-builder to {BUILDER_INSTALL_PATH}"),
+                commands: vec![format!("<install> {} -> {BUILDER_INSTALL_PATH}", src.display())],
+            });
+        }
+    }
     // env file + units are written by us (not shell) so backup semantics are exact;
     // the plan records them as pseudo-commands for the confirmation display.
     if failed("env_file") {
@@ -207,15 +255,25 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions) -> Vec<FixActio
             commands: vec![format!("<write> {ENV_FILE}")],
         });
     }
-    if failed("unit_builder") || failed("unit_runner") {
+    // Only write a unit whose ExecStart binary is present or will be installed by
+    // this same plan — never an enabled-looking unit that cannot start.
+    let ato_will_exist = is_ok("ato_cli_binary") || bins.ato_source.is_some();
+    let builder_will_exist = is_ok("snapshot_builder_binary") || bins.builder_source.is_some();
+    let mut units: Vec<&'static str> = Vec::new();
+    if failed("unit_runner") && ato_will_exist {
+        units.push(RUNNER_UNIT);
+    }
+    if failed("unit_builder") && builder_will_exist {
+        units.push(BUILDER_UNIT);
+    }
+    if !units.is_empty() {
+        let mut commands: Vec<String> =
+            units.iter().map(|u| format!("<write> {SYSTEMD_DIR}/{u}")).collect();
+        commands.push("systemctl daemon-reload".to_string());
         plan.push(FixAction {
             id: "systemd_units",
-            title: format!("Write {BUILDER_UNIT} + {RUNNER_UNIT} (existing files backed up), then daemon-reload"),
-            commands: vec![
-                format!("<write> {SYSTEMD_DIR}/{BUILDER_UNIT}"),
-                format!("<write> {SYSTEMD_DIR}/{RUNNER_UNIT}"),
-                "systemctl daemon-reload".to_string(),
-            ],
+            title: format!("Write {} (existing files backed up), then daemon-reload", units.join(" + ")),
+            commands,
         });
     }
     plan
@@ -247,16 +305,18 @@ pub(crate) fn env_file_missing_lines(
 /// setup + /dev/kvm + Docker); they read all config from the env file, so tokens
 /// never live in the unit itself.
 pub(crate) fn render_unit(unit: &str) -> String {
+    // ExecStart uses the SAME install paths setup writes the binaries to, so every
+    // unit setup emits has a runnable ExecStart.
     let (desc, exec) = if unit == BUILDER_UNIT {
         (
-            "Ato snapshot builder (capsule -> sealed Ready-State artifact)",
+            "Ato snapshot builder (capsule -> sealed Ready-State artifact)".to_string(),
             // SNAPSHOT_BUILDER_AGENT_TOKEN comes from the env file; %H = hostname.
-            "/usr/local/bin/ato-snapshot-builder --agent-id %H --work ${ATO_SNAPSHOT_ARTIFACT_ROOT}",
+            format!("{BUILDER_INSTALL_PATH} --agent-id %H --work ${{ATO_SNAPSHOT_ARTIFACT_ROOT}}"),
         )
     } else {
         (
-            "Ato connected runner agent (claims run leases, serves restored snapshots)",
-            "/usr/local/bin/ato runner serve",
+            "Ato connected runner agent (claims run leases, serves restored snapshots)".to_string(),
+            format!("{ATO_CLI_INSTALL_PATH} runner serve"),
         )
     };
     format!(
@@ -277,18 +337,23 @@ pub(crate) fn render_unit(unit: &str) -> String {
     )
 }
 
+/// `<path>.bak-<epoch>` beside `path`.
+fn backup_path(path: &Path) -> PathBuf {
+    let epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    path.with_file_name(format!(
+        "{}.bak-{epoch}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
 /// Back up `path` to `<path>.bak-<epoch>` iff it exists, then write `content`.
-fn backup_then_write(path: &Path, content: &str) -> Result<Option<std::path::PathBuf>> {
+fn backup_then_write(path: &Path, content: &str) -> Result<Option<PathBuf>> {
     let mut backup = None;
     if path.exists() {
-        let epoch = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let bak = path.with_file_name(format!(
-            "{}.bak-{epoch}",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        let bak = backup_path(path);
         std::fs::copy(path, &bak).with_context(|| format!("backup {} failed", path.display()))?;
         backup = Some(bak);
     }
@@ -297,6 +362,39 @@ fn backup_then_write(path: &Path, content: &str) -> Result<Option<std::path::Pat
     }
     std::fs::write(path, content).with_context(|| format!("write {} failed", path.display()))?;
     Ok(backup)
+}
+
+/// Install `src` → `dest` (0755), backing up an existing `dest` first. A no-op when
+/// `src == dest` (the binary is already installed in place — e.g. the running `ato`
+/// IS `/usr/local/bin/ato`), so it never truncates itself.
+fn install_binary_with_backup(src: &Path, dest: &Path) -> Result<Option<PathBuf>> {
+    if src == dest {
+        return Ok(None);
+    }
+    let mut backup = None;
+    if dest.exists() {
+        let bak = backup_path(dest);
+        std::fs::copy(dest, &bak).with_context(|| format!("backup {} failed", dest.display()))?;
+        backup = Some(bak);
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(src, dest)
+        .with_context(|| format!("install {} -> {} failed", src.display(), dest.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(backup)
+}
+
+/// Parse a `<install> {src} -> {dest}` pseudo-command into (src, dest). Pure.
+pub(crate) fn parse_install_command(cmd: &str) -> Option<(String, String)> {
+    let rest = cmd.strip_prefix("<install> ")?;
+    let (src, dest) = rest.split_once(" -> ")?;
+    Some((src.trim().to_string(), dest.trim().to_string()))
 }
 
 fn run_shell(cmd: &str) -> Result<()> {
@@ -325,9 +423,10 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
         validate_artifact_root(root)?;
     }
     let checks = checks::gather();
+    let bins = BinaryPlan::resolve();
     let blocked: Vec<&Check> =
         checks.iter().filter(|c| c.status == CheckStatus::Blocked).collect();
-    let plan = derive_plan(&checks, &opts);
+    let plan = derive_plan(&checks, &opts, &bins);
 
     if !blocked.is_empty() {
         println!("Manual steps required first (setup cannot fix these):");
@@ -398,15 +497,30 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                     println!("   (previous file backed up to {})", b.display());
                 }
             }
+            "install_ato_cli" | "install_snapshot_builder" => {
+                // `<install> {src} -> {dest}` (built by derive_plan).
+                let (src, dest) = parse_install_command(&a.commands[0])
+                    .with_context(|| format!("malformed install action: {:?}", a.commands))?;
+                let bak = install_binary_with_backup(Path::new(&src), Path::new(&dest))?;
+                if let Some(b) = bak {
+                    println!("   (previous {dest} backed up to {})", b.display());
+                }
+            }
             "systemd_units" => {
-                for unit in [BUILDER_UNIT, RUNNER_UNIT] {
-                    let path = Path::new(SYSTEMD_DIR).join(unit);
-                    let bak = backup_then_write(&path, &render_unit(unit))?;
-                    if let Some(b) = bak {
-                        println!("   (previous {unit} backed up to {})", b.display());
+                // Write EXACTLY the units the plan chose (only those whose ExecStart
+                // binary exists / was just installed) — parsed from the plan commands.
+                for cmd in &a.commands {
+                    if let Some(rest) = cmd.strip_prefix("<write> ") {
+                        let path = Path::new(rest);
+                        let unit = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let bak = backup_then_write(path, &render_unit(&unit))?;
+                        if let Some(b) = bak {
+                            println!("   (previous {unit} backed up to {})", b.display());
+                        }
+                    } else {
+                        run_shell(cmd)?;
                     }
                 }
-                run_shell("systemctl daemon-reload")?;
             }
             _ => {
                 for c in &a.commands {
@@ -416,14 +530,37 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
         }
     }
 
+    // Honest next steps: only mention re-login if a group was actually added, and
+    // only name the units that were actually written.
+    let added_group = plan.iter().any(|a| a.id == "usermod_groups");
+    let written_units: Vec<&str> = plan
+        .iter()
+        .find(|a| a.id == "systemd_units")
+        .map(|a| {
+            a.commands
+                .iter()
+                .filter_map(|c| c.strip_prefix("<write> "))
+                .filter_map(|p| Path::new(p).file_name().map(|f| f.to_str().unwrap_or("")))
+                .collect()
+        })
+        .unwrap_or_default();
     println!();
     println!("Setup complete. Next steps:");
-    println!("  1. re-login (group membership takes effect on a new session)");
-    println!("  2. ato runner login                      # enroll this host");
-    println!("  3. edit {ENV_FILE}: set SNAPSHOT_BUILDER_AGENT_TOKEN (builder) and ATO_RUNNER_PUBLIC_BASE_URL (tunnel)");
-    println!("  4. systemctl enable --now {BUILDER_UNIT} {RUNNER_UNIT}");
-    println!("  5. ato runner smoke                      # verify the full local path");
-    println!("  6. ato doctor runner                     # confirm everything is green");
+    let mut n = 1;
+    if added_group {
+        println!("  {n}. re-login so the new group membership takes effect");
+        n += 1;
+    }
+    println!("  {n}. ato runner login                      # enroll this host");
+    n += 1;
+    println!("  {n}. edit {ENV_FILE}: set SNAPSHOT_BUILDER_AGENT_TOKEN (builder) + ATO_RUNNER_PUBLIC_BASE_URL (tunnel)");
+    n += 1;
+    if !written_units.is_empty() {
+        println!("  {n}. systemctl enable --now {}", written_units.join(" "));
+        n += 1;
+    }
+    println!("  {n}. ato runner smoke                      # verify the full local path");
+    println!("  {}. ato doctor runner                     # confirm everything is green", n + 1);
     Ok(())
 }
 
@@ -446,6 +583,10 @@ mod tests {
     fn opts() -> SetupOptions {
         SetupOptions { fix: false, yes: false, artifact_root: None, api_url: None }
     }
+    /// Both binaries available (release layout) — the common case.
+    fn bins() -> BinaryPlan {
+        BinaryPlan { ato_source: Some("/src/ato".into()), builder_source: Some("/src/ato-snapshot-builder".into()) }
+    }
 
     #[test]
     fn plan_is_empty_when_everything_passes() {
@@ -453,7 +594,7 @@ mod tests {
             .iter()
             .map(|id| check(id, CheckStatus::Ok))
             .collect();
-        assert!(derive_plan(&all_ok, &opts()).is_empty());
+        assert!(derive_plan(&all_ok, &opts(), &bins()).is_empty());
     }
 
     #[test]
@@ -465,11 +606,14 @@ mod tests {
             check("guest_kernel", CheckStatus::Missing),
             check("artifact_root", CheckStatus::Missing),
             check("kvm_group", CheckStatus::Missing),
+            check("ato_cli_binary", CheckStatus::Missing),
+            check("snapshot_builder_binary", CheckStatus::Missing),
             check("env_file", CheckStatus::Missing),
             check("unit_builder", CheckStatus::Missing),
+            check("unit_runner", CheckStatus::Missing),
             check("tool_pnpm", CheckStatus::Warn), // optional — never auto-installed
         ];
-        let plan = derive_plan(&checks, &opts());
+        let plan = derive_plan(&checks, &opts(), &bins());
         let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
         assert_eq!(
             ids,
@@ -480,10 +624,16 @@ mod tests {
                 "firecracker_install",
                 "kernel_install",
                 "artifact_root",
+                "install_ato_cli",
+                "install_snapshot_builder",
                 "env_file",
-                "systemd_units"
+                "systemd_units",
             ]
         );
+        // Binaries are installed BEFORE the units that depend on them.
+        let pos = |id: &str| ids.iter().position(|x| *x == id).unwrap();
+        assert!(pos("install_ato_cli") < pos("systemd_units"));
+        assert!(pos("install_snapshot_builder") < pos("systemd_units"));
         // Downloads are pinned: the verify command carries the exact sha256.
         let fc = plan.iter().find(|a| a.id == "firecracker_install").unwrap();
         assert!(fc.commands.iter().any(|c| c.contains(FC_TGZ_SHA256) && c.contains("sha256sum -c")));
@@ -497,8 +647,88 @@ mod tests {
     fn custom_artifact_root_flows_into_the_plan() {
         let checks = vec![check("artifact_root", CheckStatus::Missing)];
         let o = SetupOptions { artifact_root: Some("/srv/snapshots".into()), ..opts() };
-        let plan = derive_plan(&checks, &o);
+        let plan = derive_plan(&checks, &o, &bins());
         assert!(plan[0].commands.iter().any(|c| c.contains("/srv/snapshots")));
+    }
+
+    #[test]
+    fn missing_binaries_derive_install_actions_and_units_wait_for_them() {
+        // Fresh host: both binaries missing but sources available ⇒ install actions,
+        // and both units are written (their ExecStart binaries will exist).
+        let checks = vec![
+            check("ato_cli_binary", CheckStatus::Missing),
+            check("snapshot_builder_binary", CheckStatus::Missing),
+            check("unit_runner", CheckStatus::Missing),
+            check("unit_builder", CheckStatus::Missing),
+        ];
+        let plan = derive_plan(&checks, &opts(), &bins());
+        let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
+        assert!(ids.contains(&"install_ato_cli") && ids.contains(&"install_snapshot_builder"));
+        let units = plan.iter().find(|a| a.id == "systemd_units").unwrap();
+        assert_eq!(units.commands.iter().filter(|c| c.starts_with("<write>")).count(), 2);
+
+        // No snapshot-builder source ⇒ NO builder install AND NO builder unit (its
+        // ExecStart could never be made to exist), but the runner unit is still written.
+        let no_builder = BinaryPlan { ato_source: Some("/src/ato".into()), builder_source: None };
+        let plan = derive_plan(&checks, &opts(), &no_builder);
+        let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
+        assert!(!ids.contains(&"install_snapshot_builder"));
+        let units = plan.iter().find(|a| a.id == "systemd_units").unwrap();
+        let written: Vec<&String> = units.commands.iter().filter(|c| c.starts_with("<write>")).collect();
+        assert_eq!(written.len(), 1);
+        assert!(written[0].contains(RUNNER_UNIT) && !written[0].contains(BUILDER_UNIT));
+    }
+
+    #[test]
+    fn install_action_source_and_dest_are_the_install_paths() {
+        let checks = vec![check("ato_cli_binary", CheckStatus::Missing)];
+        let plan = derive_plan(&checks, &opts(), &bins());
+        let a = plan.iter().find(|a| a.id == "install_ato_cli").unwrap();
+        let (src, dest) = parse_install_command(&a.commands[0]).unwrap();
+        assert_eq!(src, "/src/ato");
+        assert_eq!(dest, ATO_CLI_INSTALL_PATH);
+        // And the unit ExecStart uses that exact dest — so the written unit is runnable.
+        assert!(render_unit(RUNNER_UNIT).contains(&format!("ExecStart={ATO_CLI_INSTALL_PATH} runner serve")));
+        assert!(render_unit(BUILDER_UNIT).contains(&format!("ExecStart={BUILDER_INSTALL_PATH}")));
+    }
+
+    #[test]
+    fn non_x86_64_arch_blocks_the_firecracker_and_kernel_install() {
+        assert_eq!(checks::parse_arch("x86_64"), "x86_64");
+        assert_eq!(checks::parse_arch("amd64"), "x86_64");
+        assert_eq!(checks::parse_arch("aarch64"), "aarch64");
+        // Arch Blocked ⇒ neither the x86_64 Firecracker nor the kernel is planned,
+        // even though both are Missing.
+        let checks = vec![
+            check("arch", CheckStatus::Blocked),
+            check("firecracker", CheckStatus::Missing),
+            check("guest_kernel", CheckStatus::Missing),
+            check("docker", CheckStatus::Missing), // arch-independent — still planned
+        ];
+        let plan = derive_plan(&checks, &opts(), &bins());
+        let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
+        assert!(!ids.contains(&"firecracker_install"), "must not install x86_64 FC on non-x86_64");
+        assert!(!ids.contains(&"kernel_install"), "must not install x86_64 kernel on non-x86_64");
+        assert!(ids.contains(&"docker_enable"), "arch-independent fixes still planned");
+    }
+
+    #[test]
+    fn install_binary_preserves_existing_and_is_self_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src-ato");
+        let dest = dir.path().join("bin").join("ato");
+        std::fs::write(&src, b"NEW").unwrap();
+        // Fresh dest: no backup, content copied.
+        assert!(install_binary_with_backup(&src, &dest).unwrap().is_none());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEW");
+        // Existing dest: previous content backed up, new content installed.
+        std::fs::write(&src, b"NEWER").unwrap();
+        let bak = install_binary_with_backup(&src, &dest).unwrap().expect("backup expected");
+        assert_eq!(std::fs::read(&bak).unwrap(), b"NEW");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEWER");
+        // src == dest ⇒ no-op (never truncates the running binary onto itself).
+        assert!(install_binary_with_backup(&dest, &dest).unwrap().is_none());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"NEWER");
     }
 
     #[test]
@@ -570,7 +800,7 @@ mod tests {
     #[test]
     fn firecracker_install_uses_private_tmp_and_pins_sha() {
         let checks = vec![check("firecracker", CheckStatus::Missing)];
-        let plan = derive_plan(&checks, &opts());
+        let plan = derive_plan(&checks, &opts(), &bins());
         let fc = &plan[0].commands[0];
         assert!(fc.contains("mktemp -d"), "must download into a private tmp dir: {fc}");
         assert!(fc.contains(FC_TGZ_SHA256) && fc.contains("sha256sum -c"), "must pin sha256");
