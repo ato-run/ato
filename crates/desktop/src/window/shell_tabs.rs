@@ -62,19 +62,18 @@ pub fn is_ato_home_entry(kind: &ContentWindowKind, app_base_url: &str) -> bool {
 }
 
 /// True when `kind` should appear as a capsule tab in the icon bar:
-/// capsule-backed AppWindows only. System surfaces (Store, Settings, Dock,
-/// Launch, Import, Auth) and plain web-viewer windows are not tabs.
-pub fn is_capsule_tab_entry(kind: &ContentWindowKind) -> bool {
-    matches!(
-        kind,
+/// capsule-backed AppWindows, plus ExternalUrl app windows that are NOT
+/// the PWA Home itself (e.g. a cloud session window opened via
+/// `ato://open?handle=<session-url>`). System surfaces (Store, Settings,
+/// Dock, Launch, Import, Auth) are never tabs.
+pub fn is_capsule_tab_entry(kind: &ContentWindowKind, app_base_url: &str) -> bool {
+    match kind {
         ContentWindowKind::AppWindow {
-            route: GuestRoute::CapsuleHandle { .. }
-                | GuestRoute::CapsuleUrl { .. }
-                | GuestRoute::LocalManifest(_)
-                | GuestRoute::Capsule { .. }
-                | GuestRoute::Terminal { .. }
-        }
-    )
+            route: GuestRoute::ExternalUrl(url),
+        } => !same_origin(url.as_str(), app_base_url),
+        ContentWindowKind::AppWindow { .. } => true,
+        _ => false,
+    }
 }
 
 /// Scheme + host + port comparison, tolerant of paths / trailing slashes.
@@ -144,7 +143,7 @@ pub fn derive_shell_tabs(windows: &OpenContentWindows, app_base_url: &str) -> Ve
 
     let mut capsule_tabs: Vec<ShellTab> = entries
         .iter()
-        .filter(|entry| is_capsule_tab_entry(&entry.kind))
+        .filter(|entry| is_capsule_tab_entry(&entry.kind, app_base_url))
         .map(|entry| {
             let window_id = entry.handle.window_id().as_u64();
             let title = entry
@@ -218,10 +217,17 @@ mod tests {
 
     #[test]
     fn capsule_windows_are_tabs_but_web_and_system_windows_are_not() {
-        assert!(is_capsule_tab_entry(&capsule("hello-capsule")));
-        assert!(!is_capsule_tab_entry(&external("https://example.com/")));
-        assert!(!is_capsule_tab_entry(&ContentWindowKind::Store));
-        assert!(!is_capsule_tab_entry(&ContentWindowKind::Settings));
+        let base = "https://app.ato.run";
+        assert!(is_capsule_tab_entry(&capsule("hello-capsule"), base));
+        // A non-home ExternalUrl window (e.g. a cloud session opened via
+        // ato://open) IS a tab; the PWA Home origin itself is not.
+        assert!(is_capsule_tab_entry(
+            &external("https://abc123.app.ato.run/"),
+            base
+        ));
+        assert!(!is_capsule_tab_entry(&external("https://app.ato.run/run"), base));
+        assert!(!is_capsule_tab_entry(&ContentWindowKind::Store, base));
+        assert!(!is_capsule_tab_entry(&ContentWindowKind::Settings, base));
     }
 
     #[test]

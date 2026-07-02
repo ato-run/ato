@@ -60,6 +60,9 @@ pub struct ControlBarController {
     /// Mode to restore when transitioning out of Hidden via show/toggle.
     previous_mode: ControlBarMode,
     expanded: bool,
+    /// Configured PWA origin, cached so hover/resize paths never touch
+    /// disk. Used to classify home vs capsule tabs.
+    app_base_url: String,
 }
 
 impl gpui::Global for ControlBarController {}
@@ -77,6 +80,7 @@ impl ControlBarController {
             mode,
             previous_mode,
             expanded: matches!(mode, ControlBarMode::Floating),
+            app_base_url: crate::config::load_config().desktop.app_base_url,
         }
     }
 
@@ -224,11 +228,11 @@ pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
 
 /// Number of capsule tabs currently shown in the icon bar. Drives the
 /// pill width so it hugs its icons instead of spanning a fixed 720px.
-fn capsule_tab_count(cx: &App) -> usize {
+fn capsule_tab_count(cx: &App, app_base_url: &str) -> usize {
     cx.global::<OpenContentWindows>()
         .mru_order()
         .iter()
-        .filter(|entry| shell_tabs::is_capsule_tab_entry(&entry.kind))
+        .filter(|entry| shell_tabs::is_capsule_tab_entry(&entry.kind, app_base_url))
         .count()
 }
 
@@ -246,7 +250,11 @@ fn expanded_bar_width(capsule_count: usize) -> f32 {
 
 fn bar_size(cx: &App, expanded: bool) -> (f32, f32) {
     if expanded {
-        (expanded_bar_width(capsule_tab_count(cx)), BAR_HEIGHT)
+        let app_base_url = cx.global::<ControlBarController>().app_base_url.clone();
+        (
+            expanded_bar_width(capsule_tab_count(cx, &app_base_url)),
+            BAR_HEIGHT,
+        )
     } else {
         (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
     }

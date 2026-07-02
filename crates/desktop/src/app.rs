@@ -1050,11 +1050,40 @@ pub fn run(skip_onboarding: bool) {
         //   - http(s)://...          → ExternalUrl route.
         //   - anything else          → log + ignore.
         cx.on_action(|action: &NavigateToUrl, cx: &mut App| {
-            let raw = action.url.trim();
+            let owned_url;
+            let mut raw = action.url.trim();
             if raw.is_empty() {
                 return;
             }
             tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+
+            // ato://open?handle=<url-or-capsule-ref> — the PWA Home's
+            // "open this app outside my WebView" intent (mirrors the legacy
+            // AppState::handle_host_route deep link). Unwrap the inner
+            // target and route it like any other NavigateToUrl input: an
+            // https session URL opens an independent app window, a
+            // capsule:// ref goes through the native launch flow.
+            if raw.starts_with("ato://open") {
+                let inner = url::Url::parse(raw).ok().and_then(|url| {
+                    url.query_pairs()
+                        .find(|(k, _)| k == "handle" || k == "url")
+                        .map(|(_, v)| v.into_owned())
+                });
+                match inner {
+                    Some(inner) if !inner.trim().is_empty() => {
+                        tracing::info!(target = %inner, "NavigateToUrl(ato://open): unwrapped");
+                        owned_url = inner;
+                        raw = owned_url.trim();
+                    }
+                    _ => {
+                        tracing::warn!(
+                            url = %raw,
+                            "NavigateToUrl(ato://open): missing 'handle' query parameter — ignored"
+                        );
+                        return;
+                    }
+                }
+            }
 
             // GitHub Import: github.com/owner/repo or https://github.com/...
             // is routed to the GitHub Import review surface rather than the
