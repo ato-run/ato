@@ -46,6 +46,7 @@ fn build_input<'a>(store: &'a CasStore, rootfs: Vec<u8>, markers: Vec<String>) -
         restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: markers,
+        execution_id: None,
     }
 }
 
@@ -882,6 +883,7 @@ fn fc_kvm_binding_lease_live_e2e() {
         restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/ready".to_string()), expected_ready_ms: Some(5000) },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
+        execution_id: None,
     };
     // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
     unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
@@ -970,6 +972,7 @@ fn fc_kvm_binding_negative_paths() {
         restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/ready".to_string()), expected_ready_ms: Some(5000) },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
+        execution_id: None,
     };
     unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
     let m = b.build_ready_state(input).expect("build").manifest;
