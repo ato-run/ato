@@ -81,6 +81,13 @@ struct ClaimedJob {
     target_label: String,
     profile: String,
     source: ClaimedSource,
+    /// #932: the APPROVED store recipe manifest (`capsule_source_recipes.recipe_toml`),
+    /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
+    /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
+    /// Absent/None (older ato-api, or a recipe with no stored toml) ⇒ the repo's own
+    /// capsule.toml is required, fail-closed exactly as before.
+    #[serde(default)]
+    recipe_toml: Option<String>,
 }
 
 /// The narrow v1 target/profile gate: a job may only build when it requests the
@@ -123,6 +130,15 @@ struct Artifact {
     rootfs_bytes: u64,
     mem_bytes: u64,
     vmstate_bytes: u64,
+    // ── #932 non-secret build provenance (diagnostics; never registry identity) ──
+    /// Which manifest built this artifact: "recipe_toml" | "repo_capsule_toml".
+    manifest_source: String,
+    /// True when the readiness probe was synthesized from the declared port.
+    synthesized_probe: bool,
+    /// The manifest-declared run command, verbatim.
+    declared_command: String,
+    /// The command actually embedded into the guest init (post normalization).
+    normalized_guest_command: String,
 }
 
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
@@ -189,11 +205,18 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     let _ = std::fs::remove_dir_all(&jobdir);
 
     // 1. Materialize the SERVER-RESOLVED source (pinned commit; identity/subdir validated).
+    // #932: a Store-recipe job carries the APPROVED recipe manifest on the claim — it is
+    // materialized as capsule.toml at the source root (authoritative over any repo file,
+    // because the Store-apply publish model stores the manifest server-side and upstream
+    // repos carry none). A raw-GitHub job (no recipe_toml) requires the repo's own
+    // capsule.toml, fail-closed exactly as before.
+    let manifest_source = if job.recipe_toml.is_some() { "recipe_toml" } else { "repo_capsule_toml" };
     let src = materialize_source(
         &job.source.github_owner,
         &job.source.github_repo,
         &job.source.commit_sha,
         job.source.subdirectory.as_deref(),
+        job.recipe_toml.as_deref(),
         &jobdir.join("src"),
     )
     .map_err(|e| fail("source", e))?;
@@ -304,6 +327,12 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         rootfs_bytes: manifest_out.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
         mem_bytes: manifest_out.layers.memory.as_ref().map(|m| m.total_len).unwrap_or(0),
         vmstate_bytes: manifest_out.layers.vmstate.as_ref().map(|m| m.total_len).unwrap_or(0),
+        // #932 build provenance — lands in receipt_json via the sealed ack (diagnostics
+        // only; the ato-api registry identity comparison never reads these).
+        manifest_source: manifest_source.to_string(),
+        synthesized_probe: spec.probe_synthesized,
+        declared_command: spec.declared_start_cmd,
+        normalized_guest_command: spec.start_cmd,
     })
 }
 
@@ -378,6 +407,34 @@ mod tests {
         // target_label/profile are REQUIRED claim fields (target/profile-scoped registry).
         assert_eq!(resp.jobs[0].target_label, "web");
         assert_eq!(resp.jobs[0].profile, "default");
+        // #932: an OLDER ato-api without recipe_toml parses as None (repo-manifest path).
+        assert!(resp.jobs[0].recipe_toml.is_none());
+    }
+
+    #[test]
+    fn parses_a_claim_with_a_recipe_manifest() {
+        // #932: a Store-recipe job carries the approved recipe manifest on the claim.
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_2", "capsule_id": "cap_2",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "b".repeat(40), "subdirectory": null },
+                "recipe_toml": "schema_version = \"0.3\"\ndefault_target = \"app\"\n",
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.jobs[0].recipe_toml.as_deref(), Some("schema_version = \"0.3\"\ndefault_target = \"app\"\n"));
+        // An explicit null is also the repo-manifest path (recipe stored no toml).
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_3", "capsule_id": "cap_3",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "c".repeat(40), "subdirectory": null },
+                "recipe_toml": null,
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert!(resp.jobs[0].recipe_toml.is_none());
     }
 
     #[test]
@@ -420,8 +477,8 @@ mod tests {
 
     #[test]
     fn artifact_matches_the_sealed_ack_schema() {
-        // The ato-api artifactSchema (#157) is .strict(): the sealed-ack body must carry
-        // exactly these keys and nothing else.
+        // The ato-api artifactSchema (#157, extended by #932) is .strict(): the
+        // sealed-ack body must carry exactly these keys and nothing else.
         let a = Artifact {
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
@@ -434,6 +491,10 @@ mod tests {
             rootfs_bytes: 1,
             mem_bytes: 2,
             vmstate_bytes: 3,
+            manifest_source: "recipe_toml".into(),
+            synthesized_probe: true,
+            declared_command: "app.py".into(),
+            normalized_guest_command: "python3 app.py".into(),
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
@@ -442,11 +503,14 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "execution_id", "healthcheck_url_path",
-                "mem_bytes", "no_secret_scan_clean", "rootfs_bytes", "runner_class_id", "snapshot_backend", "vmstate_bytes"
+                "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "declared_command", "execution_id",
+                "healthcheck_url_path", "manifest_source", "mem_bytes", "no_secret_scan_clean", "normalized_guest_command",
+                "rootfs_bytes", "runner_class_id", "snapshot_backend", "synthesized_probe", "vmstate_bytes"
             ]
         );
         assert_eq!(obj["no_secret_scan_clean"], serde_json::json!(true));
+        // #932 provenance values are enum-safe for the ato-api schema.
+        assert!(matches!(obj["manifest_source"].as_str().unwrap(), "recipe_toml" | "repo_capsule_toml"));
         // No placeholder identity/location fields.
         for k in ["execution_id", "runner_class_id", "artifact_location"] {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");
