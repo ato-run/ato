@@ -32,6 +32,28 @@ use snapshot::{
     SanitizerContract, SnapshotBackend, no_secret_scan,
 };
 
+/// PEM-marker literals: a GATE for the sealed `manifest.json` (small, structured,
+/// builder-authored — a PEM marker there is always wrong) and an ADVISORY sweep over
+/// the CAS.
+///
+/// They must NOT gate the CAS. #932 finding 4, measured twice on a real capsule:
+/// the 4-byte `AKIA` literal hit random binary offsets of a 1 GiB rootfs (no key
+/// material — context inspection), and even these long PEM literals hit the string
+/// constant tables of ordinary ssh/crypto libraries (`…openssh-key-v1…-----BEGIN
+/// OPENSSH PRIVATE KEY-----…-----END OPENSSH PRI…` — header adjacent to footer,
+/// i.e. format constants, not a key). This mirrors the seal-side scanner's
+/// empirically-derived policy (`snapshot::scanner`, `ato-rs-policy/1`): literal/
+/// heuristic hits over opaque images (rootfs/memory) are advisory, never gating.
+/// What DOES gate the CAS is [`live_secret_canaries`] — exact values of the
+/// builder's own credentials, the actual leak threat, with zero false positives.
+/// `l4_canaries_are_long_enough_to_gate_binaries` enforces the minimum length.
+const L4_CANARIES: &[&[u8]] = &[
+    b"BEGIN PRIVATE KEY",
+    b"BEGIN RSA PRIVATE KEY",
+    b"BEGIN OPENSSH PRIVATE KEY",
+    b"BEGIN EC PRIVATE KEY",
+];
+
 struct Config {
     api_url: String,
     token: String,
@@ -139,6 +161,20 @@ struct Artifact {
     declared_command: String,
     /// The command actually embedded into the guest init (post normalization).
     normalized_guest_command: String,
+}
+
+/// The builder host's own LIVE secrets, as exact-value canaries for the L4 CAS gate:
+/// "did MY credentials leak into the sealed artifact?" — the concrete threat a builder
+/// host adds (env reaching a build layer). Exact long random values cannot
+/// false-positive on library constants or binary noise (#932 finding 4). Values are
+/// compared in-memory only; scan results carry paths, never content. Trivially short
+/// values are excluded — they could only produce noise, never a real credential.
+fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
+    let mut v: Vec<&[u8]> = Vec::new();
+    if cfg.token.len() >= 16 {
+        v.push(cfg.token.as_bytes());
+    }
+    v
 }
 
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
@@ -282,14 +318,42 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         .map_err(|e| fail("restore_verify", e.to_string()))?;
     let _ = backend.stop(restored.session);
 
-    // 6. No-secret scan: the build gate + the reusable L4 scanner over the CAS (canaries).
-    let l4 = no_secret_scan::scan(
-        &no_secret_scan::ScanTargets { cas: Some(jobdir.join("cas")), ..Default::default() },
-        &[b"BEGIN PRIVATE KEY", b"BEGIN RSA PRIVATE KEY", b"AKIA"],
-    );
-    let no_secret_scan_clean = receipt.no_secret_proof.is_clean() && l4.clean;
-    if !no_secret_scan_clean {
-        return Err(fail("no_secret_scan", "sealed artifact failed the no-secret scan".into()));
+    // 6. No-secret scan — two GATES + one ADVISORY, each failure says which tripped
+    // (path-only, never content):
+    //  (a) the seal-side proof: the policy-versioned `snapshot::scanner` (declared
+    //      markers block everywhere; provider-key/env heuristics block on the
+    //      build-authored layers, advisory on opaque images — empirical policy);
+    //  (b) the L4 LIVE-SECRET gate: the builder's own credentials as exact-value
+    //      canaries over the CAS. This is the real leak threat a builder host adds
+    //      (its env reaching the image), and exact long random values cannot
+    //      false-positive. The values are compared in-memory only — never logged,
+    //      never persisted (hits carry paths only);
+    //  (c) the PEM-marker sweep, ADVISORY on the CAS (#932 finding 4: ordinary
+    //      ssh/crypto libraries carry these strings as format constants).
+    if !receipt.no_secret_proof.is_clean() {
+        return Err(fail(
+            "no_secret_scan",
+            format!("seal-side no-secret proof is not clean ({} finding(s), verdict {:?})", receipt.no_secret_proof.findings.len(), receipt.no_secret_proof.verdict),
+        ));
+    }
+    let cas_targets = no_secret_scan::ScanTargets { cas: Some(jobdir.join("cas")), ..Default::default() };
+    let live: Vec<&[u8]> = live_secret_canaries(cfg);
+    let leak = no_secret_scan::scan(&cas_targets, &live);
+    if !leak.clean {
+        let first = leak.hits.first().map(|h| format!("{}:{}", h.target, h.path)).unwrap_or_default();
+        return Err(fail(
+            "no_secret_scan",
+            format!("builder credential found in the sealed artifact: {} file(s) across {} scanned; first: {first}", leak.hits.len(), leak.files_scanned),
+        ));
+    }
+    let pem = no_secret_scan::scan(&cas_targets, L4_CANARIES);
+    if !pem.clean {
+        let first = pem.hits.first().map(|h| format!("{}:{}", h.target, h.path)).unwrap_or_default();
+        eprintln!(
+            "[builder] advisory: PEM-format markers in {} of {} CAS file(s) (library string constants are common — not gating; #932 finding 4) first: {first}",
+            pem.hits.len(),
+            pem.files_scanned
+        );
     }
 
     // Registry identity/location fields (capsule_snapshots contract, #154/#157). All must
@@ -310,7 +374,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
     // it carries no layer bytes and no secrets.
     let manifest_json = serde_json::to_vec_pretty(&manifest_out).map_err(|e| fail("artifact_metadata", format!("serialize sealed manifest: {e}")))?;
-    if !no_secret_scan::blob_is_clean(&manifest_json, &[b"BEGIN PRIVATE KEY", b"BEGIN RSA PRIVATE KEY", b"AKIA"]) {
+    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
         return Err(fail("no_secret_scan", "sealed manifest json failed the no-secret scan".into()));
     }
     std::fs::write(jobdir.join("manifest.json"), &manifest_json).map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
@@ -473,6 +537,52 @@ mod tests {
         let (exec, rc) = sealed_identity(Some("real-declared-id"), Some("blake3:rc".into())).unwrap();
         assert_eq!(exec, "real-declared-id");
         assert_eq!(rc, "blake3:rc");
+    }
+
+    #[test]
+    fn l4_canaries_are_long_enough_to_gate_binaries() {
+        // #932 finding 4: a short literal over GiB-scale binaries false-positives at
+        // random offsets (expected hits ≈ windows × 256^-len; 4 bytes ⇒ multiple hits
+        // per GiB). 12+ bytes pushes the expectation to ~zero across the fleet. Never
+        // re-add a bare provider prefix here — that detection belongs to the
+        // policy-versioned seal scanner (snapshot::scanner).
+        for c in L4_CANARIES {
+            assert!(c.len() >= 12, "canary {:?} is too short to gate binary artifacts", String::from_utf8_lossy(c));
+        }
+    }
+
+    #[test]
+    fn l4_canaries_flag_pem_but_not_bare_provider_prefixes() {
+        // A random-binary AKIA occurrence (finding 4's false-positive class) must pass…
+        let binary_with_akia = [b"\x00\x9fAKIA\xffQ\x11 random bytes".as_slice(), &[0u8; 64]].concat();
+        assert!(no_secret_scan::blob_is_clean(&binary_with_akia, L4_CANARIES));
+        // …while PEM markers are detected (gating for manifest.json; advisory on CAS).
+        let pem = b"-----BEGIN PRIVATE KEY-----\nMIIEvg==\n-----END PRIVATE KEY-----";
+        assert!(!no_secret_scan::blob_is_clean(pem, L4_CANARIES));
+        let openssh = b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==";
+        assert!(!no_secret_scan::blob_is_clean(openssh, L4_CANARIES));
+    }
+
+    #[test]
+    fn live_secret_canaries_gate_the_builder_token_but_skip_trivial_values() {
+        let mk = |token: &str| Config {
+            api_url: "https://api".into(),
+            token: token.into(),
+            agent_id: "a".into(),
+            work: std::env::temp_dir(),
+            rootfs_size_mib: 1024,
+            once: true,
+            poll_secs: 15,
+        };
+        // A real (long, random) token gates: an artifact containing it is dirty.
+        let cfg = mk("0123456789abcdef0123456789abcdef");
+        let canaries = live_secret_canaries(&cfg);
+        assert_eq!(canaries.len(), 1);
+        let leaked = [b"layer bytes ".as_slice(), cfg.token.as_bytes(), b" more"].concat();
+        assert!(!no_secret_scan::blob_is_clean(&leaked, &canaries));
+        assert!(no_secret_scan::blob_is_clean(b"layer bytes without the token", &canaries));
+        // A trivially short token is excluded — it could only produce noise.
+        assert!(live_secret_canaries(&mk("short")).is_empty());
     }
 
     #[test]
