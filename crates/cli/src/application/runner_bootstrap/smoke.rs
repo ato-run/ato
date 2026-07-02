@@ -152,6 +152,11 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
         if shell("id -u") != "0" {
             bail!("smoke needs root (Firecracker tap setup): sudo -E ato runner smoke");
         }
+        // v0 is x86_64-only (pinned Firecracker + kernel) — fail clearly elsewhere.
+        let arch = super::checks::parse_arch(&shell("uname -m"));
+        if arch != super::SUPPORTED_ARCH {
+            bail!("Runner Bootstrap v0 is {}-only; this host is {arch}", super::SUPPORTED_ARCH);
+        }
         if !FirecrackerBackend::kvm_present() {
             bail!("/dev/kvm is not usable — run `ato doctor runner`");
         }
@@ -292,6 +297,70 @@ async fn smoke_pipeline(
             bail!("build_ready_state failed");
         }
     };
+
+    // ── Stage 2b: restore-lease VERIFY — persist manifest.json beside the CAS (the
+    // #928 layout) and run the SAME runner-side gate the restore_snapshot lease uses
+    // (#929): locate cas://<job>/<hash> + load_and_verify_manifest. A positive
+    // (real hash) must pass; a tampered artifact_manifest_hash must be refused —
+    // proving the integrity gate on this host, not just that restore works.
+    let t = Instant::now();
+    let verify = (|| -> Result<String> {
+        use crate::application::ready_state::restore_lease::{
+            RestoreSnapshotCommand, load_and_verify_manifest, locate_artifact,
+        };
+        // Persist the sealed manifest beside the CAS, under a job dir (artifact root
+        // == the smoke workdir; artifact_location == cas://<job>/<hash>).
+        let job = "smoke-job";
+        let jobdir = workdir.join(job);
+        std::fs::create_dir_all(jobdir.join("cas"))?;
+        // Reuse the smoke's CAS as the job CAS so restore inputs resolve.
+        let manifest_json = jobdir.join("manifest.json");
+        std::fs::write(&manifest_json, serde_json::to_vec(&sealed.manifest)?)?;
+        let hash = sealed.manifest.id();
+        let cmd = RestoreSnapshotCommand {
+            snapshot_id: "smoke".into(),
+            capsule_id: "smoke".into(),
+            target_label: "app".into(),
+            profile: "default".into(),
+            artifact_location: format!("cas://{job}/{hash}"),
+            artifact_manifest_hash: hash.clone(),
+            capsule_manifest_hash: sealed.manifest.capsule_manifest_hash.clone(),
+            execution_id: sealed.manifest.execution_id.clone().unwrap_or_default(),
+            runner_class_id: sealed
+                .manifest
+                .runner_class_id
+                .as_ref()
+                .map(|c| c.to_string())
+                .unwrap_or_default(),
+            snapshot_backend: sealed.manifest.snapshot_backend.kind.clone(),
+            healthcheck_url_path: None,
+        };
+        // locate_artifact must map cas:// to <workdir>/<job>/{manifest.json,cas}.
+        let paths = locate_artifact(&cmd.artifact_location, workdir)
+            .map_err(|(c, m)| anyhow::anyhow!("{c}: {m}"))?;
+        if paths.manifest_json != manifest_json {
+            bail!("locate_artifact mapped to {} not {}", paths.manifest_json.display(), manifest_json.display());
+        }
+        // Positive: the exact artifact must verify.
+        load_and_verify_manifest(&paths.manifest_json, &cmd)
+            .map_err(|(c, m)| anyhow::anyhow!("genuine artifact rejected: {c}: {m}"))?;
+        // Negative: a tampered hash must be refused (the gate the direct restore lacks).
+        let mut bad = cmd.clone();
+        bad.artifact_manifest_hash = "blake3:TAMPERED".into();
+        if load_and_verify_manifest(&paths.manifest_json, &bad).is_ok() {
+            bail!("SECURITY: tampered artifact_manifest_hash was accepted");
+        }
+        Ok(hash)
+    })();
+    match verify {
+        Ok(h) => {
+            push(stages, "restore_lease_verify", true, format!("manifest.id()=={h} verified; tamper refused"), t);
+        }
+        Err(e) => {
+            push(stages, "restore_lease_verify", false, format!("{e:#}"), t);
+            bail!("restore-lease verify failed");
+        }
+    }
 
     // ── Stage 3: restore ──
     let t = Instant::now();
