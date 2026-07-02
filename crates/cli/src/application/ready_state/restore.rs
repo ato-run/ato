@@ -78,6 +78,7 @@ mod tests {
                 restore_contract: RestoreContract { ports: vec![8080], ..Default::default() },
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
+                execution_id: None,
             })
             .unwrap()
             .manifest;

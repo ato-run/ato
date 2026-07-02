@@ -97,6 +97,7 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
         restore_contract: RestoreContract { ports: vec![port], healthcheck: Some(hc.clone()), expected_ready_ms: Some(8000) },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
+        execution_id: None,
     }) {
         Ok(rc) => rc,
         Err(e) => { r["failure_stage"] = json!("build"); r["failure_reason"] = json!(e.to_string()); return r; }
