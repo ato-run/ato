@@ -193,6 +193,55 @@ pub(crate) enum RunnerCommands {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Enroll this machine as a Connected Capsule Runner against the Ato control
+    /// plane (after `setup --fix` + `smoke`). Reuses the `login` registration
+    /// (browser device-flow, or a headless `--enrollment-token`), then writes the
+    /// systemd env file (`/etc/ato/runner.env`, append-only — operator keys are
+    /// never overwritten) and verifies the control plane is reachable and the runner
+    /// is active. Run with `sudo` to write the env file / start the service.
+    #[command(name = "enroll", about = "Register this host as a Connected Capsule Runner")]
+    Enroll {
+        /// Control-plane API base URL (else ATO_API_URL / ATO_STORE_API_URL).
+        #[arg(long, value_name = "URL")]
+        api_url: Option<String>,
+
+        /// Sign-in site base for the browser device-flow (else ATO_STORE_SITE_URL).
+        #[arg(long, value_name = "URL")]
+        site_base: Option<String>,
+
+        /// Display name shown in the runner list (default: hostname).
+        #[arg(long, value_name = "NAME")]
+        display_name: Option<String>,
+
+        /// Absolute, non-loopback base URL where this runner exposes ready apps.
+        #[arg(long, value_name = "URL")]
+        public_base_url: Option<String>,
+
+        /// Print the sign-in URL instead of opening a browser (for servers).
+        #[arg(long, default_value_t = false)]
+        headless: bool,
+
+        /// Headless enrollment: exchange this single-use `ato_enr_…` token for a
+        /// runner token, skipping the device-flow (else ATO_RUNNER_ENROLLMENT_TOKEN).
+        #[arg(long, value_name = "TOKEN")]
+        enrollment_token: Option<String>,
+
+        /// After enrolling, `systemctl enable --now` the runner service (needs root).
+        #[arg(long, default_value_t = false)]
+        start: bool,
+    },
+
+    /// Show this runner's status: local systemd unit states + what it advertises,
+    /// and — using its runner token — the control-plane device view (active/online,
+    /// last seen, public URL, supported lease kinds incl. restore_snapshot, and slot
+    /// capacity) via the read-only `GET /v1/runners/:id/self`.
+    #[command(name = "status", about = "Show local + control-plane status for this runner")]
+    Status {
+        /// Emit machine-readable JSON on stdout instead of the human summary.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[cfg(test)]
