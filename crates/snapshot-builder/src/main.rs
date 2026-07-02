@@ -20,6 +20,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow};
+use capsule::engine::execution_graph::{
+    ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
+};
 use capsule::foundation::types::manifest::CapsuleManifest;
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
@@ -170,8 +173,31 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
 
     // 2. Parse the capsule.toml + derive a fail-closed build spec (rejects bindings/etc.).
     let toml_bytes = std::fs::read(src.join("capsule.toml")).map_err(|e| fail("manifest", e.to_string()))?;
-    let manifest = CapsuleManifest::from_toml(&String::from_utf8_lossy(&toml_bytes)).map_err(|e| fail("manifest", e.to_string()))?;
+    let toml_text = String::from_utf8_lossy(&toml_bytes).into_owned();
+    let manifest = CapsuleManifest::from_toml(&toml_text).map_err(|e| fail("manifest", e.to_string()))?;
     let spec = derive_build_spec(&manifest, &SourceProbe::scan(&src)).map_err(|e| fail("eligibility", e))?;
+
+    // 2b. The declared Ato Execution Identity for this build — computed from DECLARED,
+    // host-independent facts only (the server-resolved pinned source + the manifest's
+    // default target/runtime/working-dir/dependencies), via the same graph
+    // canonicalization the launch path uses. Never from the job id / artifact hash /
+    // builder-host state. Stamped into the sealed manifest by build_ready_state.
+    let target = manifest.resolve_default_target().map_err(|e| fail("manifest", e.to_string()))?;
+    let envelope = ReadyStateDeclaredEnvelope {
+        source_identifier: store_source_identifier(
+            &job.source.github_owner,
+            &job.source.github_repo,
+            &job.source.commit_sha,
+            job.source.subdirectory.as_deref(),
+        ),
+        target_label: manifest.default_target.trim().to_string(),
+        runtime: target.runtime.clone(),
+        working_directory: target.working_dir.clone(),
+        dependencies: declared_dependencies_from_manifest_toml(&toml_text).map_err(|e| fail("artifact_metadata", e))?,
+        network_policy_hash: None,
+        capability_policy_hash: None,
+    };
+    let declared_execution_id = envelope.declared_execution_id();
 
     // 3. Build the bootable rootfs (Docker→ext4; commands run only in Docker/guest).
     let ext4 = jobdir.join("rootfs.ext4");
@@ -190,6 +216,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
             restore_contract: RestoreContract { ports: vec![spec.port], healthcheck: Some(spec.healthcheck.clone()), expected_ready_ms: Some(8000) },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
+            execution_id: Some(declared_execution_id),
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
     let manifest_out = receipt.manifest.clone();
@@ -252,6 +279,37 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
         }
     }
     Ok(jobs.len())
+}
+
+fn main() -> Result<()> {
+    let cfg = Config::from_env_args()?;
+    if !FirecrackerBackend::kvm_present() {
+        eprintln!("snapshot-builder: /dev/kvm absent — this must run on a KVM+Docker builder host");
+        std::process::exit(2);
+    }
+    std::fs::create_dir_all(&cfg.work)?;
+    let backend = FirecrackerBackend::new();
+    loop {
+        match run_once(&cfg, &backend) {
+            Ok(n) => {
+                if cfg.once {
+                    eprintln!("[builder] --once: processed {n} job(s), exiting");
+                    break;
+                }
+                if n == 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(cfg.poll_secs));
+                }
+            }
+            Err(e) => {
+                eprintln!("[builder] loop error: {e}");
+                if cfg.once {
+                    return Err(e);
+                }
+                std::thread::sleep(std::time::Duration::from_secs(cfg.poll_secs));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -331,35 +389,4 @@ mod tests {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");
         }
     }
-}
-
-fn main() -> Result<()> {
-    let cfg = Config::from_env_args()?;
-    if !FirecrackerBackend::kvm_present() {
-        eprintln!("snapshot-builder: /dev/kvm absent — this must run on a KVM+Docker builder host");
-        std::process::exit(2);
-    }
-    std::fs::create_dir_all(&cfg.work)?;
-    let backend = FirecrackerBackend::new();
-    loop {
-        match run_once(&cfg, &backend) {
-            Ok(n) => {
-                if cfg.once {
-                    eprintln!("[builder] --once: processed {n} job(s), exiting");
-                    break;
-                }
-                if n == 0 {
-                    std::thread::sleep(std::time::Duration::from_secs(cfg.poll_secs));
-                }
-            }
-            Err(e) => {
-                eprintln!("[builder] loop error: {e}");
-                if cfg.once {
-                    return Err(e);
-                }
-                std::thread::sleep(std::time::Duration::from_secs(cfg.poll_secs));
-            }
-        }
-    }
-    Ok(())
 }
