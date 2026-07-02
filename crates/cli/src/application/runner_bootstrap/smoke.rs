@@ -156,7 +156,15 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
             bail!("/dev/kvm is not usable — run `ato doctor runner`");
         }
         let fc = resolve_fc_bin().context("no firecracker binary (ato runner setup --fix)")?;
-        let ver = shell(&format!("{fc} --version | head -1"));
+        // Execute the binary directly (argv), never via `sh -c` — the path comes from
+        // ATO_FC_BIN and must not be shell-interpreted.
+        let ver = Command::new(&fc)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+            .unwrap_or_default();
         if ver.is_empty() {
             bail!("{fc} did not answer --version");
         }
