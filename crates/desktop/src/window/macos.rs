@@ -20,6 +20,65 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
 
+/// NSWindow backing `window`, extracted WITHOUT going through
+/// `handle.update` — usable inside that window's own event handlers,
+/// where a same-window `update` would fail.
+pub fn ns_window_of(window: &Window) -> Option<Retained<NSWindow>> {
+    let rwh = match HasWindowHandle::window_handle(window) {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "ns_window_of: window_handle failed");
+            return None;
+        }
+    };
+    match rwh.as_raw() {
+        RawWindowHandle::AppKit(h) => {
+            let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
+            view.window()
+        }
+        other => {
+            warn!(handle = ?other, "ns_window_of: not AppKit");
+            None
+        }
+    }
+}
+
+/// Resize `nswindow` keeping its top edge and horizontal centre — but
+/// OUTSIDE any GPUI update. `setFrame` synchronously re-enters GPUI's
+/// window delegates (windowDidResize); doing that while an `App` borrow
+/// is held logs "RefCell already borrowed", the resize event is dropped,
+/// and GPUI's internal size goes stale — which breaks hit-testing (a
+/// click on one icon lands on another). Scheduling the frame change on
+/// the foreground executor lets AppKit deliver the resize while GPUI is
+/// idle, so its layout and hit-test geometry stay correct.
+pub fn resize_window_outside_update(
+    nswindow: Retained<NSWindow>,
+    executor: gpui::ForegroundExecutor,
+    new_w: f32,
+    new_h: f32,
+) {
+    executor
+        .spawn(async move {
+            let current = nswindow.frame();
+            let top_y = current.origin.y + current.size.height;
+            let center_x = current.origin.x + current.size.width / 2.0;
+            let new_frame = NSRect::new(
+                NSPoint::new(center_x - new_w as f64 / 2.0, top_y - new_h as f64),
+                NSSize::new(new_w as f64, new_h as f64),
+            );
+            nswindow.setFrame_display_animate(new_frame, true, false);
+            if let Some(content_view) = nswindow.contentView() {
+                content_view.setWantsLayer(true);
+                if let Some(layer) = content_view.layer() {
+                    layer.setCornerRadius(new_h as f64 / 2.0);
+                    layer.setMasksToBounds(true);
+                }
+            }
+            nswindow.invalidateShadow();
+        })
+        .detach();
+}
+
 /// Walk from a `gpui::WindowHandle` to its underlying `NSWindow`.
 /// Returns `None` if the handle is unknown, the platform window
 /// reports a non-AppKit raw handle, or the NSView has no parent

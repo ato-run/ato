@@ -1305,6 +1305,7 @@ pub fn run(skip_onboarding: bool) {
                 return;
             };
             cx.global_mut::<OpenContentWindows>().focus(action.window_id);
+            tracing::info!(window_id = action.window_id, "FocusContentWindow: raising");
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         });
 

@@ -260,10 +260,23 @@ fn bar_size(cx: &App, expanded: bool) -> (f32, f32) {
     }
 }
 
+/// Resize the bar from within one of its own event handlers.
+///
+/// macOS: the frame change is scheduled OUTSIDE the current GPUI update
+/// (see `macos::resize_window_outside_update`) — a synchronous `setFrame`
+/// here re-enters GPUI mid-borrow, drops the resize event, and leaves
+/// hit-testing misaligned with what is on screen.
 fn resize_bar_window_in_handler(window: &mut Window, cx: &App, expanded: bool) {
     let (new_w, new_h) = bar_size(cx, expanded);
     #[cfg(target_os = "macos")]
-    super::macos::resize_window_in_handler(window, new_w, new_h);
+    if let Some(nswindow) = super::macos::ns_window_of(window) {
+        super::macos::resize_window_outside_update(
+            nswindow,
+            cx.foreground_executor().clone(),
+            new_w,
+            new_h,
+        );
+    }
     #[cfg(target_os = "windows")]
     super::windows::resize_window_in_handler(window, new_w, new_h);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -277,7 +290,14 @@ fn resize_bar_window(cx: &mut App, expanded: bool) {
     };
     let (new_w, new_h) = bar_size(cx, expanded);
     #[cfg(target_os = "macos")]
-    super::macos::resize_window_to(cx, handle, new_w, new_h);
+    if let Some(nswindow) = super::macos::ns_window_for(cx, handle) {
+        super::macos::resize_window_outside_update(
+            nswindow,
+            cx.foreground_executor().clone(),
+            new_w,
+            new_h,
+        );
+    }
     #[cfg(target_os = "windows")]
     super::windows::resize_window_to(cx, handle, new_w, new_h);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -390,8 +410,10 @@ impl Render for ControlBarShellPlaceholder {
         );
 
         // Keep the pill window hugging its icons: when the tab set
-        // changes (capsule opened/closed) the desired width changes, so
-        // resize the native window in place.
+        // changes (capsule opened/closed) the desired width changes.
+        // The native resize must NOT run synchronously inside render —
+        // setFrame re-enters GPUI window events mid-update and panics
+        // with "RefCell already borrowed" — so defer it past this pass.
         if expanded {
             let desired = expanded_bar_width(
                 tabs.iter()
@@ -400,7 +422,7 @@ impl Render for ControlBarShellPlaceholder {
             );
             let current = f32::from(window.bounds().size.width);
             if (current - desired).abs() > 0.5 {
-                resize_bar_window_in_handler(window, cx, true);
+                cx.defer(move |cx| resize_bar_window(cx, true));
             }
         }
 
