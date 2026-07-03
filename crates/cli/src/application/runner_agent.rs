@@ -879,7 +879,7 @@ pub async fn run_serve(
         // Between heartbeats: poll for leases in short slices while idle.
         let mut remaining = interval;
         while remaining > 0 {
-            let slice = remaining.min(LEASE_POLL_SECONDS);
+            let slice = remaining.min(lease_poll_seconds());
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
                 _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
@@ -967,8 +967,24 @@ pub async fn run_serve(
 // a workload with no readiness signal is reported running, never ready.
 // ─────────────────────────────────────────────
 
-/** Interval between lease polls while idle (seconds). */
+/** Default interval between lease polls while idle (seconds). Conservative for
+ *  production; latency-sensitive deployments (e.g. the staging demo runner)
+ *  override via `ATO_LEASE_POLL_SECONDS` — the 0–5s claim jitter was the
+ *  largest single share of the measured Run→Open latency (ato#940). */
 const LEASE_POLL_SECONDS: u64 = 5;
+
+/// Effective idle lease-poll interval: `ATO_LEASE_POLL_SECONDS` (clamped to
+/// 1..=60 — sub-second polling would hammer the control plane, and anything
+/// over a minute starves lease pickup) or the conservative default.
+fn lease_poll_seconds() -> u64 {
+    lease_poll_seconds_from(std::env::var("ATO_LEASE_POLL_SECONDS").ok().as_deref())
+}
+
+fn lease_poll_seconds_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(1, 60))
+        .unwrap_or(LEASE_POLL_SECONDS)
+}
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// After a port-LESS readiness signal (the human "[✓] ready" echo), hold this
 /// long for the canonical "LIFECYCLE: ready port=N" line — they race on separate
@@ -4063,6 +4079,21 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn lease_poll_interval_is_env_tunable_clamped_and_defaults_conservative() {
+        // Default (no env / garbage): the conservative 5s stays.
+        assert_eq!(lease_poll_seconds_from(None), 5);
+        assert_eq!(lease_poll_seconds_from(Some("")), 5);
+        assert_eq!(lease_poll_seconds_from(Some("fast")), 5);
+        assert_eq!(lease_poll_seconds_from(Some("-1")), 5);
+        // Staging latency override (ato#940 Track L): 1s.
+        assert_eq!(lease_poll_seconds_from(Some("1")), 1);
+        assert_eq!(lease_poll_seconds_from(Some(" 2 ")), 2);
+        // Clamped: never sub-second hammering, never minute-scale starvation.
+        assert_eq!(lease_poll_seconds_from(Some("0")), 1);
+        assert_eq!(lease_poll_seconds_from(Some("999")), 60);
+    }
 
     #[test]
     fn build_enroll_body_carries_token_and_honest_host_facts() {
