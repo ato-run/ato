@@ -1221,6 +1221,22 @@ pub fn run(skip_onboarding: bool) {
             }
             match url::Url::parse(raw) {
                 Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                    // Re-opening a URL whose origin is already hosted by an
+                    // open app window focuses that window instead of
+                    // spawning a duplicate — clicking an icon-bar tab (or
+                    // re-launching from the PWA) is a focus gesture.
+                    if let Some(existing) = find_open_external_window(cx, parsed.as_str()) {
+                        let window_id = existing.window_id().as_u64();
+                        tracing::info!(
+                            url = %parsed,
+                            window_id,
+                            "NavigateToUrl(http): focusing existing window"
+                        );
+                        cx.global_mut::<crate::window::content_windows::OpenContentWindows>()
+                            .focus(window_id);
+                        let _ = existing.update(cx, |_, window, _| window.activate_window());
+                        return;
+                    }
                     let open_mode = crate::config::load_config().desktop.capsule_open_mode;
                     match open_mode {
                         crate::config::CapsuleOpenMode::OsBrowser => {
@@ -1561,6 +1577,26 @@ fn reopen_start_or_quit(cx: &mut App) {
             }
         }
     });
+}
+
+/// Find an open ExternalUrl app window hosting the same web origin as
+/// `url` (session URLs are origin-unique). Used by NavigateToUrl(http)
+/// to focus instead of duplicating.
+fn find_open_external_window(cx: &App, url: &str) -> Option<gpui::AnyWindowHandle> {
+    use crate::state::GuestRoute;
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+
+    let target = url::Url::parse(url).ok()?;
+    cx.global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .find(|entry| match &entry.kind {
+            ContentWindowKind::AppWindow {
+                route: GuestRoute::ExternalUrl(open),
+            } => open.origin() == target.origin(),
+            _ => false,
+        })
+        .map(|entry| entry.handle)
 }
 
 /// Cycle focus through open app windows in MRU order.
