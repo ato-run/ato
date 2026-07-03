@@ -636,3 +636,58 @@ fn shipped_gpu_invm_sample_is_ineligible_fail_closed() {
     // The manifest itself is still valid (parsed fine); only Ready-State is gated.
     assert!(m.is_ready_state_eligible(), "snapshot mode is warm");
 }
+
+#[test]
+fn v12_secret_description_and_binding_mode_parse() {
+    let m = parse(
+        r#"
+[secrets.OPENAI_API_KEY]
+required = true
+description = "OpenAI API key used to summarize documents"
+env = "OPENAI_API_KEY"
+
+[bindings.input_files]
+kind = "user_files"
+mode = "read_only"
+mount = "/input"
+required = true
+
+[bindings.output_dir]
+kind = "user_files"
+mode = "read_write"
+mount = "/output"
+
+[bindings.appdata]
+kind = "state"
+mount = "/data"
+"#,
+    );
+
+    let secret = m.secrets.get("OPENAI_API_KEY").expect("secret present");
+    assert_eq!(
+        secret.description.as_deref(),
+        Some("OpenAI API key used to summarize documents")
+    );
+
+    let input = m.bindings.get("input_files").expect("input binding");
+    assert_eq!(input.mode, Some(BindingMode::ReadOnly));
+    let output = m.bindings.get("output_dir").expect("output binding");
+    assert_eq!(output.mode, Some(BindingMode::ReadWrite));
+    // Absent mode stays None — the kind's default is a launch-time decision,
+    // never guessed at parse time.
+    let state = m.bindings.get("appdata").expect("state binding");
+    assert_eq!(state.mode, None);
+    // description is optional and absent stays None.
+    assert!(m.secrets.get("OPENAI_API_KEY").unwrap().required);
+}
+
+#[test]
+fn v12_unknown_binding_mode_is_rejected() {
+    // An invalid mode must be a parse error, not a silent None — "rw" is not
+    // in the contract vocabulary (read_only | read_write). Control: the same
+    // manifest with a valid mode parses, so the failure is the mode alone.
+    let good = "[bindings.input]\nkind = \"user_files\"\nmode = \"read_only\"\n";
+    let bad = "[bindings.input]\nkind = \"user_files\"\nmode = \"rw\"\n";
+    assert!(CapsuleManifest::from_toml(&format!("{BASE}\n{good}")).is_ok());
+    assert!(CapsuleManifest::from_toml(&format!("{BASE}\n{bad}")).is_err());
+}
