@@ -215,6 +215,9 @@ pub fn begin_shutdown() {
     // Foreground-only Connected Runner: terminate `ato runner serve` so the
     // device does not linger online after the Desktop exits.
     crate::runner_agent::shutdown();
+    // Foreground-only Desktop Runner run: terminate any in-flight local
+    // cold-OCI `ato run` child (and the container it spawned) on exit.
+    crate::desktop_run_agent::shutdown();
 }
 
 /// True once [`begin_shutdown`] has been called.

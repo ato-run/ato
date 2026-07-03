@@ -8,10 +8,6 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use protocol::handle::{
-    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
-    normalize_capsule_handle,
-};
 use base64::Engine as _;
 use capsule::common::paths::ato_path;
 use capsule::state::session::{
@@ -19,6 +15,10 @@ use capsule::state::session::{
     materialized_launch_record_path, read_materialized_launch_record, read_session_records,
     session_record_path, session_root as shared_session_root,
     validate_record_for_install_profile_key, validate_record_only,
+};
+use protocol::handle::{
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -2024,6 +2024,83 @@ pub(crate) fn spawn_runner_login() -> Result<RunnerChild> {
         &runner_login_log_path(),
         "ato runner login",
     )
+}
+
+/// A spawned `ato run <source>` (Desktop Runner local cold-OCI path) child plus
+/// the **separate** log files capturing its stdout (the session receipt JSON,
+/// on success) and stderr (the structured placement error, on failure). Kept
+/// distinct from [`RunnerChild`] because the run path must parse stdout as JSON
+/// without stderr interleaving, and the waiter thread reads both after exit.
+pub(crate) struct DesktopRunnerRunChild {
+    pub child: std::process::Child,
+    pub stdout_log: PathBuf,
+    pub stderr_log: PathBuf,
+}
+
+/// Spawn `ato run <source>` on the Desktop Runner local cold-OCI path. Sets the
+/// env vars the CLI's `desktop_runner::execute::is_explicitly_selected` gate
+/// requires (`ATO_RUN_PROVIDER=desktop` + `ATO_DESKTOP_RUNNER_EXECUTE=1`), and
+/// `ATO_READY_STATE_ENABLED=1` when `ready_state_enabled` is requested. stdout
+/// and stderr are redirected to **separate** log files so a background waiter
+/// can parse the session receipt (stdout JSON) and the structured placement
+/// error (stderr, see PR 1) independently. The child is its own process-group
+/// leader so the Desktop can reap it (and any container it spawned) on shutdown.
+pub(crate) fn spawn_desktop_runner_run(
+    source: &str,
+    ready_state_enabled: bool,
+) -> Result<DesktopRunnerRunChild> {
+    let ato_bin = resolve_ato_binary()?;
+    let mut cmd = ato_helper_command(&ato_bin);
+    cmd.args(["run", source]);
+    cmd.env("ATO_RUN_PROVIDER", "desktop");
+    cmd.env("ATO_DESKTOP_RUNNER_EXECUTE", "1");
+    if ready_state_enabled {
+        cmd.env("ATO_READY_STATE_ENABLED", "1");
+    }
+
+    let stdout_log = desktop_runner_run_stdout_log_path();
+    let stderr_log = desktop_runner_run_stderr_log_path();
+    if let Some(parent) = stdout_log.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let stdout_file = std::fs::File::create(&stdout_log).with_context(|| {
+        format!(
+            "create desktop-runner run stdout log {}",
+            stdout_log.display()
+        )
+    })?;
+    let stderr_file = std::fs::File::create(&stderr_log).with_context(|| {
+        format!(
+            "create desktop-runner run stderr log {}",
+            stderr_log.display()
+        )
+    })?;
+    cmd.stdout(Stdio::from(stdout_file));
+    cmd.stderr(Stdio::from(stderr_file));
+    // Own process-group leader so the Desktop can reap the run child (and any
+    // container it spawned) with one group-directed signal — mirrors
+    // `spawn_runner_command`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn `ato run {source}` (Desktop Runner)"))?;
+    Ok(DesktopRunnerRunChild {
+        child,
+        stdout_log,
+        stderr_log,
+    })
+}
+
+fn desktop_runner_run_stdout_log_path() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-run.stdout.log")
+}
+
+fn desktop_runner_run_stderr_log_path() -> PathBuf {
+    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-run.stderr.log")
 }
 
 fn spawn_runner_command(args: &[&str], log_path: &Path, context: &str) -> Result<RunnerChild> {
@@ -5734,9 +5811,9 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
-    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use capsule::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use capsule::state::session::write_session_record_atomic;
+    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use serial_test::serial;
     use tempfile::TempDir;
 
