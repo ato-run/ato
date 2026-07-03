@@ -191,6 +191,17 @@ Everything in §§1–6 stays true for v1.0 capsules; v1.2 adds exactly four
   injected `HTTPS_PROXY`/`HTTP_PROXY`. Raw sockets / proxy-ignoring libraries
   remain unsupported even with a declared allowlist — they fail with no-route,
   and the UI/receipt must attribute that to the client shape, not the policy.
+- **Grants (implemented in v1.2 PR 2):** a grant IS the secret value being
+  present in the capsule-scoped SecretStore namespace `rs-<hash16 of the
+  capsule manifest hash>` — grant with `ato secrets set <NAME> --namespace
+  <ns>`, revoke with `ato secrets delete <NAME> --namespace <ns>`. Scoping by
+  manifest hash means another app can never resolve this app's grant. Launch
+  preflight resolves EVERY declared binding before restore and blocks with an
+  aggregated, actionable report; a grant revoked mid-session is revoked+
+  scrubbed by the renewal loop. `description` is surfaced verbatim at
+  grant/preflight time under fixed constraints: max 200 chars, control
+  characters (incl. newlines) collapse to spaces, plain text only — UIs render
+  it as a text node, never as HTML.
 - **Identity:** `snapshot_artifact_id` = the sealed manifest content address;
   `launch_execution_id` additionally commits to stable **redacted** capability
   identities (secret_ref ids, grant ids, state instance id, network policy
