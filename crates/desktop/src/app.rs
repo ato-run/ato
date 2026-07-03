@@ -147,6 +147,16 @@ pub struct FocusContentWindow {
     pub window_id: u64,
 }
 
+/// Shell Icon Bar: a blocked launch tab was clicked — show the
+/// diagnostic placeholder (blocker kind + capsule). A real consent /
+/// billing resolution UI is a later phase.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = desktop, no_json)]
+pub struct ShowLaunchBlockedInfo {
+    pub title: String,
+    pub reason: String,
+}
+
 /// Parse an `ato://app/<install_profile_key>` URL into its install profile key.
 ///
 /// Returns `None` for URLs that are not `ato://app` (so callers fall through to
@@ -585,9 +595,14 @@ pub fn run(skip_onboarding: bool) {
         // Icon Bar's fixed Ato icon opens/raises it).
         cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
         cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot::default());
+        cx.set_global(crate::window::launch_blocked_popup::LaunchBlockedPopupSlot::default());
         // Account-wide active runs on other runners — polled from the
         // account API so the Shell Icon Bar can show them as tabs.
         crate::remote_runs::start_remote_runs_poller(cx);
+        // Launch handoff tracking (IPC bridge / ato://launch): launches
+        // the desktop has accepted visible ownership of, polled per
+        // launch and surfaced as Shell Icon Bar tabs.
+        crate::launch_tracker::init(cx);
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
@@ -1102,6 +1117,49 @@ pub fn run(skip_onboarding: bool) {
             }
             tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
 
+            // ato://launch?launch_id=<id>[&capsule_ref=<publisher/slug>] —
+            // the external-browser → Desktop fallback of the launch
+            // handoff (launch-unification plan §4; the primary in-Desktop
+            // path is the injected `__ATO_DESKTOP__.launch()` IPC bridge).
+            // Only the launch_id (plus an optional display ref) rides the
+            // intent — app_url / runner URLs / tokens are never accepted;
+            // the LaunchTracker re-fetches the launch with owner-verified
+            // credentials, so a launch_id alone can never open anything
+            // the signed-in user doesn't own.
+            if raw.starts_with("ato://launch") {
+                let parsed = url::Url::parse(raw).ok();
+                let query = |key: &str| {
+                    parsed.as_ref().and_then(|url| {
+                        url.query_pairs()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, v)| v.into_owned())
+                    })
+                };
+                match query("launch_id") {
+                    Some(id) if crate::launch_tracker::is_valid_launch_id(&id) => {
+                        let capsule_ref = query("capsule_ref")
+                            .filter(|r| crate::launch_tracker::is_valid_capsule_ref(r))
+                            .unwrap_or_default();
+                        tracing::info!(
+                            launch_id = %id,
+                            "NavigateToUrl(ato://launch): tracking launch"
+                        );
+                        if !crate::launch_tracker::register_launch(cx, id, capsule_ref) {
+                            tracing::warn!(
+                                "NavigateToUrl(ato://launch): tracker refused (cap reached) — ignored"
+                            );
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            url = %raw,
+                            "NavigateToUrl(ato://launch): missing or invalid launch_id — ignored"
+                        );
+                    }
+                }
+                return;
+            }
+
             // ato://open?handle=<url-or-capsule-ref> — the PWA Home's
             // "open this app outside my WebView" intent (mirrors the legacy
             // AppState::handle_host_route deep link). Unwrap the inner
@@ -1348,6 +1406,18 @@ pub fn run(skip_onboarding: bool) {
             crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::home::show_ato_home(cx) {
                 tracing::error!(error = %err, "ShowAtoHome: failed to open Home surface");
+            }
+        });
+
+        // Shell Icon Bar — clicking a blocked launch tab shows the
+        // diagnostic placeholder popup.
+        cx.on_action(|action: &ShowLaunchBlockedInfo, cx: &mut App| {
+            if let Err(err) = crate::window::launch_blocked_popup::open_launch_blocked_popup(
+                cx,
+                action.title.clone(),
+                action.reason.clone(),
+            ) {
+                tracing::error!(error = %err, "ShowLaunchBlockedInfo: popup failed");
             }
         });
 

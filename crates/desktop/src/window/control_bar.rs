@@ -307,6 +307,10 @@ impl ControlBarShellPlaceholder {
             cx.notify();
         })
         .detach();
+        cx.observe_global::<crate::launch_tracker::LaunchTrackerSnapshot>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
 
         Self {
             locale,
@@ -391,6 +395,8 @@ impl Render for ControlBarShellPlaceholder {
             cx.global::<OpenContentWindows>(),
             &self.app_base_url,
             &cx.global::<RemoteRunsSnapshot>().runs,
+            &cx.global::<crate::launch_tracker::LaunchTrackerSnapshot>()
+                .launches,
         );
 
         div()
@@ -618,10 +624,13 @@ fn ato_home_button(is_active: bool) -> impl IntoElement {
 /// the avatar is the capsule's initial on a stable per-title tint;
 /// status is a small dot badge (amber = starting, red = failed).
 fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
-    let slot_id = match (tab.window_id, tab.open_url.as_deref()) {
-        (Some(window_id), _) => SharedString::from(format!("shell-tab-{window_id}")),
-        (None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
-        (None, None) => return div().into_any_element(),
+    let slot_id = match (tab.window_id, tab.launch_id.as_deref(), tab.open_url.as_deref()) {
+        (Some(window_id), _, _) => SharedString::from(format!("shell-tab-{window_id}")),
+        // A launch-backed tab keeps its launch_id identity across the
+        // starting → ready transition (even once it has an open_url).
+        (None, Some(launch_id), _) => SharedString::from(format!("shell-tab-launch-{launch_id}")),
+        (None, None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
+        (None, None, None) => return div().into_any_element(),
     };
     let hue = shell_tabs::avatar_hue(&tab.title);
     let dimmed = tab.status == ShellTabStatus::Starting;
@@ -655,16 +664,28 @@ fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
     let badge_color = match tab.status {
         ShellTabStatus::Running => None,
         ShellTabStatus::Starting => Some(rgb(0xf59e0b)),
+        // Blocked = waiting on the user/external condition — indigo so it
+        // never reads as "still starting" (amber) or "failed" (red).
+        ShellTabStatus::Blocked => Some(rgb(0x6366f1)),
         ShellTabStatus::Error => Some(rgb(0xef4444)),
     };
 
     let window_id = tab.window_id;
     let open_url = tab.open_url.clone();
+    let blocked = tab
+        .blocked_reason
+        .clone()
+        .map(|reason| (tab.title.to_string(), reason));
     let mut slot = tab_slot(slot_id, tab.is_active)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             if let Some(window_id) = window_id {
                 window.dispatch_action(Box::new(FocusContentWindow { window_id }), cx);
+            } else if let Some((title, reason)) = blocked.clone() {
+                window.dispatch_action(
+                    Box::new(crate::app::ShowLaunchBlockedInfo { title, reason }),
+                    cx,
+                );
             } else if let Some(url) = open_url.clone() {
                 tracing::info!(url = %url, "shell icon bar: remote run tab clicked");
                 window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
