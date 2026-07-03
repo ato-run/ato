@@ -1587,6 +1587,19 @@ fn reopen_start_or_quit(cx: &mut App) {
         {
             return;
         }
+        // macOS: the Shell Icon Bar IS the landing surface. It stays
+        // visible (Dock icon + menu bar keep the app reachable and
+        // quittable), and its Ato icon reopens the Home window on
+        // demand — no ato-start window. The Start reopen below remains
+        // the Windows behavior, where the bar is a taskbar-invisible
+        // toolwindow and a bar-only state would be unclosable.
+        if cfg!(target_os = "macos") {
+            crate::window::control_bar::ensure_bar_visible(cx);
+            tracing::info!(
+                "last content window closed — Shell Icon Bar remains as the landing surface"
+            );
+            return;
+        }
         match crate::window::start_window::open_start_window(cx) {
             Ok(()) => {
                 tracing::info!(
