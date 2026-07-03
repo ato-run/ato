@@ -141,3 +141,67 @@ The contract is enforced by, in order:
 A change that makes any positive fixture stop sealing, or any negative fixture
 stop failing (or fail with a different reason), is a contract break and must
 either be fixed or ship with an amendment to this document.
+
+---
+
+## 7. Snapshot v1.2 Compatibility Contract (Bound Snapshot Apps — PLANNED)
+
+> **Snapshot v1.2 supports: single-process web apps + runtime-injected secrets
+> + app-private persistent state + user-selected file mounts + declared network
+> egress allowlist.**
+
+Status: **planned, not yet enforced** — this section becomes normative as the
+v1.2 PRs land (plan: `docs/ready-state/snapshot-v1.2-bound-apps-plan.md`).
+Everything in §§1–6 stays true for v1.0 capsules; v1.2 adds exactly four
+**launch-time** bindings, resolved at restore — never baked into the artifact.
+
+### 7.1 What v1.2 adds
+
+| Binding | Manifest surface | Delivery |
+|---|---|---|
+| Secret | `[secrets.<NAME>]` `required` / `description` / `env` / `delivery` (`env` \| `file`) | `env`: guest-agent supervisor restarts the workload with the composed environment after bound-ready; `file`: request-time read of `/run/ato/bindings/<name>` (no restart) |
+| App-private state | `[state.<name>]` + `[bindings.<name>] kind = "state", mount` | per-instance ext4 substituted into the build-declared `state` drive slot at restore; survives stop/relaunch and snapshot-revision updates |
+| User files | `[bindings.*] kind = "user_files", mode = "read_only" \| "read_write", mount` | per-launch grant packed into the `input` (ro) / `output` (rw) drive slots; read-only is block-layer enforced; results extracted on stop |
+| Network egress | `[network] egress_allow = [...]` | host-side domain-allowlist proxy on the TAP; deny-by-default is physical (no route exists for undeclared egress) |
+
+### 7.2 Hard constraints (contract)
+
+- **Snapshot build readiness must not require a real external secret.**
+  Build-verify runs with a marked placeholder; an app whose startup/readiness
+  validates the key against the real provider cannot seal under v1.2.
+  Real-secret validation belongs to launch E2E and the bound-ready gate.
+- **No secret / user data in the artifact, ever.** Launch Profiles carry
+  references (`secret_ref`, grant ids), values live in the SecretStore;
+  receipts and logs stay value-free. Post-bind state is dirty — no re-seal.
+- **Drive-topology invariant.** Restore-time substitution preserves the exact
+  build-time topology (drive id / recorded path / size / ro-rw flag / fs
+  shape); the `state`/`input`/`output` slots are fixed contracts. **A v1.2
+  bound artifact always requires a re-seal from v1.0 — never an in-place
+  upgrade.**
+- **Egress official support = proxy-aware HTTP(S) clients** honoring the
+  injected `HTTPS_PROXY`/`HTTP_PROXY`. Raw sockets / proxy-ignoring libraries
+  remain unsupported even with a declared allowlist — they fail with no-route,
+  and the UI/receipt must attribute that to the client shape, not the policy.
+- **Identity:** `snapshot_artifact_id` = the sealed manifest content address;
+  `launch_execution_id` additionally commits to stable **redacted** capability
+  identities (secret_ref ids, grant ids, state instance id, network policy
+  hash) — never transient session facts.
+
+### 7.3 v1.2 fixture matrix (enforcement surface, when it lands)
+
+Positive: `secret-openai-web` · `secret-optional-fallback` · `sqlite-state-web`
+· `file-input-readonly` · `file-output-readwrite` · `network-allow-openai` ·
+`combined-pdf-summarizer` · `combined-github-analyzer`
+
+Negative: `missing-required-secret` (launch preflight, not seal) ·
+`secret-leaked-to-rootfs` · `secret-printed-in-log` ·
+`undeclared-network-egress` · `write-to-readonly-input` ·
+`missing-file-binding` · `broad-home-mount-rejected` ·
+`state-contract-incompatible`
+
+### 7.4 Still out of scope in v1.2
+
+OAuth flows · team/shared secrets · external managed DBs · multi-service
+compose · background workers · scheduled jobs · GPU · private-repo sources ·
+BYOC secret sync · host devices · broad filesystem mounts (`~/`, Desktop,
+hidden files, recursive home access, background watching).
