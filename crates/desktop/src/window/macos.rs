@@ -308,8 +308,11 @@ pub fn attach_as_child(
     // parent-child window relationships; objc2-app-kit marks it
     // unsafe because misuse (e.g. cyclic parenting) can crash AppKit.
     unsafe {
-        child_win.setLevel(NSFloatingWindowLevel);
         parent_win.addChildWindow_ordered(&child_win, NSWindowOrderingMode::Above);
+        // AFTER attaching: addChildWindow resets the child's level to the
+        // parent's, so setting it first is silently undone and the bar
+        // stops floating above other windows.
+        child_win.setLevel(NSFloatingWindowLevel);
     }
     tracing::info!("addChildWindow attached Control Bar to AppWindow");
     Ok(())
