@@ -25,6 +25,12 @@ pub enum HostToAgent {
     Revoke { id: BindingLeaseId },
     /// Ask whether every required binding is present (the bound-ready gate).
     QueryBoundReady,
+    /// v1.2 (supervisor mode): stop the supervised workload process. Used at BUILD
+    /// time before the pre-bind snapshot — the app must not be running when the
+    /// memory image is captured (contract §7.2: build readiness runs with a
+    /// placeholder, then the app is stopped + bindings scrubbed before seal). A
+    /// capsule without a supervisor answers `WorkloadStopped { was_running: false }`.
+    StopWorkload,
     /// Session teardown: revoke + scrub all bindings, then the host tears the VM down.
     Stop,
 }
@@ -40,6 +46,9 @@ pub enum AgentToHost {
     BoundReady { ready: bool, pending: Vec<BindingName> },
     /// A binding was scrubbed (revoke / expiry / stop).
     Scrubbed { id: BindingLeaseId },
+    /// v1.2 (supervisor mode): the supervised workload was stopped (or was not
+    /// running). Never carries a value.
+    WorkloadStopped { was_running: bool },
     /// An error — must never carry a secret.
     Error { message: String },
 }
@@ -70,6 +79,17 @@ mod tests {
         assert!(!serde_json::to_string(&resp).unwrap().contains(secret));
         // Round-trip a response.
         let back: AgentToHost = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(back, resp);
+    }
+    #[test]
+    fn supervisor_control_messages_round_trip_and_are_value_free() {
+        let stop = HostToAgent::StopWorkload;
+        let j = serde_json::to_string(&stop).unwrap();
+        assert_eq!(j, r#"{"kind":"stop_workload"}"#);
+        let resp = AgentToHost::WorkloadStopped { was_running: true };
+        let rj = serde_json::to_string(&resp).unwrap();
+        assert_eq!(rj, r#"{"kind":"workload_stopped","was_running":true}"#);
+        let back: AgentToHost = serde_json::from_str(&rj).unwrap();
         assert_eq!(back, resp);
     }
 }

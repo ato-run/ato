@@ -64,11 +64,33 @@ way to inject env vars into a running, snapshotted PID. Therefore:
 - A Phase 8a **"env binding"** is an **env-like logical binding** the workload reads
   from its binding file (`/run/ato/bindings/<name>`) or the agent metadata endpoint
   **at request time** — *not* a host-side env rewrite.
-- An app that genuinely requires a real **process env** var must use a later
-  **supervisor/restart mode**: a guest supervisor starts (or restarts) the workload
-  *after* bindings are attached, with the env populated then. That mode is **out of
-  Phase 8a scope** and is called out here only so the contract is honest about the
-  limitation.
+- An app that genuinely requires a real **process env** var uses **supervisor mode**
+  (v1.2): the guest-agent itself owns the workload process and starts (or restarts) it
+  *after* bindings are attached, with the env populated then. This is the contract's
+  named successor to the impossible environ-rewrite.
+
+### Supervisor mode (v1.2)
+
+When a capsule declares `delivery = "env"` secrets, the builder writes
+`/etc/ato/supervisor.json` into the rootfs and the guest init runs the guest-agent
+**as the supervisor** instead of launching the app directly. The agent then owns the
+workload lifecycle:
+
+- `supervisor.json` holds the workload `cmd` / `cwd`, a static `base_env`, and a
+  `bindings_env` map (`ENV_VAR → binding name`). It holds **no secret value** — only
+  the name of the binding whose tmpfs file supplies the value.
+- **Start:** once the session is **bound-ready**, the agent composes the environment
+  (`base_env` + each `bindings_env` value read from `/run/ato/bindings/<name>`) and
+  spawns the workload with it. A missing binding fails closed (the workload never
+  starts half-bound); a spawn failure is reported to the host so it never believes the
+  session is serving.
+- **Build (`StopWorkload`):** the build boots with a **placeholder** binding, verifies
+  health, then the host sends `StopWorkload`; the agent stops the workload and the
+  session scrubs the tmpfs, so the pre-bind snapshot is captured **workload-idle and
+  secret-free** (contract §7.2 placeholder-readiness).
+- **Restore:** the real bindings are delivered → bound-ready → the agent starts a
+  **fresh** workload with the real env → health → expose. The value lives only on
+  tmpfs and in the running process's environment, never in the snapshot.
 
 ## Bound-ready gate (before user traffic)
 
