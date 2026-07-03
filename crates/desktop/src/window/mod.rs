@@ -44,6 +44,7 @@ pub mod store;
 pub mod taskbar;
 #[cfg(target_os = "windows")]
 pub mod tray;
+pub mod web_app_view;
 pub mod web_bridge;
 pub mod web_link_view;
 #[cfg(target_os = "windows")]
