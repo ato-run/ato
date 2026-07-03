@@ -1,0 +1,16 @@
+# v1 compat NEGATIVE: the builder's own LIVE credential inside an artifact must
+# gate the seal (no_secret_scan). The live token cannot live in a pinned public
+# source (that is the point of the gate) — see README.md for how this row is
+# enforced at unit level and exercised in the API E2E via fault injection.
+schema_version = "0.3"
+name = "compat-planted-builder-token"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "python"
+run = "python3 app.py"
+port = 8080
+readiness_probe = { http_get = "/health" }

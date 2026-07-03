@@ -1,0 +1,14 @@
+# v1 compat NEGATIVE: port-only manifest (probe synthesized to "/") but the app
+# 404s on "/" — boot-verify must fail honestly, and the receipt must show the
+# probe was synthesized (never a silent pass).
+schema_version = "0.3"
+name = "compat-synthesized-root-404"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "python"
+run = "app.py"
+port = 8080

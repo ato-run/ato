@@ -1,0 +1,14 @@
+# v1 compat: static web + EXPLICIT run command — the contract's R7 applies to
+# static web too (the builder never generates an HTTP server; base image just
+# guarantees python3, so stdlib http.server is the canonical static runner).
+schema_version = "0.3"
+name = "compat-static-web-basic"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "web"
+run = "python3 -m http.server 8080"
+port = 8080
+readiness_probe = { http_get = "/" }
