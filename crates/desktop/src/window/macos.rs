@@ -15,7 +15,7 @@
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{NSColor, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
@@ -283,69 +283,6 @@ pub fn hide_window_in_handler(window: &mut Window) {
             warn!(handle = ?other, "hide_window_in_handler: not AppKit");
         }
     }
-}
-
-/// Make `child` a real AppKit child of `parent` via
-/// `[parent addChildWindow:child ordered:NSWindowAbove]`. Also bumps
-/// the child window's level to `NSFloatingWindowLevel` so it paints
-/// above all normal-level windows — including the parent's title bar
-/// — without leaving the parent's space group.
-///
-/// Returns `Ok(())` on success. Errors are logged at warn-level and
-/// returned as `Err(String)` so the caller can decide whether to
-/// surface the failure or treat it as best-effort.
-pub fn attach_as_child(
-    cx: &mut App,
-    parent: AnyWindowHandle,
-    child: AnyWindowHandle,
-) -> Result<(), String> {
-    let parent_win = ns_window_for(cx, parent)
-        .ok_or_else(|| "parent NSWindow unavailable (window not realised yet?)".to_string())?;
-    let child_win = ns_window_for(cx, child)
-        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
-    // SAFETY: both windows are retained for the duration of this call.
-    // `addChildWindow:ordered:` is the documented AppKit API for
-    // parent-child window relationships; objc2-app-kit marks it
-    // unsafe because misuse (e.g. cyclic parenting) can crash AppKit.
-    unsafe {
-        parent_win.addChildWindow_ordered(&child_win, NSWindowOrderingMode::Above);
-        // AFTER attaching: addChildWindow resets the child's level to the
-        // parent's, so setting it first is silently undone and the bar
-        // stops floating above other windows.
-        child_win.setLevel(NSFloatingWindowLevel);
-    }
-    tracing::info!("addChildWindow attached Control Bar to AppWindow");
-    Ok(())
-}
-
-/// Detach `child` from its parent (if any), restore its floating level
-/// and order it back on screen. Rescues a child window that AppKit
-/// ordered out together with a closing parent.
-pub fn refloat_window(cx: &mut App, child: AnyWindowHandle) -> Result<(), String> {
-    let child_win = ns_window_for(cx, child)
-        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
-    if let Some(old_parent) = child_win.parentWindow() {
-        old_parent.removeChildWindow(&child_win);
-    }
-    child_win.setLevel(NSFloatingWindowLevel);
-    child_win.orderFrontRegardless();
-    Ok(())
-}
-
-/// Re-parent `child` onto `new_parent`, detaching it from its current
-/// parent window first (AppKit does not reparent implicitly — adding a
-/// child that already has a parent corrupts the ordering).
-pub fn reattach_child(
-    cx: &mut App,
-    new_parent: AnyWindowHandle,
-    child: AnyWindowHandle,
-) -> Result<(), String> {
-    let child_win = ns_window_for(cx, child)
-        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
-    if let Some(old_parent) = child_win.parentWindow() {
-        old_parent.removeChildWindow(&child_win);
-    }
-    attach_as_child(cx, new_parent, child)
 }
 
 // ── WKWebView screenshot helpers ──────────────────────────────────
