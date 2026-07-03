@@ -32,6 +32,28 @@ use snapshot::{
     SanitizerContract, SnapshotBackend, no_secret_scan,
 };
 
+/// PEM-marker literals: a GATE for the sealed `manifest.json` (small, structured,
+/// builder-authored — a PEM marker there is always wrong) and an ADVISORY sweep over
+/// the CAS.
+///
+/// They must NOT gate the CAS. #932 finding 4, measured twice on a real capsule:
+/// the 4-byte `AKIA` literal hit random binary offsets of a 1 GiB rootfs (no key
+/// material — context inspection), and even these long PEM literals hit the string
+/// constant tables of ordinary ssh/crypto libraries (`…openssh-key-v1…-----BEGIN
+/// OPENSSH PRIVATE KEY-----…-----END OPENSSH PRI…` — header adjacent to footer,
+/// i.e. format constants, not a key). This mirrors the seal-side scanner's
+/// empirically-derived policy (`snapshot::scanner`, `ato-rs-policy/1`): literal/
+/// heuristic hits over opaque images (rootfs/memory) are advisory, never gating.
+/// What DOES gate the CAS is [`live_secret_canaries`] — exact values of the
+/// builder's own credentials, the actual leak threat, with zero false positives.
+/// `l4_canaries_are_long_enough_to_gate_binaries` enforces the minimum length.
+const L4_CANARIES: &[&[u8]] = &[
+    b"BEGIN PRIVATE KEY",
+    b"BEGIN RSA PRIVATE KEY",
+    b"BEGIN OPENSSH PRIVATE KEY",
+    b"BEGIN EC PRIVATE KEY",
+];
+
 struct Config {
     api_url: String,
     token: String,
@@ -81,6 +103,13 @@ struct ClaimedJob {
     target_label: String,
     profile: String,
     source: ClaimedSource,
+    /// #932: the APPROVED store recipe manifest (`capsule_source_recipes.recipe_toml`),
+    /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
+    /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
+    /// Absent/None (older ato-api, or a recipe with no stored toml) ⇒ the repo's own
+    /// capsule.toml is required, fail-closed exactly as before.
+    #[serde(default)]
+    recipe_toml: Option<String>,
 }
 
 /// The narrow v1 target/profile gate: a job may only build when it requests the
@@ -123,6 +152,29 @@ struct Artifact {
     rootfs_bytes: u64,
     mem_bytes: u64,
     vmstate_bytes: u64,
+    // ── #932 non-secret build provenance (diagnostics; never registry identity) ──
+    /// Which manifest built this artifact: "recipe_toml" | "repo_capsule_toml".
+    manifest_source: String,
+    /// True when the readiness probe was synthesized from the declared port.
+    synthesized_probe: bool,
+    /// The manifest-declared run command, verbatim.
+    declared_command: String,
+    /// The command actually embedded into the guest init (post normalization).
+    normalized_guest_command: String,
+}
+
+/// The builder host's own LIVE secrets, as exact-value canaries for the L4 CAS gate:
+/// "did MY credentials leak into the sealed artifact?" — the concrete threat a builder
+/// host adds (env reaching a build layer). Exact long random values cannot
+/// false-positive on library constants or binary noise (#932 finding 4). Values are
+/// compared in-memory only; scan results carry paths, never content. Trivially short
+/// values are excluded — they could only produce noise, never a real credential.
+fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
+    let mut v: Vec<&[u8]> = Vec::new();
+    if cfg.token.len() >= 16 {
+        v.push(cfg.token.as_bytes());
+    }
+    v
 }
 
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
@@ -189,11 +241,18 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     let _ = std::fs::remove_dir_all(&jobdir);
 
     // 1. Materialize the SERVER-RESOLVED source (pinned commit; identity/subdir validated).
+    // #932: a Store-recipe job carries the APPROVED recipe manifest on the claim — it is
+    // materialized as capsule.toml at the source root (authoritative over any repo file,
+    // because the Store-apply publish model stores the manifest server-side and upstream
+    // repos carry none). A raw-GitHub job (no recipe_toml) requires the repo's own
+    // capsule.toml, fail-closed exactly as before.
+    let manifest_source = if job.recipe_toml.is_some() { "recipe_toml" } else { "repo_capsule_toml" };
     let src = materialize_source(
         &job.source.github_owner,
         &job.source.github_repo,
         &job.source.commit_sha,
         job.source.subdirectory.as_deref(),
+        job.recipe_toml.as_deref(),
         &jobdir.join("src"),
     )
     .map_err(|e| fail("source", e))?;
@@ -259,14 +318,42 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         .map_err(|e| fail("restore_verify", e.to_string()))?;
     let _ = backend.stop(restored.session);
 
-    // 6. No-secret scan: the build gate + the reusable L4 scanner over the CAS (canaries).
-    let l4 = no_secret_scan::scan(
-        &no_secret_scan::ScanTargets { cas: Some(jobdir.join("cas")), ..Default::default() },
-        &[b"BEGIN PRIVATE KEY", b"BEGIN RSA PRIVATE KEY", b"AKIA"],
-    );
-    let no_secret_scan_clean = receipt.no_secret_proof.is_clean() && l4.clean;
-    if !no_secret_scan_clean {
-        return Err(fail("no_secret_scan", "sealed artifact failed the no-secret scan".into()));
+    // 6. No-secret scan — two GATES + one ADVISORY, each failure says which tripped
+    // (path-only, never content):
+    //  (a) the seal-side proof: the policy-versioned `snapshot::scanner` (declared
+    //      markers block everywhere; provider-key/env heuristics block on the
+    //      build-authored layers, advisory on opaque images — empirical policy);
+    //  (b) the L4 LIVE-SECRET gate: the builder's own credentials as exact-value
+    //      canaries over the CAS. This is the real leak threat a builder host adds
+    //      (its env reaching the image), and exact long random values cannot
+    //      false-positive. The values are compared in-memory only — never logged,
+    //      never persisted (hits carry paths only);
+    //  (c) the PEM-marker sweep, ADVISORY on the CAS (#932 finding 4: ordinary
+    //      ssh/crypto libraries carry these strings as format constants).
+    if !receipt.no_secret_proof.is_clean() {
+        return Err(fail(
+            "no_secret_scan",
+            format!("seal-side no-secret proof is not clean ({} finding(s), verdict {:?})", receipt.no_secret_proof.findings.len(), receipt.no_secret_proof.verdict),
+        ));
+    }
+    let cas_targets = no_secret_scan::ScanTargets { cas: Some(jobdir.join("cas")), ..Default::default() };
+    let live: Vec<&[u8]> = live_secret_canaries(cfg);
+    let leak = no_secret_scan::scan(&cas_targets, &live);
+    if !leak.clean {
+        let first = leak.hits.first().map(|h| format!("{}:{}", h.target, h.path)).unwrap_or_default();
+        return Err(fail(
+            "no_secret_scan",
+            format!("builder credential found in the sealed artifact: {} file(s) across {} scanned; first: {first}", leak.hits.len(), leak.files_scanned),
+        ));
+    }
+    let pem = no_secret_scan::scan(&cas_targets, L4_CANARIES);
+    if !pem.clean {
+        let first = pem.hits.first().map(|h| format!("{}:{}", h.target, h.path)).unwrap_or_default();
+        eprintln!(
+            "[builder] advisory: PEM-format markers in {} of {} CAS file(s) (library string constants are common — not gating; #932 finding 4) first: {first}",
+            pem.hits.len(),
+            pem.files_scanned
+        );
     }
 
     // Registry identity/location fields (capsule_snapshots contract, #154/#157). All must
@@ -287,7 +374,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
     // it carries no layer bytes and no secrets.
     let manifest_json = serde_json::to_vec_pretty(&manifest_out).map_err(|e| fail("artifact_metadata", format!("serialize sealed manifest: {e}")))?;
-    if !no_secret_scan::blob_is_clean(&manifest_json, &[b"BEGIN PRIVATE KEY", b"BEGIN RSA PRIVATE KEY", b"AKIA"]) {
+    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
         return Err(fail("no_secret_scan", "sealed manifest json failed the no-secret scan".into()));
     }
     std::fs::write(jobdir.join("manifest.json"), &manifest_json).map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
@@ -304,6 +391,12 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         rootfs_bytes: manifest_out.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
         mem_bytes: manifest_out.layers.memory.as_ref().map(|m| m.total_len).unwrap_or(0),
         vmstate_bytes: manifest_out.layers.vmstate.as_ref().map(|m| m.total_len).unwrap_or(0),
+        // #932 build provenance — lands in receipt_json via the sealed ack (diagnostics
+        // only; the ato-api registry identity comparison never reads these).
+        manifest_source: manifest_source.to_string(),
+        synthesized_probe: spec.probe_synthesized,
+        declared_command: spec.declared_start_cmd,
+        normalized_guest_command: spec.start_cmd,
     })
 }
 
@@ -378,6 +471,34 @@ mod tests {
         // target_label/profile are REQUIRED claim fields (target/profile-scoped registry).
         assert_eq!(resp.jobs[0].target_label, "web");
         assert_eq!(resp.jobs[0].profile, "default");
+        // #932: an OLDER ato-api without recipe_toml parses as None (repo-manifest path).
+        assert!(resp.jobs[0].recipe_toml.is_none());
+    }
+
+    #[test]
+    fn parses_a_claim_with_a_recipe_manifest() {
+        // #932: a Store-recipe job carries the approved recipe manifest on the claim.
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_2", "capsule_id": "cap_2",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "b".repeat(40), "subdirectory": null },
+                "recipe_toml": "schema_version = \"0.3\"\ndefault_target = \"app\"\n",
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.jobs[0].recipe_toml.as_deref(), Some("schema_version = \"0.3\"\ndefault_target = \"app\"\n"));
+        // An explicit null is also the repo-manifest path (recipe stored no toml).
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_3", "capsule_id": "cap_3",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "c".repeat(40), "subdirectory": null },
+                "recipe_toml": null,
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert!(resp.jobs[0].recipe_toml.is_none());
     }
 
     #[test]
@@ -419,9 +540,55 @@ mod tests {
     }
 
     #[test]
+    fn l4_canaries_are_long_enough_to_gate_binaries() {
+        // #932 finding 4: a short literal over GiB-scale binaries false-positives at
+        // random offsets (expected hits ≈ windows × 256^-len; 4 bytes ⇒ multiple hits
+        // per GiB). 12+ bytes pushes the expectation to ~zero across the fleet. Never
+        // re-add a bare provider prefix here — that detection belongs to the
+        // policy-versioned seal scanner (snapshot::scanner).
+        for c in L4_CANARIES {
+            assert!(c.len() >= 12, "canary {:?} is too short to gate binary artifacts", String::from_utf8_lossy(c));
+        }
+    }
+
+    #[test]
+    fn l4_canaries_flag_pem_but_not_bare_provider_prefixes() {
+        // A random-binary AKIA occurrence (finding 4's false-positive class) must pass…
+        let binary_with_akia = [b"\x00\x9fAKIA\xffQ\x11 random bytes".as_slice(), &[0u8; 64]].concat();
+        assert!(no_secret_scan::blob_is_clean(&binary_with_akia, L4_CANARIES));
+        // …while PEM markers are detected (gating for manifest.json; advisory on CAS).
+        let pem = b"-----BEGIN PRIVATE KEY-----\nMIIEvg==\n-----END PRIVATE KEY-----";
+        assert!(!no_secret_scan::blob_is_clean(pem, L4_CANARIES));
+        let openssh = b"-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==";
+        assert!(!no_secret_scan::blob_is_clean(openssh, L4_CANARIES));
+    }
+
+    #[test]
+    fn live_secret_canaries_gate_the_builder_token_but_skip_trivial_values() {
+        let mk = |token: &str| Config {
+            api_url: "https://api".into(),
+            token: token.into(),
+            agent_id: "a".into(),
+            work: std::env::temp_dir(),
+            rootfs_size_mib: 1024,
+            once: true,
+            poll_secs: 15,
+        };
+        // A real (long, random) token gates: an artifact containing it is dirty.
+        let cfg = mk("0123456789abcdef0123456789abcdef");
+        let canaries = live_secret_canaries(&cfg);
+        assert_eq!(canaries.len(), 1);
+        let leaked = [b"layer bytes ".as_slice(), cfg.token.as_bytes(), b" more"].concat();
+        assert!(!no_secret_scan::blob_is_clean(&leaked, &canaries));
+        assert!(no_secret_scan::blob_is_clean(b"layer bytes without the token", &canaries));
+        // A trivially short token is excluded — it could only produce noise.
+        assert!(live_secret_canaries(&mk("short")).is_empty());
+    }
+
+    #[test]
     fn artifact_matches_the_sealed_ack_schema() {
-        // The ato-api artifactSchema (#157) is .strict(): the sealed-ack body must carry
-        // exactly these keys and nothing else.
+        // The ato-api artifactSchema (#157, extended by #932) is .strict(): the
+        // sealed-ack body must carry exactly these keys and nothing else.
         let a = Artifact {
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
@@ -434,6 +601,10 @@ mod tests {
             rootfs_bytes: 1,
             mem_bytes: 2,
             vmstate_bytes: 3,
+            manifest_source: "recipe_toml".into(),
+            synthesized_probe: true,
+            declared_command: "app.py".into(),
+            normalized_guest_command: "python3 app.py".into(),
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
@@ -442,11 +613,14 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "execution_id", "healthcheck_url_path",
-                "mem_bytes", "no_secret_scan_clean", "rootfs_bytes", "runner_class_id", "snapshot_backend", "vmstate_bytes"
+                "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "declared_command", "execution_id",
+                "healthcheck_url_path", "manifest_source", "mem_bytes", "no_secret_scan_clean", "normalized_guest_command",
+                "rootfs_bytes", "runner_class_id", "snapshot_backend", "synthesized_probe", "vmstate_bytes"
             ]
         );
         assert_eq!(obj["no_secret_scan_clean"], serde_json::json!(true));
+        // #932 provenance values are enum-safe for the ato-api schema.
+        assert!(matches!(obj["manifest_source"].as_str().unwrap(), "recipe_toml" | "repo_capsule_toml"));
         // No placeholder identity/location fields.
         for k in ["execution_id", "runner_class_id", "artifact_location"] {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");

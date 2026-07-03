@@ -66,8 +66,14 @@ pub struct RootfsBuildSpec {
     pub install_cmd: Option<String>,
     pub build_cmd: Option<String>,
     pub start_cmd: String,
+    /// #932: the manifest-declared run command, verbatim — diagnostics only
+    /// (`start_cmd` is what actually runs in the guest, post normalization).
+    pub declared_start_cmd: String,
     pub port: u16,
     pub healthcheck: String,
+    /// #932: true when the readiness probe was synthesized from the declared port
+    /// (no explicit `readiness_probe.http_get` on the default target).
+    pub probe_synthesized: bool,
 }
 
 /// Non-secret receipt of a produced rootfs.
@@ -104,18 +110,41 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
 
     // 0.3 runtime/port/healthcheck live on the default [targets.<label>], not [execution].
     let target = m.resolve_default_target().map_err(|e| e.to_string())?;
-    let port = target.port.ok_or("capsule default target has no port")?;
-    let healthcheck = target
+    let port = target.port.ok_or("capsule default target has no port (declare `port = <n>` on the default target)")?;
+    // #932: an explicit `readiness_probe.http_get` wins; otherwise SYNTHESIZE one from
+    // the declared port. The capsule contract the CLI/runner path honors is "a declared
+    // port ⇒ Ato synthesizes an honest readiness probe"; the snapshot boot-verify
+    // probes over HTTP (GET expecting 200), so the synthesized form is `http_get "/"`
+    // rather than a bare TCP connect. A capsule whose root path does not answer 200
+    // still fails honestly at build_ready_state — and the synthesis is recorded in the
+    // receipt (`synthesized_probe`) either way, never silently.
+    let explicit_http = target
         .readiness_probe
         .as_ref()
         .and_then(|r| r.http_get.clone())
-        .filter(|h| !h.trim().is_empty())
-        .ok_or("capsule default target has no http readiness_probe (healthcheck)")?;
-    let start_cmd = target
+        .filter(|h| !h.trim().is_empty());
+    let probe_synthesized = explicit_http.is_none();
+    let healthcheck = explicit_http.unwrap_or_else(|| "/".to_string());
+    let declared_start_cmd = target
         .run_command
         .clone()
         .filter(|c| !c.trim().is_empty())
         .ok_or("capsule default target has no run command")?;
+    // #932: mirror the CLI's bare-`.py` convention (executors/source.rs
+    // is_python_launch_spec): a run command that is a SINGLE token ending in `.py` —
+    // the form real Store capsules use because a `python`-prefixed command
+    // mis-composes in the CLI source sandbox — cannot exec as-is in the guest's
+    // `sh -lc '<cmd>'`. Normalize it to `python3 <script>` (the python/static base
+    // images guarantee python3). Multi-token commands are left verbatim: they are an
+    // explicit shell command, not a bare entrypoint.
+    let start_cmd = {
+        let t = declared_start_cmd.trim();
+        if !t.contains(char::is_whitespace) && t.to_ascii_lowercase().ends_with(".py") {
+            format!("python3 {t}")
+        } else {
+            declared_start_cmd.clone()
+        }
+    };
     let build_cmd = target.build_command.clone().filter(|c| !c.trim().is_empty());
     // Manifest commands must be single-line + NUL-free: they are embedded (single-quoted)
     // into a generated Dockerfile/init, and a newline could break out of the quoting or the
@@ -167,7 +196,7 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         ),
     };
 
-    Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, port, healthcheck })
+    Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, declared_start_cmd, port, healthcheck, probe_synthesized })
 }
 
 /// A conservative GitHub **owner** login: 1–39 chars, alphanumeric or single hyphens,
@@ -212,7 +241,14 @@ fn validate_subdir(subdir: &str) -> Result<(), String> {
 /// store record — and treats even that record as an input boundary: `owner`/`repo` are
 /// validated as GitHub identities, `commit` must be a pinned 40-hex sha, and `subdir`
 /// cannot escape the checkout (lexical + canonical containment).
-pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<&str>, dest: &Path) -> Result<PathBuf, String> {
+///
+/// #932 `manifest_override`: the APPROVED store recipe manifest (server-resolved
+/// `capsule_source_recipes.recipe_toml`, carried on the claim). When `Some`, it is
+/// written as `capsule.toml` at the source root — AUTHORITATIVE over any repo file
+/// (the Store-apply publish model stores the manifest server-side precisely because
+/// upstream repos carry none). When `None` (raw-GitHub capsule jobs), the repo's own
+/// `capsule.toml` is required, fail-closed exactly as before.
+pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<&str>, manifest_override: Option<&str>, dest: &Path) -> Result<PathBuf, String> {
     if !valid_github_owner(owner) {
         return Err(format!("invalid github owner {owner:?}"));
     }
@@ -244,14 +280,25 @@ pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<
     run(&["fetch", "-q", "--depth", "1", "origin", commit], Some(dest))?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
 
-    contained_source_root(dest, subdir)
+    let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
+    if let Some(toml) = manifest_override {
+        // The recipe manifest is authoritative for Store-recipe jobs: write it at the
+        // contained root (overwriting a repo capsule.toml if one exists) so every later
+        // stage — manifest parse, eligibility, rootfs COPY — sees exactly the approved
+        // recipe, never a divergent repo file.
+        std::fs::write(root.join("capsule.toml"), toml)
+            .map_err(|e| format!("write recipe manifest as capsule.toml: {e}"))?;
+    }
+    Ok(root)
 }
 
-/// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout, with
-/// a `capsule.toml`. Validates the subdir lexically, then canonicalizes both paths and
-/// requires containment (closing symlink traversal). Split out so the containment logic is
-/// unit-testable without a network clone.
-pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>) -> Result<PathBuf, String> {
+/// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout.
+/// Validates the subdir lexically, then canonicalizes both paths and requires containment
+/// (closing symlink traversal). `require_manifest` demands a repo `capsule.toml` at the
+/// root (the raw-GitHub path); recipe-manifest jobs pass `false` and write the approved
+/// recipe there instead (#932). Split out so the containment logic is unit-testable
+/// without a network clone.
+pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>, require_manifest: bool) -> Result<PathBuf, String> {
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
@@ -264,8 +311,11 @@ pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>) -> Result
     if !root_canon.starts_with(&dest_canon) {
         return Err(format!("subdir escapes the checkout: {} is outside {}", root_canon.display(), dest_canon.display()));
     }
-    if !root_canon.join("capsule.toml").exists() {
-        return Err(format!("no capsule.toml at resolved source root {}", root_canon.display()));
+    if require_manifest && !root_canon.join("capsule.toml").exists() {
+        return Err(format!(
+            "no capsule.toml at resolved source root {} (and the claim carried no recipe manifest)",
+            root_canon.display()
+        ));
     }
     Ok(root_canon)
 }
@@ -432,8 +482,35 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(spec.base_image, "python:3.11-slim");
         assert_eq!(spec.port, 8080);
         assert_eq!(spec.healthcheck, "/health");
+        assert!(!spec.probe_synthesized); // explicit http_get is honored, never replaced
         assert_eq!(spec.start_cmd, "python3 app.py");
+        assert_eq!(spec.declared_start_cmd, "python3 app.py"); // multi-token: untouched
         assert!(spec.install_cmd.unwrap().contains("pip install"));
+    }
+
+    #[test]
+    fn bare_py_run_command_normalizes_to_python3() {
+        // #932: a single-token `.py` run command (the CLI-sandbox convention real Store
+        // capsules use) execs as `python3 <script>` in the guest; the declared form is
+        // preserved for the receipt.
+        let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"app.py\""));
+        let spec = derive_build_spec(&m, &probe_python()).unwrap();
+        assert_eq!(spec.start_cmd, "python3 app.py");
+        assert_eq!(spec.declared_start_cmd, "app.py");
+        // A path-y bare script normalizes too.
+        let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"scripts/serve.py\""));
+        let spec = derive_build_spec(&m, &probe_python()).unwrap();
+        assert_eq!(spec.start_cmd, "python3 scripts/serve.py");
+        // Multi-token commands are explicit shell commands — verbatim, even when they
+        // end in `.py` (never `python3 python app.py`).
+        let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"python app.py\""));
+        let spec = derive_build_spec(&m, &probe_python()).unwrap();
+        assert_eq!(spec.start_cmd, "python app.py");
+        // Non-python commands are untouched.
+        let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"node server.js\""));
+        let spec = derive_build_spec(&m, &SourceProbe { has_package_json: true, ..Default::default() }).unwrap();
+        assert_eq!(spec.start_cmd, "node server.js");
+        assert_eq!(spec.declared_start_cmd, "node server.js");
     }
 
     #[test]
@@ -471,24 +548,30 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
-    fn missing_port_or_healthcheck_fails_closed() {
+    fn missing_port_fails_closed_but_missing_probe_synthesizes() {
+        // No port: still fail-closed — nothing to probe, nothing to proxy.
         let no_port = base_toml().replace("port = 8080\n", "");
         assert!(derive_build_spec(&parse(&no_port), &probe_python()).unwrap_err().contains("port"));
+        // #932: no explicit readiness_probe but a declared port ⇒ synthesize `http_get "/"`
+        // (the port⇒probe contract the CLI/runner path honors), recorded as synthesized.
         let no_hc = base_toml().replace("readiness_probe = { http_get = \"/health\" }\n", "");
-        assert!(derive_build_spec(&parse(&no_hc), &probe_python()).unwrap_err().contains("health"));
+        let spec = derive_build_spec(&parse(&no_hc), &probe_python()).unwrap();
+        assert_eq!(spec.healthcheck, "/");
+        assert!(spec.probe_synthesized);
+        assert_eq!(spec.port, 8080);
     }
 
     #[test]
     fn materialize_rejects_a_non_pinned_commit() {
         let dir = tempfile::tempdir().unwrap();
         let sha = "a".repeat(40);
-        assert!(materialize_source("acme", "app", "main", None, dir.path()).unwrap_err().contains("non-pinned"));
+        assert!(materialize_source("acme", "app", "main", None, None, dir.path()).unwrap_err().contains("non-pinned"));
         // path-like / invalid owner + repo are rejected before any network use.
-        assert!(materialize_source("../evil", "app", &sha, None, dir.path()).unwrap_err().contains("owner"));
-        assert!(materialize_source("acme/x", "app", &sha, None, dir.path()).unwrap_err().contains("owner"));
-        assert!(materialize_source("acme", "a/b", &sha, None, dir.path()).unwrap_err().contains("repo"));
-        assert!(materialize_source("acme", "..", &sha, None, dir.path()).unwrap_err().contains("repo"));
-        assert!(materialize_source("acme", "", &sha, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(materialize_source("../evil", "app", &sha, None, None, dir.path()).unwrap_err().contains("owner"));
+        assert!(materialize_source("acme/x", "app", &sha, None, None, dir.path()).unwrap_err().contains("owner"));
+        assert!(materialize_source("acme", "a/b", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(materialize_source("acme", "..", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(materialize_source("acme", "", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
     }
 
     #[test]
@@ -514,12 +597,32 @@ readiness_probe = { http_get = "/health" }
         // in-checkout subdir with a capsule.toml is accepted.
         std::fs::create_dir_all(checkout.path().join("app")).unwrap();
         std::fs::write(checkout.path().join("app").join("capsule.toml"), b"x").unwrap();
-        assert!(contained_source_root(checkout.path(), Some("app")).is_ok());
+        assert!(contained_source_root(checkout.path(), Some("app"), true).is_ok());
         // a symlink pointing outside ⇒ containment fails.
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(outside.path(), checkout.path().join("evil")).unwrap();
-            let err = contained_source_root(checkout.path(), Some("evil")).unwrap_err();
+            let err = contained_source_root(checkout.path(), Some("evil"), true).unwrap_err();
+            assert!(err.contains("escapes the checkout"), "{err}");
+        }
+    }
+
+    #[test]
+    fn recipe_manifest_relaxes_the_repo_capsule_toml_requirement() {
+        // #932: a checkout with NO capsule.toml resolves when the claim carries a recipe
+        // manifest (require_manifest = false) — and still fail-closes without one.
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(checkout.path().join("src")).unwrap();
+        let err = contained_source_root(checkout.path(), None, true).unwrap_err();
+        assert!(err.contains("no capsule.toml"), "{err}");
+        assert!(err.contains("recipe manifest"), "the error must say what was missing: {err}");
+        assert!(contained_source_root(checkout.path(), None, false).is_ok());
+        // Containment is still enforced on the recipe path (subdir escape still rejected).
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            std::os::unix::fs::symlink(outside.path(), checkout.path().join("evil")).unwrap();
+            let err = contained_source_root(checkout.path(), Some("evil"), false).unwrap_err();
             assert!(err.contains("escapes the checkout"), "{err}");
         }
     }
@@ -541,8 +644,10 @@ readiness_probe = { http_get = "/health" }
             install_cmd: Some("true".into()),
             build_cmd: None,
             start_cmd: "python3 app.py".into(),
+            declared_start_cmd: "python3 app.py".into(),
             port: 8080,
             healthcheck: "/health".into(),
+            probe_synthesized: false,
         };
         let script = build_rootfs_script(&spec, 512);
         assert!(script.contains("trap cleanup EXIT"), "script must install an EXIT cleanup trap");
@@ -559,8 +664,10 @@ readiness_probe = { http_get = "/health" }
             install_cmd: Some("true".into()),
             build_cmd: Some(evil.into()),
             start_cmd: evil.into(),
+            declared_start_cmd: evil.into(),
             port: 8080,
             healthcheck: "/health".into(),
+            probe_synthesized: false,
         };
         let script = build_rootfs_script(&spec, 512);
         // Heredocs are QUOTED ⇒ the builder host performs no expansion of their bodies.
