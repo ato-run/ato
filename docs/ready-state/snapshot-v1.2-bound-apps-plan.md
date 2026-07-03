@@ -77,6 +77,14 @@ value** (`ATO-PLACEHOLDER-<nonce>`), then the builder **stops the app process,
 scrubs, arms the supervisor, and only then snapshots** — the L4/no-secret scan
 gains a placeholder-sentinel check proving no placeholder byte was sealed.
 
+**Placeholder-readiness constraint (contract):** *snapshot build readiness must
+not require a real external secret.* Because build-verify runs with the
+placeholder, an app whose startup or readiness path validates the key against
+the real provider (or requires live external API reachability) **cannot seal
+under v1.2**. Readiness must come up with any syntactically plausible value;
+real-secret validation belongs to **launch E2E** and the bound-ready gate,
+never to seal. This sentence goes verbatim into the v1.2 contract § (PR 1).
+
 ### D2. State & user-file mounts: **build-declared drive slots, restore-time substitution**
 
 Firecracker has **no virtio-fs/9p** (device profile is fixed
@@ -102,6 +110,14 @@ file at that path before `/snapshot/load`.
 - The existing single-session-per-snapshot constraint (baked TAP/vsock/drive
   paths, per-tap lock) already matches this model; true concurrency stays
   future work as documented.
+
+**Drive-topology invariant:** restore-time substitution must preserve the
+exact build-time topology — **drive id, recorded host path, size, ro/rw flag,
+and filesystem shape** all match what the snapshot recorded. The three v1.2
+slots are a fixed contract: fixed slot ids (`state`/`input`/`output`), fixed
+sizes declared at build, fixed guest mount points. A v1.0 artifact has none of
+these slots, so **v1.2 bindings always require a re-seal — never an in-place
+upgrade of a v1.0 artifact.**
 
 State schema **reuses the existing cold-path tables** rather than inventing
 `[state] kind = "app_private"`: `[state.<name>]` (`StateRequirement`:
@@ -143,6 +159,14 @@ egress an **opt-in, allowlisted grant**:
 - Preflight consent: "this app talks to api.openai.com" — instance-scoped,
   recorded in the receipt as the effective policy.
 
+**Supported client shape (contract):** official v1.2 egress support covers
+**proxy-aware HTTP(S) clients** — apps that honor the injected
+`HTTPS_PROXY`/`HTTP_PROXY` through the host allowlist proxy. Libraries that
+ignore proxy env vars or speak raw sockets remain **unsupported even with a
+declared allowlist**: they fail with no-route by construction. That is
+contract, not a bug — the fixture suite asserts the failure, and the UI/receipt
+must attribute it to the client shape, not to the policy.
+
 ### D4. Identity: `snapshot_artifact_id` / `launch_execution_id` split
 
 - `snapshot_artifact_id` **already exists** as
@@ -157,6 +181,13 @@ egress an **opt-in, allowlisted grant**:
   with ADR-009's `artifact_build_id ≠ execution_id`. The existing launch
   digest (`ato-launch-digest-v2`) commits to command/args/cwd/port/probe only —
   v1.2 extends it (v3) rather than inventing a parallel scheme.
+- The grant/instance identities in the digest are **stable, redacted
+  capability identities** (grant id, state instance id, secret_ref id) —
+  **never transient session facts** (ports, pids, lease ids, timestamps,
+  raw host paths), matching `LaunchTemplateKey`'s exclusion rules. Two
+  launches with the same grants and policy hash to the same
+  `launch_execution_id`; re-granting the same files under a new grant id does
+  not.
 
 ## 3. Scope
 
