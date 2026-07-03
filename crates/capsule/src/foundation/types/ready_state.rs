@@ -122,6 +122,11 @@ pub struct SecretSpec {
     #[serde(default)]
     pub required: bool,
 
+    /// Human-readable purpose, surfaced verbatim at grant/preflight time
+    /// ("OpenAI API key used to summarize documents") — v1.2, never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
     /// Target environment variable name inside the guest (when `delivery` is
     /// `env`/`fd`/`file`). `None` for proxy-only delivery.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,10 +188,26 @@ pub struct BindingSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<String>,
 
+    /// Access mode for mountable kinds (v1.2). `read_only` is enforced at the
+    /// block layer for `user_files` input mounts; `None` means the kind's
+    /// default (`state` ⇒ read-write; `user_files` must declare explicitly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<BindingMode>,
+
     /// Optional provider hint (e.g. `dedicated`, `cloud`, `local` for a
     /// `runner` binding).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+}
+
+/// Access mode of a mountable binding (v1.2 — `[bindings.*].mode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingMode {
+    /// The guest cannot write the mount (block-layer enforced for drives).
+    ReadOnly,
+    /// The guest may write the mount.
+    ReadWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
