@@ -3765,12 +3765,33 @@ where
             let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
             let binding_preview = ready_state::flags::bindings_preview_enabled();
             let binding_gate_active = binding_preview && !binding_names.is_empty();
+            // v1.2 PR 2: the grant-scoped resolver (default: host-local SecretStore,
+            // namespace rs-<hash16>) + LAUNCH PREFLIGHT. Every declared binding must
+            // resolve BEFORE anything is restored — a missing grant blocks the launch
+            // with the aggregated, actionable report (name + description + the exact
+            // `ato secrets set … --namespace …` command). Values stay in memory only
+            // until lease delivery; never logged or recorded.
+            let mut preflight_resolved: Vec<(String, protocol::binding_lease::SecretValue)> = Vec::new();
+            let mut resolver_kind: Option<String> = None;
+            let mut grant_namespace: Option<String> = None;
+            if binding_gate_active {
+                // The namespace derivation is itself fail-closed: a malformed
+                // manifest hash must never degrade into a weaker grant scope.
+                let ns = ready_state::binding_grants::binding_namespace(&rs_hash)?;
+                let resolver = ready_state::secret_resolver::select_resolver(&ns)?;
+                resolver_kind = Some(resolver.kind().to_string());
+                preflight_resolved = ready_state::binding_grants::preflight_resolve(
+                    resolver.as_ref(),
+                    &binding_names,
+                    &rs_manifest,
+                    &ns,
+                )?;
+                grant_namespace = Some(ns);
+            }
             {
                 let mut receipt = ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone());
-                if binding_gate_active {
-                    use ready_state::secret_resolver::SecretResolver;
-                    receipt.resolver_kind = Some(ready_state::secret_resolver::EnvSecretResolver.kind().to_string());
-                }
+                receipt.resolver_kind = resolver_kind.clone();
+                receipt.grant_namespace = grant_namespace.clone();
                 receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
             }
             if !binding_gate_active {
@@ -3925,7 +3946,15 @@ where
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis() as u64)
                         .unwrap_or(0);
-                    let leases = ready_state::binding_host::resolve_binding_leases(&ready_state::secret_resolver::EnvSecretResolver, &binding_names, now_ms, 3_600_000)?;
+                    // Values were preflight-resolved BEFORE restore; the lease clock
+                    // (issued/expires) starts here at delivery. TTL is policy-driven
+                    // (ATO_READY_STATE_BINDING_TTL_MS, default 1h) — the foreground
+                    // renewal loop renews inside it.
+                    let leases = ready_state::binding_host::issue_leases(
+                        std::mem::take(&mut preflight_resolved),
+                        now_ms,
+                        ready_state::flags::binding_ttl_ms(),
+                    )?;
                     ready_state::binding_host::bind_before_expose(uds, &leases, std::time::Duration::from_secs(10))
                 })();
                 if let Err(e) = bind {
@@ -4041,7 +4070,23 @@ where
                         }
                     },
                 );
+                // v1.2 PR 2 (L8): while a BOUND session serves in the foreground, renew
+                // its leases inside the TTL and revoke any lease whose grant disappears
+                // (`ato secrets delete …` mid-session ⇒ guest value scrubbed, traffic
+                // gates). Background serving has no host process to renew from — there
+                // the single TTL stands and expiry-scrubs lazily (documented).
+                let renewal = (binding_gate_active && session.vsock_uds.is_some()).then(|| {
+                    ready_state::binding_host::spawn_lease_renewal(
+                        session.vsock_uds.clone().expect("checked above"),
+                        grant_namespace.clone().expect("set when the binding gate is active"),
+                        binding_names.clone(),
+                        ready_state::flags::binding_ttl_ms(),
+                    )
+                });
                 let exit = crate::executors::source::wait_for_pid_exit(serving_pid as u32).await;
+                if let Some(task) = renewal {
+                    task.abort();
+                }
                 // Normal exit (guest shut down on its own): drop the now-stale SIGINT
                 // hook so it can't double-fire, then reap tap/overlay/lock + pid record.
                 crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(token);

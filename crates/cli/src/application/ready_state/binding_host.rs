@@ -29,6 +29,10 @@ pub(crate) struct BindingPreviewReceipt {
     /// L3 (#912): which SecretResolver would supply the values (`env` in preview) —
     /// resolver id only, never a value. `None` when no binding delivery is planned.
     pub resolver_kind: Option<String>,
+    /// v1.2 PR 2: the grant namespace (`rs-<hash16>`) the resolver read from — a
+    /// manifest-hash prefix, non-secret by construction. `None` when no binding
+    /// delivery is planned.
+    pub grant_namespace: Option<String>,
 }
 
 impl BindingPreviewReceipt {
@@ -44,6 +48,7 @@ impl BindingPreviewReceipt {
             traffic_exposed_after_bound_ready: false,
             binding_failure_reason: None,
             resolver_kind: None,
+            grant_namespace: None,
         }
     }
 

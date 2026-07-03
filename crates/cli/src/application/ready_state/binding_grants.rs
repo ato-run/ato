@@ -25,15 +25,24 @@ pub(crate) const DESCRIPTION_MAX_CHARS: usize = 200;
 /// `rs-<first 16 hex of the capsule manifest hash>`. Hash-scoped (not
 /// name-scoped) so a different manifest — even same-named — cannot read
 /// another app's grants.
-pub(crate) fn binding_namespace(capsule_manifest_hash: &str) -> String {
-    let hex: String = capsule_manifest_hash
+///
+/// This is a **security boundary**, so the input must be a well-formed digest:
+/// `blake3:<64 hex>` (or the bare 64 hex). Anything else — empty, short,
+/// non-hex, truncated — **fails closed** at launch preflight rather than
+/// silently deriving a weaker (collision-prone / shareable) namespace.
+pub(crate) fn binding_namespace(capsule_manifest_hash: &str) -> Result<String> {
+    let hex = capsule_manifest_hash
         .strip_prefix("blake3:")
         .unwrap_or(capsule_manifest_hash)
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .take(16)
-        .collect();
-    format!("rs-{hex}")
+        .trim();
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "malformed capsule manifest hash for the binding-grant namespace \
+             (expected blake3:<64 hex>, got {} chars) — failing closed",
+            hex.len()
+        );
+    }
+    Ok(format!("rs-{}", hex[..16].to_ascii_lowercase()))
 }
 
 /// The exact command a user runs to grant a binding (shown in preflight
@@ -120,11 +129,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn namespace_is_hash_scoped_and_short() {
-        let ns = binding_namespace("blake3:252d51aabbccdd00112233445566778899aabbccddeeff00");
-        assert_eq!(ns, "rs-252d51aabbccdd00");
-        // Missing prefix / short input still yields a usable namespace.
-        assert_eq!(binding_namespace("abc"), "rs-abc");
+    fn namespace_requires_a_well_formed_digest_and_fails_closed_otherwise() {
+        let full = "252d51aabbccdd00112233445566778899aabbccddeeff00112233445566aabb";
+        assert_eq!(
+            binding_namespace(&format!("blake3:{full}")).unwrap(),
+            "rs-252d51aabbccdd00"
+        );
+        // Bare 64-hex (no algo prefix) is accepted; case normalizes.
+        assert_eq!(
+            binding_namespace(&full.to_ascii_uppercase()).unwrap(),
+            "rs-252d51aabbccdd00"
+        );
+        // A malformed / short / non-hex digest must NOT degrade into a weaker,
+        // shareable namespace — it fails closed (security boundary).
+        for bad in ["", "abc", "not-a-hash", "blake3:", "blake3:abc",
+                    &full[..32], &format!("{}zz", &full[..62])] {
+            assert!(binding_namespace(bad).is_err(), "must reject {bad:?}");
+        }
     }
 
     #[test]
