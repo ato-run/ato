@@ -1,0 +1,9 @@
+{
+  "class": "negative",
+  "eligibility": "fail",
+  "eligibility_reason_contains": "v1 is no-binding only",
+  "seal": "failed",
+  "seal_failure_stage": "eligibility",
+  "manifest_source": "repo",
+  "notes": "R2 via BindingKind::Oauth. Stays out of scope even in v1.2."
+}

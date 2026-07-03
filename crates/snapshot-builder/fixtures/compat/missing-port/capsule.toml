@@ -1,0 +1,12 @@
+# v1 compat NEGATIVE: no `port` on the default target — must fail eligibility
+# with the actionable "declare `port = <n>`" message (R6).
+schema_version = "0.3"
+name = "compat-missing-port"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python3 app.py"

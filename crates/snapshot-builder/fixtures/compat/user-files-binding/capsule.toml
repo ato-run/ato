@@ -1,0 +1,17 @@
+# v1 compat NEGATIVE: user-files binding (BindingKind::UserFiles) — no-binding only (R2).
+schema_version = "0.3"
+name = "compat-user-files-binding"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python3 app.py"
+port = 8080
+
+[bindings.input_files]
+kind = "user_files"
+required = true
+mount = "/input"

@@ -1,0 +1,15 @@
+# v1 compat NEGATIVE: GPU build — must fail eligibility (R4).
+schema_version = "0.3"
+name = "compat-gpu-required"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "python3 app.py"
+port = 8080
+
+[build]
+gpu = true

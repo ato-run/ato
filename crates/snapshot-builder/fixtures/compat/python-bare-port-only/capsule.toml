@@ -1,0 +1,13 @@
+# v1 compat: the real Store-capsule shape — bare-.py run command + port only
+# (no explicit probe). Seals through bare-.py normalization + probe synthesis.
+schema_version = "0.3"
+name = "compat-python-bare-port-only"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "app.py"
+port = 8080
