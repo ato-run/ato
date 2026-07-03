@@ -115,6 +115,15 @@ The suite is intentionally minimal; widen it only by amending this contract.
 - GPU execution or GPU state in snapshots.
 - Multi-process / supervisor / background-worker topologies.
 - Non-web workloads (no port, batch jobs, CLIs).
+- **Unbuilt SPA sources served as "static web".** A dev `index.html` that
+  points at bundler entrypoints (`/src/main.tsx`, `/src/main.js`) seals and
+  serves HTTP 200 but renders a **blank page** — the builder's node install
+  path is `npm install --omit=dev`, so devDeps build tooling (Vite/webpack)
+  cannot run. Static web means a *complete, already-servable* tree. Evidence:
+  the `browser-daw` and `uptime-kuma` Store capsules were sealed this way,
+  verified blank in a real browser, and de-listed (`public_run_eligible = 0`).
+  A devDeps frontend-build pipeline (build → serve `dist/`) is a v1.x
+  expansion candidate, not v1.
 - UFFD memory backends by default (preview flags only), remote CAS serving.
 - General VM hosting semantics: arbitrary kernels, custom init, persistent
   disk mutation across runs (rootfs is read-only-shared; RAM holds session
