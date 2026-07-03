@@ -16,6 +16,7 @@ mod install_lifecycle_dashboard;
 mod intent;
 mod ipc;
 mod launch_intent;
+mod launch_tracker;
 mod localization;
 mod logging;
 mod net_client;

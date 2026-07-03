@@ -27,6 +27,7 @@ pub mod focus_guest_panes;
 pub mod gestures;
 pub mod home;
 pub mod import_window;
+pub mod launch_blocked_popup;
 pub mod launch_window;
 pub mod webview_paste;
 // `pub mod launcher;` was removed in Stage D — the legacy Launcher
