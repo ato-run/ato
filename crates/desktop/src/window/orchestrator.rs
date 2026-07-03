@@ -737,8 +737,13 @@ fn open_app_window_with_capsule_input(
         //   - Everything else → AppWindowShell placeholder for now.
         match route_for_view.clone() {
             crate::state::GuestRoute::ExternalUrl(url) => {
-                let shell = cx
-                    .new(|cx| crate::window::web_link_view::WebLinkViewShell::new(url, window, cx));
+                // Dedicated single-WebView app surface — NOT the tabbed
+                // web-viewer. The window IS the app; launch intents inside
+                // it re-dispatch through NavigateToUrl and open their own
+                // windows.
+                let shell = cx.new(|cx| {
+                    crate::window::web_app_view::WebAppView::new("Web app window", url, window, cx)
+                });
                 window.focus(&shell.read(cx).paste.focus_handle.clone(), cx);
                 cx.new(|cx| gpui_component::Root::new(shell, window, cx))
             }

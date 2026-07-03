@@ -1591,6 +1591,7 @@ fn map_tool_to_command(
                 "RunImportBlinko",
                 "CheckImportState",
                 "ScrollLaunchConsentConfigPanelBottom",
+                "ShowAtoHome",
                 "ShowSettings",
                 "SkipOnboarding",
             ];

@@ -1,17 +1,17 @@
-//! Floating Control Bar window — a white pill with the following regions:
-//! [Settings] [URL Bar] | [Windows/Tray+badge] [Store] [Profile]
-//! Restart and Stop are accessed via the Info popup menu.
-//! - Opaque white pill with a soft multi-layer drop shadow
-//! - Transparent window backdrop so the shadow blurs through to the
-//!   desktop / app behind without a coloured halo
-//! - Icon affordances are bare (no fill, no border) — they sit
-//!   directly on the pill background; only the URL chip carries its
-//!   own light tint
-//! - URL text in muted zinc-grey rather than near-black
-//! - Restart/Stop are icon-only, no text, no border
-//! - Capsule icon in URL bar opens detailed Capsule Settings window
-//! - Info icon opens lightweight context menu anchored below
-//! - Star icon toggles pin state (outline/filled)
+//! Floating Shell Icon Bar — the Focus-mode top pill.
+//!
+//! Not a browser toolbar: there is no URL text, no back/forward/reload,
+//! no settings button. The pill shows exactly
+//! [Ato icon] | [open capsule icons…]
+//!   - the fixed Ato icon opens/raises the Ato PWA Home (the control
+//!     surface: login, Discover, Run, runner settings),
+//!   - one icon per open capsule window; clicking switches to that
+//!     capsule's window. Active capsule gets a tinted background,
+//!     starting/error states get a small status dot.
+//!
+//! Capsule URLs / localhost origins are never rendered here.
+//! Restart/Stop/logs remain reachable via the Info popup, which is now
+//! an automation/debug surface (ToggleControlBarInfoPopup action).
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -20,30 +20,38 @@ use std::rc::Rc;
 use anyhow::Result;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase,
-    Entity, FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent,
-    Pixels, Render, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb,
-    size, svg, transparent_black,
+    AnyWindowHandle, App, Bounds, BoxShadow, ClipboardItem, Context, DispatchPhase, Entity,
+    FontWeight, IntoElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseUpEvent, Pixels,
+    Render, ScrollWheelEvent, SharedString, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowKind, WindowOptions, canvas, div, hsla, point, px, rgb, size,
+    transparent_black,
 };
-use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher, OpenContentWindowLogs,
-    OpenContentWindowSettings, OpenDockWindow, OpenStoreWindow, ShowSettings,
-    ToggleControlBarInfoPopup, ToggleStarCapsule,
+    FocusContentWindow, FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher,
+    OpenContentWindowLogs, OpenContentWindowSettings, ShowAtoHome,
 };
 use crate::config::{ControlBarMode, load_config, save_config};
 use crate::localization::{LocaleCode, resolve_locale, tr};
-use crate::state::GuestRoute;
+use crate::remote_runs::RemoteRunsSnapshot;
 use crate::window::content_windows::OpenContentWindows;
 use crate::window::gestures::{GestureAction, GestureState};
+use crate::window::shell_tabs::{self, ShellTab, ShellTabKind, ShellTabStatus};
 
-const BAR_WIDTH: f32 = 720.0;
 const BAR_HEIGHT: f32 = 56.0;
+/// Fixed width of the (transparent) bar window. The visible pill is
+/// centered inside and sized by its icon count.
+const BAR_WIDTH: f32 = 720.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
 const COMPACT_HEIGHT: f32 = 10.0;
+
+/// Horizontal padding inside the pill.
+const BAR_PAD_X: f32 = 12.0;
+/// Square hit-target per tab icon.
+const TAB_BUTTON: f32 = 40.0;
+/// Gap between adjacent items in the pill.
+const TAB_GAP: f32 = 8.0;
 
 #[derive(Default)]
 pub struct ControlBarController {
@@ -53,6 +61,9 @@ pub struct ControlBarController {
     /// Mode to restore when transitioning out of Hidden via show/toggle.
     previous_mode: ControlBarMode,
     expanded: bool,
+    /// Configured PWA origin, cached so hover/resize paths never touch
+    /// disk. Used to classify home vs capsule tabs.
+    app_base_url: String,
 }
 
 impl gpui::Global for ControlBarController {}
@@ -70,6 +81,7 @@ impl ControlBarController {
             mode,
             previous_mode,
             expanded: matches!(mode, ControlBarMode::Floating),
+            app_base_url: crate::config::load_config().desktop.app_base_url,
         }
     }
 
@@ -203,27 +215,87 @@ pub fn toggle_control_bar(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
     }
 }
 
+/// Rescue the bar after a content window closes. The bar is an AppKit
+/// child of some content window; when that parent closes, AppKit orders
+/// the bar out with it and it "disappears". Detach it from the (dead)
+/// parent, restore its floating level, order it back on screen, and
+/// re-attach it to the new frontmost content window if one exists.
+/// Deferred slightly so the closing window's teardown finishes first.
+pub fn ensure_bar_visible(cx: &mut App) {
+    let Some(bar) = cx.global::<ControlBarController>().handle else {
+        return;
+    };
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    fe.spawn(async move {
+        be.timer(std::time::Duration::from_millis(120)).await;
+        aa.update(|cx| {
+            // The bar itself may have closed in the meantime.
+            if cx.global::<ControlBarController>().handle != Some(bar) {
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(err) = super::macos::refloat_window(cx, bar) {
+                    tracing::debug!(error = %err, "ensure_bar_visible: refloat failed");
+                    return;
+                }
+                if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+                    && let Err(err) = super::macos::reattach_child(cx, entry.handle, bar)
+                {
+                    tracing::debug!(error = %err, "ensure_bar_visible: re-attach failed");
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (bar, cx);
+        });
+    })
+    .detach();
+}
+
+/// Show and expand the icon bar. Historically this focused the omnibar
+/// text input; the icon bar has no URL input (by design — arbitrary URL
+/// navigation is not a user-facing affordance), so Cmd+L now just
+/// surfaces the bar.
 pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
     let handle = show_control_bar(cx)?;
     cx.global_mut::<ControlBarController>().force_expand();
     resize_bar_window(cx, true);
-    if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
-        let _ = handle.update(cx, |_, window, cx| {
-            window.activate_window();
-            shell.update(cx, |shell, cx| shell.focus_omnibar(window, cx));
-        });
-    }
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
     Ok(handle)
 }
 
-fn resize_bar_window_in_handler(window: &mut Window, expanded: bool) {
-    let (new_w, new_h) = if expanded {
+/// The bar window is a FIXED-size transparent strip; the visible pill
+/// inside hugs its icons via GPUI layout. The native window is never
+/// resized per tab count — external setFrame changes proved unreliable
+/// to synchronize with GPUI's internal size, breaking hit-testing.
+fn bar_size(_cx: &App, expanded: bool) -> (f32, f32) {
+    if expanded {
         (BAR_WIDTH, BAR_HEIGHT)
     } else {
         (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
-    };
+    }
+}
+
+/// Resize the bar from within one of its own event handlers.
+///
+/// macOS: the frame change is scheduled OUTSIDE the current GPUI update
+/// (see `macos::resize_window_outside_update`) — a synchronous `setFrame`
+/// here re-enters GPUI mid-borrow, drops the resize event, and leaves
+/// hit-testing misaligned with what is on screen.
+fn resize_bar_window_in_handler(window: &mut Window, cx: &App, expanded: bool) {
+    let (new_w, new_h) = bar_size(cx, expanded);
     #[cfg(target_os = "macos")]
-    super::macos::resize_window_in_handler(window, new_w, new_h);
+    if let Some(nswindow) = super::macos::ns_window_of(window) {
+        super::macos::resize_window_outside_update(
+            nswindow,
+            cx.foreground_executor().clone(),
+            new_w,
+            new_h,
+        );
+    }
     #[cfg(target_os = "windows")]
     super::windows::resize_window_in_handler(window, new_w, new_h);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -235,13 +307,16 @@ fn resize_bar_window(cx: &mut App, expanded: bool) {
         Some(h) => h,
         None => return,
     };
-    let (new_w, new_h) = if expanded {
-        (BAR_WIDTH, BAR_HEIGHT)
-    } else {
-        (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
-    };
+    let (new_w, new_h) = bar_size(cx, expanded);
     #[cfg(target_os = "macos")]
-    super::macos::resize_window_to(cx, handle, new_w, new_h);
+    if let Some(nswindow) = super::macos::ns_window_for(cx, handle) {
+        super::macos::resize_window_outside_update(
+            nswindow,
+            cx.foreground_executor().clone(),
+            new_w,
+            new_h,
+        );
+    }
     #[cfg(target_os = "windows")]
     super::windows::resize_window_to(cx, handle, new_w, new_h);
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -249,9 +324,10 @@ fn resize_bar_window(cx: &mut App, expanded: bool) {
 }
 
 pub struct ControlBarShellPlaceholder {
-    omnibar: Entity<InputState>,
     locale: LocaleCode,
-    omnibar_focused: bool,
+    /// Configured PWA origin, cached so the render pass never touches
+    /// disk. Used to recognize the Ato Home window among open windows.
+    app_base_url: String,
     /// Track which capsule handles are starred (pinned).
     starred_handles: HashSet<String>,
     /// Trackpad / mouse gesture recognizer (#174).
@@ -259,93 +335,33 @@ pub struct ControlBarShellPlaceholder {
 }
 
 impl ControlBarShellPlaceholder {
-    pub fn new(route: &GuestRoute, window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
-        let initial = display_url_from_route(route);
-        let locale = resolve_locale(crate::config::load_config().general.language);
-        let placeholder = tr(locale, "control_bar.omnibar_placeholder");
-        let omnibar = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(placeholder)
-                .default_value(initial.clone())
-        });
-
-        cx.subscribe_in(
-            &omnibar,
-            window,
-            |this: &mut Self, omnibar, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { .. } => {
-                    let url = omnibar.read(cx).value().to_string();
-                    if !url.is_empty() {
-                        window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
-                    }
-                }
-                InputEvent::Change => {
-                    cx.notify();
-                }
-                InputEvent::Focus => {
-                    this.omnibar_focused = true;
-                }
-                InputEvent::Blur => {
-                    this.omnibar_focused = false;
-                    let was_expanded = cx.global::<ControlBarController>().expanded;
-                    cx.global_mut::<ControlBarController>().collapse();
-                    if was_expanded && !cx.global::<ControlBarController>().expanded {
-                        resize_bar_window_in_handler(window, false);
-                    }
-                    cx.notify();
-                }
-            },
-        )
-        .detach();
+    pub fn new(_window: &mut gpui::Window, cx: &mut Context<Self>) -> Self {
+        let config = crate::config::load_config();
+        let locale = resolve_locale(config.general.language);
 
         cx.observe_global::<OpenContentWindows>(|_view, cx| {
             cx.notify();
         })
         .detach();
+        cx.observe_global::<RemoteRunsSnapshot>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
 
         Self {
-            omnibar,
             locale,
-            omnibar_focused: false,
-            starred_handles: load_config()
-                .desktop
-                .pinned_capsules
-                .iter()
-                .cloned()
-                .collect(),
+            app_base_url: config.desktop.app_base_url.clone(),
+            starred_handles: config.desktop.pinned_capsules.iter().cloned().collect(),
             gesture_state: GestureState::new(),
         }
     }
 
-    /// Normalize the omnibar display value into a stable pin key.
-    /// When the omnibar is focused, the user's explicit input always wins.
-    /// Otherwise the frontmost managed capsule is preferred because the
-    /// display value may be a decorated `capsule://{handle} → {url}` form.
+    /// Pin key for the frontmost managed capsule, if any. The icon bar
+    /// has no URL input, so the frontmost capsule is the only candidate.
     fn current_pin_key(&self, cx: &App) -> Option<String> {
-        let value = self.omnibar.read(cx).value().trim().to_string();
-        if self.omnibar_focused {
-            return Self::parse_pin_key_from_value(&value);
-        }
-        if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
-            && let Some(capsule) = &entry.capsule
-        {
-            return Some(format!("capsule://{}", capsule.active_handle()));
-        }
-        Self::parse_pin_key_from_value(&value)
-    }
-
-    fn parse_pin_key_from_value(value: &str) -> Option<String> {
-        let raw = value.trim();
-        let stripped = raw.strip_prefix("capsule://").filter(|s| !s.is_empty())?;
-        let handle = match stripped.find(" → ") {
-            Some(pos) => &stripped[..pos],
-            None => stripped,
-        };
-        Some(format!("capsule://{}", handle.trim_end_matches('/')))
-    }
-
-    fn focus_omnibar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.omnibar.update(cx, |state, cx| state.focus(window, cx));
+        let entry = cx.global::<OpenContentWindows>().frontmost()?;
+        let capsule = entry.capsule.as_ref()?;
+        Some(format!("capsule://{}", capsule.active_handle()))
     }
 
     /// Toggle the info popup open/closed. Called from the action handler
@@ -408,53 +424,14 @@ fn entry_handle_to_window_id(entry: &crate::window::content_windows::ContentWind
     entry.handle.window_id().as_u64()
 }
 
-fn display_url_from_route(route: &GuestRoute) -> String {
-    match route {
-        GuestRoute::ExternalUrl(url) => url.as_str().to_string(),
-        GuestRoute::CapsuleHandle { handle, .. } => format!("capsule://{handle}"),
-        GuestRoute::LocalManifest(local) => format!("capsule://{}", local.source_handle),
-        GuestRoute::CapsuleUrl { handle, url, .. } => {
-            format!("capsule://{handle} → {url}")
-        }
-        GuestRoute::Capsule { session, .. } => format!("capsule://{session}/"),
-        GuestRoute::Terminal { session_id } => format!("terminal://{session_id}/"),
-    }
-}
-
 impl Render for ControlBarShellPlaceholder {
-    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let window_count = cx.global::<OpenContentWindows>().len();
-
-        if !self.omnibar_focused {
-            let target = cx
-                .global::<OpenContentWindows>()
-                .mru_order()
-                .into_iter()
-                .next()
-                .map(|e| e.url.clone());
-            if let Some(target) = target {
-                let current: SharedString = self.omnibar.read(cx).value().to_string().into();
-                if current != target {
-                    self.omnibar.update(cx, |state, cx| {
-                        state.set_value(target.clone(), window, cx);
-                    });
-                }
-            }
-        }
-
-        let is_capsule = self
-            .omnibar
-            .read(cx)
-            .value()
-            .trim_start()
-            .starts_with("capsule://");
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let expanded = cx.global::<ControlBarController>().should_render_expanded();
-        let omnibar_focused = self.omnibar_focused;
-
-        let is_starred = self
-            .current_pin_key(cx)
-            .map(|key| self.starred_handles.contains(&key))
-            .unwrap_or(false);
+        let tabs = shell_tabs::derive_shell_tabs(
+            cx.global::<OpenContentWindows>(),
+            &self.app_base_url,
+            &cx.global::<RemoteRunsSnapshot>().runs,
+        );
 
         div()
             .id("control-bar-hover-zone")
@@ -503,7 +480,7 @@ impl Render for ControlBarShellPlaceholder {
                 cx.global_mut::<ControlBarController>().expand();
                 let now_expanded = cx.global::<ControlBarController>().expanded;
                 if now_expanded && !was_expanded {
-                    resize_bar_window_in_handler(window, true);
+                    resize_bar_window_in_handler(window, cx, true);
                 }
                 if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                     shell.update(cx, |_shell, cx| cx.notify());
@@ -526,16 +503,16 @@ impl Render for ControlBarShellPlaceholder {
                     cx.global_mut::<ControlBarController>().expand();
                     let now_expanded = cx.global::<ControlBarController>().expanded;
                     if now_expanded && !was_expanded {
-                        resize_bar_window_in_handler(window, true);
+                        resize_bar_window_in_handler(window, cx, true);
                     }
                     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                         shell.update(cx, |_shell, cx| cx.notify());
                     }
-                } else if !omnibar_focused {
+                } else {
                     let was_expanded = cx.global::<ControlBarController>().expanded;
                     cx.global_mut::<ControlBarController>().collapse();
                     if was_expanded && !cx.global::<ControlBarController>().expanded {
-                        resize_bar_window_in_handler(window, false);
+                        resize_bar_window_in_handler(window, cx, false);
                     }
                     if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                         shell.update(cx, |_shell, cx| cx.notify());
@@ -549,13 +526,10 @@ impl Render for ControlBarShellPlaceholder {
                             if phase != DispatchPhase::Bubble {
                                 return;
                             }
-                            if omnibar_focused {
-                                return;
-                            }
                             let was_expanded = cx.global::<ControlBarController>().expanded;
                             cx.global_mut::<ControlBarController>().collapse();
                             if was_expanded && !cx.global::<ControlBarController>().expanded {
-                                resize_bar_window_in_handler(window, false);
+                                resize_bar_window_in_handler(window, cx, false);
                             }
                             if let Some(shell) = cx.global::<ControlBarController>().shell.clone() {
                                 shell.update(cx, |_shell, cx| cx.notify());
@@ -567,14 +541,7 @@ impl Render for ControlBarShellPlaceholder {
                 .size(px(0.0)),
             )
             .child(if expanded {
-                bar_pill(
-                    self.omnibar.clone(),
-                    is_capsule,
-                    is_starred,
-                    window_count,
-                    self.locale,
-                )
-                .into_any_element()
+                shell_icon_bar(tabs).into_any_element()
             } else {
                 compact_pill().into_any_element()
             })
@@ -605,62 +572,161 @@ fn bar_surface_shape(d: gpui::Div, border_alpha: f32) -> gpui::Div {
         .border_color(hsla(0.0, 0.0, 0.0, border_alpha))
 }
 
-fn bar_pill(
-    omnibar: Entity<InputState>,
-    is_capsule: bool,
-    is_starred: bool,
-    window_count: usize,
-    locale: LocaleCode,
-) -> impl IntoElement {
-    bar_surface_shape(
+/// The expanded pill: [Ato icon] | [capsule tab icons…].
+fn shell_icon_bar(tabs: Vec<ShellTab>) -> impl IntoElement {
+    let mut capsule_tabs: Vec<ShellTab> = Vec::new();
+    let mut home_tab: Option<ShellTab> = None;
+    for tab in tabs {
+        match tab.kind {
+            ShellTabKind::AtoHome => home_tab = Some(tab),
+            ShellTabKind::Capsule => capsule_tabs.push(tab),
+        }
+    }
+
+    let mut bar = bar_surface_shape(
         div()
-            .size_full()
-            .px(px(6.0))
+            .h(px(BAR_HEIGHT))
+            .px(px(BAR_PAD_X))
             .flex()
             .items_center()
-            .gap(px(4.0))
-            .bg(rgb(0xffffff)),
-        0.04,
-    )
-    .child(left_action_group(locale))
-    .child(pill_separator())
-    .child(url_pill(omnibar, is_capsule, is_starred))
-    .child(pill_separator())
-    .child(right_action_group(window_count, locale))
+            .justify_center()
+            .gap(px(TAB_GAP))
+            .bg(hsla(0.0, 0.0, 1.0, 0.92)),
+        0.08,
+    );
+    if let Some(home) = home_tab {
+        bar = bar.child(ato_home_button(home.is_active));
+    }
+    if !capsule_tabs.is_empty() {
+        bar = bar.child(pill_separator());
+        for tab in capsule_tabs {
+            bar = bar.child(capsule_tab_button(tab));
+        }
+    }
+    bar
 }
 
-/// Left group: [Settings]
-fn left_action_group(_locale: LocaleCode) -> impl IntoElement {
-    div().flex().items_center().gap(px(2.0)).child(pill_button(
-        "settings",
-        Some(PillIcon::Builtin(IconName::Settings)),
-        None,
-        ActionTarget::Settings,
-        None,
-    ))
-}
-
-/// Right group: [Windows/Tray+badge] [Store] [My Dock]
-fn right_action_group(window_count: usize, _locale: LocaleCode) -> impl IntoElement {
-    div()
+/// Shared shape for every 40×40 icon slot in the pill: round hit target,
+/// hover tint, active tint per the icon-bar design spec.
+fn tab_slot(id: SharedString, is_active: bool) -> gpui::Stateful<gpui::Div> {
+    let slot = div()
+        .id(id)
+        .relative()
+        .w(px(TAB_BUTTON))
+        .h(px(TAB_BUTTON))
+        .flex_shrink_0()
         .flex()
         .items_center()
-        .gap(px(2.0))
-        .child(pill_button(
-            "windows-tray",
-            Some(PillIcon::Builtin(IconName::GalleryVerticalEnd)),
-            None,
-            ActionTarget::CardSwitcher,
-            Some(window_count),
-        ))
-        .child(pill_button(
-            "store",
-            Some(PillIcon::Custom("icons/shopping-bag.svg")),
-            None,
-            ActionTarget::Store,
-            None,
-        ))
-        .child(my_dock_button())
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)));
+    if is_active {
+        slot.bg(hsla(0.63, 0.54, 0.51, 0.10))
+    } else {
+        slot
+    }
+}
+
+/// The fixed leading Ato icon — opens/raises the Ato PWA Home surface.
+/// Renders the brand PNG (black mark, transparent background) directly
+/// via `img` — the GPUI svg path renders this particular asset inverted,
+/// so the raster source is authoritative here. White borderless wrapper
+/// keeps the slot aligned with the capsule avatars.
+fn ato_home_button(is_active: bool) -> impl IntoElement {
+    tab_slot(SharedString::from("shell-tab-ato-home"), is_active)
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            cx.stop_propagation();
+            tracing::info!("shell icon bar: Ato tile clicked");
+            window.dispatch_action(Box::new(ShowAtoHome), cx);
+        })
+        .child(
+            div()
+                .w(px(30.0))
+                .h(px(30.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(0xffffff))
+                .child(gpui::img("icons/ato.png").w(px(20.0)).h(px(20.0))),
+        )
+}
+
+/// One open-capsule icon. Clicking raises that capsule's window.
+/// No capsule icon asset is plumbed through the window registry yet, so
+/// the avatar is the capsule's initial on a stable per-title tint;
+/// status is a small dot badge (amber = starting, red = failed).
+fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
+    let slot_id = match (tab.window_id, tab.open_url.as_deref()) {
+        (Some(window_id), _) => SharedString::from(format!("shell-tab-{window_id}")),
+        (None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
+        (None, None) => return div().into_any_element(),
+    };
+    let hue = shell_tabs::avatar_hue(&tab.title);
+    let dimmed = tab.status == ShellTabStatus::Starting;
+
+    // Real Store icon when cached locally, else the letter avatar.
+    let avatar = if let Some(icon_path) = tab.icon_path.clone() {
+        div()
+            .w(px(30.0))
+            .h(px(30.0))
+            .rounded_full()
+            .overflow_hidden()
+            .when(dimmed, |slot| slot.opacity(0.45))
+            .child(gpui::img(icon_path).w(px(30.0)).h(px(30.0)))
+            .into_any_element()
+    } else {
+        div()
+            .w(px(30.0))
+            .h(px(30.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(hsla(hue, 0.45, 0.55, if dimmed { 0.45 } else { 1.0 }))
+            .text_color(rgb(0xffffff))
+            .text_size(px(14.0))
+            .font_weight(FontWeight(600.0))
+            .child(tab.initial.clone())
+            .into_any_element()
+    };
+
+    let badge_color = match tab.status {
+        ShellTabStatus::Running => None,
+        ShellTabStatus::Starting => Some(rgb(0xf59e0b)),
+        ShellTabStatus::Error => Some(rgb(0xef4444)),
+    };
+
+    let window_id = tab.window_id;
+    let open_url = tab.open_url.clone();
+    let mut slot = tab_slot(slot_id, tab.is_active)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            if let Some(window_id) = window_id {
+                window.dispatch_action(Box::new(FocusContentWindow { window_id }), cx);
+            } else if let Some(url) = open_url.clone() {
+                tracing::info!(url = %url, "shell icon bar: remote run tab clicked");
+                window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
+            }
+        })
+        .child(avatar);
+
+    if let Some(color) = badge_color {
+        slot = slot.child(
+            div()
+                .absolute()
+                .bottom(px(3.0))
+                .right(px(3.0))
+                .w(px(10.0))
+                .h(px(10.0))
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(0xffffff))
+                .bg(color),
+        );
+    }
+    slot.into_any_element()
 }
 
 /// Thin vertical separator line between bar groups.
@@ -680,232 +746,6 @@ fn compact_pill() -> impl IntoElement {
             .bg(hsla(0.0, 0.0, 1.0, 0.90)),
         0.08,
     )
-}
-
-fn my_dock_button() -> impl IntoElement {
-    div()
-        .id("my-dock")
-        .w(px(36.0))
-        .h(px(36.0))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(18.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0xf4f4f5)))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            window.dispatch_action(Box::new(OpenDockWindow), cx);
-        })
-        .child(
-            Icon::new(IconName::LayoutDashboard)
-                .size(px(16.0))
-                .text_color(rgb(0x3f3f46)),
-        )
-}
-
-#[derive(Copy, Clone)]
-enum ActionTarget {
-    Settings,
-    Store,
-    CardSwitcher,
-}
-
-#[derive(Clone)]
-enum PillIcon {
-    Builtin(IconName),
-    Custom(&'static str),
-}
-
-fn pill_button(
-    id: &'static str,
-    icon: Option<PillIcon>,
-    label: Option<SharedString>,
-    target: ActionTarget,
-    badge: Option<usize>,
-) -> impl IntoElement {
-    let mut body = div()
-        .id(id)
-        .relative()
-        .h(px(36.0))
-        .px(px(if label.is_some() { 12.0 } else { 10.0 }))
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .rounded(px(18.0))
-        .text_color(rgb(0x18181b))
-        .text_sm()
-        .font_weight(FontWeight(500.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgb(0xf4f4f5)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            // Stop propagation so the outer gesture zone does not record
-            // this mouse-down. Without this, a hold >= 400 ms on the pill
-            // button would cause the gesture's on_mouse_up handler to fire
-            // a second OpenCardSwitcher dispatch, toggling the window
-            // closed immediately after it opened.
-            cx.stop_propagation();
-            match target {
-                ActionTarget::Settings => {
-                    window.dispatch_action(Box::new(ShowSettings), cx);
-                }
-                ActionTarget::Store => {
-                    window.dispatch_action(Box::new(OpenStoreWindow), cx);
-                }
-                ActionTarget::CardSwitcher => {
-                    window.dispatch_action(Box::new(OpenCardSwitcher), cx);
-                }
-            }
-        });
-    match icon {
-        Some(PillIcon::Builtin(name)) => {
-            body = body.child(Icon::new(name).size(px(16.0)).text_color(rgb(0x3f3f46)));
-        }
-        Some(PillIcon::Custom(path)) => {
-            body = body.child(
-                svg()
-                    .path(SharedString::from(path))
-                    .size(px(16.0))
-                    .text_color(rgb(0x3f3f46)),
-            );
-        }
-        None => {}
-    }
-    if let Some(label) = label {
-        body = body.child(div().child(label));
-    }
-    if let Some(count) = badge.filter(|n| *n > 0) {
-        body = body.child(
-            div()
-                .absolute()
-                .top(px(-2.0))
-                .right(px(-2.0))
-                .w(px(16.0))
-                .h(px(16.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .bg(rgb(0x18181b))
-                .text_color(rgb(0xffffff))
-                .text_size(px(10.0))
-                .font_weight(FontWeight(700.0))
-                .child(SharedString::from(count.to_string())),
-        );
-    }
-    body
-}
-
-/// The URL pill — the center focal element of the control bar.
-/// Interior: [Capsule icon (clickable)] [Input text] [Info icon] [Star icon]
-fn url_pill(omnibar: Entity<InputState>, is_capsule: bool, is_starred: bool) -> impl IntoElement {
-    let leading_icon: AnyElement = if is_capsule {
-        // Clickable capsule icon → opens Capsule Settings window
-        div()
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.7))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                cx.stop_propagation();
-                let target_id = cx
-                    .global::<OpenContentWindows>()
-                    .frontmost()
-                    .filter(|entry| entry.capsule.is_some())
-                    .map(|entry| entry_handle_to_window_id(&entry));
-                if let Some(window_id) = target_id {
-                    window.dispatch_action(Box::new(OpenContentWindowSettings { window_id }), cx);
-                }
-            })
-            .child(
-                svg()
-                    .path(SharedString::from("icons/capsule.svg"))
-                    .size(px(15.0))
-                    .text_color(rgb(0x4f46e5)),
-            )
-            .into_any_element()
-    } else {
-        Icon::new(IconName::Globe)
-            .size(px(15.0))
-            .text_color(rgb(0x71717a))
-            .into_any_element()
-    };
-
-    let star_icon_name = if is_starred {
-        IconName::StarFill
-    } else {
-        IconName::Star
-    };
-
-    div()
-        .id("url-pill")
-        .flex_1()
-        .h(px(36.0))
-        .px(px(12.0))
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .rounded(px(18.0))
-        .bg(rgb(0xfafafa))
-        .border_1()
-        .border_color(rgb(0xeeeeee))
-        .text_color(rgb(0x52525b))
-        .text_sm()
-        .child(leading_icon)
-        .child(
-            div().flex_1().h_full().flex().items_center().child(
-                Input::new(&omnibar)
-                    .appearance(false)
-                    .bordered(false)
-                    .focus_bordered(false)
-                    .bg(hsla(0.0, 0.0, 0.0, 0.0))
-                    .text_size(px(13.0))
-                    .text_color(rgb(0x52525b)),
-            ),
-        )
-        .child(info_icon_button())
-        .child(star_icon_button(star_icon_name))
-}
-
-/// Info icon button — opens/closes the info popup anchored below the bar.
-fn info_icon_button() -> impl IntoElement {
-    div()
-        .id("info-button")
-        .w(px(24.0))
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)))
-        .on_mouse_down(MouseButton::Left, |_, window, cx| {
-            cx.stop_propagation();
-            window.dispatch_action(Box::new(ToggleControlBarInfoPopup), cx);
-        })
-        .child(
-            Icon::new(IconName::Info)
-                .size(px(13.0))
-                .text_color(rgb(0x71717a)),
-        )
-}
-
-/// Star icon button — toggles pin state (outline/filled).
-fn star_icon_button(icon: IconName) -> impl IntoElement {
-    div()
-        .id("star-button")
-        .w(px(24.0))
-        .h(px(24.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(12.0))
-        .cursor_pointer()
-        .hover(|s| s.bg(hsla(0.0, 0.0, 0.0, 0.05)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            window.dispatch_action(Box::new(ToggleStarCapsule), cx);
-        })
-        .child(Icon::new(icon).size(px(13.0)).text_color(rgb(0x9ca3af)))
 }
 
 // ─── Info Popup ───────────────────────────────────────────────────────
@@ -1279,11 +1119,9 @@ fn close_info_popup_if_live(cx: &mut App) -> bool {
 
 /// Return the initial `(width, height)` for the control bar window.
 fn initial_bar_size(cx: &App) -> (Pixels, Pixels) {
-    if cx.global::<ControlBarController>().should_render_expanded() {
-        (px(BAR_WIDTH), px(BAR_HEIGHT))
-    } else {
-        (px(COMPACT_BAR_WIDTH), px(COMPACT_HEIGHT))
-    }
+    let expanded = cx.global::<ControlBarController>().should_render_expanded();
+    let (w, h) = bar_size(cx, expanded);
+    (px(w), px(h))
 }
 
 /// Open the Focus-mode Control Bar as a process-lifetime singleton.
@@ -1316,21 +1154,10 @@ pub fn open_focus_control_bar(cx: &mut App) -> Result<AnyWindowHandle> {
         }
         None => Bounds::centered(None, size(win_w, win_h), cx),
     };
-    let initial_route = url::Url::parse("https://ato.run/")
-        .map(GuestRoute::ExternalUrl)
-        .unwrap_or_else(|_| GuestRoute::CapsuleHandle {
-            handle: "wasedap2p".to_string(),
-            label: "WasedaP2P".to_string(),
-            community_toml_id: None,
-        });
-    open_control_bar_inner(cx, bounds, initial_route)
+    open_control_bar_inner(cx, bounds)
 }
 
-fn open_control_bar_inner(
-    cx: &mut App,
-    bounds: Bounds<Pixels>,
-    route: GuestRoute,
-) -> Result<AnyWindowHandle> {
+fn open_control_bar_inner(cx: &mut App, bounds: Bounds<Pixels>) -> Result<AnyWindowHandle> {
     let options = WindowOptions {
         titlebar: None,
         focus: false,
@@ -1347,7 +1174,7 @@ fn open_control_bar_inner(
         Rc::new(RefCell::new(None));
     let shell_slot_for_window = shell_slot.clone();
     let handle = cx.open_window(options, move |window, cx| {
-        let shell = cx.new(|cx| ControlBarShellPlaceholder::new(&route, window, cx));
+        let shell = cx.new(|cx| ControlBarShellPlaceholder::new(window, cx));
         *shell_slot_for_window.borrow_mut() = Some(shell.clone());
         cx.new(|cx| gpui_component::Root::new(shell, window, cx).bg(transparent_black()))
     })?;

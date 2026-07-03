@@ -14,6 +14,7 @@
 //! and tracked in the consolidated PR description.
 
 pub mod app_capsule_shell;
+pub mod ato_home_shell;
 pub mod auth_login_window;
 pub mod capsule_panel;
 pub mod card_switcher;
@@ -34,14 +35,17 @@ pub mod webview_paste;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod onboarding_window;
+pub mod quit_prompt;
 pub mod orchestrator;
 pub mod settings_window;
+pub mod shell_tabs;
 pub mod start_window;
 pub mod store;
 #[cfg(target_os = "windows")]
 pub mod taskbar;
 #[cfg(target_os = "windows")]
 pub mod tray;
+pub mod web_app_view;
 pub mod web_bridge;
 pub mod web_link_view;
 #[cfg(target_os = "windows")]
@@ -64,6 +68,34 @@ pub use control_bar::{
     toggle_control_bar,
 };
 pub use orchestrator::open_app_window;
+
+/// Raise a content window from a Shell Icon Bar gesture.
+///
+/// The bar is an AppKit CHILD of some content window; clicking it makes
+/// macOS bring that parent's window group forward as part of the click,
+/// which overrides a synchronous `activate_window` on the target. Defer
+/// the raise until the click activation has settled, then activate the
+/// target and re-parent the bar onto it so the pair stays on top
+/// together.
+pub fn raise_content_window(cx: &mut gpui::App, handle: gpui::AnyWindowHandle) {
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    fe.spawn(async move {
+        be.timer(std::time::Duration::from_millis(80)).await;
+        aa.update(|cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = cx.global::<ControlBarController>().handle
+                && let Err(err) = macos::reattach_child(cx, handle, bar)
+            {
+                tracing::debug!(error = %err, "raise_content_window: bar re-attach failed");
+            }
+        });
+    })
+    .detach();
+}
 
 pub(crate) fn stop_session_once_with_ui_completion(cx: &mut gpui::App, session_id: &str) {
     let request = cx
@@ -166,7 +198,9 @@ pub fn open_configured_startup_surface(
             Ok(())
         }
         crate::config::StartupSurface::Start => {
-            start_window::open_start_window(cx)?;
+            // ato-start is retired as a landing surface — Start now
+            // routes to the PWA Home like the default.
+            home::open_home_window(cx)?;
             Ok(())
         }
         crate::config::StartupSurface::Blank => Ok(()),
