@@ -126,7 +126,11 @@ actions!(
         // Toggle the Control Bar info popup (anchor below URL bar)
         ToggleControlBarInfoPopup,
         // Toggle star/pin state for the current capsule URL
-        ToggleStarCapsule
+        ToggleStarCapsule,
+        // Shell Icon Bar: open/raise the Ato PWA Home — the fixed
+        // leading Ato icon in the top pill. The Home window is the
+        // control surface (login, Discover, Run, runner settings).
+        ShowAtoHome
     ]
 );
 
@@ -134,6 +138,13 @@ actions!(
 #[action(namespace = desktop, no_json)]
 pub struct NavigateToUrl {
     pub url: String,
+}
+
+/// Shell Icon Bar: raise the content window backing a capsule tab.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = desktop, no_json)]
+pub struct FocusContentWindow {
+    pub window_id: u64,
 }
 
 /// Parse an `ato://app/<install_profile_key>` URL into its install profile key.
@@ -570,6 +581,13 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the currently-open Store window (Wry WebView
         // on ato.run).
         cx.set_global(crate::window::store::StoreWindowSlot::default());
+        // Slot tracking the dedicated Ato PWA Home window (the Shell
+        // Icon Bar's fixed Ato icon opens/raises it).
+        cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
+        cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot::default());
+        // Account-wide active runs on other runners — polled from the
+        // account API so the Shell Icon Bar can show them as tabs.
+        crate::remote_runs::start_remote_runs_poller(cx);
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
@@ -752,7 +770,33 @@ pub fn run(skip_onboarding: bool) {
                     cx.global_mut::<crate::window::ControlBarController>()
                         .clear_window(handle);
                     tracing::info!("Control Bar window closed; controller cleared");
+                    // The bar must never stay gone: whatever closed it
+                    // (stray Cmd+W, programmatic remove_window), reopen it
+                    // unless the app is quitting. Deferred so the close
+                    // finishes unwinding first.
+                    if !crate::window::is_shutting_down() {
+                        crate::system_capsule::ipc::defer_after_dispatch_for(
+                            cx,
+                            std::time::Duration::from_millis(150),
+                            |cx| {
+                                if crate::window::is_shutting_down() {
+                                    return;
+                                }
+                                match crate::window::open_focus_control_bar(cx) {
+                                    Ok(_) => tracing::info!("Control Bar reopened after close"),
+                                    Err(err) => tracing::warn!(
+                                        error = %err,
+                                        "Control Bar reopen after close failed"
+                                    ),
+                                }
+                            },
+                        );
+                    }
                 }
+
+            // If the closed window was the bar's AppKit parent, the bar got
+            // ordered out with it — rescue it back on screen.
+            crate::window::control_bar::ensure_bar_visible(cx);
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
@@ -892,7 +936,25 @@ pub fn run(skip_onboarding: bool) {
             // landing surface (its quit button is the explicit exit). If the
             // Start page cannot be opened and only the Control Bar remains,
             // that is an unrecoverable state — quit as abnormal.
-            if !crate::window::is_shutting_down()
+            // Closing the quit prompt itself means "Reopen": bring the
+            // PWA Home back instead of re-showing the prompt.
+            let prompt_slot = cx
+                .global::<crate::window::quit_prompt::QuitPromptWindowSlot>()
+                .0;
+            if prompt_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot(None));
+                if !crate::window::is_shutting_down() {
+                    crate::system_capsule::ipc::defer_after_dispatch_for(
+                        cx,
+                        std::time::Duration::from_millis(100),
+                        |cx| {
+                            if let Err(err) = crate::window::home::open_home_window(cx) {
+                                tracing::error!(error = %err, "quit prompt closed: reopen Home failed");
+                            }
+                        },
+                    );
+                }
+            } else if !crate::window::is_shutting_down()
                 && cx
                     .global::<crate::window::content_windows::OpenContentWindows>()
                     .is_empty()
@@ -1036,11 +1098,40 @@ pub fn run(skip_onboarding: bool) {
         //   - http(s)://...          → ExternalUrl route.
         //   - anything else          → log + ignore.
         cx.on_action(|action: &NavigateToUrl, cx: &mut App| {
-            let raw = action.url.trim();
+            let owned_url;
+            let mut raw = action.url.trim();
             if raw.is_empty() {
                 return;
             }
             tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+
+            // ato://open?handle=<url-or-capsule-ref> — the PWA Home's
+            // "open this app outside my WebView" intent (mirrors the legacy
+            // AppState::handle_host_route deep link). Unwrap the inner
+            // target and route it like any other NavigateToUrl input: an
+            // https session URL opens an independent app window, a
+            // capsule:// ref goes through the native launch flow.
+            if raw.starts_with("ato://open") {
+                let inner = url::Url::parse(raw).ok().and_then(|url| {
+                    url.query_pairs()
+                        .find(|(k, _)| k == "handle" || k == "url")
+                        .map(|(_, v)| v.into_owned())
+                });
+                match inner {
+                    Some(inner) if !inner.trim().is_empty() => {
+                        tracing::info!(target = %inner, "NavigateToUrl(ato://open): unwrapped");
+                        owned_url = inner;
+                        raw = owned_url.trim();
+                    }
+                    _ => {
+                        tracing::warn!(
+                            url = %raw,
+                            "NavigateToUrl(ato://open): missing 'handle' query parameter — ignored"
+                        );
+                        return;
+                    }
+                }
+            }
 
             // GitHub Import: github.com/owner/repo or https://github.com/...
             // is routed to the GitHub Import review surface rather than the
@@ -1175,6 +1266,22 @@ pub fn run(skip_onboarding: bool) {
             }
             match url::Url::parse(raw) {
                 Ok(parsed) if matches!(parsed.scheme(), "http" | "https") => {
+                    // Re-opening a URL whose origin is already hosted by an
+                    // open app window focuses that window instead of
+                    // spawning a duplicate — clicking an icon-bar tab (or
+                    // re-launching from the PWA) is a focus gesture.
+                    if let Some(existing) = find_open_external_window(cx, parsed.as_str()) {
+                        let window_id = existing.window_id().as_u64();
+                        tracing::info!(
+                            url = %parsed,
+                            window_id,
+                            "NavigateToUrl(http): focusing existing window"
+                        );
+                        cx.global_mut::<crate::window::content_windows::OpenContentWindows>()
+                            .focus(window_id);
+                        crate::window::raise_content_window(cx, existing);
+                        return;
+                    }
                     let open_mode = crate::config::load_config().desktop.capsule_open_mode;
                     match open_mode {
                         crate::config::CapsuleOpenMode::OsBrowser => {
@@ -1235,6 +1342,35 @@ pub fn run(skip_onboarding: bool) {
                     }
                 },
             );
+        });
+
+        // Shell Icon Bar — the fixed Ato icon opens/raises the Ato PWA
+        // Home control surface.
+        cx.on_action(|_: &ShowAtoHome, cx: &mut App| {
+            tracing::info!("ShowAtoHome action received");
+            crate::window::control_bar::dismiss_info_popup(cx);
+            if let Err(err) = crate::window::home::show_ato_home(cx) {
+                tracing::error!(error = %err, "ShowAtoHome: failed to open Home surface");
+            }
+        });
+
+        // Shell Icon Bar — a capsule tab raises its content window.
+        cx.on_action(|action: &FocusContentWindow, cx: &mut App| {
+            use crate::window::content_windows::OpenContentWindows;
+            let target = cx
+                .global::<OpenContentWindows>()
+                .get(action.window_id)
+                .map(|entry| entry.handle);
+            let Some(handle) = target else {
+                tracing::warn!(
+                    window_id = action.window_id,
+                    "FocusContentWindow: window not tracked (already closed?)"
+                );
+                return;
+            };
+            cx.global_mut::<OpenContentWindows>().focus(action.window_id);
+            tracing::info!(window_id = action.window_id, "FocusContentWindow: raising");
+            crate::window::raise_content_window(cx, handle);
         });
 
         // #174 — cycle through open app windows in MRU order via
@@ -1336,12 +1472,14 @@ pub fn run(skip_onboarding: bool) {
         // action is still registered so MCP / keybind paths reach
         // the same target.
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
+            // ato-start is retired: the "new window" gesture opens (or
+            // raises) the PWA Home instead.
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
                 |cx| {
-                    if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                        tracing::error!(error = %err, "failed to open start window");
+                    if let Err(err) = crate::window::home::show_ato_home(cx) {
+                        tracing::error!(error = %err, "OpenStartWindow: show_ato_home failed");
                     }
                 },
             );
@@ -1470,22 +1608,54 @@ fn reopen_start_or_quit(cx: &mut App) {
         {
             return;
         }
-        match crate::window::start_window::open_start_window(cx) {
-            Ok(()) => {
-                tracing::info!(
-                    "last content window closed — reopened Start capsule as landing surface"
-                );
+        // macOS: the Shell Icon Bar IS the landing surface. It stays
+        // visible (Dock icon + menu bar keep the app reachable and
+        // quittable), and its Ato icon reopens the Home window on
+        // demand. Windows: the bar is a taskbar-invisible toolwindow,
+        // so ask "Quit Ato?" instead — Quit exits, Reopen (or closing
+        // the prompt) brings the PWA Home back. ato-start is retired
+        // as a landing surface on both platforms.
+        if cfg!(target_os = "macos") {
+            crate::window::control_bar::ensure_bar_visible(cx);
+            tracing::info!(
+                "last content window closed — Shell Icon Bar remains as the landing surface"
+            );
+            return;
+        }
+        match crate::window::quit_prompt::open_quit_prompt_window(cx) {
+            Ok(_) => {
+                tracing::info!("last content window closed — quit prompt shown");
             }
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to reopen Start capsule after last window closed; only the Control Bar remains — quitting as abnormal"
+                    "failed to open the quit prompt after last window closed — quitting as abnormal"
                 );
                 crate::window::begin_shutdown();
                 cx.quit();
             }
         }
     });
+}
+
+/// Find an open ExternalUrl app window hosting the same web origin as
+/// `url` (session URLs are origin-unique). Used by NavigateToUrl(http)
+/// to focus instead of duplicating.
+fn find_open_external_window(cx: &App, url: &str) -> Option<gpui::AnyWindowHandle> {
+    use crate::state::GuestRoute;
+    use crate::window::content_windows::{ContentWindowKind, OpenContentWindows};
+
+    let target = url::Url::parse(url).ok()?;
+    cx.global::<OpenContentWindows>()
+        .mru_order()
+        .into_iter()
+        .find(|entry| match &entry.kind {
+            ContentWindowKind::AppWindow {
+                route: GuestRoute::ExternalUrl(open),
+            } => open.origin() == target.origin(),
+            _ => false,
+        })
+        .map(|entry| entry.handle)
 }
 
 /// Cycle focus through open app windows in MRU order.

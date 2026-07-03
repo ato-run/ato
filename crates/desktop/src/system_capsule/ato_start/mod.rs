@@ -503,6 +503,7 @@ pub fn build_start_snapshot(
                     crate::window::content_windows::ContentWindowKind::AppWindow { .. } => {
                         "AppWindow"
                     }
+                    crate::window::content_windows::ContentWindowKind::Home => "Home",
                     crate::window::content_windows::ContentWindowKind::Store => "Store",
                     crate::window::content_windows::ContentWindowKind::Start => "Start",
                     crate::window::content_windows::ContentWindowKind::Settings => "Settings",
