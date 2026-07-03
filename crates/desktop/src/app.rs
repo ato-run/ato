@@ -1133,7 +1133,11 @@ pub fn run(skip_onboarding: bool) {
                             launch_id = %id,
                             "NavigateToUrl(ato://launch): tracking launch"
                         );
-                        crate::launch_tracker::register_launch(cx, id, capsule_ref);
+                        if !crate::launch_tracker::register_launch(cx, id, capsule_ref) {
+                            tracing::warn!(
+                                "NavigateToUrl(ato://launch): tracker refused (cap reached) — ignored"
+                            );
+                        }
                     }
                     _ => {
                         tracing::warn!(

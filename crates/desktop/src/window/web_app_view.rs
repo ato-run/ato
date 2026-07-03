@@ -96,6 +96,18 @@ impl WebAppView {
         let queue_for_nav = nav_queue.clone();
         let ipc_queue: IpcLaunchQueue = Arc::new(Mutex::new(Vec::new()));
         let queue_for_ipc = ipc_queue.clone();
+        // The launch-handoff bridge is for the trusted PWA surface only:
+        // it exists iff this window's initial URL is on the configured
+        // `app_base_url` origin. Windows opened onto arbitrary ready
+        // app_urls never get `launch()` injected, and the IPC handler
+        // below independently re-checks the *posting page's* origin, so
+        // neither a hostile app page nor a trusted window navigated away
+        // can register launches (see origin check in the handler).
+        let launch_origin = launch_bridge_origin(
+            &url,
+            &crate::window::home::home_url(&crate::config::load_config()),
+        );
+        let ipc_launch_origin = launch_origin.clone();
         let _wv_guard = crate::webview_init_guard::WebviewInitGuard::new();
         let builder = WebViewBuilder::new()
             .with_url(url.as_str())
@@ -108,14 +120,27 @@ impl WebAppView {
                 env!("CARGO_PKG_VERSION")
             ))
             // Desktop marker, layer 2: JS global injected before page
-            // scripts so client code can feature-gate on it — plus the
-            // launch-handoff bridge (`__ATO_DESKTOP__.launch`).
-            .with_initialization_script(&desktop_init_script())
+            // scripts so client code can feature-gate on it — plus, on
+            // the trusted PWA origin only, the launch-handoff bridge
+            // (`__ATO_DESKTOP__.launch`).
+            .with_initialization_script(desktop_init_script(launch_origin.is_some()))
             // Launch handoff IPC: the wry callback runs off the GPUI
             // world — parse + validate only, queue for the drain loop
             // (same discipline as the intercepted-nav queue above).
+            // Fail-closed origin gate: the request URI is the URL of the
+            // page that posted, so launch registrations are only honored
+            // from the trusted PWA origin even if the window has since
+            // navigated elsewhere.
             .with_ipc_handler(move |request| {
-                if let Some(parsed) = parse_ipc_launch_message(request.body()) {
+                let page = request.uri().to_string();
+                if let Some(mut parsed) = parse_ipc_launch_message(request.body()) {
+                    if !ipc_origin_trusted(&page, ipc_launch_origin.as_ref()) {
+                        tracing::warn!(
+                            page = %page,
+                            "web app view: launch IPC from untrusted origin — refused"
+                        );
+                        parsed.outcome = Err("untrusted_origin".to_string());
+                    }
                     if let Ok(mut queue) = queue_for_ipc.lock() {
                         queue.push(parsed);
                     }
@@ -219,15 +244,50 @@ fn spawn_intercepted_nav_drain(
     .detach();
 }
 
-/// The `window.__ATO_DESKTOP__` init script: version/platform marker plus
-/// the launch-handoff bridge. `launch({launch_id, capsule_ref})` returns a
+/// The launch bridge exists only for the trusted PWA surface: returns the
+/// allowed origin when this window's initial URL sits on the configured
+/// `app_base_url` (PWA Home) origin, `None` for every other window —
+/// arbitrary ready app_urls hosted in a WebAppView must not be able to
+/// register launches at all.
+fn launch_bridge_origin(initial: &Url, home: &Url) -> Option<url::Origin> {
+    let origin = initial.origin();
+    (origin.is_tuple() && origin == home.origin()).then_some(origin)
+}
+
+/// Fail-closed check that the page which posted a launch IPC message is
+/// on the allowed origin. `allowed = None` (bridge disabled for this
+/// window) refuses everything; unparseable page URLs refuse too.
+fn ipc_origin_trusted(page_url: &str, allowed: Option<&url::Origin>) -> bool {
+    let Some(allowed) = allowed else {
+        return false;
+    };
+    match Url::parse(page_url) {
+        Ok(page) => {
+            let origin = page.origin();
+            origin.is_tuple() && &origin == allowed
+        }
+        Err(_) => false,
+    }
+}
+
+/// The `window.__ATO_DESKTOP__` init script: version/platform marker plus,
+/// when `launch_bridge` is set (trusted PWA origin only), the
+/// launch-handoff bridge. `launch({launch_id, capsule_ref})` returns a
 /// Promise resolving to the Desktop's ack (`{accepted, reason?}`) — the
 /// PWA keeps polling the launch itself until `accepted:true` comes back
 /// (plan §4: no orphan launches). Only ids ride the channel; app_url /
 /// tokens are rejected Rust-side by shape validation.
-fn desktop_init_script() -> String {
+fn desktop_init_script(launch_bridge: bool) -> String {
+    let marker = format!(
+        r#"window.__ATO_DESKTOP__ = {{ version: "{version}", platform: "{platform}" }};"#,
+        version = env!("CARGO_PKG_VERSION"),
+        platform = std::env::consts::OS,
+    );
+    if !launch_bridge {
+        return marker;
+    }
     format!(
-        r#"window.__ATO_DESKTOP__ = {{ version: "{version}", platform: "{platform}" }};
+        r#"{marker}
 window.__ATO_DESKTOP_PENDING__ = (function() {{
     var pending = {{}};
     var next = 1;
@@ -256,9 +316,7 @@ window.__ATO_DESKTOP__.launch = function(payload) {{
             resolve({{ accepted: false, reason: "ipc_unavailable" }});
         }}
     }});
-}};"#,
-        version = env!("CARGO_PKG_VERSION"),
-        platform = std::env::consts::OS,
+}};"#
     )
 }
 
@@ -354,16 +412,24 @@ fn spawn_ipc_launch_drain(cx: &mut Context<WebAppView>, queue: IpcLaunchQueue) {
                 for request in drained {
                     let (accepted, reason) = match request.outcome {
                         Ok(handoff) => {
-                            tracing::info!(
-                                launch_id = %handoff.launch_id,
-                                "web app view: launch handoff accepted"
-                            );
-                            crate::launch_tracker::register_launch(
+                            let launch_id = handoff.launch_id.clone();
+                            if crate::launch_tracker::register_launch(
                                 cx,
                                 handoff.launch_id,
                                 handoff.capsule_ref,
-                            );
-                            (true, None)
+                            ) {
+                                tracing::info!(
+                                    launch_id = %launch_id,
+                                    "web app view: launch handoff accepted"
+                                );
+                                (true, None)
+                            } else {
+                                // Tracker at capacity (or backstop
+                                // validation refused): honest nack so the
+                                // PWA keeps polling instead of orphaning
+                                // the launch (plan §4).
+                                (false, Some("launch_limit".to_string()))
+                            }
                         }
                         Err(reason) => {
                             tracing::warn!(
@@ -471,11 +537,60 @@ mod tests {
 
     #[test]
     fn desktop_init_script_defines_marker_and_launch_bridge() {
-        let script = desktop_init_script();
+        let script = desktop_init_script(true);
         assert!(script.contains("window.__ATO_DESKTOP__ = {"));
         assert!(script.contains("window.__ATO_DESKTOP__.launch = function"));
         assert!(script.contains("window.__ATO_DESKTOP_PENDING__"));
         assert!(script.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn desktop_init_script_omits_launch_bridge_for_untrusted_windows() {
+        let script = desktop_init_script(false);
+        assert!(script.contains("window.__ATO_DESKTOP__ = {"));
+        assert!(script.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!script.contains(".launch"));
+        assert!(!script.contains("__ATO_DESKTOP_PENDING__"));
+    }
+
+    #[test]
+    fn launch_bridge_exists_only_on_the_pwa_origin() {
+        let home = Url::parse("https://app.ato.run").unwrap();
+        // Same origin (any path) → bridge enabled.
+        assert!(
+            launch_bridge_origin(&Url::parse("https://app.ato.run/open/x").unwrap(), &home)
+                .is_some()
+        );
+        // Different host / scheme / port, or an arbitrary app_url → none.
+        for other in [
+            "https://abc123.app.ato.run/",
+            "http://app.ato.run/",
+            "https://app.ato.run:8443/",
+            "https://evil.example/",
+        ] {
+            assert!(
+                launch_bridge_origin(&Url::parse(other).unwrap(), &home).is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn ipc_origin_check_is_fail_closed() {
+        let allowed = Url::parse("https://app.ato.run").unwrap().origin();
+        assert!(ipc_origin_trusted(
+            "https://app.ato.run/run?x=1",
+            Some(&allowed)
+        ));
+        // Wrong origin, opaque origin, garbage, or bridge-disabled → refused.
+        assert!(!ipc_origin_trusted("https://evil.example/", Some(&allowed)));
+        assert!(!ipc_origin_trusted(
+            "https://sess.app.ato.run/",
+            Some(&allowed)
+        ));
+        assert!(!ipc_origin_trusted("data:text/html,hi", Some(&allowed)));
+        assert!(!ipc_origin_trusted("not a url", Some(&allowed)));
+        assert!(!ipc_origin_trusted("https://app.ato.run/", None));
     }
 
     #[test]
