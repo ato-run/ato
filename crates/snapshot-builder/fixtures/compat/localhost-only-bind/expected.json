@@ -1,0 +1,11 @@
+{
+  "class": "negative",
+  "eligibility": "pass",
+  "runtime": "python",
+  "probe_synthesized": false,
+  "start_cmd": "python3 app.py",
+  "seal": "failed",
+  "seal_failure_stage": "build_ready_state",
+  "manifest_source": "repo",
+  "notes": "Guests must bind 0.0.0.0 — the probe and proxy arrive over the TAP, not loopback."
+}
