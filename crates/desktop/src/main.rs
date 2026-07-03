@@ -22,6 +22,7 @@ mod net_client;
 mod netd;
 mod orchestrator;
 mod proc_util;
+mod remote_runs;
 mod retention;
 mod runner_agent;
 mod runtime_control_client;

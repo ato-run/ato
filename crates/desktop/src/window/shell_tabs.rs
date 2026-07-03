@@ -13,6 +13,7 @@
 
 use gpui::SharedString;
 
+use crate::remote_runs::RemoteRun;
 use crate::state::GuestRoute;
 use crate::window::content_windows::{
     CapsuleWindowStatus, ContentWindowKind, OpenContentWindows,
@@ -38,8 +39,12 @@ pub enum ShellTabStatus {
 pub struct ShellTab {
     pub kind: ShellTabKind,
     /// GPUI window id backing this tab. `None` for the Ato Home tab when
-    /// no Home window is currently open (clicking it opens one).
+    /// no Home window is currently open (clicking it opens one), and for
+    /// remote-run tabs (no local window yet).
     pub window_id: Option<u64>,
+    /// For a tab with no local window (an app already running on another
+    /// runner): the URL to open when clicked.
+    pub open_url: Option<String>,
     pub title: SharedString,
     /// Fallback avatar glyph — first letter of the capsule title.
     pub initial: SharedString,
@@ -73,6 +78,32 @@ pub fn is_capsule_tab_entry(kind: &ContentWindowKind, app_base_url: &str) -> boo
         } => !same_origin(url.as_str(), app_base_url),
         ContentWindowKind::AppWindow { .. } => true,
         _ => false,
+    }
+}
+
+/// Display title for a remote run. `label` falls back to the raw run id
+/// when the run has no source metadata — prefer the capsule's
+/// `publisher/slug` slug in that case so the avatar letter is meaningful.
+pub fn remote_run_title(run: &RemoteRun) -> String {
+    let label_is_run_id = run.label == run.id;
+    if label_is_run_id
+        && let Some(scoped) = run
+            .capsule_scoped_id
+            .as_deref()
+            .and_then(|scoped| scoped.rsplit('/').next())
+            .filter(|slug| !slug.is_empty())
+    {
+        return scoped.to_string();
+    }
+    run.label.clone()
+}
+
+/// Serving states count as Running; everything else still in the active
+/// set (launching / provisioning / stopping…) shows the starting dot.
+pub fn remote_run_status(status: &str) -> ShellTabStatus {
+    match status {
+        "running" | "ready" => ShellTabStatus::Running,
+        _ => ShellTabStatus::Starting,
     }
 }
 
@@ -121,7 +152,11 @@ pub fn avatar_hue(title: &str) -> f32 {
 /// The Ato Home tab is always first. Capsule tabs follow in window-id
 /// order (creation order) — deliberately NOT MRU order, so icons don't
 /// jump around as the user switches between them.
-pub fn derive_shell_tabs(windows: &OpenContentWindows, app_base_url: &str) -> Vec<ShellTab> {
+pub fn derive_shell_tabs(
+    windows: &OpenContentWindows,
+    app_base_url: &str,
+    remote_runs: &[RemoteRun],
+) -> Vec<ShellTab> {
     let entries = windows.mru_order();
     let frontmost_id = entries
         .first()
@@ -135,6 +170,7 @@ pub fn derive_shell_tabs(windows: &OpenContentWindows, app_base_url: &str) -> Ve
     let mut tabs = vec![ShellTab {
         kind: ShellTabKind::AtoHome,
         window_id: home_window_id,
+        open_url: None,
         title: SharedString::from("Ato"),
         initial: SharedString::from("A"),
         status: ShellTabStatus::Running,
@@ -155,6 +191,7 @@ pub fn derive_shell_tabs(windows: &OpenContentWindows, app_base_url: &str) -> Ve
             ShellTab {
                 kind: ShellTabKind::Capsule,
                 window_id: Some(window_id),
+                open_url: None,
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
                 status: tab_status(entry.capsule.as_ref().map(|capsule| &capsule.status)),
@@ -164,12 +201,76 @@ pub fn derive_shell_tabs(windows: &OpenContentWindows, app_base_url: &str) -> Ve
         .collect();
     capsule_tabs.sort_by_key(|tab| tab.window_id);
     tabs.extend(capsule_tabs);
+
+    // Apps already running on the account's other runners. A remote run
+    // that is already open as a local window (same origin) stays a
+    // window tab; the rest get their own icon — clicking opens the run's
+    // public URL as an independent window.
+    let mut remote_tabs: Vec<ShellTab> = remote_runs
+        .iter()
+        .filter_map(|run| {
+            let open_url = run.open_url()?;
+            let already_open = entries.iter().any(|entry| match &entry.kind {
+                ContentWindowKind::AppWindow {
+                    route: GuestRoute::ExternalUrl(url),
+                } => same_origin(url.as_str(), open_url),
+                _ => false,
+            });
+            if already_open {
+                return None;
+            }
+            let title = remote_run_title(run);
+            Some(ShellTab {
+                kind: ShellTabKind::Capsule,
+                window_id: None,
+                open_url: Some(open_url.to_string()),
+                initial: SharedString::from(avatar_initial(&title)),
+                title: SharedString::from(title),
+                status: remote_run_status(&run.status),
+                is_active: false,
+            })
+        })
+        .collect();
+    remote_tabs.sort_by(|a, b| a.title.cmp(&b.title));
+    tabs.extend(remote_tabs);
     tabs
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote(label: &str, status: &str, app_url: Option<&str>) -> RemoteRun {
+        RemoteRun {
+            id: format!("run_{label}"),
+            label: label.to_string(),
+            capsule_scoped_id: None,
+            status: status.to_string(),
+            runner_display_name: Some("oci-a1".to_string()),
+            app_url: app_url.map(str::to_string),
+            ready_url: None,
+        }
+    }
+
+    #[test]
+    fn remote_runs_become_capsule_tabs_after_home() {
+        let windows = OpenContentWindows::default();
+        let runs = vec![
+            remote("hello", "running", Some("https://abc.app.ato.run/")),
+            remote("booting", "launching", Some("https://def.app.ato.run/")),
+            remote("no-url", "running", None),
+        ];
+        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &runs);
+        assert_eq!(tabs.len(), 3); // home + 2 remote (no-url dropped)
+        assert_eq!(tabs[0].kind, ShellTabKind::AtoHome);
+        let hello = tabs.iter().find(|t| t.title.as_ref() == "hello").unwrap();
+        assert_eq!(hello.status, ShellTabStatus::Running);
+        assert_eq!(hello.initial.as_ref(), "H");
+        assert_eq!(hello.open_url.as_deref(), Some("https://abc.app.ato.run/"));
+        assert!(hello.window_id.is_none());
+        let booting = tabs.iter().find(|t| t.title.as_ref() == "booting").unwrap();
+        assert_eq!(booting.status, ShellTabStatus::Starting);
+    }
 
     fn external(url: &str) -> ContentWindowKind {
         ContentWindowKind::AppWindow {
@@ -245,6 +346,23 @@ mod tests {
             tab_status(Some(&CapsuleWindowStatus::Failed)),
             ShellTabStatus::Error
         );
+    }
+
+    #[test]
+    fn remote_run_title_prefers_capsule_slug_over_run_id_label() {
+        let mut run = remote("01KW12MFHY", "ready", Some("https://x.app.ato.run/"));
+        run.id = "01KW12MFHY".to_string();
+        run.capsule_scoped_id = Some("community/immich".to_string());
+        assert_eq!(remote_run_title(&run), "immich");
+        run.label = "My Immich".to_string();
+        assert_eq!(remote_run_title(&run), "My Immich");
+    }
+
+    #[test]
+    fn remote_run_status_treats_ready_as_running() {
+        assert_eq!(remote_run_status("ready"), ShellTabStatus::Running);
+        assert_eq!(remote_run_status("running"), ShellTabStatus::Running);
+        assert_eq!(remote_run_status("launching"), ShellTabStatus::Starting);
     }
 
     #[test]

@@ -29,19 +29,20 @@ use gpui::{
 use gpui_component::{Icon, IconName};
 
 use crate::app::{
-    FocusContentWindow, FocusNextAppWindow, FocusPrevAppWindow, OpenCardSwitcher,
+    FocusContentWindow, FocusNextAppWindow, FocusPrevAppWindow, NavigateToUrl, OpenCardSwitcher,
     OpenContentWindowLogs, OpenContentWindowSettings, ShowAtoHome,
 };
 use crate::config::{ControlBarMode, load_config, save_config};
 use crate::localization::{LocaleCode, resolve_locale, tr};
+use crate::remote_runs::RemoteRunsSnapshot;
 use crate::window::content_windows::OpenContentWindows;
 use crate::window::gestures::{GestureAction, GestureState};
 use crate::window::shell_tabs::{self, ShellTab, ShellTabKind, ShellTabStatus};
 
 const BAR_HEIGHT: f32 = 56.0;
-/// Width cap so a pathological number of open capsules cannot span the
-/// whole display; beyond this the icons compress via flex.
-const BAR_MAX_WIDTH: f32 = 720.0;
+/// Fixed width of the (transparent) bar window. The visible pill is
+/// centered inside and sized by its icon count.
+const BAR_WIDTH: f32 = 720.0;
 const COMPACT_BAR_WIDTH: f32 = 360.0;
 const COMPACT_HEIGHT: f32 = 10.0;
 
@@ -226,35 +227,13 @@ pub fn focus_control_bar_input(cx: &mut App) -> Result<AnyWindowHandle> {
     Ok(handle)
 }
 
-/// Number of capsule tabs currently shown in the icon bar. Drives the
-/// pill width so it hugs its icons instead of spanning a fixed 720px.
-fn capsule_tab_count(cx: &App, app_base_url: &str) -> usize {
-    cx.global::<OpenContentWindows>()
-        .mru_order()
-        .iter()
-        .filter(|entry| shell_tabs::is_capsule_tab_entry(&entry.kind, app_base_url))
-        .count()
-}
-
-/// Pill width for the expanded icon bar:
-/// [pad] [Ato] ([gap] [separator] [gap] [tab]×n with gaps) [pad].
-fn expanded_bar_width(capsule_count: usize) -> f32 {
-    let mut width = 2.0 * BAR_PAD_X + TAB_BUTTON;
-    if capsule_count > 0 {
-        width += TAB_GAP + 1.0 + TAB_GAP; // separator span
-        width += capsule_count as f32 * TAB_BUTTON;
-        width += (capsule_count - 1) as f32 * TAB_GAP;
-    }
-    width.min(BAR_MAX_WIDTH)
-}
-
-fn bar_size(cx: &App, expanded: bool) -> (f32, f32) {
+/// The bar window is a FIXED-size transparent strip; the visible pill
+/// inside hugs its icons via GPUI layout. The native window is never
+/// resized per tab count — external setFrame changes proved unreliable
+/// to synchronize with GPUI's internal size, breaking hit-testing.
+fn bar_size(_cx: &App, expanded: bool) -> (f32, f32) {
     if expanded {
-        let app_base_url = cx.global::<ControlBarController>().app_base_url.clone();
-        (
-            expanded_bar_width(capsule_tab_count(cx, &app_base_url)),
-            BAR_HEIGHT,
-        )
+        (BAR_WIDTH, BAR_HEIGHT)
     } else {
         (COMPACT_BAR_WIDTH, COMPACT_HEIGHT)
     }
@@ -321,6 +300,10 @@ impl ControlBarShellPlaceholder {
         let locale = resolve_locale(config.general.language);
 
         cx.observe_global::<OpenContentWindows>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
+        cx.observe_global::<RemoteRunsSnapshot>(|_view, cx| {
             cx.notify();
         })
         .detach();
@@ -402,29 +385,13 @@ fn entry_handle_to_window_id(entry: &crate::window::content_windows::ContentWind
 }
 
 impl Render for ControlBarShellPlaceholder {
-    fn render(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
         let expanded = cx.global::<ControlBarController>().should_render_expanded();
         let tabs = shell_tabs::derive_shell_tabs(
             cx.global::<OpenContentWindows>(),
             &self.app_base_url,
+            &cx.global::<RemoteRunsSnapshot>().runs,
         );
-
-        // Keep the pill window hugging its icons: when the tab set
-        // changes (capsule opened/closed) the desired width changes.
-        // The native resize must NOT run synchronously inside render —
-        // setFrame re-enters GPUI window events mid-update and panics
-        // with "RefCell already borrowed" — so defer it past this pass.
-        if expanded {
-            let desired = expanded_bar_width(
-                tabs.iter()
-                    .filter(|tab| tab.kind == ShellTabKind::Capsule)
-                    .count(),
-            );
-            let current = f32::from(window.bounds().size.width);
-            if (current - desired).abs() > 0.5 {
-                cx.defer(move |cx| resize_bar_window(cx, true));
-            }
-        }
 
         div()
             .id("control-bar-hover-zone")
@@ -578,7 +545,7 @@ fn shell_icon_bar(tabs: Vec<ShellTab>) -> impl IntoElement {
 
     let mut bar = bar_surface_shape(
         div()
-            .size_full()
+            .h(px(BAR_HEIGHT))
             .px(px(BAR_PAD_X))
             .flex()
             .items_center()
@@ -651,9 +618,10 @@ fn ato_home_button(is_active: bool) -> impl IntoElement {
 /// the avatar is the capsule's initial on a stable per-title tint;
 /// status is a small dot badge (amber = starting, red = failed).
 fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
-    let Some(window_id) = tab.window_id else {
-        // Defensive: capsule tabs always carry a window id.
-        return div().into_any_element();
+    let slot_id = match (tab.window_id, tab.open_url.as_deref()) {
+        (Some(window_id), _) => SharedString::from(format!("shell-tab-{window_id}")),
+        (None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
+        (None, None) => return div().into_any_element(),
     };
     let hue = shell_tabs::avatar_hue(&tab.title);
     let dimmed = tab.status == ShellTabStatus::Starting;
@@ -677,15 +645,19 @@ fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
         ShellTabStatus::Error => Some(rgb(0xef4444)),
     };
 
-    let mut slot = tab_slot(
-        SharedString::from(format!("shell-tab-{window_id}")),
-        tab.is_active,
-    )
-    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-        cx.stop_propagation();
-        window.dispatch_action(Box::new(FocusContentWindow { window_id }), cx);
-    })
-    .child(avatar);
+    let window_id = tab.window_id;
+    let open_url = tab.open_url.clone();
+    let mut slot = tab_slot(slot_id, tab.is_active)
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            if let Some(window_id) = window_id {
+                window.dispatch_action(Box::new(FocusContentWindow { window_id }), cx);
+            } else if let Some(url) = open_url.clone() {
+                tracing::info!(url = %url, "shell icon bar: remote run tab clicked");
+                window.dispatch_action(Box::new(NavigateToUrl { url }), cx);
+            }
+        })
+        .child(avatar);
 
     if let Some(color) = badge_color {
         slot = slot.child(

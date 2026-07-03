@@ -584,6 +584,9 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the dedicated Ato PWA Home window (the Shell
         // Icon Bar's fixed Ato icon opens/raises it).
         cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
+        // Account-wide active runs on other runners — polled from the
+        // account API so the Shell Icon Bar can show them as tabs.
+        crate::remote_runs::start_remote_runs_poller(cx);
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
