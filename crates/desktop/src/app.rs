@@ -794,9 +794,6 @@ pub fn run(skip_onboarding: bool) {
                     }
                 }
 
-            // If the closed window was the bar's AppKit parent, the bar got
-            // ordered out with it — rescue it back on screen.
-            crate::window::control_bar::ensure_bar_visible(cx);
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
@@ -1616,7 +1613,6 @@ fn reopen_start_or_quit(cx: &mut App) {
         // the prompt) brings the PWA Home back. ato-start is retired
         // as a landing surface on both platforms.
         if cfg!(target_os = "macos") {
-            crate::window::control_bar::ensure_bar_visible(cx);
             tracing::info!(
                 "last content window closed — Shell Icon Bar remains as the landing surface"
             );
