@@ -215,6 +215,46 @@ pub fn toggle_control_bar(cx: &mut App) -> Result<Option<AnyWindowHandle>> {
     }
 }
 
+/// Rescue the bar after a content window closes. The bar is an AppKit
+/// child of some content window; when that parent closes, AppKit orders
+/// the bar out with it and it "disappears". Detach it from the (dead)
+/// parent, restore its floating level, order it back on screen, and
+/// re-attach it to the new frontmost content window if one exists.
+/// Deferred slightly so the closing window's teardown finishes first.
+pub fn ensure_bar_visible(cx: &mut App) {
+    let Some(bar) = cx.global::<ControlBarController>().handle else {
+        return;
+    };
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    fe.spawn(async move {
+        be.timer(std::time::Duration::from_millis(120)).await;
+        aa.update(|cx| {
+            // The bar itself may have closed in the meantime.
+            if cx.global::<ControlBarController>().handle != Some(bar) {
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(err) = super::macos::refloat_window(cx, bar) {
+                    tracing::debug!(error = %err, "ensure_bar_visible: refloat failed");
+                    return;
+                }
+                if let Some(entry) = cx.global::<OpenContentWindows>().frontmost()
+                    && let Err(err) = super::macos::reattach_child(cx, entry.handle, bar)
+                {
+                    tracing::debug!(error = %err, "ensure_bar_visible: re-attach failed");
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (bar, cx);
+        });
+    })
+    .detach();
+}
+
 /// Show and expand the icon bar. Historically this focused the omnibar
 /// text input; the icon bar has no URL input (by design — arbitrary URL
 /// navigation is not a user-facing affordance), so Cmd+L now just

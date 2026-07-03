@@ -318,6 +318,20 @@ pub fn attach_as_child(
     Ok(())
 }
 
+/// Detach `child` from its parent (if any), restore its floating level
+/// and order it back on screen. Rescues a child window that AppKit
+/// ordered out together with a closing parent.
+pub fn refloat_window(cx: &mut App, child: AnyWindowHandle) -> Result<(), String> {
+    let child_win = ns_window_for(cx, child)
+        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
+    if let Some(old_parent) = child_win.parentWindow() {
+        old_parent.removeChildWindow(&child_win);
+    }
+    child_win.setLevel(NSFloatingWindowLevel);
+    child_win.orderFrontRegardless();
+    Ok(())
+}
+
 /// Re-parent `child` onto `new_parent`, detaching it from its current
 /// parent window first (AppKit does not reparent implicitly — adding a
 /// child that already has a parent corrupts the ordering).

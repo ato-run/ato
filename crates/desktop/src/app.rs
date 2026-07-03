@@ -769,7 +769,33 @@ pub fn run(skip_onboarding: bool) {
                     cx.global_mut::<crate::window::ControlBarController>()
                         .clear_window(handle);
                     tracing::info!("Control Bar window closed; controller cleared");
+                    // The bar must never stay gone: whatever closed it
+                    // (stray Cmd+W, programmatic remove_window), reopen it
+                    // unless the app is quitting. Deferred so the close
+                    // finishes unwinding first.
+                    if !crate::window::is_shutting_down() {
+                        crate::system_capsule::ipc::defer_after_dispatch_for(
+                            cx,
+                            std::time::Duration::from_millis(150),
+                            |cx| {
+                                if crate::window::is_shutting_down() {
+                                    return;
+                                }
+                                match crate::window::open_focus_control_bar(cx) {
+                                    Ok(_) => tracing::info!("Control Bar reopened after close"),
+                                    Err(err) => tracing::warn!(
+                                        error = %err,
+                                        "Control Bar reopen after close failed"
+                                    ),
+                                }
+                            },
+                        );
+                    }
                 }
+
+            // If the closed window was the bar's AppKit parent, the bar got
+            // ordered out with it — rescue it back on screen.
+            crate::window::control_bar::ensure_bar_visible(cx);
 
             // Clear singleton slots when their tracked window closes
             // so the next Settings / Store / switcher click opens a
