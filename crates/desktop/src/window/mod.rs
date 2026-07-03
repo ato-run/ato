@@ -68,6 +68,34 @@ pub use control_bar::{
 };
 pub use orchestrator::open_app_window;
 
+/// Raise a content window from a Shell Icon Bar gesture.
+///
+/// The bar is an AppKit CHILD of some content window; clicking it makes
+/// macOS bring that parent's window group forward as part of the click,
+/// which overrides a synchronous `activate_window` on the target. Defer
+/// the raise until the click activation has settled, then activate the
+/// target and re-parent the bar onto it so the pair stays on top
+/// together.
+pub fn raise_content_window(cx: &mut gpui::App, handle: gpui::AnyWindowHandle) {
+    let async_app = cx.to_async();
+    let fe = async_app.foreground_executor().clone();
+    let be = async_app.background_executor().clone();
+    let aa = async_app.clone();
+    fe.spawn(async move {
+        be.timer(std::time::Duration::from_millis(80)).await;
+        aa.update(|cx| {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            #[cfg(target_os = "macos")]
+            if let Some(bar) = cx.global::<ControlBarController>().handle
+                && let Err(err) = macos::reattach_child(cx, handle, bar)
+            {
+                tracing::debug!(error = %err, "raise_content_window: bar re-attach failed");
+            }
+        });
+    })
+    .detach();
+}
+
 pub(crate) fn stop_session_once_with_ui_completion(cx: &mut gpui::App, session_id: &str) {
     let request = cx
         .global_mut::<crate::state::session::SessionRegistry>()

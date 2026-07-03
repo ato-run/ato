@@ -315,6 +315,22 @@ pub fn attach_as_child(
     Ok(())
 }
 
+/// Re-parent `child` onto `new_parent`, detaching it from its current
+/// parent window first (AppKit does not reparent implicitly — adding a
+/// child that already has a parent corrupts the ordering).
+pub fn reattach_child(
+    cx: &mut App,
+    new_parent: AnyWindowHandle,
+    child: AnyWindowHandle,
+) -> Result<(), String> {
+    let child_win = ns_window_for(cx, child)
+        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
+    if let Some(old_parent) = child_win.parentWindow() {
+        old_parent.removeChildWindow(&child_win);
+    }
+    attach_as_child(cx, new_parent, child)
+}
+
 // ── WKWebView screenshot helpers ──────────────────────────────────
 //
 // `screencapture -l <windowID>` cannot capture Metal-backed windows

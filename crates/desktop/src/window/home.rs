@@ -92,12 +92,10 @@ pub fn show_ato_home(cx: &mut App) -> Result<()> {
         .find(|entry| matches!(entry.kind, ContentWindowKind::Home));
     if let Some(entry) = existing {
         let window_id = entry.handle.window_id().as_u64();
-        if entry
-            .handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
-        {
+        // Probe liveness cheaply before treating the entry as raisable.
+        if entry.handle.update(cx, |_, _, _| ()).is_ok() {
             cx.global_mut::<OpenContentWindows>().focus(window_id);
+            crate::window::raise_content_window(cx, entry.handle);
             tracing::info!(window_id, "show_ato_home: raised existing Home window");
             return Ok(());
         }

@@ -1234,7 +1234,7 @@ pub fn run(skip_onboarding: bool) {
                         );
                         cx.global_mut::<crate::window::content_windows::OpenContentWindows>()
                             .focus(window_id);
-                        let _ = existing.update(cx, |_, window, _| window.activate_window());
+                        crate::window::raise_content_window(cx, existing);
                         return;
                     }
                     let open_mode = crate::config::load_config().desktop.capsule_open_mode;
@@ -1325,7 +1325,7 @@ pub fn run(skip_onboarding: bool) {
             };
             cx.global_mut::<OpenContentWindows>().focus(action.window_id);
             tracing::info!(window_id = action.window_id, "FocusContentWindow: raising");
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            crate::window::raise_content_window(cx, handle);
         });
 
         // #174 — cycle through open app windows in MRU order via
