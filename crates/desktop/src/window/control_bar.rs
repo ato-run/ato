@@ -626,18 +626,31 @@ fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
     let hue = shell_tabs::avatar_hue(&tab.title);
     let dimmed = tab.status == ShellTabStatus::Starting;
 
-    let avatar = div()
-        .w(px(30.0))
-        .h(px(30.0))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_full()
-        .bg(hsla(hue, 0.45, 0.55, if dimmed { 0.45 } else { 1.0 }))
-        .text_color(rgb(0xffffff))
-        .text_size(px(14.0))
-        .font_weight(FontWeight(600.0))
-        .child(tab.initial.clone());
+    // Real Store icon when cached locally, else the letter avatar.
+    let avatar = if let Some(icon_path) = tab.icon_path.clone() {
+        div()
+            .w(px(30.0))
+            .h(px(30.0))
+            .rounded_full()
+            .overflow_hidden()
+            .when(dimmed, |slot| slot.opacity(0.45))
+            .child(gpui::img(icon_path).w(px(30.0)).h(px(30.0)))
+            .into_any_element()
+    } else {
+        div()
+            .w(px(30.0))
+            .h(px(30.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(hsla(hue, 0.45, 0.55, if dimmed { 0.45 } else { 1.0 }))
+            .text_color(rgb(0xffffff))
+            .text_size(px(14.0))
+            .font_weight(FontWeight(600.0))
+            .child(tab.initial.clone())
+            .into_any_element()
+    };
 
     let badge_color = match tab.status {
         ShellTabStatus::Running => None,

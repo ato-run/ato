@@ -11,6 +11,8 @@
 //! the real window set. URLs / local origins are deliberately absent from
 //! this model — the icon bar never shows them.
 
+use std::path::PathBuf;
+
 use gpui::SharedString;
 
 use crate::remote_runs::RemoteRun;
@@ -45,6 +47,9 @@ pub struct ShellTab {
     /// For a tab with no local window (an app already running on another
     /// runner): the URL to open when clicked.
     pub open_url: Option<String>,
+    /// Local cache file of the capsule's Store icon; `None` falls back to
+    /// the letter avatar.
+    pub icon_path: Option<PathBuf>,
     pub title: SharedString,
     /// Fallback avatar glyph — first letter of the capsule title.
     pub initial: SharedString,
@@ -85,6 +90,9 @@ pub fn is_capsule_tab_entry(kind: &ContentWindowKind, app_base_url: &str) -> boo
 /// when the run has no source metadata — prefer the capsule's
 /// `publisher/slug` slug in that case so the avatar letter is meaningful.
 pub fn remote_run_title(run: &RemoteRun) -> String {
+    if let Some(name) = run.display_name.as_deref().filter(|name| !name.is_empty()) {
+        return name.to_string();
+    }
     let label_is_run_id = run.label == run.id;
     if label_is_run_id
         && let Some(scoped) = run
@@ -171,6 +179,7 @@ pub fn derive_shell_tabs(
         kind: ShellTabKind::AtoHome,
         window_id: home_window_id,
         open_url: None,
+        icon_path: None,
         title: SharedString::from("Ato"),
         initial: SharedString::from("A"),
         status: ShellTabStatus::Running,
@@ -182,16 +191,32 @@ pub fn derive_shell_tabs(
         .filter(|entry| is_capsule_tab_entry(&entry.kind, app_base_url))
         .map(|entry| {
             let window_id = entry.handle.window_id().as_u64();
-            let title = entry
-                .capsule
-                .as_ref()
-                .map(|capsule| capsule.title.clone())
-                .filter(|title| !title.is_empty())
+            // A window opened FROM a remote run (same origin) inherits the
+            // run's Store icon and display name.
+            let matching_run = match &entry.kind {
+                ContentWindowKind::AppWindow {
+                    route: GuestRoute::ExternalUrl(url),
+                } => remote_runs.iter().find(|run| {
+                    run.open_url()
+                        .is_some_and(|open| same_origin(url.as_str(), open))
+                }),
+                _ => None,
+            };
+            let title = matching_run
+                .map(remote_run_title)
+                .or_else(|| {
+                    entry
+                        .capsule
+                        .as_ref()
+                        .map(|capsule| capsule.title.clone())
+                        .filter(|title| !title.is_empty())
+                })
                 .unwrap_or_else(|| entry.title.to_string());
             ShellTab {
                 kind: ShellTabKind::Capsule,
                 window_id: Some(window_id),
                 open_url: None,
+                icon_path: matching_run.and_then(|run| run.icon_path.clone()),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
                 status: tab_status(entry.capsule.as_ref().map(|capsule| &capsule.status)),
@@ -224,6 +249,7 @@ pub fn derive_shell_tabs(
                 kind: ShellTabKind::Capsule,
                 window_id: None,
                 open_url: Some(open_url.to_string()),
+                icon_path: run.icon_path.clone(),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
                 status: remote_run_status(&run.status),
@@ -249,7 +275,16 @@ mod tests {
             runner_display_name: Some("oci-a1".to_string()),
             app_url: app_url.map(str::to_string),
             ready_url: None,
+            display_name: None,
+            icon_path: None,
         }
+    }
+
+    #[test]
+    fn remote_run_title_prefers_store_display_name() {
+        let mut run = remote("x", "ready", Some("https://x.app.ato.run/"));
+        run.display_name = Some("Immich".to_string());
+        assert_eq!(remote_run_title(&run), "Immich");
     }
 
     #[test]
