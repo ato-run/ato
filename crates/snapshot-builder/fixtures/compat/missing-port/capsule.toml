@@ -4,9 +4,9 @@ schema_version = "0.3"
 name = "compat-missing-port"
 version = "0.1.0"
 type = "app"
-default_target = "app"
+default_target = "web"
 
-[targets.app]
+[targets.web]
 runtime = "source"
 driver = "python"
 run = "python3 app.py"
