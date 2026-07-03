@@ -584,6 +584,7 @@ pub fn run(skip_onboarding: bool) {
         // Slot tracking the dedicated Ato PWA Home window (the Shell
         // Icon Bar's fixed Ato icon opens/raises it).
         cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
+        cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot::default());
         // Account-wide active runs on other runners — polled from the
         // account API so the Shell Icon Bar can show them as tabs.
         crate::remote_runs::start_remote_runs_poller(cx);
@@ -935,7 +936,25 @@ pub fn run(skip_onboarding: bool) {
             // landing surface (its quit button is the explicit exit). If the
             // Start page cannot be opened and only the Control Bar remains,
             // that is an unrecoverable state — quit as abnormal.
-            if !crate::window::is_shutting_down()
+            // Closing the quit prompt itself means "Reopen": bring the
+            // PWA Home back instead of re-showing the prompt.
+            let prompt_slot = cx
+                .global::<crate::window::quit_prompt::QuitPromptWindowSlot>()
+                .0;
+            if prompt_slot.map(|h| h.window_id() == window_id).unwrap_or(false) {
+                cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot(None));
+                if !crate::window::is_shutting_down() {
+                    crate::system_capsule::ipc::defer_after_dispatch_for(
+                        cx,
+                        std::time::Duration::from_millis(100),
+                        |cx| {
+                            if let Err(err) = crate::window::home::open_home_window(cx) {
+                                tracing::error!(error = %err, "quit prompt closed: reopen Home failed");
+                            }
+                        },
+                    );
+                }
+            } else if !crate::window::is_shutting_down()
                 && cx
                     .global::<crate::window::content_windows::OpenContentWindows>()
                     .is_empty()
@@ -1453,12 +1472,14 @@ pub fn run(skip_onboarding: bool) {
         // action is still registered so MCP / keybind paths reach
         // the same target.
         cx.on_action(|_: &OpenStartWindow, cx: &mut App| {
+            // ato-start is retired: the "new window" gesture opens (or
+            // raises) the PWA Home instead.
             crate::system_capsule::ipc::defer_after_dispatch_for(
                 cx,
                 std::time::Duration::from_millis(50),
                 |cx| {
-                    if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                        tracing::error!(error = %err, "failed to open start window");
+                    if let Err(err) = crate::window::home::show_ato_home(cx) {
+                        tracing::error!(error = %err, "OpenStartWindow: show_ato_home failed");
                     }
                 },
             );
@@ -1590,9 +1611,10 @@ fn reopen_start_or_quit(cx: &mut App) {
         // macOS: the Shell Icon Bar IS the landing surface. It stays
         // visible (Dock icon + menu bar keep the app reachable and
         // quittable), and its Ato icon reopens the Home window on
-        // demand — no ato-start window. The Start reopen below remains
-        // the Windows behavior, where the bar is a taskbar-invisible
-        // toolwindow and a bar-only state would be unclosable.
+        // demand. Windows: the bar is a taskbar-invisible toolwindow,
+        // so ask "Quit Ato?" instead — Quit exits, Reopen (or closing
+        // the prompt) brings the PWA Home back. ato-start is retired
+        // as a landing surface on both platforms.
         if cfg!(target_os = "macos") {
             crate::window::control_bar::ensure_bar_visible(cx);
             tracing::info!(
@@ -1600,16 +1622,14 @@ fn reopen_start_or_quit(cx: &mut App) {
             );
             return;
         }
-        match crate::window::start_window::open_start_window(cx) {
-            Ok(()) => {
-                tracing::info!(
-                    "last content window closed — reopened Start capsule as landing surface"
-                );
+        match crate::window::quit_prompt::open_quit_prompt_window(cx) {
+            Ok(_) => {
+                tracing::info!("last content window closed — quit prompt shown");
             }
             Err(err) => {
                 tracing::error!(
                     error = %err,
-                    "failed to reopen Start capsule after last window closed; only the Control Bar remains — quitting as abnormal"
+                    "failed to open the quit prompt after last window closed — quitting as abnormal"
                 );
                 crate::window::begin_shutdown();
                 cx.quit();

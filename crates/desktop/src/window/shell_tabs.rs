@@ -57,16 +57,15 @@ pub struct ShellTab {
     pub is_active: bool,
 }
 
-/// True when `kind` is the Ato Home window — an ExternalUrl AppWindow whose
-/// initial route points at the configured PWA origin, or the native
-/// `ato-start` fallback landing.
+/// True when `kind` is the Ato Home window — the dedicated Home shell,
+/// or an ExternalUrl AppWindow whose initial route points at the
+/// configured PWA origin.
 pub fn is_ato_home_entry(kind: &ContentWindowKind, app_base_url: &str) -> bool {
     match kind {
         ContentWindowKind::Home => true,
         ContentWindowKind::AppWindow {
             route: GuestRoute::ExternalUrl(url),
         } => same_origin(url.as_str(), app_base_url),
-        ContentWindowKind::Start => true,
         _ => false,
     }
 }
@@ -339,14 +338,6 @@ mod tests {
     fn dedicated_home_window_counts_as_home() {
         assert!(is_ato_home_entry(
             &ContentWindowKind::Home,
-            "https://app.ato.run"
-        ));
-    }
-
-    #[test]
-    fn native_start_landing_counts_as_home() {
-        assert!(is_ato_home_entry(
-            &ContentWindowKind::Start,
             "https://app.ato.run"
         ));
     }

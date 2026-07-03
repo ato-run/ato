@@ -35,6 +35,7 @@ pub mod webview_paste;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod onboarding_window;
+pub mod quit_prompt;
 pub mod orchestrator;
 pub mod settings_window;
 pub mod shell_tabs;
@@ -197,7 +198,9 @@ pub fn open_configured_startup_surface(
             Ok(())
         }
         crate::config::StartupSurface::Start => {
-            start_window::open_start_window(cx)?;
+            // ato-start is retired as a landing surface — Start now
+            // routes to the PWA Home like the default.
+            home::open_home_window(cx)?;
             Ok(())
         }
         crate::config::StartupSurface::Blank => Ok(()),
