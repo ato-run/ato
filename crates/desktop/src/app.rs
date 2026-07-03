@@ -588,6 +588,10 @@ pub fn run(skip_onboarding: bool) {
         // Account-wide active runs on other runners — polled from the
         // account API so the Shell Icon Bar can show them as tabs.
         crate::remote_runs::start_remote_runs_poller(cx);
+        // Launch handoff tracking (IPC bridge / ato://launch): launches
+        // the desktop has accepted visible ownership of, polled per
+        // launch and surfaced as Shell Icon Bar tabs.
+        crate::launch_tracker::init(cx);
         // Slot tracking the currently-open Developer Console window.
         cx.set_global(crate::window::dock::DockWindowSlot::default());
         cx.set_global(crate::window::dock::DockEntitySlot::default());
@@ -1101,6 +1105,45 @@ pub fn run(skip_onboarding: bool) {
                 return;
             }
             tracing::info!(url = %raw, "Focus-mode NavigateToUrl");
+
+            // ato://launch?launch_id=<id>[&capsule_ref=<publisher/slug>] —
+            // the external-browser → Desktop fallback of the launch
+            // handoff (launch-unification plan §4; the primary in-Desktop
+            // path is the injected `__ATO_DESKTOP__.launch()` IPC bridge).
+            // Only the launch_id (plus an optional display ref) rides the
+            // intent — app_url / runner URLs / tokens are never accepted;
+            // the LaunchTracker re-fetches the launch with owner-verified
+            // credentials, so a launch_id alone can never open anything
+            // the signed-in user doesn't own.
+            if raw.starts_with("ato://launch") {
+                let parsed = url::Url::parse(raw).ok();
+                let query = |key: &str| {
+                    parsed.as_ref().and_then(|url| {
+                        url.query_pairs()
+                            .find(|(k, _)| k == key)
+                            .map(|(_, v)| v.into_owned())
+                    })
+                };
+                match query("launch_id") {
+                    Some(id) if crate::launch_tracker::is_valid_launch_id(&id) => {
+                        let capsule_ref = query("capsule_ref")
+                            .filter(|r| crate::launch_tracker::is_valid_capsule_ref(r))
+                            .unwrap_or_default();
+                        tracing::info!(
+                            launch_id = %id,
+                            "NavigateToUrl(ato://launch): tracking launch"
+                        );
+                        crate::launch_tracker::register_launch(cx, id, capsule_ref);
+                    }
+                    _ => {
+                        tracing::warn!(
+                            url = %raw,
+                            "NavigateToUrl(ato://launch): missing or invalid launch_id — ignored"
+                        );
+                    }
+                }
+                return;
+            }
 
             // ato://open?handle=<url-or-capsule-ref> — the PWA Home's
             // "open this app outside my WebView" intent (mirrors the legacy
