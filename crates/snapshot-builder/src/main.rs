@@ -586,6 +586,40 @@ mod tests {
     }
 
     #[test]
+    fn planted_builder_token_fails_the_cas_scan_without_printing_it() {
+        // compat fixture `planted-builder-token`, executable (local-only): an artifact
+        // whose CAS content contains the builder's OWN token — exact value — must fail
+        // the no_secret_scan, and nothing the scan reports may carry the token value.
+        // Runs with a FAKE token so no real credential ever touches a fixture; this is
+        // the runtime proof behind the contract row the fixture can only declare.
+        let fake_token = "fake-builder-token-a1b2c3d4e5f6a7b8"; // long enough to gate
+        let cfg = Config {
+            api_url: "https://api".into(),
+            token: fake_token.into(),
+            agent_id: "a".into(),
+            work: std::env::temp_dir(),
+            rootfs_size_mib: 1024,
+            once: true,
+            poll_secs: 15,
+        };
+        let cas = std::env::temp_dir().join(format!("compat-planted-token-{}", std::process::id()));
+        std::fs::create_dir_all(&cas).unwrap();
+        std::fs::write(cas.join("layer.bin"), format!("prefix {fake_token} suffix")).unwrap();
+
+        let targets = no_secret_scan::ScanTargets { cas: Some(cas.clone()), ..Default::default() };
+        let canaries = live_secret_canaries(&cfg);
+        let result = no_secret_scan::scan(&targets, &canaries);
+        std::fs::remove_dir_all(&cas).ok();
+
+        assert!(!result.clean, "a planted builder token must fail the CAS scan");
+        assert_eq!(result.hits.len(), 1);
+        // The report (what would reach logs / the failed-ack reason) must never
+        // contain the token value — only the target label and file path.
+        let report = format!("{result:?}");
+        assert!(!report.contains(fake_token), "scan report must not print the token value");
+    }
+
+    #[test]
     fn artifact_matches_the_sealed_ack_schema() {
         // The ato-api artifactSchema (#157, extended by #932) is .strict(): the
         // sealed-ack body must carry exactly these keys and nothing else.
