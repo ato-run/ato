@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use gpui::SharedString;
 
+use crate::launch_tracker::TrackedLaunch;
 use crate::remote_runs::RemoteRun;
 use crate::state::GuestRoute;
 use crate::window::content_windows::{
@@ -45,8 +46,12 @@ pub struct ShellTab {
     /// remote-run tabs (no local window yet).
     pub window_id: Option<u64>,
     /// For a tab with no local window (an app already running on another
-    /// runner): the URL to open when clicked.
+    /// runner, or a ready launch): the URL to open when clicked.
     pub open_url: Option<String>,
+    /// For a launch-backed tab: the tracked launch's id — the tab's
+    /// identity while the launch has no window yet. A starting launch has
+    /// neither `window_id` nor `open_url`; clicking it is a no-op.
+    pub launch_id: Option<String>,
     /// Local cache file of the capsule's Store icon; `None` falls back to
     /// the letter avatar.
     pub icon_path: Option<PathBuf>,
@@ -114,6 +119,30 @@ pub fn remote_run_status(status: &str) -> ShellTabStatus {
     }
 }
 
+/// Display title for a launch-backed tab — the `publisher/slug` ref's
+/// slug; falls back to the launch id when the handoff carried no ref.
+pub fn launch_tab_title(launch: &TrackedLaunch) -> String {
+    launch
+        .capsule_ref
+        .rsplit('/')
+        .next()
+        .filter(|slug| !slug.is_empty())
+        .unwrap_or(&launch.launch_id)
+        .to_string()
+}
+
+/// Badge for a launch-backed tab. `None` means the launch is over
+/// (cancelled / expired / stopped) and gets no tab at all. Unknown future
+/// states (`stopping`, `blocked`, …) render honestly as still starting.
+pub fn launch_tab_status(state: &str) -> Option<ShellTabStatus> {
+    match state {
+        "ready" => Some(ShellTabStatus::Running),
+        "failed" => Some(ShellTabStatus::Error),
+        "cancelled" | "expired" | "stopped" => None,
+        _ => Some(ShellTabStatus::Starting),
+    }
+}
+
 /// Scheme + host + port comparison, tolerant of paths / trailing slashes.
 fn same_origin(a: &str, b: &str) -> bool {
     match (url::Url::parse(a.trim()), url::Url::parse(b.trim())) {
@@ -163,6 +192,7 @@ pub fn derive_shell_tabs(
     windows: &OpenContentWindows,
     app_base_url: &str,
     remote_runs: &[RemoteRun],
+    launches: &[TrackedLaunch],
 ) -> Vec<ShellTab> {
     let entries = windows.mru_order();
     let frontmost_id = entries
@@ -178,6 +208,7 @@ pub fn derive_shell_tabs(
         kind: ShellTabKind::AtoHome,
         window_id: home_window_id,
         open_url: None,
+        launch_id: None,
         icon_path: None,
         title: SharedString::from("Ato"),
         initial: SharedString::from("A"),
@@ -215,6 +246,7 @@ pub fn derive_shell_tabs(
                 kind: ShellTabKind::Capsule,
                 window_id: Some(window_id),
                 open_url: None,
+                launch_id: None,
                 icon_path: matching_run.and_then(|run| run.icon_path.clone()),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
@@ -248,6 +280,7 @@ pub fn derive_shell_tabs(
                 kind: ShellTabKind::Capsule,
                 window_id: None,
                 open_url: Some(open_url.to_string()),
+                launch_id: None,
                 icon_path: run.icon_path.clone(),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
@@ -258,6 +291,51 @@ pub fn derive_shell_tabs(
         .collect();
     remote_tabs.sort_by(|a, b| a.title.cmp(&b.title));
     tabs.extend(remote_tabs);
+
+    // Launches the desktop accepted ownership of (IPC / ato://launch).
+    // Tab identity = launch_id. A launch whose app is already visible as
+    // a local window or a remote-runs tab (same origin) is suppressed —
+    // the covering tab is the click target; keeping both would show the
+    // same app twice.
+    let mut launch_tabs: Vec<ShellTab> = launches
+        .iter()
+        .filter_map(|launch| {
+            let status = launch_tab_status(&launch.state)?;
+            if let Some(app_url) = launch.app_url.as_deref().filter(|url| !url.is_empty()) {
+                let covered_by_window = entries.iter().any(|entry| match &entry.kind {
+                    ContentWindowKind::AppWindow {
+                        route: GuestRoute::ExternalUrl(url),
+                    } => same_origin(url.as_str(), app_url),
+                    _ => false,
+                });
+                let covered_by_remote = remote_runs.iter().any(|run| {
+                    run.open_url()
+                        .is_some_and(|open| same_origin(open, app_url))
+                });
+                if covered_by_window || covered_by_remote {
+                    return None;
+                }
+            }
+            let title = launch_tab_title(launch);
+            Some(ShellTab {
+                kind: ShellTabKind::Capsule,
+                window_id: None,
+                // Ready → clicking opens the app URL; otherwise there is
+                // nothing to open yet and the click is a no-op.
+                open_url: (status == ShellTabStatus::Running)
+                    .then(|| launch.app_url.clone())
+                    .flatten(),
+                launch_id: Some(launch.launch_id.clone()),
+                icon_path: None,
+                initial: SharedString::from(avatar_initial(&title)),
+                title: SharedString::from(title),
+                status,
+                is_active: false,
+            })
+        })
+        .collect();
+    launch_tabs.sort_by(|a, b| a.launch_id.cmp(&b.launch_id));
+    tabs.extend(launch_tabs);
     tabs
 }
 
@@ -294,7 +372,7 @@ mod tests {
             remote("booting", "launching", Some("https://def.app.ato.run/")),
             remote("no-url", "running", None),
         ];
-        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &runs);
+        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &runs, &[]);
         assert_eq!(tabs.len(), 3); // home + 2 remote (no-url dropped)
         assert_eq!(tabs[0].kind, ShellTabKind::AtoHome);
         let hello = tabs.iter().find(|t| t.title.as_ref() == "hello").unwrap();
@@ -389,6 +467,96 @@ mod tests {
         assert_eq!(remote_run_status("ready"), ShellTabStatus::Running);
         assert_eq!(remote_run_status("running"), ShellTabStatus::Running);
         assert_eq!(remote_run_status("launching"), ShellTabStatus::Starting);
+    }
+
+    fn launch(launch_id: &str, capsule_ref: &str, state: &str, app_url: Option<&str>) -> TrackedLaunch {
+        TrackedLaunch {
+            launch_id: launch_id.to_string(),
+            capsule_ref: capsule_ref.to_string(),
+            state: state.to_string(),
+            app_url: app_url.map(str::to_string),
+            opened: false,
+            polling: false,
+        }
+    }
+
+    #[test]
+    fn launch_tab_title_uses_slug_and_falls_back_to_launch_id() {
+        let l = launch("lch_1", "community/hello-capsule", "starting", None);
+        assert_eq!(launch_tab_title(&l), "hello-capsule");
+        let bare = launch("lch_2", "", "starting", None);
+        assert_eq!(launch_tab_title(&bare), "lch_2");
+    }
+
+    #[test]
+    fn launch_tab_status_maps_states_and_drops_finished_launches() {
+        assert_eq!(launch_tab_status("starting"), Some(ShellTabStatus::Starting));
+        assert_eq!(launch_tab_status("ready"), Some(ShellTabStatus::Running));
+        assert_eq!(launch_tab_status("failed"), Some(ShellTabStatus::Error));
+        // Unknown future states render honestly as non-ready.
+        assert_eq!(launch_tab_status("stopping"), Some(ShellTabStatus::Starting));
+        assert_eq!(launch_tab_status("blocked"), Some(ShellTabStatus::Starting));
+        assert_eq!(launch_tab_status("cancelled"), None);
+        assert_eq!(launch_tab_status("expired"), None);
+        assert_eq!(launch_tab_status("stopped"), None);
+    }
+
+    #[test]
+    fn launches_become_tabs_with_launch_id_identity() {
+        let windows = OpenContentWindows::default();
+        let launches = vec![
+            launch("lch_a", "community/hello-capsule", "starting", None),
+            launch("lch_b", "community/immich", "ready", Some("https://abc.app.ato.run/")),
+            launch("lch_c", "community/gone", "cancelled", None),
+        ];
+        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &[], &launches);
+        assert_eq!(tabs.len(), 3); // home + 2 launches (cancelled dropped)
+
+        let starting = tabs
+            .iter()
+            .find(|t| t.launch_id.as_deref() == Some("lch_a"))
+            .unwrap();
+        assert_eq!(starting.status, ShellTabStatus::Starting);
+        assert_eq!(starting.title.as_ref(), "hello-capsule");
+        // Starting launch: no window, no URL — clicking is a no-op.
+        assert!(starting.window_id.is_none());
+        assert!(starting.open_url.is_none());
+
+        let ready = tabs
+            .iter()
+            .find(|t| t.launch_id.as_deref() == Some("lch_b"))
+            .unwrap();
+        assert_eq!(ready.status, ShellTabStatus::Running);
+        assert_eq!(ready.open_url.as_deref(), Some("https://abc.app.ato.run/"));
+    }
+
+    #[test]
+    fn ready_launch_tab_suppressed_when_remote_run_covers_same_origin() {
+        let windows = OpenContentWindows::default();
+        let runs = vec![remote("hello", "running", Some("https://abc.app.ato.run/x"))];
+        let launches = vec![launch(
+            "lch_b",
+            "community/hello-capsule",
+            "ready",
+            Some("https://abc.app.ato.run/"),
+        )];
+        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &runs, &launches);
+        // home + the remote-run tab; the launch tab is suppressed.
+        assert_eq!(tabs.len(), 2);
+        assert!(tabs.iter().all(|t| t.launch_id.is_none()));
+    }
+
+    #[test]
+    fn failed_launch_keeps_error_badge_even_without_app_url() {
+        let windows = OpenContentWindows::default();
+        let launches = vec![launch("lch_x", "community/broken", "failed", None)];
+        let tabs = derive_shell_tabs(&windows, "https://app.ato.run", &[], &launches);
+        let failed = tabs
+            .iter()
+            .find(|t| t.launch_id.as_deref() == Some("lch_x"))
+            .unwrap();
+        assert_eq!(failed.status, ShellTabStatus::Error);
+        assert!(failed.open_url.is_none());
     }
 
     #[test]

@@ -307,6 +307,10 @@ impl ControlBarShellPlaceholder {
             cx.notify();
         })
         .detach();
+        cx.observe_global::<crate::launch_tracker::LaunchTrackerSnapshot>(|_view, cx| {
+            cx.notify();
+        })
+        .detach();
 
         Self {
             locale,
@@ -391,6 +395,8 @@ impl Render for ControlBarShellPlaceholder {
             cx.global::<OpenContentWindows>(),
             &self.app_base_url,
             &cx.global::<RemoteRunsSnapshot>().runs,
+            &cx.global::<crate::launch_tracker::LaunchTrackerSnapshot>()
+                .launches,
         );
 
         div()
@@ -618,10 +624,13 @@ fn ato_home_button(is_active: bool) -> impl IntoElement {
 /// the avatar is the capsule's initial on a stable per-title tint;
 /// status is a small dot badge (amber = starting, red = failed).
 fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
-    let slot_id = match (tab.window_id, tab.open_url.as_deref()) {
-        (Some(window_id), _) => SharedString::from(format!("shell-tab-{window_id}")),
-        (None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
-        (None, None) => return div().into_any_element(),
+    let slot_id = match (tab.window_id, tab.launch_id.as_deref(), tab.open_url.as_deref()) {
+        (Some(window_id), _, _) => SharedString::from(format!("shell-tab-{window_id}")),
+        // A launch-backed tab keeps its launch_id identity across the
+        // starting → ready transition (even once it has an open_url).
+        (None, Some(launch_id), _) => SharedString::from(format!("shell-tab-launch-{launch_id}")),
+        (None, None, Some(url)) => SharedString::from(format!("shell-tab-remote-{url}")),
+        (None, None, None) => return div().into_any_element(),
     };
     let hue = shell_tabs::avatar_hue(&tab.title);
     let dimmed = tab.status == ShellTabStatus::Starting;
