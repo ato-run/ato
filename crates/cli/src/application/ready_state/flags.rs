@@ -90,6 +90,27 @@ pub(crate) fn bindings_preview_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// v1.2 PR 2 (L8): the binding-lease TTL, `ATO_READY_STATE_BINDING_TTL_MS`
+/// (default 1h). The foreground serving loop renews well inside this window;
+/// an un-renewed lease expiry-scrubs in the guest (lazy) and traffic gates.
+/// Clamped to ≥ 10s so a typo cannot create an instantly-expiring lease; a
+/// non-numeric value falls back to the default with a warning (never a crash
+/// mid-run-gate).
+pub(crate) fn binding_ttl_ms() -> u64 {
+    const VAR: &str = "ATO_READY_STATE_BINDING_TTL_MS";
+    const DEFAULT: u64 = 3_600_000;
+    match std::env::var(VAR).ok().filter(|v| !v.trim().is_empty()) {
+        None => DEFAULT,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) => ms.max(10_000),
+            Err(_) => {
+                tracing::warn!(target: "ato::ready_state", raw, "invalid {VAR}; using default");
+                DEFAULT
+            }
+        },
+    }
+}
+
 /// An explicitly selected snapshot backend id (`ATO_SNAPSHOT_BACKEND`), if any.
 pub(crate) fn selected_backend_id() -> Option<String> {
     std::env::var(BACKEND_VAR)
