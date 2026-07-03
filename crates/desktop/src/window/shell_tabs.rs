@@ -35,6 +35,9 @@ pub enum ShellTabKind {
 pub enum ShellTabStatus {
     Running,
     Starting,
+    /// Waiting on the user or an external condition (consent, billing,
+    /// capacity) — a first-class visible state, never an endless spinner.
+    Blocked,
     Error,
 }
 
@@ -55,6 +58,9 @@ pub struct ShellTab {
     /// Local cache file of the capsule's Store icon; `None` falls back to
     /// the letter avatar.
     pub icon_path: Option<PathBuf>,
+    /// For a blocked launch tab: the first blocker kind (e.g.
+    /// `billing_required`) shown in the diagnostic placeholder.
+    pub blocked_reason: Option<String>,
     pub title: SharedString,
     /// Fallback avatar glyph — first letter of the capsule title.
     pub initial: SharedString,
@@ -132,12 +138,15 @@ pub fn launch_tab_title(launch: &TrackedLaunch) -> String {
 }
 
 /// Badge for a launch-backed tab. `None` means the launch is over
-/// (cancelled / expired / stopped) and gets no tab at all. Unknown future
-/// states (`stopping`, `blocked`, …) render honestly as still starting.
+/// (cancelled / expired / stopped) and gets no tab at all. `blocked` is a
+/// first-class visible state (the tracker pauses polling; the tab shows a
+/// blocked badge and clicking it opens a diagnostic placeholder). Other
+/// unknown future states (`stopping`, …) render honestly as still starting.
 pub fn launch_tab_status(state: &str) -> Option<ShellTabStatus> {
     match state {
         "ready" => Some(ShellTabStatus::Running),
         "failed" => Some(ShellTabStatus::Error),
+        "blocked" => Some(ShellTabStatus::Blocked),
         "cancelled" | "expired" | "stopped" => None,
         _ => Some(ShellTabStatus::Starting),
     }
@@ -209,6 +218,7 @@ pub fn derive_shell_tabs(
         window_id: home_window_id,
         open_url: None,
         launch_id: None,
+        blocked_reason: None,
         icon_path: None,
         title: SharedString::from("Ato"),
         initial: SharedString::from("A"),
@@ -247,6 +257,7 @@ pub fn derive_shell_tabs(
                 window_id: Some(window_id),
                 open_url: None,
                 launch_id: None,
+                blocked_reason: None,
                 icon_path: matching_run.and_then(|run| run.icon_path.clone()),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
@@ -281,6 +292,7 @@ pub fn derive_shell_tabs(
                 window_id: None,
                 open_url: Some(open_url.to_string()),
                 launch_id: None,
+                blocked_reason: None,
                 icon_path: run.icon_path.clone(),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
@@ -327,6 +339,12 @@ pub fn derive_shell_tabs(
                     .flatten(),
                 launch_id: Some(launch.launch_id.clone()),
                 icon_path: None,
+                blocked_reason: (status == ShellTabStatus::Blocked).then(|| {
+                    launch
+                        .blocker
+                        .clone()
+                        .unwrap_or_else(|| "blocked".to_string())
+                }),
                 initial: SharedString::from(avatar_initial(&title)),
                 title: SharedString::from(title),
                 status,
@@ -475,9 +493,23 @@ mod tests {
             capsule_ref: capsule_ref.to_string(),
             state: state.to_string(),
             app_url: app_url.map(str::to_string),
+            blocker: None,
             opened: false,
             polling: false,
         }
+    }
+
+    #[test]
+    fn blocked_launches_get_a_first_class_blocked_tab() {
+        assert_eq!(
+            launch_tab_status("blocked"),
+            Some(ShellTabStatus::Blocked)
+        );
+        // stopping still renders as starting (hot polling continues)
+        assert_eq!(
+            launch_tab_status("stopping"),
+            Some(ShellTabStatus::Starting)
+        );
     }
 
     #[test]
@@ -493,9 +525,10 @@ mod tests {
         assert_eq!(launch_tab_status("starting"), Some(ShellTabStatus::Starting));
         assert_eq!(launch_tab_status("ready"), Some(ShellTabStatus::Running));
         assert_eq!(launch_tab_status("failed"), Some(ShellTabStatus::Error));
-        // Unknown future states render honestly as non-ready.
+        // Unknown future states render honestly as non-ready; blocked is
+        // a first-class visible state of its own.
         assert_eq!(launch_tab_status("stopping"), Some(ShellTabStatus::Starting));
-        assert_eq!(launch_tab_status("blocked"), Some(ShellTabStatus::Starting));
+        assert_eq!(launch_tab_status("blocked"), Some(ShellTabStatus::Blocked));
         assert_eq!(launch_tab_status("cancelled"), None);
         assert_eq!(launch_tab_status("expired"), None);
         assert_eq!(launch_tab_status("stopped"), None);

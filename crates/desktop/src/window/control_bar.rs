@@ -664,16 +664,28 @@ fn capsule_tab_button(tab: ShellTab) -> impl IntoElement {
     let badge_color = match tab.status {
         ShellTabStatus::Running => None,
         ShellTabStatus::Starting => Some(rgb(0xf59e0b)),
+        // Blocked = waiting on the user/external condition — indigo so it
+        // never reads as "still starting" (amber) or "failed" (red).
+        ShellTabStatus::Blocked => Some(rgb(0x6366f1)),
         ShellTabStatus::Error => Some(rgb(0xef4444)),
     };
 
     let window_id = tab.window_id;
     let open_url = tab.open_url.clone();
+    let blocked = tab
+        .blocked_reason
+        .clone()
+        .map(|reason| (tab.title.to_string(), reason));
     let mut slot = tab_slot(slot_id, tab.is_active)
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             cx.stop_propagation();
             if let Some(window_id) = window_id {
                 window.dispatch_action(Box::new(FocusContentWindow { window_id }), cx);
+            } else if let Some((title, reason)) = blocked.clone() {
+                window.dispatch_action(
+                    Box::new(crate::app::ShowLaunchBlockedInfo { title, reason }),
+                    cx,
+                );
             } else if let Some(url) = open_url.clone() {
                 tracing::info!(url = %url, "shell icon bar: remote run tab clicked");
                 window.dispatch_action(Box::new(NavigateToUrl { url }), cx);

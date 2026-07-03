@@ -147,6 +147,16 @@ pub struct FocusContentWindow {
     pub window_id: u64,
 }
 
+/// Shell Icon Bar: a blocked launch tab was clicked — show the
+/// diagnostic placeholder (blocker kind + capsule). A real consent /
+/// billing resolution UI is a later phase.
+#[derive(Clone, PartialEq, Eq, Deserialize, Action)]
+#[action(namespace = desktop, no_json)]
+pub struct ShowLaunchBlockedInfo {
+    pub title: String,
+    pub reason: String,
+}
+
 /// Parse an `ato://app/<install_profile_key>` URL into its install profile key.
 ///
 /// Returns `None` for URLs that are not `ato://app` (so callers fall through to
@@ -585,6 +595,7 @@ pub fn run(skip_onboarding: bool) {
         // Icon Bar's fixed Ato icon opens/raises it).
         cx.set_global(crate::window::ato_home_shell::AtoHomeWindowSlot::default());
         cx.set_global(crate::window::quit_prompt::QuitPromptWindowSlot::default());
+        cx.set_global(crate::window::launch_blocked_popup::LaunchBlockedPopupSlot::default());
         // Account-wide active runs on other runners — polled from the
         // account API so the Shell Icon Bar can show them as tabs.
         crate::remote_runs::start_remote_runs_poller(cx);
@@ -1395,6 +1406,18 @@ pub fn run(skip_onboarding: bool) {
             crate::window::control_bar::dismiss_info_popup(cx);
             if let Err(err) = crate::window::home::show_ato_home(cx) {
                 tracing::error!(error = %err, "ShowAtoHome: failed to open Home surface");
+            }
+        });
+
+        // Shell Icon Bar — clicking a blocked launch tab shows the
+        // diagnostic placeholder popup.
+        cx.on_action(|action: &ShowLaunchBlockedInfo, cx: &mut App| {
+            if let Err(err) = crate::window::launch_blocked_popup::open_launch_blocked_popup(
+                cx,
+                action.title.clone(),
+                action.reason.clone(),
+            ) {
+                tracing::error!(error = %err, "ShowLaunchBlockedInfo: popup failed");
             }
         });
 

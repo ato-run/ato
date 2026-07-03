@@ -56,6 +56,10 @@ pub struct TrackedLaunch {
     /// Unknown future states are kept verbatim and rendered as non-ready.
     pub state: String,
     pub app_url: Option<String>,
+    /// First blocker kind reported while `state == "blocked"` (e.g.
+    /// `billing_required`, `consent_required`) — surfaced in the tab's
+    /// diagnostic placeholder.
+    pub blocker: Option<String>,
     /// True once the ready `app_url` has been dispatched — the window is
     /// opened exactly once per launch.
     pub opened: bool,
@@ -102,10 +106,21 @@ pub fn is_valid_capsule_ref(capsule_ref: &str) -> bool {
 
 /// States after which polling stops. `ready` is terminal for the poller
 /// (the app window is open; live run state is the remote-runs poller's
-/// job); unknown future states (`stopping`, `blocked`, …) keep polling —
-/// they may still transition — bounded by [`MAX_POLLS`].
+/// job). `blocked` is NOT terminal but pauses polling (see
+/// [`is_paused_state`]); other unknown future states (`stopping`, …)
+/// keep polling — they may still transition — bounded by [`MAX_POLLS`].
 pub fn is_terminal_state(state: &str) -> bool {
     matches!(state, "ready" | "failed" | "cancelled" | "expired" | "stopped")
+}
+
+/// States that stop hot polling WITHOUT being terminal: the launch is
+/// waiting on the user or an external condition (consent, billing,
+/// capacity). The entry stays visible with its launch_id identity and a
+/// blocked badge — never an endless "Starting" spinner — and a fresh
+/// handoff of the same launch_id (the PWA's resume re-POST) wakes the
+/// poll loop again.
+pub fn is_paused_state(state: &str) -> bool {
+    state == "blocked"
 }
 
 /// Outcome of applying a registration to the tracked-launch list.
@@ -162,6 +177,7 @@ fn register_in(
         capsule_ref,
         state: "starting".to_string(),
         app_url: None,
+        blocker: None,
         opened: false,
         polling: true,
     });
@@ -213,6 +229,14 @@ struct LaunchStatusResponse {
     state: String,
     #[serde(default)]
     app_url: Option<String>,
+    #[serde(default)]
+    blockers: Vec<LaunchBlockerDto>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct LaunchBlockerDto {
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 /// One poll attempt, classified so the loop can react honestly.
@@ -277,8 +301,10 @@ fn is_dispatchable_app_url(url: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Apply one polled status to the snapshot; returns true when the state
-/// is now terminal. Dispatches the ready `app_url` exactly once.
+/// Apply one polled status to the snapshot; returns true when the poll
+/// loop should stop (terminal state, blocked pause, or vanished entry).
+/// Dispatches the ready `app_url` exactly once; a blocked launch never
+/// dispatches — it idles with a blocked badge until re-registered.
 fn apply_status(cx: &mut gpui::App, launch_id: &str, status: LaunchStatusResponse) -> bool {
     let mut open_url: Option<String> = None;
     {
@@ -300,6 +326,11 @@ fn apply_status(cx: &mut gpui::App, launch_id: &str, status: LaunchStatusRespons
         }
         entry.state = status.state;
         entry.app_url = status.app_url.filter(|url| !url.is_empty());
+        entry.blocker = status
+            .blockers
+            .into_iter()
+            .find_map(|blocker| blocker.kind)
+            .filter(|kind| !kind.is_empty());
         if entry.state == "ready"
             && !entry.opened
             && let Some(url) = entry.app_url.as_deref().filter(|url| is_dispatchable_app_url(url))
@@ -318,7 +349,7 @@ fn apply_status(cx: &mut gpui::App, launch_id: &str, status: LaunchStatusRespons
         .find(|launch| launch.launch_id == launch_id)
         .map(|launch| launch.state.clone())
         .unwrap_or_default();
-    is_terminal_state(&state)
+    is_terminal_state(&state) || is_paused_state(&state)
 }
 
 /// Route the ready URL through the app-level `NavigateToUrl` action (the
@@ -547,6 +578,21 @@ mod tests {
     }
 
     #[test]
+    fn blocked_pauses_polling_without_being_terminal() {
+        assert!(!is_terminal_state("blocked"));
+        assert!(is_paused_state("blocked"));
+        // stopping keeps hot-polling: neither terminal nor paused
+        assert!(!is_terminal_state("stopping"));
+        assert!(!is_paused_state("stopping"));
+        // paused entries are idle (polling=false) and re-registrable:
+        let mut launches = vec![tracked("l1", "blocked", false)];
+        assert_eq!(
+            register_in(&mut launches, "l1", String::new()),
+            RegisterOutcome::NeedsPoll
+        );
+    }
+
+    #[test]
     fn owner_rejections_are_terminal_but_retryable_statuses_are_not() {
         for code in [400, 403, 404, 410, 422] {
             assert!(rejection_is_terminal(code), "{code} should be terminal");
@@ -562,6 +608,7 @@ mod tests {
             capsule_ref: String::new(),
             state: state.to_string(),
             app_url: None,
+            blocker: None,
             opened: false,
             polling,
         }
