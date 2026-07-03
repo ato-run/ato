@@ -29,6 +29,10 @@ pub(crate) struct BindingPreviewReceipt {
     /// L3 (#912): which SecretResolver would supply the values (`env` in preview) —
     /// resolver id only, never a value. `None` when no binding delivery is planned.
     pub resolver_kind: Option<String>,
+    /// v1.2 PR 2: the grant namespace (`rs-<hash16>`) the resolver read from — a
+    /// manifest-hash prefix, non-secret by construction. `None` when no binding
+    /// delivery is planned.
+    pub grant_namespace: Option<String>,
 }
 
 impl BindingPreviewReceipt {
@@ -44,6 +48,7 @@ impl BindingPreviewReceipt {
             traffic_exposed_after_bound_ready: false,
             binding_failure_reason: None,
             resolver_kind: None,
+            grant_namespace: None,
         }
     }
 
@@ -177,21 +182,18 @@ pub(crate) fn ensure_pre_bind_before_seal(session_is_bound: bool) -> Result<()> 
     Ok(())
 }
 
-/// Phase 8a-RunGate PR D2 (#912) / L3: resolve declared binding names to leases via a
-/// [`SecretResolver`](super::secret_resolver::SecretResolver) (the preview uses
-/// `EnvSecretResolver`; Vault/cloud/config resolvers slot in later). A binding the
-/// resolver cannot resolve **fails closed** (the run must not expose an unbound
-/// session). Values go straight to the wire; never logged or recorded.
-pub(crate) fn resolve_binding_leases(
-    resolver: &dyn super::secret_resolver::SecretResolver,
-    names: &[String],
+/// v1.2 PR 2: turn pre-resolved `(name, value)` pairs into leases. Resolution
+/// happens in [`super::binding_grants::preflight_resolve`] BEFORE the restore
+/// starts (aggregated, actionable grant report); the lease clock
+/// (`issued/expires`) starts here at delivery time.
+pub(crate) fn issue_leases(
+    resolved: Vec<(String, protocol::binding_lease::SecretValue)>,
     now_ms: u64,
     ttl_ms: u64,
 ) -> Result<Vec<BindingLease>> {
     use protocol::binding_lease::{BindingLeaseId, BindingName};
-    let mut leases = Vec::with_capacity(names.len());
-    for name in names {
-        let value = resolver.resolve(name)?; // fail-closed on missing/unresolvable
+    let mut leases = Vec::with_capacity(resolved.len());
+    for (name, value) in resolved {
         let bname = BindingName::parse(name.as_str())
             .map_err(|e| anyhow::anyhow!("invalid binding name '{name}': {e}"))?;
         leases.push(BindingLease::issue(
@@ -220,7 +222,7 @@ pub(crate) fn bind_before_expose(
 
 /// PR 5: revoke a single lease by id — the agent scrubs that binding's tmpfs file
 /// immediately (e.g. a TTL that was not renewed). Returns the agent's `Scrubbed` ack.
-#[allow(dead_code)] // wired into lease renewal in a later PR
+/// Wired into the v1.2 PR 2 renewal loop: a grant revoked mid-session revokes here.
 pub(crate) fn revoke_binding(
     channel: &mut dyn AgentChannel,
     id: protocol::binding_lease::BindingLeaseId,
@@ -230,6 +232,123 @@ pub(crate) fn revoke_binding(
         AgentToHost::Error { message } => bail!("revoke failed: {message}"),
         other => bail!("unexpected agent response to Revoke: {other:?}"),
     }
+}
+
+/// v1.2 PR 2 (closes L8): renew a lease — protocol-wise, **renew = Deliver again**
+/// (the agent atomically replaces the tmpfs file and the presence record's
+/// `expires_at_ms`). One `QueryBoundReady` after confirms the session is still
+/// fully bound (a cheap health signal on every renewal tick).
+pub(crate) fn renew_leases(channel: &mut dyn AgentChannel, leases: &[BindingLease]) -> Result<()> {
+    establish_bindings(channel, leases, 1)
+}
+
+/// v1.2 PR 2 (closes L8): the host-side **lease renewal loop** for a foreground
+/// serving session. Every tick (TTL/3, clamped to [5s, 300s]) it re-resolves
+/// each grant from the selected resolver and re-delivers a fresh lease over
+/// vsock; a grant revoked mid-session (`ato secrets delete …`) makes the
+/// resolve fail → the loop REVOKES that lease so the agent scrubs the tmpfs
+/// value immediately and bound-ready drops — the app's next secret read fails,
+/// gating traffic without killing the VM. Everything here is best-effort
+/// (serving must never crash on a transient store/vsock error) and value-free
+/// in logs. The task runs until aborted by the serving loop.
+pub(crate) fn spawn_lease_renewal(
+    vsock_uds: std::path::PathBuf,
+    namespace: String,
+    names: Vec<String>,
+    ttl_ms: u64,
+) -> tokio::task::JoinHandle<()> {
+    let interval = std::time::Duration::from_millis((ttl_ms / 3).clamp(5_000, 300_000));
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Blocking store/vsock I/O — keep it off the async reactor.
+            let uds = vsock_uds.clone();
+            let ns = namespace.clone();
+            let names = names.clone();
+            let tick = tokio::task::spawn_blocking(move || renewal_tick(&uds, &ns, &names, ttl_ms));
+            match tick.await {
+                Ok(Ok(renewed)) => {
+                    tracing::debug!(target: "ato::ready_state", renewed, "binding lease renewal tick");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(target: "ato::ready_state", error = %e, "binding lease renewal tick failed (will retry)");
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ato::ready_state", error = %e, "binding lease renewal task join error");
+                }
+            }
+        }
+    })
+}
+
+/// One renewal pass: resolve every grant, re-deliver the resolvable ones,
+/// revoke the ones whose grant disappeared. Returns how many leases were
+/// renewed. Names/reasons only in errors — never a value.
+fn renewal_tick(
+    vsock_uds: &std::path::Path,
+    namespace: &str,
+    names: &[String],
+    ttl_ms: u64,
+) -> Result<usize> {
+    let resolver = super::secret_resolver::select_resolver(namespace)?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let mut resolved: Vec<(String, protocol::binding_lease::SecretValue)> = Vec::new();
+    let mut revoked: Vec<String> = Vec::new();
+    for name in names {
+        match resolver.resolve(name) {
+            Ok(value) => resolved.push((name.clone(), value)),
+            Err(_) => revoked.push(name.clone()),
+        }
+    }
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, std::time::Duration::from_secs(5))
+        .context("connect guest-agent for lease renewal")?;
+    for name in &revoked {
+        let id = protocol::binding_lease::BindingLeaseId::new(format!("lease-{name}"));
+        match revoke_binding(&mut channel, id) {
+            Ok(()) => tracing::warn!(
+                target: "ato::ready_state",
+                binding = %name,
+                "grant revoked — lease revoked, guest value scrubbed (traffic gates on next read)"
+            ),
+            Err(e) => tracing::warn!(
+                target: "ato::ready_state",
+                binding = %name,
+                error = %e,
+                "grant revoked but lease revoke failed (expiry will scrub lazily)"
+            ),
+        }
+    }
+    let renewed = resolved.len();
+    if renewed > 0 {
+        let leases = issue_leases(resolved, now_ms, ttl_ms)?;
+        renew_over_channel(&mut channel, &leases, revoked.is_empty())?;
+    }
+    Ok(renewed)
+}
+
+/// The channel half of a renewal pass. When `assert_bound_ready` (all grants
+/// still resolve) the renewal also asserts the session is fully bound; when a
+/// grant was revoked, bound-ready is false BY DESIGN, so the still-granted
+/// leases are re-delivered Ack-only (they must not expire too).
+fn renew_over_channel(
+    channel: &mut dyn AgentChannel,
+    leases: &[BindingLease],
+    assert_bound_ready: bool,
+) -> Result<()> {
+    if assert_bound_ready {
+        return renew_leases(channel, leases);
+    }
+    for lease in leases {
+        match channel.request(HostToAgent::Deliver(lease.to_delivery()))? {
+            AgentToHost::Ack { .. } => {}
+            AgentToHost::Error { message } => bail!("renewal delivery failed: {message}"),
+            other => bail!("unexpected agent response to Deliver: {other:?}"),
+        }
+    }
+    Ok(())
 }
 
 /// PR D3 (#912): connect the guest-agent over vsock and stop-scrub. Used by `ato stop`
@@ -395,26 +514,18 @@ mod tests {
     }
 
     #[test]
-    fn resolve_binding_leases_from_env_fails_closed_on_missing() {
-        // SAFETY: single-threaded test; vars restored at the end.
-        let set = |k: &str, v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
-        };
-        set("ATO_BINDING_api_key", Some("sk-secret-xyz"));
-        set("ATO_BINDING_db_url", None);
-
-        let resolver = super::super::secret_resolver::EnvSecretResolver;
-        // present ⇒ a lease carrying the value (only on the wire payload).
-        let ok = resolve_binding_leases(&resolver, &["api_key".into()], 1000, 60_000).unwrap();
+    fn issued_leases_carry_the_value_only_on_the_wire_payload() {
+        let ok = issue_leases(
+            vec![("api_key".to_string(), SecretValue::new("sk-secret-xyz"))],
+            1000,
+            60_000,
+        )
+        .unwrap();
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].to_delivery().value.expose(), "sk-secret-xyz");
         assert!(!format!("{:?}", ok[0]).contains("sk-secret-xyz"), "lease Debug must redact");
-
-        // missing ⇒ FAIL CLOSED (never expose an unbound session).
-        let err = resolve_binding_leases(&resolver, &["db_url".into()], 1000, 60_000).unwrap_err().to_string();
-        assert!(err.contains("db_url") && err.contains("ATO_BINDING_db_url"), "{err}");
-
-        set("ATO_BINDING_api_key", None);
+        // An invalid binding name fails closed at issuance.
+        assert!(issue_leases(vec![("bad name!".to_string(), SecretValue::new("v"))], 1000, 60_000).is_err());
     }
 
     #[test]
@@ -441,5 +552,66 @@ mod tests {
         let err = ensure_pre_bind_before_seal(true).unwrap_err().to_string();
         assert!(err.contains("post-bind state is dirty"), "{err}");
         assert!(err.to_lowercase().contains("never re-seal"), "{err}");
+    }
+
+    #[test]
+    fn renewal_extends_leases_and_stays_bound_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ch = MockChannel {
+            session: BindingSession::new(
+                vec![BindingName::parse("api_key").unwrap()],
+                TmpfsBindingSink::new(dir.path()),
+            ),
+            now_ms: 1_000,
+        };
+        establish_bindings(&mut ch, &[lease("api_key", "l1")], 3).expect("bind");
+        // Renew with a fresh lease (renew = Deliver again): value replaced
+        // atomically and the session stays bound-ready at the renewed clock.
+        let renewed = BindingLease::issue(
+            BindingLeaseId::new("l1"),
+            BindingName::parse("api_key").unwrap(),
+            SecretValue::new("secret-for-api_key-v2"),
+            50_000,
+            60_000,
+        );
+        renew_over_channel(&mut ch, std::slice::from_ref(&renewed), true).expect("renew");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("api_key")).unwrap(),
+            "secret-for-api_key-v2"
+        );
+        // Past the ORIGINAL expiry (1_000+60_000) but inside the renewed one:
+        ch.now_ms = 100_000;
+        match ch.request(HostToAgent::QueryBoundReady).unwrap() {
+            AgentToHost::BoundReady { ready, .. } => assert!(ready, "renewed lease must outlive the original TTL"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn revoked_grant_scrubs_and_remaining_leases_renew_ack_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ch = MockChannel {
+            session: BindingSession::new(
+                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                TmpfsBindingSink::new(dir.path()),
+            ),
+            now_ms: 1_000,
+        };
+        establish_bindings(&mut ch, &[lease("db_url", "l1"), lease("api_key", "l2")], 3).expect("bind");
+        // Grant for db_url disappears -> the renewal loop revokes that lease…
+        revoke_binding(&mut ch, BindingLeaseId::new("l1")).expect("revoke");
+        assert!(!dir.path().join("db_url").exists(), "revoked value must be scrubbed");
+        // …and the still-granted lease renews Ack-only (bound-ready is false by design).
+        renew_over_channel(&mut ch, &[lease("api_key", "l2")], false).expect("ack-only renew");
+        assert!(dir.path().join("api_key").exists());
+        match ch.request(HostToAgent::QueryBoundReady).unwrap() {
+            AgentToHost::BoundReady { ready, pending } => {
+                assert!(!ready, "partially revoked session must not be bound-ready");
+                assert_eq!(pending.len(), 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // A full renew (assert_bound_ready) must FAIL CLOSED in this state.
+        assert!(renew_over_channel(&mut ch, &[lease("api_key", "l2")], true).is_err());
     }
 }
