@@ -18,7 +18,7 @@
 
 use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassMismatch};
 
-use super::facts::{DesktopRunnerFacts, ReadyStateKind};
+use super::facts::{DesktopRunnerFacts, LocalBackendBlocker, ReadyStateKind};
 
 /// What a placement decision resolves to for a Desktop Runner host.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,8 +34,14 @@ pub(crate) enum DesktopPlacement {
     /// silently cold-start. An explicit managed-runner handoff is the answer.
     ReadyStateRestoreUnsupportedLocal { reason: String },
     /// No safe local path. An **explicit** managed-runner handoff — the reason
-    /// is meant to be logged and shown, never a silent degrade.
-    SuggestManagedRunner { reason: String },
+    /// is meant to be logged and shown, never a silent degrade. `blockers`
+    /// carries the structured per-precondition reasons the host has no local
+    /// cold-OCI backend (empty when the handoff is for a non-backend cause such
+    /// as a Ready-State-without-artifact request or a class mismatch).
+    SuggestManagedRunner {
+        reason: String,
+        blockers: Vec<LocalBackendBlocker>,
+    },
 }
 
 /// The Ready-State exact-class gate: may an artifact built for `artifact_class`
@@ -59,7 +65,10 @@ fn local_cold_backend(host: &DesktopRunnerFacts) -> Option<&super::facts::Backen
         .filter(|b| b.ready_state_kind == ReadyStateKind::ColdOci)
 }
 
-/// Offer the local cold backend, else suggest a managed runner (explicit).
+/// Offer the local cold backend, else suggest a managed runner (explicit). The
+/// managed-runner suggestion carries the host's structured
+/// [`LocalBackendBlocker`]s so the caller can name every missing precondition
+/// (Apple silicon / macOS 26+ / `container`) instead of a single generic line.
 fn cold_or_managed(host: &DesktopRunnerFacts) -> DesktopPlacement {
     match local_cold_backend(host) {
         Some(b) => DesktopPlacement::ColdOciLocal {
@@ -70,6 +79,7 @@ fn cold_or_managed(host: &DesktopRunnerFacts) -> DesktopPlacement {
                 "no local Desktop Runner backend on {}/{}; use a managed runner",
                 host.host_os, host.host_arch
             ),
+            blockers: host.local_backend_blockers.clone(),
         },
     }
 }
@@ -120,6 +130,7 @@ pub(crate) fn select_placement(
                      (first divergent field: {}); not restorable on {}/{} — use a managed runner",
                     mismatch.first_divergent_field, host.host_os, host.host_arch
                 ),
+                blockers: Vec::new(),
             },
         },
         None => {
@@ -129,6 +140,7 @@ pub(crate) fn select_placement(
                         "Ready-State is enabled but this Desktop Runner cannot restore locally \
                          (no sealed artifact for this host class); use a managed runner"
                             .to_string(),
+                    blockers: Vec::new(),
                 }
             } else {
                 cold_or_managed(host)
@@ -203,7 +215,7 @@ mod tests {
         let host_class = RunnerClassFacts::from_host();
         let placement = select_placement(&host, &host_class, Some(&linux_x86_64_fc()), true);
         match placement {
-            DesktopPlacement::SuggestManagedRunner { reason } => {
+            DesktopPlacement::SuggestManagedRunner { reason, .. } => {
                 assert!(reason.contains("managed runner"), "{reason}");
             }
             other => panic!("must not restore/cold-start a foreign-class artifact: {other:?}"),
@@ -216,7 +228,7 @@ mod tests {
         let host_class = RunnerClassFacts::from_host();
         let placement = select_placement(&host, &host_class, None, true);
         match placement {
-            DesktopPlacement::SuggestManagedRunner { reason } => {
+            DesktopPlacement::SuggestManagedRunner { reason, .. } => {
                 assert!(reason.contains("managed runner"), "{reason}");
             }
             other => panic!("expected explicit managed-runner suggestion, got {other:?}"),
@@ -272,9 +284,16 @@ mod tests {
         );
         let host_class = RunnerClassFacts::from_host();
         let placement = select_placement(&host, &host_class, None, false);
-        assert!(matches!(
-            placement,
-            DesktopPlacement::SuggestManagedRunner { .. }
-        ));
+        match placement {
+            DesktopPlacement::SuggestManagedRunner { blockers, .. } => {
+                assert!(
+                    blockers
+                        .iter()
+                        .any(|b| b.as_str() == "apple_container_missing"),
+                    "blockers should name the missing container tool: {blockers:?}"
+                );
+            }
+            other => panic!("expected SuggestManagedRunner, got {other:?}"),
+        }
     }
 }

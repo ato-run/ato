@@ -18,6 +18,7 @@
 //! [`plan`] is pure (decision + guard + resolution) and fully unit-tested; the
 //! live [`cold_oci::run`] is exercised only by the ignored macOS-26 smoke.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -85,11 +86,7 @@ pub(crate) fn plan(
     if decision.placement != kind::LOCAL_COLD_OCI_CANDIDATE {
         // suggest_managed_runner / ready_state_restore_unsupported_local / etc.
         // A recommendation, never an automatic dispatch — we just refuse to run.
-        return Err(anyhow!(
-            "Desktop Runner will not run this capsule locally ({}): {}",
-            decision.placement,
-            decision.reason
-        ));
+        return Err(render_placement_failure(&decision));
     }
 
     // Binding guard — reject before any container starts. Names only, never values.
@@ -117,6 +114,47 @@ pub(crate) fn plan(
         exec_class,
         request,
     })
+}
+
+/// Render a non-cold-OCI placement decision as a structured, actionable CLI
+/// error. Keeps the one-line `(<placement>): <reason>` summary for log greppers,
+/// then adds the four fields a user/developer needs to tell "host requirement
+/// unmet" apart from "Desktop shell not wired":
+///   - `platform`: the host os/arch the decision was made for
+///   - `local backend`: `unavailable` (always, at this gate)
+///   - `reasons`: the structured [`LocalBackendBlocker`] tags (empty when the
+///     cause is not a missing backend, e.g. Ready-State-without-artifact)
+///   - `next action`: per-blocker remediation, or a generic managed-runner hint
+fn render_placement_failure(decision: &DesktopPlacementDecision) -> anyhow::Error {
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "Desktop Runner will not run this capsule locally ({}): {}",
+        decision.placement, decision.reason
+    );
+    let _ = write!(
+        s,
+        "\n  platform: {}/{}",
+        decision.host_os, decision.host_arch
+    );
+    let _ = write!(s, "\n  local backend: unavailable");
+    if decision.local_backend_blockers.is_empty() {
+        let _ = write!(s, "\n  next action: use a managed runner");
+    } else {
+        let tags: Vec<&str> = decision
+            .local_backend_blockers
+            .iter()
+            .map(|b| b.as_str())
+            .collect();
+        let _ = write!(s, "\n  reasons: [{}]", tags.join(", "));
+        let actions: Vec<&str> = decision
+            .local_backend_blockers
+            .iter()
+            .map(|b| b.next_action())
+            .collect();
+        let _ = write!(s, "\n  next action: {}", actions.join(" / "));
+    }
+    anyhow!(s)
 }
 
 /// A container name unique per run: `ato-desktop-<sanitized-name>-<pid>-<ms>`.
@@ -219,6 +257,34 @@ mod tests {
         build_macos_facts(&i, "0.7.0")
     }
 
+    fn old_macos_facts() -> super::super::facts::DesktopRunnerFacts {
+        build_macos_facts(
+            &MacosProbeInputs {
+                host_arch: "aarch64".into(),
+                product_version: Some("15.5".into()),
+                is_apple_silicon: true,
+                container_path: Some("/usr/local/bin/container".into()),
+                container_version: Some("container 0.1.0".into()),
+                container_service_running: false,
+            },
+            "0.7.0",
+        )
+    }
+
+    fn intel_mac_facts() -> super::super::facts::DesktopRunnerFacts {
+        build_macos_facts(
+            &MacosProbeInputs {
+                host_arch: "x86_64".into(),
+                product_version: Some("26.0".into()),
+                is_apple_silicon: false,
+                container_path: Some("/usr/local/bin/container".into()),
+                container_version: Some("container 0.1.0".into()),
+                container_service_running: false,
+            },
+            "0.7.0",
+        )
+    }
+
     fn manifest(extra: &str) -> CapsuleManifest {
         let base = r#"
 schema_version = "0.3"
@@ -289,6 +355,92 @@ default_target = "app"
             "{err}"
         );
         assert!(err.to_string().contains("managed runner"), "{err}");
+    }
+
+    // ── structured placement diagnostics (4 host patterns) ─────────────────
+    //
+    // The placement gate must distinguish "host requirement unmet" (one of the
+    // three macOS preconditions) from a generic "no local backend" so a user
+    // knows exactly what to fix. Each pattern asserts the rendered error names
+    // the specific blocker tag + next action, and that the success path does
+    // not error.
+
+    #[test]
+    fn placement_failure_apple_silicon_macos_too_old_names_upgrade_action() {
+        let err = plan(
+            &oci_capsule(),
+            None,
+            &old_macos_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "n".into(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("macos_too_old"), "missing blocker tag: {msg}");
+        assert!(
+            msg.contains("upgrade macOS"),
+            "missing next-action hint: {msg}"
+        );
+        assert!(msg.contains("platform: macos/aarch64"), "{msg}");
+        assert!(msg.contains("local backend: unavailable"), "{msg}");
+    }
+
+    #[test]
+    fn placement_failure_apple_silicon_container_missing_names_install_action() {
+        let err = plan(
+            &oci_capsule(),
+            None,
+            &no_container_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "n".into(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("apple_container_missing"), "{msg}");
+        assert!(
+            msg.contains("install Apple `container`"),
+            "missing next-action hint: {msg}"
+        );
+    }
+
+    #[test]
+    fn placement_failure_intel_mac_names_apple_silicon_blocker() {
+        let err = plan(
+            &oci_capsule(),
+            None,
+            &intel_mac_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "n".into(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not_apple_silicon"), "{msg}");
+        assert!(
+            msg.contains("Apple Containerization requires Apple silicon"),
+            "missing next-action hint: {msg}"
+        );
+        assert!(msg.contains("platform: macos/x86_64"), "{msg}");
+    }
+
+    #[test]
+    fn placement_success_all_requirements_satisfied_plans_cold_oci() {
+        let p = plan(
+            &oci_capsule(),
+            None,
+            &supported_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "ato-desktop-test".into(),
+        )
+        .unwrap();
+        assert_eq!(p.decision.placement, kind::LOCAL_COLD_OCI_CANDIDATE);
+        assert!(
+            p.decision.local_backend_blockers.is_empty(),
+            "a satisfied host has no blockers"
+        );
     }
 
     #[test]
