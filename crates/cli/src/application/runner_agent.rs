@@ -3326,6 +3326,22 @@ async fn handle_restore_snapshot_lease(
 
     let lease_id = lease.id.clone();
 
+    // ── Track R1 (ato#948): restore-prep phase profiling ────────────────────
+    // The measured claimed→firecracker gap (~1.7s) hid inside this handler.
+    // Every phase is timed and emitted as ONE stable key=value line
+    // (`RESTORE_PROF …`) on the success path — ids only, never secrets/URLs.
+    // `spans=` carries the snapshot backend's internal bench spans
+    // (rehydrate/cache/spawn/health…), populated when ATO_READY_STATE_BENCH=1.
+    let prof_total = std::time::Instant::now();
+    let mut prof_last = std::time::Instant::now();
+    let mut prof_parts: Vec<String> = Vec::new();
+    macro_rules! prof_mark {
+        ($name:literal) => {{
+            prof_parts.push(format!(concat!($name, "={}"), prof_last.elapsed().as_millis()));
+            prof_last = std::time::Instant::now();
+        }};
+    }
+
     // Report a typed failure and release the slot (fail-closed on every reject path).
     async fn fail(
         client: &reqwest::Client,
@@ -3360,8 +3376,10 @@ async fn handle_restore_snapshot_lease(
         "📦 restore lease {lease_id}: snapshot {} (capsule {}, {}/{})",
         cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
     );
+    prof_mark!("parse_ms");
     let _ = report_lease_status(client, api_base, runner_token, &lease_id, &LeaseReport::Preparing)
         .await;
+    prof_mark!("report_preparing_ms");
 
     // 2. Locate the fetched artifact on this host (v1 same-host CAS, ato#928 layout).
     let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
@@ -3387,6 +3405,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("locate_artifact_ms");
 
     // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate).
     let manifest = match load_and_verify_manifest(&paths.manifest_json, &cmd) {
@@ -3396,6 +3415,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("verify_manifest_ms");
 
     // 4. Open the artifact's CAS + select the host backend (both fail-closed).
     let store = match CasStore::open(&paths.cas_dir) {
@@ -3430,6 +3450,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("cas_open_backend_select_ms");
 
     // 5. Restore + expose. The disposable overlay is destroyed on teardown. host_runner
     // class stays None so `backend.restore` re-gates the manifest's runner class against
@@ -3437,6 +3458,8 @@ async fn handle_restore_snapshot_lease(
     let overlay_root = std::env::temp_dir()
         .join("ato-restore-overlays")
         .join(&lease_id);
+    // Drain any stale spans so `spans=` below carries THIS restore only.
+    let _ = snapshot::bench::drain();
     let receipt =
         match restore_and_expose(backend.as_ref(), &store, manifest, overlay_root, None, false) {
             Ok(r) => r,
@@ -3454,6 +3477,11 @@ async fn handle_restore_snapshot_lease(
                 return;
             }
         };
+    prof_mark!("backend_restore_ms");
+    let prof_spans: Vec<String> = snapshot::bench::drain()
+        .into_iter()
+        .map(|s| format!("{}={}ms", s.name, s.micros / 1000))
+        .collect();
     let session = receipt.session;
 
     let Some(guest_port) = session.guest_port else {
@@ -3516,6 +3544,7 @@ async fn handle_restore_snapshot_lease(
         Some(guest_port),
         proxy_started,
     );
+    prof_mark!("proxy_setup_ms");
     println!(
         "📨 restore lease {lease_id}: ready ({}, ready_url={})",
         payload.execution_id,
@@ -3527,6 +3556,15 @@ async fn handle_restore_snapshot_lease(
             scrub_secrets(&format!("{err:#}"))
         );
     }
+    prof_mark!("ready_ack_ms");
+    // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
+    println!(
+        "RESTORE_PROF lease={lease_id} snapshot={} {} total_ms={} spans=\"{}\"",
+        cmd.snapshot_id,
+        prof_parts.join(" "),
+        prof_total.elapsed().as_millis(),
+        prof_spans.join(";"),
+    );
 
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
     let control_url = format!(
