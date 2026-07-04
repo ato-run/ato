@@ -220,29 +220,42 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
     Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, declared_start_cmd, port, healthcheck, probe_synthesized, supervisor: None })
 }
 
-/// v1.2 (#912): derive a **supervisor** build spec for a `delivery = "env"`/`"file"`
-/// secret capsule. The workload is launched by the guest-agent (which starts it with
-/// the composed env only after the bindings are delivered), so the rootfs runs the
+/// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
+/// interpolated into the generated `supervisor.json` + the guest spawn script, so a
+/// malformed name is **rejected at emission** (fail-closed), never emitted — mirroring
+/// the guest-agent's own validation (#947) so a broken `supervisor.json` is never built.
+fn valid_env_var_name(name: &str) -> bool {
+    let mut cs = name.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// v1.2 (#912): derive a **supervisor** build spec for a `delivery = "env"` secret
+/// capsule. The workload is launched by the guest-agent (which starts it with the
+/// composed env only after the bindings are delivered), so the rootfs runs the
 /// agent-as-init and carries `/etc/ato/supervisor.json`.
 ///
 /// Fail-closed, and it relaxes ONLY the secret gate: at least one `[secrets.*]` must
-/// be declared and every one must be `env`/`file` delivery (`proxy`/`fd` are out of
-/// v1.2 scope); non-secret `[bindings.*]`, `[external.*]`, and GPU stay rejected. All
-/// runtime/port/command detection is the exact same tested logic as the no-binding
-/// path — this reuses [`derive_build_spec`] on a secret-stripped manifest, so it
-/// cannot drift, then attaches the supervisor config.
+/// be declared and every one must be `delivery = "env"` — `file`/`proxy`/`fd` are NOT
+/// env injection and belong to later binding paths, so they are rejected here; a
+/// duplicate resolved env var is rejected (a half-used binding would desync preflight /
+/// bound-ready from the actual injection); non-secret `[bindings.*]`, `[external.*]`,
+/// and GPU stay rejected. All runtime/port/command detection is the exact same tested
+/// logic as the no-binding path — this reuses [`derive_build_spec`] on a secret-stripped
+/// manifest, so it cannot drift, then attaches the supervisor config.
 pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
     if m.secrets.is_empty() {
-        return Err("supervisor build requires at least one [secrets.*] (delivery env/file)".into());
+        return Err("supervisor build requires at least one [secrets.*] (delivery = \"env\")".into());
     }
     for (name, s) in &m.secrets {
-        match s.delivery {
-            SecretDelivery::Env | SecretDelivery::File => {}
-            other => {
-                return Err(format!(
-                    "secret '{name}': delivery {other:?} is not supported by the v1.2 supervisor (env|file only)"
-                ));
-            }
+        // Only `env` delivery is supervisor env injection. `file` is a request-time
+        // read (a later file-binding path), and `proxy`/`fd` never inject an env var.
+        if s.delivery != SecretDelivery::Env {
+            return Err(format!(
+                "secret '{name}': delivery {:?} is not supported by the v1.2 supervisor \
+                 (delivery = \"env\" only; file/proxy/fd are out of scope here)",
+                s.delivery
+            ));
         }
     }
     // Reuse every no-binding gate + detection by deriving on a secret-stripped clone:
@@ -254,11 +267,25 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
 
     // ENV_VAR → binding name (the binding name IS the secret name; the run gate
     // delivers a lease per name). Env var = the secret's `env`, else its name.
-    let mut env_map = BTreeMap::new();
+    // Fail-closed: reject a malformed env var name (never emit a broken supervisor.json)
+    // and reject a duplicate env var (two secrets → one env var would half-use a binding
+    // and desync preflight/bound-ready from the actual injection).
+    let mut env_map: BTreeMap<String, String> = BTreeMap::new();
     let mut binding_names = Vec::with_capacity(m.secrets.len());
     for (name, s) in &m.secrets {
         let var = s.env.clone().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| name.clone());
-        env_map.insert(var, name.clone());
+        if !valid_env_var_name(&var) {
+            return Err(format!(
+                "secret '{name}': env var name {var:?} is not a POSIX identifier \
+                 (^[A-Za-z_][A-Za-z0-9_]*$)"
+            ));
+        }
+        if let Some(prev) = env_map.insert(var.clone(), name.clone()) {
+            return Err(format!(
+                "secrets '{prev}' and '{name}' both resolve to env var {var:?} — \
+                 duplicate env injection is ambiguous (fail-closed)"
+            ));
+        }
         binding_names.push(name.clone());
     }
     binding_names.sort();
@@ -838,12 +865,19 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
-    fn supervisor_derive_fails_closed_on_proxy_delivery_and_non_secret_bindings() {
-        // proxy/fd delivery is out of v1.2 supervisor scope.
-        let proxy = supervisor_toml().replace("env = \"OPENAI_API_KEY\"", "delivery = \"proxy\"");
-        assert!(derive_supervisor_build_spec(&parse(&proxy), &probe_python())
-            .unwrap_err()
-            .contains("delivery"));
+    fn supervisor_derive_accepts_only_env_delivery() {
+        // Only delivery = "env" injects a supervisor env var. file / proxy / fd are
+        // all rejected here (file is a later request-time read path; proxy/fd never
+        // inject an env var).
+        for d in ["file", "proxy", "fd"] {
+            let toml = supervisor_toml().replace("env = \"OPENAI_API_KEY\"", &format!("delivery = \"{d}\""));
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("delivery"), "{d}: {err}");
+        }
+    }
+
+    #[test]
+    fn supervisor_derive_fails_closed_on_non_secret_bindings_and_no_secrets() {
         // A non-secret binding is still rejected (state/user_files come later).
         let with_binding = format!(
             "{}\n[bindings.data]\nkind = \"state\"\nmount = \"/data\"\n",
@@ -856,6 +890,36 @@ readiness_probe = { http_get = "/health" }
         assert!(derive_supervisor_build_spec(&parse(&base_toml()), &probe_python())
             .unwrap_err()
             .contains("requires at least one"));
+    }
+
+    #[test]
+    fn supervisor_derive_rejects_malformed_and_duplicate_env_var_names() {
+        // A malformed env var name must never reach the generated supervisor.json.
+        let bad = format!(
+            "{}\n[secrets.KEY]\nrequired = true\nenv = \"BAD-VAR\"\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&bad), &probe_python())
+            .unwrap_err()
+            .contains("POSIX identifier"));
+        // Two secrets resolving to the SAME env var is ambiguous → fail-closed.
+        let dup = format!(
+            "{}\n[secrets.KEY_A]\nrequired = true\nenv = \"SHARED\"\n\
+             [secrets.KEY_B]\nrequired = true\nenv = \"SHARED\"\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
+            .unwrap_err()
+            .contains("duplicate env injection"));
+        // A secret with no `env` uses its NAME; a name that isn't a POSIX identifier
+        // (dot allowed in a binding name but not an env var) is rejected too.
+        let name_as_var = format!(
+            "{}\n[secrets.\"api.key\"]\nrequired = true\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&name_as_var), &probe_python())
+            .unwrap_err()
+            .contains("POSIX identifier"));
     }
 
     #[test]
