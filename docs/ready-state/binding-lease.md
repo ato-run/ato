@@ -64,11 +64,49 @@ way to inject env vars into a running, snapshotted PID. Therefore:
 - A Phase 8a **"env binding"** is an **env-like logical binding** the workload reads
   from its binding file (`/run/ato/bindings/<name>`) or the agent metadata endpoint
   **at request time** — *not* a host-side env rewrite.
-- An app that genuinely requires a real **process env** var must use a later
-  **supervisor/restart mode**: a guest supervisor starts (or restarts) the workload
-  *after* bindings are attached, with the env populated then. That mode is **out of
-  Phase 8a scope** and is called out here only so the contract is honest about the
-  limitation.
+- An app that genuinely requires a real **process env** var uses **supervisor mode**
+  (v1.2): the guest-agent itself owns the workload process and starts (or restarts) it
+  *after* bindings are attached, with the env populated then. This is the contract's
+  named successor to the impossible environ-rewrite.
+
+### Supervisor mode (v1.2)
+
+When a capsule declares `delivery = "env"` secrets, the builder writes
+`/etc/ato/supervisor.json` into the rootfs and the guest init runs the guest-agent
+**as the supervisor** instead of launching the app directly. The agent then owns the
+workload lifecycle:
+
+- `supervisor.json` holds the workload `cmd` / `cwd`, a static `base_env`, and a
+  `bindings_env` map (`ENV_VAR → binding name`). It holds **no secret value** — only
+  the name of the binding whose tmpfs file supplies the value.
+- **Start:** once the session is **bound-ready**, the agent composes the environment
+  (`base_env` + each `bindings_env` value read from `/run/ato/bindings/<name>`) and
+  spawns the workload with it. A missing binding fails closed (the workload never
+  starts half-bound); a spawn failure is reported to the host so it never believes the
+  session is serving.
+- **Build (`StopWorkload` + `Revoke`):** the build boots with a **placeholder**
+  binding, verifies health, then the host sends `StopWorkload` (stop the workload —
+  this does **not** scrub) **followed by `Revoke` for every lease** (scrub the
+  tmpfs). The pre-bind snapshot is then captured **workload-idle and secret-free**
+  (contract §7.2 placeholder-readiness). `StopWorkload` is stop-only by design so
+  stopping the workload and scrubbing bindings stay independent operations.
+- **Restore:** the real bindings are delivered → bound-ready → the agent starts a
+  **fresh** workload with the real env → health → expose. The value lives only on
+  tmpfs and in the running process's environment, never in the snapshot.
+
+**Value never enters the agent's heap.** A KVM spike (`spikes/firecracker-supervisor/`)
+found that composing the env inside the long-lived agent left the value resident in
+guest RAM (the agent is init; its heap is never freed, so `init_on_free` can't zero
+it). The agent therefore hands the workload child a plan of tmpfs **paths**, and the
+child reads each value at `exec` (`sh -c 'export VAR="$(cat PATH)"; exec CMD'`) — the
+value lives only in the child's environment.
+
+**No *real* secret is ever sealed** because the build delivers only a placeholder and
+the real binding is delivered at restore into a VM that is never re-snapshotted
+(post-bind-dirty). As defense-in-depth, a supervisor build should boot with
+`init_on_free=1` so the killed workload's freed env pages are zeroed; a guest kernel
+without that config leaves the *non-secret* placeholder in freed pages (proven
+harmless — see the spike receipt).
 
 ## Bound-ready gate (before user traffic)
 

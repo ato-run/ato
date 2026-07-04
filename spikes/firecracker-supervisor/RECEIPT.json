@@ -1,0 +1,22 @@
+{
+  "steps": [
+    "build: booted supervisor rootfs",
+    "build: PLACEHOLDER delivered over vsock",
+    "build: /health up \u2014 supervisor started the workload with the placeholder env",
+    "build: StopWorkload + Revoke \u2014 app idle, tmpfs scrubbed",
+    "build: snapshot created (mem + vmstate)",
+    "seal: REAL key ABSENT from mem + vmstate",
+    "hardening: placeholder present in /tmp/sup-e2e/mem \u2014 guest kernel lacks init_on_free (non-secret; see PR notes)",
+    "restore: snapshot loaded + resumed",
+    "restore: REAL key delivered over vsock",
+    "restore: /health up + /keyhash=72ea2734f206 \u2014 workload RESTARTED with the REAL env"
+  ],
+  "checks": {
+    "placeholder_health": true,
+    "health_down_after_stop": true,
+    "real_key_absent_from_seal": true,
+    "placeholder_absent_hardening": false,
+    "restart_with_real_env": true
+  },
+  "verdict": "PASS"
+}
