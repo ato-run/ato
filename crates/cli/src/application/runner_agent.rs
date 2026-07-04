@@ -3377,9 +3377,35 @@ async fn handle_restore_snapshot_lease(
         cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
     );
     prof_mark!("parse_ms");
-    let _ = report_lease_status(client, api_base, runner_token, &lease_id, &LeaseReport::Preparing)
-        .await;
-    prof_mark!("report_preparing_ms");
+    // Track R3 (ato#948): the Preparing report is a PROGRESS HINT, not a
+    // terminal contract — R1 measured it at p50 ~1.1s of pure control-plane
+    // round-trip sitting on the restore critical path. Fire it in the
+    // background (ONE task per restore, no retry loop) and start the restore
+    // immediately. Ready/Failed reporting stays awaited — the terminal
+    // contract is unchanged.
+    {
+        let client = client.clone();
+        let api_base = api_base.to_string();
+        let runner_token = runner_token.to_string();
+        let lease_id = lease_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = report_lease_status(
+                &client,
+                &api_base,
+                &runner_token,
+                &lease_id,
+                &LeaseReport::Preparing,
+            )
+            .await
+            {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: preparing report failed (non-fatal): {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+            }
+        });
+    }
+    prof_mark!("report_preparing_spawn_ms");
 
     // 2. Locate the fetched artifact on this host (v1 same-host CAS, ato#928 layout).
     let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
