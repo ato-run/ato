@@ -13,18 +13,27 @@ per-session lightweight VM), `micro_vm` (bare Firecracker microVM).
 
 ## Desktop Runner — macOS
 
-| Host | Substrate | Isolation | M0 `ready_state_kind` | Future | Accelerator | Cross-arch |
-|---|---|---|---|---|---|---|
-| macOS aarch64 + Apple Containerization | `apple_containerization` | `vm_wrapped_container` | `cold_oci` | `criu_checkpoint` | `apple_vz` | explicit/debug only, **never default** |
-| macOS aarch64, **no** `container` / macOS < 26 | — (unavailable) | — | — | — | — | recommend managed runner |
-| macOS x86_64 (Intel) | — (Apple Containerization unsupported) | — | — | — | — | recommend managed runner |
+| Host | Substrate | Isolation | `substrate_scope` | M0 `ready_state_kind` | Future | Accelerator | Cross-arch |
+|---|---|---|---|---|---|---|---|
+| macOS aarch64 + Apple Containerization | `apple_containerization` | `vm_wrapped_container` | `per_session_vm` | `cold_oci` | `criu_checkpoint` | `apple_vz` | explicit/debug only, **never default** |
+| macOS aarch64/x86_64 + Podman (`ato-podman` running) | `podman` | `vm_wrapped_container` | `shared_machine` | `cold_oci` | — | `none` | explicit/debug only, **never default** |
+| macOS aarch64, **no** `container` / macOS < 26, **no** Podman | — (unavailable) | — | — | — | — | — | recommend managed runner |
+| macOS x86_64 (Intel), no Podman | — (Apple Containerization unsupported) | — | — | — | — | — | recommend managed runner |
 
 Notes:
 
 - The macOS aarch64 + Apple Containerization backend is advertised **only** when
   the host is Apple silicon **and** macOS 26+ **and** `container` is installed.
-  Otherwise no backend is produced; an actionable diagnostic is carried and
-  surfaced only on local Desktop Runner selection.
+- The macOS + Podman backend is advertised when the `podman` binary is resolved
+  **and** the `ato-podman` machine is running. It is available on both Apple
+  silicon and Intel Macs, and on macOS < 26 — broadening host coverage beyond
+  Apple Containerization. The probe is read-only and never starts the machine.
+- When both substrates are available, Apple Containerization is preferred
+  (lighter-weight, per-session VM); Podman is the fallback.
+- **Blocker rendering policy:** if any substrate is available, the unavailable
+  substrates' blockers do NOT appear in the placement failure path (a backend IS
+  available, so placement succeeds with no blockers). They may appear in
+  `ato doctor desktop-runner` substrate details.
 - VM snapshot / Firecracker are **not supported locally** on macOS.
 - A macOS aarch64 host never restores a `linux`/`x86_64`/`firecracker`
   Ready-State artifact, and never silently uses QEMU TCG or Rosetta for
