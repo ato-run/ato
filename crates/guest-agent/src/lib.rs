@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::{BindingLeaseId, BindingName};
 
+pub mod supervisor;
 pub mod tmpfs;
 pub mod vsock;
 pub use tmpfs::TmpfsBindingSink;
@@ -85,6 +86,11 @@ impl<S: BindingSink> BindingSession<S> {
                 self.scrub_all();
                 self.bound_ready_response(now_ms)
             }
+            // Supervisor control (v1.2): not a binding-session concern — the guest
+            // binary routes it to the workload supervisor before reaching here. If it
+            // ever arrives (a session with no supervisor), report the current
+            // bound-ready state rather than error.
+            HostToAgent::StopWorkload => self.bound_ready_response(now_ms),
         }
     }
 
