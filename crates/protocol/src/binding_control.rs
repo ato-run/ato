@@ -25,11 +25,12 @@ pub enum HostToAgent {
     Revoke { id: BindingLeaseId },
     /// Ask whether every required binding is present (the bound-ready gate).
     QueryBoundReady,
-    /// v1.2 (supervisor mode): stop the supervised workload process. Used at BUILD
-    /// time before the pre-bind snapshot — the app must not be running when the
-    /// memory image is captured (contract §7.2: build readiness runs with a
-    /// placeholder, then the app is stopped + bindings scrubbed before seal). A
-    /// capsule without a supervisor answers `WorkloadStopped { was_running: false }`.
+    /// v1.2 (supervisor mode): stop the supervised workload process — **stop only,
+    /// it does NOT scrub bindings**. Used at BUILD time before the pre-bind snapshot;
+    /// the app must not be running when the memory image is captured. The build
+    /// sequence is `StopWorkload` **then `Revoke` (all leases)** to also scrub the
+    /// tmpfs before the seal (contract §7.2). A capsule without a supervisor answers
+    /// `WorkloadStopped { was_running: false }`.
     StopWorkload,
     /// Session teardown: revoke + scrub all bindings, then the host tears the VM down.
     Stop,

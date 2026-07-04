@@ -84,10 +84,12 @@ workload lifecycle:
   spawns the workload with it. A missing binding fails closed (the workload never
   starts half-bound); a spawn failure is reported to the host so it never believes the
   session is serving.
-- **Build (`StopWorkload`):** the build boots with a **placeholder** binding, verifies
-  health, then the host sends `StopWorkload`; the agent stops the workload and the
-  session scrubs the tmpfs, so the pre-bind snapshot is captured **workload-idle and
-  secret-free** (contract §7.2 placeholder-readiness).
+- **Build (`StopWorkload` + `Revoke`):** the build boots with a **placeholder**
+  binding, verifies health, then the host sends `StopWorkload` (stop the workload —
+  this does **not** scrub) **followed by `Revoke` for every lease** (scrub the
+  tmpfs). The pre-bind snapshot is then captured **workload-idle and secret-free**
+  (contract §7.2 placeholder-readiness). `StopWorkload` is stop-only by design so
+  stopping the workload and scrubbing bindings stay independent operations.
 - **Restore:** the real bindings are delivered → bound-ready → the agent starts a
   **fresh** workload with the real env → health → expose. The value lives only on
   tmpfs and in the running process's environment, never in the snapshot.
