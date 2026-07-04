@@ -92,6 +92,20 @@ workload lifecycle:
   **fresh** workload with the real env → health → expose. The value lives only on
   tmpfs and in the running process's environment, never in the snapshot.
 
+**Value never enters the agent's heap.** A KVM spike (`spikes/firecracker-supervisor/`)
+found that composing the env inside the long-lived agent left the value resident in
+guest RAM (the agent is init; its heap is never freed, so `init_on_free` can't zero
+it). The agent therefore hands the workload child a plan of tmpfs **paths**, and the
+child reads each value at `exec` (`sh -c 'export VAR="$(cat PATH)"; exec CMD'`) — the
+value lives only in the child's environment.
+
+**No *real* secret is ever sealed** because the build delivers only a placeholder and
+the real binding is delivered at restore into a VM that is never re-snapshotted
+(post-bind-dirty). As defense-in-depth, a supervisor build should boot with
+`init_on_free=1` so the killed workload's freed env pages are zeroed; a guest kernel
+without that config leaves the *non-secret* placeholder in freed pages (proven
+harmless — see the spike receipt).
+
 ## Bound-ready gate (before user traffic)
 
 No user traffic is exposed until **bound-ready**. The agent signals (over vsock) that:
