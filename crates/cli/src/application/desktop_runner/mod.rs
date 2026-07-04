@@ -47,7 +47,9 @@ pub(crate) mod placement;
 #[cfg(test)]
 mod port_verify;
 
-use facts::{DesktopRunnerFacts, Maturity, PROVIDER_KIND_DESKTOP, SubstrateCapability};
+use facts::{
+    DesktopRunnerFacts, LocalBackendBlocker, Maturity, PROVIDER_KIND_DESKTOP, SubstrateCapability,
+};
 
 /// WSL2 substrate placeholder identifier (Windows; not implemented in M0).
 const SUBSTRATE_WSL2: &str = "wsl2";
@@ -123,6 +125,11 @@ fn build_other_facts(host_os: &str, host_arch: &str) -> DesktopRunnerFacts {
         substrates,
         backends: Vec::new(),
         diagnostics,
+        // Every non-macOS host lacks the Apple Containerization substrate; that
+        // is the single structured blocker for Linux/Windows/other.
+        local_backend_blockers: vec![LocalBackendBlocker::NonMacOsHost {
+            host_os: host_os.to_string(),
+        }],
     }
 }
 

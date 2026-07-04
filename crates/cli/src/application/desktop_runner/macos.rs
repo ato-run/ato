@@ -10,8 +10,9 @@
 //! tested across simulated hosts without a real macOS 26 machine.
 
 use super::facts::{
-    ACCELERATOR_APPLE_VZ, BackendCapability, DesktopRunnerFacts, IsolationBoundary, Maturity,
-    PROVIDER_KIND_DESKTOP, ReadyStateKind, SUBSTRATE_APPLE_CONTAINERIZATION, SubstrateCapability,
+    ACCELERATOR_APPLE_VZ, BackendCapability, DesktopRunnerFacts, IsolationBoundary,
+    LocalBackendBlocker, Maturity, PROVIDER_KIND_DESKTOP, ReadyStateKind,
+    SUBSTRATE_APPLE_CONTAINERIZATION, SubstrateCapability,
 };
 
 /// Apple `container` requires macOS 26 or newer. Below this the substrate is
@@ -67,10 +68,15 @@ pub(crate) fn build_macos_facts(
     let available = inputs.is_apple_silicon && macos_supported && container_present;
 
     let mut diagnostics = Vec::new();
+    let mut blockers = Vec::new();
     if !available {
         // One coarse, actionable line per missing precondition. Surfaced only
         // when the user selects local Desktop Runner execution (see mod.rs).
+        // Each missing precondition is also recorded as a structured
+        // `LocalBackendBlocker` so the placement decision / CLI error can name
+        // every reason individually instead of a generic "no local backend".
         if !inputs.is_apple_silicon {
+            blockers.push(LocalBackendBlocker::NotAppleSilicon);
             diagnostics.push(
                 "Apple Containerization requires Apple silicon; this Mac is Intel. \
                  Use a managed runner for local-equivalent execution."
@@ -82,12 +88,17 @@ pub(crate) fn build_macos_facts(
                 .product_version
                 .clone()
                 .unwrap_or_else(|| "unknown".into());
+            blockers.push(LocalBackendBlocker::MacOsTooOld {
+                found: inputs.product_version.clone(),
+                required: MIN_MACOS_MAJOR_FOR_CONTAINER,
+            });
             diagnostics.push(format!(
                 "Apple Containerization requires macOS {MIN_MACOS_MAJOR_FOR_CONTAINER}+ \
                  (found macOS {have}). Upgrade macOS or use a managed runner."
             ));
         }
         if !container_present {
+            blockers.push(LocalBackendBlocker::AppleContainerMissing);
             diagnostics.push(
                 "Apple `container` is not installed. Install it from \
                  https://github.com/apple/container, or use a managed runner."
@@ -141,6 +152,7 @@ pub(crate) fn build_macos_facts(
         substrates: vec![substrate],
         backends,
         diagnostics,
+        local_backend_blockers: blockers,
     }
 }
 

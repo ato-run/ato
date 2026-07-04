@@ -98,6 +98,57 @@ impl Maturity {
     }
 }
 
+/// A structured reason the host cannot serve a local cold-OCI Desktop Runner
+/// backend. The machine-readable counterpart to the free-text `diagnostics`
+/// strings: each blocker names *one* missing precondition so a placement
+/// failure can tell the user exactly what to fix (upgrade macOS / install
+/// `container` / use a managed runner) instead of a single generic "no local
+/// backend" message. Populated by the host probes ([`super::macos`] /
+/// [`super::build_other_facts`]); empty when a local backend is available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum LocalBackendBlocker {
+    /// Host is not Apple silicon (Apple Containerization requires it).
+    NotAppleSilicon,
+    /// macOS is older than the minimum required for Apple Containerization.
+    MacOsTooOld {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        found: Option<String>,
+        required: u32,
+    },
+    /// The Apple `container` tool is not installed / not on PATH.
+    AppleContainerMissing,
+    /// Host OS has no Desktop Runner cold-OCI substrate (Linux/Windows/etc.).
+    NonMacOsHost { host_os: String },
+}
+
+impl LocalBackendBlocker {
+    /// Stable snake_case tag (matches the serde `kind` label).
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotAppleSilicon => "not_apple_silicon",
+            Self::MacOsTooOld { .. } => "macos_too_old",
+            Self::AppleContainerMissing => "apple_container_missing",
+            Self::NonMacOsHost { .. } => "non_macos_host",
+        }
+    }
+
+    /// One-line actionable next step for the user.
+    pub(crate) fn next_action(&self) -> &'static str {
+        match self {
+            Self::NotAppleSilicon => {
+                "use a managed runner (Apple Containerization requires Apple silicon)"
+            }
+            Self::MacOsTooOld { .. } => "upgrade macOS to 26+ or use a managed runner",
+            Self::AppleContainerMissing => {
+                "install Apple `container` from https://github.com/apple/container, or use a \
+                 managed runner"
+            }
+            Self::NonMacOsHost { .. } => "use a managed runner (local cold-OCI is macOS-only)",
+        }
+    }
+}
+
 /// Availability of one isolation substrate on this host (e.g. Apple
 /// Containerization). Reported even when unavailable so a diagnostic can name
 /// what is missing — but an unavailable substrate yields no [`BackendCapability`].
@@ -178,6 +229,12 @@ pub(crate) struct DesktopRunnerFacts {
     /// never raised during normal Desktop startup.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) diagnostics: Vec<String>,
+    /// Structured reasons the host cannot serve a local cold-OCI backend (empty
+    /// when a backend is available). The machine-readable counterpart to
+    /// `diagnostics`; surfaced in placement decisions so the CLI can tell users
+    /// exactly what to fix instead of a generic "no local backend" message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) local_backend_blockers: Vec<LocalBackendBlocker>,
 }
 
 impl DesktopRunnerFacts {
@@ -243,6 +300,7 @@ mod tests {
             substrates: vec![],
             backends: vec![],
             diagnostics: vec![],
+            local_backend_blockers: vec![],
         };
         let json = facts.to_receipt_json();
         let back: DesktopRunnerFacts = serde_json::from_str(&json).unwrap();

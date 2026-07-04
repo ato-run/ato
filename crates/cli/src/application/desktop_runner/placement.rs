@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use capsule::foundation::install_lifecycle::RunnerClassFacts;
 
-use super::facts::{DesktopRunnerFacts, PROVIDER_KIND_DESKTOP};
+use super::facts::{DesktopRunnerFacts, LocalBackendBlocker, PROVIDER_KIND_DESKTOP};
 use super::matching::{DesktopPlacement, select_placement};
 
 /// Stable `placement` kind labels (snake_case, for receipts/logs).
@@ -45,6 +45,12 @@ pub(crate) struct DesktopPlacementDecision {
     pub(crate) backend_substrate: Option<String>,
     /// Human-readable rationale (safe to log/show).
     pub(crate) reason: String,
+    /// Structured reasons the host has no local cold-OCI backend, surfaced from
+    /// [`matching::DesktopPlacement::SuggestManagedRunner`] when the decision
+    /// was reached via `cold_or_managed`. Empty for decisions whose cause is not
+    /// a missing backend (e.g. Ready-State-without-artifact, class mismatch).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) local_backend_blockers: Vec<LocalBackendBlocker>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) diagnostics: Vec<String>,
     /// Always `false` in M2: a placement decision is not an execution. Makes the
@@ -67,7 +73,7 @@ pub(crate) fn decide(
     artifact_class: Option<&RunnerClassFacts>,
     ready_state_enabled: bool,
 ) -> DesktopPlacementDecision {
-    let (placement, backend_substrate, reason) =
+    let (placement, backend_substrate, reason, blockers) =
         match select_placement(facts, host_class, artifact_class, ready_state_enabled) {
             DesktopPlacement::ReadyStateRestore { backend_substrate } => (
                 kind::READY_STATE_RESTORE,
@@ -76,6 +82,7 @@ pub(crate) fn decide(
                     "exact RunnerClass match; Ready-State restore permitted on {backend_substrate} \
                      (not executed in M2)"
                 ),
+                Vec::new(),
             ),
             DesktopPlacement::ColdOciLocal { backend_substrate } => (
                 kind::LOCAL_COLD_OCI_CANDIDATE,
@@ -84,12 +91,16 @@ pub(crate) fn decide(
                     "local cold-OCI candidate on {backend_substrate}; local execution is not wired \
                      yet (MacBook M3)"
                 ),
+                Vec::new(),
             ),
-            DesktopPlacement::ReadyStateRestoreUnsupportedLocal { reason } => {
-                (kind::READY_STATE_RESTORE_UNSUPPORTED_LOCAL, None, reason)
-            }
-            DesktopPlacement::SuggestManagedRunner { reason } => {
-                (kind::SUGGEST_MANAGED_RUNNER, None, reason)
+            DesktopPlacement::ReadyStateRestoreUnsupportedLocal { reason } => (
+                kind::READY_STATE_RESTORE_UNSUPPORTED_LOCAL,
+                None,
+                reason,
+                Vec::new(),
+            ),
+            DesktopPlacement::SuggestManagedRunner { reason, blockers } => {
+                (kind::SUGGEST_MANAGED_RUNNER, None, reason, blockers)
             }
         };
 
@@ -102,6 +113,7 @@ pub(crate) fn decide(
         placement: placement.to_string(),
         backend_substrate,
         reason,
+        local_backend_blockers: blockers,
         diagnostics: facts.diagnostics.clone(),
         is_executable_now: false,
     }
