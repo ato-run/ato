@@ -35,6 +35,10 @@ WORK = os.environ.get("ATO_FC_WORK", "/tmp/sup-e2e")
 TAP = os.environ.get("ATO_FC_TAP", "fctap0")
 HOST_IP = "172.16.0.1"
 GUEST_IP = "172.16.0.2"
+# The binding name the guest-agent requires (matches the rootfs's supervisor.json /
+# init argv). Default "openai" for the hand-built rootfs; the Rust-built rootfs uses
+# the secret name (e.g. OPENAI_API_KEY) — set ATO_SPIKE_BINDING to match.
+BINDING = os.environ.get("ATO_SPIKE_BINDING", "openai")
 PLACEHOLDER = "ATO-PLACEHOLDER-8f3a1c-do-not-seal"
 REAL_KEY = "sk-real-live-key-2f9d4b7e-never-at-build"
 FAR_FUTURE = 100_000_000_000_000  # expires_at_ms, ~year 5138 (vs guest real clock)
@@ -205,7 +209,7 @@ def main():
         log("build: booted supervisor rootfs")
 
         sock = vsock_connect(uds)
-        r = deliver(sock, "openai", PLACEHOLDER, "lease-openai")
+        r = deliver(sock, BINDING, PLACEHOLDER, "lease-openai")
         assert r.get("kind") == "ack", f"deliver placeholder: {r}"
         log("build: PLACEHOLDER delivered over vsock")
         assert wait_health(), "app never became healthy with the placeholder"
@@ -262,7 +266,7 @@ def main():
 
         sock2 = vsock_connect(uds)
         real_hash = hashlib.sha256(REAL_KEY.encode()).hexdigest()[:12]
-        r = deliver(sock2, "openai", REAL_KEY, "lease-openai-real")
+        r = deliver(sock2, BINDING, REAL_KEY, "lease-openai-real")
         assert r.get("kind") == "ack", f"deliver real: {r}"
         log("restore: REAL key delivered over vsock")
         assert wait_health(), "app never became healthy after real bind (restart-with-env failed)"
