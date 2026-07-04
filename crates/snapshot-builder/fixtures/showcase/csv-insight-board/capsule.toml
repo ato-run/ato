@@ -1,0 +1,15 @@
+# Staging showcase: CSV Insight Board — a small, useful, secret-free web tool.
+# Snapshot v1 shape: single web target, dependency-free node foreground process,
+# declared port, explicit readiness probe. All CSV analysis runs in the browser.
+schema_version = "0.3"
+name = "csv-insight-board"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+run = "node server.js"
+port = 8080
+readiness_probe = { http_get = "/" }

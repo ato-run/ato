@@ -1,0 +1,15 @@
+# Staging showcase: Markdown Slide Maker — paste markdown, get a slide deck.
+# Snapshot v1 shape: dependency-free node foreground process, declared port,
+# explicit readiness probe. Rendering + export run in the browser.
+schema_version = "0.3"
+name = "markdown-slide-maker"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+run = "node server.js"
+port = 8080
+readiness_probe = { http_get = "/" }

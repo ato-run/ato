@@ -1,0 +1,15 @@
+# Staging showcase: Capsule Readiness Checker — paste a capsule.toml, get a
+# Snapshot v1 compatibility verdict with Ato-style blocker messages. Mirrors
+# the real derive_build_spec / eligibility rules. Dependency-free node.
+schema_version = "0.3"
+name = "capsule-readiness-checker"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+run = "node server.js"
+port = 8080
+readiness_probe = { http_get = "/" }
