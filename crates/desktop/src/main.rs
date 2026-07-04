@@ -9,6 +9,7 @@ mod cli_install;
 mod community_api;
 mod config;
 mod crash;
+mod desktop_run_agent;
 mod egress_policy;
 mod egress_proxy;
 mod github_manifest_draft;
