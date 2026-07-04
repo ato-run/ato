@@ -73,36 +73,72 @@ impl SupervisorConfig {
     }
 }
 
-/// Compose the workload environment: `base_env`, then each `bindings_env` entry with
-/// its value read from `<bindings_root>/<binding>`. A missing binding file is an
-/// error (fail-closed — the workload must never start half-bound). Returns the full
-/// env map; the caller applies it to the child. Values are never logged.
-pub fn compose_env(
-    config: &SupervisorConfig,
-    bindings_root: &Path,
-) -> std::io::Result<BTreeMap<String, String>> {
-    let mut env = config.base_env.clone();
+/// How to spawn the workload. The secret bindings are carried as **tmpfs FILE
+/// PATHS, never values** — a KVM finding (PR 3b): a long-lived agent that read the
+/// value into its own heap left the secret resident in guest RAM (init_on_free only
+/// zeroes *freed* pages, not the live agent's heap). So the value is read **only in
+/// the workload child**, at exec time, and lives solely in that child's environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnPlan {
+    pub cmd: Vec<String>,
+    pub cwd: String,
+    /// Non-secret env, applied to the child directly.
+    pub base_env: BTreeMap<String, String>,
+    /// `ENV_VAR -> tmpfs file path`. The child reads each at exec; the agent never
+    /// reads the value.
+    pub secret_env: Vec<(String, PathBuf)>,
+}
+
+/// Build the spawn plan from the config + bindings root. Verifies each binding file
+/// **exists** (fail-closed — never start half-bound) WITHOUT reading its contents, so
+/// no value enters the agent's address space.
+pub fn plan_spawn(config: &SupervisorConfig, bindings_root: &Path) -> std::io::Result<SpawnPlan> {
+    let mut secret_env = Vec::with_capacity(config.bindings_env.len());
     for (var, binding) in &config.bindings_env {
         let path = bindings_root.join(binding);
-        let value = std::fs::read_to_string(&path).map_err(|e| {
-            std::io::Error::new(
-                e.kind(),
-                format!("binding '{binding}' for env '{var}' not readable at {}", path.display()),
-            )
-        })?;
-        // tmpfs files are written without a trailing newline, but trim defensively so
-        // an accidental newline never rides into the credential.
-        env.insert(var.clone(), value.trim_end_matches(['\n', '\r']).to_string());
+        if !path.exists() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("binding '{binding}' for env '{var}' absent at {}", path.display()),
+            ));
+        }
+        secret_env.push((var.clone(), path));
     }
-    Ok(env)
+    Ok(SpawnPlan {
+        cmd: config.cmd.clone(),
+        cwd: config.cwd.clone(),
+        base_env: config.base_env.clone(),
+        secret_env,
+    })
+}
+
+/// POSIX single-quote a string for safe embedding in an `sh -c` script.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The `sh -c` script that reads each secret from its tmpfs file into the env, then
+/// `exec`s the workload — so the value only ever materializes inside the child (which
+/// becomes the workload via exec), never in the agent. `cmd`/paths are shell-quoted.
+fn spawn_script(plan: &SpawnPlan) -> String {
+    let mut script = String::new();
+    for (var, path) in &plan.secret_env {
+        // export VAR="$(cat 'path')" — the value is read by the subshell, held only
+        // in this child's environment, and never appears in argv/the process table.
+        script.push_str(&format!(
+            "export {var}=\"$(cat {})\"\n",
+            shell_single_quote(&path.to_string_lossy())
+        ));
+    }
+    let quoted: Vec<String> = plan.cmd.iter().map(|a| shell_single_quote(a)).collect();
+    script.push_str(&format!("exec {}\n", quoted.join(" ")));
+    script
 }
 
 /// The workload process, behind a trait so the supervisor orchestration is testable
-/// without spawning. `start` receives the fully composed env; `stop` kills the child.
+/// without spawning. `start` receives the [`SpawnPlan`] (secret paths, not values).
 pub trait Workload {
-    /// Spawn the workload with `env` (in addition to, and overriding, the inherited
-    /// environment) and `cwd`. Idempotent callers guard against double-start.
-    fn start(&mut self, cmd: &[String], cwd: &str, env: &BTreeMap<String, String>) -> std::io::Result<()>;
+    fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()>;
     /// Stop the workload (SIGTERM then reap). Idempotent — not running ⇒ Ok(false).
     fn stop(&mut self) -> std::io::Result<bool>;
     /// Whether the workload child is currently running.
@@ -110,20 +146,22 @@ pub trait Workload {
 }
 
 /// A real OS process workload (`std::process::Command`), used by the guest binary.
+/// Spawns `sh -c <script>` so the secret is read in the child at exec, never in the
+/// agent's heap.
 #[derive(Default)]
 pub struct ChildWorkload {
     child: Option<std::process::Child>,
 }
 
 impl Workload for ChildWorkload {
-    fn start(&mut self, cmd: &[String], cwd: &str, env: &BTreeMap<String, String>) -> std::io::Result<()> {
-        let (prog, args) = cmd
-            .split_first()
-            .ok_or_else(|| std::io::Error::other("supervisor cmd is empty"))?;
-        let mut c = std::process::Command::new(prog);
-        c.args(args).current_dir(cwd);
-        for (k, v) in env {
-            c.env(k, v);
+    fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()> {
+        if plan.cmd.is_empty() {
+            return Err(std::io::Error::other("supervisor cmd is empty"));
+        }
+        let mut c = std::process::Command::new("/bin/sh");
+        c.arg("-c").arg(spawn_script(plan)).current_dir(&plan.cwd);
+        for (k, v) in &plan.base_env {
+            c.env(k, v); // non-secret only
         }
         self.child = Some(c.spawn()?);
         Ok(())
@@ -133,12 +171,12 @@ impl Workload for ChildWorkload {
         match self.child.take() {
             Some(mut ch) => {
                 // Best-effort graceful stop then reap. The VM teardown would kill it
-                // regardless; this makes the pre-snapshot image workload-idle.
+                // regardless; this makes the pre-snapshot image workload-idle so the
+                // workload's env pages free (and init_on_free zeroes them).
                 #[cfg(unix)]
                 unsafe {
                     libc::kill(ch.id() as i32, libc::SIGTERM);
                 }
-                // Give it a moment, then ensure it's gone.
                 let _ = ch.wait();
                 Ok(true)
             }
@@ -174,8 +212,8 @@ impl<W: Workload> Supervisor<W> {
         if self.started || !bound_ready {
             return Ok(false);
         }
-        let env = compose_env(&self.config, &self.bindings_root)?;
-        self.workload.start(&self.config.cmd, &self.config.cwd, &env)?;
+        let plan = plan_spawn(&self.config, &self.bindings_root)?;
+        self.workload.start(&plan)?;
         self.started = true;
         Ok(true)
     }
@@ -234,38 +272,48 @@ mod tests {
     }
 
     #[test]
-    fn compose_env_reads_tmpfs_and_fails_closed_on_missing_binding() {
+    fn plan_carries_paths_not_values_and_fails_closed_on_missing_binding() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "openai", "sk-REAL-VALUE\n"); // trailing newline trimmed
+        write(dir.path(), "openai", "sk-REAL-VALUE"); // the value must NOT enter the plan
         let cfg = SupervisorConfig {
-            cmd: vec!["true".into()],
+            cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::from([("PORT".to_string(), "8080".to_string())]),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
         };
-        let env = compose_env(&cfg, dir.path()).unwrap();
-        assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some("sk-REAL-VALUE"));
-        assert_eq!(env.get("PORT").map(String::as_str), Some("8080"));
+        let plan = plan_spawn(&cfg, dir.path()).unwrap();
+        assert_eq!(plan.base_env.get("PORT").map(String::as_str), Some("8080"));
+        assert_eq!(plan.secret_env.len(), 1);
+        assert_eq!(plan.secret_env[0].0, "OPENAI_API_KEY");
+        assert_eq!(plan.secret_env[0].1, dir.path().join("openai"));
+        // The value is NOT anywhere in the plan (never read into the agent).
+        assert!(!format!("{plan:?}").contains("sk-REAL-VALUE"), "plan must not carry the value");
+
+        // The spawn script reads the value from the file at exec, in the child.
+        let script = spawn_script(&plan);
+        assert!(script.contains("export OPENAI_API_KEY=\"$(cat "), "{script}");
+        assert!(script.contains("exec 'python3' 'app.py'"), "{script}");
+        assert!(!script.contains("sk-REAL-VALUE"), "script must not carry the value");
 
         // A missing binding must fail closed, never start half-bound.
         let cfg2 = SupervisorConfig {
             bindings_env: BTreeMap::from([("X".to_string(), "absent".to_string())]),
             ..cfg
         };
-        assert!(compose_env(&cfg2, dir.path()).is_err());
+        assert!(plan_spawn(&cfg2, dir.path()).is_err());
     }
 
-    /// Records lifecycle + the env the workload was started with (proves the value
-    /// reaches the child env, and that stop/restart composes fresh).
+    /// Records lifecycle + the plans the workload was started with (proves the agent
+    /// hands the child a PATH, never a value, and that stop/restart re-plans).
     #[derive(Default)]
     struct FakeWorkload {
         running: bool,
-        starts: RefCell<Vec<BTreeMap<String, String>>>,
+        starts: RefCell<Vec<SpawnPlan>>,
         stops: RefCell<u32>,
     }
     impl Workload for FakeWorkload {
-        fn start(&mut self, _cmd: &[String], _cwd: &str, env: &BTreeMap<String, String>) -> std::io::Result<()> {
-            self.starts.borrow_mut().push(env.clone());
+        fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()> {
+            self.starts.borrow_mut().push(plan.clone());
             self.running = true;
             Ok(())
         }
@@ -296,29 +344,23 @@ mod tests {
         assert!(!sup.on_bound_ready(false).unwrap());
         assert!(!sup.is_running());
 
-        // Bound-ready → starts once (build: placeholder env).
+        // Bound-ready → starts once, handed the openai PATH (not the value).
         assert!(sup.on_bound_ready(true).unwrap());
         assert!(sup.is_running());
         // Idempotent: a second bound-ready does not double-start.
         assert!(!sup.on_bound_ready(true).unwrap());
         assert_eq!(sup.workload.starts.borrow().len(), 1);
-        assert_eq!(
-            sup.workload.starts.borrow()[0].get("OPENAI_API_KEY").map(String::as_str),
-            Some("sk-PLACEHOLDER")
-        );
+        assert_eq!(sup.workload.starts.borrow()[0].secret_env[0].0, "OPENAI_API_KEY");
+        assert!(!format!("{:?}", sup.workload.starts.borrow()[0]).contains("sk-PLACEHOLDER"));
 
         // StopWorkload (pre-snapshot) → stops, allows a fresh start on restore.
         assert!(sup.stop_workload().unwrap());
         assert!(!sup.is_running());
 
-        // Restore: real value delivered, bound-ready again → restart with REAL env.
+        // Restore: real value on tmpfs, bound-ready again → re-plans + restarts.
         write(dir.path(), "openai", "sk-REAL");
         assert!(sup.on_bound_ready(true).unwrap());
         assert_eq!(sup.workload.starts.borrow().len(), 2);
-        assert_eq!(
-            sup.workload.starts.borrow()[1].get("OPENAI_API_KEY").map(String::as_str),
-            Some("sk-REAL")
-        );
     }
 
     #[test]
@@ -335,17 +377,34 @@ mod tests {
     }
 
     #[test]
-    fn real_child_workload_starts_and_stops() {
+    fn real_child_reads_the_secret_from_tmpfs_at_exec_not_the_agent() {
+        // The value lives only in the workload child's env — proven by having the
+        // child WRITE its own env var to an output file, then reading it back. The
+        // agent (this test process) only ever handled the PATH.
         let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("seen.txt");
+        write(dir.path(), "openai", "sk-CHILD-ONLY-VALUE");
         let cfg = SupervisorConfig {
-            cmd: vec!["sleep".into(), "30".into()],
+            cmd: vec![
+                "sh".into(),
+                "-c".into(),
+                format!("printf %s \"$OPENAI_API_KEY\" > {}; sleep 30", out.display()),
+            ],
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
-            bindings_env: BTreeMap::new(),
+            bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
         assert!(sup.on_bound_ready(true).unwrap());
         assert!(sup.is_running());
+        // Wait for the child to write the file (it read the value at exec).
+        for _ in 0..50 {
+            if out.exists() && !std::fs::read_to_string(&out).unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "sk-CHILD-ONLY-VALUE");
         assert!(sup.stop_workload().unwrap(), "a live child reports was_running=true");
         assert!(!sup.is_running());
     }

@@ -155,25 +155,25 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use guest_agent::supervisor::SupervisorConfig;
+    use guest_agent::supervisor::{SpawnPlan, SupervisorConfig};
     use protocol::binding_lease::{BindingLease, BindingLeaseId, SecretValue};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
     use std::rc::Rc;
 
-    /// A workload that records the env of each start + how many stops — shared via Rc
-    /// so the test can inspect it after moving it into the Supervisor.
+    /// A workload that records each spawn plan + how many stops — shared via Rc so the
+    /// test can inspect it after moving it into the Supervisor.
     #[derive(Clone, Default)]
     struct SpyWorkload(Rc<SpyState>);
     #[derive(Default)]
     struct SpyState {
         running: RefCell<bool>,
-        starts: RefCell<Vec<BTreeMap<String, String>>>,
+        starts: RefCell<Vec<SpawnPlan>>,
         stops: RefCell<u32>,
     }
     impl Workload for SpyWorkload {
-        fn start(&mut self, _cmd: &[String], _cwd: &str, env: &BTreeMap<String, String>) -> std::io::Result<()> {
-            self.0.starts.borrow_mut().push(env.clone());
+        fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()> {
+            self.0.starts.borrow_mut().push(plan.clone());
             *self.0.running.borrow_mut() = true;
             Ok(())
         }
@@ -228,7 +228,9 @@ mod tests {
         let (resp, _stop) = rt.dispatch(&deliver_line("openai", "ATO-PLACEHOLDER-nonce"));
         assert!(resp.contains("ack"), "deliver acked: {resp}");
         assert!(spy.running.borrow().to_owned(), "workload started on bound-ready");
-        assert_eq!(spy.starts.borrow()[0].get("OPENAI_API_KEY").map(String::as_str), Some("ATO-PLACEHOLDER-nonce"));
+        // The plan carries the tmpfs PATH, never the value (read only in the child).
+        assert_eq!(spy.starts.borrow()[0].secret_env[0].0, "OPENAI_API_KEY");
+        assert!(!format!("{:?}", spy.starts.borrow()[0]).contains("PLACEHOLDER"), "value must not enter the plan");
 
         // Host sends StopWorkload before the pre-bind snapshot → workload idled.
         let (resp, stop) = rt.dispatch(&serde_json::to_string(&HostToAgent::StopWorkload).unwrap());
@@ -243,12 +245,13 @@ mod tests {
     fn restore_flow_restarts_workload_with_the_real_value() {
         let dir = tempfile::tempdir().unwrap();
         let (mut rt, spy) = runtime_with_supervisor(dir.path());
-        // Restore delivers the REAL value → bound-ready → workload starts with it.
+        // Restore delivers the REAL value to tmpfs → bound-ready → workload starts.
         rt.dispatch(&deliver_line("openai", "sk-REAL-KEY"));
         assert!(spy.running.borrow().to_owned());
-        assert_eq!(spy.starts.borrow().last().unwrap().get("OPENAI_API_KEY").map(String::as_str), Some("sk-REAL-KEY"));
-        // The placeholder is never seen here (fresh restore); exactly one start.
+        // Exactly one start; the plan references the binding path, not the value.
         assert_eq!(spy.starts.borrow().len(), 1);
+        assert_eq!(spy.starts.borrow()[0].secret_env[0].0, "OPENAI_API_KEY");
+        assert!(!format!("{:?}", spy.starts.borrow()[0]).contains("sk-REAL-KEY"));
     }
 
     #[test]
