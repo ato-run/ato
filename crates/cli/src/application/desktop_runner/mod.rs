@@ -100,6 +100,7 @@ fn build_other_facts(host_os: &str, host_arch: &str) -> DesktopRunnerFacts {
                 tool_version: None,
                 system_service_running: false,
                 accelerator: None,
+                substrate_scope: facts::SubstrateScope::SharedMachine,
                 maturity: Maturity::Experimental,
             });
             diagnostics.push(
