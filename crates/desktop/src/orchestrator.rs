@@ -2041,10 +2041,12 @@ pub(crate) struct DesktopRunnerRunChild {
 /// env vars the CLI's `desktop_runner::execute::is_explicitly_selected` gate
 /// requires (`ATO_RUN_PROVIDER=desktop` + `ATO_DESKTOP_RUNNER_EXECUTE=1`), and
 /// `ATO_READY_STATE_ENABLED=1` when `ready_state_enabled` is requested. stdout
-/// and stderr are redirected to **separate** log files so a background waiter
-/// can parse the session receipt (stdout JSON) and the structured placement
-/// error (stderr, see PR 1) independently. The child is its own process-group
-/// leader so the Desktop can reap it (and any container it spawned) on shutdown.
+/// and stderr are redirected to **separate, per-run unique** log files so a
+/// background waiter can parse the session receipt (stdout JSON) and the
+/// structured placement error (stderr, see PR 1) independently, and a second
+/// run cannot overwrite the first run's logs before its waiter reads them. The
+/// child is its own process-group leader so the Desktop can reap it (and any
+/// container it spawned) on shutdown.
 pub(crate) fn spawn_desktop_runner_run(
     source: &str,
     ready_state_enabled: bool,
@@ -2058,8 +2060,8 @@ pub(crate) fn spawn_desktop_runner_run(
         cmd.env("ATO_READY_STATE_ENABLED", "1");
     }
 
-    let stdout_log = desktop_runner_run_stdout_log_path();
-    let stderr_log = desktop_runner_run_stderr_log_path();
+    let run_id = unique_desktop_runner_run_id(source);
+    let (stdout_log, stderr_log) = desktop_runner_run_log_paths(&run_id);
     if let Some(parent) = stdout_log.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -2095,12 +2097,41 @@ pub(crate) fn spawn_desktop_runner_run(
     })
 }
 
-fn desktop_runner_run_stdout_log_path() -> PathBuf {
-    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-run.stdout.log")
+/// Build a per-run unique id (`<ms>-<pid>-<short-source-hash>`) so two
+/// consecutive `ato://run` intents get distinct log files. Pure so the
+/// uniqueness contract is unit-testable without spawning.
+pub(crate) fn unique_desktop_runner_run_id(source: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let pid = std::process::id();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let hash = short_source_hash(source);
+    format!("{ms}-{pid}-{hash}")
 }
 
-fn desktop_runner_run_stderr_log_path() -> PathBuf {
-    capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-run.stderr.log")
+/// Short, filesystem-safe hash of the source for the run id. Truncated so the
+/// log filename stays readable; not a security primitive.
+fn short_source_hash(source: &str) -> String {
+    // FNV-1a 32-bit over the UTF-8 bytes, hex-encoded. Stable across platforms
+    // and std-only (no extra dep).
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in source.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
+/// Per-run log paths under `logs/desktop-runner-runs/<run_id>.{stdout,stderr}.log`.
+/// Pure (no fs side effects) so the uniqueness / path-shape contract is
+/// unit-testable.
+pub(crate) fn desktop_runner_run_log_paths(run_id: &str) -> (PathBuf, PathBuf) {
+    let dir = capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-runs");
+    let stdout = dir.join(format!("{run_id}.stdout.log"));
+    let stderr = dir.join(format!("{run_id}.stderr.log"));
+    (stdout, stderr)
 }
 
 fn spawn_runner_command(args: &[&str], log_path: &Path, context: &str) -> Result<RunnerChild> {
@@ -6470,5 +6501,60 @@ mod preflight_retry_tests {
     fn retryable_empty_stdout_is_not_retried() {
         assert!(!preflight_stdout_is_retryable(""));
         assert!(!preflight_stdout_is_retryable("not json"));
+    }
+}
+
+#[cfg(test)]
+mod desktop_runner_run_log_tests {
+    use super::*;
+
+    #[test]
+    fn log_paths_are_unique_per_run_id() {
+        let (a_out, a_err) = desktop_runner_run_log_paths("run-a");
+        let (b_out, b_err) = desktop_runner_run_log_paths("run-b");
+        assert_ne!(a_out, b_out, "stdout paths must differ per run");
+        assert_ne!(a_err, b_err, "stderr paths must differ per run");
+    }
+
+    #[test]
+    fn log_paths_live_under_desktop_runner_runs_dir_and_carry_run_id() {
+        let (out, err) = desktop_runner_run_log_paths("1700000000000-1234-abc123");
+        assert!(
+            out.to_string_lossy().contains("desktop-runner-runs"),
+            "stdout path should live under desktop-runner-runs/: {}",
+            out.display()
+        );
+        assert!(
+            err.to_string_lossy().contains("desktop-runner-runs"),
+            "stderr path should live under desktop-runner-runs/: {}",
+            err.display()
+        );
+        assert!(out.to_string_lossy().ends_with(".stdout.log"));
+        assert!(err.to_string_lossy().ends_with(".stderr.log"));
+        // The run id appears in both filenames so the waiter can trace a log
+        // back to its run.
+        assert!(
+            out.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("1700000000000-1234-abc123")
+        );
+    }
+
+    #[test]
+    fn unique_run_id_is_unique_across_calls_and_carries_source_hash() {
+        // Two ids produced back-to-back share the pid + (likely) source but
+        // should differ in the timestamp component on any non-degenerate
+        // clock; the source hash is deterministic.
+        let id1 = unique_desktop_runner_run_id("community/hello");
+        let id2 = unique_desktop_runner_run_id("community/hello");
+        // Same source → same trailing hash.
+        let hash1 = id1.rsplit('-').next().unwrap();
+        let hash2 = id2.rsplit('-').next().unwrap();
+        assert_eq!(hash1, hash2, "same source must hash identically");
+        // Different sources → different hashes.
+        let id_other = unique_desktop_runner_run_id("acme/chat");
+        let hash_other = id_other.rsplit('-').next().unwrap();
+        assert_ne!(hash1, hash_other, "different sources must hash differently");
     }
 }

@@ -14,7 +14,7 @@
 //! honest result surfacing; it never re-validates the origin.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use crate::orchestrator;
 use crate::state::{ActivityEntry, ActivityTone};
@@ -23,9 +23,19 @@ use crate::state::{ActivityEntry, ActivityTone};
 /// into `AppState` by the render loop, next to `bridge.drain_activity()`.
 static PENDING_ACTIVITY: Mutex<Vec<ActivityEntry>> = Mutex::new(Vec::new());
 
+/// Single-flight guard: at most one Desktop Runner local cold-OCI run may be
+/// in flight at a time. Acquired before spawn; released by the waiter thread
+/// after the child exits (and by [`shutdown`] on Desktop exit). This is the
+/// M3 policy choice — see PR 2 review: "single-flight is safer than allowing
+/// multiple in-flight local cold-OCI runs in the initial version." A second
+/// `ato://run` while a run is in flight is rejected with an activity warning
+/// rather than spawning a second child.
+static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
 /// PID of the in-flight run child, mirrored so the cx-less [`shutdown`] hook
 /// can group-kill it without locking the waiter thread's owned child. `0` =
-/// no run in flight.
+/// no run in flight. Holds a meaningful value only while [`IN_FLIGHT`] is
+/// `true`; the single-flight invariant guarantees at most one PID.
 static CURRENT_PID: AtomicU32 = AtomicU32::new(0);
 
 fn push_pending(tone: ActivityTone, message: impl Into<String>) {
@@ -47,31 +57,84 @@ pub fn drain_pending_activity() -> Vec<ActivityEntry> {
     )
 }
 
+/// Try to acquire the single-flight slot. Returns `true` if acquired (caller
+/// must release it via [`release_inflight`] when done), `false` if a run is
+/// already in flight. Pure over the atomic; testable with serial tests.
+fn try_acquire_inflight() -> bool {
+    IN_FLIGHT
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Release the single-flight slot. Called by the waiter after the child exits,
+/// and by [`shutdown`] after reaping the child.
+fn release_inflight() {
+    IN_FLIGHT.store(false, Ordering::SeqCst);
+}
+
+/// Whether a Desktop Runner local run is currently in flight. Exposed for
+/// tests and for the dispatcher to decide whether to surface a "wait" hint.
+pub fn is_in_flight() -> bool {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
 /// Launch a capsule on the Desktop Runner local cold-OCI path. Returns
 /// immediately; the run outcome is surfaced in the activity log asynchronously
 /// via [`drain_pending_activity`]. The caller pushes the "run started" activity
 /// synchronously so the user gets instant feedback; this function posts the
 /// success/failure result when the `ato run` child exits.
 ///
+/// **Single-flight:** at most one run may be in flight. A second call while a
+/// run is in flight is rejected with an activity warning pushed to the pending
+/// queue; no second child is spawned. This is the deliberate M3 policy choice
+/// — duplicate `ato://run` intents (double-click / re-click while busy) must
+/// not spawn overlapping children whose per-run logs could race.
+///
 /// `ready_state_enabled` forwards to the CLI via `ATO_READY_STATE_ENABLED=1`;
 /// pass `false` for the M3 cold-OCI path (local Ready-State restore is not
 /// supported, and the CLI's placement gate would refuse to cold-start with
 /// Ready-State on).
 pub fn launch(source: &str, run_id: Option<&str>, ready_state_enabled: bool) -> Result<(), String> {
-    let run = orchestrator::spawn_desktop_runner_run(source, ready_state_enabled)
-        .map_err(|e| format!("could not start Desktop Runner run for {source}: {e:#}"))?;
+    // Acquire the single-flight slot BEFORE spawning so a failed spawn releases
+    // the slot cleanly without ever publishing a PID.
+    if !try_acquire_inflight() {
+        push_pending(
+            ActivityTone::Warning,
+            "A local Desktop Runner run is already starting/running; wait for it to finish before \
+             starting another."
+                .to_string(),
+        );
+        return Err(
+            "a local Desktop Runner run is already in flight; refusing to spawn a second child"
+                .to_string(),
+        );
+    }
+    let run = match orchestrator::spawn_desktop_runner_run(source, ready_state_enabled) {
+        Ok(r) => r,
+        Err(e) => {
+            release_inflight();
+            return Err(format!(
+                "could not start Desktop Runner run for {source}: {e:#}"
+            ));
+        }
+    };
     CURRENT_PID.store(run.child.id(), Ordering::SeqCst);
 
     let source = source.to_string();
     let run_id = run_id.map(str::to_string);
+    // Capture this run's unique log paths by value so the waiter reads its
+    // OWN logs even if a later run (after the slot is released) writes to
+    // different per-run paths.
     let stdout_log = run.stdout_log.clone();
     let stderr_log = run.stderr_log.clone();
+    let my_pid = run.child.id();
     std::thread::spawn(move || {
         let mut child = run.child;
         let exit = child.wait();
-        // Clear the in-flight PID only if it still points at this child; a
-        // later run may have already swapped in a new PID.
-        let _ = CURRENT_PID.compare_exchange(child.id(), 0, Ordering::SeqCst, Ordering::SeqCst);
+        // Clear the in-flight PID only if it still points at this child, then
+        // release the single-flight slot so the next intent may start.
+        let _ = CURRENT_PID.compare_exchange(my_pid, 0, Ordering::SeqCst, Ordering::SeqCst);
+        release_inflight();
         let stdout = std::fs::read_to_string(&stdout_log).unwrap_or_default();
         let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
         let (tone, message) = match exit {
@@ -197,14 +260,18 @@ fn tail_lines(s: &str, n: usize) -> String {
 }
 
 /// Best-effort teardown: kill any in-flight run child's process group so a
-/// local cold-OCI run does not outlive the Desktop. Safe to call without a GPUI
-/// context (invoked from `window::begin_shutdown`).
+/// local cold-OCI run does not outlive the Desktop, then release the
+/// single-flight slot so a future session (after a restart) can start a fresh
+/// run. Safe to call without a GPUI context (invoked from
+/// `window::begin_shutdown`). The single-flight invariant guarantees at most
+/// one in-flight child, so one kill reaps everything.
 pub fn shutdown() {
     let pid = CURRENT_PID.swap(0, Ordering::SeqCst);
     if pid > 1 {
         kill_process_tree(pid);
         tracing::info!(pid, "desktop_run_agent: run child terminated on shutdown");
     }
+    release_inflight();
 }
 
 fn kill_process_tree(pid: u32) {
@@ -343,6 +410,15 @@ DESKTOP-RUNNER: placement selected: local_cold_oci_candidate (guest linux/aarch6
         assert!(extract_placement_error("").is_none());
     }
 
+    // ── shared-static tests (must serialize: PENDING_ACTIVITY / IN_FLIGHT /
+    // CURRENT_PID are process-wide) ────────────────────────────────────────
+    //
+    // Every test in this group touches process-wide statics, so we serialize
+    // them with `serial_test::serial` to keep the invariants honest. Pure
+    // renderer/parser tests above are NOT serialized — they do not touch the
+    // statics.
+
+    #[serial_test::serial]
     #[test]
     fn drain_pending_activity_returns_and_clears() {
         // Static lock — serialize against other tests in this module that push.
@@ -351,5 +427,128 @@ DESKTOP-RUNNER: placement selected: local_cold_oci_candidate (guest linux/aarch6
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].message, "test drain");
         assert!(drain_pending_activity().is_empty(), "drain must clear");
+    }
+
+    // ── single-flight guard ────────────────────────────────────────────────
+    //
+    // The single-flight statics (`IN_FLIGHT`, `CURRENT_PID`) are process-wide
+    // and shared across tests, so every test in this group MUST leave them in
+    // the released (false / 0) state. We serialize by always acquiring at the
+    // start and force-releasing at the end (via `shutdown`) so a panic between
+    // acquire and release does not poison the slot for the next test.
+
+    fn reset_inflight_state() {
+        let _ = CURRENT_PID.swap(0, Ordering::SeqCst);
+        release_inflight();
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn try_acquire_inflight_succeeds_when_idle() {
+        reset_inflight_state();
+        assert!(
+            try_acquire_inflight(),
+            "first acquire must succeed when idle"
+        );
+        // Clean up — do not leave the slot held.
+        release_inflight();
+        assert!(!is_in_flight(), "release must clear the in-flight flag");
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn second_acquire_while_in_flight_is_rejected() {
+        reset_inflight_state();
+        assert!(try_acquire_inflight(), "first acquire must succeed");
+        assert!(
+            !try_acquire_inflight(),
+            "second acquire while in flight must be rejected (single-flight invariant)"
+        );
+        release_inflight();
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn release_then_acquire_allows_next_run() {
+        reset_inflight_state();
+        assert!(try_acquire_inflight());
+        release_inflight();
+        // After release, the next caller must be able to start a run — this is
+        // the invariant that lets the waiter's release unblock the next intent.
+        assert!(
+            try_acquire_inflight(),
+            "acquire must succeed after a release"
+        );
+        release_inflight();
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn shutdown_releases_inflight_slot_and_clears_pid() {
+        reset_inflight_state();
+        // Simulate the spawn path: acquire, then publish a sentinel PID.
+        assert!(try_acquire_inflight());
+        CURRENT_PID.store(42, Ordering::SeqCst);
+        assert!(is_in_flight());
+        assert_eq!(CURRENT_PID.load(Ordering::SeqCst), 42);
+
+        shutdown();
+
+        assert!(
+            !is_in_flight(),
+            "shutdown must release the single-flight slot"
+        );
+        assert_eq!(
+            CURRENT_PID.load(Ordering::SeqCst),
+            0,
+            "shutdown must clear the in-flight PID"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn launch_while_in_flight_rejects_without_spawning() {
+        // Drive the single-flight guard into the in-flight state, then call
+        // `launch`. It must reject with an error AND push a Warning activity
+        // — without ever spawning an `ato run` child (the spawn would shell
+        // out to the real CLI, which unit tests must not do). We detect the
+        // rejection by observing the pending activity queue and the Err
+        // return; a successful spawn would have pushed no pending activity
+        // from `launch` itself (only the waiter does, and no waiter is
+        // running here).
+        reset_inflight_state();
+        assert!(try_acquire_inflight(), "precondition: slot is held");
+
+        let _ = drain_pending_activity(); // clean slate
+        let result = launch("community/test", None, false);
+        assert!(
+            result.is_err(),
+            "launch must error while a run is in flight"
+        );
+
+        let drained = drain_pending_activity();
+        assert_eq!(
+            drained.len(),
+            1,
+            "exactly one warning activity must be pushed: {:?}",
+            drained
+        );
+        assert_eq!(drained[0].tone, ActivityTone::Warning);
+        assert!(
+            drained[0].message.contains("already starting/running"),
+            "warning must explain the in-flight reason: {:?}",
+            drained[0].message
+        );
+
+        // The slot must still be held by the original acquirer (launch did not
+        // release it), and no PID must have been published.
+        assert!(is_in_flight(), "rejected launch must not release the slot");
+        assert_eq!(
+            CURRENT_PID.load(Ordering::SeqCst),
+            0,
+            "rejected launch must not publish a PID"
+        );
+
+        release_inflight();
     }
 }
