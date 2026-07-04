@@ -876,22 +876,52 @@ pub async fn run_serve(
             }
         }
 
-        // Between heartbeats: poll for leases in short slices while idle.
+        // Between heartbeats: poll for leases in short slices while idle. With
+        // long-poll on, the API holds the request itself, so we skip the
+        // pre-sleep and let the (heartbeat-bounded) hold BE the wait; every
+        // iteration decrements `remaining` by its true elapsed time so the
+        // heartbeat cadence never drifts regardless of hold length.
+        let long_poll = lease_long_poll_enabled();
         let mut remaining = interval;
         while remaining > 0 {
-            let slice = remaining.min(lease_poll_seconds());
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
-                _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+            let iter_start = std::time::Instant::now();
+            let can_poll = pool.has_free();
+
+            // Pre-sleep only when we are NOT about to long-poll a free slot:
+            // the short idle cadence (non-long-poll), or backpressure when at
+            // capacity (can't accept work — never hold a connection then).
+            if !long_poll || !can_poll {
+                let slice = remaining.min(lease_poll_seconds());
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
+                    _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+                }
             }
-            remaining = remaining.saturating_sub(slice);
 
             // Don't poll (and therefore don't CLAIM) when every slot is taken.
-            if !pool.has_free() {
+            if !can_poll {
+                remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
                 continue;
             }
-            match fetch_next_lease(&client, &api_base, &creds.runner_id, &creds.runner_token).await
-            {
+
+            // Hold budget: cap at LEASE_LONG_POLL_WAIT_MS AND at the time left
+            // before the next heartbeat — a hold must never outlast the
+            // heartbeat window. 0 keeps the historical one-shot poll.
+            let wait_ms = if long_poll {
+                LEASE_LONG_POLL_WAIT_MS.min(remaining.saturating_mul(1000))
+            } else {
+                0
+            };
+            let poll = fetch_next_lease(
+                &client,
+                &api_base,
+                &creds.runner_id,
+                &creds.runner_token,
+                wait_ms,
+            )
+            .await;
+            remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
+            match poll {
                 LeasePoll::None => {}
                 LeasePoll::Claimed(lease) => match pool.acquire() {
                     Some(slot) => {
@@ -984,6 +1014,19 @@ fn lease_poll_seconds_from(raw: Option<&str>) -> u64 {
     raw.and_then(|v| v.trim().parse::<u64>().ok())
         .map(|v| v.clamp(1, 60))
         .unwrap_or(LEASE_POLL_SECONDS)
+}
+
+/// L2 long-poll (ato#948): when `ATO_LEASE_LONG_POLL=1`, the idle claim poll
+/// asks the API to HOLD the request for up to this budget until a lease is
+/// claimable — cutting claim latency from the idle-poll floor to sub-second.
+/// The API caps its own hold at 25s; we ask for 20s, comfortably inside a
+/// reqwest/Workers request. Off by default (opt-in per deployment).
+const LEASE_LONG_POLL_WAIT_MS: u64 = 20_000;
+
+fn lease_long_poll_enabled() -> bool {
+    std::env::var("ATO_LEASE_LONG_POLL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// After a port-LESS readiness signal (the human "[✓] ready" echo), hold this
@@ -1309,9 +1352,20 @@ async fn fetch_next_lease(
     api_base: &str,
     runner_id: &str,
     runner_token: &str,
+    wait_ms: u64,
 ) -> LeasePoll {
+    // Transport only: `wait_ms>0` asks the API to hold the request until a
+    // lease is claimable (L2). The claim CONTRACT is unchanged — same capacity
+    // gate, ownership, idempotency and terminal handling; a full runner / no
+    // lease still returns `{lease:null}`, just after an honest hold instead of
+    // now. 0 ⇒ the historical one-shot poll.
+    let wait = if wait_ms > 0 {
+        format!("?wait_ms={wait_ms}")
+    } else {
+        String::new()
+    };
     let url = format!(
-        "{}/v1/runners/{}/leases/next",
+        "{}/v1/runners/{}/leases/next{wait}",
         api_base.trim_end_matches('/'),
         runner_id
     );
@@ -5516,7 +5570,7 @@ mod tests {
             "{\"lease\":{\"id\":\"01LEASE\",\"run_id\":\"01RUN\",\"command\":{\"kind\":\"run_source_sandbox\",\"source_url\":\"https://github.com/x/y\"}},\"next_poll_seconds\":5}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let request = server.join().expect("server");
         assert!(request.contains("GET /v1/runners/01R/leases/next"));
         match outcome {
@@ -5531,13 +5585,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_poll_wait_ms_appended_only_when_long_poll_requested() {
+        // wait_ms=0 ⇒ the historical one-shot URL (no query).
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let client = reqwest::Client::new();
+        let _ = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runners/01R/leases/next "));
+        assert!(!request.contains("wait_ms"));
+
+        // wait_ms>0 ⇒ the long-poll query is appended verbatim.
+        let (base2, server2) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let _ = fetch_next_lease(&client, &base2, "01R", "ato_rnr_t", 20_000).await;
+        let request2 = server2.join().expect("server");
+        assert!(request2.contains("GET /v1/runners/01R/leases/next?wait_ms=20000"));
+    }
+
+    #[tokio::test]
     async fn lease_poll_revoked_is_terminal() {
         let (base, server) = one_shot_http(
             "HTTP/1.1 401 Unauthorized",
             "{\"error\":\"runner_revoked\",\"message\":\"revoked\"}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let _ = server.join();
         assert!(matches!(outcome, LeasePoll::Revoked));
     }
