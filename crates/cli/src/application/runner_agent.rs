@@ -793,6 +793,15 @@ pub async fn run_serve(
     if let Some(template) = public_url_template.as_deref() {
         println!("   Public URL template: {template}");
     }
+    // #948 N-slot: with more than one slot (or an explicit ATO_FC_NETNS=1) each
+    // restore runs in its own network namespace so identical `fctap0`/172.16.0.2
+    // VMs coexist. Single-slot stays on the legacy root-namespace path.
+    let netns_enabled = pool.capacity() > 1
+        || std::env::var("ATO_FC_NETNS").ok().as_deref() == Some("1");
+    if netns_enabled {
+        println!("   Network: per-slot namespaces (ato-slot-N) enabled");
+        cleanup_orphan_slot_netns(pool.capacity());
+    }
 
     loop {
         let capabilities = collect_capabilities();
@@ -925,16 +934,31 @@ pub async fn run_serve(
                 LeasePoll::None => {}
                 LeasePoll::Claimed(lease) => match pool.acquire() {
                     Some(slot) => {
-                        handle_claimed_lease(
-                            &client,
-                            &api_base,
-                            &creds.runner_token,
-                            lease,
-                            slot,
-                            public_base_url.clone(),
-                            public_url_template.clone(),
-                        )
-                        .await;
+                        // #948 N-slot: SPAWN (don't await inline). A restore
+                        // lease holds its VM for the whole session; awaiting it
+                        // here would block the poll loop and starve the other
+                        // slots (the pool would never fill). Detach the task —
+                        // it owns the SlotLease and releases it after teardown,
+                        // matching the run-lifecycle spawn below. Panic-safety:
+                        // SlotLease's Drop frees the slot even if the task dies.
+                        let client = client.clone();
+                        let api_base = api_base.clone();
+                        let runner_token = creds.runner_token.clone();
+                        let public_base_url = public_base_url.clone();
+                        let public_url_template = public_url_template.clone();
+                        tokio::spawn(async move {
+                            handle_claimed_lease(
+                                &client,
+                                &api_base,
+                                &runner_token,
+                                lease,
+                                slot,
+                                public_base_url,
+                                public_url_template,
+                                netns_enabled,
+                            )
+                            .await;
+                        });
                     }
                     None => {
                         // Defensive: `has_free()` was true immediately before the
@@ -1296,6 +1320,36 @@ impl SlotLease {
         if !self.released.swap(true, Ordering::SeqCst) {
             self.occupied.store(false, Ordering::SeqCst);
         }
+    }
+}
+
+/// Panic-safety net (#948 N-slot): a claimed lease is now handled in a detached
+/// task, so a PANIC inside it must not wedge the slot forever. Release happens
+/// on drop ONLY while unwinding a panic — a normal drop deliberately does NOT
+/// release, preserving the fail-closed invariant that a slot whose VM teardown
+/// could not be confirmed stays held (explicit `release()` after a confirmed
+/// teardown owns the normal path). `release()` is idempotent regardless.
+impl Drop for SlotLease {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.release();
+        }
+    }
+}
+
+/// Best-effort startup sweep of per-slot network state left by a crashed prior
+/// serve (#948 N-slot). Safe because at serve start no slot is live yet:
+/// deleting each `ato-slot-{i}` namespace atomically removes its in-ns tap,
+/// veth end, and iptables rules; the root veth end `vsl{i}h` and the stale
+/// per-slot lockfile are removed too. Silent (these usually don't exist).
+fn cleanup_orphan_slot_netns(capacity: usize) {
+    let work_root = snapshot::FirecrackerConfig::default().work_root;
+    for i in 0..capacity {
+        let ns = format!("ato-slot-{i}");
+        let veth = format!("vsl{i}h");
+        let _ = std::process::Command::new("ip").args(["netns", "del", &ns]).status();
+        let _ = std::process::Command::new("ip").args(["link", "del", &veth]).status();
+        let _ = std::fs::remove_file(work_root.join(format!("{ns}.lock")));
     }
 }
 
@@ -3370,8 +3424,9 @@ async fn handle_restore_snapshot_lease(
     slot: SlotLease,
     public_base_url: Option<String>,
     public_url_template: Option<String>,
+    netns_enabled: bool,
 ) {
-    use crate::application::ready_state::backend::select_backend;
+    use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
         load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
@@ -3514,7 +3569,10 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
-    let backend = match select_backend() {
+    // #948 N-slot: build the backend for THIS slot. Under netns mode the
+    // Firecracker config is namespaced (ato-slot-{index}) so concurrent restores
+    // don't collide on tap/IP/lock; legacy single-slot keeps the root-ns config.
+    let backend = match select_backend_for_slot(slot.index, netns_enabled) {
         Ok(b) => b,
         Err(e) => {
             fail(
@@ -3710,6 +3768,7 @@ async fn handle_claimed_lease(
     slot: SlotLease,
     public_base_url: Option<String>,
     public_url_template: Option<String>,
+    netns_enabled: bool,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
     // Track E (#912): a restore_snapshot lease restores a sealed Ready-State snapshot
@@ -3727,6 +3786,7 @@ async fn handle_claimed_lease(
             slot,
             public_base_url,
             public_url_template,
+            netns_enabled,
         )
         .await;
         return;

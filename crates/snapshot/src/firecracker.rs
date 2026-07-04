@@ -94,6 +94,17 @@ pub struct FirecrackerConfig {
     pub work_root: PathBuf,
     pub cpu_template: Option<String>,
     pub boot_timeout: Duration,
+    /// Per-slot network isolation (#948 N-slot). When `Some`, this restore runs
+    /// inside network namespace `netns`: the tap + guest keep the frozen
+    /// snapshot addressing (`tap_dev` / `host_ip` / `guest_ip`) but live inside
+    /// the namespace, and the guest is reached from the root namespace at
+    /// `ingress_ip` via a veth pair (`veth_root` ↔ `veth_ns`) + in-ns DNAT.
+    /// `None` = the legacy single-slot path in the root namespace (unchanged).
+    pub netns: Option<String>,
+    pub ingress_ip: Option<String>,
+    pub veth_root: Option<String>,
+    pub veth_root_ip: Option<String>,
+    pub veth_ns: Option<String>,
 }
 
 impl Default for FirecrackerConfig {
@@ -114,7 +125,40 @@ impl Default for FirecrackerConfig {
             work_root: PathBuf::from(env_or("ATO_FC_WORK", "/tmp/ato-fc")),
             cpu_template: std::env::var("ATO_FC_CPU_TEMPLATE").ok().filter(|v| !v.is_empty()),
             boot_timeout: Duration::from_secs(env_or("ATO_FC_BOOT_TIMEOUT_S", "30").parse().unwrap_or(30)),
+            // Legacy single-slot by default; `for_slot` fills these when netns-on.
+            netns: None,
+            ingress_ip: None,
+            veth_root: None,
+            veth_root_ip: None,
+            veth_ns: None,
         }
+    }
+}
+
+impl FirecrackerConfig {
+    /// Derive a per-slot config for network-namespace isolation (#948 N-slot).
+    ///
+    /// `netns_enabled` = `ATO_FC_NETNS=1 || max_slots > 1` (decided by the
+    /// caller). When off, the returned config is `base` unchanged — the legacy
+    /// single-slot root-namespace path, byte-identical to today. When on, EVERY
+    /// slot (including slot 0) runs in its own namespace `ato-slot-{index}`,
+    /// reached from the root namespace at `{prefix}.{index}.2` via a veth `/30`.
+    /// The tap name and guest IP stay the frozen snapshot values — only the
+    /// namespace and the host-side ingress differ per slot.
+    pub fn for_slot(index: usize, netns_enabled: bool, base: &FirecrackerConfig) -> FirecrackerConfig {
+        let mut c = base.clone();
+        if !netns_enabled {
+            return c;
+        }
+        // Integer-only names/addresses (no shell interpolation risk). `/30`
+        // subnet per slot: .1 = root veth end, .2 = in-ns ingress.
+        let prefix = env_or("ATO_FC_NETNS_CIDR_PREFIX", "10.201");
+        c.netns = Some(format!("ato-slot-{index}"));
+        c.veth_root = Some(format!("vsl{index}h"));
+        c.veth_ns = Some(format!("vsl{index}n"));
+        c.veth_root_ip = Some(format!("{prefix}.{index}.1"));
+        c.ingress_ip = Some(format!("{prefix}.{index}.2"));
+        c
     }
 }
 
@@ -201,6 +245,14 @@ impl FirecrackerBackend {
         )
     }
 
+    /// The address the RESTORE process (root namespace) and any fronting proxy
+    /// must dial to reach this session's workload: the guest IP directly in the
+    /// legacy path, or the per-slot ingress (`10.201.{i}.2`) in netns mode,
+    /// which DNATs into the namespace to the same frozen guest IP.
+    fn reachable_host(&self) -> &str {
+        self.config.ingress_ip.as_deref().unwrap_or(&self.config.guest_ip)
+    }
+
     /// Stable cache path keyed on a layer's content id (no content read needed),
     /// so build and restore agree and large immutable layers are rehydrated from
     /// CapsuleFS at most once, then reused across restores.
@@ -262,7 +314,12 @@ impl FirecrackerBackend {
         })
     }
     fn lock_path(&self) -> PathBuf {
-        self.config.work_root.join(format!("{}.lock", self.config.tap_dev))
+        // Per-slot lock: in netns mode the tap name (`fctap0`) is identical in
+        // every namespace, so keying the lock on the tap alone would re-serialize
+        // all slots on one shared host file. Key on the namespace instead so each
+        // slot has its own lock; legacy (no netns) keeps the tap-keyed path.
+        let key = self.config.netns.as_deref().unwrap_or(&self.config.tap_dev);
+        self.config.work_root.join(format!("{key}.lock"))
     }
 }
 
@@ -297,7 +354,24 @@ impl FirecrackerBackend {
             .map_err(|e| self.backend_err(format!("spawn `ip {}`: {e}", args.join(" "))))?;
         if status.success() { Ok(()) } else { Err(self.backend_err(format!("`ip {}` failed", args.join(" ")))) }
     }
-    fn net_up(&self) -> Result<(), SnapshotError> {
+    /// `ip netns exec <ns> <argv…>` — run a host command inside a namespace.
+    fn run_in_netns(&self, ns: &str, argv: &[&str]) -> Result<(), SnapshotError> {
+        let mut a = vec!["netns", "exec", ns];
+        a.extend_from_slice(argv);
+        let status = Command::new("ip").args(&a).status()
+            .map_err(|e| self.backend_err(format!("spawn `ip netns exec {ns} {}`: {e}", argv.join(" "))))?;
+        if status.success() { Ok(()) } else { Err(self.backend_err(format!("`ip netns exec {ns} {}` failed", argv.join(" ")))) }
+    }
+
+    fn net_up(&self, guest_port: u16) -> Result<(), SnapshotError> {
+        match self.config.netns.clone() {
+            None => self.net_up_root(),
+            Some(ns) => self.net_up_netns(&ns, guest_port),
+        }
+    }
+
+    /// Legacy single-slot networking in the ROOT namespace (unchanged).
+    fn net_up_root(&self) -> Result<(), SnapshotError> {
         let tap = &self.config.tap_dev;
         let _ = Command::new("ip").args(["link", "del", tap]).status();
         self.run_ip(&["tuntap", "add", "dev", tap, "mode", "tap"])?;
@@ -305,14 +379,84 @@ impl FirecrackerBackend {
         self.run_ip(&["link", "set", tap, "up"])?;
         Ok(())
     }
+
+    /// Per-slot networking (#948 N-slot): the frozen tap (`fctap0`) + guest
+    /// (`172.16.0.2`) live inside namespace `ns`, reached from the root namespace
+    /// at `ingress_ip` via a veth `/30` + in-ns DNAT to the guest. All addresses
+    /// are integer-derived and passed as argv (no shell). Idempotent: a stale
+    /// namespace from a crashed prior run is torn down first.
+    fn net_up_netns(&self, ns: &str, guest_port: u16) -> Result<(), SnapshotError> {
+        let tap = &self.config.tap_dev;
+        let host_ip = &self.config.host_ip;
+        let guest_ip = &self.config.guest_ip;
+        let veth_root = self.config.veth_root.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_root"))?;
+        let veth_ns = self.config.veth_ns.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_ns"))?;
+        let veth_root_ip = self.config.veth_root_ip.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_root_ip"))?;
+        let ingress_ip = self.config.ingress_ip.as_deref().ok_or_else(|| self.backend_err("netns config missing ingress_ip"))?;
+        let port = guest_port.to_string();
+        let dnat = format!("{guest_ip}:{port}");
+        let veth_root_cidr = format!("{veth_root_ip}/30");
+        let ingress_cidr = format!("{ingress_ip}/30");
+        let host_cidr = format!("{host_ip}/24");
+
+        // Clean any stale state from a crashed prior run (best-effort).
+        self.net_down();
+        // Namespace + loopback + in-ns tap with the frozen guest addressing.
+        self.run_ip(&["netns", "add", ns])?;
+        self.run_in_netns(ns, &["ip", "link", "set", "lo", "up"])?;
+        self.run_in_netns(ns, &["ip", "tuntap", "add", "dev", tap, "mode", "tap"])?;
+        self.run_in_netns(ns, &["ip", "addr", "add", &host_cidr, "dev", tap])?;
+        self.run_in_netns(ns, &["ip", "link", "set", tap, "up"])?;
+        // veth pair: root end stays in root ns, the other end moves into `ns`.
+        self.run_ip(&["link", "add", veth_root, "type", "veth", "peer", "name", veth_ns])?;
+        self.run_ip(&["link", "set", veth_ns, "netns", ns])?;
+        self.run_ip(&["addr", "add", &veth_root_cidr, "dev", veth_root])?;
+        self.run_ip(&["link", "set", veth_root, "up"])?;
+        self.run_in_netns(ns, &["ip", "addr", "add", &ingress_cidr, "dev", veth_ns])?;
+        self.run_in_netns(ns, &["ip", "link", "set", veth_ns, "up"])?;
+        // Forward + DNAT the ingress to the guest, MASQUERADE toward the tap so
+        // the guest replies to a same-subnet source. All rules stay inside `ns`
+        // (root namespace is left untouched → teardown is just `ip netns del`).
+        self.run_in_netns(ns, &["sysctl", "-q", "-w", "net.ipv4.ip_forward=1"])?;
+        self.run_in_netns(ns, &["iptables", "-t", "nat", "-A", "PREROUTING", "-d", ingress_ip, "-p", "tcp", "--dport", &port, "-j", "DNAT", "--to-destination", &dnat])?;
+        self.run_in_netns(ns, &["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", tap, "-j", "MASQUERADE"])?;
+        Ok(())
+    }
+
     fn net_down(&self) {
-        let _ = Command::new("ip").args(["link", "del", &self.config.tap_dev]).status();
+        match &self.config.netns {
+            // Deleting the namespace atomically removes the in-ns tap, the
+            // in-ns veth end, and all in-ns iptables rules. The root veth end is
+            // auto-removed with its peer, but delete it explicitly too.
+            Some(ns) => {
+                let _ = Command::new("ip").args(["netns", "del", ns]).status();
+                if let Some(v) = &self.config.veth_root {
+                    let _ = Command::new("ip").args(["link", "del", v]).status();
+                }
+            }
+            None => {
+                let _ = Command::new("ip").args(["link", "del", &self.config.tap_dev]).status();
+            }
+        }
+    }
+
+    /// The base command to launch firecracker — wrapped in `ip netns exec <ns>`
+    /// when this slot is namespaced so the VMM (and its tap) live inside `ns`.
+    fn fc_command(&self) -> Command {
+        match &self.config.netns {
+            Some(ns) => {
+                let mut c = Command::new("ip");
+                c.args(["netns", "exec", ns, &self.config.firecracker_bin]);
+                c
+            }
+            None => Command::new(&self.config.firecracker_bin),
+        }
     }
 
     fn start_fc(&self, sock: &Path, console_log: &Path) -> Result<FcProcess, SnapshotError> {
         let _ = std::fs::remove_file(sock);
         let log = std::fs::File::create(console_log).map_err(|e| self.backend_err(format!("create console log: {e}")))?;
-        let child = Command::new(&self.config.firecracker_bin)
+        let child = self.fc_command()
             .arg("--api-sock").arg(sock)
             .stdout(Stdio::from(log.try_clone().map_err(|e| self.backend_err(e.to_string()))?))
             .stderr(Stdio::from(log))
@@ -362,7 +506,10 @@ impl FirecrackerBackend {
         path: &str,
         abort: impl Fn() -> Option<String>,
     ) -> Result<u128, SnapshotError> {
-        let addr: std::net::SocketAddr = format!("{}:{}", self.config.guest_ip, port)
+        // Dial the ROOT-reachable address: the guest IP directly (legacy), or
+        // the per-slot ingress (netns mode) which DNATs into the namespace.
+        let reachable = self.reachable_host();
+        let addr: std::net::SocketAddr = format!("{reachable}:{port}")
             .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
         let start = Instant::now();
         while start.elapsed() < self.config.boot_timeout {
@@ -669,7 +816,8 @@ impl SnapshotBackend for FirecrackerBackend {
         let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
         let path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
 
-        self.net_up()?;
+        // Build always runs in the root namespace (default config, netns=None).
+        self.net_up(port)?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
             let fc = bench::time("build.start_fc", || {
                 self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
@@ -825,6 +973,27 @@ impl SnapshotBackend for FirecrackerBackend {
         let vmstate = input.manifest.layers.vmstate.as_ref().ok_or_else(|| self.backend_err("manifest has no vmstate layer"))?;
         let memory = input.manifest.layers.memory.as_ref().ok_or_else(|| self.backend_err("manifest has no memory layer"))?;
 
+        // N-slot fail-closed guards (#948, Phase -1 audit). Netns isolates the
+        // NETWORK, not host filesystem paths, so two concurrent restores of the
+        // SAME snapshot still collide on any shared host path:
+        //  * rw-rootfs is rehydrated to a content-addressed SHARED cache path →
+        //    two writers corrupt it; require read-only rootfs under netns.
+        //  * a vsock UDS path is BAKED into the snapshot (`/tmp/ato-vsock/{hash}`)
+        //    and recreated on load → identical for every instance; refuse until
+        //    it is mount-namespace isolated. (Showcase apps have no vsock.)
+        if self.config.netns.is_some() {
+            if !self.config.rootfs_read_only {
+                return Err(self.unsupported(
+                    "N-slot (netns) restore requires read-only rootfs; rw-rootfs writes a shared cache path and would corrupt under concurrency",
+                ));
+            }
+            if vsock_enabled() || input.manifest.has_vsock {
+                return Err(self.unsupported(
+                    "N-slot (netns) restore does not yet support vsock snapshots; the baked vsock UDS path collides across concurrent instances",
+                ));
+            }
+        }
+
         self.acquire_lock("restore")?;
         // From here, on any error we must release the lock + net before returning.
         let result = (|| -> Result<(RestoredSession, Child, Option<crate::uffd_page_server::PageServerHandle>), SnapshotError> {
@@ -908,7 +1077,8 @@ impl SnapshotBackend for FirecrackerBackend {
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
-            self.net_up()?;
+            // Per-slot DNAT targets this guest port (see net_up_netns).
+            self.net_up(port)?;
 
             // U1 (#854)/U2 (#855): when ATO_FC_UFFD is set, start the local page-server
             // on a UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
@@ -1070,7 +1240,12 @@ impl SnapshotBackend for FirecrackerBackend {
             let _ = std::fs::write(input.overlay_root.join(".fc-session.json"), json!({
                 "pid": child.id(), "tap": self.config.tap_dev, "session_id": session_id,
                 // L5 (#912): record the vsock UDS so a cross-process `ato stop` can unlink it.
-                "vsock_uds": vsock_uds.as_ref().map(|p| p.to_string_lossy().to_string())
+                "vsock_uds": vsock_uds.as_ref().map(|p| p.to_string_lossy().to_string()),
+                // #948 N-slot: record the namespace + root veth so a cross-process
+                // `ato stop` (fresh backend, empty config) tears down the exact
+                // per-slot network state this restore created.
+                "netns": self.config.netns,
+                "veth_root": self.config.veth_root,
             }).to_string());
             let session = RestoredSession {
                 session_id,
@@ -1080,9 +1255,10 @@ impl SnapshotBackend for FirecrackerBackend {
                 restored_bytes,
                 vmm_pid: Some(child.id() as i32),
                 vsock_uds,
-                // The restored app answers on the TAP guest IP, not host loopback —
-                // any fronting proxy must dial this exact address.
-                workload_addr: Some(format!("{}:{}", self.config.guest_ip, port)),
+                // Where the restored workload is reachable from the root namespace:
+                // the guest IP directly (legacy) or the per-slot ingress (netns).
+                // Any fronting proxy dials this exact address.
+                workload_addr: Some(format!("{}:{}", self.reachable_host(), port)),
             };
             Ok((session, child, page_handle))
         })();
@@ -1112,8 +1288,17 @@ impl SnapshotBackend for FirecrackerBackend {
         let meta = std::fs::read_to_string(session.overlay_root.join(".fc-session.json")).unwrap_or_default();
         let recorded_tap = json_str(&meta, "tap");
         let tap = recorded_tap.as_deref().unwrap_or(&self.config.tap_dev);
+        // #948 N-slot: the recorded namespace (if any) is authoritative for a
+        // cross-process `ato stop` whose fresh backend has an empty config.
+        let recorded_netns = json_str(&meta, "netns").filter(|s| !s.is_empty());
+        let netns = recorded_netns.as_deref().or(self.config.netns.as_deref());
+        let recorded_veth = json_str(&meta, "veth_root").filter(|s| !s.is_empty());
+        let veth_root = recorded_veth.as_deref().or(self.config.veth_root.as_deref());
 
-        // Kill + reap the child we spawned (no zombie); else kill by recorded pid.
+        // FIXED TEARDOWN ORDER (#948): (1) kill+reap the VMM, (2) wait for exit,
+        // BEFORE removing the namespace — `ip netns del` while firecracker is
+        // still attached would drop the named-ns bind mount but leave the live
+        // namespace held by the process, leaking it invisibly.
         if let Some(mut child) = self.sessions.lock().unwrap().remove(&session.session_id) {
             let _ = child.kill();
             let _ = child.wait();
@@ -1126,9 +1311,20 @@ impl SnapshotBackend for FirecrackerBackend {
         if let Some(h) = self.page_servers.lock().unwrap().remove(&session.session_id) {
             let _ = h.stop_and_join();
         }
-        // Tear down the RECORDED tap + its single-session lockfile (env-independent).
-        let _ = Command::new("ip").args(["link", "del", tap]).status();
-        let _ = std::fs::remove_file(self.config.work_root.join(format!("{tap}.lock")));
+        // (3) Tear down the network + (5) the per-slot lockfile. In netns mode
+        // `ip netns del` atomically removes the in-ns tap, the in-ns veth end,
+        // and all in-ns iptables rules; (4) the root veth end is deleted too.
+        // The lock is keyed on the namespace (netns) else the tap (legacy).
+        if let Some(ns) = netns {
+            let _ = Command::new("ip").args(["netns", "del", ns]).status();
+            if let Some(v) = veth_root {
+                let _ = Command::new("ip").args(["link", "del", v]).status();
+            }
+            let _ = std::fs::remove_file(self.config.work_root.join(format!("{ns}.lock")));
+        } else {
+            let _ = Command::new("ip").args(["link", "del", tap]).status();
+            let _ = std::fs::remove_file(self.config.work_root.join(format!("{tap}.lock")));
+        }
         // L5 (#912): remove the Firecracker vsock host UDS so it does not linger after
         // teardown (Firecracker does not unlink it on exit). The session carries it
         // when this stop() came from restore; a cross-process `ato stop` recomputes the
@@ -1168,6 +1364,70 @@ fn json_str(s: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #948 N-slot: per-slot netns config derivation + host-path isolation ──
+
+    #[test]
+    fn for_slot_netns_off_is_legacy_identity() {
+        let base = FirecrackerConfig::default();
+        let c = FirecrackerConfig::for_slot(0, false, &base);
+        assert!(c.netns.is_none() && c.ingress_ip.is_none() && c.veth_root.is_none());
+        // legacy reachable host is the guest IP; lock is tap-keyed.
+        assert_eq!(FirecrackerBackend::with_config(c.clone()).reachable_host(), c.guest_ip);
+        assert!(FirecrackerBackend::with_config(c).lock_path().to_string_lossy().contains("fctap0.lock"));
+    }
+
+    #[test]
+    fn for_slot_netns_on_derives_distinct_per_slot_addressing() {
+        let base = FirecrackerConfig::default();
+        let s0 = FirecrackerConfig::for_slot(0, true, &base);
+        let s1 = FirecrackerConfig::for_slot(1, true, &base);
+        // slot 0 is ALSO namespaced when netns is on (all-or-nothing).
+        assert_eq!(s0.netns.as_deref(), Some("ato-slot-0"));
+        assert_eq!(s1.netns.as_deref(), Some("ato-slot-1"));
+        // frozen snapshot addressing is IDENTICAL across slots (isolated by ns)…
+        assert_eq!(s0.tap_dev, s1.tap_dev);
+        assert_eq!(s0.guest_ip, s1.guest_ip);
+        // …while every host-visible handle is distinct per slot. (Prefix-
+        // agnostic — the exact CIDR is covered by the override test, which
+        // mutates the shared env and so can't assert exact values in parallel.)
+        assert_ne!(s0.ingress_ip, s1.ingress_ip);
+        assert_ne!(s0.veth_root, s1.veth_root);
+        assert_ne!(s0.veth_ns, s1.veth_ns);
+        assert!(s0.ingress_ip.as_deref().unwrap().ends_with(".0.2"));
+        assert!(s1.ingress_ip.as_deref().unwrap().ends_with(".1.2"));
+        // reachable host is the per-slot ingress, not the shared guest IP.
+        let s1_ingress = s1.ingress_ip.clone().unwrap();
+        assert_eq!(FirecrackerBackend::with_config(s1).reachable_host(), s1_ingress);
+    }
+
+    #[test]
+    fn per_slot_lock_paths_are_distinct_for_same_snapshot() {
+        // The bug this guards: two slots share tap `fctap0`, so a tap-keyed lock
+        // would re-serialize them. Namespaced slots get namespace-keyed locks.
+        let base = FirecrackerConfig::default();
+        let l0 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(0, true, &base)).lock_path();
+        let l1 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(1, true, &base)).lock_path();
+        assert_ne!(l0, l1);
+        assert!(l0.to_string_lossy().contains("ato-slot-0.lock"));
+        assert!(l1.to_string_lossy().contains("ato-slot-1.lock"));
+    }
+
+    #[test]
+    fn for_slot_honors_cidr_prefix_override() {
+        // SAFETY: single-threaded test; restores the var before returning.
+        let prev = std::env::var("ATO_FC_NETNS_CIDR_PREFIX").ok();
+        unsafe { std::env::set_var("ATO_FC_NETNS_CIDR_PREFIX", "10.99") };
+        let c = FirecrackerConfig::for_slot(2, true, &FirecrackerConfig::default());
+        assert_eq!(c.ingress_ip.as_deref(), Some("10.99.2.2"));
+        assert_eq!(c.veth_root_ip.as_deref(), Some("10.99.2.1"));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("ATO_FC_NETNS_CIDR_PREFIX", v),
+                None => std::env::remove_var("ATO_FC_NETNS_CIDR_PREFIX"),
+            }
+        }
+    }
 
     #[test]
     fn probe_reports_facets_and_availability_matches_host() {

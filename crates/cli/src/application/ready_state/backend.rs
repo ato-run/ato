@@ -11,7 +11,8 @@
 
 use anyhow::bail;
 use snapshot::{
-    FakeSnapshotBackend, FirecrackerBackend, KataBackend, QemuBackend, SnapshotBackend,
+    FakeSnapshotBackend, FirecrackerBackend, FirecrackerConfig, KataBackend, QemuBackend,
+    SnapshotBackend,
 };
 
 use super::flags;
@@ -48,6 +49,27 @@ pub(crate) fn select_backend() -> anyhow::Result<Box<dyn SnapshotBackend>> {
             "unknown ATO_SNAPSHOT_BACKEND='{other}' (expected: fake | firecracker | qemu | kata)"
         ),
     }
+}
+
+/// Select the backend for a specific run SLOT (#948 N-slot). Identical to
+/// [`select_backend`] except that, for the Firecracker backend under
+/// `netns_enabled`, it derives a per-slot network-namespaced config
+/// ([`FirecrackerConfig::for_slot`]) so N restores can run concurrently in
+/// isolated namespaces. `netns_enabled == false` yields the exact legacy config
+/// (single-slot, root namespace). Non-Firecracker backends ignore the slot.
+pub(crate) fn select_backend_for_slot(
+    slot_index: usize,
+    netns_enabled: bool,
+) -> anyhow::Result<Box<dyn SnapshotBackend>> {
+    let Some(id) = flags::selected_backend_id() else {
+        return Ok(Box::new(FakeSnapshotBackend::new()));
+    };
+    if id == "firecracker" {
+        let cfg = FirecrackerConfig::for_slot(slot_index, netns_enabled, &FirecrackerConfig::default());
+        return require_available(Box::new(FirecrackerBackend::with_config(cfg)), "firecracker");
+    }
+    // Other backends have no per-slot network isolation; defer to the base path.
+    select_backend()
 }
 
 #[cfg(test)]
