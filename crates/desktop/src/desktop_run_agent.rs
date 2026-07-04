@@ -12,9 +12,22 @@
 //! `crate::intent` before it ever reaches here — only a trusted Ato Home pane
 //! can request a local run. This module performs the privileged local spawn and
 //! honest result surfacing; it never re-validates the origin.
+//!
+//! ## Run history
+//!
+//! Every completed run (success or failure) is also persisted to
+//! [`DesktopRunHistoryStore`] (`~/.ato/desktop-runner-run-history.json`) by the
+//! same waiter thread that renders the activity-log message, so a run's
+//! outcome survives past the transient activity feed. See that type's doc
+//! comment for why this is a sibling of
+//! `system_capsule::ato_start::StartPageHistoryStore` rather than an extension
+//! of it, and for the current (non-)status of UI surfacing.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use crate::orchestrator;
 use crate::state::{ActivityEntry, ActivityTone};
@@ -137,20 +150,40 @@ pub fn launch(source: &str, run_id: Option<&str>, ready_state_enabled: bool) -> 
         release_inflight();
         let stdout = std::fs::read_to_string(&stdout_log).unwrap_or_default();
         let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
-        let (tone, message) = match exit {
-            Ok(status) => render_run_result(
-                status.success(),
-                &stdout,
-                &stderr,
-                &source,
-                run_id.as_deref(),
-            ),
-            Err(err) => (
-                ActivityTone::Error,
-                format!("Run failed for {source}: wait failed: {err}"),
-            ),
+        let completed_at = now_unix_secs();
+        let (tone, message, history_entry) = match exit {
+            Ok(status) => {
+                let exit_ok = status.success();
+                let (tone, message) =
+                    render_run_result(exit_ok, &stdout, &stderr, &source, run_id.as_deref());
+                let entry = build_history_entry(
+                    exit_ok,
+                    &stdout,
+                    &stderr,
+                    &source,
+                    run_id.as_deref(),
+                    completed_at,
+                );
+                (tone, message, entry)
+            }
+            Err(err) => {
+                let message = format!("Run failed for {source}: wait failed: {err}");
+                let entry = DesktopRunHistoryEntry {
+                    source: source.clone(),
+                    run_id: run_id.clone(),
+                    completed_at,
+                    success: false,
+                    session_id: None,
+                    summary: message.clone(),
+                };
+                (ActivityTone::Error, message, entry)
+            }
         };
         push_pending(tone, message);
+        // Persist regardless of outcome — a history-write failure is logged
+        // and swallowed; it must never affect the (already-surfaced) run
+        // outcome above.
+        record_run_history(history_entry);
     });
     Ok(())
 }
@@ -293,6 +326,167 @@ fn kill_process_tree(pid: u32) {
             .no_console_window()
             .status();
     }
+}
+
+// ─── Desktop Runner run history ──────────────────────────────────────────
+//
+// Persisted history of completed Desktop Runner (`ato://run`) runs, kept as
+// a sibling of `system_capsule::ato_start::StartPageHistoryStore` rather than
+// folded into it: `StartHistoryEntry` is shaped around *webview capsule
+// opens* (a `handle` re-opened through the consent / installed-launch flow —
+// see `open_capsule_from_start`) and has no notion of a run outcome. An
+// `ato://run` entry is a fire-and-forget CLI spawn on the Desktop Runner with
+// a distinct relaunch path (`desktop_run_agent::launch`) and a
+// success/failure outcome the capsule-open schema has no field for. Reusing
+// the exact same JSON-file persistence pattern (load/save via serde_json,
+// most-recent-first, bounded cap) keeps the two stores consistent without
+// conflating their semantics.
+//
+// NOTE (UI surfacing): the Start page reads `StartPageHistoryStore` today
+// (`recent_capsules` in the injected snapshot) and a click posts
+// `open_capsule`, which routes through the webview consent / installed-launch
+// flow — wiring an `ato://run` entry into that same list would make clicking
+// it incorrectly attempt to *open a webview* for a source the Desktop Runner
+// ran headlessly, instead of re-invoking `desktop_run_agent::launch`. Because
+// of that, this store's data does NOT show up anywhere in the UI yet by
+// construction; surfacing it (e.g. a "recent runs" list wired to `launch()`)
+// is left to a follow-up PR.
+
+/// A single completed Desktop Runner (`ato://run`) run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DesktopRunHistoryEntry {
+    /// The capsule ref passed to `ato run <source>` — also the relaunch key:
+    /// a follow-up UI can call
+    /// `desktop_run_agent::launch(&entry.source, entry.run_id.as_deref(), false)`.
+    /// (`ready_state_enabled` is hardcoded `false` at the only current call
+    /// site — M3 cold-OCI-only policy — so it is not persisted here; if that
+    /// ever becomes dynamic, add it to this entry then.)
+    pub source: String,
+    /// The `ato://run?source=...&run_id=<id>` id, when the triggering intent
+    /// supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Unix timestamp (seconds) the run finished.
+    pub completed_at: u64,
+    /// `true` on a clean exit (with or without a parseable session receipt);
+    /// `false` on any failure (placement-gate rejection, non-zero exit, or a
+    /// `wait()` failure).
+    pub success: bool,
+    /// Session id parsed from a successful run's receipt, when the CLI
+    /// printed one. `None` on failure or when stdout had no parseable
+    /// receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The same human-readable summary shown in the activity log, so a
+    /// future history view can explain the outcome without re-reading log
+    /// files.
+    pub summary: String,
+}
+
+/// Persistent store for completed Desktop Runner run history.
+///
+/// Stored at `~/.ato/desktop-runner-run-history.json`, matching
+/// `StartPageHistoryStore`'s persistence approach (serde_json pretty bytes,
+/// load tolerant of a missing/corrupt file). At most [`MAX_RUN_HISTORY`]
+/// entries, most-recently-completed first.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct DesktopRunHistoryStore {
+    pub entries: Vec<DesktopRunHistoryEntry>,
+}
+
+/// Cap on persisted run-history entries — same bound convention as
+/// `StartPageHistoryStore::MAX_HISTORY`.
+const MAX_RUN_HISTORY: usize = 20;
+
+impl DesktopRunHistoryStore {
+    /// Load from `~/.ato/desktop-runner-run-history.json`. Returns an empty
+    /// store if the file does not exist or cannot be parsed (non-fatal).
+    pub fn load() -> Self {
+        let path = match run_history_path() {
+            Ok(p) => p,
+            Err(_) => return Self::default(),
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => return Self::default(),
+        };
+        serde_json::from_slice(&bytes).unwrap_or_default()
+    }
+
+    /// Persist to disk.
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = run_history_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let bytes = serde_json::to_vec_pretty(self)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Record a completed run, most-recent first, capped at
+    /// [`MAX_RUN_HISTORY`]. Unlike `StartPageHistoryStore::upsert`, this
+    /// never dedups by source: repeated runs of the same capsule are
+    /// distinct history events (each with its own outcome), not a single
+    /// "recently opened" row.
+    pub fn record(&mut self, entry: DesktopRunHistoryEntry) {
+        self.entries.push(entry);
+        self.entries
+            .sort_by_key(|e| std::cmp::Reverse(e.completed_at));
+        self.entries.truncate(MAX_RUN_HISTORY);
+    }
+}
+
+fn run_history_path() -> anyhow::Result<PathBuf> {
+    capsule::common::paths::ato_path("desktop-runner-run-history.json").map_err(anyhow::Error::from)
+}
+
+/// Build the persisted history entry for a completed run. Pure (no I/O) —
+/// mirrors [`render_run_result`]'s inputs but produces the durable record
+/// instead of the transient activity message; both derive the session id /
+/// summary from the same stdout/stderr, so what is recorded stays consistent
+/// with what the user saw live.
+pub fn build_history_entry(
+    exit_ok: bool,
+    stdout: &str,
+    stderr: &str,
+    source: &str,
+    run_id: Option<&str>,
+    completed_at: u64,
+) -> DesktopRunHistoryEntry {
+    let session_id = if exit_ok {
+        parse_session_receipt(stdout).map(|r| r.session_id)
+    } else {
+        None
+    };
+    let (_, summary) = render_run_result(exit_ok, stdout, stderr, source, run_id);
+    DesktopRunHistoryEntry {
+        source: source.to_string(),
+        run_id: run_id.map(str::to_string),
+        completed_at,
+        success: exit_ok,
+        session_id,
+        summary,
+    }
+}
+
+/// Load, append, cap, and persist a completed run's history entry. Errors
+/// are logged and swallowed — a history-write failure must never affect run
+/// outcome surfacing (which has already happened via `push_pending` by the
+/// time this is called).
+fn record_run_history(entry: DesktopRunHistoryEntry) {
+    let mut store = DesktopRunHistoryStore::load();
+    store.record(entry);
+    if let Err(err) = store.save() {
+        tracing::warn!(error = %err, "desktop_run_agent: failed to save run history");
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -550,5 +744,155 @@ DESKTOP-RUNNER: placement selected: local_cold_oci_candidate (guest linux/aarch6
         );
 
         release_inflight();
+    }
+
+    // ── DesktopRunHistoryStore / build_history_entry ────────────────────────
+
+    #[test]
+    fn build_history_entry_success_captures_session_id_and_summary() {
+        let entry = build_history_entry(
+            true,
+            SESSION_STDOUT,
+            "",
+            "community/hello",
+            Some("run_7"),
+            1_700_000_000,
+        );
+        assert_eq!(entry.source, "community/hello");
+        assert_eq!(entry.run_id.as_deref(), Some("run_7"));
+        assert_eq!(entry.completed_at, 1_700_000_000);
+        assert!(entry.success);
+        assert_eq!(
+            entry.session_id.as_deref(),
+            Some("ato-desktop-demo-app-123-456")
+        );
+        assert!(entry.summary.contains("session ato-desktop-demo-app-123-456"));
+    }
+
+    #[test]
+    fn build_history_entry_success_without_receipt_has_no_session_id() {
+        let entry = build_history_entry(true, "started ok\n", "", "acme/app", None, 42);
+        assert!(entry.success);
+        assert!(entry.session_id.is_none());
+        assert!(entry.summary.contains("Run completed"));
+    }
+
+    #[test]
+    fn build_history_entry_failure_has_no_session_id_and_records_reason() {
+        let entry = build_history_entry(
+            false,
+            "",
+            PLACEMENT_ERR,
+            "acme/app",
+            None,
+            1_700_000_100,
+        );
+        assert!(!entry.success);
+        assert!(entry.session_id.is_none());
+        assert!(entry.summary.contains("macos_too_old"));
+        assert_eq!(entry.completed_at, 1_700_000_100);
+    }
+
+    #[test]
+    fn history_store_records_most_recent_first() {
+        let mut store = DesktopRunHistoryStore::default();
+        store.record(DesktopRunHistoryEntry {
+            source: "acme/one".to_string(),
+            run_id: None,
+            completed_at: 100,
+            success: true,
+            session_id: Some("s1".to_string()),
+            summary: "ok".to_string(),
+        });
+        store.record(DesktopRunHistoryEntry {
+            source: "acme/two".to_string(),
+            run_id: None,
+            completed_at: 200,
+            success: false,
+            session_id: None,
+            summary: "failed".to_string(),
+        });
+        assert_eq!(store.entries.len(), 2);
+        assert_eq!(store.entries[0].source, "acme/two", "newest first");
+        assert_eq!(store.entries[1].source, "acme/one");
+    }
+
+    #[test]
+    fn history_store_does_not_dedup_repeated_source_runs() {
+        // Unlike StartPageHistoryStore, two runs of the same source are two
+        // distinct history events, not one upserted row.
+        let mut store = DesktopRunHistoryStore::default();
+        for i in 0..3 {
+            store.record(DesktopRunHistoryEntry {
+                source: "acme/repeat".to_string(),
+                run_id: None,
+                completed_at: i,
+                success: true,
+                session_id: None,
+                summary: "ok".to_string(),
+            });
+        }
+        assert_eq!(store.entries.len(), 3);
+    }
+
+    #[test]
+    fn history_store_caps_at_max() {
+        let mut store = DesktopRunHistoryStore::default();
+        for i in 0..(MAX_RUN_HISTORY as u64 + 5) {
+            store.record(DesktopRunHistoryEntry {
+                source: format!("acme/run-{i}"),
+                run_id: None,
+                completed_at: i,
+                success: true,
+                session_id: None,
+                summary: "ok".to_string(),
+            });
+        }
+        assert_eq!(store.entries.len(), MAX_RUN_HISTORY);
+        // The newest entries (highest completed_at) must survive the cap.
+        assert_eq!(
+            store.entries[0].completed_at,
+            MAX_RUN_HISTORY as u64 + 4,
+            "newest entry must be kept after truncation"
+        );
+    }
+
+    #[test]
+    fn history_entry_round_trips_through_serde_and_omits_none_fields() {
+        let entry = DesktopRunHistoryEntry {
+            source: "acme/app".to_string(),
+            run_id: None,
+            completed_at: 12345,
+            success: false,
+            session_id: None,
+            summary: "Run failed".to_string(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("\"run_id\":null"),
+            "None run_id must be omitted, not serialized as null: {json}"
+        );
+        assert!(
+            !json.contains("\"session_id\":null"),
+            "None session_id must be omitted, not serialized as null: {json}"
+        );
+        let back: DesktopRunHistoryEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+    }
+
+    #[test]
+    fn history_store_round_trips_through_serde() {
+        let mut store = DesktopRunHistoryStore::default();
+        store.record(DesktopRunHistoryEntry {
+            source: "acme/app".to_string(),
+            run_id: Some("run_1".to_string()),
+            completed_at: 555,
+            success: true,
+            session_id: Some("sess-1".to_string()),
+            summary: "Run ready".to_string(),
+        });
+        let json = serde_json::to_string(&store).unwrap();
+        let back: DesktopRunHistoryStore = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries, store.entries);
     }
 }
