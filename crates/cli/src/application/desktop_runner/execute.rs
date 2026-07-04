@@ -103,7 +103,7 @@ pub(crate) fn plan(
     let resolved = cold_oci::resolve_oci_target(manifest, target)?;
 
     // local_cold_oci_candidate guarantees a local backend exists.
-    let backend = facts.local_backend().ok_or_else(|| {
+    let backend = facts.preferred_local_cold_backend().ok_or_else(|| {
         anyhow!("Desktop Runner: internal error — placement is a cold-OCI candidate but no backend")
     })?;
     let exec_class = ExecutionClass::from_backend(backend);
@@ -227,62 +227,79 @@ pub(crate) fn run_selected(path: &Path, target: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::desktop_runner::macos::{MacosProbeInputs, build_macos_facts};
+    use crate::application::desktop_runner::macos::{
+        MacosProbeInputs, PodmanMachineProbe, build_macos_facts,
+    };
     use capsule::foundation::install_lifecycle::RunnerClassFacts;
 
-    fn supported_facts() -> super::super::facts::DesktopRunnerFacts {
-        build_macos_facts(
-            &MacosProbeInputs {
-                host_arch: "aarch64".into(),
-                product_version: Some("26.0".into()),
-                is_apple_silicon: true,
-                container_path: Some("/usr/local/bin/container".into()),
-                container_version: Some("container 0.1.0".into()),
-                container_service_running: true,
-            },
-            "0.7.0",
-        )
-    }
-
-    fn no_container_facts() -> super::super::facts::DesktopRunnerFacts {
-        let mut i = MacosProbeInputs {
+    /// Default Apple-only supported inputs (no Podman). Tests that need Podman
+    /// override the podman_* fields.
+    fn base_inputs() -> MacosProbeInputs {
+        MacosProbeInputs {
             host_arch: "aarch64".into(),
             product_version: Some("26.0".into()),
             is_apple_silicon: true,
             container_path: Some("/usr/local/bin/container".into()),
-            container_version: None,
-            container_service_running: false,
-        };
+            container_version: Some("container 0.1.0".into()),
+            container_service_running: true,
+            podman_binary_present: false,
+            podman_version: None,
+            podman_machine: PodmanMachineProbe::default(),
+        }
+    }
+
+    fn supported_facts() -> super::super::facts::DesktopRunnerFacts {
+        build_macos_facts(&base_inputs(), "0.7.0")
+    }
+
+    fn no_container_facts() -> super::super::facts::DesktopRunnerFacts {
+        let mut i = base_inputs();
         i.container_path = None;
+        i.container_version = None;
         build_macos_facts(&i, "0.7.0")
     }
 
     fn old_macos_facts() -> super::super::facts::DesktopRunnerFacts {
-        build_macos_facts(
-            &MacosProbeInputs {
-                host_arch: "aarch64".into(),
-                product_version: Some("15.5".into()),
-                is_apple_silicon: true,
-                container_path: Some("/usr/local/bin/container".into()),
-                container_version: Some("container 0.1.0".into()),
-                container_service_running: false,
-            },
-            "0.7.0",
-        )
+        let mut i = base_inputs();
+        i.product_version = Some("15.5".into());
+        i.container_service_running = false;
+        build_macos_facts(&i, "0.7.0")
     }
 
     fn intel_mac_facts() -> super::super::facts::DesktopRunnerFacts {
-        build_macos_facts(
-            &MacosProbeInputs {
-                host_arch: "x86_64".into(),
-                product_version: Some("26.0".into()),
-                is_apple_silicon: false,
-                container_path: Some("/usr/local/bin/container".into()),
-                container_version: Some("container 0.1.0".into()),
-                container_service_running: false,
-            },
-            "0.7.0",
-        )
+        let mut i = base_inputs();
+        i.is_apple_silicon = false;
+        i.host_arch = "x86_64".into();
+        i.container_service_running = false;
+        build_macos_facts(&i, "0.7.0")
+    }
+
+    /// macOS 15 + Apple Silicon + Podman running (ato-podman machine up).
+    /// This is the "Podman saves the day" host — no Apple Containerization,
+    /// but Podman provides a local cold-OCI backend.
+    fn podman_running_macos15_facts() -> super::super::facts::DesktopRunnerFacts {
+        let mut i = base_inputs();
+        i.product_version = Some("15.5".into());
+        i.container_path = None;
+        i.container_version = None;
+        i.container_service_running = false;
+        i.podman_binary_present = true;
+        i.podman_version = Some("podman 5.2.3".into());
+        i.podman_machine = PodmanMachineProbe::AtoPodmanRunning;
+        build_macos_facts(&i, "0.7.0")
+    }
+
+    /// macOS 15 + Apple Silicon + Podman installed but ato-podman machine stopped.
+    fn podman_stopped_macos15_facts() -> super::super::facts::DesktopRunnerFacts {
+        let mut i = base_inputs();
+        i.product_version = Some("15.5".into());
+        i.container_path = None;
+        i.container_version = None;
+        i.container_service_running = false;
+        i.podman_binary_present = true;
+        i.podman_version = Some("podman 5.2.3".into());
+        i.podman_machine = PodmanMachineProbe::AtoPodmanStopped;
+        build_macos_facts(&i, "0.7.0")
     }
 
     fn manifest(extra: &str) -> CapsuleManifest {
@@ -538,5 +555,67 @@ default_target = "app"
         assert!(json.contains("\"guest_os\":\"linux\""), "{json}");
         assert!(json.contains("\"binding_required\":false"), "{json}");
         assert!(json.contains("\"binding_leases\":0"), "{json}");
+    }
+
+    // ── Podman substrate placement tests ─────────────────────────────────────
+
+    #[test]
+    fn podman_running_macos15_plans_cold_oci_via_podman_substrate() {
+        // macOS 15 + no Apple container + Podman running → placement is
+        // local_cold_oci_candidate with the Podman backend.
+        let p = plan(
+            &oci_capsule(),
+            None,
+            &podman_running_macos15_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "ato-desktop-test".into(),
+        )
+        .unwrap();
+        assert_eq!(p.decision.placement, kind::LOCAL_COLD_OCI_CANDIDATE);
+        assert_eq!(
+            p.exec_class.substrate,
+            super::super::facts::SUBSTRATE_PODMAN
+        );
+        assert!(p.decision.local_backend_blockers.is_empty());
+    }
+
+    #[test]
+    fn podman_stopped_macos15_placement_failure_names_podman_action() {
+        let err = plan(
+            &oci_capsule(),
+            None,
+            &podman_stopped_macos15_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "n".into(),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("will not run this capsule locally"), "{msg}");
+        assert!(msg.contains("podman_machine_stopped"), "{msg}");
+        assert!(
+            msg.contains("start the `ato-podman` machine"),
+            "missing Podman next-action: {msg}"
+        );
+        // Also has Apple blockers (no substrate available).
+        assert!(msg.contains("macos_too_old"), "{msg}");
+        assert!(msg.contains("apple_container_missing"), "{msg}");
+    }
+
+    #[test]
+    fn podman_available_suppresses_apple_blockers_in_placement() {
+        // macOS 15 + Podman running → placement succeeds; Apple blockers
+        // are NOT in the decision (a backend IS available).
+        let p = plan(
+            &oci_capsule(),
+            None,
+            &podman_running_macos15_facts(),
+            &RunnerClassFacts::from_host(),
+            false,
+            "ato-desktop-test".into(),
+        )
+        .unwrap();
+        assert!(p.decision.local_backend_blockers.is_empty());
     }
 }

@@ -1008,6 +1008,82 @@ fn open_capsule_from_start(cx: &mut App, route: GuestRoute, handle: &str) {
     }
 }
 
+/// Dispatch an `ato://run?source=<capsule-ref>[&run_id=<id>]` request — the
+/// embedded PWA Home's "run this on my Desktop Runner" intent (PR-D1). Unlike
+/// [`open_capsule_from_start`], this never opens an AppWindow / guest WebView
+/// pane: approval spawns `ato run <source>` on the Desktop Runner cold-OCI
+/// substrate directly via `desktop_run_agent::launch`.
+///
+/// Consent gating mirrors the omnibar/`capsule://` flow exactly, per PR-D1's
+/// scope (reuse the existing bar, do not invent a new one):
+/// - already installed (a single, non-degraded [`InstalledMatch::One`], same
+///   bar [`resolve_open_intent`] uses for handle re-opens) → pre-consented,
+///   skip the wizard and launch immediately;
+/// - otherwise → show the SAME consent wizard `capsule://` opens
+///   ([`crate::window::launch_window::open_consent_window_for_run_agent`]),
+///   which routes Approve to `desktop_run_agent::launch` and a Cancel to a
+///   logged decline (see `ato_launch::dispatch`) instead of the AppWindow
+///   boot flow.
+///
+/// Deliberately does NOT consult live-session / Start-history install
+/// identity the way [`resolve_open_intent`] does for handle re-opens: the
+/// Desktop Runner cold-OCI substrate has no live "focus this session" or
+/// "resume via install_profile_key" concept, so only the installed-vs-not
+/// question applies here.
+pub(crate) fn dispatch_run_intent(
+    cx: &mut App,
+    source: String,
+    run_id: Option<String>,
+    origin: String,
+) {
+    use crate::launch_intent::{
+        InstalledMatch, installed_match_for_handle, run_intent_is_pre_consented,
+    };
+
+    let installed_match = match open_install_store() {
+        Ok(store) => installed_match_for_handle(&store, &source).unwrap_or(InstalledMatch::None),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                source,
+                "ato_start: run intent — install store unavailable; treating as not installed"
+            );
+            InstalledMatch::None
+        }
+    };
+
+    if run_intent_is_pre_consented(&installed_match) {
+        tracing::info!(
+            source,
+            "ato_start: run intent — already installed, skipping consent wizard"
+        );
+        let ready_state_enabled = false; // M3: cold-OCI only; local Ready-State restore is not supported.
+        match crate::desktop_run_agent::launch(&source, run_id.as_deref(), ready_state_enabled) {
+            Ok(()) => {
+                tracing::info!(
+                    source,
+                    "ato_start: run intent launched on the Desktop Runner"
+                );
+            }
+            Err(reason) => {
+                tracing::warn!(source, %reason, "ato_start: run intent failed to start");
+                if let Err(err) = crate::window::launch_blocked_popup::open_launch_blocked_popup(
+                    cx, source, reason,
+                ) {
+                    tracing::error!(error = %err, "ato_start: failed to show run-intent launch-failed popup");
+                }
+            }
+        }
+        return;
+    }
+
+    if let Err(err) =
+        crate::window::launch_window::open_consent_window_for_run_agent(cx, source, run_id, origin)
+    {
+        tracing::error!(error = %err, "ato_start: run intent — open_consent_window_for_run_agent failed");
+    }
+}
+
 /// Open an installed app by its durable `install_profile_key` — the identity
 /// behind an `ato://app/<ipk>` URL (#261). This is the deep-link / automation
 /// entry point that mirrors what a Start-window tile click does, but keyed by

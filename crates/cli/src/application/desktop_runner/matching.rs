@@ -59,9 +59,11 @@ pub(crate) fn class_compatible(
     artifact_class.ensure_compatible(host_class)
 }
 
-/// The local cold backend a placement would use, if any.
+/// The local cold backend a placement would use, if any. Honors the substrate
+/// preference order (Apple Containerization before Podman) via
+/// [`DesktopRunnerFacts::preferred_local_cold_backend`].
 fn local_cold_backend(host: &DesktopRunnerFacts) -> Option<&super::facts::BackendCapability> {
-    host.local_backend()
+    host.preferred_local_cold_backend()
         .filter(|b| b.ready_state_kind == ReadyStateKind::ColdOci)
 }
 
@@ -189,6 +191,9 @@ mod tests {
                 container_path: Some("/usr/local/bin/container".into()),
                 container_version: Some("container 0.1.0".into()),
                 container_service_running: false,
+                podman_binary_present: false,
+                podman_version: None,
+                podman_machine: super::super::macos::PodmanMachineProbe::default(),
             },
             "0.7.0",
         )
@@ -279,6 +284,9 @@ mod tests {
                 container_path: None,
                 container_version: None,
                 container_service_running: false,
+                podman_binary_present: false,
+                podman_version: None,
+                podman_machine: super::super::macos::PodmanMachineProbe::default(),
             },
             "0.7.0",
         );

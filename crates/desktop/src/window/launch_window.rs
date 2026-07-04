@@ -70,6 +70,29 @@ pub struct PendingLaunches(pub std::collections::HashMap<String, StashedLaunch>)
 pub struct StashedLaunch {
     pub route: GuestRoute,
     pub requested_client: crate::state::session::SessionClientKind,
+    /// PR-D1: set when this consent request originated from `ato://run`
+    /// (Desktop Runner cold-OCI launch) rather than the omnibar/`capsule://`
+    /// flow. On Approve, `ato_launch::dispatch` spawns `ato run <source>`
+    /// directly via `desktop_run_agent::launch` instead of opening the boot
+    /// wizard / AppWindow — the Desktop Runner path never embeds a guest
+    /// WebView pane. `None` for every other launch path (unchanged).
+    pub run_agent_request: Option<RunAgentRequest>,
+}
+
+/// An `ato://run?source=<capsule-ref>[&run_id=<id>]` request parked under the
+/// SAME consent wizard the omnibar/`capsule://` flow uses (PR-D1). Carries
+/// just enough to spawn the Desktop Runner cold-OCI run on Approve; the
+/// wizard's own preflight + permission summary are computed generically from
+/// the `GuestRoute::CapsuleHandle` built from `source`, same as any other
+/// capsule handle.
+#[derive(Debug, Clone)]
+pub struct RunAgentRequest {
+    pub source: String,
+    pub run_id: Option<String>,
+    /// The requesting origin (embedded Home / trusted pane), carried through
+    /// for logging only — the trust decision itself already happened before
+    /// this request was ever built (see `system_capsule::ato_start::dispatch_run_intent`).
+    pub origin: String,
 }
 
 impl gpui::Global for PendingLaunches {}
@@ -473,6 +496,43 @@ pub fn open_consent_window_for_route_with_client(
     route: GuestRoute,
     requested_client: crate::state::session::SessionClientKind,
 ) -> Result<()> {
+    open_consent_window_for_route_inner(cx, route, requested_client, None)
+}
+
+/// Open the SAME consent wizard the omnibar/`capsule://` flow uses for an
+/// `ato://run?source=...&run_id=...` request (PR-D1). Builds the identical
+/// `GuestRoute::CapsuleHandle` a `capsule://` launch of `source` would build,
+/// so the wizard's preflight + permission-summary computation is unchanged —
+/// only the post-approval routing differs (see `RunAgentRequest`).
+pub fn open_consent_window_for_run_agent(
+    cx: &mut App,
+    source: String,
+    run_id: Option<String>,
+    origin: String,
+) -> Result<()> {
+    let route = GuestRoute::CapsuleHandle {
+        handle: source.clone(),
+        label: source.clone(),
+        community_toml_id: None,
+    };
+    open_consent_window_for_route_inner(
+        cx,
+        route,
+        crate::state::session::SessionClientKind::AtoWindow,
+        Some(RunAgentRequest {
+            source,
+            run_id,
+            origin,
+        }),
+    )
+}
+
+fn open_consent_window_for_route_inner(
+    cx: &mut App,
+    route: GuestRoute,
+    requested_client: crate::state::session::SessionClientKind,
+    run_agent_request: Option<RunAgentRequest>,
+) -> Result<()> {
     let (display_name, display_handle) = match &route {
         GuestRoute::CapsuleHandle { handle, label, .. } => {
             let pretty_name = label
@@ -503,6 +563,7 @@ pub fn open_consent_window_for_route_with_client(
     let stashed = StashedLaunch {
         route: route.clone(),
         requested_client,
+        run_agent_request,
     };
     let launches = cx.global_mut::<PendingLaunches>();
     launches.0.insert(preview_id.clone(), stashed);

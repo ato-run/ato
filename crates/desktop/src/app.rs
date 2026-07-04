@@ -1232,6 +1232,41 @@ pub fn run(skip_onboarding: bool) {
                 return;
             }
 
+            // ato://run?source=<capsule-ref>[&run_id=<id>] — the embedded PWA
+            // Home's "run this on my Desktop Runner" intent (PR-D1). Unlike
+            // `capsule://` below, this never embeds a guest WebView pane:
+            // approval spawns `ato run <source>` on the Desktop Runner
+            // cold-OCI substrate directly. Checked via a parsed host
+            // comparison (not `starts_with`) so it cannot collide with a
+            // future `ato://runner/...` verb, which shares the `ato://run`
+            // string prefix.
+            if let Ok(parsed_ato) = url::Url::parse(raw)
+                && parsed_ato.scheme() == "ato"
+                && parsed_ato.host_str() == Some("run")
+            {
+                match crate::intent::parse_run_query(raw) {
+                    Some((source, run_id)) => {
+                        // No per-navigation pane origin is available on this
+                        // live router (see the `crate::intent` module note);
+                        // the Home surface's own configured origin is the
+                        // honest stand-in for "who asked for this" in logs.
+                        let origin = crate::window::home::home_url(&crate::config::load_config())
+                            .origin()
+                            .ascii_serialization();
+                        crate::system_capsule::ato_start::dispatch_run_intent(
+                            cx, source, run_id, origin,
+                        );
+                    }
+                    None => {
+                        tracing::warn!(
+                            url = %raw,
+                            "NavigateToUrl(ato://run): missing 'source' — ignored"
+                        );
+                    }
+                }
+                return;
+            }
+
             if let Some(rest) = raw.strip_prefix("capsule://") {
                 // Extract optional ?ctoml=<id> query parameter.
                 let (rest_path, community_toml_id) = if let Some(q_pos) = rest.find('?') {

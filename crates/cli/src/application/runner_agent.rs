@@ -790,8 +790,22 @@ pub async fn run_serve(
         pool.capacity(),
         proxy_listen
     );
+    if capacity == DEFAULT_MAX_SLOTS {
+        println!(
+            "           (default; override with --max-slots or ATO_RUNNER_MAX_SLOTS, max {MAX_SLOTS_CEILING})"
+        );
+    }
     if let Some(template) = public_url_template.as_deref() {
         println!("   Public URL template: {template}");
+    }
+    // #948 N-slot: with more than one slot (or an explicit ATO_FC_NETNS=1) each
+    // restore runs in its own network namespace so identical `fctap0`/172.16.0.2
+    // VMs coexist. Single-slot stays on the legacy root-namespace path.
+    let netns_enabled = pool.capacity() > 1
+        || std::env::var("ATO_FC_NETNS").ok().as_deref() == Some("1");
+    if netns_enabled {
+        println!("   Network: per-slot namespaces (ato-slot-N) enabled");
+        cleanup_orphan_slot_netns(pool.capacity());
     }
 
     loop {
@@ -876,35 +890,80 @@ pub async fn run_serve(
             }
         }
 
-        // Between heartbeats: poll for leases in short slices while idle.
+        // Between heartbeats: poll for leases in short slices while idle. With
+        // long-poll on, the API holds the request itself, so we skip the
+        // pre-sleep and let the (heartbeat-bounded) hold BE the wait; every
+        // iteration decrements `remaining` by its true elapsed time so the
+        // heartbeat cadence never drifts regardless of hold length.
+        let long_poll = lease_long_poll_enabled();
         let mut remaining = interval;
         while remaining > 0 {
-            let slice = remaining.min(lease_poll_seconds());
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
-                _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+            let iter_start = std::time::Instant::now();
+            let can_poll = pool.has_free();
+
+            // Pre-sleep only when we are NOT about to long-poll a free slot:
+            // the short idle cadence (non-long-poll), or backpressure when at
+            // capacity (can't accept work — never hold a connection then).
+            if !long_poll || !can_poll {
+                let slice = remaining.min(lease_poll_seconds());
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
+                    _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+                }
             }
-            remaining = remaining.saturating_sub(slice);
 
             // Don't poll (and therefore don't CLAIM) when every slot is taken.
-            if !pool.has_free() {
+            if !can_poll {
+                remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
                 continue;
             }
-            match fetch_next_lease(&client, &api_base, &creds.runner_id, &creds.runner_token).await
-            {
+
+            // Hold budget: cap at LEASE_LONG_POLL_WAIT_MS AND at the time left
+            // before the next heartbeat — a hold must never outlast the
+            // heartbeat window. 0 keeps the historical one-shot poll.
+            let wait_ms = if long_poll {
+                LEASE_LONG_POLL_WAIT_MS.min(remaining.saturating_mul(1000))
+            } else {
+                0
+            };
+            let poll = fetch_next_lease(
+                &client,
+                &api_base,
+                &creds.runner_id,
+                &creds.runner_token,
+                wait_ms,
+            )
+            .await;
+            remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
+            match poll {
                 LeasePoll::None => {}
                 LeasePoll::Claimed(lease) => match pool.acquire() {
                     Some(slot) => {
-                        handle_claimed_lease(
-                            &client,
-                            &api_base,
-                            &creds.runner_token,
-                            lease,
-                            slot,
-                            public_base_url.clone(),
-                            public_url_template.clone(),
-                        )
-                        .await;
+                        // #948 N-slot: SPAWN (don't await inline). A restore
+                        // lease holds its VM for the whole session; awaiting it
+                        // here would block the poll loop and starve the other
+                        // slots (the pool would never fill). Detach the task —
+                        // it owns the SlotLease and releases it after teardown,
+                        // matching the run-lifecycle spawn below. Panic-safety:
+                        // SlotLease's Drop frees the slot even if the task dies.
+                        let client = client.clone();
+                        let api_base = api_base.clone();
+                        let runner_token = creds.runner_token.clone();
+                        let public_base_url = public_base_url.clone();
+                        let public_url_template = public_url_template.clone();
+                        tokio::spawn(async move {
+                            handle_claimed_lease(
+                                &client,
+                                &api_base,
+                                &runner_token,
+                                lease,
+                                slot,
+                                public_base_url,
+                                public_url_template,
+                                netns_enabled,
+                            )
+                            .await;
+                        });
                     }
                     None => {
                         // Defensive: `has_free()` was true immediately before the
@@ -984,6 +1043,19 @@ fn lease_poll_seconds_from(raw: Option<&str>) -> u64 {
     raw.and_then(|v| v.trim().parse::<u64>().ok())
         .map(|v| v.clamp(1, 60))
         .unwrap_or(LEASE_POLL_SECONDS)
+}
+
+/// L2 long-poll (ato#948): when `ATO_LEASE_LONG_POLL=1`, the idle claim poll
+/// asks the API to HOLD the request for up to this budget until a lease is
+/// claimable — cutting claim latency from the idle-poll floor to sub-second.
+/// The API caps its own hold at 25s; we ask for 20s, comfortably inside a
+/// reqwest/Workers request. Off by default (opt-in per deployment).
+const LEASE_LONG_POLL_WAIT_MS: u64 = 20_000;
+
+fn lease_long_poll_enabled() -> bool {
+    std::env::var("ATO_LEASE_LONG_POLL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// After a port-LESS readiness signal (the human "[✓] ready" echo), hold this
@@ -1256,6 +1328,36 @@ impl SlotLease {
     }
 }
 
+/// Panic-safety net (#948 N-slot): a claimed lease is now handled in a detached
+/// task, so a PANIC inside it must not wedge the slot forever. Release happens
+/// on drop ONLY while unwinding a panic — a normal drop deliberately does NOT
+/// release, preserving the fail-closed invariant that a slot whose VM teardown
+/// could not be confirmed stays held (explicit `release()` after a confirmed
+/// teardown owns the normal path). `release()` is idempotent regardless.
+impl Drop for SlotLease {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.release();
+        }
+    }
+}
+
+/// Best-effort startup sweep of per-slot network state left by a crashed prior
+/// serve (#948 N-slot). Safe because at serve start no slot is live yet:
+/// deleting each `ato-slot-{i}` namespace atomically removes its in-ns tap,
+/// veth end, and iptables rules; the root veth end `vsl{i}h` and the stale
+/// per-slot lockfile are removed too. Silent (these usually don't exist).
+fn cleanup_orphan_slot_netns(capacity: usize) {
+    let work_root = snapshot::FirecrackerConfig::default().work_root;
+    for i in 0..capacity {
+        let ns = format!("ato-slot-{i}");
+        let veth = format!("vsl{i}h");
+        let _ = std::process::Command::new("ip").args(["netns", "del", &ns]).status();
+        let _ = std::process::Command::new("ip").args(["link", "del", &veth]).status();
+        let _ = std::fs::remove_file(work_root.join(format!("{ns}.lock")));
+    }
+}
+
 /// The public URL the runner will claim for a slot — honestly.
 ///
 /// * With a template (`{port}` / `{slot}` placeholders) the operator asserts
@@ -1309,9 +1411,20 @@ async fn fetch_next_lease(
     api_base: &str,
     runner_id: &str,
     runner_token: &str,
+    wait_ms: u64,
 ) -> LeasePoll {
+    // Transport only: `wait_ms>0` asks the API to hold the request until a
+    // lease is claimable (L2). The claim CONTRACT is unchanged — same capacity
+    // gate, ownership, idempotency and terminal handling; a full runner / no
+    // lease still returns `{lease:null}`, just after an honest hold instead of
+    // now. 0 ⇒ the historical one-shot poll.
+    let wait = if wait_ms > 0 {
+        format!("?wait_ms={wait_ms}")
+    } else {
+        String::new()
+    };
     let url = format!(
-        "{}/v1/runners/{}/leases/next",
+        "{}/v1/runners/{}/leases/next{wait}",
         api_base.trim_end_matches('/'),
         runner_id
     );
@@ -3316,8 +3429,9 @@ async fn handle_restore_snapshot_lease(
     slot: SlotLease,
     public_base_url: Option<String>,
     public_url_template: Option<String>,
+    netns_enabled: bool,
 ) {
-    use crate::application::ready_state::backend::select_backend;
+    use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
         load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
@@ -3325,6 +3439,22 @@ async fn handle_restore_snapshot_lease(
     use capsulefs::CasStore;
 
     let lease_id = lease.id.clone();
+
+    // ── Track R1 (ato#948): restore-prep phase profiling ────────────────────
+    // The measured claimed→firecracker gap (~1.7s) hid inside this handler.
+    // Every phase is timed and emitted as ONE stable key=value line
+    // (`RESTORE_PROF …`) on the success path — ids only, never secrets/URLs.
+    // `spans=` carries the snapshot backend's internal bench spans
+    // (rehydrate/cache/spawn/health…), populated when ATO_READY_STATE_BENCH=1.
+    let prof_total = std::time::Instant::now();
+    let mut prof_last = std::time::Instant::now();
+    let mut prof_parts: Vec<String> = Vec::new();
+    macro_rules! prof_mark {
+        ($name:literal) => {{
+            prof_parts.push(format!(concat!($name, "={}"), prof_last.elapsed().as_millis()));
+            prof_last = std::time::Instant::now();
+        }};
+    }
 
     // Report a typed failure and release the slot (fail-closed on every reject path).
     async fn fail(
@@ -3360,8 +3490,36 @@ async fn handle_restore_snapshot_lease(
         "📦 restore lease {lease_id}: snapshot {} (capsule {}, {}/{})",
         cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
     );
-    let _ = report_lease_status(client, api_base, runner_token, &lease_id, &LeaseReport::Preparing)
-        .await;
+    prof_mark!("parse_ms");
+    // Track R3 (ato#948): the Preparing report is a PROGRESS HINT, not a
+    // terminal contract — R1 measured it at p50 ~1.1s of pure control-plane
+    // round-trip sitting on the restore critical path. Fire it in the
+    // background (ONE task per restore, no retry loop) and start the restore
+    // immediately. Ready/Failed reporting stays awaited — the terminal
+    // contract is unchanged.
+    {
+        let client = client.clone();
+        let api_base = api_base.to_string();
+        let runner_token = runner_token.to_string();
+        let lease_id = lease_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = report_lease_status(
+                &client,
+                &api_base,
+                &runner_token,
+                &lease_id,
+                &LeaseReport::Preparing,
+            )
+            .await
+            {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: preparing report failed (non-fatal): {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+            }
+        });
+    }
+    prof_mark!("report_preparing_spawn_ms");
 
     // 2. Locate the fetched artifact on this host (v1 same-host CAS, ato#928 layout).
     let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
@@ -3387,6 +3545,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("locate_artifact_ms");
 
     // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate).
     let manifest = match load_and_verify_manifest(&paths.manifest_json, &cmd) {
@@ -3396,6 +3555,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("verify_manifest_ms");
 
     // 4. Open the artifact's CAS + select the host backend (both fail-closed).
     let store = match CasStore::open(&paths.cas_dir) {
@@ -3414,7 +3574,10 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
-    let backend = match select_backend() {
+    // #948 N-slot: build the backend for THIS slot. Under netns mode the
+    // Firecracker config is namespaced (ato-slot-{index}) so concurrent restores
+    // don't collide on tap/IP/lock; legacy single-slot keeps the root-ns config.
+    let backend = match select_backend_for_slot(slot.index, netns_enabled) {
         Ok(b) => b,
         Err(e) => {
             fail(
@@ -3430,6 +3593,7 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    prof_mark!("cas_open_backend_select_ms");
 
     // 5. Restore + expose. The disposable overlay is destroyed on teardown. host_runner
     // class stays None so `backend.restore` re-gates the manifest's runner class against
@@ -3437,6 +3601,8 @@ async fn handle_restore_snapshot_lease(
     let overlay_root = std::env::temp_dir()
         .join("ato-restore-overlays")
         .join(&lease_id);
+    // Drain any stale spans so `spans=` below carries THIS restore only.
+    let _ = snapshot::bench::drain();
     let receipt =
         match restore_and_expose(backend.as_ref(), &store, manifest, overlay_root, None, false) {
             Ok(r) => r,
@@ -3454,6 +3620,11 @@ async fn handle_restore_snapshot_lease(
                 return;
             }
         };
+    prof_mark!("backend_restore_ms");
+    let prof_spans: Vec<String> = snapshot::bench::drain()
+        .into_iter()
+        .map(|s| format!("{}={}ms", s.name, s.micros / 1000))
+        .collect();
     let session = receipt.session;
 
     let Some(guest_port) = session.guest_port else {
@@ -3516,6 +3687,7 @@ async fn handle_restore_snapshot_lease(
         Some(guest_port),
         proxy_started,
     );
+    prof_mark!("proxy_setup_ms");
     println!(
         "📨 restore lease {lease_id}: ready ({}, ready_url={})",
         payload.execution_id,
@@ -3527,6 +3699,15 @@ async fn handle_restore_snapshot_lease(
             scrub_secrets(&format!("{err:#}"))
         );
     }
+    prof_mark!("ready_ack_ms");
+    // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
+    println!(
+        "RESTORE_PROF lease={lease_id} snapshot={} {} total_ms={} spans=\"{}\"",
+        cmd.snapshot_id,
+        prof_parts.join(" "),
+        prof_total.elapsed().as_millis(),
+        prof_spans.join(";"),
+    );
 
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
     let control_url = format!(
@@ -3592,6 +3773,7 @@ async fn handle_claimed_lease(
     slot: SlotLease,
     public_base_url: Option<String>,
     public_url_template: Option<String>,
+    netns_enabled: bool,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
     // Track E (#912): a restore_snapshot lease restores a sealed Ready-State snapshot
@@ -3609,6 +3791,7 @@ async fn handle_claimed_lease(
             slot,
             public_base_url,
             public_url_template,
+            netns_enabled,
         )
         .await;
         return;
@@ -5452,7 +5635,7 @@ mod tests {
             "{\"lease\":{\"id\":\"01LEASE\",\"run_id\":\"01RUN\",\"command\":{\"kind\":\"run_source_sandbox\",\"source_url\":\"https://github.com/x/y\"}},\"next_poll_seconds\":5}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let request = server.join().expect("server");
         assert!(request.contains("GET /v1/runners/01R/leases/next"));
         match outcome {
@@ -5467,13 +5650,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_poll_wait_ms_appended_only_when_long_poll_requested() {
+        // wait_ms=0 ⇒ the historical one-shot URL (no query).
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let client = reqwest::Client::new();
+        let _ = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runners/01R/leases/next "));
+        assert!(!request.contains("wait_ms"));
+
+        // wait_ms>0 ⇒ the long-poll query is appended verbatim.
+        let (base2, server2) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let _ = fetch_next_lease(&client, &base2, "01R", "ato_rnr_t", 20_000).await;
+        let request2 = server2.join().expect("server");
+        assert!(request2.contains("GET /v1/runners/01R/leases/next?wait_ms=20000"));
+    }
+
+    #[tokio::test]
     async fn lease_poll_revoked_is_terminal() {
         let (base, server) = one_shot_http(
             "HTTP/1.1 401 Unauthorized",
             "{\"error\":\"runner_revoked\",\"message\":\"revoked\"}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let _ = server.join();
         assert!(matches!(outcome, LeasePoll::Revoked));
     }
