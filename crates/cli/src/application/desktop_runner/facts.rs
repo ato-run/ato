@@ -25,6 +25,9 @@ pub(crate) const PROVIDER_KIND_DESKTOP: &str = "desktop";
 /// Apple Containerization substrate identifier (`container` / Apple VZ).
 pub(crate) const SUBSTRATE_APPLE_CONTAINERIZATION: &str = "apple_containerization";
 
+/// Podman substrate identifier (`podman` / the shared `ato-podman` machine).
+pub(crate) const SUBSTRATE_PODMAN: &str = "podman";
+
 /// Apple Virtualization.framework accelerator label.
 pub(crate) const ACCELERATOR_APPLE_VZ: &str = "apple_vz";
 
@@ -40,6 +43,33 @@ pub(crate) enum IsolationBoundary {
     /// A bare microVM (e.g. Firecracker) — the existing snapshot path's domain,
     /// reported here only for matrix completeness, never produced by M0.
     MicroVm,
+}
+
+/// The VM scope of a `vm_wrapped_container` substrate. Both Apple
+/// Containerization and Podman are `vm_wrapped_container` at the boundary
+/// level, but the VM scope differs — and that difference matters for cleanup,
+/// state reuse, and what a session receipt honestly claims.
+///
+/// - `per_session_vm`: a fresh VM is started per container and torn down on
+///   exit (Apple Containerization).
+/// - `shared_machine`: containers run inside a shared, persistent Podman
+///   machine; the container outlives the wrapper process and must be
+///   explicitly removed (`podman rm -f`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SubstrateScope {
+    PerSessionVm,
+    SharedMachine,
+}
+
+impl SubstrateScope {
+    /// The snake_case wire label (matches the serde representation).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::PerSessionVm => "per_session_vm",
+            Self::SharedMachine => "shared_machine",
+        }
+    }
 }
 
 /// The Ready-State mechanism a backend can restore from.
@@ -102,12 +132,20 @@ impl Maturity {
 /// backend. The machine-readable counterpart to the free-text `diagnostics`
 /// strings: each blocker names *one* missing precondition so a placement
 /// failure can tell the user exactly what to fix (upgrade macOS / install
-/// `container` / use a managed runner) instead of a single generic "no local
-/// backend" message. Populated by the host probes ([`super::macos`] /
-/// [`super::build_other_facts`]); empty when a local backend is available.
+/// `container` / start the `ato-podman` machine / use a managed runner) instead
+/// of a single generic "no local backend" message. Populated by the host probes
+/// ([`super::macos`] / [`super::build_other_facts`]); empty when a local backend
+/// is available.
+///
+/// **Rendering policy:** blockers are emitted only for substrates that are
+/// unavailable. If any substrate is available, the unavailable substrates'
+/// blockers do NOT appear in the placement failure path (a backend IS
+/// available, so placement succeeds with no blockers). They may still appear
+/// in `ato doctor desktop-runner` substrate details.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum LocalBackendBlocker {
+    // ── Apple Containerization substrate ────────────────────────────────────
     /// Host is not Apple silicon (Apple Containerization requires it).
     NotAppleSilicon,
     /// macOS is older than the minimum required for Apple Containerization.
@@ -118,6 +156,18 @@ pub(crate) enum LocalBackendBlocker {
     },
     /// The Apple `container` tool is not installed / not on PATH.
     AppleContainerMissing,
+    // ── Podman substrate ────────────────────────────────────────────────────
+    /// The `podman` binary is not installed / not resolvable.
+    PodmanBinaryMissing,
+    /// The `ato-podman` machine is configured but not running.
+    PodmanMachineStopped,
+    /// No `ato-podman` machine is configured (`podman machine list` returned
+    /// no entries, or none named `ato-podman`).
+    PodmanMachineNotConfigured,
+    /// `podman machine list` could not run, returned unparseable output, or hit
+    /// a permission error. `reason` is a short, safe summary (never raw stderr).
+    PodmanMachineStatusUnavailable { reason: String },
+    // ── non-macOS ───────────────────────────────────────────────────────────
     /// Host OS has no Desktop Runner cold-OCI substrate (Linux/Windows/etc.).
     NonMacOsHost { host_os: String },
 }
@@ -129,6 +179,10 @@ impl LocalBackendBlocker {
             Self::NotAppleSilicon => "not_apple_silicon",
             Self::MacOsTooOld { .. } => "macos_too_old",
             Self::AppleContainerMissing => "apple_container_missing",
+            Self::PodmanBinaryMissing => "podman_binary_missing",
+            Self::PodmanMachineStopped => "podman_machine_stopped",
+            Self::PodmanMachineNotConfigured => "podman_machine_not_configured",
+            Self::PodmanMachineStatusUnavailable { .. } => "podman_machine_status_unavailable",
             Self::NonMacOsHost { .. } => "non_macos_host",
         }
     }
@@ -144,21 +198,35 @@ impl LocalBackendBlocker {
                 "install Apple `container` from https://github.com/apple/container, or use a \
                  managed runner"
             }
+            Self::PodmanBinaryMissing => {
+                "install Podman (or start it with `ato runtime setup`), or use a managed runner"
+            }
+            Self::PodmanMachineStopped => {
+                "start the `ato-podman` machine (`podman machine start ato-podman`), or use a \
+                 managed runner"
+            }
+            Self::PodmanMachineNotConfigured => {
+                "create the `ato-podman` machine (`ato runtime setup`), or use a managed runner"
+            }
+            Self::PodmanMachineStatusUnavailable { .. } => {
+                "check Podman installation (`podman machine list`), or use a managed runner"
+            }
             Self::NonMacOsHost { .. } => "use a managed runner (local cold-OCI is macOS-only)",
         }
     }
 }
 
 /// Availability of one isolation substrate on this host (e.g. Apple
-/// Containerization). Reported even when unavailable so a diagnostic can name
-/// what is missing — but an unavailable substrate yields no [`BackendCapability`].
+/// Containerization, Podman). Reported even when unavailable so a diagnostic
+/// can name what is missing — but an unavailable substrate yields no
+/// [`BackendCapability`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SubstrateCapability {
-    /// e.g. [`SUBSTRATE_APPLE_CONTAINERIZATION`].
+    /// e.g. [`SUBSTRATE_APPLE_CONTAINERIZATION`] or [`SUBSTRATE_PODMAN`].
     pub(crate) substrate: String,
     /// Whether this substrate can actually be used on this host right now.
     pub(crate) available: bool,
-    /// The CLI/tool backing the substrate (e.g. `"container"`), if any.
+    /// The CLI/tool backing the substrate (e.g. `"container"`, `"podman"`), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tool: Option<String>,
     /// Resolved path to the tool, if found.
@@ -168,11 +236,18 @@ pub(crate) struct SubstrateCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) tool_version: Option<String>,
     /// Whether the substrate's system service is already running. **Detected,
-    /// never auto-started** — M0 must not invoke `container system start`.
+    /// never auto-started** — M0 must not invoke `container system start` or
+    /// `podman machine start`.
     pub(crate) system_service_running: bool,
     /// Hardware accelerator the substrate uses, e.g. [`ACCELERATOR_APPLE_VZ`].
+    /// `None` for Podman (it uses its own virtualization; no Ato-managed
+    /// accelerator label).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) accelerator: Option<String>,
+    /// VM scope of this substrate — distinguishes per-session VMs (Apple
+    /// Containerization) from shared-machine substrates (Podman) within the
+    /// same `vm_wrapped_container` isolation boundary.
+    pub(crate) substrate_scope: SubstrateScope,
     pub(crate) maturity: Maturity,
 }
 
@@ -188,6 +263,10 @@ pub(crate) struct BackendCapability {
     pub(crate) guest_os: String,
     pub(crate) guest_arch: String,
     pub(crate) isolation_boundary: IsolationBoundary,
+    /// VM scope — `per_session_vm` (Apple Containerization) or
+    /// `shared_machine` (Podman). Drives cleanup semantics: a shared-machine
+    /// container outlives the wrapper process and must be explicitly removed.
+    pub(crate) substrate_scope: SubstrateScope,
     pub(crate) ready_state_kind: ReadyStateKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) accelerator: Option<String>,
@@ -248,11 +327,42 @@ impl DesktopRunnerFacts {
     }
 
     /// The first backend whose host facets match this host (the local backend a
-    /// placement would target), if any.
+    /// placement would target), if any. Unopinionated about substrate preference
+    /// — returns whichever backend was inserted first.
     pub(crate) fn local_backend(&self) -> Option<&BackendCapability> {
         self.backends
             .iter()
             .find(|b| b.host_os == self.host_os && b.host_arch == self.host_arch)
+    }
+
+    /// The preferred local cold-OCI backend, honoring the substrate preference
+    /// order: Apple Containerization (lighter-weight, per-session VM) first,
+    /// then Podman (broader host coverage, shared machine). Returns `None` when
+    /// no cold-OCI backend is available on this host. Used by
+    /// `matching::cold_or_managed` so the placement gate picks the best
+    /// substrate, not just the first-inserted one.
+    pub(crate) fn preferred_local_cold_backend(&self) -> Option<&BackendCapability> {
+        let candidates: Vec<_> = self
+            .backends
+            .iter()
+            .filter(|b| {
+                b.host_os == self.host_os
+                    && b.host_arch == self.host_arch
+                    && b.ready_state_kind == ReadyStateKind::ColdOci
+            })
+            .collect();
+        // Preference order: apple_containerization before podman.
+        candidates
+            .iter()
+            .copied()
+            .find(|b| b.substrate == SUBSTRATE_APPLE_CONTAINERIZATION)
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|b| b.substrate == SUBSTRATE_PODMAN)
+            })
+            .or_else(|| candidates.first().copied())
     }
 
     /// Render the facts as a stable, pretty JSON receipt.
