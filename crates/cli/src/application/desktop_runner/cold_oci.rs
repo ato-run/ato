@@ -252,17 +252,23 @@ pub(crate) fn container(args: &[&str], timeout: Duration) -> CmdResult {
     wait_with_timeout(&mut child, "container", args, timeout)
 }
 
-/// Run `podman <args>` with captured output and a hard timeout, going through
-/// [`PodmanInvocation`] so binary resolution, connection pinning to
-/// `ato-podman`, `CONTAINERS_CONF`, and `PATH` prepending stay consistent with
-/// the default OCI provider. The Desktop Runner cold-OCI path must NOT hand-roll
-/// a divergent `podman run` path — it reuses this helper for every podman
-/// invocation (run, ls, rm).
+/// Run `podman --connection ato-podman <args>` with captured output and a hard
+/// timeout, going through [`PodmanInvocation`] so binary resolution, `CONTAINERS_CONF`,
+/// and `PATH` prepending stay consistent with the default OCI provider. The
+/// `--connection ato-podman` flag is **always** prepended so every Podman
+/// invocation (run, ls, rm) targets the `ato-podman` machine the probe verified
+/// — never the host's default Podman connection, which may point at a different
+/// machine. The Desktop Runner cold-OCI path must NOT hand-roll a divergent
+/// `podman run` path — it reuses this helper for every podman invocation.
 pub(crate) fn podman_container(args: &[&str], timeout: Duration) -> CmdResult {
-    use capsule::foundation::podman::podman_invocation;
+    use capsule::foundation::podman::{ATO_PODMAN_MACHINE_NAME, podman_invocation};
 
     let invocation = podman_invocation();
     let mut cmd = Command::new(&invocation.program);
+    // Pin every Podman invocation to the `ato-podman` machine. The substrate is
+    // only advertised when `ato-podman` is Running (see macos.rs probe), so this
+    // pin is always valid at run time and prevents a default-connection drift.
+    cmd.args(["--connection", ATO_PODMAN_MACHINE_NAME]);
     cmd.args(args);
     if let Some(path_env) = &invocation.path_env {
         cmd.env("PATH", path_env);
@@ -272,16 +278,21 @@ pub(crate) fn podman_container(args: &[&str], timeout: Duration) -> CmdResult {
     }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // The full argv for diagnostics: include the injected --connection flag.
+    let full_args: Vec<&str> = std::iter::once("--connection")
+        .chain(std::iter::once(ATO_PODMAN_MACHINE_NAME))
+        .chain(args.iter().copied())
+        .collect();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return CmdResult {
-                stderr: format!("spawn `podman {}` failed: {e}", args.join(" ")),
+                stderr: format!("spawn `podman {}` failed: {e}", full_args.join(" ")),
                 ..Default::default()
             };
         }
     };
-    wait_with_timeout(&mut child, "podman", args, timeout)
+    wait_with_timeout(&mut child, "podman", &full_args, timeout)
 }
 
 /// Shared timeout + output capture loop for `container` and `podman` invocations.

@@ -1,17 +1,21 @@
-//! Desktop Runner placement *decision* layer (#838, MacBook M2).
+//! Desktop Runner placement *decision* layer (#838).
 //!
 //! This is the seam between the capability probe ([`super::probe`] /
-//! [`DesktopRunnerFacts`]) and a future run path. It turns the low-level
-//! [`matching::select_placement`] result into a [`DesktopPlacementDecision`] — a
-//! serializable receipt/log record that says *what the host would do* and *why*.
+//! [`DesktopRunnerFacts`]) and the run path ([`super::execute`]). It turns the
+//! low-level [`matching::select_placement`] result into a
+//! [`DesktopPlacementDecision`] — a serializable receipt/log record that says
+//! *what the host would do* and *why*.
 //!
-//! **M2 decides; it does not execute.** Every decision carries
-//! `is_executable_now: false`: there is no local Apple Containerization run path
-//! yet (MacBook M3), no Ready-State restore on macOS, no CRIU, no binding
-//! injection. A `suggest_managed_runner` decision is a *recommendation*, never an
-//! automatic dispatch — the caller decides what to do with it. The decision is
-//! produced only when the Desktop Runner is explicitly considered (today: the
-//! `ato doctor desktop-runner` diagnostic); it changes no default `ato run` path.
+//! **Decision vs execution.** A `local_cold_oci_candidate` decision means a
+//! local cold-OCI backend is available **and** the executor branch for that
+//! substrate is wired ([`super::cold_oci::run`]) — so `is_executable_now` is
+//! `true` for that placement. A `suggest_managed_runner` /
+//! `ready_state_restore_unsupported_local` decision is a *recommendation*, never
+//! an automatic dispatch — `is_executable_now` is `false`. The decision is
+//! produced both when the Desktop Runner is explicitly considered (the
+//! `ato doctor desktop-runner` diagnostic) and inside the `ato run` placement
+//! gate; `ato doctor` never executes workloads, but a candidate decision it
+//! renders is still executable by the run path.
 
 use serde::Serialize;
 
@@ -53,8 +57,13 @@ pub(crate) struct DesktopPlacementDecision {
     pub(crate) local_backend_blockers: Vec<LocalBackendBlocker>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) diagnostics: Vec<String>,
-    /// Always `false` in M2: a placement decision is not an execution. Makes the
-    /// "decide, don't run" boundary explicit in every receipt.
+    /// Whether the placement can be executed **right now** by the wired
+    /// executor. `true` for `local_cold_oci_candidate` (the cold-OCI executor
+    /// branch exists for both Apple Containerization and Podman substrates);
+    /// `false` for managed-runner suggestions and Ready-State-unsupported
+    /// decisions (no local executor for those paths yet). This is the placement
+    /// contract invariant: a candidate is only returned when the executor is
+    /// wired.
     pub(crate) is_executable_now: bool,
 }
 
@@ -73,34 +82,37 @@ pub(crate) fn decide(
     artifact_class: Option<&RunnerClassFacts>,
     ready_state_enabled: bool,
 ) -> DesktopPlacementDecision {
-    let (placement, backend_substrate, reason, blockers) =
+    let (placement, backend_substrate, reason, blockers, is_executable_now) =
         match select_placement(facts, host_class, artifact_class, ready_state_enabled) {
             DesktopPlacement::ReadyStateRestore { backend_substrate } => (
                 kind::READY_STATE_RESTORE,
                 Some(backend_substrate.clone()),
                 format!(
                     "exact RunnerClass match; Ready-State restore permitted on {backend_substrate} \
-                     (not executed in M2)"
+                     (local restore executor is not wired yet)"
                 ),
                 Vec::new(),
+                false, // Ready-State restore executor is not wired yet.
             ),
             DesktopPlacement::ColdOciLocal { backend_substrate } => (
                 kind::LOCAL_COLD_OCI_CANDIDATE,
                 Some(backend_substrate.clone()),
                 format!(
-                    "local cold-OCI candidate on {backend_substrate}; local execution is not wired \
-                     yet (MacBook M3)"
+                    "local cold-OCI candidate on {backend_substrate}; explicit Desktop Runner \
+                     execution is available"
                 ),
                 Vec::new(),
+                true, // The cold-OCI executor branch is wired for this substrate.
             ),
             DesktopPlacement::ReadyStateRestoreUnsupportedLocal { reason } => (
                 kind::READY_STATE_RESTORE_UNSUPPORTED_LOCAL,
                 None,
                 reason,
                 Vec::new(),
+                false,
             ),
             DesktopPlacement::SuggestManagedRunner { reason, blockers } => {
-                (kind::SUGGEST_MANAGED_RUNNER, None, reason, blockers)
+                (kind::SUGGEST_MANAGED_RUNNER, None, reason, blockers, false)
             }
         };
 
@@ -115,7 +127,7 @@ pub(crate) fn decide(
         reason,
         local_backend_blockers: blockers,
         diagnostics: facts.diagnostics.clone(),
-        is_executable_now: false,
+        is_executable_now,
     }
 }
 
@@ -157,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_mac_ready_state_disabled_is_local_cold_oci_candidate_not_executed() {
+    fn supported_mac_ready_state_disabled_is_local_cold_oci_candidate_and_executable() {
         let facts = build_macos_facts(&supported_inputs(), "0.7.0");
         let host_class = RunnerClassFacts::from_host();
         let d = decide(&facts, &host_class, None, false);
@@ -166,7 +178,10 @@ mod tests {
             d.backend_substrate.as_deref(),
             Some(super::super::facts::SUBSTRATE_APPLE_CONTAINERIZATION)
         );
-        assert!(!d.is_executable_now, "M2 never executes");
+        assert!(
+            d.is_executable_now,
+            "cold-OCI candidate means executor is wired — placement contract invariant"
+        );
         assert!(!d.suggests_managed_runner());
     }
 
@@ -238,12 +253,12 @@ mod tests {
     }
 
     #[test]
-    fn decision_serializes_with_executable_now_false() {
+    fn decision_serializes_with_executable_now_true_for_cold_oci() {
         let facts = build_macos_facts(&supported_inputs(), "0.7.0");
         let host_class = RunnerClassFacts::from_host();
         let d = decide(&facts, &host_class, None, false);
         let json = serde_json::to_string(&d).unwrap();
-        assert!(json.contains("\"is_executable_now\":false"), "{json}");
+        assert!(json.contains("\"is_executable_now\":true"), "{json}");
         assert!(json.contains("\"provider_kind\":\"desktop\""), "{json}");
     }
 }

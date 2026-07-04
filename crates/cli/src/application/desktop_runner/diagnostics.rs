@@ -6,7 +6,10 @@
 //! host *could* run as a local Ato Runner provider — it never starts the
 //! `container` service and never launches a workload. `--json` emits a
 //! `{facts, placement}` receipt; the default is a human summary. The placement
-//! is a *decision*, not an execution (`is_executable_now: false`).
+//! is a *decision* — `ato doctor` renders it but does not execute workloads.
+//! A `local_cold_oci_candidate` decision is executable by the `ato run` path
+//! (`is_executable_now: true`); a `suggest_managed_runner` decision is not
+//! locally executable (`is_executable_now: false`).
 //!
 //! Diagnostics (e.g. "macOS 26+ required") are surfaced **only** here, when the
 //! user explicitly invokes this command — never during normal startup.
@@ -77,10 +80,12 @@ pub(crate) fn placement_summary(decision: &DesktopPlacementDecision) -> String {
     if decision.suggests_managed_runner() {
         let _ = writeln!(s, "    recommended: managed runner");
     }
-    // Make the M2 boundary explicit: this is a decision, not a run.
+    // Make the decision/execution boundary explicit: `ato doctor` renders the
+    // decision but does not execute workloads. A `local_cold_oci_candidate`
+    // decision is executable by the `ato run` path, just not by this diagnostic.
     let _ = writeln!(
         s,
-        "    note: local execution is not wired yet (decision only)"
+        "    note: doctor does not execute workloads; use `ato run` with the Desktop Runner to run"
     );
     s
 }
@@ -213,7 +218,7 @@ mod tests {
         let out = placement_summary(&decision);
         assert!(out.contains("placement (ready-state disabled)"), "{out}");
         assert!(out.contains("local_cold_oci_candidate"), "{out}");
-        assert!(out.contains("decision only"), "{out}");
+        assert!(out.contains("doctor does not execute"), "{out}");
     }
 
     #[test]

@@ -334,6 +334,13 @@ fn gather_inputs() -> MacosProbeInputs {
 /// Read-only Podman probe: resolve the binary, read its version, and query the
 /// `ato-podman` machine state via `podman machine list --format json`. Never
 /// starts the machine. Returns `(binary_present, version, machine_state)`.
+///
+/// The machine-list query goes through [`ResolvedPodman::invocation`] (the same
+/// `PodmanInvocation` the OCI provider uses) so the resolved binary, `PATH`
+/// prepending, and `CONTAINERS_CONF` are all applied — critical for a macOS GUI
+/// launch where the minimal `PATH` omits `/opt/homebrew/bin` and a bare
+/// `Command::new("podman")` would fail with `NotFound` even though Homebrew
+/// Podman is installed.
 fn probe_podman() -> (bool, Option<String>, PodmanMachineProbe) {
     use crate::adapters::runtime::podman_machine::{
         PodmanMachineStatus, parse_podman_machine_list,
@@ -344,18 +351,27 @@ fn probe_podman() -> (bool, Option<String>, PodmanMachineProbe) {
     let resolved = match resolve_podman() {
         Ok(mut r) => {
             let version = r.query_version().map(str::to_string);
-            (true, version)
+            // Build the invocation (program + PATH + CONTAINERS_CONF) so the
+            // machine-list query targets the exact same binary the resolver
+            // found — not a bare "podman" that may not be on the minimal PATH.
+            let invocation = r.invocation();
+            (true, version, Some(invocation))
         }
-        Err(_) => (false, None),
+        Err(_) => (false, None, None),
     };
-    let (binary_present, version) = resolved;
+    let (binary_present, version, invocation) = resolved;
 
     if !binary_present {
         return (false, None, PodmanMachineProbe::NotProbed);
     }
+    let invocation = invocation.expect("invocation is Some when binary_present");
 
     // `podman machine list --format json` — read-only, never starts anything.
-    let machine_state = match run_capture("podman", &["machine", "list", "--format", "json"]) {
+    // Goes through the resolved PodmanInvocation so PATH / CONTAINERS_CONF /
+    // absolute binary path are all applied (macOS GUI minimal-PATH safe).
+    let machine_list_output =
+        run_podman_via_invocation(&invocation, &["machine", "list", "--format", "json"]);
+    let machine_state = match machine_list_output {
         Some(stdout) => match parse_podman_machine_list(&stdout) {
             PodmanMachineStatus::Running {
                 running_names,
@@ -390,6 +406,33 @@ fn probe_podman() -> (bool, Option<String>, PodmanMachineProbe) {
     };
 
     (true, version, machine_state)
+}
+
+/// Run a podman subcommand via a [`PodmanInvocation`] (resolved binary + PATH +
+/// `CONTAINERS_CONF`), returning trimmed stdout on success. This mirrors what
+/// the OCI provider does but stays read-only and side-effect free — it never
+/// starts the `ato-podman` machine.
+fn run_podman_via_invocation(
+    invocation: &capsule::foundation::podman::PodmanInvocation,
+    args: &[&str],
+) -> Option<String> {
+    use capsule::foundation::podman::PodmanInvocation;
+    let _ = invocation; // already used via `cmd` below; keep the param type explicit
+    let inv: &PodmanInvocation = invocation;
+    let mut cmd = std::process::Command::new(&inv.program);
+    cmd.args(args);
+    if let Some(path_env) = &inv.path_env {
+        cmd.env("PATH", path_env);
+    }
+    if let Some(containers_conf) = &inv.containers_conf {
+        cmd.env("CONTAINERS_CONF", containers_conf);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// Normalize `uname -m` to the runner-class arch vocabulary. On Apple silicon
