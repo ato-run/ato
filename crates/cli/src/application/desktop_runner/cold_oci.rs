@@ -122,13 +122,9 @@ impl ColdOciRunRequest {
     }
 }
 
-/// Build the `container run` argv (pure).
-///
-/// Detached (`-d`), uniquely named, **declared env only** (`--env K=V` — never
-/// the host environment), optional `--user`. It deliberately does **not**
-/// `--publish` a port or mount any host path: M3 only checks the container's
-/// running state and does not expose external user traffic (a publish/port
-/// command must be verified against the real Apple `container` CLI first).
+/// Build the `container run` argv for the Apple Containerization substrate
+/// (pure). Detached (`-d`), uniquely named, declared env only, optional
+/// `--user`. No `--publish` or host bind mounts in M3.
 pub(crate) fn build_run_args(req: &ColdOciRunRequest) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
@@ -147,6 +143,30 @@ pub(crate) fn build_run_args(req: &ColdOciRunRequest) -> Vec<String> {
     args.push(req.image.clone());
     args.extend(req.cmd.iter().cloned());
     args
+}
+
+/// Build the `podman run` argv for the Podman substrate (pure). Same shape as
+/// Apple Containerization — detached, uniquely named, declared env only — but
+/// routed through `podman` (and the shared `ato-podman` machine) rather than
+/// Apple `container`. No `--publish` or host bind mounts in M3. The actual
+/// spawn goes through [`PodmanInvocation`] (see [`podman_container`]) so binary
+/// resolution / connection pinning / `CONTAINERS_CONF` stay consistent with the
+/// default OCI provider — this builder only shapes the argv.
+pub(crate) fn build_podman_run_args(req: &ColdOciRunRequest) -> Vec<String> {
+    // Identical argv shape to Apple Containerization; `podman` and `container`
+    // share the `run -d --name --env` CLI surface for the subset M3 uses.
+    build_run_args(req)
+}
+
+/// Build the `podman rm -f <name>` argv (pure), used by the Podman cleanup
+/// path. A shared-machine container outlives the wrapper process, so explicit
+/// removal is mandatory (unlike Apple Containerization's per-session VM).
+pub(crate) fn build_podman_rm_args(container_name: &str) -> Vec<String> {
+    vec![
+        "rm".to_string(),
+        "-f".to_string(),
+        container_name.to_string(),
+    ]
 }
 
 /// The execution class of a cold-OCI session — the **guest** Linux/aarch64 class,
@@ -229,19 +249,66 @@ pub(crate) fn container(args: &[&str], timeout: Duration) -> CmdResult {
             };
         }
     };
+    wait_with_timeout(&mut child, "container", args, timeout)
+}
+
+/// Run `podman <args>` with captured output and a hard timeout, going through
+/// [`PodmanInvocation`] so binary resolution, connection pinning to
+/// `ato-podman`, `CONTAINERS_CONF`, and `PATH` prepending stay consistent with
+/// the default OCI provider. The Desktop Runner cold-OCI path must NOT hand-roll
+/// a divergent `podman run` path — it reuses this helper for every podman
+/// invocation (run, ls, rm).
+pub(crate) fn podman_container(args: &[&str], timeout: Duration) -> CmdResult {
+    use capsule::foundation::podman::podman_invocation;
+
+    let invocation = podman_invocation();
+    let mut cmd = Command::new(&invocation.program);
+    cmd.args(args);
+    if let Some(path_env) = &invocation.path_env {
+        cmd.env("PATH", path_env);
+    }
+    if let Some(containers_conf) = &invocation.containers_conf {
+        cmd.env("CONTAINERS_CONF", containers_conf);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return CmdResult {
+                stderr: format!("spawn `podman {}` failed: {e}", args.join(" ")),
+                ..Default::default()
+            };
+        }
+    };
+    wait_with_timeout(&mut child, "podman", args, timeout)
+}
+
+/// Shared timeout + output capture loop for `container` and `podman` invocations.
+fn wait_with_timeout(
+    child: &mut std::process::Child,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> CmdResult {
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().ok();
-                let (stdout, stderr) = out
-                    .map(|o| {
-                        (
-                            String::from_utf8_lossy(&o.stdout).into_owned(),
-                            String::from_utf8_lossy(&o.stderr).into_owned(),
-                        )
-                    })
-                    .unwrap_or_default();
+                // `wait_with_output` takes ownership, but we only have
+                // `&mut Child`. Drop the borrow by taking stdout/stderr pipes
+                // first, then reading them. The child has already exited
+                // (try_wait returned Some), so the pipes hold the full output.
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut out) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = out.read_to_string(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = err.read_to_string(&mut stderr);
+                }
                 return CmdResult {
                     timed_out: false,
                     status_ok: status.success(),
@@ -256,7 +323,7 @@ pub(crate) fn container(args: &[&str], timeout: Duration) -> CmdResult {
                     return CmdResult {
                         timed_out: true,
                         stderr: format!(
-                            "`container {}` timed out after {timeout:?}",
+                            "`{program} {}` timed out after {timeout:?}",
                             args.join(" ")
                         ),
                         ..Default::default()
@@ -266,7 +333,7 @@ pub(crate) fn container(args: &[&str], timeout: Duration) -> CmdResult {
             }
             Err(e) => {
                 return CmdResult {
-                    stderr: format!("wait `container {}` failed: {e}", args.join(" ")),
+                    stderr: format!("wait `{program} {}` failed: {e}", args.join(" ")),
                     ..Default::default()
                 };
             }
@@ -275,30 +342,56 @@ pub(crate) fn container(args: &[&str], timeout: Duration) -> CmdResult {
 }
 
 /// Stops and deletes a container on drop, so a panic/early-return never leaves a
-/// stray container behind.
+/// stray container behind. Knows which substrate it is cleaning up: Apple
+/// Containerization uses `container stop` + `container delete`/`rm`; Podman uses
+/// `podman stop` + `podman rm -f` (the shared-machine container outlives the
+/// wrapper process, so explicit removal is mandatory).
 pub(crate) struct ContainerGuard {
     name: String,
+    substrate: ContainerGuardSubstrate,
     cleaned: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContainerGuardSubstrate {
+    AppleContainerization,
+    Podman,
 }
 
 impl ContainerGuard {
     pub(crate) fn new(name: String) -> Self {
+        Self::for_substrate(name, ContainerGuardSubstrate::AppleContainerization)
+    }
+
+    pub(crate) fn for_substrate(name: String, substrate: ContainerGuardSubstrate) -> Self {
         Self {
             name,
+            substrate,
             cleaned: false,
         }
     }
 
-    /// Stop then delete the container. Returns true once it is gone. Apple
-    /// `container` uses `delete`; fall back to `rm` for other CLIs.
+    /// Stop then delete the container. Returns true once it is gone.
     pub(crate) fn cleanup(&mut self) -> bool {
         if self.cleaned {
             return true;
         }
         self.cleaned = true;
-        let _ = container(&["stop", &self.name], Duration::from_secs(15));
-        container(&["delete", &self.name], Duration::from_secs(15)).status_ok
-            || container(&["rm", &self.name], Duration::from_secs(15)).status_ok
+        match self.substrate {
+            ContainerGuardSubstrate::AppleContainerization => {
+                let _ = container(&["stop", &self.name], Duration::from_secs(15));
+                container(&["delete", &self.name], Duration::from_secs(15)).status_ok
+                    || container(&["rm", &self.name], Duration::from_secs(15)).status_ok
+            }
+            ContainerGuardSubstrate::Podman => {
+                // `podman rm -f` stops + removes in one call; the -f is safe
+                // because the container is owned by this Desktop Runner session
+                // (unique name from #951).
+                let rm_args = build_podman_rm_args(&self.name);
+                let rm_refs: Vec<&str> = rm_args.iter().map(String::as_str).collect();
+                podman_container(&rm_refs, Duration::from_secs(15)).status_ok
+            }
+        }
     }
 }
 
@@ -315,19 +408,41 @@ impl Drop for ContainerGuard {
 /// cold start rather than serving long-lived external traffic (port publish is a
 /// follow-up pending CLI verification). Never executes binding-required capsules
 /// — that is rejected upstream in [`super::execute`].
+///
+/// The executor branch is selected on `class.substrate`:
+/// - `apple_containerization` → Apple `container` run/ls/stop/delete
+/// - `podman` → `podman` run/ls/rm via [`podman_container`] (reuses
+///   `PodmanInvocation` for binary resolution / connection pinning)
 pub(crate) fn run(
     req: &ColdOciRunRequest,
     class: &ExecutionClass,
 ) -> Result<DesktopColdOciSession> {
-    eprintln!("DESKTOP-RUNNER: cold OCI starting ({})", req.image);
-    let mut guard = ContainerGuard::new(req.container_name.clone());
+    let substrate = class.substrate.as_str();
+    eprintln!(
+        "DESKTOP-RUNNER: cold OCI starting ({}) via {substrate}",
+        req.image
+    );
 
-    let arg_strings = build_run_args(req);
+    let guard_substrate = if substrate == super::facts::SUBSTRATE_PODMAN {
+        ContainerGuardSubstrate::Podman
+    } else {
+        ContainerGuardSubstrate::AppleContainerization
+    };
+    let mut guard = ContainerGuard::for_substrate(req.container_name.clone(), guard_substrate);
+
+    // Build argv and select the executor (container vs podman_container).
+    type Executor = fn(&[&str], Duration) -> CmdResult;
+    let (arg_strings, executor): (Vec<String>, Executor) =
+        if substrate == super::facts::SUBSTRATE_PODMAN {
+            (build_podman_run_args(req), podman_container)
+        } else {
+            (build_run_args(req), container)
+        };
     let arg_refs: Vec<&str> = arg_strings.iter().map(String::as_str).collect();
-    let started = container(&arg_refs, Duration::from_secs(120));
+    let started = executor(&arg_refs, Duration::from_secs(120));
     if !started.status_ok {
         return Err(anyhow!(
-            "Desktop Runner cold OCI: `container run` failed for {} (timed_out={}): {}\n{}",
+            "Desktop Runner cold OCI: `{substrate} run` failed for {} (timed_out={}): {}\n{}",
             req.image,
             started.timed_out,
             started.stdout.trim(),
@@ -340,7 +455,7 @@ pub(crate) fn run(
     let mut health_status = "unknown".to_string();
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let ls = container(&["ls"], Duration::from_secs(10));
+        let ls = executor(&["ls"], Duration::from_secs(10));
         if ls.status_ok {
             health_status = if ls.stdout.contains(&req.container_name) {
                 "running".to_string()
@@ -482,6 +597,9 @@ env = { FOO = "bar", BAZ = "qux" }
                 container_path: Some("/usr/local/bin/container".into()),
                 container_version: Some("container 0.1.0".into()),
                 container_service_running: true,
+                podman_binary_present: false,
+                podman_version: None,
+                podman_machine: super::super::macos::PodmanMachineProbe::default(),
             },
             "0.7.0",
         );
@@ -493,5 +611,35 @@ env = { FOO = "bar", BAZ = "qux" }
         assert_eq!(class.guest_arch, "aarch64");
         assert_eq!(class.isolation_boundary, "vm_wrapped_container");
         assert_eq!(class.ready_state_kind, "cold_oci");
+    }
+
+    #[test]
+    fn build_podman_run_args_same_shape_as_apple_container() {
+        let req = ColdOciRunRequest {
+            container_name: "ato-desktop-x".into(),
+            image: "img:tag".into(),
+            cmd: vec!["server".into()],
+            env: vec![("FOO".into(), "bar".into())],
+            port: Some(8080),
+            user: None,
+        };
+        let podman_args = build_podman_run_args(&req);
+        let apple_args = build_run_args(&req);
+        // Same argv shape — podman and container share the run CLI surface.
+        assert_eq!(podman_args, apple_args);
+        // No --publish, no -v (no host bind mounts, no external traffic in M3).
+        assert!(
+            !podman_args
+                .iter()
+                .any(|a| a == "--publish" || a == "-p" || a == "-v")
+        );
+    }
+
+    #[test]
+    fn build_podman_rm_args_includes_force_flag() {
+        let args = build_podman_rm_args("ato-desktop-test-123");
+        assert_eq!(args, vec!["rm", "-f", "ato-desktop-test-123"]);
+        // -f is mandatory: a shared-machine container outlives the wrapper,
+        // so cleanup must stop+remove in one call.
     }
 }

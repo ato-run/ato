@@ -132,6 +132,9 @@ mod tests {
             container_path: Some("/usr/local/bin/container".into()),
             container_version: Some("container 0.1.0".into()),
             container_service_running: false,
+            podman_binary_present: false,
+            podman_version: None,
+            podman_machine: super::super::macos::PodmanMachineProbe::default(),
         }
     }
 

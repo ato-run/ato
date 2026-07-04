@@ -156,7 +156,9 @@ fn yes_no(supported: bool) -> &'static str {
 mod tests {
     use super::*;
     use crate::application::desktop_runner::facts::SUBSTRATE_APPLE_CONTAINERIZATION;
-    use crate::application::desktop_runner::macos::{MacosProbeInputs, build_macos_facts};
+    use crate::application::desktop_runner::macos::{
+        MacosProbeInputs, PodmanMachineProbe, build_macos_facts,
+    };
 
     fn inputs() -> MacosProbeInputs {
         MacosProbeInputs {
@@ -166,6 +168,9 @@ mod tests {
             container_path: Some("/usr/local/bin/container".into()),
             container_version: Some("container 0.1.0".into()),
             container_service_running: false,
+            podman_binary_present: false,
+            podman_version: None,
+            podman_machine: PodmanMachineProbe::default(),
         }
     }
 
