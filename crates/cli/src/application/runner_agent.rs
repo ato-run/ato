@@ -790,6 +790,11 @@ pub async fn run_serve(
         pool.capacity(),
         proxy_listen
     );
+    if capacity == DEFAULT_MAX_SLOTS {
+        println!(
+            "           (default; override with --max-slots or ATO_RUNNER_MAX_SLOTS, max {MAX_SLOTS_CEILING})"
+        );
+    }
     if let Some(template) = public_url_template.as_deref() {
         println!("   Public URL template: {template}");
     }
