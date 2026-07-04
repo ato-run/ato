@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use capsule::foundation::types::manifest::CapsuleManifest;
-use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec, materialize_source, valid_github_owner, valid_github_repo};
+use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec, materialize_source, valid_github_owner, valid_github_repo};
 
 fn arg(flags: &[&str]) -> Option<String> {
     let a: Vec<String> = std::env::args().collect();
@@ -65,7 +65,14 @@ fn main() {
     let manifest = CapsuleManifest::from_toml(&toml).unwrap_or_else(|e| fail("manifest", format!("parse capsule.toml: {e}")));
 
     let probe = SourceProbe::scan(&src);
-    let spec = derive_build_spec(&manifest, &probe).unwrap_or_else(|e| fail("eligibility", e));
+    // v1.2: a capsule that declares [secrets.*] is a SUPERVISOR build (env-delivery) —
+    // the rootfs runs the guest-agent as init + carries /etc/ato/supervisor.json (needs
+    // ATO_GUEST_AGENT_BIN). A no-secret capsule uses the v1.0 no-binding path.
+    let spec = if manifest.secrets.is_empty() {
+        derive_build_spec(&manifest, &probe).unwrap_or_else(|e| fail("eligibility", e))
+    } else {
+        derive_supervisor_build_spec(&manifest, &probe).unwrap_or_else(|e| fail("eligibility", e))
+    };
 
     let receipt = build_rootfs(Path::new(&src), &spec, &out, size_mib).unwrap_or_else(|e| fail("rootfs_build", e));
     println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "ok": true, "receipt": receipt })).unwrap());
