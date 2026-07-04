@@ -14,10 +14,12 @@
 //! [`materialize_source`] (git) and [`build_rootfs`] (docker → ext4) shell out and are
 //! validated on a KVM+Docker builder host.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use capsule::foundation::types::manifest::{CapsuleManifest, RuntimeType};
+use capsule::foundation::types::ready_state::SecretDelivery;
 use serde::Serialize;
 
 /// The narrow runtime subset the v1 Docker builder supports.
@@ -58,6 +60,19 @@ impl SourceProbe {
     }
 }
 
+/// v1.2 (#912): the supervisor build config emitted into the rootfs
+/// (`/etc/ato/supervisor.json`) for a `delivery = "env"` secret capsule. Holds NO
+/// secret value — only the `ENV_VAR → binding name` map whose tmpfs file the
+/// guest-agent reads at exec. Non-secret; safe in a receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SupervisorBuildSpec {
+    /// The binding names the guest-agent requires before it starts the workload
+    /// (the run gate delivers a lease per name). = the declared `[secrets.*]` names.
+    pub binding_names: Vec<String>,
+    /// `ENV_VAR → binding name` (from each secret's `env` or its name).
+    pub env_map: BTreeMap<String, String>,
+}
+
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
 #[derive(Debug, Clone, Serialize)]
 pub struct RootfsBuildSpec {
@@ -74,6 +89,12 @@ pub struct RootfsBuildSpec {
     /// #932: true when the readiness probe was synthesized from the declared port
     /// (no explicit `readiness_probe.http_get` on the default target).
     pub probe_synthesized: bool,
+    /// v1.2: when `Some`, this is a SUPERVISOR build — init runs the guest-agent
+    /// (which starts the workload after bindings are delivered) instead of launching
+    /// the app directly, and `/etc/ato/supervisor.json` is written. `None` = the v1.0
+    /// no-binding path (byte-identical to before).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorBuildSpec>,
 }
 
 /// Non-secret receipt of a produced rootfs.
@@ -196,7 +217,80 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         ),
     };
 
-    Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, declared_start_cmd, port, healthcheck, probe_synthesized })
+    Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, declared_start_cmd, port, healthcheck, probe_synthesized, supervisor: None })
+}
+
+/// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
+/// interpolated into the generated `supervisor.json` + the guest spawn script, so a
+/// malformed name is **rejected at emission** (fail-closed), never emitted — mirroring
+/// the guest-agent's own validation (#947) so a broken `supervisor.json` is never built.
+fn valid_env_var_name(name: &str) -> bool {
+    let mut cs = name.chars();
+    matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// v1.2 (#912): derive a **supervisor** build spec for a `delivery = "env"` secret
+/// capsule. The workload is launched by the guest-agent (which starts it with the
+/// composed env only after the bindings are delivered), so the rootfs runs the
+/// agent-as-init and carries `/etc/ato/supervisor.json`.
+///
+/// Fail-closed, and it relaxes ONLY the secret gate: at least one `[secrets.*]` must
+/// be declared and every one must be `delivery = "env"` — `file`/`proxy`/`fd` are NOT
+/// env injection and belong to later binding paths, so they are rejected here; a
+/// duplicate resolved env var is rejected (a half-used binding would desync preflight /
+/// bound-ready from the actual injection); non-secret `[bindings.*]`, `[external.*]`,
+/// and GPU stay rejected. All runtime/port/command detection is the exact same tested
+/// logic as the no-binding path — this reuses [`derive_build_spec`] on a secret-stripped
+/// manifest, so it cannot drift, then attaches the supervisor config.
+pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
+    if m.secrets.is_empty() {
+        return Err("supervisor build requires at least one [secrets.*] (delivery = \"env\")".into());
+    }
+    for (name, s) in &m.secrets {
+        // Only `env` delivery is supervisor env injection. `file` is a request-time
+        // read (a later file-binding path), and `proxy`/`fd` never inject an env var.
+        if s.delivery != SecretDelivery::Env {
+            return Err(format!(
+                "secret '{name}': delivery {:?} is not supported by the v1.2 supervisor \
+                 (delivery = \"env\" only; file/proxy/fd are out of scope here)",
+                s.delivery
+            ));
+        }
+    }
+    // Reuse every no-binding gate + detection by deriving on a secret-stripped clone:
+    // this rejects non-secret bindings / external / GPU / unsupported runtime and
+    // resolves the runtime/port/command identically to the v1.0 path.
+    let mut stripped = m.clone();
+    stripped.secrets.clear();
+    let mut spec = derive_build_spec(&stripped, probe)?;
+
+    // ENV_VAR → binding name (the binding name IS the secret name; the run gate
+    // delivers a lease per name). Env var = the secret's `env`, else its name.
+    // Fail-closed: reject a malformed env var name (never emit a broken supervisor.json)
+    // and reject a duplicate env var (two secrets → one env var would half-use a binding
+    // and desync preflight/bound-ready from the actual injection).
+    let mut env_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut binding_names = Vec::with_capacity(m.secrets.len());
+    for (name, s) in &m.secrets {
+        let var = s.env.clone().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| name.clone());
+        if !valid_env_var_name(&var) {
+            return Err(format!(
+                "secret '{name}': env var name {var:?} is not a POSIX identifier \
+                 (^[A-Za-z_][A-Za-z0-9_]*$)"
+            ));
+        }
+        if let Some(prev) = env_map.insert(var.clone(), name.clone()) {
+            return Err(format!(
+                "secrets '{prev}' and '{name}' both resolve to env var {var:?} — \
+                 duplicate env injection is ambiguous (fail-closed)"
+            ));
+        }
+        binding_names.push(name.clone());
+    }
+    binding_names.sort();
+    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map });
+    Ok(spec)
 }
 
 /// A conservative GitHub **owner** login: 1–39 chars, alphanumeric or single hyphens,
@@ -375,6 +469,51 @@ fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     let build_q = shell_single_quote(spec.build_cmd.as_deref().unwrap_or("true"));
     let start_q = shell_single_quote(&spec.start_cmd);
+
+    // v1.2 supervisor build: init runs the guest-agent (which starts the workload with
+    // the composed env after bindings arrive) instead of launching the app; the agent
+    // binary + /etc/ato/supervisor.json are staged into the rootfs. `agent_prep` runs
+    // after `docker export`; `launch` replaces the direct app launch. Both are empty
+    // for the v1.0 no-binding path, so that script stays byte-identical.
+    let (agent_prep, launch) = match &spec.supervisor {
+        None => (String::new(), format!("/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &")),
+        Some(sup) => {
+            // supervisor.json (no secret value — env var → binding name only).
+            let cfg = serde_json::json!({
+                "cmd": ["/bin/sh", "-lc", spec.start_cmd],
+                "cwd": "/app",
+                "base_env": { "PORT": spec.port.to_string() },
+                "bindings_env": sup.env_map,
+            });
+            let cfg_json = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
+            // Binding names become the agent's argv — shell-quote each defensively.
+            let args = sup
+                .binding_names
+                .iter()
+                .map(|n| shell_single_quote(n))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let prep = format!(
+                r#"# v1.2 supervisor: stage the guest-agent + its config into the rootfs.
+: "${{ATO_GUEST_AGENT_BIN:?ATO_GUEST_AGENT_BIN must point to the guest-agent binary for a supervisor build}}"
+mkdir -p "$BUILD/rootfs/usr/local/bin" "$BUILD/rootfs/etc/ato" "$BUILD/rootfs/run/ato/bindings"
+cp "$ATO_GUEST_AGENT_BIN" "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
+chmod 0755 "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
+cat > "$BUILD/rootfs/etc/ato/supervisor.json" <<'ATOSUPERVISORJSON'
+{cfg_json}
+ATOSUPERVISORJSON"#
+            );
+            // The agent is the supervisor: vsock control plane on 1025, required
+            // bindings as argv. It reads /etc/ato/supervisor.json and starts the app
+            // only once every binding is delivered (bound-ready).
+            let launch = format!(
+                "mkdir -p /run/ato/bindings\n\
+                 export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\n\
+                 /usr/local/bin/ato-guest-agent {args} >/tmp/agent.log 2>&1 &"
+            );
+            (prep, launch)
+        }
+    };
     format!(
         r#"set -euo pipefail
 TAG="ato-rootfs-$$"
@@ -405,6 +544,7 @@ CID=$(docker create "$TAG")
 mkdir -p "$BUILD/rootfs"
 docker export "$CID" | tar -x -C "$BUILD/rootfs"
 docker rm -f "$CID" >/dev/null; CID=""
+{agent_prep}
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port} + healthcheck {hc}) and keep PID 1 alive. QUOTED heredoc: the
@@ -421,7 +561,7 @@ mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 cd /app
-/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &
+{launch}
 while true; do sleep 1000; done
 INIT
 chmod +x "$BUILD/rootfs/sbin/init"
@@ -437,7 +577,8 @@ sync; umount "$MNT"
         base = spec.base_image,
         install_q = install_q,
         build_q = build_q,
-        start_q = start_q,
+        agent_prep = agent_prep,
+        launch = launch,
         port = spec.port,
         hc = spec.healthcheck,
         size = size_mib,
@@ -648,6 +789,7 @@ readiness_probe = { http_get = "/health" }
             port: 8080,
             healthcheck: "/health".into(),
             probe_synthesized: false,
+            supervisor: None,
         };
         let script = build_rootfs_script(&spec, 512);
         assert!(script.contains("trap cleanup EXIT"), "script must install an EXIT cleanup trap");
@@ -668,6 +810,7 @@ readiness_probe = { http_get = "/health" }
             port: 8080,
             healthcheck: "/health".into(),
             probe_synthesized: false,
+            supervisor: None,
         };
         let script = build_rootfs_script(&spec, 512);
         // Heredocs are QUOTED ⇒ the builder host performs no expansion of their bodies.
@@ -692,5 +835,117 @@ readiness_probe = { http_get = "/health" }
     fn newline_or_nul_in_a_command_fails_closed() {
         let nl = base_toml().replace("run = \"python3 app.py\"", "run = \"python3 app.py\\nrm -rf /\"");
         assert!(derive_build_spec(&parse(&nl), &probe_python()).unwrap_err().contains("newline"));
+    }
+
+    // ── v1.2 supervisor emission ──────────────────────────────────────────────
+
+    fn supervisor_toml() -> String {
+        format!(
+            "{}\n[secrets.OPENAI_API_KEY]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n",
+            base_toml()
+        )
+    }
+
+    #[test]
+    fn env_secret_derives_a_supervisor_spec_and_no_binding_path_still_rejects_it() {
+        let m = parse(&supervisor_toml());
+        // The v1.0 no-binding path still rejects any secret (unchanged contract).
+        assert!(
+            derive_build_spec(&m, &probe_python()).unwrap_err().contains("secrets"),
+            "no-binding derive must still reject a secret capsule"
+        );
+        // The v1.2 supervisor path accepts it and produces the supervisor config.
+        let spec = derive_supervisor_build_spec(&m, &probe_python()).expect("supervisor spec");
+        let sup = spec.supervisor.as_ref().expect("supervisor present");
+        assert_eq!(sup.binding_names, vec!["OPENAI_API_KEY"]);
+        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("OPENAI_API_KEY"));
+        // Runtime/port/command detection is identical to the no-binding path.
+        assert_eq!(spec.start_cmd, "python3 app.py");
+        assert_eq!(spec.port, 8080);
+    }
+
+    #[test]
+    fn supervisor_derive_accepts_only_env_delivery() {
+        // Only delivery = "env" injects a supervisor env var. file / proxy / fd are
+        // all rejected here (file is a later request-time read path; proxy/fd never
+        // inject an env var).
+        for d in ["file", "proxy", "fd"] {
+            let toml = supervisor_toml().replace("env = \"OPENAI_API_KEY\"", &format!("delivery = \"{d}\""));
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("delivery"), "{d}: {err}");
+        }
+    }
+
+    #[test]
+    fn supervisor_derive_fails_closed_on_non_secret_bindings_and_no_secrets() {
+        // A non-secret binding is still rejected (state/user_files come later).
+        let with_binding = format!(
+            "{}\n[bindings.data]\nkind = \"state\"\nmount = \"/data\"\n",
+            supervisor_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&with_binding), &probe_python())
+            .unwrap_err()
+            .contains("no-binding"));
+        // No secrets at all → not a supervisor build.
+        assert!(derive_supervisor_build_spec(&parse(&base_toml()), &probe_python())
+            .unwrap_err()
+            .contains("requires at least one"));
+    }
+
+    #[test]
+    fn supervisor_derive_rejects_malformed_and_duplicate_env_var_names() {
+        // A malformed env var name must never reach the generated supervisor.json.
+        let bad = format!(
+            "{}\n[secrets.KEY]\nrequired = true\nenv = \"BAD-VAR\"\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&bad), &probe_python())
+            .unwrap_err()
+            .contains("POSIX identifier"));
+        // Two secrets resolving to the SAME env var is ambiguous → fail-closed.
+        let dup = format!(
+            "{}\n[secrets.KEY_A]\nrequired = true\nenv = \"SHARED\"\n\
+             [secrets.KEY_B]\nrequired = true\nenv = \"SHARED\"\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
+            .unwrap_err()
+            .contains("duplicate env injection"));
+        // A secret with no `env` uses its NAME; a name that isn't a POSIX identifier
+        // (dot allowed in a binding name but not an env var) is rejected too.
+        let name_as_var = format!(
+            "{}\n[secrets.\"api.key\"]\nrequired = true\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&name_as_var), &probe_python())
+            .unwrap_err()
+            .contains("POSIX identifier"));
+    }
+
+    #[test]
+    fn supervisor_build_script_runs_agent_as_init_and_emits_config_without_secrets() {
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        // init runs the guest-agent (vsock supervisor) with the binding name as argv,
+        // NOT the app directly.
+        assert!(script.contains("/usr/local/bin/ato-guest-agent 'OPENAI_API_KEY'"), "{script}");
+        assert!(script.contains("ATO_GUEST_AGENT_MODE=vsock"), "agent runs in vsock mode");
+        assert!(!script.contains("python3 app.py' >/tmp/app.log"), "app is not launched directly");
+        // supervisor.json is staged, requires the agent binary, and carries NO value —
+        // only the env var → binding name map.
+        assert!(script.contains("ATO_GUEST_AGENT_BIN"), "supervisor build needs the agent binary");
+        assert!(script.contains("supervisor.json"), "config is staged");
+        assert!(script.contains("\"OPENAI_API_KEY\": \"OPENAI_API_KEY\""), "env→binding map present");
+        assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs still quoted");
+    }
+
+    #[test]
+    fn no_binding_script_is_unaffected_by_the_supervisor_addition() {
+        // A no-binding spec still runs the app directly and stages no agent.
+        let spec = derive_build_spec(&parse(&base_toml()), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        assert!(script.contains("/bin/sh -lc 'python3 app.py' >/tmp/app.log"), "direct app launch");
+        assert!(!script.contains("ato-guest-agent"), "no agent in a no-binding rootfs");
+        assert!(!script.contains("supervisor.json"), "no supervisor config");
     }
 }
