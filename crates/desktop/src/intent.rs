@@ -19,6 +19,17 @@
 //! on-origin pane; their per-verb handling (and confirmation model) lives in the
 //! dispatcher (`crate::webview::dispatch_privileged_intent`), not here. This
 //! module's job is to classify and gate; it never executes.
+//!
+//! PR-D1 note: `crate::webview::WebViewManager` (the pane type this module was
+//! written for) has no live construction site in the current Focus-mode
+//! Desktop. The embedded Home now runs through
+//! `window::web_app_view::WebAppView` + `app.rs`'s `NavigateToUrl` action
+//! instead, which does not carry a per-navigation pane origin.
+//! `parse_run_query` below is factored out so both the origin-gated path here
+//! and that origin-agnostic live path share one parser. The live `ato://run`
+//! consent gate itself lives in `system_capsule::ato_start::dispatch_run_intent`
+//! and `window::launch_window::open_consent_window_for_run_agent`, not in this
+//! module's `classify` / `dispatch_privileged_intent` pair.
 
 /// Outcome of classifying an intercepted `ato://` / `capsule://` navigation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +59,11 @@ pub enum PrivilegedIntent {
     Run {
         source: String,
         run_id: Option<String>,
+        /// The trusted pane origin the intent was emitted from (already
+        /// validated by [`is_trusted_intent_origin`] above). Carried through
+        /// so the dispatcher can show it in the consent wizard PR-D1 adds —
+        /// this verb is the only one whose dispatcher needs it today.
+        origin: String,
     },
     /// `ato://runner/register` — register this device as a personal Connected
     /// Runner.
@@ -165,6 +181,33 @@ pub fn classify_top_level_navigation(
     }
 }
 
+/// Parse the `source` (required) and `run_id` (optional) query parameters off
+/// an `ato://run?source=<capsule-ref>[&run_id=<id>]` URI. Returns `None` when
+/// `source` is absent or blank so no caller ever proceeds without an explicit
+/// launch target.
+///
+/// Shared by [`classify`] (the origin-gated embedded-pane path) and the
+/// live Focus-mode `NavigateToUrl` router in `app.rs` (PR-D1): `WebAppView`'s
+/// navigation intercept does not carry a per-navigation pane origin the way
+/// the legacy `WebViewManager` pane did, so that router calls this parser
+/// directly rather than going through the origin check here. Both callers
+/// must agree on the query-string shape, so it is extracted once instead of
+/// duplicated.
+pub fn parse_run_query(uri: &str) -> Option<(String, Option<String>)> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let source = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "source")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.trim().is_empty())?;
+    let run_id = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "run_id")
+        .map(|(_, v)| v.into_owned())
+        .filter(|v| !v.trim().is_empty());
+    Some((source, run_id))
+}
+
 /// Classify an intercepted custom-scheme navigation emitted by the pane at
 /// `origin`. Pure — all policy is expressed here so it is unit-testable
 /// without GPUI / Wry.
@@ -211,19 +254,11 @@ pub fn classify(origin: &str, uri: &str) -> IntentDecision {
                     "run intent from untrusted origin '{origin}'"
                 ));
             }
-            let source = parsed
-                .query_pairs()
-                .find(|(k, _)| k == "source")
-                .map(|(_, v)| v.into_owned())
-                .filter(|v| !v.trim().is_empty());
-            match source {
-                Some(source) => IntentDecision::Privileged(PrivilegedIntent::Run {
+            match parse_run_query(uri) {
+                Some((source, run_id)) => IntentDecision::Privileged(PrivilegedIntent::Run {
                     source,
-                    run_id: parsed
-                        .query_pairs()
-                        .find(|(k, _)| k == "run_id")
-                        .map(|(_, v)| v.into_owned())
-                        .filter(|v| !v.trim().is_empty()),
+                    run_id,
+                    origin: origin.to_string(),
                 }),
                 None => IntentDecision::Reject("run intent missing 'source' parameter".to_string()),
             }
@@ -405,6 +440,7 @@ mod tests {
             IntentDecision::Privileged(PrivilegedIntent::Run {
                 source: "community/hello-capsule".to_string(),
                 run_id: None,
+                origin: TRUSTED.to_string(),
             })
         );
         assert_eq!(
@@ -412,8 +448,45 @@ mod tests {
             IntentDecision::Privileged(PrivilegedIntent::Run {
                 source: "acme/chat".to_string(),
                 run_id: Some("run_123".to_string()),
+                origin: TRUSTED.to_string(),
             })
         );
+    }
+
+    #[test]
+    fn run_intent_captures_the_requesting_origin() {
+        // PR-D1: the dispatcher needs the requesting origin to show in the
+        // consent wizard, so `classify` must echo the (already-validated)
+        // pane origin back on the `Run` variant rather than discarding it.
+        const STAGING: &str = "https://stg-app.ato.run";
+        assert_eq!(
+            classify(STAGING, "ato://run?source=acme%2Fchat"),
+            IntentDecision::Privileged(PrivilegedIntent::Run {
+                source: "acme/chat".to_string(),
+                run_id: None,
+                origin: STAGING.to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_run_query_extracts_source_and_run_id() {
+        assert_eq!(
+            parse_run_query("ato://run?source=community%2Fhello-capsule"),
+            Some(("community/hello-capsule".to_string(), None))
+        );
+        assert_eq!(
+            parse_run_query("ato://run?source=acme%2Fchat&run_id=run_123"),
+            Some(("acme/chat".to_string(), Some("run_123".to_string())))
+        );
+    }
+
+    #[test]
+    fn parse_run_query_rejects_missing_or_blank_source() {
+        assert_eq!(parse_run_query("ato://run"), None);
+        assert_eq!(parse_run_query("ato://run?source="), None);
+        assert_eq!(parse_run_query("ato://run?run_id=run_1"), None);
+        assert_eq!(parse_run_query("not a url"), None);
     }
 
     #[test]
