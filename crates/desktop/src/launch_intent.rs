@@ -128,6 +128,24 @@ pub fn resolve_launch_intent(inputs: IntentInputs) -> DesktopLaunchIntent {
     }
 }
 
+/// Whether an `ato://run` request for a handle should skip the consent
+/// wizard because the user already reviewed and installed this exact capsule
+/// (PR-D1). Mirrors the bar [`resolve_launch_intent`]'s
+/// `LaunchInstalledProfile` arm already uses for handle re-opens: a single,
+/// non-degraded installed match is pre-consented. Pure over
+/// [`InstalledMatch`] — the caller performs the (impure) install-store
+/// lookup via [`installed_match_for_handle`] and passes the result here so
+/// the decision itself stays deterministic and testable without a real
+/// install store.
+///
+/// Deliberately narrower than [`resolve_launch_intent`]: `ato://run` targets
+/// the Desktop Runner cold-OCI substrate, which has no live-session /
+/// AppWindow concept to fast-path through, so only the installed-vs-not
+/// question applies here.
+pub fn run_intent_is_pre_consented(installed_match: &InstalledMatch) -> bool {
+    matches!(installed_match, InstalledMatch::One { .. })
+}
+
 /// Look a handle up against the installed-app store and classify the match.
 ///
 /// A handle is considered launchable only when its single matching app has a
@@ -364,6 +382,18 @@ mod tests {
                 handle: "acme/hello".into()
             }
         );
+    }
+
+    // ── run_intent_is_pre_consented (PR-D1) ─────────────────────────────────
+
+    #[test]
+    fn run_intent_pre_consented_only_for_a_single_installed_match() {
+        assert!(run_intent_is_pre_consented(&InstalledMatch::One {
+            install_profile_key: "ipk_abc".into(),
+            app_url: "ato://app/ipk_abc".into(),
+        }));
+        assert!(!run_intent_is_pre_consented(&InstalledMatch::None));
+        assert!(!run_intent_is_pre_consented(&InstalledMatch::Many));
     }
 
     // ── installed_match_for_handle (store-backed) ───────────────────────────
