@@ -20,6 +20,7 @@ use std::process::Command;
 
 use capsule::foundation::types::manifest::{CapsuleManifest, RuntimeType};
 use capsule::foundation::types::ready_state::SecretDelivery;
+use protocol::binding_lease::BindingName;
 use serde::Serialize;
 
 /// The narrow runtime subset the v1 Docker builder supports.
@@ -267,12 +268,28 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
 
     // ENV_VAR → binding name (the binding name IS the secret name; the run gate
     // delivers a lease per name). Env var = the secret's `env`, else its name.
-    // Fail-closed: reject a malformed env var name (never emit a broken supervisor.json)
-    // and reject a duplicate env var (two secrets → one env var would half-use a binding
-    // and desync preflight/bound-ready from the actual injection).
+    // Fail-closed on THREE axes, all at emission so a broken supervisor.json is never
+    // built: (1) the secret name is used verbatim as the binding name — as the agent's
+    // argv AND the `bindings_env` value the guest-agent revalidates with
+    // `BindingName::parse` (#947) — so it must be a valid `BindingName` (`[a-z0-9_.-]`,
+    // lowercase); a mismatch here is exactly what made the agent `exit(2)` before it
+    // opened the vsock listener. (2) the resolved env var name must be a POSIX
+    // identifier. (3) two secrets → one env var is rejected (a half-used binding would
+    // desync preflight/bound-ready from the actual injection). Note (1) and (2) use
+    // DIFFERENT alphabets on purpose: an env var is conventionally UPPERCASE, a binding
+    // name is lowercase — so an uppercase env var uses a lowercase secret key plus an
+    // explicit `env`, e.g. `[secrets.openai_api_key] env = "OPENAI_API_KEY"`.
     let mut env_map: BTreeMap<String, String> = BTreeMap::new();
     let mut binding_names = Vec::with_capacity(m.secrets.len());
     for (name, s) in &m.secrets {
+        if let Err(e) = BindingName::parse(name.as_str()) {
+            return Err(format!(
+                "secret '{name}': the secret name is used as the binding name and must be a \
+                 valid BindingName ({e}). If you need an uppercase environment variable, use a \
+                 lowercase secret key with an explicit `env`, e.g. \
+                 [secrets.openai_api_key] env = \"OPENAI_API_KEY\""
+            ));
+        }
         let var = s.env.clone().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| name.clone());
         if !valid_env_var_name(&var) {
             return Err(format!(
@@ -840,8 +857,10 @@ readiness_probe = { http_get = "/health" }
     // ── v1.2 supervisor emission ──────────────────────────────────────────────
 
     fn supervisor_toml() -> String {
+        // Canonical form: a lowercase secret key (used verbatim as the binding name) with
+        // an explicit UPPERCASE `env`. The two alphabets differ by design.
         format!(
-            "{}\n[secrets.OPENAI_API_KEY]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n",
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n",
             base_toml()
         )
     }
@@ -857,11 +876,31 @@ readiness_probe = { http_get = "/health" }
         // The v1.2 supervisor path accepts it and produces the supervisor config.
         let spec = derive_supervisor_build_spec(&m, &probe_python()).expect("supervisor spec");
         let sup = spec.supervisor.as_ref().expect("supervisor present");
-        assert_eq!(sup.binding_names, vec!["OPENAI_API_KEY"]);
-        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("OPENAI_API_KEY"));
+        // Binding name = the (lowercase) secret key; env_map is ENV_VAR → binding name.
+        assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
         // Runtime/port/command detection is identical to the no-binding path.
         assert_eq!(spec.start_cmd, "python3 app.py");
         assert_eq!(spec.port, 8080);
+    }
+
+    #[test]
+    fn supervisor_derive_rejects_uppercase_secret_key_used_as_binding_name() {
+        // REGRESSION (#954 follow-up): an uppercase secret key like `OPENAI_API_KEY` is a
+        // valid POSIX env var but NOT a valid BindingName (lowercase-only), so the
+        // guest-agent's own `SupervisorConfig::validate` rejects the emitted
+        // supervisor.json and the agent `exit(2)`s BEFORE opening the vsock listener —
+        // surfacing only as a silent "vsock never acked". Reject it at emission with an
+        // actionable message instead of shipping a rootfs that cannot boot.
+        let toml = format!(
+            "{}\n[secrets.OPENAI_API_KEY]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+        assert!(err.contains("binding name"), "{err}");
+        assert!(err.contains("[secrets.openai_api_key]"), "message must suggest the lowercase form: {err}");
+        // The canonical lowercase-key + explicit-uppercase-env form is accepted.
+        assert!(derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).is_ok());
     }
 
     #[test]
@@ -895,8 +934,9 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn supervisor_derive_rejects_malformed_and_duplicate_env_var_names() {
         // A malformed env var name must never reach the generated supervisor.json.
+        // (lowercase secret key so it passes the binding-name gate and reaches the env check)
         let bad = format!(
-            "{}\n[secrets.KEY]\nrequired = true\nenv = \"BAD-VAR\"\n",
+            "{}\n[secrets.key]\nrequired = true\nenv = \"BAD-VAR\"\n",
             base_toml()
         );
         assert!(derive_supervisor_build_spec(&parse(&bad), &probe_python())
@@ -904,8 +944,8 @@ readiness_probe = { http_get = "/health" }
             .contains("POSIX identifier"));
         // Two secrets resolving to the SAME env var is ambiguous → fail-closed.
         let dup = format!(
-            "{}\n[secrets.KEY_A]\nrequired = true\nenv = \"SHARED\"\n\
-             [secrets.KEY_B]\nrequired = true\nenv = \"SHARED\"\n",
+            "{}\n[secrets.key_a]\nrequired = true\nenv = \"SHARED\"\n\
+             [secrets.key_b]\nrequired = true\nenv = \"SHARED\"\n",
             base_toml()
         );
         assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
@@ -926,16 +966,17 @@ readiness_probe = { http_get = "/health" }
     fn supervisor_build_script_runs_agent_as_init_and_emits_config_without_secrets() {
         let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
-        // init runs the guest-agent (vsock supervisor) with the binding name as argv,
-        // NOT the app directly.
-        assert!(script.contains("/usr/local/bin/ato-guest-agent 'OPENAI_API_KEY'"), "{script}");
+        // init runs the guest-agent (vsock supervisor) with the (lowercase) binding name
+        // as argv, NOT the app directly — and NOT the uppercase env var name.
+        assert!(script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"), "{script}");
+        assert!(!script.contains("ato-guest-agent 'OPENAI_API_KEY'"), "env var must not be the binding argv");
         assert!(script.contains("ATO_GUEST_AGENT_MODE=vsock"), "agent runs in vsock mode");
         assert!(!script.contains("python3 app.py' >/tmp/app.log"), "app is not launched directly");
         // supervisor.json is staged, requires the agent binary, and carries NO value —
         // only the env var → binding name map.
         assert!(script.contains("ATO_GUEST_AGENT_BIN"), "supervisor build needs the agent binary");
         assert!(script.contains("supervisor.json"), "config is staged");
-        assert!(script.contains("\"OPENAI_API_KEY\": \"OPENAI_API_KEY\""), "env→binding map present");
+        assert!(script.contains("\"OPENAI_API_KEY\": \"openai_api_key\""), "env→binding map present");
         assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs still quoted");
     }
 
