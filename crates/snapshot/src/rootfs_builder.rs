@@ -19,7 +19,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use capsule::foundation::types::manifest::{
-    CapsuleManifest, RuntimeType, ServiceSpec as ManifestServiceSpec,
+    CapsuleManifest, DEFAULT_STATE_VOLUME_SIZE_MB, RuntimeType, ServiceSpec as ManifestServiceSpec,
+    StateDurability, StateSharing, validate_and_normalize_state_mount_target,
+    validate_state_volume_size_mb,
 };
 use capsule::foundation::types::ready_state::SecretDelivery;
 use protocol::binding_lease::BindingName;
@@ -122,6 +124,27 @@ pub struct ServiceBuildSpec {
     /// internal = its first resolved `expose` port or literal `env.PORT`). Used
     /// for the readiness probe. `None` = no determinable port (ready-once-started).
     pub port: Option<u16>,
+    /// v1.6 (ato#983): this service's durable state volumes, derived from its
+    /// `state_bindings`. Empty for every service without declared state — no
+    /// behavior change for existing capsules. Not yet emitted into
+    /// `supervisor.json` (recorded here for the receipt; a later slice wires
+    /// the actual Firecracker drive attach + guest mount).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volumes: Vec<DurableVolumeBuildSpec>,
+}
+
+/// v1.6 (ato#983): one durable state volume a snapshot service mounts. Derived
+/// from a `state_bindings` entry + its `[state.<name>]` requirement.
+/// Non-secret — safe in a receipt. `target` is already validated + LEXICALLY
+/// NORMALIZED (see [`validate_and_normalize_state_mount_target`]) and
+/// `size_mb` already bounds-checked (see [`validate_state_volume_size_mb`]) —
+/// both at manifest-validation time AND again here (defense in depth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DurableVolumeBuildSpec {
+    pub state_name: String,
+    /// Normalized absolute in-guest mount path, always under `/ato/state/`.
+    pub target: String,
+    pub size_mb: u32,
 }
 
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
@@ -498,6 +521,7 @@ fn derive_supervisor_services(
         readiness_http_path: Option<String>,
         expose: Vec<String>,
         literal_port: Option<u16>,
+        volumes: Vec<DurableVolumeBuildSpec>,
     }
     let mut collected: Vec<Resolved> = Vec::with_capacity(services.len());
     let mut public_count = 0usize;
@@ -516,12 +540,42 @@ fn derive_supervisor_services(
         if svc.entrypoint.trim().is_empty() {
             return Err(format!("service '{name}': `entrypoint` is empty"));
         }
-        // Reject container-only fields (single-VM snapshot cannot honour them).
-        if !svc.state_bindings.is_empty() {
-            return Err(format!(
-                "service '{name}': `state_bindings` is a container/volume feature not \
-                 supported in a single-VM snapshot (v1.6 persistent state is out of scope here)"
-            ));
+        // v1.6 (ato#983): derive this service's durable state volumes.
+        // Defense-in-depth — the manifest validator (`manifest_validation.rs`)
+        // already runs these exact checks (via the same shared
+        // `capsule::foundation::types::manifest` helpers), but the builder never
+        // trusts that validation ran; a config error here still fails closed
+        // instead of silently building an unmountable/oversized volume.
+        let mut volumes: Vec<DurableVolumeBuildSpec> = Vec::new();
+        for binding in &svc.state_bindings {
+            let state_name = binding.state.trim();
+            if binding.service_target.is_some() {
+                return Err(format!(
+                    "service '{name}': `state_bindings.service_target` is not applicable to a \
+                     single-VM snapshot service (mounts are VM-wide, not per-container); binding \
+                     for state '{state_name}'"
+                ));
+            }
+            let requirement = m.state.get(state_name).ok_or_else(|| {
+                format!("service '{name}': state '{state_name}' is not declared under [state]")
+            })?;
+            if requirement.durability != StateDurability::Persistent {
+                return Err(format!(
+                    "service '{name}': state '{state_name}' must have durability=\"persistent\" to \
+                     be used as a snapshot durable-volume binding"
+                ));
+            }
+            if requirement.sharing == StateSharing::SameCapsule {
+                return Err(format!(
+                    "service '{name}': state '{state_name}' has sharing=\"same-capsule\", not \
+                     supported for a snapshot durable-volume binding in this release"
+                ));
+            }
+            let size_mb = validate_state_volume_size_mb(state_name, requirement.size_mb)
+                .map_err(|e| format!("service '{name}': {e}"))?;
+            let target = validate_and_normalize_state_mount_target(&binding.target)
+                .map_err(|e| format!("service '{name}': {e}"))?;
+            volumes.push(DurableVolumeBuildSpec { state_name: state_name.to_string(), target, size_mb });
         }
         if let Some(net) = &svc.network {
             if !net.allow_from.is_empty() {
@@ -638,7 +692,48 @@ fn derive_supervisor_services(
             readiness_http_path,
             expose,
             literal_port,
+            volumes,
         });
+    }
+
+    // v1.6 (ato#983): cross-service durable-state checks, defense-in-depth
+    // alongside the manifest validator's equivalent (which may not have run —
+    // this builder never trusts that it did). A state name must have exactly
+    // one owning service, and two volumes' mount targets must never be
+    // identical or nested under one another (both would make a later slice's
+    // mount step try to mount two devices onto/under the same directory).
+    {
+        let mut state_owner: BTreeMap<String, String> = BTreeMap::new();
+        let mut all_targets: Vec<(String, String, String)> = Vec::new();
+        for r in &collected {
+            for v in &r.volumes {
+                if let Some(prev) = state_owner.insert(v.state_name.clone(), r.name.clone())
+                    && prev != r.name
+                {
+                    return Err(format!(
+                        "state '{}' is bound by both service '{prev}' and '{}' — a snapshot \
+                         durable-volume binding has exactly one owning service",
+                        v.state_name, r.name
+                    ));
+                }
+                all_targets.push((r.name.clone(), v.state_name.clone(), v.target.clone()));
+            }
+        }
+        for i in 0..all_targets.len() {
+            for j in (i + 1)..all_targets.len() {
+                let (service_a, state_a, target_a) = &all_targets[i];
+                let (service_b, state_b, target_b) = &all_targets[j];
+                let path_a = Path::new(target_a);
+                let path_b = Path::new(target_b);
+                if path_a == path_b || path_a.starts_with(path_b) || path_b.starts_with(path_a) {
+                    return Err(format!(
+                        "target '{target_a}' (service '{service_a}', state '{state_a}') conflicts \
+                         with target '{target_b}' (service '{service_b}', state '{state_b}') — \
+                         durable mount targets must not be identical or nested under one another"
+                    ));
+                }
+            }
+        }
     }
 
     // Exactly one PUBLIC service — the run gate proxies exactly one guest port.
@@ -831,6 +926,7 @@ fn derive_supervisor_services(
             aliases: r.aliases.clone(),
             readiness_http_path: r.readiness_http_path.clone(),
             port: primary.get(&r.name).copied(),
+            volumes: r.volumes.clone(),
         });
     }
 
@@ -2194,16 +2290,246 @@ readiness_probe = { http_get = "/health" }
             "[services.api]\nentrypoint = \"a\"\ndepends_on = [\"ghost\"]\n[services.api.network]\npublish = true\n",
             "not a declared service",
         );
-        // Container-only field: state_bindings.
+        // v1.6 (ato#983): a state_bindings entry naming an UNDECLARED state is
+        // still rejected (state_bindings itself is no longer a blanket
+        // container-only reject — see `durable_state_binding_rules` below).
         bad(
-            "[services.api]\nentrypoint = \"a\"\nstate_bindings = [{ state = \"d\", target = \"/x\" }]\n[services.api.network]\npublish = true\n",
-            "state_bindings",
+            "[services.api]\nentrypoint = \"a\"\nstate_bindings = [{ state = \"d\", target = \"/ato/state/d\" }]\n[services.api.network]\npublish = true\n",
+            "not declared under [state]",
         );
         // Container-only field: egress_proxy opt-out.
         bad(
             "[services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\negress_proxy = false\n",
             "egress_proxy = false",
         );
+    }
+
+    /// v1.6 (ato#983) Slice 1: durable state volume derivation + fail-closed rules.
+    #[test]
+    fn durable_state_binding_rules() {
+        // A valid, persistent+exclusive `[state.<name>]` schema_id (64 hex chars —
+        // this builder doesn't format-check it, but it's kept realistic anyway;
+        // the manifest-validation layer does check the format).
+        fn schema_id_64() -> String {
+            format!("sha256:{}", "0".repeat(64))
+        }
+        fn state_decl(name: &str, extra: &str) -> String {
+            format!(
+                "[state.{name}]\nkind = \"filesystem\"\ndurability = \"persistent\"\n\
+                 purpose = \"test state\"\nattach = \"explicit\"\nschema_id = \"{}\"\n{extra}",
+                schema_id_64()
+            )
+        }
+        let ok = |extra_state: &str, extra_service: &str| -> Result<RootfsBuildSpec, String> {
+            // NOTE: `extra_service` (state_bindings) MUST come before
+            // `[services.api.network]` — TOML scopes bare keys to the most
+            // recently opened table, so a `state_bindings = [...]` line after
+            // `[services.api.network]` would silently become a key of THAT
+            // sub-table instead of `[services.api]`.
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+                 {extra_state}\n[services.api]\nentrypoint = \"a\"\n{extra_service}\
+                 [services.api.network]\npublish = true\n",
+                base_toml()
+            );
+            derive_supervisor_build_spec(&parse(&toml), &probe_python())
+        };
+        let bad_state = |extra_state: &str, extra_service: &str, needle: &str| {
+            let err = ok(extra_state, extra_service).unwrap_err();
+            assert!(err.contains(needle), "expected {needle:?} in: {err}");
+        };
+
+        // Accepted: default size_mb.
+        let spec = ok(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+        )
+        .unwrap();
+        {
+            let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+            let api = services.iter().find(|s| s.name == "api").unwrap();
+            assert_eq!(api.volumes.len(), 1);
+            assert_eq!(api.volumes[0].state_name, "dbdata");
+            assert_eq!(api.volumes[0].target, "/ato/state/dbdata");
+            assert_eq!(api.volumes[0].size_mb, DEFAULT_STATE_VOLUME_SIZE_MB);
+        }
+        // And it DOES appear in the receipt when non-empty.
+        let receipt = serde_json::to_value(&spec).unwrap();
+        assert_eq!(receipt["supervisor"]["services"][0]["volumes"][0]["state_name"], "dbdata");
+        // Not emitted into the guest-facing supervisor.json in this slice.
+        let sup_json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        assert!(sup_json["services"][0].get("volumes").is_none());
+
+        // Accepted: custom in-bounds size_mb, and lexical normalization (trailing
+        // slash + repeated slash) both collapse to the same target string.
+        let spec = ok(
+            &state_decl("dbdata", "size_mb = 4096\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state//dbdata/\" }]\n",
+        )
+        .unwrap();
+        let services = spec.supervisor.unwrap().services.unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        assert_eq!(api.volumes[0].size_mb, 4096);
+        assert_eq!(api.volumes[0].target, "/ato/state/dbdata");
+
+        // size_mb = 0 rejected.
+        bad_state(
+            &state_decl("dbdata", "size_mb = 0\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+            "out of range",
+        );
+        // size_mb below MIN (nonzero) rejected.
+        bad_state(
+            &state_decl("dbdata", "size_mb = 1\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+            "out of range",
+        );
+        // size_mb above MAX rejected.
+        bad_state(
+            &state_decl("dbdata", "size_mb = 4294967295\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+            "out of range",
+        );
+
+        // durability = "ephemeral" rejected for a snapshot durable-volume binding.
+        bad_state(
+            "[state.dbdata]\nkind = \"filesystem\"\ndurability = \"ephemeral\"\npurpose = \"x\"\n",
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+            "durability=\"persistent\"",
+        );
+
+        // sharing = "same-capsule" rejected in this MVP.
+        bad_state(
+            &state_decl("dbdata", "sharing = \"same-capsule\"\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]\n",
+            "same-capsule",
+        );
+
+        // service_target set is rejected (not applicable to a single-VM service).
+        bad_state(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\", service_target = \"api\" }]\n",
+            "service_target",
+        );
+
+        // target outside /ato/state/ rejected.
+        bad_state(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/var/lib/dbdata\" }]\n",
+            "must be under",
+        );
+        // target exactly "/ato/state" rejected (needs a real subpath).
+        bad_state(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state\" }]\n",
+            "not '/ato/state' itself",
+        );
+        // target with a ".." component rejected.
+        bad_state(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/../etc\" }]\n",
+            "'.', '..'",
+        );
+        // relative target rejected.
+        bad_state(
+            &state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"ato/state/dbdata\" }]\n",
+            "absolute path",
+        );
+
+        // Same state name bound by two different services → rejected (one owner).
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [{{ state = \"dbdata\", target = \"/ato/state/dbdata\" }}]\n\
+                 [services.api.network]\npublish = true\n\
+                 [services.worker]\nentrypoint = \"w\"\n\
+                 state_bindings = [{{ state = \"dbdata\", target = \"/ato/state/dbdata2\" }}]\n",
+                base_toml(),
+                state_decl("dbdata", "")
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("exactly one owning service"), "{err}");
+        }
+
+        // Two DIFFERENT state names whose targets are identical → rejected.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [{{ state = \"dba\", target = \"/ato/state/shared\" }}]\n\
+                 [services.api.network]\npublish = true\n\
+                 [services.worker]\nentrypoint = \"w\"\n\
+                 state_bindings = [{{ state = \"dbb\", target = \"/ato/state/shared\" }}]\n",
+                base_toml(),
+                state_decl("dba", ""),
+                state_decl("dbb", "")
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("must not be identical or nested"), "{err}");
+        }
+
+        // Two DIFFERENT state names whose targets prefix-overlap → rejected.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [{{ state = \"dba\", target = \"/ato/state/db\" }}]\n\
+                 [services.api.network]\npublish = true\n\
+                 [services.worker]\nentrypoint = \"w\"\n\
+                 state_bindings = [{{ state = \"dbb\", target = \"/ato/state/db/backup\" }}]\n",
+                base_toml(),
+                state_decl("dba", ""),
+                state_decl("dbb", "")
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("must not be identical or nested"), "{err}");
+        }
+
+        // Multiple independent per-service volumes, non-colliding, all accepted.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [{{ state = \"dba\", target = \"/ato/state/api-data\" }}]\n\
+                 [services.api.network]\npublish = true\n\
+                 [services.worker]\nentrypoint = \"w\"\n\
+                 state_bindings = [{{ state = \"dbb\", target = \"/ato/state/worker-data\" }}]\n",
+                base_toml(),
+                state_decl("dba", ""),
+                state_decl("dbb", "")
+            );
+            let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+            let services = spec.supervisor.unwrap().services.unwrap();
+            let api = services.iter().find(|s| s.name == "api").unwrap();
+            let worker = services.iter().find(|s| s.name == "worker").unwrap();
+            assert_eq!(api.volumes.len(), 1);
+            assert_eq!(worker.volumes.len(), 1);
+            assert_eq!(api.volumes[0].target, "/ato/state/api-data");
+            assert_eq!(worker.volumes[0].target, "/ato/state/worker-data");
+        }
+
+        // No declared state at all → volumes stays empty (no behavior change), and
+        // the RECEIPT (not the guest-facing supervisor.json, which never carries
+        // `volumes` in this slice regardless) omits the empty `volumes` array via
+        // `skip_serializing_if` — proving no downstream receipt consumer sees a
+        // new field for a capsule that declares no state.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+                 [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n",
+                base_toml()
+            );
+            let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+            let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+            assert!(services.iter().find(|s| s.name == "api").unwrap().volumes.is_empty());
+            let receipt = serde_json::to_value(&spec).unwrap();
+            assert!(
+                receipt["supervisor"]["services"][0].get("volumes").is_none(),
+                "volumes must be omitted from the receipt when empty: {receipt}"
+            );
+        }
     }
 
     #[test]
