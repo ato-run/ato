@@ -83,6 +83,13 @@ pub struct SupervisorBuildSpec {
     /// byte-identical to before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<ServiceBuildSpec>>,
+    /// v1.5 app_url selection (ato#973): the ONE service that owns the proxied
+    /// public port — the app_url / ready_url target. Exactly the service with
+    /// `network.publish = true` (0 or 2+ are rejected at derive time). Recorded so
+    /// the receipt/diagnostic names which service the public URL points at. `None`
+    /// for the legacy single-service build (its sole service is implicitly public).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_service: Option<String>,
 }
 
 /// v1.5 (ato#973): one service in a multi-service supervisor build. Non-secret —
@@ -353,7 +360,12 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
     let services = derive_supervisor_services(m, &env_map, spec.port)?;
-    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services });
+    // app_url selection: the sole public service (exactly one, enforced in derive)
+    // is the app_url / ready_url target. Recorded in the receipt; None for legacy.
+    let public_service = services
+        .as_ref()
+        .and_then(|svcs| svcs.iter().find(|s| s.public).map(|s| s.name.clone()));
+    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services, public_service });
     Ok(spec)
 }
 
@@ -629,6 +641,44 @@ fn derive_supervisor_services(
                     ));
                 }
             }
+        }
+    }
+
+    // ── app_url selection (ato#973): the proxied target port has EXACTLY ONE owner
+    // — the public service. An author-declared literal `env.PORT` must not let an
+    // internal service claim it (bind collision / URL-vs-owner drift), and two
+    // services must not declare the same concrete literal port. `expose`-allocated
+    // ports are already collision-free (see `reserved`); this closes the remaining
+    // author-declared-literal ambiguity so `public_service` is auditable as the
+    // sole target-port owner. ──
+    let public_name = collected
+        .iter()
+        .find(|r| r.public)
+        .map(|r| r.name.clone())
+        .expect("exactly one public service (checked above)");
+    let mut port_owner: BTreeMap<u16, String> = BTreeMap::new();
+    port_owner.insert(target_port, public_name.clone()); // the public service owns it
+    for r in &collected {
+        let Some(p) = r.literal_port else { continue };
+        if r.public {
+            // The public service's literal PORT was already validated == target_port
+            // and it is the registered owner — nothing more to check.
+            continue;
+        }
+        if p == target_port {
+            return Err(format!(
+                "internal service '{}': env PORT = {p} is the proxied public port owned by \
+                 service '{public_name}' — only the public service may listen on the target \
+                 port. Give '{}' a different port (or expose a placeholder)",
+                r.name, r.name
+            ));
+        }
+        if let Some(prev) = port_owner.insert(p, r.name.clone()) {
+            return Err(format!(
+                "services '{prev}' and '{}' both declare env PORT = {p} — each concrete \
+                 listen port must have a single owner in a single-VM snapshot",
+                r.name
+            ));
         }
     }
 
@@ -1535,6 +1585,102 @@ readiness_probe = { http_get = "/health" }
         assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
         assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
         assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+    }
+
+    // ── v1.5 (ato#973): app_url selection ──
+
+    #[test]
+    fn app_url_selection_records_the_public_service_and_targets_its_port() {
+        // api(public) + redis(internal) → the app_url target is api, on the proxied
+        // target port; redis is never the URL target and its port is not exposed.
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        // The receipt records WHICH service the public URL points at.
+        assert_eq!(sup.public_service.as_deref(), Some("api"), "public service recorded for app_url");
+        // That service owns the proxied target port (= the ready_url/app_url port).
+        let services = sup.services.as_ref().unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        assert!(api.public);
+        assert_eq!(api.port, Some(spec.port), "public service listens on the proxied port");
+        // The internal service is never selected, and it does not own the target port.
+        let redis = services.iter().find(|s| s.name == "redis").unwrap();
+        assert!(!redis.public);
+        assert_ne!(sup.public_service.as_deref(), Some("redis"));
+        assert_ne!(redis.port, Some(spec.port), "internal service is not on the public port");
+        // The recorded name is exactly the one public service.
+        assert_eq!(services.iter().filter(|s| s.public).count(), 1);
+    }
+
+    #[test]
+    fn app_url_selection_ignores_internal_expose_ports_and_aliases() {
+        // An internal service EXPOSES a port and declares an alias; neither becomes
+        // the app_url target — only the public service's proxied port is the URL.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n\
+             [services.redis.network]\naliases = [\"cache\"]\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert_eq!(sup.public_service.as_deref(), Some("api"));
+        let redis = sup.services.as_ref().unwrap().iter().find(|s| s.name == "redis").unwrap();
+        // redis's exposed port is a real allocated loopback port, but it is NOT the
+        // public/proxied port, and redis is not the URL target.
+        let rport = redis.base_env.get("REDIS_PORT").unwrap().parse::<u16>().unwrap();
+        assert_ne!(rport, spec.port, "internal expose port is not the public port");
+        assert!(!redis.aliases.is_empty(), "redis has an alias (cache) — internal, not a URL target");
+        assert!(!redis.public);
+    }
+
+    #[test]
+    fn only_the_public_service_may_own_the_target_port() {
+        // (1) An internal service declaring env PORT == the target port is rejected —
+        //     the proxied port has a single owner (the public service).
+        let internal_on_target = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"8080\"\n",
+            base_toml() // target port 8080
+        );
+        let err = derive_supervisor_build_spec(&parse(&internal_on_target), &probe_python()).unwrap_err();
+        assert!(err.contains("proxied public port") && err.contains("redis"), "{err}");
+
+        // (2) Two internal services declaring the SAME concrete literal port → rejected.
+        let dup_literal = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"9001\"\n\
+             [services.worker]\nentrypoint = \"w\"\n[services.worker.env]\nPORT = \"9001\"\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&dup_literal), &probe_python()).unwrap_err();
+        assert!(err.contains("single owner") && err.contains("9001"), "{err}");
+
+        // (3) The public service remains the ONLY service whose primary port == target;
+        //     an internal service on a DIFFERENT literal port is fine.
+        let ok = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"6379\"\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&ok), &probe_python()).unwrap();
+        let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+        assert_eq!(services.iter().filter(|s| s.port == Some(spec.port)).count(), 1, "one target-port owner");
+        let owner = services.iter().find(|s| s.port == Some(spec.port)).unwrap();
+        assert!(owner.public && owner.name == "api", "the target-port owner is the public service");
+    }
+
+    #[test]
+    fn legacy_single_service_has_no_recorded_public_service() {
+        // A legacy single-service build: no [services] → services None, and
+        // public_service is None (the sole workload is implicitly the URL target).
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert!(sup.services.is_none(), "legacy single-service build");
+        assert!(sup.public_service.is_none(), "no explicit public service selection for legacy");
     }
 
     #[test]
