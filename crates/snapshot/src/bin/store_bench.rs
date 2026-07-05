@@ -98,6 +98,7 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        supervisor: None,
     }) {
         Ok(rc) => rc,
         Err(e) => { r["failure_stage"] = json!("build"); r["failure_reason"] = json!(e.to_string()); return r; }

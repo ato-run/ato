@@ -47,6 +47,7 @@ fn build_input<'a>(store: &'a CasStore, rootfs: Vec<u8>, markers: Vec<String>) -
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: markers,
         execution_id: None,
+        supervisor: None,
     }
 }
 
@@ -767,6 +768,26 @@ fn http_req(ip: &str, port: u16, method: &str, path: &str, body: Option<&str>) -
     resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
+/// v1.2 PR 3d: lenient GET for states where NO LISTENER is the expected outcome —
+/// a supervisor session pre-bind (workload group-killed before the seal) or
+/// mid-restart-with-env (old process gone, new one not yet bound). `http_get`'s
+/// bare `.expect("connect guest")` treats ECONNREFUSED as a harness panic, which
+/// turned the CORRECT fully-down state into a test crash. Down = empty body.
+fn http_get_down_ok(ip: &str, port: u16, path: &str) -> String {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect((ip, port)) else {
+        return String::new(); // connection refused = nothing listening = down
+    };
+    s.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok();
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {ip}\r\nContent-Length: 0\r\n\r\n");
+    if s.write_all(req.as_bytes()).is_err() {
+        return String::new(); // listener died mid-request = down
+    }
+    let mut resp = String::new();
+    let _ = s.read_to_string(&mut resp);
+    resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+}
+
 // ── Phase 8a-HW PR B (#912): Firecracker vsock ↔ guest-agent connection smoke ──────
 // Requires ATO_FC_AGENT_ROOTFS: a rootfs that serves /health AND launches
 // ato-guest-agent in vsock mode at boot. Set ATO_FC_VSOCK=1 is done by the test.
@@ -884,6 +905,7 @@ fn fc_kvm_binding_lease_live_e2e() {
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        supervisor: None,
     };
     // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
     unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
@@ -949,6 +971,135 @@ fn fc_kvm_binding_lease_live_e2e() {
     eprintln!("### PRC-E2E-DONE bound=true nosecret=true teardown=clean");
 }
 
+// ── v1.2 PR 3d: SUPERVISOR full live E2E ────────────────────────────────────────────
+// Requires ATO_FC_SUPERVISOR_ROOTFS: a rootfs built by `rootfs_build` from a
+// `[secrets.*]` capsule (e.g. spikes/firecracker-supervisor/rust-built-capsule):
+// agent-as-init in vsock mode requiring "openai_api_key", /etc/ato/supervisor.json
+// mapping OPENAI_API_KEY -> openai_api_key, and an app whose /health is 200 only
+// when the env var is present (+ /keyhash echoing sha256(key)[..12]).
+
+/// v1.2 PR 3d: the four merge blockers in one live run.
+/// ① BUILD drives placeholder delivery → health (the supervisor starts the app only
+///    at bound-ready, so a successful build IS the placeholder-health proof).
+/// ② StopWorkload → Revoke-all runs before the snapshot (asserted by the restored
+///    VM waking with the app DOWN and not bound-ready).
+/// ③ restore → REAL binding → restart-with-env → health + /keyhash match.
+/// ④ the real secret is absent from every host artifact (L4 scan) — and never
+///    existed at build time by construction.
+#[test]
+#[ignore]
+fn fc_kvm_supervisor_full_e2e() {
+    if !FirecrackerBackend::kvm_present() { eprintln!("SKIP: no kvm"); return; }
+    let rootfs = match std::env::var("ATO_FC_SUPERVISOR_ROOTFS") {
+        Ok(p) if !p.is_empty() => std::fs::read(p).expect("read ATO_FC_SUPERVISOR_ROOTFS"),
+        _ => { eprintln!("SKIP: ATO_FC_SUPERVISOR_ROOTFS not set"); return; }
+    };
+    let b = FirecrackerBackend::new();
+    if !b.probe().available { eprintln!("SKIP: fc unavailable"); return; }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let real_secret = "sk-REAL-SUPERVISOR-E2E-7c4d1e";
+
+    // ①② Build WITH the supervisor drive: the backend delivers a placeholder,
+    // waits for /health (app runs with placeholder env), StopWorkload + Revoke,
+    // then snapshots. A no-vsock or undelivered build would fail on health.
+    let input = BuildReadyStateInput {
+        store: &store,
+        capsule_manifest_hash: "blake3:fc-kvm-supervisor".to_string(),
+        runner_class: None,
+        layers: BuildLayers { rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
+        restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(5000) },
+        sanitizer_contract: SanitizerContract::default(),
+        declared_secret_markers: vec![],
+        execution_id: None,
+        supervisor: Some(crate::backend::SupervisorBindings {
+            binding_names: vec!["openai_api_key".to_string()],
+        }),
+    };
+    // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
+    unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
+    let build = b.build_ready_state(input);
+    let receipt = match build { Ok(r) => r, Err(e) => { unsafe { std::env::remove_var("ATO_FC_VSOCK") }; panic!("supervisor build: {e}") } };
+    let m = receipt.manifest;
+    let sup = m.supervisor_build.as_ref().expect("supervisor build receipt in manifest");
+    assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+    assert!(sup.page_hygiene_boot_args, "supervisor build must carry the hygiene cmdline");
+    eprintln!(
+        "### PR3D-BUILD ok placeholder_absent_from_seal={:?} (advisory)",
+        sup.placeholder_absent_from_seal
+    );
+    let manifest_json = serde_json::to_string(&m).unwrap();
+
+    // ② (observable half): the restored VM wakes in the post-StopWorkload state —
+    // app down, not bound-ready, nothing in tmpfs.
+    let overlay = dir.path().join("ov");
+    let r = b.restore(RestoreReadyStateInput { store: &store, manifest: m, overlay_root: overlay.clone(), host_runner_class: None, uffd_preview: false });
+    unsafe { std::env::remove_var("ATO_FC_VSOCK") };
+    let r = r.expect("restore");
+    let uds = r.session.vsock_uds.clone().expect("vsock uds");
+    let port = r.session.guest_port.unwrap_or(8080);
+    let gip = FirecrackerConfig::default().guest_ip;
+    // Lenient probe: the CORRECT state here is "no listener at all" (the build
+    // drive group-killed the workload before the seal) — connection refused is
+    // the expected outcome, not a harness error.
+    let pre = http_get_down_ok(&gip, port, "/health");
+    assert!(!pre.contains("ok"), "post-restore pre-bind /health must be down (StopWorkload before seal): {pre:?}");
+    let ready0 = vsock_exchange(&uds, 1025, &["{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(ready0[0].contains("\"ready\":false"), "restored session must not be bound-ready (Revoke before seal): {ready0:?}");
+
+    // ③ Deliver the REAL lease → the supervisor restarts the workload with the
+    // real env → /health 200 and /keyhash proves WHICH key is live.
+    let lease = protocol::binding_lease::BindingLease::issue(
+        protocol::binding_lease::BindingLeaseId::new("lease-real"),
+        protocol::binding_lease::BindingName::parse("openai_api_key").unwrap(),
+        protocol::binding_lease::SecretValue::new(real_secret),
+        0,
+        100_000_000_000_000,
+    );
+    let deliver = serde_json::to_string(&protocol::binding_control::HostToAgent::Deliver(lease.to_delivery())).unwrap();
+    let acks = vsock_exchange(&uds, 1025, &[deliver, "{\"kind\":\"query_bound_ready\"}".into()]);
+    assert!(acks[0].contains("\"kind\":\"ack\""), "real deliver ack: {acks:?}");
+    assert!(acks[1].contains("\"ready\":true"), "bound-ready after real delivery: {acks:?}");
+    let mut healthy = false;
+    for _ in 0..30 {
+        // Lenient: the first polls can land BEFORE the restarted app binds its
+        // listener — refused = "not up yet", not a harness error.
+        if http_get_down_ok(&gip, port, "/health").contains("ok") { healthy = true; break; }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert!(healthy, "restart-with-env: /health must reach ok after real delivery");
+    let expect_hash = {
+        // sha256(real_secret)[..12] — same digest the fixture app echoes.
+        use std::process::Command;
+        let out = Command::new("sh").arg("-c")
+            .arg(format!("printf %s '{real_secret}' | sha256sum | cut -c1-12"))
+            .output().expect("sha256sum");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let keyhash = http_get(&gip, port, "/keyhash");
+    assert!(keyhash.contains(&expect_hash), "the REAL key must be live (want {expect_hash}, got {keyhash:?})");
+    eprintln!("### PR3D-RESTART-WITH-ENV health=ok keyhash={keyhash}");
+
+    // ④ The real secret must not appear in ANY host artifact — CAS (incl. the
+    // sealed mem/vmstate chunks), work dir, overlay, manifest JSON.
+    let work = std::path::PathBuf::from(std::env::var("ATO_FC_WORK").unwrap_or_else(|_| "/tmp/ato-fc".into()));
+    let mut roots = vec![dir.path().join("cas"), work.clone(), overlay.clone()];
+    roots.retain(|p| p.exists());
+    let hits = scan_for_secret(&roots, real_secret.as_bytes());
+    assert!(hits.is_empty(), "REAL SECRET LEAKED into host artifacts: {hits:?}");
+    assert!(!manifest_json.contains(real_secret), "real secret in manifest JSON");
+    eprintln!("### PR3D-NOSECRET host artifacts clean ({} roots)", roots.len());
+
+    // Teardown: stop-scrub then stop; re-scan surviving roots.
+    let scrub = vsock_exchange(&uds, 1025, &["{\"kind\":\"stop\"}".into()]);
+    eprintln!("### PR3D-STOP scrub resp={scrub:?}");
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+    let after: Vec<std::path::PathBuf> = [dir.path().join("cas"), work].into_iter().filter(|p| p.exists()).collect();
+    assert!(scan_for_secret(&after, real_secret.as_bytes()).is_empty(), "secret in host artifacts after stop");
+    eprintln!("### PR3D-E2E-DONE build-drive=ok stop-revoke=ok restart-with-env=ok nosecret=ok");
+}
+
 /// PR D3 (#912): binding negative paths in a real restored microVM — missing delivery,
 /// expired lease, and revoke all leave the session NOT bound-ready with `/health`
 /// failing (the app never sees a binding). Complements the positive live E2E.
@@ -973,6 +1124,7 @@ fn fc_kvm_binding_negative_paths() {
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        supervisor: None,
     };
     unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };
     let m = b.build_ready_state(input).expect("build").manifest;

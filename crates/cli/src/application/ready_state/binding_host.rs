@@ -72,68 +72,10 @@ impl BindingPreviewReceipt {
     }
 }
 
-/// The host's request/response channel to the guest-agent (vsock in production; an
-/// in-process mock in tests).
-#[allow(dead_code)] // wired into the run gate in PR C
-pub(crate) trait AgentChannel {
-    fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost>;
-}
-
-/// PR B (#912): the real host→guest-agent channel over Firecracker's vsock UDS.
-///
-/// Firecracker exposes a host Unix socket (`uds_path`); to reach a guest AF_VSOCK
-/// listener on `guest_port` the host connects to that UDS and sends `CONNECT
-/// <guest_port>\n`, expecting `OK <host_port>\n`, after which the stream carries the
-/// newline-delimited JSON control protocol to/from the guest-agent. All reads/writes
-/// are timeout-bounded; any protocol error fails closed.
-#[allow(dead_code)] // wired into the run gate in PR C
-pub(crate) struct FirecrackerAgentChannel {
-    reader: std::io::BufReader<std::os::unix::net::UnixStream>,
-    writer: std::os::unix::net::UnixStream,
-}
-
-#[allow(dead_code)]
-impl FirecrackerAgentChannel {
-    /// Connect through the FC vsock UDS to the guest-agent on `guest_port`.
-    pub(crate) fn connect(
-        uds_path: &std::path::Path,
-        guest_port: u32,
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
-
-        let mut stream = UnixStream::connect(uds_path)
-            .with_context(|| format!("connect FC vsock UDS {}", uds_path.display()))?;
-        stream.set_read_timeout(Some(timeout))?;
-        stream.set_write_timeout(Some(timeout))?;
-        // Firecracker host→guest CONNECT handshake.
-        writeln!(stream, "CONNECT {guest_port}")?;
-        stream.flush()?;
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        if !line.starts_with("OK") {
-            bail!("guest-agent vsock CONNECT rejected on port {guest_port}: {line:?}");
-        }
-        Ok(FirecrackerAgentChannel { reader, writer: stream })
-    }
-}
-
-impl AgentChannel for FirecrackerAgentChannel {
-    fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost> {
-        use std::io::{BufRead, Write};
-        let json = serde_json::to_string(&msg)?;
-        writeln!(self.writer, "{json}")?;
-        self.writer.flush()?;
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line)?;
-        if n == 0 || line.trim().is_empty() {
-            bail!("guest-agent closed the vsock stream / empty response");
-        }
-        serde_json::from_str(&line).with_context(|| format!("parse agent response: {line:?}"))
-    }
-}
+/// v1.2 PR 3d: the channel trait + vsock transport moved to `snapshot::agent_channel`
+/// so the FirecrackerBackend's build-side supervisor drive shares the exact transport
+/// this run gate uses. Re-exported so every call site here is unchanged.
+pub(crate) use snapshot::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT};
 
 /// Deliver every lease, then poll bound-ready up to `max_polls` times. Returns `Ok`
 /// only when the agent reports bound-ready; otherwise **fails closed** with the still
@@ -215,7 +157,7 @@ pub(crate) fn bind_before_expose(
     leases: &[BindingLease],
     timeout: std::time::Duration,
 ) -> Result<()> {
-    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, timeout)
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, timeout)
         .context("connect guest-agent over vsock")?;
     establish_bindings(&mut channel, leases, 10)
 }
@@ -303,7 +245,7 @@ fn renewal_tick(
             Err(_) => revoked.push(name.clone()),
         }
     }
-    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, std::time::Duration::from_secs(5))
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, std::time::Duration::from_secs(5))
         .context("connect guest-agent for lease renewal")?;
     for name in &revoked {
         let id = protocol::binding_lease::BindingLeaseId::new(format!("lease-{name}"));
@@ -355,7 +297,7 @@ fn renew_over_channel(
 /// to wipe the guest's tmpfs bindings BEFORE VM teardown. Best-effort — a connect
 /// failure is returned to the caller which logs it and proceeds with teardown.
 pub(crate) fn stop_scrub_over_vsock(vsock_uds: &std::path::Path) -> Result<()> {
-    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, 1025, std::time::Duration::from_secs(5))
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, std::time::Duration::from_secs(5))
         .context("connect guest-agent for stop-scrub")?;
     stop_scrub(&mut channel)
 }
