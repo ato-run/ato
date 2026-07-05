@@ -261,6 +261,7 @@ mod tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: Some("sha256:exec".into()),
+                supervisor: None,
             })
             .expect("build");
         let m = receipt.manifest;
