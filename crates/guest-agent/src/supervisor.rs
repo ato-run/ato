@@ -202,6 +202,17 @@ impl Workload for ChildWorkload {
         }
         let mut c = std::process::Command::new("/bin/sh");
         c.arg("-c").arg(spawn_script(plan)).current_dir(&plan.cwd);
+        #[cfg(unix)]
+        {
+            // Own process group (pgid = child pid). The supervisor cmd is often a
+            // shell wrapper (the rootfs builder emits `/bin/sh -lc <start_cmd>`), so
+            // the real app can be a GRANDCHILD of the spawned pid — `stop` must take
+            // down the whole tree via killpg, not kill. (PR 3d finding: single-PID
+            // SIGTERM killed only the wrapper shell, the orphaned app kept serving,
+            // and the "stopped" pre-seal snapshot captured a RUNNING workload.)
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
         for (k, v) in &plan.base_env {
             c.env(k, v); // non-secret only
         }
@@ -213,28 +224,52 @@ impl Workload for ChildWorkload {
         match self.child.take() {
             Some(mut ch) => {
                 // BOUNDED stop (this is the pre-snapshot build boundary — StopWorkload
-                // must always return): SIGTERM, wait up to a grace window, then SIGKILL
-                // a workload that ignored SIGTERM, and reap. A workload that traps
-                // SIGTERM cannot stall the seal.
+                // must always return): SIGTERM the whole PROCESS GROUP, wait up to a
+                // grace window, then SIGKILL a workload that ignored SIGTERM, and
+                // reap. killpg (pgid = child pid, set at spawn) is load-bearing: the
+                // cmd may be a shell wrapper whose real app is a grandchild — a
+                // single-PID kill would orphan it still serving (PR 3d finding). A
+                // workload that traps SIGTERM cannot stall the seal.
+                #[cfg(unix)]
+                let pgid = ch.id() as i32;
                 #[cfg(unix)]
                 unsafe {
-                    libc::kill(ch.id() as i32, libc::SIGTERM);
+                    libc::killpg(pgid, libc::SIGTERM);
                 }
                 let grace = std::time::Duration::from_millis(STOP_GRACE_MS);
                 let step = std::time::Duration::from_millis(20);
                 let deadline = std::time::Instant::now() + grace;
+                let mut reaped = false;
                 loop {
-                    match ch.try_wait()? {
-                        Some(_) => return Ok(true), // exited within grace
-                        None if std::time::Instant::now() >= deadline => break,
-                        None => std::thread::sleep(step),
+                    // Reap the direct child as soon as it exits (a zombie leader
+                    // would otherwise keep the group probe alive forever).
+                    if !reaped && ch.try_wait()?.is_some() {
+                        reaped = true;
                     }
+                    // "Stopped" = the whole GROUP is gone, not just the direct
+                    // child — a wrapper shell can exit while its grandchild (the
+                    // real app) survives. killpg(sig 0) probes remaining members.
+                    #[cfg(unix)]
+                    let group_alive = unsafe { libc::killpg(pgid, 0) == 0 };
+                    #[cfg(not(unix))]
+                    let group_alive = !reaped;
+                    if !group_alive {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        // Grace expired with survivors — SIGKILL the group
+                        // (unblockable, so the seal boundary stays bounded).
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::killpg(pgid, libc::SIGKILL);
+                        }
+                        break;
+                    }
+                    std::thread::sleep(step);
                 }
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(ch.id() as i32, libc::SIGKILL);
+                if !reaped {
+                    let _ = ch.wait(); // reap the (SIGKILLed) direct child
                 }
-                let _ = ch.wait(); // reap the killed child (bounded: SIGKILL is unblockable)
                 Ok(true)
             }
             None => Ok(false),
@@ -524,5 +559,48 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(sup.stop_workload().unwrap());
         assert!(started.elapsed() < std::time::Duration::from_millis(500), "normal stop should be fast");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stop_kills_the_whole_process_group_not_just_the_wrapper_shell() {
+        // REGRESSION (PR 3d live E2E): the rootfs builder emits the workload cmd as
+        // a shell wrapper (`/bin/sh -lc <start_cmd>`), so the real app can be a
+        // GRANDCHILD of the spawned pid. A single-PID SIGTERM killed only the
+        // wrapper, the orphaned app kept serving, and the "stopped" pre-seal
+        // snapshot captured a RUNNING workload (restore woke with /health ok).
+        // Model that exact shape: wrapper sh whose compound body (`…; true` defeats
+        // dash/bash's exec optimization) keeps the sleeper as a grandchild.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig {
+            cmd: vec!["sh".into(), "-c".into(), "sleep 300; true".into()],
+            cwd: "/tmp".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::new(),
+        };
+        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
+        assert!(sup.on_bound_ready(true).unwrap());
+        // The spawn put the wrapper in its own process group (pgid = child pid) —
+        // the property killpg-stop relies on.
+        let pid = match &sup.workload.child {
+            Some(ch) => ch.id() as i32,
+            None => panic!("child running"),
+        };
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "workload must lead its own process group");
+        assert!(sup.stop_workload().unwrap());
+        // The WHOLE group must be gone — poll killpg(sig 0) until ESRCH (the
+        // grandchild sleeper included; reparented orphans are reaped by init).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = unsafe { libc::killpg(pid, 0) == 0 };
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group survived stop — the grandchild workload outlived StopWorkload"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

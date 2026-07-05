@@ -206,6 +206,20 @@ pub struct BuildLayers {
     pub memory: Vec<u8>,
 }
 
+/// v1.2 PR 3d: build-side inputs for a **supervisor** capsule (a `[secrets.*]`
+/// rootfs whose init is the guest-agent, built by `derive_supervisor_build_spec`).
+/// Present ⇒ the backend must drive the supervisor build protocol before sealing:
+/// deliver a PLACEHOLDER lease per binding over vsock (the agent starts the
+/// workload only at bound-ready, so health is unreachable without this), wait for
+/// health, then `StopWorkload` + `Revoke` every placeholder so the snapshot is
+/// taken with the workload down and the tmpfs bindings scrubbed. Names only —
+/// the placeholder values are generated inside the backend and never stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupervisorBindings {
+    /// The binding names the guest rootfs requires (its agent argv), verbatim.
+    pub binding_names: Vec<String>,
+}
+
 /// Inputs to [`SnapshotBackend::build_ready_state`].
 pub struct BuildReadyStateInput<'a> {
     /// CapsuleFS store the layers are written into.
@@ -230,6 +244,10 @@ pub struct BuildReadyStateInput<'a> {
     /// execution identity). `None` ⇒ the sealed manifest carries no execution id and a
     /// registry builder fails closed at `artifact_metadata`.
     pub execution_id: Option<String>,
+    /// v1.2 PR 3d: `Some` ⇒ this rootfs is a supervisor build (agent-as-init) and
+    /// the backend drives placeholder-deliver → health → StopWorkload → Revoke
+    /// before the snapshot. `None` = the unchanged no-binding path.
+    pub supervisor: Option<SupervisorBindings>,
 }
 
 /// Result of a successful build.
