@@ -40,15 +40,19 @@ fn valid_env_var_name(name: &str) -> bool {
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// `/etc/ato/supervisor.json` — how the guest-agent launches the workload. Written
-/// into the rootfs by the builder for a supervisor (env-secret) capsule. Holds NO
-/// secret value: `bindings_env` maps an env var name to the **binding name** whose
-/// value the agent reads from tmpfs at spawn.
+/// v1.5 (ato#973): one process the supervisor manages. A capsule with a single
+/// service is the common case (byte-identical to the pre-v1.5 single-`cmd`
+/// config); a multi-service capsule (frontend + backend + redis…) lists several.
+/// Holds NO secret value — `bindings_env` maps an env var name to the binding
+/// NAME whose tmpfs value the agent reads at spawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SupervisorConfig {
+pub struct ServiceSpec {
+    /// Stable service name (diagnostics + per-service logs). Defaults to "app".
+    #[serde(default = "default_service_name")]
+    pub name: String,
     /// The workload argv (`["python3", "app.py"]` / `["/bin/sh", "-lc", "…"]`).
     pub cmd: Vec<String>,
-    /// Working directory for the workload (default `/app`).
+    /// Working directory (default `/app`).
     #[serde(default = "default_cwd")]
     pub cwd: String,
     /// Static environment (non-secret) applied before bindings.
@@ -60,8 +64,90 @@ pub struct SupervisorConfig {
     pub bindings_env: BTreeMap<String, String>,
 }
 
+/// `/etc/ato/supervisor.json` — how the guest-agent launches the workload(s).
+/// Written into the rootfs by the builder for a supervisor (env-secret) capsule.
+/// Holds NO secret value.
+///
+/// v1.5: backward-compatible superset. A single-service config keeps the legacy
+/// top-level `cmd`/`cwd`/`base_env`/`bindings_env` (and no `services`); a
+/// multi-service config lists `services` and omits the top-level `cmd`. Exactly
+/// one shape must be present — see [`SupervisorConfig::services`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorConfig {
+    /// LEGACY single-service argv. Empty when `services` is used.
+    #[serde(default)]
+    pub cmd: Vec<String>,
+    /// Working directory for the legacy single service (default `/app`).
+    #[serde(default = "default_cwd")]
+    pub cwd: String,
+    /// Static environment for the legacy single service.
+    #[serde(default)]
+    pub base_env: BTreeMap<String, String>,
+    /// `ENV_VAR -> binding name` for the legacy single service.
+    #[serde(default)]
+    pub bindings_env: BTreeMap<String, String>,
+    /// v1.5 multi-service list. When non-empty this is authoritative and the
+    /// legacy top-level fields are ignored.
+    #[serde(default)]
+    pub services: Vec<ServiceSpec>,
+}
+
 fn default_cwd() -> String {
     "/app".to_string()
+}
+
+fn default_service_name() -> String {
+    "app".to_string()
+}
+
+impl SupervisorConfig {
+    /// The NORMALIZED service list the supervisor drives: `services` when present,
+    /// else a single service synthesized from the legacy top-level fields. The
+    /// synthesized service is named "app" (matching the legacy sole workload).
+    pub fn services(&self) -> Vec<ServiceSpec> {
+        if !self.services.is_empty() {
+            return self.services.clone();
+        }
+        vec![ServiceSpec {
+            name: default_service_name(),
+            cmd: self.cmd.clone(),
+            cwd: self.cwd.clone(),
+            base_env: self.base_env.clone(),
+            bindings_env: self.bindings_env.clone(),
+        }]
+    }
+}
+
+impl ServiceSpec {
+    /// Fail-closed per-service validation (see [`SupervisorConfig::validate`]).
+    fn validate(&self) -> Result<(), String> {
+        if self.cmd.is_empty() {
+            return Err(format!("supervisor.json: service {:?} has empty `cmd`", self.name));
+        }
+        if self.name.trim().is_empty() {
+            return Err("supervisor.json: a service has an empty `name`".into());
+        }
+        for var in self.base_env.keys() {
+            if !valid_env_var_name(var) {
+                return Err(format!(
+                    "supervisor.json: service {:?} invalid base_env var name {var:?}",
+                    self.name
+                ));
+            }
+        }
+        for (var, binding) in &self.bindings_env {
+            if !valid_env_var_name(var) {
+                return Err(format!(
+                    "supervisor.json: service {:?} invalid bindings_env var name {var:?}",
+                    self.name
+                ));
+            }
+            BindingName::parse(binding.as_str()).map_err(|e| {
+                format!("supervisor.json: service {:?} invalid binding name {binding:?}: {e}", self.name)
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl SupervisorConfig {
@@ -81,20 +167,24 @@ impl SupervisorConfig {
     /// every binding name is a valid [`BindingName`] (it is joined onto the tmpfs
     /// root). `base_env` names are validated too.
     pub fn validate(&self) -> Result<(), String> {
-        if self.cmd.is_empty() {
-            return Err("supervisor.json: `cmd` is empty".into());
+        // Exactly one shape: either the legacy top-level `cmd` OR a `services`
+        // list — never both, never neither (fail-closed on an ambiguous config).
+        if !self.services.is_empty() && !self.cmd.is_empty() {
+            return Err(
+                "supervisor.json: set EITHER top-level `cmd` OR `services`, not both".into(),
+            );
         }
-        for var in self.base_env.keys() {
-            if !valid_env_var_name(var) {
-                return Err(format!("supervisor.json: invalid base_env var name {var:?}"));
-            }
+        let services = self.services();
+        if services.is_empty() {
+            return Err("supervisor.json: no service (`cmd` and `services` both empty)".into());
         }
-        for (var, binding) in &self.bindings_env {
-            if !valid_env_var_name(var) {
-                return Err(format!("supervisor.json: invalid bindings_env var name {var:?}"));
+        // Unique service names (they key per-service logs + diagnostics).
+        let mut seen = std::collections::BTreeSet::new();
+        for svc in &services {
+            svc.validate()?;
+            if !seen.insert(svc.name.clone()) {
+                return Err(format!("supervisor.json: duplicate service name {:?}", svc.name));
             }
-            BindingName::parse(binding.as_str())
-                .map_err(|e| format!("supervisor.json: invalid binding name {binding:?}: {e}"))?;
         }
         Ok(())
     }
@@ -135,21 +225,36 @@ pub fn plan_spawn(config: &SupervisorConfig, bindings_root: &Path) -> std::io::R
     config
         .validate()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    let mut secret_env = Vec::with_capacity(config.bindings_env.len());
-    for (var, binding) in &config.bindings_env {
+    // Back-compat single-service entry point: plan the sole normalized service.
+    let services = config.services();
+    plan_spawn_service(&services[0], bindings_root)
+}
+
+/// Plan the spawn for ONE service (v1.5). Verifies each binding file EXISTS
+/// (fail-closed — never start half-bound) without reading its contents.
+pub fn plan_spawn_service(service: &ServiceSpec, bindings_root: &Path) -> std::io::Result<SpawnPlan> {
+    service
+        .validate()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let mut secret_env = Vec::with_capacity(service.bindings_env.len());
+    for (var, binding) in &service.bindings_env {
         let path = bindings_root.join(binding);
         if !path.exists() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("binding '{binding}' for env '{var}' absent at {}", path.display()),
+                format!(
+                    "service '{}': binding '{binding}' for env '{var}' absent at {}",
+                    service.name,
+                    path.display()
+                ),
             ));
         }
         secret_env.push((var.clone(), path));
     }
     Ok(SpawnPlan {
-        cmd: config.cmd.clone(),
-        cwd: config.cwd.clone(),
-        base_env: config.base_env.clone(),
+        cmd: service.cmd.clone(),
+        cwd: service.cwd.clone(),
+        base_env: service.base_env.clone(),
         secret_env,
     })
 }
@@ -284,43 +389,101 @@ impl Workload for ChildWorkload {
 /// Ties a [`SupervisorConfig`] to a [`Workload`] + bindings root. The guest binary
 /// calls [`Supervisor::on_bound_ready`] after each control message (idempotent start
 /// once all bindings are present) and [`Supervisor::stop_workload`] on `StopWorkload`.
+/// v1.5 (ato#973): the supervisor manages a GROUP of service processes as a unit.
+/// One workload per normalized service; the whole group starts on bound-ready,
+/// stops on revoke/teardown, and restarts on rotation (the v1.4 hard gate, now
+/// applied to every service). A single-service capsule is the group-of-one case,
+/// byte-identical to the pre-v1.5 behaviour.
+///
+/// Workloads are produced by a factory so the caller controls the concrete type
+/// (production: `ChildWorkload::default`; tests: a shared-state spy). The group is
+/// empty until the first `on_bound_ready(true)`.
 pub struct Supervisor<W: Workload> {
     config: SupervisorConfig,
     bindings_root: PathBuf,
-    workload: W,
+    make_workload: Box<dyn FnMut() -> W>,
+    workloads: Vec<W>,
     started: bool,
 }
 
 impl<W: Workload> Supervisor<W> {
-    pub fn new(config: SupervisorConfig, bindings_root: impl Into<PathBuf>, workload: W) -> Self {
-        Supervisor { config, bindings_root: bindings_root.into(), workload, started: false }
+    pub fn new(
+        config: SupervisorConfig,
+        bindings_root: impl Into<PathBuf>,
+        make_workload: impl FnMut() -> W + 'static,
+    ) -> Self {
+        Supervisor {
+            config,
+            bindings_root: bindings_root.into(),
+            make_workload: Box::new(make_workload),
+            workloads: Vec::new(),
+            started: false,
+        }
     }
 
-    /// Start the workload exactly once, when the session is bound-ready. Composes the
-    /// env from tmpfs and spawns. A compose/spawn error is returned (fail-closed —
-    /// the caller must not report a healthy serving state). No-op if already started
-    /// or not yet bound-ready.
+    /// Start EVERY service exactly once, when the session is bound-ready. Each
+    /// service's env is composed from tmpfs and spawned. A compose/spawn error on
+    /// any service is fail-closed: already-started services in this call are
+    /// stopped so the caller never sees a partially-running group reported healthy.
+    /// No-op if already started or not yet bound-ready.
     pub fn on_bound_ready(&mut self, bound_ready: bool) -> std::io::Result<bool> {
         if self.started || !bound_ready {
             return Ok(false);
         }
-        let plan = plan_spawn(&self.config, &self.bindings_root)?;
-        self.workload.start(&plan)?;
+        let services = self.config.services();
+        for svc in &services {
+            let plan = match plan_spawn_service(svc, &self.bindings_root) {
+                Ok(p) => p,
+                Err(e) => {
+                    self.stop_all_started();
+                    return Err(e);
+                }
+            };
+            let mut w = (self.make_workload)();
+            if let Err(e) = w.start(&plan) {
+                self.stop_all_started();
+                return Err(e);
+            }
+            self.workloads.push(w);
+        }
         self.started = true;
         Ok(true)
     }
 
-    /// Stop the workload (pre-snapshot at build, or teardown). Returns whether a
-    /// process was actually running. Leaves `started=false` so a later bound-ready
-    /// (restore) starts a fresh workload with the real env.
+    /// Stop the group (pre-snapshot at build, or teardown). Returns whether ANY
+    /// service was running. Leaves `started=false` so a later bound-ready starts a
+    /// fresh group with the real env. Every service is stopped even if one errors.
     pub fn stop_workload(&mut self) -> std::io::Result<bool> {
-        let was_running = self.workload.stop()?;
+        let mut any_running = false;
+        let mut first_err: Option<std::io::Error> = None;
+        for mut w in self.workloads.drain(..) {
+            match w.stop() {
+                Ok(was) => any_running |= was,
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
         self.started = false;
-        Ok(was_running)
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(any_running),
+        }
+    }
+
+    /// Best-effort stop of workloads started so far (partial-start rollback). Never
+    /// errors — this is the fail-closed cleanup path.
+    fn stop_all_started(&mut self) {
+        for mut w in self.workloads.drain(..) {
+            let _ = w.stop();
+        }
+        self.started = false;
     }
 
     pub fn is_running(&self) -> bool {
-        self.workload.is_running()
+        self.workloads.iter().any(|w| w.is_running())
     }
 
     /// Whether a bound-ready start has happened (and no stop since). The v1.4 hard
@@ -352,6 +515,7 @@ pub fn bindings_root() -> PathBuf {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn write(dir: &Path, name: &str, value: &str) {
         std::fs::write(dir.join(name), value).unwrap();
@@ -368,6 +532,129 @@ mod tests {
         assert_eq!(cfg.bindings_env.get("OPENAI_API_KEY").map(String::as_str), Some("openai"));
         assert!(SupervisorConfig::from_json(r#"{"cmd":[]}"#).is_err());
         assert!(SupervisorConfig::from_json("not json").is_err());
+    }
+
+    // ── v1.5 (ato#973): multi-service process group ──
+
+    #[test]
+    fn config_parses_a_multi_service_list_and_back_compat_single_cmd() {
+        // Legacy single-cmd config normalizes to one "app" service.
+        let legacy = SupervisorConfig::from_json(r#"{"cmd":["python3","app.py"]}"#).unwrap();
+        let svcs = legacy.services();
+        assert_eq!(svcs.len(), 1);
+        assert_eq!(svcs[0].name, "app");
+        assert_eq!(svcs[0].cmd, vec!["python3", "app.py"]);
+
+        // Multi-service config: authoritative `services`, top-level cmd omitted.
+        let multi = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"backend","cmd":["python3","api.py"],"cwd":"/app/api"},
+                {"name":"redis","cmd":["redis-server"]}
+            ]}"#,
+        )
+        .unwrap();
+        let svcs = multi.services();
+        assert_eq!(svcs.len(), 2);
+        assert_eq!(svcs[0].name, "backend");
+        assert_eq!(svcs[0].cwd, "/app/api");
+        assert_eq!(svcs[1].name, "redis");
+        assert_eq!(svcs[1].cwd, "/app"); // default
+    }
+
+    #[test]
+    fn config_rejects_both_shapes_neither_shape_and_duplicate_names() {
+        // Both `cmd` and `services` set = ambiguous → rejected.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"cmd":["a"],"services":[{"cmd":["b"]}]}"#
+            )
+            .is_err(),
+            "cmd + services together must be rejected"
+        );
+        // Neither → rejected.
+        assert!(SupervisorConfig::from_json(r#"{}"#).is_err(), "empty config rejected");
+        assert!(SupervisorConfig::from_json(r#"{"services":[]}"#).is_err(), "empty services rejected");
+        // A service with empty cmd → rejected.
+        assert!(
+            SupervisorConfig::from_json(r#"{"services":[{"cmd":[]}]}"#).is_err(),
+            "service with empty cmd rejected"
+        );
+        // Duplicate service names → rejected (they key per-service logs).
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]},{"name":"x","cmd":["b"]}]}"#
+            )
+            .is_err(),
+            "duplicate service names rejected"
+        );
+        // Per-service binding/env validation still fail-closed.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"],"bindings_env":{"BAD NAME":"openai"}}]}"#
+            )
+            .is_err(),
+            "invalid env var in a service rejected"
+        );
+    }
+
+    #[test]
+    fn supervisor_starts_and_stops_the_WHOLE_group_as_a_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "openai", "sk-KEY");
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"backend","cmd":["true"],"bindings_env":{"OPENAI_API_KEY":"openai"}},
+                {"name":"worker","cmd":["true"]},
+                {"name":"redis","cmd":["true"]}
+            ]}"#,
+        )
+        .unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let mut sup = Supervisor::new(cfg, dir.path(), move || fake.clone());
+
+        // Bound-ready → ALL three services start.
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert!(sup.is_running());
+        assert_eq!(st.starts.borrow().len(), 3, "every service started");
+        assert_eq!(*st.live.borrow(), 3);
+
+        // Idempotent.
+        assert!(!sup.on_bound_ready(true).unwrap());
+        assert_eq!(st.starts.borrow().len(), 3);
+
+        // Stop → the WHOLE group is torn down (was_running=true, all live gone).
+        assert!(sup.stop_workload().unwrap());
+        assert!(!sup.is_running());
+        assert_eq!(*st.live.borrow(), 0);
+        assert_eq!(*st.stops.borrow(), 3, "every service stopped");
+
+        // Rotation-style restart re-plans + restarts the whole group.
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert_eq!(st.starts.borrow().len(), 6);
+        assert_eq!(*st.live.borrow(), 3);
+    }
+
+    #[test]
+    fn a_service_that_fails_to_start_rolls_back_the_group_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        // Second service requires a binding that is ABSENT ⇒ plan fails after the
+        // first already started ⇒ the group must roll back (no partial serving).
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"ok","cmd":["true"]},
+                {"name":"broken","cmd":["true"],"bindings_env":{"KEY":"absent"}}
+            ]}"#,
+        )
+        .unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let mut sup = Supervisor::new(cfg, dir.path(), move || fake.clone());
+
+        assert!(sup.on_bound_ready(true).is_err(), "missing binding fails the group");
+        assert!(!sup.is_running(), "the started service was rolled back");
+        assert!(!sup.started(), "group is not marked started");
+        assert_eq!(*st.live.borrow(), 0, "no service left running");
     }
 
     #[test]
@@ -400,6 +687,7 @@ mod tests {
             cwd: "/app".into(),
             base_env: BTreeMap::from([("PORT".to_string(), "8080".to_string())]),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
+            services: Vec::new(),
         };
         let plan = plan_spawn(&cfg, dir.path()).unwrap();
         assert_eq!(plan.base_env.get("PORT").map(String::as_str), Some("8080"));
@@ -425,26 +713,34 @@ mod tests {
 
     /// Records lifecycle + the plans the workload was started with (proves the agent
     /// hands the child a PATH, never a value, and that stop/restart re-plans).
+    /// v1.5: SHARED state (Rc) so a factory yields state-aggregating clones — the
+    /// `Supervisor` builds one workload per service via the factory, and the test
+    /// inspects the aggregate `starts`/`stops` plus a live-instance count (so
+    /// `is_running` = any live, `starts.len()` = cumulative across restarts).
+    #[derive(Clone, Default)]
+    struct FakeWorkload(Rc<FakeState>);
     #[derive(Default)]
-    struct FakeWorkload {
-        running: bool,
+    struct FakeState {
         starts: RefCell<Vec<SpawnPlan>>,
         stops: RefCell<u32>,
+        live: RefCell<i32>,
     }
     impl Workload for FakeWorkload {
         fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()> {
-            self.starts.borrow_mut().push(plan.clone());
-            self.running = true;
+            self.0.starts.borrow_mut().push(plan.clone());
+            *self.0.live.borrow_mut() += 1;
             Ok(())
         }
         fn stop(&mut self) -> std::io::Result<bool> {
-            let was = self.running;
-            self.running = false;
-            *self.stops.borrow_mut() += 1;
+            let was = *self.0.live.borrow() > 0;
+            if was {
+                *self.0.live.borrow_mut() -= 1;
+            }
+            *self.0.stops.borrow_mut() += 1;
             Ok(was)
         }
         fn is_running(&self) -> bool {
-            self.running
+            *self.0.live.borrow() > 0
         }
     }
 
@@ -457,8 +753,11 @@ mod tests {
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default());
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let mut sup = Supervisor::new(cfg, dir.path(), move || fake.clone());
 
         // Not bound-ready → no start.
         assert!(!sup.on_bound_ready(false).unwrap());
@@ -469,9 +768,9 @@ mod tests {
         assert!(sup.is_running());
         // Idempotent: a second bound-ready does not double-start.
         assert!(!sup.on_bound_ready(true).unwrap());
-        assert_eq!(sup.workload.starts.borrow().len(), 1);
-        assert_eq!(sup.workload.starts.borrow()[0].secret_env[0].0, "OPENAI_API_KEY");
-        assert!(!format!("{:?}", sup.workload.starts.borrow()[0]).contains("sk-PLACEHOLDER"));
+        assert_eq!(st.starts.borrow().len(), 1);
+        assert_eq!(st.starts.borrow()[0].secret_env[0].0, "OPENAI_API_KEY");
+        assert!(!format!("{:?}", st.starts.borrow()[0]).contains("sk-PLACEHOLDER"));
 
         // StopWorkload (pre-snapshot) → stops, allows a fresh start on restore.
         assert!(sup.stop_workload().unwrap());
@@ -480,7 +779,7 @@ mod tests {
         // Restore: real value on tmpfs, bound-ready again → re-plans + restarts.
         write(dir.path(), "openai", "sk-REAL");
         assert!(sup.on_bound_ready(true).unwrap());
-        assert_eq!(sup.workload.starts.borrow().len(), 2);
+        assert_eq!(st.starts.borrow().len(), 2);
     }
 
     #[test]
@@ -491,8 +790,9 @@ mod tests {
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default());
+        let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default);
         assert!(!sup.stop_workload().unwrap(), "nothing to stop ⇒ was_running=false");
     }
 
@@ -513,8 +813,9 @@ mod tests {
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
+        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
         assert!(sup.is_running());
         // Wait for the child to write the file (it read the value at exec).
@@ -539,8 +840,9 @@ mod tests {
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
+        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
         assert!(sup.is_running());
         let started = std::time::Instant::now();
@@ -560,8 +862,9 @@ mod tests {
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
+        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
         let started = std::time::Instant::now();
         assert!(sup.stop_workload().unwrap());
@@ -584,12 +887,13 @@ mod tests {
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
+            services: Vec::new(),
         };
-        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default());
+        let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
         // The spawn put the wrapper in its own process group (pgid = child pid) —
         // the property killpg-stop relies on.
-        let pid = match &sup.workload.child {
+        let pid = match sup.workloads.first().and_then(|w| w.child.as_ref()) {
             Some(ch) => ch.id() as i32,
             None => panic!("child running"),
         };
