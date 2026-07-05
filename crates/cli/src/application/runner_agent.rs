@@ -743,6 +743,7 @@ pub async fn run_serve(
     // them per-slot at ready time.
     validate_slot_port_range(proxy_base_port, capacity)?;
     validate_public_url_template(public_url_template.as_deref())?;
+    validate_multi_slot_public_url(capacity, public_url_template.as_deref())?;
     let creds = load_runner_credentials()?;
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
@@ -1266,6 +1267,23 @@ pub fn validate_public_url_template(template: Option<&str>) -> Result<()> {
     {
         bail!(
             "public URL template must include {{port}} or {{slot}} so each slot renders a distinct URL"
+        );
+    }
+    Ok(())
+}
+
+/// v1.3 (ato#968): a multi-slot runner WITHOUT a public URL template can only
+/// ever hand a URL to slot 0 — every other slot reports an honest but
+/// unopenable ready (and under netns its guest is unreachable except through
+/// the proxy the URL would front). Readiness must mean "openable", so the
+/// configuration is refused at startup instead of failing one run at a time.
+pub fn validate_multi_slot_public_url(capacity: usize, template: Option<&str>) -> Result<()> {
+    if capacity > 1 && template.is_none() {
+        bail!(
+            "--max-slots {capacity} requires a public URL template: without one only slot 0 \
+             gets a ready_url and every other slot's run is unopenable. Pass \
+             --public-url-template (e.g. \"http://HOST:{{port}}\") or set \
+             ATO_RUNNER_PUBLIC_URL_TEMPLATE."
         );
     }
     Ok(())
@@ -6028,6 +6046,19 @@ mod tests {
             start_root_proxy(&listen2, dead_port).await.is_err(),
             "proxy must refuse to come up in front of a dead workload"
         );
+    }
+
+    /// v1.3 (ato#968): multi-slot without a URL template = slot≥1 unopenable;
+    /// the config must be refused at serve startup, not one run at a time.
+    #[test]
+    fn multi_slot_without_template_is_refused_at_startup() {
+        assert!(validate_multi_slot_public_url(1, None).is_ok());
+        assert!(validate_multi_slot_public_url(1, Some("http://h:{port}")).is_ok());
+        assert!(validate_multi_slot_public_url(2, Some("http://h:{port}")).is_ok());
+        assert!(validate_multi_slot_public_url(3, Some("http://h/{slot}/")).is_ok());
+        let err = validate_multi_slot_public_url(2, None).unwrap_err().to_string();
+        assert!(err.contains("public URL template"), "actionable message, got: {err}");
+        assert!(err.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE"));
     }
 
     // ── Proxy readiness probe (3e-4) ──
