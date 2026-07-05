@@ -109,6 +109,14 @@ pub struct FirecrackerConfig {
     pub veth_root: Option<String>,
     pub veth_root_ip: Option<String>,
     pub veth_ns: Option<String>,
+    /// v1.4 (ato#970): per-slot vsock UDS isolation. The vsock host UDS path is
+    /// BAKED into the snapshot (deterministic per capsule hash — Firecracker
+    /// cannot override it at load), so two concurrent restores of the same
+    /// capsule collide on it. When `Some`, the VMM runs in a PRIVATE MOUNT
+    /// NAMESPACE with this directory bind-mounted over the baked path's parent
+    /// (`$TMPDIR/ato-vsock`): the guest-facing socket lands in this per-slot
+    /// directory, where the host dials it. `None` = legacy shared path.
+    pub vsock_slot_dir: Option<PathBuf>,
 }
 
 impl Default for FirecrackerConfig {
@@ -135,6 +143,7 @@ impl Default for FirecrackerConfig {
             veth_root: None,
             veth_root_ip: None,
             veth_ns: None,
+            vsock_slot_dir: None,
         }
     }
 }
@@ -162,6 +171,9 @@ impl FirecrackerConfig {
         c.veth_ns = Some(format!("vsl{index}n"));
         c.veth_root_ip = Some(format!("{prefix}.{index}.1"));
         c.ingress_ip = Some(format!("{prefix}.{index}.2"));
+        // v1.4 (ato#970): each slot gets a private view of the baked vsock UDS
+        // parent dir, so concurrent supervisor restores never share a socket path.
+        c.vsock_slot_dir = Some(std::env::temp_dir().join("ato-vsock-slots").join(format!("ato-slot-{index}")));
         c
     }
 }
@@ -452,21 +464,53 @@ impl FirecrackerBackend {
 
     /// The base command to launch firecracker — wrapped in `ip netns exec <ns>`
     /// when this slot is namespaced so the VMM (and its tap) live inside `ns`.
-    fn fc_command(&self) -> Command {
+    ///
+    /// v1.4 (ato#970): when the restore also needs vsock isolation
+    /// (`vsock_isolation` = a supervisor artifact under netns), the VMM is
+    /// additionally wrapped in a PRIVATE MOUNT NAMESPACE (`unshare -m`, which
+    /// makes mounts rprivate) with the slot's own directory bind-mounted over
+    /// the BAKED vsock UDS parent — the socket FC re-creates at the baked path
+    /// then lands in the per-slot directory, where the host dials it. The bind
+    /// mount is invisible outside the VMM's namespace and dies with it. Both
+    /// directories are created by the caller before spawn (same underlying fs).
+    fn fc_command(&self, vsock_isolation: bool) -> Command {
         match &self.config.netns {
-            Some(ns) => {
-                let mut c = Command::new("ip");
-                c.args(["netns", "exec", ns, &self.config.firecracker_bin]);
-                c
-            }
+            Some(ns) => match self.config.vsock_slot_dir.as_ref().filter(|_| vsock_isolation) {
+                Some(slot_dir) => {
+                    let mut c = Command::new("ip");
+                    c.args([
+                        "netns", "exec", ns,
+                        "unshare", "--mount",
+                        "sh", "-c",
+                        // $1 = per-slot dir, $2 = baked vsock parent; the rest is
+                        // the VMM argv (start_fc appends --api-sock etc. after
+                        // the firecracker binary below).
+                        r#"mount --bind "$1" "$2" && shift 2 && exec "$@""#,
+                        "sh",
+                    ]);
+                    c.arg(slot_dir);
+                    c.arg(vsock_uds_parent_dir());
+                    c.arg(&self.config.firecracker_bin);
+                    c
+                }
+                None => {
+                    let mut c = Command::new("ip");
+                    c.args(["netns", "exec", ns, &self.config.firecracker_bin]);
+                    c
+                }
+            },
             None => Command::new(&self.config.firecracker_bin),
         }
     }
 
     fn start_fc(&self, sock: &Path, console_log: &Path) -> Result<FcProcess, SnapshotError> {
+        self.start_fc_with(sock, console_log, false)
+    }
+
+    fn start_fc_with(&self, sock: &Path, console_log: &Path, vsock_isolation: bool) -> Result<FcProcess, SnapshotError> {
         let _ = std::fs::remove_file(sock);
         let log = std::fs::File::create(console_log).map_err(|e| self.backend_err(format!("create console log: {e}")))?;
-        let child = self.fc_command()
+        let child = self.fc_command(vsock_isolation)
             .arg("--api-sock").arg(sock)
             .stdout(Stdio::from(log.try_clone().map_err(|e| self.backend_err(e.to_string()))?))
             .stderr(Stdio::from(log))
@@ -761,6 +805,12 @@ fn vsock_enabled() -> bool {
     matches!(std::env::var("ATO_FC_VSOCK").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
 }
 
+/// The parent directory of every baked vsock host UDS (`$TMPDIR/ato-vsock`). Also the
+/// bind-mount TARGET for v1.4 per-slot vsock isolation (see `fc_command`).
+fn vsock_uds_parent_dir() -> PathBuf {
+    std::env::temp_dir().join("ato-vsock")
+}
+
 /// The vsock host UDS for a capsule — **deterministic** so build (which bakes it into
 /// the snapshot) and restore (which re-creates it) agree on the same-host developer
 /// preview. Firecracker does not allow overriding the vsock uds at load, so the path is
@@ -770,7 +820,7 @@ fn vsock_uds_path(capsule_manifest_hash: &str) -> PathBuf {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    std::env::temp_dir().join("ato-vsock").join(format!("{safe}.sock"))
+    vsock_uds_parent_dir().join(format!("{safe}.sock"))
 }
 
 /// v1.2 PR 3d: keep the transient build dir (incl. `console.log`) on disk instead of
@@ -1286,17 +1336,23 @@ impl SnapshotBackend for FirecrackerBackend {
         // host says nothing about whether THIS artifact collides — gating on it
         // blocked every N-slot restore on a supervisor-capable host (runner
         // profiles: public N-slot = non-vsock artifacts; supervisor = vsock
-        // artifacts, single-slot until v1.4). The env flag's forced UDS prep is
-        // correspondingly skipped under netns below.
+        // artifacts). The env flag's forced UDS prep is correspondingly skipped
+        // under netns below.
+        //
+        // v1.4 (ato#970): a vsock artifact under netns is no longer refused when
+        // the slot provides `vsock_slot_dir` — the VMM then runs in a private
+        // mount namespace with that directory bind-mounted over the baked UDS
+        // parent, so concurrent instances get distinct sockets (see
+        // `fc_command`). A netns slot WITHOUT a slot dir stays fail-closed.
         if self.config.netns.is_some() {
             if !self.config.rootfs_read_only {
                 return Err(self.unsupported(
                     "N-slot (netns) restore requires read-only rootfs; rw-rootfs writes a shared cache path and would corrupt under concurrency",
                 ));
             }
-            if input.manifest.has_vsock {
+            if input.manifest.has_vsock && self.config.vsock_slot_dir.is_none() {
                 return Err(self.unsupported(
-                    "N-slot (netns) restore does not yet support vsock snapshots; the baked vsock UDS path collides across concurrent instances",
+                    "N-slot (netns) restore of a vsock snapshot needs a per-slot vsock dir (vsock_slot_dir); without one the baked vsock UDS path collides across concurrent instances",
                 ));
             }
         }
@@ -1448,8 +1504,21 @@ impl SnapshotBackend for FirecrackerBackend {
                 page_handle = Some(server.serve(hotset));
             }
 
+            // v1.4 (ato#970): vsock isolation is decided BEFORE the VMM spawns —
+            // the mount-ns wrapper bind-mounts the per-slot dir over the baked
+            // UDS parent at exec, so both directories must already exist.
+            let vsock_isolation = input.manifest.has_vsock && self.config.netns.is_some();
+            if vsock_isolation {
+                let slot_dir = self.config.vsock_slot_dir.as_ref().ok_or_else(|| {
+                    self.backend_err("vsock isolation without a vsock_slot_dir (gate should have refused)")
+                })?;
+                std::fs::create_dir_all(slot_dir)
+                    .map_err(|e| self.backend_err(format!("vsock slot dir: {e}")))?;
+                std::fs::create_dir_all(vsock_uds_parent_dir())
+                    .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+            }
             let fc = bench::time("restore.start_fc", || {
-                self.start_fc(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"))
+                self.start_fc_with(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"), vsock_isolation)
             })?;
             // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
             // uds_path; FC re-creates that socket on load, so its directory must exist.
@@ -1457,17 +1526,30 @@ impl SnapshotBackend for FirecrackerBackend {
             // without an env flag; ATO_FC_VSOCK still forces it for the smokes —
             // EXCEPT under netns (v1.3, ato#968): the UDS path is deterministic per
             // capsule hash, so a forced prep (`remove_file`) from one slot could rip
-            // out another slot's live socket. Under netns only the manifest decides
-            // (and a has_vsock manifest was already rejected by the gate above).
+            // out another slot's live socket.
+            // v1.4: under isolation the HOST-side dial path is the per-slot dir —
+            // the baked path stays what FC (in its private mount ns) re-creates.
             let vsock_uds = if input.manifest.has_vsock
                 || (vsock_enabled() && self.config.netns.is_none())
             {
-                let uds = vsock_uds_path(&input.manifest.capsule_manifest_hash);
-                if let Some(d) = uds.parent() {
-                    std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+                let baked = vsock_uds_path(&input.manifest.capsule_manifest_hash);
+                if vsock_isolation {
+                    let slot_dir = self.config.vsock_slot_dir.as_ref().ok_or_else(|| {
+                        self.backend_err("vsock isolation without a vsock_slot_dir (gate should have refused)")
+                    })?;
+                    let file = baked.file_name().ok_or_else(|| {
+                        self.backend_err("baked vsock uds path has no file name")
+                    })?;
+                    let host_uds = slot_dir.join(file);
+                    let _ = std::fs::remove_file(&host_uds);
+                    Some(host_uds)
+                } else {
+                    if let Some(d) = baked.parent() {
+                        std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+                    }
+                    let _ = std::fs::remove_file(&baked);
+                    Some(baked)
                 }
-                let _ = std::fs::remove_file(&uds);
-                Some(uds)
             } else {
                 None
             };
@@ -1731,6 +1813,54 @@ mod tests {
         // reachable host is the per-slot ingress, not the shared guest IP.
         let s1_ingress = s1.ingress_ip.clone().unwrap();
         assert_eq!(FirecrackerBackend::with_config(s1).reachable_host(), s1_ingress);
+    }
+
+    // ── v1.4 (ato#970): per-slot vsock UDS isolation ──
+
+    #[test]
+    fn for_slot_netns_on_derives_distinct_vsock_slot_dirs() {
+        let base = FirecrackerConfig::default();
+        // netns off ⇒ no isolation dir (legacy shared baked path).
+        assert!(FirecrackerConfig::for_slot(0, false, &base).vsock_slot_dir.is_none());
+        // netns on ⇒ every slot gets its own dir.
+        let s0 = FirecrackerConfig::for_slot(0, true, &base);
+        let s1 = FirecrackerConfig::for_slot(1, true, &base);
+        let (d0, d1) = (s0.vsock_slot_dir.unwrap(), s1.vsock_slot_dir.unwrap());
+        assert_ne!(d0, d1);
+        assert!(d0.to_string_lossy().contains("ato-slot-0"));
+        assert!(d1.to_string_lossy().contains("ato-slot-1"));
+    }
+
+    #[test]
+    fn fc_command_wraps_vsock_isolation_in_a_private_mount_ns() {
+        let base = FirecrackerConfig::default();
+
+        // Legacy: no netns ⇒ plain firecracker, isolation flag irrelevant.
+        let plain = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(0, false, &base));
+        assert_eq!(plain.fc_command(true).get_program(), std::ffi::OsStr::new(&base.firecracker_bin));
+
+        // Netns without isolation: ip netns exec <ns> <fc> (unchanged shape).
+        let ns = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(1, true, &base));
+        let cmd = ns.fc_command(false);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("ip"));
+        assert_eq!(args, vec!["netns", "exec", "ato-slot-1", &base.firecracker_bin]);
+
+        // Netns WITH isolation: the VMM is exec'd inside `unshare --mount` with
+        // the per-slot dir bind-mounted over the baked vsock parent, and the
+        // firecracker binary last so start_fc's appended args reach "$@".
+        let cmd = ns.fc_command(true);
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(cmd.get_program(), std::ffi::OsStr::new("ip"));
+        assert_eq!(&args[..3], ["netns", "exec", "ato-slot-1"]);
+        assert_eq!(&args[3..5], ["unshare", "--mount"]);
+        assert_eq!(args[5], "sh");
+        assert_eq!(args[6], "-c");
+        assert!(args[7].contains(r#"mount --bind "$1" "$2""#) && args[7].contains(r#"exec "$@""#));
+        assert!(args[9].contains("ato-slot-1"), "per-slot dir, got {}", args[9]);
+        assert_eq!(args[10], vsock_uds_parent_dir().to_string_lossy());
+        assert_eq!(args[11], base.firecracker_bin);
+        assert_eq!(args.len(), 12, "firecracker binary must be LAST so --api-sock appends into \"$@\"");
     }
 
     #[test]
