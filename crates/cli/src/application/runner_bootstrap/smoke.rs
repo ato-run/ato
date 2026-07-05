@@ -342,6 +342,7 @@ async fn smoke_pipeline(
                 .unwrap_or_default(),
             snapshot_backend: sealed.manifest.snapshot_backend.kind.clone(),
             healthcheck_url_path: None,
+            with_bindings: false,
         };
         // locate_artifact must map cas:// to <workdir>/<job>/{manifest.json,cas}.
         let paths = locate_artifact(&cmd.artifact_location, workdir)
@@ -350,12 +351,12 @@ async fn smoke_pipeline(
             bail!("locate_artifact mapped to {} not {}", paths.manifest_json.display(), manifest_json.display());
         }
         // Positive: the exact artifact must verify.
-        load_and_verify_manifest(&paths.manifest_json, &cmd)
+        load_and_verify_manifest(&paths.manifest_json, &cmd, false)
             .map_err(|(c, m)| anyhow::anyhow!("genuine artifact rejected: {c}: {m}"))?;
         // Negative: a tampered hash must be refused (the gate the direct restore lacks).
         let mut bad = cmd.clone();
         bad.artifact_manifest_hash = "blake3:TAMPERED".into();
-        if load_and_verify_manifest(&paths.manifest_json, &bad).is_ok() {
+        if load_and_verify_manifest(&paths.manifest_json, &bad, false).is_ok() {
             bail!("SECURITY: tampered artifact_manifest_hash was accepted");
         }
         Ok(hash)
