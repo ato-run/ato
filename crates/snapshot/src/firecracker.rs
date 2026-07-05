@@ -643,6 +643,31 @@ impl FirecrackerBackend {
         ))
     }
 
+    /// v1.2 PR 3d: restore-readiness probe for a SUPERVISOR artifact. The workload is
+    /// down by design (StopWorkload+Revoke ran before the seal), so readiness =
+    /// "VM resumed + guest-agent reachable" — and, fail-closed, the agent must
+    /// report NOT bound-ready: a bound-ready session straight out of restore means
+    /// binding state survived the seal (a pre-bind-seal violation), never expose it.
+    fn probe_restored_agent_unbound(&self, uds: &Path) -> Result<(), SnapshotError> {
+        let mut ch = FirecrackerAgentChannel::connect_with_retry(
+            uds,
+            GUEST_AGENT_VSOCK_PORT,
+            self.config.boot_timeout,
+        )
+        .map_err(|e| self.backend_err(format!("supervisor restore: agent unreachable: {e:#}")))?;
+        match ch.request(HostToAgent::QueryBoundReady) {
+            Ok(AgentToHost::BoundReady { ready: false, .. }) => Ok(()),
+            Ok(AgentToHost::BoundReady { ready: true, .. }) => Err(self.backend_err(
+                "supervisor restore: session is ALREADY bound-ready after restore — \
+                 binding state survived the seal (pre-bind-seal violation); refusing to expose",
+            )),
+            Ok(other) => Err(self.backend_err(format!(
+                "supervisor restore: unexpected BoundReady response: {other:?}"
+            ))),
+            Err(e) => Err(self.backend_err(format!("supervisor restore: bound-ready probe: {e:#}"))),
+        }
+    }
+
     /// v1.2 PR 3d: build-failure forensics. The guest console (`console.log`) was
     /// being captured and then silently deleted with the build dir on EVERY outcome —
     /// exactly why earlier guest failures were undiagnosable. On failure, always emit
@@ -1448,22 +1473,41 @@ impl SnapshotBackend for FirecrackerBackend {
             // Readiness: U1a (Zero) serves garbage pages, so the guest never reaches
             // health — confirm the fault loop fired instead. Everything else (File,
             // U1b Mem) waits for health as usual.
-            let time_to_health_ms: Option<u128> = match (uffd, &page_handle) {
-                // U1a: zero pages → never reaches health; confirm the loop fired.
-                (Some(UffdMode::Zero), Some(h)) => {
-                    h.wait_for_first_fault(Duration::from_secs(10));
-                    None
+            //
+            // v1.2 PR 3d: a SUPERVISOR artifact wakes with the workload down BY
+            // DESIGN (StopWorkload+Revoke ran before the seal), so a TCP health-wait
+            // can never pass until the caller delivers the REAL bindings. Its
+            // readiness gate is instead: guest-agent reachable over vsock AND not
+            // bound-ready (bound-ready out of restore = binding state survived the
+            // seal → fail closed).
+            let time_to_health_ms: Option<u128> = if input.manifest.supervisor_build.is_some() {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err(
+                        "supervisor artifact restored without a vsock uds \
+                         (manifest.has_vsock must be true for a supervisor build)",
+                    )
+                })?;
+                let probe_start = Instant::now();
+                bench::time("restore.probe_agent", || self.probe_restored_agent_unbound(uds))?;
+                Some(probe_start.elapsed().as_millis())
+            } else {
+                match (uffd, &page_handle) {
+                    // U1a: zero pages → never reaches health; confirm the loop fired.
+                    (Some(UffdMode::Zero), Some(h)) => {
+                        h.wait_for_first_fault(Duration::from_secs(10));
+                        None
+                    }
+                    // U1b/U2 (uffd mem/cas): wait for health but FAIL CLOSED FAST (U5) if
+                    // the page-server hits a fatal CAS miss/corrupt — don't burn the full
+                    // timeout booting a VM on memory that can never be served.
+                    (Some(_), Some(h)) => {
+                        let ms = self.wait_health_until(port, &path, || h.failed())?;
+                        h.mark_health_reached();
+                        Some(ms)
+                    }
+                    // File backend (default): unchanged.
+                    _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
                 }
-                // U1b/U2 (uffd mem/cas): wait for health but FAIL CLOSED FAST (U5) if
-                // the page-server hits a fatal CAS miss/corrupt — don't burn the full
-                // timeout booting a VM on memory that can never be served.
-                (Some(_), Some(h)) => {
-                    let ms = self.wait_health_until(port, &path, || h.failed())?;
-                    h.mark_health_reached();
-                    Some(ms)
-                }
-                // File backend (default): unchanged.
-                _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
             };
 
             // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
