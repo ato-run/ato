@@ -602,10 +602,43 @@ fn derive_supervisor_services(
         }
     }
 
+    // Fail-closed: no DUPLICATE expose placeholder within a service — the second
+    // would silently overwrite the first's allocated port.
+    for r in &collected {
+        let mut seen = std::collections::BTreeSet::new();
+        for ph in &r.expose {
+            if !seen.insert(ph.as_str()) {
+                return Err(format!("service '{}': duplicate expose placeholder {ph:?}", r.name));
+            }
+        }
+    }
+    // Fail-closed: the GENERATED cross-reference env var names
+    // (`<SERVICE>_<PLACEHOLDER>`) must be unique across all pairs — a service name
+    // with a `-` and a placeholder with a `_` can otherwise alias (`a-b`+`C` and
+    // `a`+`B_C` both → `A_B_C`), silently losing one port reference.
+    {
+        let mut xref: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for r in &collected {
+            for ph in &r.expose {
+                let var = format!("{}_{}", env_prefix(&r.name), ph);
+                if let Some(prev) = xref.insert(var.clone(), (r.name.clone(), ph.clone())) {
+                    return Err(format!(
+                        "expose placeholders collide: {}.{} and {}.{} both generate the \
+                         cross-reference env var {var:?} — rename one placeholder to disambiguate",
+                        prev.0, prev.1, r.name, ph
+                    ));
+                }
+            }
+        }
+    }
+
     // ── Allocate the ports each service's `expose` placeholders name ──
     // Reserved: the proxied target port + every literal `env.PORT`. The PUBLIC
     // service's FIRST expose placeholder resolves to the target port; every other
-    // placeholder gets the next free port from a deterministic base.
+    // placeholder gets the next free port from a FIXED base. The base is a
+    // constant (not ambient env) so the sealed rootfs is reproducible from the
+    // manifest alone — the same manifest never allocates differently on two hosts.
+    const SERVICE_PORT_BASE: u16 = 8091;
     let mut reserved: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     reserved.insert(target_port);
     for r in &collected {
@@ -613,11 +646,7 @@ fn derive_supervisor_services(
             reserved.insert(p);
         }
     }
-    let base: u16 = std::env::var("ATO_SERVICE_PORT_BASE")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(8091);
-    let mut next = base;
+    let mut next = SERVICE_PORT_BASE;
     let mut alloc = || -> Result<u16, String> {
         loop {
             let p = next;
@@ -652,24 +681,49 @@ fn derive_supervisor_services(
 
     // ── Build final services: inject own placeholders (unprefixed) + every
     // service's resolved ports as `<SERVICE>_<PLACEHOLDER>` for cross-service
-    // reachability on loopback. ──
+    // reachability on loopback. EVERY injected var is checked against what is
+    // already present (author env or a prior injection) — a collision is a config
+    // error, never a silent override (Ato fail-closed). ──
+    fn insert_checked(
+        env: &mut BTreeMap<String, String>,
+        service: &str,
+        key: String,
+        val: String,
+    ) -> Result<(), String> {
+        if env.contains_key(&key) {
+            return Err(format!(
+                "service '{service}': injected port env {key:?} collides with an existing \
+                 env var — rename the expose placeholder or drop the conflicting env"
+            ));
+        }
+        env.insert(key, val);
+        Ok(())
+    }
     let mut out: Vec<ServiceBuildSpec> = Vec::with_capacity(collected.len());
     for r in &collected {
         let mut base_env = r.author_env.clone();
+        // The public service always listens on the proxied target port. A public
+        // service that declared `env.PORT` was already validated == target_port, so
+        // set it idempotently BEFORE the checked injections (an expose placeholder
+        // literally named "PORT" would then correctly collide).
+        if r.public {
+            base_env.entry("PORT".to_string()).or_insert_with(|| target_port.to_string());
+        }
         // Own placeholders, unprefixed, so THIS service binds there.
         for ph in &r.expose {
-            if let Some(p) = resolved_ports.get(&(r.name.clone(), ph.clone())) {
-                base_env.insert(ph.clone(), p.to_string());
+            let p = resolved_ports[&(r.name.clone(), ph.clone())];
+            // A public first placeholder resolves to the target port; if it is
+            // literally "PORT" the idempotent public-PORT set above already holds
+            // the same value, so allow that exact match rather than false-collide.
+            if r.public && ph == "PORT" && base_env.get("PORT") == Some(&p.to_string()) {
+                continue;
             }
-        }
-        // The public service always gets PORT = the proxied target port.
-        if r.public {
-            base_env.insert("PORT".to_string(), target_port.to_string());
+            insert_checked(&mut base_env, &r.name, ph.clone(), p.to_string())?;
         }
         // Cross-references: every service's ports, as <SERVICE>_<PLACEHOLDER>.
         for ((svc, ph), port) in &resolved_ports {
             let var = format!("{}_{}", env_prefix(svc), ph);
-            base_env.entry(var).or_insert_with(|| port.to_string());
+            insert_checked(&mut base_env, &r.name, var, port.to_string())?;
         }
         out.push(ServiceBuildSpec {
             name: r.name.clone(),
@@ -1514,6 +1568,83 @@ readiness_probe = { http_get = "/health" }
         assert!(derive_supervisor_build_spec(&parse(&toml), &probe_python())
             .unwrap_err()
             .contains("POSIX identifier"));
+    }
+
+    /// Helper: a two-service capsule (public api + one internal service) with the
+    /// internal service's body spliced in, for the collision fail-closed cases.
+    fn expose_collision_toml(internal: &str) -> String {
+        format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n{internal}",
+            base_toml()
+        )
+    }
+
+    #[test]
+    fn expose_port_injection_is_fail_closed_on_every_collision() {
+        // (1) Duplicate placeholder within a service → rejected (would overwrite).
+        let dup = expose_collision_toml(
+            "[services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\", \"REDIS_PORT\"]\n",
+        );
+        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
+            .unwrap_err()
+            .contains("duplicate expose placeholder"));
+
+        // (2) Two (service, placeholder) pairs generate the SAME cross-ref var:
+        //     `a-b`+`C` and `a`+`B_C` both → `A_B_C`. Rejected.
+        let alias = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.web]\nentrypoint = \"w\"\n[services.web.network]\npublish = true\n\
+             [services.a-b]\nentrypoint = \"x\"\nexpose = [\"C\"]\n\
+             [services.a]\nentrypoint = \"y\"\nexpose = [\"B_C\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&alias), &probe_python())
+            .unwrap_err()
+            .contains("cross-reference env var"));
+
+        // (3a) Own placeholder env var already declared by the author → rejected.
+        let own = expose_collision_toml(
+            "[services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n\
+             [services.redis.env]\nREDIS_PORT = \"1234\"\n",
+        );
+        assert!(derive_supervisor_build_spec(&parse(&own), &probe_python())
+            .unwrap_err()
+            .contains("collides with an existing"));
+
+        // (3b) Generated cross-reference var already declared by the author → rejected.
+        let xref = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api.env]\nREDIS_REDIS_PORT = \"1234\"\n\
+             [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&xref), &probe_python())
+            .unwrap_err()
+            .contains("collides with an existing"));
+    }
+
+    #[test]
+    fn port_allocation_is_deterministic_and_independent_of_ambient_env() {
+        // The base is a fixed constant, not ambient env — the same manifest always
+        // allocates the same ports (reproducible sealed rootfs). Setting the old
+        // env var must have NO effect.
+        let toml = expose_collision_toml(
+            "[services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n",
+        );
+        let port_of = || {
+            let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+            let svc = spec.supervisor.unwrap().services.unwrap();
+            svc.iter().find(|s| s.name == "redis").unwrap().port.unwrap()
+        };
+        let a = port_of();
+        // SAFETY: single-threaded test; the value is ignored by the allocator now.
+        unsafe { std::env::set_var("ATO_SERVICE_PORT_BASE", "20000") };
+        let b = port_of();
+        unsafe { std::env::remove_var("ATO_SERVICE_PORT_BASE") };
+        assert_eq!(a, b, "allocation must not depend on ambient env");
+        assert_eq!(a, 8091, "fixed base");
     }
 
     #[test]
