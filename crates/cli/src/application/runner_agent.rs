@@ -6048,6 +6048,163 @@ mod tests {
         );
     }
 
+    /// Pick a free loopback port + return a `listen` string for the proxy (the
+    /// proxy's listen arg is a string; bind-then-drop reserves a free port).
+    fn free_listen() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let a = l.local_addr().expect("addr").to_string();
+        drop(l);
+        a
+    }
+
+    /// v1.5 (ato#973): the runner proxy is a raw L4 `copy_bidirectional` pipe, so a
+    /// WebSocket upgrade + full-duplex frames tunnel through it unchanged. This locks
+    /// that in — a future proxy change that buffers or closes early would break it.
+    #[tokio::test]
+    async fn proxy_tunnels_a_websocket_upgrade_and_bidirectional_frames() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = std::thread::spawn(move || {
+            // #1: the proxy's bring-up probe — accept and drop.
+            let _ = upstream_listener.accept();
+            // #2: the real connection.
+            let (mut s, _) = upstream_listener.accept().expect("real conn");
+            let mut buf = [0u8; 1024];
+            let n = s.read(&mut buf).expect("upgrade request");
+            assert!(
+                String::from_utf8_lossy(&buf[..n]).to_lowercase().contains("upgrade: websocket"),
+                "proxy forwarded the upgrade request"
+            );
+            s.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .unwrap();
+            // Echo frames both directions on the SAME persistent connection until
+            // the client closes.
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if s.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let listen = free_listen();
+        let handle = start_root_proxy(&listen, upstream_port).await.expect("proxy up");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut c = tokio::net::TcpStream::connect(&listen).await.expect("connect proxy");
+        c.write_all(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = c.read(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("101 Switching Protocols"),
+            "proxy tunnelled the 101 upgrade response"
+        );
+        // Full-duplex frames after the upgrade, same connection.
+        c.write_all(b"frame-one").await.unwrap();
+        let n = c.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"frame-one", "first WS frame echoed through the proxy");
+        c.write_all(b"frame-two").await.unwrap();
+        let n = c.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"frame-two", "second WS frame — the pipe stays open bidirectionally");
+
+        // Close the client FIRST so the proxy propagates EOF to the upstream (whose
+        // echo loop then breaks); the upstream thread is detached (not joined — it
+        // would block if the abort raced the close), reaped at process teardown.
+        drop(c);
+        handle.abort();
+        drop(upstream);
+    }
+
+    /// v1.5 (ato#973): Server-Sent Events must STREAM through the proxy — chunks
+    /// pushed over time arrive incrementally, not buffered until EOF. Proven
+    /// DETERMINISTICALLY (no timing race): the upstream sends event 1, then BLOCKS
+    /// on a channel until the test — which only signals AFTER it has received event
+    /// 1 through the proxy — releases the rest. A buffer-to-EOF proxy delivers
+    /// nothing until close, so the test would never see event 1, never signal,
+    /// and phase 1 would time out (fail) instead of racing on sleeps.
+    #[tokio::test]
+    async fn proxy_streams_sse_chunks_incrementally_not_buffered() {
+        // test → upstream: "you may send event 2 and 3 now".
+        let (cont_tx, cont_rx) = std::sync::mpsc::channel::<()>();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = std::thread::spawn(move || {
+            let _ = upstream_listener.accept(); // bring-up probe
+            let (mut s, _) = upstream_listener.accept().expect("real conn");
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf); // the GET request
+            // Headers + event 1, flushed — available to a STREAMING proxy immediately.
+            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n").unwrap();
+            s.write_all(b"data: 1\n\n").unwrap();
+            s.flush().unwrap();
+            // Hold events 2 & 3 until the test confirms it saw event 1 (recv_timeout
+            // so a failed test can't block this detached thread forever).
+            let released = cont_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            if released {
+                let _ = s.write_all(b"data: 2\n\ndata: 3\n\n");
+                let _ = s.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+
+        let listen = free_listen();
+        let handle = start_root_proxy(&listen, upstream_port).await.expect("proxy up");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut c = tokio::net::TcpStream::connect(&listen).await.expect("connect proxy");
+        c.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut acc = String::new();
+        let mut buf = vec![0u8; 4096];
+
+        // Phase 1: event 1 must arrive through the proxy BEFORE the test releases
+        // events 2 & 3. A buffering proxy delivers nothing here → this loop times out.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !acc.contains("data: 1") {
+            assert!(tokio::time::Instant::now() < deadline, "event 1 never streamed through: {acc:?}");
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => panic!("read timed out before event 1 (proxy buffered to EOF?): {acc:?}"),
+            }
+        }
+        // The stream came through the proxy with its SSE content type + event 1, and
+        // event 2 does NOT exist yet (the upstream is blocked on the channel).
+        assert!(acc.contains("content-type: text/event-stream"), "SSE content-type seen through proxy: {acc:?}");
+        assert!(acc.contains("data: 1"), "event 1 received: {acc:?}");
+        assert!(!acc.contains("data: 2"), "event 2 must NOT have arrived before release: {acc:?}");
+
+        // Phase 2: release events 2 & 3, then read them in order.
+        cont_tx.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !acc.contains("data: 3") {
+            assert!(tokio::time::Instant::now() < deadline, "events 2/3 never arrived: {acc:?}");
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => break,
+            }
+        }
+        let (p1, p2, p3) = (
+            acc.find("data: 1").unwrap(),
+            acc.find("data: 2").expect("event 2"),
+            acc.find("data: 3").expect("event 3"),
+        );
+        assert!(p1 < p2 && p2 < p3, "events in order: {acc:?}");
+
+        drop(c);
+        handle.abort();
+        drop(upstream); // detached.
+    }
+
     /// v1.3 (ato#968): multi-slot without a URL template = slot≥1 unopenable;
     /// the config must be refused at serve startup, not one run at a time.
     #[test]
