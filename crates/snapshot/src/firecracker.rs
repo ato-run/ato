@@ -621,6 +621,28 @@ impl FirecrackerBackend {
         Ok(())
     }
 
+    /// v1.2 PR 3d: after StopWorkload+Revoke, verify the workload is actually DOWN
+    /// (its listener gone) before sealing. This caught a real bug: the agent acked
+    /// WorkloadStopped after killing only the wrapper shell while the orphaned app
+    /// kept serving — the acks alone are not proof. "Down" = TCP connect refused;
+    /// a still-accepting listener within the window fails the build closed.
+    fn wait_workload_down(&self, port: u16, timeout: Duration) -> Result<(), SnapshotError> {
+        let reachable = self.reachable_host();
+        let addr: std::net::SocketAddr = format!("{reachable}:{port}")
+            .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(self.backend_err(
+            "supervisor build: workload still accepting connections after StopWorkload — \
+             refusing to seal a snapshot with the app running",
+        ))
+    }
+
     /// v1.2 PR 3d: build-failure forensics. The guest console (`console.log`) was
     /// being captured and then silently deleted with the build dir on EVERY outcome —
     /// exactly why earlier guest failures were undiagnosable. On failure, always emit
@@ -1048,11 +1070,14 @@ impl SnapshotBackend for FirecrackerBackend {
                 // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
                 // pause/snapshot, so the seal carries no running workload and no
                 // binding material in guest tmpfs (contract order: stop, then revoke).
+                // Then VERIFY the listener is gone — acks alone are not proof (a
+                // wrapper-shell kill once left the orphaned app serving).
                 if let Some(drive) = &supervisor_drive {
                     let uds = vsock_uds.as_ref().ok_or_else(|| {
                         self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
                     })?;
                     self.supervisor_stop_and_revoke(uds, drive)?;
+                    self.wait_workload_down(port, Duration::from_secs(10))?;
                 }
                 Ok(())
             })?;
