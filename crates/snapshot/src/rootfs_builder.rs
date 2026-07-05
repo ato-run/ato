@@ -111,6 +111,10 @@ pub struct ServiceBuildSpec {
     /// The service's declared HTTP readiness path (`readiness_probe.http_get`),
     /// recorded for the readiness-graph slice. `None` = no HTTP probe declared.
     pub readiness_http_path: Option<String>,
+    /// The service's PRIMARY listen port (public = the proxied target port;
+    /// internal = its first resolved `expose` port or literal `env.PORT`). Used
+    /// for the readiness probe. `None` = no determinable port (ready-once-started).
+    pub port: Option<u16>,
 }
 
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
@@ -369,27 +373,22 @@ fn build_supervisor_json(
             let svc_json: Vec<serde_json::Value> = services
                 .iter()
                 .map(|s| {
-                    let mut base_env = s.base_env.clone();
-                    if s.public {
-                        base_env
-                            .entry("PORT".to_string())
-                            .or_insert_with(|| port.to_string());
-                    }
                     let mut obj = serde_json::json!({
                         "name": s.name,
                         "cmd": s.cmd,
                         "cwd": s.cwd,
-                        "base_env": base_env,
+                        "base_env": s.base_env,
                         "bindings_env": s.env_map,
                     });
                     if !s.depends_on.is_empty() {
                         obj["depends_on"] = serde_json::json!(s.depends_on);
                     }
                     // Readiness (so a dependent can WAIT): emit when the service has a
-                    // determinable listen PORT. The guest probes 127.0.0.1:<port>
-                    // (plus the HTTP path when declared). A service with no port is
-                    // "ready once started" — no readiness block.
-                    if let Some(rport) = base_env.get("PORT").and_then(|p| p.parse::<u16>().ok()) {
+                    // determinable PRIMARY port (public = the proxied target port;
+                    // internal = its first resolved expose port or literal env.PORT).
+                    // The guest probes 127.0.0.1:<port> (plus the HTTP path when
+                    // declared). No port ⇒ "ready once started" (no readiness block).
+                    if let Some(rport) = s.port {
                         let mut r = serde_json::json!({ "port": rport });
                         if let Some(path) = &s.readiness_http_path {
                             r["http_path"] = serde_json::json!(path);
@@ -448,7 +447,23 @@ fn derive_supervisor_services(
     // complementary, not competing. (Schema 0.3 has no `[execution]` section — a
     // legacy top-level entrypoint cannot even parse here.)
 
-    let mut out: Vec<ServiceBuildSpec> = Vec::with_capacity(services.len());
+    // v1.5 expose port resolution: an intermediate captured per service, then the
+    // ports its `expose` placeholders name are ALLOCATED deterministically and
+    // injected (own placeholders unprefixed; every service's ports cross-referenced
+    // as `<SERVICE>_<PLACEHOLDER>` so a dependent can reach it on loopback).
+    struct Resolved {
+        name: String,
+        cmd: Vec<String>,
+        author_env: BTreeMap<String, String>,
+        env_map: BTreeMap<String, String>,
+        public: bool,
+        depends_on: Vec<String>,
+        aliases: Vec<String>,
+        readiness_http_path: Option<String>,
+        expose: Vec<String>,
+        literal_port: Option<u16>,
+    }
+    let mut collected: Vec<Resolved> = Vec::with_capacity(services.len());
     let mut public_count = 0usize;
     // Deterministic order (BTree by name) so the emitted supervisor.json + receipt
     // are reproducible regardless of the source map's iteration order.
@@ -541,34 +556,142 @@ fn derive_supervisor_services(
             .as_ref()
             .and_then(|p| p.http_get.clone())
             .filter(|s| !s.trim().is_empty());
-        out.push(ServiceBuildSpec {
+        // `expose` placeholders → env var names the builder resolves to concrete
+        // ports. Each must be a POSIX identifier (it becomes an env var).
+        let expose = svc.expose.clone().unwrap_or_default();
+        for ph in &expose {
+            if !valid_env_var_name(ph) {
+                return Err(format!(
+                    "service '{name}': expose placeholder {ph:?} is not a POSIX identifier"
+                ));
+            }
+        }
+        // A literal `env.PORT` (the author hardcoded a port) is reserved so
+        // allocation never collides with it.
+        let literal_port = base_env.get("PORT").and_then(|p| p.parse::<u16>().ok());
+
+        collected.push(Resolved {
             name: (*name).clone(),
-            // Wrap the entrypoint in a login shell, exactly like the single-service
-            // path, so the same start semantics (PATH, `-l`) apply per service.
             cmd: vec!["/bin/sh".into(), "-lc".into(), svc.entrypoint.clone()],
-            cwd: "/app".into(),
-            base_env,
+            author_env: base_env,
             env_map: common_secret_env_map.clone(),
             public,
             depends_on,
             aliases,
             readiness_http_path,
+            expose,
+            literal_port,
         });
     }
 
     // Exactly one PUBLIC service — the run gate proxies exactly one guest port.
     match public_count {
-        1 => Ok(Some(out)),
-        0 => Err(
-            "no public service: exactly one service must set `network.publish = true` \
-             (the one exposed via the runner proxy)"
-                .into(),
-        ),
-        n => Err(format!(
-            "{n} services set `network.publish = true`; exactly one may be public in a \
-             single-VM snapshot (the rest are internal)"
-        )),
+        1 => {}
+        0 => {
+            return Err(
+                "no public service: exactly one service must set `network.publish = true` \
+                 (the one exposed via the runner proxy)"
+                    .into(),
+            );
+        }
+        n => {
+            return Err(format!(
+                "{n} services set `network.publish = true`; exactly one may be public in a \
+                 single-VM snapshot (the rest are internal)"
+            ));
+        }
     }
+
+    // ── Allocate the ports each service's `expose` placeholders name ──
+    // Reserved: the proxied target port + every literal `env.PORT`. The PUBLIC
+    // service's FIRST expose placeholder resolves to the target port; every other
+    // placeholder gets the next free port from a deterministic base.
+    let mut reserved: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
+    reserved.insert(target_port);
+    for r in &collected {
+        if let Some(p) = r.literal_port {
+            reserved.insert(p);
+        }
+    }
+    let base: u16 = std::env::var("ATO_SERVICE_PORT_BASE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(8091);
+    let mut next = base;
+    let mut alloc = || -> Result<u16, String> {
+        loop {
+            let p = next;
+            next = next.checked_add(1).ok_or("ran out of ports allocating service expose placeholders")?;
+            if !reserved.contains(&p) {
+                reserved.insert(p);
+                return Ok(p);
+            }
+        }
+    };
+    // `(service, placeholder) → port` and each service's primary port.
+    let mut resolved_ports: BTreeMap<(String, String), u16> = BTreeMap::new();
+    let mut primary: BTreeMap<String, u16> = BTreeMap::new();
+    for r in &collected {
+        for (i, ph) in r.expose.iter().enumerate() {
+            let port = if r.public && i == 0 { target_port } else { alloc()? };
+            resolved_ports.insert((r.name.clone(), ph.clone()), port);
+            if i == 0 {
+                primary.entry(r.name.clone()).or_insert(port);
+            }
+        }
+        // Primary fallback: a public service always listens on the target port; an
+        // internal service with no expose but a literal env.PORT uses that.
+        if r.public {
+            primary.insert(r.name.clone(), target_port);
+        } else if !primary.contains_key(&r.name) {
+            if let Some(p) = r.literal_port {
+                primary.insert(r.name.clone(), p);
+            }
+        }
+    }
+
+    // ── Build final services: inject own placeholders (unprefixed) + every
+    // service's resolved ports as `<SERVICE>_<PLACEHOLDER>` for cross-service
+    // reachability on loopback. ──
+    let mut out: Vec<ServiceBuildSpec> = Vec::with_capacity(collected.len());
+    for r in &collected {
+        let mut base_env = r.author_env.clone();
+        // Own placeholders, unprefixed, so THIS service binds there.
+        for ph in &r.expose {
+            if let Some(p) = resolved_ports.get(&(r.name.clone(), ph.clone())) {
+                base_env.insert(ph.clone(), p.to_string());
+            }
+        }
+        // The public service always gets PORT = the proxied target port.
+        if r.public {
+            base_env.insert("PORT".to_string(), target_port.to_string());
+        }
+        // Cross-references: every service's ports, as <SERVICE>_<PLACEHOLDER>.
+        for ((svc, ph), port) in &resolved_ports {
+            let var = format!("{}_{}", env_prefix(svc), ph);
+            base_env.entry(var).or_insert_with(|| port.to_string());
+        }
+        out.push(ServiceBuildSpec {
+            name: r.name.clone(),
+            cmd: r.cmd.clone(),
+            cwd: "/app".into(),
+            base_env,
+            env_map: r.env_map.clone(),
+            public: r.public,
+            depends_on: r.depends_on.clone(),
+            aliases: r.aliases.clone(),
+            readiness_http_path: r.readiness_http_path.clone(),
+            port: primary.get(&r.name).copied(),
+        });
+    }
+    Ok(Some(out))
+}
+
+/// Uppercase a service name into an env-var prefix: `-` → `_`, then uppercase
+/// (`my-api` → `MY_API`). Service names are DNS-safe labels, so the result is a
+/// valid POSIX identifier prefix.
+fn env_prefix(service: &str) -> String {
+    service.replace('-', "_").to_ascii_uppercase()
 }
 
 /// A conservative GitHub **owner** login: 1–39 chars, alphanumeric or single hyphens,
@@ -1327,6 +1450,70 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(redis["readiness"]["port"], 6379);
         assert!(redis["readiness"].get("http_path").is_none());
         assert!(redis.get("depends_on").is_none(), "no deps ⇒ field omitted");
+    }
+
+    #[test]
+    fn expose_placeholders_resolve_to_ports_and_cross_reference_across_services() {
+        // api (public) depends on redis (internal) which EXPOSES its port via a
+        // placeholder rather than hardcoding it. The builder allocates redis's port
+        // and makes it reachable from api as REDIS_REDIS_PORT + gives redis its own
+        // REDIS_PORT.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"node server.js\"\ndepends_on = [\"redis\"]\n\
+             [services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"redis-server\"\nexpose = [\"REDIS_PORT\"]\n",
+            base_toml() // target port 8080
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        let redis = services.iter().find(|s| s.name == "redis").unwrap();
+
+        // redis's placeholder resolved to a concrete allocated port (not the target).
+        let rport = redis.base_env.get("REDIS_PORT").expect("own placeholder injected");
+        assert_ne!(rport, "8080");
+        let rport: u16 = rport.parse().unwrap();
+        assert!(rport >= 8091, "allocated from the service port base");
+        // redis's primary/readiness port is that allocated port.
+        assert_eq!(redis.port, Some(rport));
+
+        // api can reach redis on loopback via the cross-referenced env var.
+        assert_eq!(api.base_env.get("REDIS_REDIS_PORT").map(String::as_str), Some(rport.to_string().as_str()));
+        // The public service still listens on the proxied target port.
+        assert_eq!(api.base_env.get("PORT").map(String::as_str), Some("8080"));
+        assert_eq!(api.port, Some(8080));
+    }
+
+    #[test]
+    fn public_service_first_expose_placeholder_is_the_target_port() {
+        // A public service may itself use `expose` — its FIRST placeholder is the
+        // proxied target port; an additional one gets an allocated port.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.web]\nentrypoint = \"node web.js\"\nexpose = [\"HTTP_PORT\", \"METRICS_PORT\"]\n\
+             [services.web.network]\npublish = true\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let web = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap()[0].clone();
+        assert_eq!(web.base_env.get("HTTP_PORT").map(String::as_str), Some("8080"), "first expose = target port");
+        assert_eq!(web.base_env.get("PORT").map(String::as_str), Some("8080"), "public always gets PORT=target");
+        let metrics: u16 = web.base_env.get("METRICS_PORT").unwrap().parse().unwrap();
+        assert_ne!(metrics, 8080, "second expose is a distinct allocated port");
+        assert_eq!(web.port, Some(8080));
+    }
+
+    #[test]
+    fn expose_placeholder_must_be_a_posix_identifier() {
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\nexpose = [\"bad-name\"]\n[services.api.network]\npublish = true\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&toml), &probe_python())
+            .unwrap_err()
+            .contains("POSIX identifier"));
     }
 
     #[test]
