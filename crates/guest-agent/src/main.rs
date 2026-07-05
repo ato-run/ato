@@ -228,7 +228,7 @@ fn main() -> std::io::Result<()> {
     // config for a supervisor capsule fails closed (the agent exits) rather than
     // launching the workload unbound.
     let supervisor = match SupervisorConfig::load(&config_path()) {
-        Ok(Some(cfg)) => Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default())),
+        Ok(Some(cfg)) => Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default)),
         Ok(None) => None,
         Err(e) => {
             eprintln!("ato-guest-agent: {e}");
@@ -331,10 +331,13 @@ mod tests {
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
+            services: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
-        let sup = Supervisor::new(cfg, dir.to_path_buf(), spy);
+        // Factory yields state-sharing spies (SpyWorkload clones share the Rc), so a
+        // multi-service group aggregates its starts/stops into the one `state`.
+        let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
         (AgentRuntime::new(session, Some(sup), required), state)
     }
 
