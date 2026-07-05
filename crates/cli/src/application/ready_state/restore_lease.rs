@@ -20,6 +20,15 @@ use snapshot::ReadyStateManifest;
 /// `RESTORE_SNAPSHOT_LEASE_KIND`).
 pub(crate) const RESTORE_SNAPSHOT_LEASE_KIND: &str = "restore_snapshot";
 
+/// v1.2 PR 3e: lease kind for restoring a SUPERVISOR (binding-required) snapshot.
+/// A separate kind — not an additive field — so the control plane capability-gates
+/// dispatch on `supported_lease_kinds` and an older runner is NEVER handed a
+/// binding artifact it cannot serve. Payload shape is identical to
+/// `restore_snapshot`; the binding names come from the sealed manifest
+/// (`supervisor_build.binding_names`), the single source of truth — a lease field
+/// would not be trusted.
+pub(crate) const RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND: &str = "restore_snapshot_with_bindings";
+
 /// The reference-only identity a `restore_snapshot` lease carries. No secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RestoreSnapshotCommand {
@@ -34,18 +43,25 @@ pub(crate) struct RestoreSnapshotCommand {
     pub runner_class_id: String,
     pub snapshot_backend: String,
     pub healthcheck_url_path: Option<String>,
+    /// v1.2 PR 3e: true iff the lease kind is `restore_snapshot_with_bindings`.
+    /// The kind PROMISES a supervisor artifact; `classify_restore_artifact`
+    /// fail-closes any kind↔artifact mismatch in either direction.
+    pub with_bindings: bool,
 }
 
-/// Parse + validate a `restore_snapshot` lease command. Every identity field is
-/// required and non-empty (a lease missing one is refused, never restored blind).
+/// Parse + validate a `restore_snapshot` / `restore_snapshot_with_bindings` lease
+/// command. Every identity field is required and non-empty (a lease missing one is
+/// refused, never restored blind).
 pub(crate) fn parse_restore_snapshot_command(
     command: &serde_json::Value,
 ) -> std::result::Result<RestoreSnapshotCommand, (String, String)> {
     let err = |m: &str| ("invalid_restore_lease".to_string(), m.to_string());
     let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    if kind != RESTORE_SNAPSHOT_LEASE_KIND {
-        return Err(err(&format!("not a restore_snapshot lease (kind {kind:?})")));
-    }
+    let with_bindings = match kind {
+        RESTORE_SNAPSHOT_LEASE_KIND => false,
+        RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND => true,
+        _ => return Err(err(&format!("not a restore_snapshot lease (kind {kind:?})"))),
+    };
     let req = |k: &str| -> std::result::Result<String, (String, String)> {
         command
             .get(k)
@@ -71,6 +87,7 @@ pub(crate) fn parse_restore_snapshot_command(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty()),
+        with_bindings,
     })
 }
 
@@ -112,6 +129,90 @@ pub(crate) fn locate_artifact(
     })
 }
 
+/// v1.2 PR 3e: what kind of restore this artifact is, decided fail-closed by
+/// [`classify_restore_artifact`]. `Supervisor` carries the binding names read from
+/// the sealed manifest — the ONLY source of truth (a lease field is never trusted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RestoreArtifactClass {
+    /// The v1 no-binding artifact: restore + expose directly.
+    NoBinding,
+    /// A supervisor (binding-required) artifact: the runner must resolve + deliver
+    /// every named binding over vsock BEFORE exposing traffic. 3e MVP: ALL names
+    /// are required — optional-secret semantics do not exist in this path yet.
+    Supervisor { binding_names: Vec<String> },
+}
+
+/// v1.2 PR 3e: the NARROW supervisor exception to the "no vsock artifact" rule.
+/// A supervisor restore is allowed ONLY when every one of these holds — anything
+/// else fails closed:
+/// - the lease kind is `restore_snapshot_with_bindings` (the capability-gated kind);
+/// - this runner is opted in (`ATO_RUNNER_SUPERVISOR=1`);
+/// - `manifest.has_vsock == true` AND `manifest.supervisor_build` is present
+///   (either without the other = an inconsistent artifact, rejected);
+/// - `binding_names` is non-empty and every name parses as a `BindingName`.
+/// The plain `restore_snapshot` kind still restores ONLY a no-binding artifact
+/// (`!has_vsock`, no supervisor receipt) — the old rejection is unchanged for it.
+/// (The backend binding capability is re-checked in the handler, where a backend
+/// exists to probe.)
+pub(crate) fn classify_restore_artifact(
+    manifest: &ReadyStateManifest,
+    with_bindings_kind: bool,
+    supervisor_enabled: bool,
+) -> std::result::Result<RestoreArtifactClass, (String, String)> {
+    let err = |m: String| ("artifact_verification_failed".to_string(), m);
+    match (&manifest.supervisor_build, manifest.has_vsock) {
+        (None, false) => {
+            if with_bindings_kind {
+                return Err(err(
+                    "restore_snapshot_with_bindings lease references a no-binding artifact \
+                     (kind/artifact mismatch)"
+                        .to_string(),
+                ));
+            }
+            Ok(RestoreArtifactClass::NoBinding)
+        }
+        (None, true) => Err(err(
+            "artifact declares a vsock binding channel but carries no supervisor_build \
+             receipt; refusing to restore an inconsistent artifact"
+                .to_string(),
+        )),
+        (Some(_), false) => Err(err(
+            "artifact carries a supervisor_build receipt but has_vsock=false; refusing to \
+             restore an inconsistent artifact"
+                .to_string(),
+        )),
+        (Some(sup), true) => {
+            if !with_bindings_kind {
+                return Err(err(
+                    "supervisor (binding-required) artifact needs a restore_snapshot_with_bindings \
+                     lease; a plain restore_snapshot lease cannot launch it"
+                        .to_string(),
+                ));
+            }
+            if !supervisor_enabled {
+                return Err(err(
+                    "supervisor artifact refused: this runner is not opted into supervisor \
+                     restores (set ATO_RUNNER_SUPERVISOR=1)"
+                        .to_string(),
+                ));
+            }
+            if sup.binding_names.is_empty() {
+                return Err(err(
+                    "supervisor artifact carries an empty binding_names list; refusing to \
+                     restore (nothing to bind = inconsistent artifact)"
+                        .to_string(),
+                ));
+            }
+            for name in &sup.binding_names {
+                if let Err(e) = protocol::binding_lease::BindingName::parse(name.as_str()) {
+                    return Err(err(format!("supervisor artifact binding name {name:?}: {e}")));
+                }
+            }
+            Ok(RestoreArtifactClass::Supervisor { binding_names: sup.binding_names.clone() })
+        }
+    }
+}
+
 /// Load `manifest.json` and **verify it is exactly the artifact the lease references**,
 /// fail-closed. This is the integrity gate `backend.restore` does not provide.
 ///
@@ -122,12 +223,14 @@ pub(crate) fn locate_artifact(
 /// - `capsule_manifest_hash` / `execution_id` / `snapshot_backend` match the lease;
 /// - `runner_class_id` is present and matches the lease (restore also re-gates it, but
 ///   this gives a clean pre-restore error and pins the lease↔manifest agreement);
-/// - the artifact is **no-binding** (`!has_vsock` — a Phase 8 binding artifact must never
-///   reach a public snapshot run).
+/// - the artifact class is admissible for THIS lease kind + runner
+///   ([`classify_restore_artifact`]: no-binding for `restore_snapshot`, the narrow
+///   supervisor exception for `restore_snapshot_with_bindings`).
 pub(crate) fn load_and_verify_manifest(
     manifest_json: &Path,
     cmd: &RestoreSnapshotCommand,
-) -> std::result::Result<ReadyStateManifest, (String, String)> {
+    supervisor_enabled: bool,
+) -> std::result::Result<(ReadyStateManifest, RestoreArtifactClass), (String, String)> {
     let err = |m: String| ("artifact_verification_failed".to_string(), m);
     let bytes = std::fs::read(manifest_json).map_err(|e| err(format!("read {}: {e}", manifest_json.display())))?;
     let manifest: ReadyStateManifest =
@@ -170,10 +273,8 @@ pub(crate) fn load_and_verify_manifest(
             )));
         }
     }
-    if manifest.has_vsock {
-        return Err(err("artifact declares a vsock binding channel; a public snapshot run must be no-binding".to_string()));
-    }
-    Ok(manifest)
+    let class = classify_restore_artifact(&manifest, cmd.with_bindings, supervisor_enabled)?;
+    Ok((manifest, class))
 }
 
 #[cfg(test)]
@@ -213,6 +314,90 @@ mod tests {
         assert_eq!(c.snapshot_id, "snap_1");
         assert_eq!(c.artifact_manifest_hash, "blake3:art");
         assert_eq!(c.healthcheck_url_path.as_deref(), Some("/health"));
+        assert!(!c.with_bindings);
+        // v1.2 PR 3e: the with-bindings kind parses identically, flagged.
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "kind": "restore_snapshot_with_bindings" }))).unwrap();
+        assert!(c.with_bindings);
+    }
+
+    // ── v1.2 PR 3e: the narrow supervisor gate matrix ─────────────────────────
+
+    fn manifest_with(supervisor: Option<Vec<&str>>, has_vsock: bool) -> ReadyStateManifest {
+        // Minimal structurally-valid manifest — classify only reads has_vsock +
+        // supervisor_build, but build it via serde to stay honest to the schema.
+        let mut v = serde_json::json!({
+            "schema": "ato.ready-state/v1",
+            "capsule_manifest_hash": "blake3:cap",
+            "has_vsock": has_vsock,
+            "layers": {},
+            "snapshot_backend": { "kind": "firecracker", "version": "1", "snapshot_format_version": "fc-v2" },
+            "restore_contract": {},
+            "sanitizer_contract": { "steps": [] },
+        });
+        if let Some(names) = supervisor {
+            v["supervisor_build"] = serde_json::json!({
+                "binding_names": names,
+                "page_hygiene_boot_args": true,
+            });
+        }
+        serde_json::from_value(v).expect("manifest")
+    }
+
+    #[test]
+    fn old_kind_cannot_launch_a_supervisor_artifact() {
+        let m = manifest_with(Some(vec!["openai_api_key"]), true);
+        // Even with the flag ON: the plain kind must never launch a supervisor artifact.
+        let e = classify_restore_artifact(&m, false, true).unwrap_err();
+        assert!(e.1.contains("restore_snapshot_with_bindings"), "{}", e.1);
+    }
+
+    #[test]
+    fn with_bindings_kind_rejects_a_no_binding_artifact() {
+        let m = manifest_with(None, false);
+        let e = classify_restore_artifact(&m, true, true).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+        // The plain kind still restores it.
+        assert_eq!(classify_restore_artifact(&m, false, true).unwrap(), RestoreArtifactClass::NoBinding);
+        assert_eq!(classify_restore_artifact(&m, false, false).unwrap(), RestoreArtifactClass::NoBinding);
+    }
+
+    #[test]
+    fn supervisor_artifact_with_flag_off_is_rejected() {
+        let m = manifest_with(Some(vec!["openai_api_key"]), true);
+        let e = classify_restore_artifact(&m, true, false).unwrap_err();
+        assert!(e.1.contains("ATO_RUNNER_SUPERVISOR"), "{}", e.1);
+    }
+
+    #[test]
+    fn inconsistent_vsock_supervisor_combinations_are_rejected_both_ways() {
+        // has_vsock without a supervisor receipt: the ORIGINAL rejection, kept.
+        let m = manifest_with(None, true);
+        assert!(classify_restore_artifact(&m, false, true).unwrap_err().1.contains("no supervisor_build"));
+        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("no supervisor_build"));
+        // supervisor receipt without vsock: also inconsistent.
+        let m = manifest_with(Some(vec!["openai_api_key"]), false);
+        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("has_vsock=false"));
+    }
+
+    #[test]
+    fn supervisor_binding_names_must_be_non_empty_and_valid() {
+        let m = manifest_with(Some(vec![]), true);
+        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("empty binding_names"));
+        // An uppercase (invalid BindingName) name fails closed.
+        let m = manifest_with(Some(vec!["OPENAI_API_KEY"]), true);
+        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn supervisor_artifact_with_every_prerequisite_classifies_with_manifest_names() {
+        let m = manifest_with(Some(vec!["openai_api_key", "db_url"]), true);
+        let class = classify_restore_artifact(&m, true, true).unwrap();
+        assert_eq!(
+            class,
+            RestoreArtifactClass::Supervisor {
+                binding_names: vec!["openai_api_key".into(), "db_url".into()]
+            }
+        );
     }
 
     #[test]
@@ -281,13 +466,15 @@ mod tests {
             runner_class_id: rc.clone(),
             snapshot_backend: m.snapshot_backend.kind.clone(),
             healthcheck_url_path: Some("/health".into()),
+            with_bindings: false,
         };
-        // Exact match ⇒ ok.
-        assert!(load_and_verify_manifest(&mpath, &base).is_ok());
+        // Exact match ⇒ ok, classified NoBinding.
+        let (_, class) = load_and_verify_manifest(&mpath, &base, false).unwrap();
+        assert_eq!(class, RestoreArtifactClass::NoBinding);
         // Tampered artifact hash ⇒ fail (the integrity anchor restore() lacks).
         let mut bad = base.clone();
         bad.artifact_manifest_hash = "blake3:TAMPERED".into();
-        assert!(load_and_verify_manifest(&mpath, &bad).unwrap_err().1.contains("artifact_manifest_hash mismatch"));
+        assert!(load_and_verify_manifest(&mpath, &bad, false).unwrap_err().1.contains("artifact_manifest_hash mismatch"));
         // Wrong execution_id / capsule hash / runner class / backend ⇒ fail.
         for mutate in [
             |c: &mut RestoreSnapshotCommand| c.execution_id = "sha256:other".into(),
@@ -297,7 +484,7 @@ mod tests {
         ] {
             let mut c = base.clone();
             mutate(&mut c);
-            assert!(load_and_verify_manifest(&mpath, &c).is_err());
+            assert!(load_and_verify_manifest(&mpath, &c, false).is_err());
         }
     }
 }
