@@ -1127,7 +1127,11 @@ fn native_inference_ready() -> bool {
 /// Pure: the lease kinds/runtimes to advertise given the host's native-inference
 /// readiness. Split from the cached host probe so the conditional `native-inference`
 /// append is unit-testable.
-fn advertised_lease_kinds_for(native_inference_ready: bool, restore_ready: bool) -> Vec<String> {
+fn advertised_lease_kinds_for(
+    native_inference_ready: bool,
+    restore_ready: bool,
+    supervisor_restore_ready: bool,
+) -> Vec<String> {
     let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS
         .iter()
         .map(|s| s.to_string())
@@ -1141,6 +1145,16 @@ fn advertised_lease_kinds_for(native_inference_ready: bool, restore_ready: bool)
     if restore_ready {
         kinds.push(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND.to_string());
     }
+    // v1.2 PR 3e: restore_snapshot_with_bindings needs restore-readiness AND the
+    // supervisor prerequisites (operator flag + backend binding-lease capability) —
+    // BOTH, so a flag-only host without vsock support is never handed a binding
+    // artifact, and a capable-but-not-opted-in host isn't either.
+    if restore_ready && supervisor_restore_ready {
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+                .to_string(),
+        );
+    }
     kinds
 }
 
@@ -1151,8 +1165,25 @@ fn ready_state_restore_ready() -> bool {
     snapshot::FirecrackerBackend::kvm_present()
 }
 
+/// v1.2 PR 3e: this host may serve SUPERVISOR (binding-required) restores iff the
+/// operator opted in (`ATO_RUNNER_SUPERVISOR=1`, read live) AND the backend's
+/// binding-lease capability probes true (cached — host vsock/KVM facts don't change
+/// mid-serve, and the heartbeat calls this frequently).
+fn supervisor_restore_ready() -> bool {
+    static CAPABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::application::ready_state::flags::runner_supervisor_enabled()
+        && *CAPABLE.get_or_init(|| {
+            use snapshot::SnapshotBackend as _;
+            snapshot::FirecrackerBackend::new().probe().binding.supports_binding_lease
+        })
+}
+
 pub(crate) fn advertised_lease_kinds() -> Vec<String> {
-    advertised_lease_kinds_for(native_inference_ready(), ready_state_restore_ready())
+    advertised_lease_kinds_for(
+        native_inference_ready(),
+        ready_state_restore_ready(),
+        supervisor_restore_ready(),
+    )
 }
 
 /// Fail-closed dispatch guard. The control plane already gates native-inference
@@ -3419,7 +3450,16 @@ const RESTORE_HOLD_POLL_SECS: u64 = 2;
 /// are verified against the fetched manifest by `load_and_verify_manifest` (incl. the
 /// `manifest.id() == artifact_manifest_hash` gate that `backend.restore` does not
 /// provide) BEFORE anything is restored. Every failure reports a typed `Failed` and
-/// releases the slot; no secret is ever consumed (a no-binding artifact only).
+/// releases the slot.
+///
+/// v1.2 PR 3e: a `restore_snapshot_with_bindings` lease restores a SUPERVISOR
+/// artifact. The binding names come ONLY from the sealed manifest
+/// (`supervisor_build.binding_names` — never a lease field); every name is REQUIRED
+/// and resolved from the RUNNER host's own secret store BEFORE the restore (fail
+/// fast, no VM booted on a missing grant), then delivered over vsock and gated
+/// bound-ready BEFORE any traffic is exposed (`bind_before_expose`). Values live
+/// only in guest tmpfs; renewal runs for the session lifetime and is scrubbed at
+/// teardown.
 #[allow(clippy::too_many_arguments)]
 async fn handle_restore_snapshot_lease(
     client: &reqwest::Client,
@@ -3432,10 +3472,14 @@ async fn handle_restore_snapshot_lease(
     netns_enabled: bool,
 ) {
     use crate::application::ready_state::backend::select_backend_for_slot;
+    use crate::application::ready_state::binding_grants::{binding_namespace, preflight_resolve_names};
+    use crate::application::ready_state::binding_host::{bind_before_expose, issue_leases, spawn_lease_renewal, stop_scrub_over_vsock};
+    use crate::application::ready_state::flags::{binding_ttl_ms, runner_supervisor_enabled};
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
-        load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
+        RestoreArtifactClass, load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
     };
+    use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
 
     let lease_id = lease.id.clone();
@@ -3547,13 +3591,21 @@ async fn handle_restore_snapshot_lease(
     };
     prof_mark!("locate_artifact_ms");
 
-    // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate).
-    let manifest = match load_and_verify_manifest(&paths.manifest_json, &cmd) {
-        Ok(m) => m,
-        Err((code, message)) => {
-            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
-            return;
-        }
+    // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate)
+    // and classify it (fail-closed narrow supervisor exception, PR 3e).
+    let (manifest, artifact_class) =
+        match load_and_verify_manifest(&paths.manifest_json, &cmd, runner_supervisor_enabled()) {
+            Ok(m) => m,
+            Err((code, message)) => {
+                fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+                return;
+            }
+        };
+    // Binding names from the SEALED MANIFEST only (the single source of truth) —
+    // captured now because `manifest` is moved into the restore below.
+    let supervisor_names: Option<Vec<String>> = match &artifact_class {
+        RestoreArtifactClass::Supervisor { binding_names } => Some(binding_names.clone()),
+        RestoreArtifactClass::NoBinding => None,
     };
     prof_mark!("verify_manifest_ms");
 
@@ -3594,6 +3646,58 @@ async fn handle_restore_snapshot_lease(
         }
     };
     prof_mark!("cas_open_backend_select_ms");
+
+    // v1.2 PR 3e (supervisor only): re-check the BACKEND's binding capability —
+    // the control plane gates dispatch on the advertised kind, but a runner that
+    // advertises it while its backend cannot do binding leases must still refuse
+    // (defence in depth), and BEFORE any restore.
+    if supervisor_names.is_some() && !backend.probe().binding.supports_binding_lease {
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "binding_unsupported",
+            "supervisor artifact refused: this runner's snapshot backend does not support \
+             binding leases (vsock/KVM capability missing)"
+                .to_string(),
+        )
+        .await;
+        return;
+    }
+    // v1.2 PR 3e (supervisor only): resolve EVERY binding from the RUNNER host's
+    // own secret store BEFORE the restore — all names are required (3e MVP has no
+    // optional-secret semantics), and a missing grant must not boot a VM at all.
+    // Values are held in-memory only, for lease issuance below; never logged.
+    let resolved_bindings: Option<Vec<(String, protocol::binding_lease::SecretValue)>> =
+        match &supervisor_names {
+            Some(names) => {
+                let step = || -> Result<Vec<(String, protocol::binding_lease::SecretValue)>> {
+                    let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+                    let resolver = select_resolver(&namespace)?;
+                    preflight_resolve_names(resolver.as_ref(), names, &namespace)
+                };
+                match step() {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        fail(
+                            client,
+                            api_base,
+                            runner_token,
+                            &lease_id,
+                            slot,
+                            "bind_failed",
+                            format!("{e:#}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+    prof_mark!("binding_preflight_ms");
 
     // 5. Restore + expose. The disposable overlay is destroyed on teardown. host_runner
     // class stays None so `backend.restore` re-gates the manifest's runner class against
@@ -3647,6 +3751,64 @@ async fn handle_restore_snapshot_lease(
     // (Firecracker serves on the TAP guest IP, e.g. 172.16.0.2:8080, not host loopback).
     // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
     let workload_addr = session.workload_addr.clone();
+
+    // v1.2 PR 3e (supervisor only): BIND BEFORE EXPOSE. Issue leases from the
+    // pre-resolved values and deliver them over the restored session's vsock; the
+    // gate returns Ok only at bound-ready (the guest-agent then restarts the
+    // workload with the real env). ANY failure = teardown + typed fail — an
+    // unbound supervisor session must never reach the proxy/ready steps below.
+    let supervisor_bind: Option<(std::path::PathBuf, String)> = if let Some(names) = &supervisor_names {
+        let step = async {
+            let uds = session
+                .vsock_uds
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("restored supervisor session exposes no vsock uds"))?;
+            let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let leases = issue_leases(
+                resolved_bindings.clone().unwrap_or_default(),
+                now_ms,
+                binding_ttl_ms(),
+            )?;
+            let bind_uds = uds.clone();
+            // Blocking vsock connect + delivery — keep it off the async reactor.
+            tokio::task::spawn_blocking(move || {
+                bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
+            Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+        };
+        match step.await {
+            Ok(ctx) => {
+                println!(
+                    "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
+                    names.len()
+                );
+                Some(ctx)
+            }
+            Err(e) => {
+                let _ = teardown(backend.as_ref(), session);
+                fail(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    slot,
+                    "bind_failed",
+                    format!("{e:#}"),
+                )
+                .await;
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    prof_mark!("bind_before_expose_ms");
 
     // 6. Bring the per-slot root proxy up BEFORE claiming a URL — a proxy that failed (or
     // a slot with no URL to claim, or a session with no dialable workload address)
@@ -3709,6 +3871,20 @@ async fn handle_restore_snapshot_lease(
         prof_spans.join(";"),
     );
 
+    // v1.2 PR 3e (supervisor only): keep the leases fresh for the session lifetime.
+    // The renewal loop re-resolves from the runner's store every tick (a deleted
+    // grant revokes the lease → the guest scrubs it and bound-ready drops).
+    // Held in-handler (the runner records no ProcessInfo for restored sessions) and
+    // aborted at teardown below.
+    let renewal_handle = supervisor_bind.as_ref().map(|(uds, namespace)| {
+        spawn_lease_renewal(
+            uds.clone(),
+            namespace.clone(),
+            supervisor_names.clone().unwrap_or_default(),
+            binding_ttl_ms(),
+        )
+    });
+
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
     let control_url = format!(
         "{}/v1/runner-leases/{}/control",
@@ -3733,6 +3909,23 @@ async fn handle_restore_snapshot_lease(
     // 8. Teardown: stop the VM + destroy the overlay, stop the proxy, ack /stopped, and
     // free the slot ONLY on a fully confirmed teardown (fail closed — a slot held is
     // safer than one offered while a VM may still be up).
+    // v1.2 PR 3e (supervisor only): first stop renewing, then best-effort scrub the
+    // guest's tmpfs bindings over vsock BEFORE the VM (and its tmpfs) is destroyed —
+    // teardown wipes them regardless, so a scrub failure is logged, never fatal.
+    if let Some(handle) = renewal_handle {
+        handle.abort();
+    }
+    if let Some((uds, _)) = supervisor_bind {
+        let scrub = tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+        match scrub {
+            Ok(Ok(())) => println!("🧹 restore lease {lease_id}: guest bindings scrubbed"),
+            Ok(Err(e)) => eprintln!(
+                "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                scrub_secrets(&format!("{e:#}"))
+            ),
+            Err(e) => eprintln!("⚠️  restore lease {lease_id}: binding scrub task join error: {e}"),
+        }
+    }
     let vm_stopped = match teardown(backend.as_ref(), session) {
         Ok(_) => true,
         Err(e) => {
@@ -3780,9 +3973,11 @@ async fn handle_claimed_lease(
     // (Track D dispatch, ato-api#159). It is NOT a child-process sandbox run, so it owns
     // its own fetch → verify → restore → expose → teardown lifecycle — routed here,
     // before the run_source/run_capsule machinery that would reject the kind.
-    if lease.command.get("kind").and_then(|v| v.as_str())
-        == Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND)
-    {
+    if matches!(
+        lease.command.get("kind").and_then(|v| v.as_str()),
+        Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND)
+            | Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND)
+    ) {
         handle_restore_snapshot_lease(
             client,
             api_base,
@@ -4760,7 +4955,7 @@ mod tests {
         // Not ready: base kinds only, NO native-inference advertised — so the
         // control plane will not dispatch native-inference here (the slice-1 gate
         // requires the capability).
-        let base = advertised_lease_kinds_for(false, false);
+        let base = advertised_lease_kinds_for(false, false, false);
         assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
         assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
@@ -4768,7 +4963,7 @@ mod tests {
             "must NOT advertise native-inference when the host is not ready"
         );
         // Ready: base kinds preserved + native-inference appended.
-        let ready = advertised_lease_kinds_for(true, false);
+        let ready = advertised_lease_kinds_for(true, false, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
             ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
@@ -4782,15 +4977,37 @@ mod tests {
         // KVM-free host: restore_snapshot is NOT advertised, so the control plane will
         // not dispatch a restore here (a Fake/KVM-free host cannot serve a real app_url).
         assert!(
-            !advertised_lease_kinds_for(false, false)
+            !advertised_lease_kinds_for(false, false, false)
                 .iter()
                 .any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND),
             "must NOT advertise restore_snapshot when the host cannot restore+serve"
         );
         // Restore-ready host: base kinds preserved + restore_snapshot appended.
-        let ready = advertised_lease_kinds_for(false, true);
+        let ready = advertised_lease_kinds_for(false, true, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(ready.iter().any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND));
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_with_bindings_only_when_restore_and_supervisor_ready() {
+        use crate::application::ready_state::restore_lease::{
+            RESTORE_SNAPSHOT_LEASE_KIND, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND,
+        };
+        let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
+        // Neither: no binding kind.
+        assert!(!has(&advertised_lease_kinds_for(false, false, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        // Supervisor-ready but NOT restore-ready (no KVM): still refused — the
+        // binding kind requires BOTH.
+        assert!(!has(&advertised_lease_kinds_for(false, false, true), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        // Restore-ready but not supervisor-ready (flag off / no vsock capability):
+        // plain restore advertised, binding kind NOT.
+        let plain = advertised_lease_kinds_for(false, true, false);
+        assert!(has(&plain, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(!has(&plain, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        // Both: both kinds advertised.
+        let both = advertised_lease_kinds_for(false, true, true);
+        assert!(has(&both, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(has(&both, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
     }
 
     fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {
