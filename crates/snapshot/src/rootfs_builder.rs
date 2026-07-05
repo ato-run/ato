@@ -1606,6 +1606,83 @@ readiness_probe = { http_get = "/health" }
         assert!(redis.env_map.is_empty(), "redis scopes no secret → empty injection map");
     }
 
+    // ── v1.5 multi-service COMPOSITION fixture (ato#984) ──
+    // One realistic capsule exercising every v1.5 piece together, so a regression
+    // that only shows up when the pieces COMPOSE (not in a per-slice unit) fails
+    // here. A public `web` + an internal `redis` + an internal `worker` that
+    // depends on redis; expose ports, an alias, a readiness probe, and per-service
+    // secret scoping all in one manifest. (CI-runnable — no KVM/Docker; the live
+    // seal→restore of a fixture like this runs via the runner smoke on a real host.)
+
+    fn compose_fixture_toml() -> String {
+        format!(
+            "{}\n\
+             [secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [secrets.redis_password]\nrequired = true\nenv = \"REDIS_PASSWORD\"\n\
+             [services.web]\nentrypoint = \"node web.js\"\ndepends_on = [\"redis\", \"worker\"]\n\
+             secrets = [\"openai_api_key\"]\n\
+             [services.web.network]\npublish = true\n\
+             [services.web.readiness_probe]\nhttp_get = \"/healthz\"\n\
+             [services.redis]\nentrypoint = \"redis-server\"\nexpose = [\"REDIS_PORT\"]\n\
+             secrets = [\"redis_password\"]\n\
+             [services.redis.network]\naliases = [\"cache\"]\n\
+             [services.worker]\nentrypoint = \"node worker.js\"\ndepends_on = [\"redis\"]\n",
+            base_toml() // target port 8080
+        )
+    }
+
+    #[test]
+    fn multi_service_fixture_composes_every_v15_piece() {
+        let spec = derive_supervisor_build_spec(&parse(&compose_fixture_toml()), &probe_python())
+            .expect("compose fixture derives");
+        let sup = spec.supervisor.as_ref().unwrap();
+        let services = sup.services.as_ref().unwrap();
+        let by = |n: &str| services.iter().find(|s| s.name == n).unwrap();
+        let (web, redis, worker) = (by("web"), by("redis"), by("worker"));
+
+        // app_url selection: web is the sole public service + the target-port owner.
+        assert_eq!(sup.public_service.as_deref(), Some("web"));
+        assert_eq!(web.port, Some(spec.port));
+        assert_eq!(services.iter().filter(|s| s.port == Some(spec.port)).count(), 1);
+
+        // expose resolution + cross-injection: redis's port is allocated (≠ target),
+        // web can reach it by REDIS_REDIS_PORT, and it matches redis's own REDIS_PORT.
+        let rport = redis.base_env.get("REDIS_PORT").expect("redis own port");
+        assert_ne!(rport, "8080");
+        assert_eq!(web.base_env.get("REDIS_REDIS_PORT"), Some(rport));
+        assert_eq!(worker.base_env.get("REDIS_REDIS_PORT"), Some(rport), "worker reaches redis too");
+
+        // service aliasing: /etc/hosts maps every name + alias to loopback.
+        let hosts = build_etc_hosts(services);
+        for h in ["web", "redis", "cache", "worker"] {
+            assert!(hosts.contains(h), "hosts missing {h}");
+        }
+
+        // per-service secret scoping: least privilege, no cross-delivery.
+        assert_eq!(web.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert!(!web.env_map.contains_key("REDIS_PASSWORD"), "web must not get redis's secret");
+        assert_eq!(redis.env_map.get("REDIS_PASSWORD").map(String::as_str), Some("redis_password"));
+        assert!(!redis.env_map.contains_key("OPENAI_API_KEY"));
+        assert!(worker.env_map.is_empty(), "worker scopes no secret");
+        // Both required secrets are scoped → both waited-for by the gate.
+        assert_eq!(sup.binding_names, vec!["openai_api_key", "redis_password"]);
+
+        // readiness graph + emission: the emitted supervisor.json carries depends_on
+        // and readiness, web depends on redis + worker, and the group is startable.
+        let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+        let arr = json["services"].as_array().unwrap();
+        let webj = arr.iter().find(|s| s["name"] == "web").unwrap();
+        assert_eq!(webj["depends_on"], serde_json::json!(["redis", "worker"]));
+        assert_eq!(webj["readiness"]["port"], spec.port);
+        assert_eq!(webj["readiness"]["http_path"], "/healthz");
+        // No secret VALUE anywhere in the emitted config (names only).
+        assert!(!json.to_string().contains("sk-") && !json.to_string().to_lowercase().contains("password="));
+
+        // The whole build script assembles (multi-service supervisor.json + /etc/hosts).
+        let script = build_rootfs_script(&spec, 1024);
+        assert!(script.contains("\"services\"") && script.contains("rootfs/etc/hosts"));
+    }
+
     #[test]
     fn a_required_secret_scoped_to_no_service_is_rejected() {
         // openai_api_key is required but no service names it → fail-closed.
