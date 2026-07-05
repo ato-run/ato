@@ -1279,14 +1279,22 @@ impl SnapshotBackend for FirecrackerBackend {
         //    two writers corrupt it; require read-only rootfs under netns.
         //  * a vsock UDS path is BAKED into the snapshot (`/tmp/ato-vsock/{hash}`)
         //    and recreated on load → identical for every instance; refuse until
-        //    it is mount-namespace isolated. (Showcase apps have no vsock.)
+        //    it is mount-namespace isolated (v1.4: per-slot vsock UDS pathing).
+        //
+        // v1.3 (ato#968): the vsock gate is MANIFEST-driven, not env-driven.
+        // Restore devices come from the snapshot, so `ATO_FC_VSOCK=1` on the
+        // host says nothing about whether THIS artifact collides — gating on it
+        // blocked every N-slot restore on a supervisor-capable host (runner
+        // profiles: public N-slot = non-vsock artifacts; supervisor = vsock
+        // artifacts, single-slot until v1.4). The env flag's forced UDS prep is
+        // correspondingly skipped under netns below.
         if self.config.netns.is_some() {
             if !self.config.rootfs_read_only {
                 return Err(self.unsupported(
                     "N-slot (netns) restore requires read-only rootfs; rw-rootfs writes a shared cache path and would corrupt under concurrency",
                 ));
             }
-            if vsock_enabled() || input.manifest.has_vsock {
+            if input.manifest.has_vsock {
                 return Err(self.unsupported(
                     "N-slot (netns) restore does not yet support vsock snapshots; the baked vsock UDS path collides across concurrent instances",
                 ));
@@ -1446,8 +1454,14 @@ impl SnapshotBackend for FirecrackerBackend {
             // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
             // uds_path; FC re-creates that socket on load, so its directory must exist.
             // The artifact self-describes vsock (manifest.has_vsock) so restore preps it
-            // without an env flag; ATO_FC_VSOCK still forces it for the smokes.
-            let vsock_uds = if vsock_enabled() || input.manifest.has_vsock {
+            // without an env flag; ATO_FC_VSOCK still forces it for the smokes —
+            // EXCEPT under netns (v1.3, ato#968): the UDS path is deterministic per
+            // capsule hash, so a forced prep (`remove_file`) from one slot could rip
+            // out another slot's live socket. Under netns only the manifest decides
+            // (and a has_vsock manifest was already rejected by the gate above).
+            let vsock_uds = if input.manifest.has_vsock
+                || (vsock_enabled() && self.config.netns.is_none())
+            {
                 let uds = vsock_uds_path(&input.manifest.capsule_manifest_hash);
                 if let Some(d) = uds.parent() {
                     std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
