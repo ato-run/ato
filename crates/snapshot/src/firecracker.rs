@@ -1836,16 +1836,14 @@ mod tests {
         // AF_UNIX sun_path budget: the host-side dial path (slot dir + the
         // 76-byte `blake3_<64-hex>.sock` file name) must stay under SUN_LEN
         // (~108). `/tmp/ato-vsock-slots/ato-slot-0/…` was exactly 108 and
-        // failed the first live restore — keep the dir terse.
-        let dial = FirecrackerConfig::for_slot(99, true, &base)
-            .vsock_slot_dir
-            .unwrap()
-            .join(format!("blake3_{}.sock", "a".repeat(64)));
+        // failed the first live restore — keep the dir terse. Budgeted against
+        // `/tmp` (restore is Linux-only; this test also runs on macOS, where
+        // `temp_dir()` is a long per-user path that never restores anything).
+        let dial = format!("/tmp/ato-vsk/99/blake3_{}.sock", "a".repeat(64));
         assert!(
-            dial.as_os_str().len() <= 100,
-            "host dial path must fit sun_path with margin, got {} bytes: {}",
-            dial.as_os_str().len(),
-            dial.display()
+            dial.len() <= 100,
+            "host dial path must fit sun_path with margin, got {} bytes: {dial}",
+            dial.len(),
         );
     }
 
