@@ -322,6 +322,13 @@ impl<W: Workload> Supervisor<W> {
     pub fn is_running(&self) -> bool {
         self.workload.is_running()
     }
+
+    /// Whether a bound-ready start has happened (and no stop since). The v1.4 hard
+    /// gate uses this to distinguish "fresh pre-bind session" (false — normal, no
+    /// stop needed) from "bound session that lost a binding" (true — stop NOW).
+    pub fn started(&self) -> bool {
+        self.started
+    }
 }
 
 /// The default supervisor config path inside the guest (`ATO_SUPERVISOR_CONFIG`
