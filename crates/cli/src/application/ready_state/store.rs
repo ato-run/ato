@@ -98,6 +98,7 @@ mod tests {
             sanitizer_contract: Default::default(),
             no_secret_proof: None,
             build_receipt_id: None,
+            supervisor_build: None,
         };
         let root = dir.path();
         assert!(load_manifest(root, "blake3:deadbeef").unwrap().is_none());

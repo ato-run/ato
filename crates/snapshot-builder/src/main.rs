@@ -308,6 +308,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(declared_execution_id),
+            supervisor: None,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
     let manifest_out = receipt.manifest.clone();

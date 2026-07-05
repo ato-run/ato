@@ -120,6 +120,7 @@ pub(crate) fn seal(
             sanitizer_contract: sanitizer_contract_from_manifest(manifest),
             declared_secret_markers: declared_secret_markers(manifest),
             execution_id: None,
+            supervisor: None,
         })
         .context("snapshot backend build_ready_state failed")?;
 
