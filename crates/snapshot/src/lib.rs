@@ -27,6 +27,7 @@
 //! * **Fail-closed restore class** — `restore` rejects a host whose
 //!   `runner_class_id` differs from the one the snapshot was built for.
 
+pub mod agent_channel;
 mod backend;
 pub mod bench;
 mod fake;
