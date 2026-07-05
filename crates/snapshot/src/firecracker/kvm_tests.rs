@@ -768,6 +768,26 @@ fn http_req(ip: &str, port: u16, method: &str, path: &str, body: Option<&str>) -
     resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
 }
 
+/// v1.2 PR 3d: lenient GET for states where NO LISTENER is the expected outcome —
+/// a supervisor session pre-bind (workload group-killed before the seal) or
+/// mid-restart-with-env (old process gone, new one not yet bound). `http_get`'s
+/// bare `.expect("connect guest")` treats ECONNREFUSED as a harness panic, which
+/// turned the CORRECT fully-down state into a test crash. Down = empty body.
+fn http_get_down_ok(ip: &str, port: u16, path: &str) -> String {
+    use std::io::{Read, Write};
+    let Ok(mut s) = std::net::TcpStream::connect((ip, port)) else {
+        return String::new(); // connection refused = nothing listening = down
+    };
+    s.set_read_timeout(Some(std::time::Duration::from_secs(3))).ok();
+    let req = format!("GET {path} HTTP/1.0\r\nHost: {ip}\r\nContent-Length: 0\r\n\r\n");
+    if s.write_all(req.as_bytes()).is_err() {
+        return String::new(); // listener died mid-request = down
+    }
+    let mut resp = String::new();
+    let _ = s.read_to_string(&mut resp);
+    resp.split("\r\n\r\n").nth(1).unwrap_or("").to_string()
+}
+
 // ── Phase 8a-HW PR B (#912): Firecracker vsock ↔ guest-agent connection smoke ──────
 // Requires ATO_FC_AGENT_ROOTFS: a rootfs that serves /health AND launches
 // ato-guest-agent in vsock mode at boot. Set ATO_FC_VSOCK=1 is done by the test.
@@ -1019,7 +1039,10 @@ fn fc_kvm_supervisor_full_e2e() {
     let uds = r.session.vsock_uds.clone().expect("vsock uds");
     let port = r.session.guest_port.unwrap_or(8080);
     let gip = FirecrackerConfig::default().guest_ip;
-    let pre = http_get(&gip, port, "/health");
+    // Lenient probe: the CORRECT state here is "no listener at all" (the build
+    // drive group-killed the workload before the seal) — connection refused is
+    // the expected outcome, not a harness error.
+    let pre = http_get_down_ok(&gip, port, "/health");
     assert!(!pre.contains("ok"), "post-restore pre-bind /health must be down (StopWorkload before seal): {pre:?}");
     let ready0 = vsock_exchange(&uds, 1025, &["{\"kind\":\"query_bound_ready\"}".into()]);
     assert!(ready0[0].contains("\"ready\":false"), "restored session must not be bound-ready (Revoke before seal): {ready0:?}");
@@ -1039,7 +1062,9 @@ fn fc_kvm_supervisor_full_e2e() {
     assert!(acks[1].contains("\"ready\":true"), "bound-ready after real delivery: {acks:?}");
     let mut healthy = false;
     for _ in 0..30 {
-        if http_get(&gip, port, "/health").contains("ok") { healthy = true; break; }
+        // Lenient: the first polls can land BEFORE the restarted app binds its
+        // listener — refused = "not up yet", not a harness error.
+        if http_get_down_ok(&gip, port, "/health").contains("ok") { healthy = true; break; }
         std::thread::sleep(Duration::from_millis(300));
     }
     assert!(healthy, "restart-with-env: /health must reach ok after real delivery");
