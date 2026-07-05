@@ -360,6 +360,28 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
     let services = derive_supervisor_services(m, &env_map, spec.port)?;
+
+    // v1.5 per-service secret scoping (ato#982): in a MULTI-service build a secret
+    // reaches only the service(s) that named it. Fail-closed: every REQUIRED secret
+    // must be scoped to at least one service (an unscoped required secret would be
+    // waited-for by the gate but delivered to nobody — a config error). The lease
+    // set (`binding_names`, the agent's argv) then shrinks to the secrets actually
+    // used, so the guest never blocks on a secret no service consumes. The legacy
+    // single-service build is untouched (its sole workload gets every secret).
+    if let Some(svcs) = services.as_ref() {
+        let scoped: std::collections::BTreeSet<&str> =
+            svcs.iter().flat_map(|s| s.env_map.values()).map(|s| s.as_str()).collect();
+        for (name, s) in &m.secrets {
+            if s.required && !scoped.contains(name.as_str()) {
+                return Err(format!(
+                    "required secret '{name}' is not used by any service — scope it to a \
+                     service with `secrets = [\"{name}\"]` (least privilege) or drop it"
+                ));
+            }
+        }
+        binding_names.retain(|n| scoped.contains(n.as_str()));
+    }
+
     // app_url selection: the sole public service (exactly one, enforced in derive)
     // is the app_url / ready_url target. Recorded in the receipt; None for legacy.
     let public_service = services
@@ -582,11 +604,32 @@ fn derive_supervisor_services(
         // allocation never collides with it.
         let literal_port = base_env.get("PORT").and_then(|p| p.parse::<u16>().ok());
 
+        // v1.5 per-service secret scoping (ato#982): a secret reaches ONLY the
+        // service(s) that name it in `secrets = [...]`. Build this service's
+        // injection map as the subset of the global env_map whose secret name is
+        // declared here. Fail-closed: a referenced secret must actually exist.
+        // `common_secret_env_map` is ENV_VAR → secret name.
+        let wanted: std::collections::BTreeSet<&str> =
+            svc.secrets.iter().flatten().map(|s| s.as_str()).collect();
+        for secret in &wanted {
+            if !common_secret_env_map.values().any(|n| n == secret) {
+                return Err(format!(
+                    "service '{name}': secrets entry '{secret}' is not a declared \
+                     [secrets.*] — declare it or remove the reference"
+                ));
+            }
+        }
+        let env_map: BTreeMap<String, String> = common_secret_env_map
+            .iter()
+            .filter(|(_, secret)| wanted.contains(secret.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
         collected.push(Resolved {
             name: (*name).clone(),
             cmd: vec!["/bin/sh".into(), "-lc".into(), svc.entrypoint.clone()],
             author_env: base_env,
-            env_map: common_secret_env_map.clone(),
+            env_map,
             public,
             depends_on,
             aliases,
@@ -1513,6 +1556,90 @@ readiness_probe = { http_get = "/health" }
             .contains("POSIX identifier"));
     }
 
+    // ── v1.5 per-service secret scoping (ato#982) ──
+
+    #[test]
+    fn a_secret_reaches_only_the_services_that_scope_it() {
+        // Two secrets; api scopes the openai key, redis scopes the redis password.
+        // Neither service sees the other's secret (least privilege).
+        let toml = format!(
+            "{}\n\
+             [secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [secrets.redis_password]\nrequired = true\nenv = \"REDIS_PASSWORD\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\nsecrets = [\"redis_password\"]\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        let services = sup.services.as_ref().unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        let redis = services.iter().find(|s| s.name == "redis").unwrap();
+        // api gets ONLY the openai key; redis gets ONLY the redis password.
+        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert!(!api.env_map.contains_key("REDIS_PASSWORD"), "api must NOT get redis's secret");
+        assert_eq!(redis.env_map.get("REDIS_PASSWORD").map(String::as_str), Some("redis_password"));
+        assert!(!redis.env_map.contains_key("OPENAI_API_KEY"), "redis must NOT get api's secret");
+        // Both required secrets are scoped, so both are still waited-for by the gate.
+        assert_eq!(sup.binding_names, vec!["openai_api_key", "redis_password"]);
+    }
+
+    #[test]
+    fn an_unscoped_secret_is_not_delivered_and_shrinks_the_lease_set() {
+        // redis needs no secret; the (optional) unused secret is delivered to nobody
+        // and drops out of binding_names (the guest never blocks on it).
+        let toml = format!(
+            "{}\n\
+             [secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [secrets.unused_key]\nrequired = false\nenv = \"UNUSED\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        // The optional unused secret is not waited-for; redis carries no secret.
+        assert_eq!(sup.binding_names, vec!["openai_api_key"], "unused optional secret dropped from lease set");
+        let redis = sup.services.as_ref().unwrap().iter().find(|s| s.name == "redis").unwrap();
+        assert!(redis.env_map.is_empty(), "redis scopes no secret → empty injection map");
+    }
+
+    #[test]
+    fn a_required_secret_scoped_to_no_service_is_rejected() {
+        // openai_api_key is required but no service names it → fail-closed.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+        assert!(err.contains("required secret 'openai_api_key'") && err.contains("not used by any service"), "{err}");
+    }
+
+    #[test]
+    fn a_service_scoping_an_undeclared_secret_is_rejected() {
+        // api references a secret that does not exist in [secrets.*] → fail-closed.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\", \"ghost_key\"]\n[services.api.network]\npublish = true\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+        assert!(err.contains("'ghost_key'") && err.contains("not a declared"), "{err}");
+    }
+
+    #[test]
+    fn legacy_single_service_still_receives_every_secret() {
+        // The legacy single-service build (no [services]) is unchanged: the sole
+        // workload gets every declared secret, and binding_names is the full set.
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert!(sup.services.is_none(), "legacy single-service build");
+        assert_eq!(sup.binding_names, vec!["openai_api_key"], "legacy keeps every declared secret");
+        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+    }
+
     #[test]
     fn supervisor_build_script_runs_agent_as_init_and_emits_config_without_secrets() {
         let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
@@ -1549,6 +1676,7 @@ readiness_probe = { http_get = "/health" }
         format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
              [services.api]\nentrypoint = \"python3 api.py\"\ndepends_on = [\"redis\"]\n\
+             secrets = [\"openai_api_key\"]\n\
              [services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"redis-server\"\n",
             base_toml()
@@ -1617,7 +1745,7 @@ readiness_probe = { http_get = "/health" }
         // the app_url target — only the public service's proxied port is the URL.
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n\
              [services.redis.network]\naliases = [\"cache\"]\n",
             base_toml()
@@ -1640,7 +1768,7 @@ readiness_probe = { http_get = "/health" }
         //     the proxied port has a single owner (the public service).
         let internal_on_target = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"8080\"\n",
             base_toml() // target port 8080
         );
@@ -1650,7 +1778,7 @@ readiness_probe = { http_get = "/health" }
         // (2) Two internal services declaring the SAME concrete literal port → rejected.
         let dup_literal = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"9001\"\n\
              [services.worker]\nentrypoint = \"w\"\n[services.worker.env]\nPORT = \"9001\"\n",
             base_toml()
@@ -1662,7 +1790,7 @@ readiness_probe = { http_get = "/health" }
         //     an internal service on a DIFFERENT literal port is fine.
         let ok = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"6379\"\n",
             base_toml()
         );
@@ -1690,7 +1818,7 @@ readiness_probe = { http_get = "/health" }
         // name (`redis:$REDIS_REDIS_PORT` or `cache:$...`).
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\ndepends_on = [\"redis\"]\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\ndepends_on = [\"redis\"]\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"redis-server\"\nexpose = [\"REDIS_PORT\"]\n\
              [services.redis.network]\naliases = [\"cache\"]\n",
             base_toml()
@@ -1710,7 +1838,7 @@ readiness_probe = { http_get = "/health" }
         // A duplicate hostname (alias equals another service's name) is fail-closed.
         let dup = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\n[services.redis.network]\naliases = [\"api\"]\n",
             base_toml()
         );
@@ -1725,7 +1853,7 @@ readiness_probe = { http_get = "/health" }
         // be EXACTLY this (loopback line = sorted names+aliases, then the ::1 line).
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"r\"\n[services.redis.network]\naliases = [\"cache\"]\n",
             base_toml()
         );
@@ -1749,7 +1877,7 @@ readiness_probe = { http_get = "/health" }
         };
         // alias = "localhost"
         reject(
-            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"localhost\"]\n",
+            "[services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\naliases = [\"localhost\"]\n",
         );
         // service NAME = "localhost"
         reject(
@@ -1757,12 +1885,12 @@ readiness_probe = { http_get = "/health" }
         );
         // alias = "ip6-localhost"
         reject(
-            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"ip6-localhost\"]\n",
+            "[services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\naliases = [\"ip6-localhost\"]\n",
         );
         // A normal alias still works.
         let ok = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"web\"]\n",
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\naliases = [\"web\"]\n",
             base_toml()
         );
         assert!(derive_supervisor_build_spec(&parse(&ok), &probe_python()).is_ok());
@@ -1792,7 +1920,7 @@ readiness_probe = { http_get = "/health" }
         // supervisor.json must carry the graph so the guest can order + wait.
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"python3 api.py\"\ndepends_on = [\"redis\"]\n\
+             [services.api]\nentrypoint = \"python3 api.py\"\ndepends_on = [\"redis\"]\nsecrets = [\"openai_api_key\"]\n\
              [services.api.network]\npublish = true\n\
              [services.api.readiness_probe]\nhttp_get = \"/health\"\n\
              [services.redis]\nentrypoint = \"redis-server\"\n[services.redis.env]\nPORT = \"6379\"\n",
@@ -1821,7 +1949,7 @@ readiness_probe = { http_get = "/health" }
         // REDIS_PORT.
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"node server.js\"\ndepends_on = [\"redis\"]\n\
+             [services.api]\nentrypoint = \"node server.js\"\ndepends_on = [\"redis\"]\nsecrets = [\"openai_api_key\"]\n\
              [services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"redis-server\"\nexpose = [\"REDIS_PORT\"]\n",
             base_toml() // target port 8080
@@ -1852,7 +1980,7 @@ readiness_probe = { http_get = "/health" }
         // proxied target port; an additional one gets an allocated port.
         let toml = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.web]\nentrypoint = \"node web.js\"\nexpose = [\"HTTP_PORT\", \"METRICS_PORT\"]\n\
+             [services.web]\nentrypoint = \"node web.js\"\nexpose = [\"HTTP_PORT\", \"METRICS_PORT\"]\nsecrets = [\"openai_api_key\"]\n\
              [services.web.network]\npublish = true\n",
             base_toml()
         );
@@ -1882,7 +2010,7 @@ readiness_probe = { http_get = "/health" }
     fn expose_collision_toml(internal: &str) -> String {
         format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n{internal}",
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n{internal}",
             base_toml()
         )
     }
@@ -1922,7 +2050,7 @@ readiness_probe = { http_get = "/health" }
         // (3b) Generated cross-reference var already declared by the author → rejected.
         let xref = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.api.env]\nREDIS_REDIS_PORT = \"1234\"\n\
              [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n",
             base_toml()
@@ -1983,7 +2111,7 @@ readiness_probe = { http_get = "/health" }
         );
         // Container-only field: egress_proxy opt-out.
         bad(
-            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\negress_proxy = false\n",
+            "[services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\negress_proxy = false\n",
             "egress_proxy = false",
         );
     }
@@ -1994,7 +2122,7 @@ readiness_probe = { http_get = "/health" }
         // port would listen where the proxy is NOT — fail closed.
         let mismatch = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"node server.js\"\n[services.api.env]\nPORT = \"3000\"\n\
+             [services.api]\nentrypoint = \"node server.js\"\nsecrets = [\"openai_api_key\"]\n[services.api.env]\nPORT = \"3000\"\n\
              [services.api.network]\npublish = true\n",
             base_toml() // target port = 8080
         );
@@ -2004,7 +2132,7 @@ readiness_probe = { http_get = "/health" }
         // Declaring the SAME port is fine (redundant but honest).
         let same = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"node server.js\"\n[services.api.env]\nPORT = \"8080\"\n\
+             [services.api]\nentrypoint = \"node server.js\"\nsecrets = [\"openai_api_key\"]\n[services.api.env]\nPORT = \"8080\"\n\
              [services.api.network]\npublish = true\n",
             base_toml()
         );
@@ -2020,7 +2148,7 @@ readiness_probe = { http_get = "/health" }
         // An INTERNAL service may listen wherever it likes — its PORT is untouched.
         let internal_port = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.redis]\nentrypoint = \"redis-server\"\n[services.redis.env]\nPORT = \"6379\"\n",
             base_toml()
         );
@@ -2034,7 +2162,7 @@ readiness_probe = { http_get = "/health" }
     fn service_aliases_must_be_dns_safe_and_readiness_path_is_recorded() {
         let bad_alias = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"Bad_Alias\"]\n",
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\naliases = [\"Bad_Alias\"]\n",
             base_toml()
         );
         assert!(derive_supervisor_build_spec(&parse(&bad_alias), &probe_python())
@@ -2044,7 +2172,7 @@ readiness_probe = { http_get = "/health" }
         // A declared HTTP readiness path is recorded on the service spec.
         let with_probe = format!(
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\n\
              [services.api.readiness_probe]\nhttp_get = \"/healthz\"\n",
             base_toml()
         );
