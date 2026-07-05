@@ -318,6 +318,11 @@ pub struct SpawnPlan {
     /// `ENV_VAR -> tmpfs file path`. The child reads each at exec; the agent never
     /// reads the value.
     pub secret_env: Vec<(String, PathBuf)>,
+    /// v1.5 per-service logs (ato#973): this service's stdout/stderr are redirected
+    /// to these files so one service's output never mixes into another's (or the
+    /// agent's). Deterministic per service name (see [`service_log_paths`]).
+    pub stdout_log: PathBuf,
+    pub stderr_log: PathBuf,
 }
 
 /// Build the spawn plan from the config + bindings root. Verifies each binding file
@@ -367,12 +372,31 @@ pub fn plan_spawn_service(service: &ServiceSpec, bindings_root: &Path) -> std::i
         }
         secret_env.push((var.clone(), path));
     }
+    let (stdout_log, stderr_log) = service_log_paths(&service.name);
     Ok(SpawnPlan {
         cmd: service.cmd.clone(),
         cwd: service.cwd.clone(),
         base_env: service.base_env.clone(),
         secret_env,
+        stdout_log,
+        stderr_log,
     })
+}
+
+/// The service-logs directory (`$ATO_SERVICE_LOG_DIR`, else `/tmp/ato/services`).
+pub fn service_log_dir() -> PathBuf {
+    match std::env::var("ATO_SERVICE_LOG_DIR") {
+        Ok(d) if !d.trim().is_empty() => PathBuf::from(d),
+        _ => PathBuf::from("/tmp/ato/services"),
+    }
+}
+
+/// Deterministic per-service log paths: `<dir>/<name>.stdout.log` +
+/// `<name>.stderr.log`. The service name is a DNS-safe label ([a-z0-9-]) — which is
+/// also PATH-safe (no `/`, `.`, or `..` component), so it cannot escape the dir.
+pub fn service_log_paths(name: &str) -> (PathBuf, PathBuf) {
+    let dir = service_log_dir();
+    (dir.join(format!("{name}.stdout.log")), dir.join(format!("{name}.stderr.log")))
 }
 
 /// POSIX single-quote a string for safe embedding in an `sh -c` script.
@@ -436,6 +460,19 @@ impl Workload for ChildWorkload {
         }
         for (k, v) in &plan.base_env {
             c.env(k, v); // non-secret only
+        }
+        // v1.5 per-service logs: redirect this service's stdout/stderr to its own
+        // files so one service's output never mixes into another's (or the agent's
+        // /tmp/agent.log). Best-effort: if the dir/files can't be created (read-only
+        // fs, exotic host), fall back to inherited stdio rather than failing to start.
+        if let Some(parent) = plan.stdout_log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(out) = std::fs::File::create(&plan.stdout_log) {
+            c.stdout(std::process::Stdio::from(out));
+        }
+        if let Ok(err) = std::fs::File::create(&plan.stderr_log) {
+            c.stderr(std::process::Stdio::from(err));
         }
         self.child = Some(c.spawn()?);
         Ok(())
@@ -653,7 +690,12 @@ impl<W: Workload> Supervisor<W> {
             let mut w = (self.make_workload)();
             if let Err(e) = w.start(&plan) {
                 self.stop_all_started();
-                return Err(e);
+                // Name the service in the diagnostic (per-service logs at
+                // service_log_paths(name) hold its output).
+                return Err(std::io::Error::new(
+                    e.kind(),
+                    format!("service '{name}' failed to start: {e}"),
+                ));
             }
             self.workloads.push(w);
         }
@@ -929,6 +971,113 @@ mod tests {
         assert!(!sup.is_running(), "the started service was rolled back");
         assert!(!sup.started(), "group is not marked started");
         assert_eq!(*st.live.borrow(), 0, "no service left running");
+    }
+
+    // ── v1.5 (ato#973): per-service logs ──
+
+    #[test]
+    fn per_service_log_paths_are_distinct_deterministic_and_path_safe() {
+        // Env-independent: assert the FILENAME shape + distinctness + determinism
+        // against whatever the current service_log_dir() is (no shared-env mutation,
+        // so this can't race a parallel test).
+        let dir = service_log_dir();
+        let (api_out, api_err) = service_log_paths("api");
+        let (redis_out, redis_err) = service_log_paths("redis");
+        // api and redis never share a log file; stdout ≠ stderr.
+        assert_ne!(api_out, redis_out);
+        assert_ne!(api_out, api_err);
+        assert_ne!(redis_out, redis_err);
+        assert_eq!(api_out.file_name().unwrap(), "api.stdout.log");
+        assert_eq!(redis_err.file_name().unwrap(), "redis.stderr.log");
+        // Deterministic (same input → same path).
+        assert_eq!(service_log_paths("api").0, api_out);
+        // Path-safe: a DNS-safe service name yields a single filename component under
+        // the dir — it cannot contain `/`, `.`-only, or `..` traversal.
+        for name in ["api", "redis", "my-worker", "svc0"] {
+            let (out, _) = service_log_paths(name);
+            assert_eq!(out.parent().unwrap(), dir);
+            let file = out.file_name().unwrap().to_string_lossy();
+            assert!(!file.contains('/') && file != ".." && file != ".", "path-safe: {file}");
+        }
+    }
+
+    #[test]
+    fn each_service_plan_carries_its_own_log_paths_no_value_leak() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "openai", "sk-SECRET-VALUE");
+        let api = ServiceSpec {
+            name: "api".into(),
+            cmd: vec!["python3".into(), "api.py".into()],
+            cwd: "/app".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::from([("OPENAI_API_KEY".into(), "openai".into())]),
+            depends_on: Vec::new(),
+            readiness: None,
+        };
+        let plan = plan_spawn_service(&api, dir.path()).unwrap();
+        assert!(plan.stdout_log.to_string_lossy().ends_with("api.stdout.log"));
+        assert!(plan.stderr_log.to_string_lossy().ends_with("api.stderr.log"));
+        // The plan (which is what feeds the spawn) never carries the secret VALUE —
+        // only the tmpfs path. A reported diagnostic built from the plan is clean.
+        assert!(!format!("{plan:?}").contains("sk-SECRET-VALUE"), "plan carries no value");
+    }
+
+    #[test]
+    fn a_real_child_writes_to_its_per_service_log_not_shared_stdout() {
+        // Spawn a real child that prints to stdout + stderr; assert its output landed
+        // in THIS service's own files (read via the PLAN's captured paths, so the
+        // test is robust against any parallel change to the log-dir env).
+        let bindings = tempfile::tempdir().unwrap();
+        let svc = ServiceSpec {
+            name: "logtest-api".into(), // distinct name → own files in the default dir
+            cmd: vec!["sh".into(), "-c".into(), "echo OUT; echo ERR 1>&2".into()],
+            cwd: "/tmp".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::new(),
+            depends_on: Vec::new(),
+            readiness: None,
+        };
+        let plan = plan_spawn_service(&svc, bindings.path()).unwrap();
+        let mut w = ChildWorkload::default();
+        w.start(&plan).unwrap();
+        // Wait for the short-lived child to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while w.is_running() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let out = std::fs::read_to_string(&plan.stdout_log).unwrap_or_default();
+        let err = std::fs::read_to_string(&plan.stderr_log).unwrap_or_default();
+        assert!(out.contains("OUT"), "stdout in the service's stdout log: {out:?}");
+        assert!(err.contains("ERR"), "stderr in the service's stderr log: {err:?}");
+        assert!(!out.contains("ERR"), "stderr must NOT leak into the stdout log");
+        let _ = w.stop();
+        let _ = std::fs::remove_file(&plan.stdout_log);
+        let _ = std::fs::remove_file(&plan.stderr_log);
+    }
+
+    #[test]
+    fn a_failed_service_start_names_the_service_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // A workload whose start() always fails, so on_bound_ready surfaces the name.
+        #[derive(Clone, Default)]
+        struct FailWorkload;
+        impl Workload for FailWorkload {
+            fn start(&mut self, _: &SpawnPlan) -> std::io::Result<()> {
+                Err(std::io::Error::other("boom"))
+            }
+            fn stop(&mut self) -> std::io::Result<bool> {
+                Ok(false)
+            }
+            fn is_running(&self) -> bool {
+                false
+            }
+        }
+        let cfg =
+            SupervisorConfig::from_json(r#"{"services":[{"name":"redis","cmd":["redis-server"]}]}"#)
+                .unwrap();
+        let mut sup = Supervisor::new(cfg, dir.path(), FailWorkload::default);
+        let err = sup.on_bound_ready(true).unwrap_err();
+        assert!(err.to_string().contains("service 'redis'"), "names the failed service: {err}");
     }
 
     // ── v1.5 (ato#973): readiness graph — dependency-ordered start + wait ──
