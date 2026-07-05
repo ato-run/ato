@@ -173,7 +173,11 @@ impl FirecrackerConfig {
         c.ingress_ip = Some(format!("{prefix}.{index}.2"));
         // v1.4 (ato#970): each slot gets a private view of the baked vsock UDS
         // parent dir, so concurrent supervisor restores never share a socket path.
-        c.vsock_slot_dir = Some(std::env::temp_dir().join("ato-vsock-slots").join(format!("ato-slot-{index}")));
+        // The dir name is deliberately TERSE: the host-side dial path is
+        // `<dir>/blake3_<64-hex>.sock` (76 bytes of file name) and AF_UNIX caps
+        // sun_path at ~108 bytes — `/tmp/ato-vsock-slots/ato-slot-0/…` was
+        // exactly 108 and failed SUN_LEN on the first live restore.
+        c.vsock_slot_dir = Some(std::env::temp_dir().join("ato-vsk").join(index.to_string()));
         c
     }
 }
@@ -1827,8 +1831,22 @@ mod tests {
         let s1 = FirecrackerConfig::for_slot(1, true, &base);
         let (d0, d1) = (s0.vsock_slot_dir.unwrap(), s1.vsock_slot_dir.unwrap());
         assert_ne!(d0, d1);
-        assert!(d0.to_string_lossy().contains("ato-slot-0"));
-        assert!(d1.to_string_lossy().contains("ato-slot-1"));
+        assert!(d0.ends_with("ato-vsk/0"), "got {}", d0.display());
+        assert!(d1.ends_with("ato-vsk/1"), "got {}", d1.display());
+        // AF_UNIX sun_path budget: the host-side dial path (slot dir + the
+        // 76-byte `blake3_<64-hex>.sock` file name) must stay under SUN_LEN
+        // (~108). `/tmp/ato-vsock-slots/ato-slot-0/…` was exactly 108 and
+        // failed the first live restore — keep the dir terse.
+        let dial = FirecrackerConfig::for_slot(99, true, &base)
+            .vsock_slot_dir
+            .unwrap()
+            .join(format!("blake3_{}.sock", "a".repeat(64)));
+        assert!(
+            dial.as_os_str().len() <= 100,
+            "host dial path must fit sun_path with margin, got {} bytes: {}",
+            dial.as_os_str().len(),
+            dial.display()
+        );
     }
 
     #[test]
@@ -1857,7 +1875,7 @@ mod tests {
         assert_eq!(args[5], "sh");
         assert_eq!(args[6], "-c");
         assert!(args[7].contains(r#"mount --bind "$1" "$2""#) && args[7].contains(r#"exec "$@""#));
-        assert!(args[9].contains("ato-slot-1"), "per-slot dir, got {}", args[9]);
+        assert!(args[9].ends_with("ato-vsk/1"), "per-slot dir, got {}", args[9]);
         assert_eq!(args[10], vsock_uds_parent_dir().to_string_lossy());
         assert_eq!(args[11], base.firecracker_bin);
         assert_eq!(args.len(), 12, "firecracker binary must be LAST so --api-sock appends into \"$@\"");
