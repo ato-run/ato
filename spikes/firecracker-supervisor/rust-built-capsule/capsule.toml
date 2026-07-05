@@ -12,6 +12,9 @@ run = "python3 app.py"
 port = 8080
 readiness_probe = { http_get = "/health" }
 
-[secrets.OPENAI_API_KEY]
+# The secret KEY is the binding name (lowercase-only BindingName: [a-z0-9_.-]); the
+# UPPERCASE process env var is set explicitly via `env`. Using an uppercase key here
+# would emit a supervisor.json the guest-agent refuses (exit 2 before the vsock listener).
+[secrets.openai_api_key]
 required = true
 env = "OPENAI_API_KEY"
