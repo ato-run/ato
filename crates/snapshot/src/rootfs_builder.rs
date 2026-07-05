@@ -738,7 +738,46 @@ fn derive_supervisor_services(
             port: primary.get(&r.name).copied(),
         });
     }
+
+    // v1.5 service aliasing (ato#973): every service NAME and its aliases become an
+    // in-guest hostname resolving to loopback (see build_etc_hosts), so a service
+    // reaches another by NAME (`redis:$REDIS_REDIS_PORT`). Every hostname must be
+    // UNIQUE across the whole set — a name/alias claimed by two services (or twice)
+    // would be an ambiguous DNS entry. Fail-closed here (the alias's own DNS-safe
+    // shape was already checked per service).
+    let mut host_owner: BTreeMap<String, String> = BTreeMap::new();
+    for s in &out {
+        for host in std::iter::once(&s.name).chain(s.aliases.iter()) {
+            if let Some(prev) = host_owner.insert(host.clone(), s.name.clone()) {
+                return Err(format!(
+                    "hostname '{host}' is claimed by both service '{prev}' and '{}' — a service \
+                     name and every alias must be unique across the capsule",
+                    s.name
+                ));
+            }
+        }
+    }
+
     Ok(Some(out))
+}
+
+/// v1.5 (ato#973): the `/etc/hosts` a multi-service guest is built with, so a
+/// service reaches another by NAME on loopback. Every service name and alias maps
+/// to `127.0.0.1` (single VM ⇒ everything is loopback). Uniqueness is enforced by
+/// the caller (`derive_supervisor_services`). Deterministic (BTree-ordered names).
+fn build_etc_hosts(services: &[ServiceBuildSpec]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for s in services {
+        names.push(&s.name);
+        for a in &s.aliases {
+            names.push(a);
+        }
+    }
+    names.sort_unstable();
+    let joined = names.join(" ");
+    format!(
+        "127.0.0.1 localhost {joined}\n::1 localhost ip6-localhost ip6-loopback\n"
+    )
 }
 
 /// Uppercase a service name into an env-var prefix: `-` → `_`, then uppercase
@@ -943,6 +982,19 @@ fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
                 .map(|n| shell_single_quote(n))
                 .collect::<Vec<_>>()
                 .join(" ");
+            // v1.5 service aliasing: a MULTI-service build bakes /etc/hosts so each
+            // service name + alias resolves to loopback (single-service builds stay
+            // byte-identical — no hosts write).
+            let hosts_prep = match &sup.services {
+                Some(services) => {
+                    let hosts = build_etc_hosts(services);
+                    format!(
+                        "\n# v1.5 service aliasing: names + aliases → loopback.\n\
+                         cat > \"$BUILD/rootfs/etc/hosts\" <<'ATOETCHOSTS'\n{hosts}ATOETCHOSTS"
+                    )
+                }
+                None => String::new(),
+            };
             let prep = format!(
                 r#"# v1.2 supervisor: stage the guest-agent + its config into the rootfs.
 : "${{ATO_GUEST_AGENT_BIN:?ATO_GUEST_AGENT_BIN must point to the guest-agent binary for a supervisor build}}"
@@ -951,7 +1003,7 @@ cp "$ATO_GUEST_AGENT_BIN" "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
 chmod 0755 "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
 cat > "$BUILD/rootfs/etc/ato/supervisor.json" <<'ATOSUPERVISORJSON'
 {cfg_json}
-ATOSUPERVISORJSON"#
+ATOSUPERVISORJSON{hosts_prep}"#
             );
             // The agent is the supervisor: vsock control plane on 1025, required
             // bindings as argv. It reads /etc/ato/supervisor.json and starts the app
@@ -1467,6 +1519,50 @@ readiness_probe = { http_get = "/health" }
         assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
         assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
         assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+    }
+
+    #[test]
+    fn multi_service_bakes_etc_hosts_with_names_and_aliases_and_rejects_duplicates() {
+        // api (public) + redis (internal) with an alias "cache". The build bakes an
+        // /etc/hosts mapping every name + alias to loopback, so api reaches redis by
+        // name (`redis:$REDIS_REDIS_PORT` or `cache:$...`).
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\ndepends_on = [\"redis\"]\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"redis-server\"\nexpose = [\"REDIS_PORT\"]\n\
+             [services.redis.network]\naliases = [\"cache\"]\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+        let hosts = build_etc_hosts(services);
+        assert!(hosts.contains("127.0.0.1 localhost"));
+        for h in ["api", "redis", "cache"] {
+            assert!(hosts.contains(h), "hosts missing {h}: {hosts}");
+        }
+        // The rootfs script bakes /etc/hosts for the multi-service build.
+        let script = build_rootfs_script(&spec, 512);
+        assert!(script.contains("rootfs/etc/hosts"), "multi-service bakes /etc/hosts");
+        assert!(script.contains("cache"), "alias present in the baked hosts file");
+
+        // A duplicate hostname (alias equals another service's name) is fail-closed.
+        let dup = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n[services.redis.network]\naliases = [\"api\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
+            .unwrap_err()
+            .contains("claimed by both"));
+    }
+
+    #[test]
+    fn single_service_supervisor_build_does_not_bake_etc_hosts() {
+        // A legacy single-service supervisor build stays byte-identical: no /etc/hosts.
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        assert!(!script.contains("rootfs/etc/hosts"), "single-service must not bake /etc/hosts");
     }
 
     #[test]
