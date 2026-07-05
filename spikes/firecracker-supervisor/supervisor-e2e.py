@@ -37,7 +37,8 @@ HOST_IP = "172.16.0.1"
 GUEST_IP = "172.16.0.2"
 # The binding name the guest-agent requires (matches the rootfs's supervisor.json /
 # init argv). Default "openai" for the hand-built rootfs; the Rust-built rootfs uses
-# the secret name (e.g. OPENAI_API_KEY) — set ATO_SPIKE_BINDING to match.
+# the (lowercase) secret KEY — for rust-built-capsule that is "openai_api_key" (NOT the
+# uppercase env var OPENAI_API_KEY) — set ATO_SPIKE_BINDING to match.
 BINDING = os.environ.get("ATO_SPIKE_BINDING", "openai")
 PLACEHOLDER = "ATO-PLACEHOLDER-8f3a1c-do-not-seal"
 REAL_KEY = "sk-real-live-key-2f9d4b7e-never-at-build"
