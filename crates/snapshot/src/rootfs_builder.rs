@@ -462,10 +462,12 @@ fn valid_service_name(name: &str) -> bool {
 /// cross-container volume mount, an egress-proxy opt-out, or a service-to-service
 /// ACL, so declaring them here is a config error, never silently ignored.
 ///
-/// `common_secret_env_map` is the global `[secrets.*]` env injection (every
-/// service receives it — per-service secret scoping is a follow-up). The
-/// supervisor's required binding names (agent argv) stay the global secret set,
-/// so bound-ready still gates on every declared secret.
+/// `common_secret_env_map` is the global `[secrets.*]` env injection (ENV_VAR →
+/// secret name). v1.5 per-service secret scoping (ato#982): each service receives
+/// ONLY the secrets it names in `secrets = [...]` — this map is filtered per
+/// service, not cloned wholesale. The caller then shrinks the required binding
+/// names (agent argv) to the secrets actually scoped, and rejects a required
+/// secret that no service uses.
 fn derive_supervisor_services(
     m: &CapsuleManifest,
     common_secret_env_map: &BTreeMap<String, String>,
