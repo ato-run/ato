@@ -6124,10 +6124,16 @@ mod tests {
     }
 
     /// v1.5 (ato#973): Server-Sent Events must STREAM through the proxy — chunks
-    /// pushed over time arrive incrementally, not buffered until EOF. Proven by
-    /// receiving the first event well before the later ones are even sent.
+    /// pushed over time arrive incrementally, not buffered until EOF. Proven
+    /// DETERMINISTICALLY (no timing race): the upstream sends event 1, then BLOCKS
+    /// on a channel until the test — which only signals AFTER it has received event
+    /// 1 through the proxy — releases the rest. A buffer-to-EOF proxy delivers
+    /// nothing until close, so the test would never see event 1, never signal,
+    /// and phase 1 would time out (fail) instead of racing on sleeps.
     #[tokio::test]
     async fn proxy_streams_sse_chunks_incrementally_not_buffered() {
+        // test → upstream: "you may send event 2 and 3 now".
+        let (cont_tx, cont_rx) = std::sync::mpsc::channel::<()>();
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let upstream_port = upstream_listener.local_addr().unwrap().port();
         let upstream = std::thread::spawn(move || {
@@ -6135,16 +6141,18 @@ mod tests {
             let (mut s, _) = upstream_listener.accept().expect("real conn");
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf); // the GET request
+            // Headers + event 1, flushed — available to a STREAMING proxy immediately.
             s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n").unwrap();
+            s.write_all(b"data: 1\n\n").unwrap();
             s.flush().unwrap();
-            for i in 1..=3 {
-                std::thread::sleep(std::time::Duration::from_millis(120));
-                if s.write_all(format!("data: {i}\n\n").as_bytes()).is_err() {
-                    break;
-                }
+            // Hold events 2 & 3 until the test confirms it saw event 1 (recv_timeout
+            // so a failed test can't block this detached thread forever).
+            let released = cont_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            if released {
+                let _ = s.write_all(b"data: 2\n\ndata: 3\n\n");
                 let _ = s.flush();
             }
-            std::thread::sleep(std::time::Duration::from_millis(80));
+            std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
         let listen = free_listen();
@@ -6156,43 +6164,45 @@ mod tests {
             .await
             .unwrap();
 
-        // Read incrementally, accumulating, with a per-read timeout. Track when each
-        // event first appears so we can prove they arrive spread over time.
         let mut acc = String::new();
         let mut buf = vec![0u8; 4096];
-        let mut saw_one_before_two = false;
-        loop {
-            let read = tokio::time::timeout(std::time::Duration::from_millis(1000), c.read(&mut buf)).await;
-            let n = match read {
-                Ok(Ok(0)) | Err(_) => break, // EOF or timeout
-                Ok(Ok(n)) => n,
-                Ok(Err(_)) => break,
-            };
-            acc.push_str(&String::from_utf8_lossy(&buf[..n]));
-            // The streaming proof: at some read we have event 1 but NOT yet event 2
-            // (event 2 is only sent 120ms after event 1). A buffer-to-EOF proxy would
-            // deliver 1, 2, 3 together and this would never hold.
-            if acc.contains("data: 1") && !acc.contains("data: 2") {
-                saw_one_before_two = true;
-            }
-            if acc.contains("data: 3") {
-                break;
+
+        // Phase 1: event 1 must arrive through the proxy BEFORE the test releases
+        // events 2 & 3. A buffering proxy delivers nothing here → this loop times out.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !acc.contains("data: 1") {
+            assert!(tokio::time::Instant::now() < deadline, "event 1 never streamed through: {acc:?}");
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => panic!("read timed out before event 1 (proxy buffered to EOF?): {acc:?}"),
             }
         }
+        // The stream came through the proxy with its SSE content type + event 1, and
+        // event 2 does NOT exist yet (the upstream is blocked on the channel).
+        assert!(acc.contains("content-type: text/event-stream"), "SSE content-type seen through proxy: {acc:?}");
+        assert!(acc.contains("data: 1"), "event 1 received: {acc:?}");
+        assert!(!acc.contains("data: 2"), "event 2 must NOT have arrived before release: {acc:?}");
 
-        assert!(acc.contains("data: 1") && acc.contains("data: 2") && acc.contains("data: 3"), "all events: {acc:?}");
-        // Order preserved.
+        // Phase 2: release events 2 & 3, then read them in order.
+        cont_tx.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !acc.contains("data: 3") {
+            assert!(tokio::time::Instant::now() < deadline, "events 2/3 never arrived: {acc:?}");
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => break,
+            }
+        }
         let (p1, p2, p3) = (
             acc.find("data: 1").unwrap(),
-            acc.find("data: 2").unwrap(),
-            acc.find("data: 3").unwrap(),
+            acc.find("data: 2").expect("event 2"),
+            acc.find("data: 3").expect("event 3"),
         );
-        assert!(p1 < p2 && p2 < p3, "events in order");
-        assert!(saw_one_before_two, "event 1 streamed through BEFORE event 2 was sent (not buffered)");
+        assert!(p1 < p2 && p2 < p3, "events in order: {acc:?}");
 
         drop(c);
         handle.abort();
-        drop(upstream); // detached; the SSE thread has already finished its 3 chunks.
+        drop(upstream); // detached.
     }
 
     /// v1.3 (ato#968): multi-slot without a URL template = slot≥1 unopenable;
