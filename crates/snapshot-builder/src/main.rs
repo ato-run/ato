@@ -8,9 +8,16 @@
 //! (`sealed` on success, `failed` with a structured stage/reason otherwise).
 //!
 //! Hard constraints (v1): NO `capsule_snapshots` write (PR 3 does that from the sealed
-//! ack); never trust the job's `source_ref` / any client source; no binding-required
-//! capsules (the spec derivation fails those closed); no Phase 8 BindingLease path; UFFD
-//! is not enabled; no traffic is ever exposed — the daemon only builds + seals + verifies.
+//! ack); never trust the job's `source_ref` / any client source; no Phase 8 BindingLease
+//! path; UFFD is not enabled; no traffic is ever exposed — the daemon only builds +
+//! seals + verifies.
+//!
+//! v1.2 PR 3d-2: a `[secrets.*]` capsule may build via the SUPERVISOR path (agent-as-
+//! init rootfs + the backend's placeholder build drive, #962) — but ONLY when the
+//! operator opts this builder in with `ATO_BUILDER_SUPERVISOR=1` AND `ATO_GUEST_AGENT_BIN`
+//! + `ATO_FC_VSOCK=1` are set; otherwise secret capsules keep failing closed at
+//! eligibility exactly as before. No secret VALUE ever reaches this daemon either way —
+//! the build uses backend-internal placeholders and the seal stays pre-bind.
 //!
 //! ```sh
 //! ATO_API_URL=https://api… SNAPSHOT_BUILDER_AGENT_TOKEN=… ATO_FC_BIN=… ATO_FC_KERNEL=… \
@@ -26,10 +33,13 @@ use capsule::engine::execution_graph::{
 use capsule::foundation::types::manifest::CapsuleManifest;
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
-use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_build_spec, materialize_source};
+use snapshot::rootfs_builder::{
+    RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
+    materialize_source,
+};
 use snapshot::{
     BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SanitizerContract, SnapshotBackend, no_secret_scan,
+    SanitizerContract, SnapshotBackend, SupervisorBindings, no_secret_scan,
 };
 
 /// PEM-marker literals: a GATE for the sealed `manifest.json` (small, structured,
@@ -233,6 +243,63 @@ fn sealed_identity(
     Ok((exec, rc))
 }
 
+/// v1.2 PR 3d-2: whether this builder is opted into SUPERVISOR builds for
+/// `[secrets.*]` capsules. Off by default — secret capsules then keep failing
+/// closed at eligibility exactly as v1 did.
+fn supervisor_builds_enabled() -> bool {
+    matches!(std::env::var("ATO_BUILDER_SUPERVISOR").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
+/// Mirror of the snapshot backend's `ATO_FC_VSOCK` gate (kept private there); the
+/// backend re-checks and fails closed regardless — this early copy only exists to
+/// fail a supervisor job at ELIGIBILITY with an actionable message instead of
+/// after a rootfs build.
+fn builder_vsock_enabled() -> bool {
+    matches!(std::env::var("ATO_FC_VSOCK").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
+/// v1.2 PR 3d-2: choose the build-spec derivation for a job. A `[secrets.*]` capsule
+/// takes the SUPERVISOR path (agent-as-init rootfs; the backend then drives
+/// placeholder-deliver → health → StopWorkload → Revoke before the seal) — but only
+/// when the operator opted in AND the prerequisites hold, each checked fail-closed
+/// with an actionable reason. A no-secret capsule keeps the v1 derivation untouched.
+fn derive_job_spec(
+    manifest: &CapsuleManifest,
+    probe: &SourceProbe,
+    supervisor_enabled: bool,
+    guest_agent_bin_set: bool,
+    vsock_on: bool,
+) -> std::result::Result<RootfsBuildSpec, (String, String)> {
+    let fail = |e: String| ("eligibility".to_string(), e);
+    if manifest.secrets.is_empty() {
+        // v1 no-binding path, byte-for-byte unchanged (it also rejects any stray
+        // bindings/external/GPU itself).
+        return derive_build_spec(manifest, probe).map_err(fail);
+    }
+    if !supervisor_enabled {
+        return Err(fail(
+            "capsule declares [secrets.*]: supervisor builds are disabled on this builder \
+             (operator opt-in: ATO_BUILDER_SUPERVISOR=1)"
+                .into(),
+        ));
+    }
+    if !guest_agent_bin_set {
+        return Err(fail(
+            "supervisor build requires ATO_GUEST_AGENT_BIN (path to the guest-agent binary \
+             staged into the rootfs as /sbin-init supervisor)"
+                .into(),
+        ));
+    }
+    if !vsock_on {
+        return Err(fail(
+            "supervisor build requires the vsock binding channel: set ATO_FC_VSOCK=1 \
+             (the guest-agent gates workload start on placeholder delivery)"
+                .into(),
+        ));
+    }
+    derive_supervisor_build_spec(manifest, probe).map_err(fail)
+}
+
 /// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
 /// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
 fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> std::result::Result<Artifact, (String, String)> {
@@ -264,7 +331,16 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     // v1 target/profile gate: only the manifest default target with profile "default"
     // may seal (never silently substitute the default for a different requested target).
     v1_target_profile_gate(&job.target_label, &job.profile, manifest.default_target.trim())?;
-    let spec = derive_build_spec(&manifest, &SourceProbe::scan(&src)).map_err(|e| fail("eligibility", e))?;
+    // v1.2 PR 3d-2: secret capsules dispatch to the supervisor derivation when this
+    // builder is opted in (each prerequisite fail-closed with an actionable reason);
+    // no-secret capsules keep the v1 derivation untouched.
+    let spec = derive_job_spec(
+        &manifest,
+        &SourceProbe::scan(&src),
+        supervisor_builds_enabled(),
+        std::env::var("ATO_GUEST_AGENT_BIN").map(|v| !v.trim().is_empty()).unwrap_or(false),
+        builder_vsock_enabled(),
+    )?;
 
     // 2b. The declared Ato Execution Identity for this build — computed from DECLARED,
     // host-independent facts only (the server-resolved pinned source + the manifest's
@@ -295,9 +371,16 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     build_rootfs(&src, &spec, &ext4, cfg.rootfs_size_mib).map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
 
-    // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no bindings/UFFD).
+    // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
+    // a supervisor spec the backend drives the whole placeholder protocol itself
+    // (deliver → health → StopWorkload → Revoke → seal, #962); the daemon only passes
+    // the binding NAMES — no secret value exists anywhere in this process.
     let store = CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
     let capsule_manifest_hash = format!("blake3:{}", blake3::hash(&toml_bytes).to_hex());
+    // NOTE: the ack schema is .strict() on the ato-api side — the binding NAMES are
+    // NOT added to the ack; they live in the sealed manifest (supervisor_build),
+    // which the runner-side launch delivery (PR 3e) reads. ato-api schema evolution
+    // happens there, together.
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
@@ -308,12 +391,17 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(declared_execution_id),
-            supervisor: None,
+            supervisor: spec
+                .supervisor
+                .as_ref()
+                .map(|s| SupervisorBindings { binding_names: s.binding_names.clone() }),
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
     let manifest_out = receipt.manifest.clone();
 
-    // 5. Verify the sealed artifact RESTORES before we call it sealed (no traffic exposed).
+    // 5. Verify the sealed artifact RESTORES before we call it sealed (no traffic
+    // exposed). A supervisor artifact's restore-readiness is the backend's agent
+    // probe (reachable + NOT bound-ready, #962) — no health wait, no binding needed.
     let restored = backend
         .restore(RestoreReadyStateInput { store: &store, manifest: manifest_out.clone(), overlay_root: jobdir.join("verify-ov"), host_runner_class: None, uffd_preview: false })
         .map_err(|e| fail("restore_verify", e.to_string()))?;
@@ -516,6 +604,71 @@ mod tests {
         let err = v1_target_profile_gate("app", "gpu", "app").unwrap_err();
         assert_eq!(err.0, "eligibility");
         assert!(err.1.contains("app/gpu"), "{}", err.1);
+    }
+
+    // ── v1.2 PR 3d-2: supervisor dispatch ────────────────────────────────────
+
+    fn probe_python() -> SourceProbe {
+        SourceProbe {
+            has_package_json: false,
+            has_requirements_txt: false,
+            has_pyproject: false,
+            has_index_html: false,
+            has_py_files: true,
+        }
+    }
+
+    fn manifest(secrets: bool) -> CapsuleManifest {
+        let base = "schema_version = \"0.3\"\nname = \"t\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+                    default_target = \"app\"\n[targets.app]\nruntime = \"source\"\n\
+                    run = \"python3 app.py\"\nport = 8080\n\
+                    readiness_probe = { http_get = \"/health\" }\n";
+        let toml = if secrets {
+            format!("{base}[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n")
+        } else {
+            base.to_string()
+        };
+        CapsuleManifest::from_toml(&toml).unwrap()
+    }
+
+    #[test]
+    fn no_secret_capsule_keeps_the_v1_derivation_regardless_of_flags() {
+        // Flags on or off, a no-secret capsule derives the v1 no-binding spec.
+        for (sup, bin, vsock) in [(false, false, false), (true, true, true)] {
+            let spec = derive_job_spec(&manifest(false), &probe_python(), sup, bin, vsock).unwrap();
+            assert!(spec.supervisor.is_none());
+            assert_eq!(spec.start_cmd, "python3 app.py");
+        }
+    }
+
+    #[test]
+    fn secret_capsule_fails_closed_unless_every_supervisor_prerequisite_holds() {
+        let m = manifest(true);
+        // Opt-in flag off → eligibility failure naming the flag (v1 behavior for
+        // secret capsules stays "no", just with an actionable reason).
+        let err = derive_job_spec(&m, &probe_python(), false, true, true).unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("ATO_BUILDER_SUPERVISOR"), "{}", err.1);
+        // Missing guest-agent binary → names the env var.
+        let err = derive_job_spec(&m, &probe_python(), true, false, true).unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("ATO_GUEST_AGENT_BIN"), "{}", err.1);
+        // vsock off → names the flag.
+        let err = derive_job_spec(&m, &probe_python(), true, true, false).unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("ATO_FC_VSOCK"), "{}", err.1);
+    }
+
+    #[test]
+    fn secret_capsule_with_all_prerequisites_derives_a_supervisor_spec() {
+        let spec = derive_job_spec(&manifest(true), &probe_python(), true, true, true).unwrap();
+        let sup = spec.supervisor.as_ref().expect("supervisor spec");
+        assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        // Runtime/port/probe detection identical to the v1 path.
+        assert_eq!(spec.start_cmd, "python3 app.py");
+        assert_eq!(spec.port, 8080);
+        assert_eq!(spec.healthcheck, "/health");
     }
 
     #[test]
