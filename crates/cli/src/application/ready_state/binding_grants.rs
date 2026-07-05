@@ -92,19 +92,46 @@ pub(crate) fn preflight_resolve(
     manifest: &capsule::types::CapsuleManifest,
     namespace: &str,
 ) -> Result<Vec<(String, SecretValue)>> {
+    let describe = |name: &str| {
+        manifest
+            .secrets
+            .get(name)
+            .and_then(|s| s.description.as_deref())
+            .map(sanitize_description)
+            .filter(|d| !d.is_empty())
+    };
+    preflight_resolve_with(resolver, names, namespace, describe)
+}
+
+/// v1.2 PR 3e: names-only preflight for the RUNNER restore path, which holds only
+/// the sealed `ReadyStateManifest` (binding names, no capsule.toml → no secret
+/// descriptions). Same aggregation + fail-closed semantics as [`preflight_resolve`];
+/// the per-name purpose line simply degrades to absent. 3e MVP: every name is
+/// REQUIRED — one unresolvable binding blocks the launch.
+pub(crate) fn preflight_resolve_names(
+    resolver: &dyn SecretResolver,
+    names: &[String],
+    namespace: &str,
+) -> Result<Vec<(String, SecretValue)>> {
+    preflight_resolve_with(resolver, names, namespace, |_| None)
+}
+
+/// Shared core: resolve EVERY name (all required), aggregating all missing grants
+/// into one actionable error. Values are returned for lease issuance and never
+/// logged; the error carries names/reasons only.
+fn preflight_resolve_with(
+    resolver: &dyn SecretResolver,
+    names: &[String],
+    namespace: &str,
+    describe: impl Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, SecretValue)>> {
     let mut resolved = Vec::with_capacity(names.len());
     let mut missing: Vec<String> = Vec::new();
     for name in names {
         match resolver.resolve(name) {
             Ok(value) => resolved.push((name.clone(), value)),
             Err(e) => {
-                let description = manifest
-                    .secrets
-                    .get(name)
-                    .and_then(|s| s.description.as_deref())
-                    .map(sanitize_description)
-                    .filter(|d| !d.is_empty());
-                let purpose = description.map(|d| format!(" — {d}")).unwrap_or_default();
+                let purpose = describe(name).map(|d| format!(" — {d}")).unwrap_or_default();
                 missing.push(format!(
                     "  {name}{purpose}\n    reason: {e}\n    grant:  {}",
                     grant_hint(name, namespace)
@@ -146,6 +173,42 @@ mod tests {
                     &full[..32], &format!("{}zz", &full[..62])] {
             assert!(binding_namespace(bad).is_err(), "must reject {bad:?}");
         }
+    }
+
+    #[test]
+    fn names_only_preflight_resolves_all_or_aggregates_missing() {
+        // v1.2 PR 3e: the runner restore path resolves from binding NAMES only (no
+        // capsule.toml on a runner) — same all-required, aggregate-missing semantics.
+        struct Fake;
+        impl crate::application::ready_state::secret_resolver::SecretResolver for Fake {
+            fn resolve(&self, name: &str) -> Result<protocol::binding_lease::SecretValue> {
+                if name == "present" {
+                    Ok(protocol::binding_lease::SecretValue::new("v"))
+                } else {
+                    anyhow::bail!("no grant")
+                }
+            }
+            fn kind(&self) -> &'static str {
+                "fake"
+            }
+        }
+        // All resolve → values returned in order.
+        let ok = preflight_resolve_names(&Fake, &["present".into()], "rs-abc").unwrap();
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].0, "present");
+        // ONE missing blocks the whole launch (3e MVP: every name is required) and
+        // the error names it with a grant hint — but never a value.
+        let err = preflight_resolve_names(
+            &Fake,
+            &["present".into(), "missing_a".into(), "missing_b".into()],
+            "rs-abc",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("2 binding(s) not granted"), "{err}");
+        assert!(err.contains("missing_a") && err.contains("missing_b"), "{err}");
+        assert!(err.contains("ato secrets set"), "must carry the grant hint: {err}");
+        assert!(!err.contains('v') || !err.contains("value"), "no values in errors");
     }
 
     #[test]
