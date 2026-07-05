@@ -167,12 +167,33 @@ impl SupervisorConfig {
     /// every binding name is a valid [`BindingName`] (it is joined onto the tmpfs
     /// root). `base_env` names are validated too.
     pub fn validate(&self) -> Result<(), String> {
-        // Exactly one shape: either the legacy top-level `cmd` OR a `services`
-        // list — never both, never neither (fail-closed on an ambiguous config).
-        if !self.services.is_empty() && !self.cmd.is_empty() {
-            return Err(
-                "supervisor.json: set EITHER top-level `cmd` OR `services`, not both".into(),
-            );
+        // Exactly one shape: either the legacy top-level single service OR a
+        // `services` list — never both, never neither (fail-closed on an ambiguous
+        // config). When `services` is set, EVERY legacy top-level field must be
+        // empty: `services()` treats the list as authoritative and would otherwise
+        // SILENTLY IGNORE a top-level `base_env`/`bindings_env` — dropping a secret
+        // requirement (a builder that mistakenly puts a common binding at the top
+        // level would ship a supervisor that starts unbound). `cwd` has a serde
+        // default so an explicit "/app" is indistinguishable from the default; it
+        // is intentionally not checked here (schema hardening is a follow-up).
+        if !self.services.is_empty() {
+            let mut leaked = Vec::new();
+            if !self.cmd.is_empty() {
+                leaked.push("cmd");
+            }
+            if !self.base_env.is_empty() {
+                leaked.push("base_env");
+            }
+            if !self.bindings_env.is_empty() {
+                leaked.push("bindings_env");
+            }
+            if !leaked.is_empty() {
+                return Err(format!(
+                    "supervisor.json: `services` is set, so top-level {} must be empty \
+                     (put per-service config inside each service, never at the top level)",
+                    leaked.join("/")
+                ));
+            }
         }
         let services = self.services();
         if services.is_empty() {
@@ -219,13 +240,25 @@ pub struct SpawnPlan {
 /// Build the spawn plan from the config + bindings root. Verifies each binding file
 /// **exists** (fail-closed — never start half-bound) WITHOUT reading its contents, so
 /// no value enters the agent's address space.
+/// LEGACY single-service entry point. Plans the sole normalized service. A
+/// MULTI-service config is rejected (`InvalidInput`) rather than silently
+/// planning only `services[0]` — a caller with >1 service must plan each via
+/// [`plan_spawn_service`] (as [`Supervisor::on_bound_ready`] does). This
+/// fail-closed guard surfaces a config-plumbing mistake immediately instead of
+/// silently starting only the first service.
 pub fn plan_spawn(config: &SupervisorConfig, bindings_root: &Path) -> std::io::Result<SpawnPlan> {
     // Defense in depth: never plan a spawn from a config that would not have passed
     // load-time validation (invalid env/binding names never reach the shell script).
     config
         .validate()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-    // Back-compat single-service entry point: plan the sole normalized service.
+    if config.services.len() > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "plan_spawn is single-service only; a multi-service config must plan each \
+             service via plan_spawn_service",
+        ));
+    }
     let services = config.services();
     plan_spawn_service(&services[0], bindings_root)
 }
@@ -562,15 +595,51 @@ mod tests {
     }
 
     #[test]
-    fn config_rejects_both_shapes_neither_shape_and_duplicate_names() {
-        // Both `cmd` and `services` set = ambiguous → rejected.
+    fn config_rejects_any_legacy_top_level_field_mixed_with_services() {
+        // `services` is authoritative, so ANY legacy top-level field alongside it
+        // would be SILENTLY IGNORED — a top-level bindings_env would drop a secret
+        // requirement. Every mix must fail-close, not just cmd.
+        let bad = |json: &str| assert!(SupervisorConfig::from_json(json).is_err(), "{json}");
+        // services + top-level cmd (existing).
+        bad(r#"{"cmd":["a"],"services":[{"cmd":["b"]}]}"#);
+        // services + top-level bindings_env → MUST reject (dropped secret).
+        bad(r#"{"services":[{"name":"api","cmd":["python3","api.py"]}],"bindings_env":{"OPENAI_API_KEY":"openai_api_key"}}"#);
+        // services + top-level base_env → MUST reject.
+        bad(r#"{"services":[{"name":"api","cmd":["a"]}],"base_env":{"NODE_ENV":"production"}}"#);
+        // services-only → accepted.
         assert!(
             SupervisorConfig::from_json(
-                r#"{"cmd":["a"],"services":[{"cmd":["b"]}]}"#
+                r#"{"services":[{"name":"api","cmd":["a"],"bindings_env":{"K":"openai"}}]}"#
             )
-            .is_err(),
-            "cmd + services together must be rejected"
+            .is_ok(),
+            "per-service bindings_env is the correct place"
         );
+        // legacy top-level only → accepted.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"cmd":["a"],"bindings_env":{"K":"openai"},"base_env":{"NODE_ENV":"x"}}"#
+            )
+            .is_ok(),
+            "legacy single-service shape still accepted"
+        );
+    }
+
+    #[test]
+    fn plan_spawn_rejects_a_multi_service_config_instead_of_planning_services_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let multi = SupervisorConfig::from_json(
+            r#"{"services":[{"name":"a","cmd":["true"]},{"name":"b","cmd":["true"]}]}"#,
+        )
+        .unwrap();
+        let err = plan_spawn(&multi, dir.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        // A single-service `services` list is still plannable via the legacy entry.
+        let one = SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["true"]}]}"#).unwrap();
+        assert!(plan_spawn(&one, dir.path()).is_ok());
+    }
+
+    #[test]
+    fn config_rejects_neither_shape_and_duplicate_names() {
         // Neither → rejected.
         assert!(SupervisorConfig::from_json(r#"{}"#).is_err(), "empty config rejected");
         assert!(SupervisorConfig::from_json(r#"{"services":[]}"#).is_err(), "empty services rejected");
