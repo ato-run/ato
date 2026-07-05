@@ -1728,6 +1728,67 @@ entrypoint = "node apps/dashboard/server.js"
 }
 
 #[test]
+fn test_per_service_secrets_on_a_target_based_service_is_rejected() {
+    // `secrets` (per-service secret scoping) is a snapshot-supervisor feature; a
+    // TARGET-based (OCI) service would silently ignore it, so it must be rejected
+    // rather than lull the author into thinking a secret is scoped.
+    let toml = r#"
+schema_version = "0.3"
+name = "web-services-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+[services.main]
+target = "app"
+secrets = ["openai_api_key"]
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().unwrap_err();
+    assert!(
+        errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidService(name, msg)
+                if name == "main" && msg.contains("only supported for snapshot supervisor")
+        )),
+        "target-based service with secrets must be rejected: {errors:?}"
+    );
+}
+
+#[test]
+fn test_target_based_service_without_secrets_is_unaffected() {
+    // The same manifest WITHOUT `secrets` validates OK — the scoping check only
+    // fires for a target-based service that declares secrets.
+    let toml = r#"
+schema_version = "0.3"
+name = "web-services-app"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web"
+driver = "deno"
+port = 4173
+[services.main]
+target = "app"
+"#;
+    let manifest = CapsuleManifest::from_toml(toml).unwrap();
+    let errors = manifest.validate().err().unwrap_or_default();
+    assert!(
+        !errors.iter().any(|e| matches!(
+            e,
+            ValidationError::InvalidService(_, msg) if msg.contains("only supported for snapshot supervisor")
+        )),
+        "no scoping error without secrets: {errors:?}"
+    );
+}
+
+#[test]
 fn test_validate_web_deno_services_requires_main_service() {
     let toml = r#"
 schema_version = "0.3"

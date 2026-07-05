@@ -292,6 +292,33 @@ impl CapsuleManifest {
                 })
             })
             .unwrap_or(false);
+
+        // v1.5 per-service secret scoping (ato#982) is a SNAPSHOT-SUPERVISOR feature
+        // (`derive_supervisor_services` scopes each secret to the naming service). A
+        // TARGET-based service runs the OCI/container orchestration path, which does
+        // not honour `secrets` — so accepting it there would silently no-op a
+        // security-sensitive field (the author would believe a secret is scoped when
+        // it is not). Fail-closed: reject `secrets` on a target-based service.
+        if let Some(services) = self.services.as_ref() {
+            for (name, service) in services {
+                let has_target = service
+                    .target
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false);
+                let has_secrets = service.secrets.as_ref().is_some_and(|s| !s.is_empty());
+                if has_target && has_secrets {
+                    errors.push(ValidationError::InvalidService(
+                        name.clone(),
+                        "`secrets` (per-service secret scoping) is only supported for snapshot \
+                         supervisor services (`target` unset); a target-based/OCI service would \
+                         silently ignore it. Remove `secrets` here or drop `target`."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         let mut requires_web_services_validation = false;
 
         for (label, target) in &named_targets {

@@ -378,6 +378,14 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
 
+    /// v1.5 per-service secret scoping (ato#982): the `[secrets.<name>]` this
+    /// service needs. A secret is delivered ONLY to the service(s) that name it
+    /// here (least privilege). `None`/empty ⇒ this service receives no secret. In a
+    /// multi-service capsule every REQUIRED secret must be named by at least one
+    /// service (fail-closed) — an unscoped required secret is a config error.
+    #[serde(default)]
+    pub secrets: Option<Vec<String>>,
+
     /// State requirements bound into this service at runtime.
     #[serde(default)]
     pub state_bindings: Vec<ServiceStateBinding>,
