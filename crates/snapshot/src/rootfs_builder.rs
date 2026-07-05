@@ -748,6 +748,15 @@ fn derive_supervisor_services(
     let mut host_owner: BTreeMap<String, String> = BTreeMap::new();
     for s in &out {
         for host in std::iter::once(&s.name).chain(s.aliases.iter()) {
+            // Reserved loopback names are baked unconditionally by build_etc_hosts —
+            // a service name or alias that shadows one is an ambiguous DNS entry.
+            if RESERVED_HOSTNAMES.contains(&host.as_str()) {
+                return Err(format!(
+                    "service '{}': hostname '{host}' is reserved for the loopback entry \
+                     and cannot be a service name or alias",
+                    s.name
+                ));
+            }
             if let Some(prev) = host_owner.insert(host.clone(), s.name.clone()) {
                 return Err(format!(
                     "hostname '{host}' is claimed by both service '{prev}' and '{}' — a service \
@@ -761,10 +770,17 @@ fn derive_supervisor_services(
     Ok(Some(out))
 }
 
+/// Hostnames `build_etc_hosts` bakes unconditionally for the loopback entries — a
+/// service name or alias may not shadow one (ambiguous DNS). `localhost.localdomain`
+/// is reserved defensively even though it is not emitted.
+const RESERVED_HOSTNAMES: &[&str] =
+    &["localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"];
+
 /// v1.5 (ato#973): the `/etc/hosts` a multi-service guest is built with, so a
 /// service reaches another by NAME on loopback. Every service name and alias maps
-/// to `127.0.0.1` (single VM ⇒ everything is loopback). Uniqueness is enforced by
-/// the caller (`derive_supervisor_services`). Deterministic (BTree-ordered names).
+/// to `127.0.0.1` (single VM ⇒ everything is loopback). Uniqueness (and that no
+/// name shadows a reserved loopback host) is enforced by the caller
+/// (`derive_supervisor_services`). Deterministic (BTree-ordered names).
 fn build_etc_hosts(services: &[ServiceBuildSpec]) -> String {
     let mut names: Vec<&str> = Vec::new();
     for s in services {
@@ -1555,6 +1571,55 @@ readiness_probe = { http_get = "/health" }
         assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
             .unwrap_err()
             .contains("claimed by both"));
+    }
+
+    #[test]
+    fn etc_hosts_content_is_exact_and_deterministic() {
+        // Two internal services + a public one, aliases included. The baked file must
+        // be EXACTLY this (loopback line = sorted names+aliases, then the ::1 line).
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\n[services.redis.network]\naliases = [\"cache\"]\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+        assert_eq!(
+            build_etc_hosts(services),
+            "127.0.0.1 localhost api cache redis\n::1 localhost ip6-localhost ip6-loopback\n"
+        );
+    }
+
+    #[test]
+    fn reserved_loopback_hostnames_are_rejected_as_service_names_or_aliases() {
+        let reject = |body: &str| {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{body}",
+                base_toml()
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("reserved for the loopback"), "{err}");
+        };
+        // alias = "localhost"
+        reject(
+            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"localhost\"]\n",
+        );
+        // service NAME = "localhost"
+        reject(
+            "[services.localhost]\nentrypoint = \"a\"\n[services.localhost.network]\npublish = true\n",
+        );
+        // alias = "ip6-localhost"
+        reject(
+            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"ip6-localhost\"]\n",
+        );
+        // A normal alias still works.
+        let ok = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"web\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&ok), &probe_python()).is_ok());
     }
 
     #[test]
