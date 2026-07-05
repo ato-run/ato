@@ -171,6 +171,20 @@ struct Artifact {
     declared_command: String,
     /// The command actually embedded into the guest init (post normalization).
     normalized_guest_command: String,
+    /// v1.2 PR 3e-2c: SUPERVISOR (binding-required) artifact facts — binding NAMES
+    /// only, never a value. `Some` ⇒ ato-api registers the row with
+    /// `no_binding_required=false` (+ persists the names) and the firewall CHECK
+    /// keeps it permanently non-public. Omitted entirely for a no-binding artifact
+    /// (`skip_serializing_if`), so those acks stay byte-identical against the
+    /// `.strict()` ack schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_build: Option<SupervisorAck>,
+}
+
+/// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
+#[derive(Debug, Clone, Serialize)]
+struct SupervisorAck {
+    binding_names: Vec<String>,
 }
 
 /// The builder host's own LIVE secrets, as exact-value canaries for the L4 CAS gate:
@@ -377,10 +391,15 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     // the binding NAMES — no secret value exists anywhere in this process.
     let store = CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
     let capsule_manifest_hash = format!("blake3:{}", blake3::hash(&toml_bytes).to_hex());
-    // NOTE: the ack schema is .strict() on the ato-api side — the binding NAMES are
-    // NOT added to the ack; they live in the sealed manifest (supervisor_build),
-    // which the runner-side launch delivery (PR 3e) reads. ato-api schema evolution
-    // happens there, together.
+    // v1.2 PR 3e-2c: capture the supervisor binding names for the SEALED ACK. ato-api's
+    // artifactSchema now accepts an optional `supervisor_build` (3e-2), so the ack must
+    // carry the names — otherwise ato-api registers the row as no-binding + PUBLIC
+    // (the E2E caught exactly this). A no-binding capsule keeps the field absent, so
+    // those acks stay byte-identical against the .strict() schema.
+    let supervisor_ack = spec
+        .supervisor
+        .as_ref()
+        .map(|s| SupervisorAck { binding_names: s.binding_names.clone() });
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
@@ -486,6 +505,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         synthesized_probe: spec.probe_synthesized,
         declared_command: spec.declared_start_cmd,
         normalized_guest_command: spec.start_cmd,
+        supervisor_build: supervisor_ack,
     })
 }
 
@@ -793,11 +813,14 @@ mod tests {
             synthesized_probe: true,
             declared_command: "app.py".into(),
             normalized_guest_command: "python3 app.py".into(),
+            supervisor_build: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
+        // A NO-BINDING ack omits supervisor_build entirely (byte-identical vs the
+        // pre-3e-2c schema, which the .strict() ato-api validator requires).
         assert_eq!(
             keys,
             [
@@ -813,5 +836,36 @@ mod tests {
         for k in ["execution_id", "runner_class_id", "artifact_location"] {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");
         }
+    }
+
+    #[test]
+    fn supervisor_artifact_ack_carries_binding_names() {
+        // v1.2 PR 3e-2c: a supervisor ack DOES include supervisor_build.binding_names
+        // (names only) so ato-api derives no_binding_required=false + persists them.
+        let a = Artifact {
+            capsule_manifest_hash: "blake3:c".into(),
+            execution_id: "exec-1".into(),
+            artifact_manifest_hash: "blake3:a".into(),
+            runner_class_id: "rc".into(),
+            snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
+            healthcheck_url_path: "/health".into(),
+            no_secret_scan_clean: true,
+            rootfs_bytes: 1,
+            mem_bytes: 2,
+            vmstate_bytes: 3,
+            manifest_source: "recipe_toml".into(),
+            synthesized_probe: true,
+            declared_command: "app.py".into(),
+            normalized_guest_command: "python3 app.py".into(),
+            supervisor_build: Some(SupervisorAck { binding_names: vec!["openai_api_key".into()] }),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(
+            v["supervisor_build"],
+            serde_json::json!({ "binding_names": ["openai_api_key"] })
+        );
+        // Still no secret value anywhere in the ack.
+        assert!(!serde_json::to_string(&v).unwrap().to_lowercase().contains("sk-"));
     }
 }
