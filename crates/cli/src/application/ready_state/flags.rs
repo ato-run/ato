@@ -122,6 +122,27 @@ pub(crate) fn binding_ttl_ms() -> u64 {
     }
 }
 
+/// v1.2 PR 3e-4: total budget for the restore path's proxy readiness probe,
+/// `ATO_PROXY_READY_TIMEOUT_MS` (default 5s). The supervisor guest restarts
+/// its workload with the real env AFTER bind, so the first accept can lag
+/// bring-up by 1-2s — a single probe is a guaranteed race. Clamped to ≥ 1s so
+/// a typo cannot reintroduce that race; a non-numeric value falls back to the
+/// default with a warning (never a crash mid-restore).
+pub(crate) fn proxy_ready_timeout_ms() -> u64 {
+    const VAR: &str = "ATO_PROXY_READY_TIMEOUT_MS";
+    const DEFAULT: u64 = 5_000;
+    match std::env::var(VAR).ok().filter(|v| !v.trim().is_empty()) {
+        None => DEFAULT,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(ms) => ms.max(1_000),
+            Err(_) => {
+                tracing::warn!(target: "ato::ready_state", raw, "invalid {VAR}; using default");
+                DEFAULT
+            }
+        },
+    }
+}
+
 /// An explicitly selected snapshot backend id (`ATO_SNAPSHOT_BACKEND`), if any.
 pub(crate) fn selected_backend_id() -> Option<String> {
     std::env::var(BACKEND_VAR)

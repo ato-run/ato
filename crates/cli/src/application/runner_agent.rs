@@ -2047,6 +2047,141 @@ pub async fn start_root_proxy_to(
     Ok(handle)
 }
 
+// ── Proxy readiness probe (v1.2 PR 3e-4) ──
+//
+// The restore path's supervisor guest restarts its workload with the real env
+// AFTER bind_before_expose, so the first accept can lag proxy bring-up by
+// 1-2s. `start_root_proxy_to`'s single connect check is a guaranteed race
+// there (observed on staging: bound-ready followed by ready_url=none). The
+// restore path instead brings the listener up first and proves readiness
+// END-TO-END through it — the same path a user's browser takes — retrying on
+// a short backoff until `ATO_PROXY_READY_TIMEOUT_MS` is spent.
+
+/// Backoff schedule (ms) for the readiness probe: fast first attempts for the
+/// common 1-2s restart lag, settling to 1s ticks until the budget is spent.
+const PROXY_READY_BACKOFF_MS: [u64; 6] = [50, 100, 200, 400, 800, 1_000];
+/// Per-attempt IO budget: connect + request + first response byte.
+const PROXY_READY_ATTEMPT_IO_MS: u64 = 1_000;
+
+/// Outcome of the through-proxy readiness probe — feeds the `PROXY_READY_PROF`
+/// line and the `RESTORE_PROF` extras. Counters only; never URLs or secrets.
+pub struct ProxyReadyProbe {
+    pub attempts: u32,
+    pub wait_ms: u64,
+    pub ok: bool,
+}
+
+impl ProxyReadyProbe {
+    pub fn result_label(&self) -> &'static str {
+        if self.ok { "ok" } else { "timeout" }
+    }
+}
+
+/// One probe attempt through the proxy listener: connect, send a minimal
+/// HTTP/1.0 GET, and count ANY response byte as ready (the workload accepted
+/// and answered — status is its business). An upstream that refuses makes the
+/// proxy drop the inbound connection → EOF → not ready yet.
+async fn probe_once_via(listen: &str, request: &[u8], io_timeout: Duration) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let attempt = async {
+        let mut stream = tokio::net::TcpStream::connect(listen).await.ok()?;
+        stream.write_all(request).await.ok()?;
+        let mut buf = [0u8; 1];
+        match stream.read(&mut buf).await {
+            Ok(n) if n > 0 => Some(()),
+            _ => None,
+        }
+    };
+    tokio::time::timeout(io_timeout, attempt)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Bring the slot's root proxy up and prove readiness THROUGH it before the
+/// caller claims a URL. Returns the accept-loop handle only when a probe
+/// request got response bytes back through the proxy; on timeout the listener
+/// is aborted and the caller must treat the lease as failed — a ready_url in
+/// front of a dead workload is a lie, and (for a web run) a ready without a
+/// URL is the same lie in the other direction. The probe outcome is returned
+/// in BOTH cases so the caller can always emit `PROXY_READY_PROF`.
+pub async fn start_root_proxy_ready(
+    listen: &str,
+    upstream_addr: String,
+    probe_path: &str,
+    timeout: Duration,
+) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
+    let started = std::time::Instant::now();
+    let mut probe = ProxyReadyProbe { attempts: 0, wait_ms: 0, ok: false };
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            probe.wait_ms = started.elapsed().as_millis() as u64;
+            return (
+                Err(anyhow::Error::new(e)
+                    .context(format!("failed to bind proxy listener on {listen}"))),
+                probe,
+            );
+        }
+    };
+    let accept_upstream = upstream_addr.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut inbound, _)) = listener.accept().await else {
+                break;
+            };
+            let upstream_addr = accept_upstream.clone();
+            tokio::spawn(async move {
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+            });
+        }
+    });
+
+    let path = if probe_path.starts_with('/') {
+        probe_path.to_string()
+    } else {
+        format!("/{probe_path}")
+    };
+    let request = format!("GET {path} HTTP/1.0\r\nHost: ato-proxy-ready-probe\r\n\r\n").into_bytes();
+    let mut backoff = PROXY_READY_BACKOFF_MS.iter().copied();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        probe.attempts += 1;
+        let io_budget = remaining.min(Duration::from_millis(PROXY_READY_ATTEMPT_IO_MS));
+        if probe_once_via(listen, &request, io_budget).await {
+            probe.ok = true;
+            break;
+        }
+        let delay = Duration::from_millis(backoff.next().unwrap_or(1_000));
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(delay.min(remaining)).await;
+    }
+    probe.wait_ms = started.elapsed().as_millis() as u64;
+    if probe.ok {
+        (Ok(handle), probe)
+    } else {
+        handle.abort();
+        (
+            Err(anyhow::anyhow!(
+                "workload behind proxy {listen} did not answer the readiness probe within {}ms ({} attempt(s))",
+                timeout.as_millis(),
+                probe.attempts
+            )),
+            probe,
+        )
+    }
+}
+
 // ── Owner-initiated stop (P3-C) ──
 //
 // Stop is two-phase and honest: the PWA asks the API to stop, the API marks
@@ -3474,7 +3609,9 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::binding_grants::{binding_namespace, preflight_resolve_names};
     use crate::application::ready_state::binding_host::{bind_before_expose, issue_leases, spawn_lease_renewal, stop_scrub_over_vsock};
-    use crate::application::ready_state::flags::{binding_ttl_ms, runner_supervisor_enabled};
+    use crate::application::ready_state::flags::{
+        binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
+    };
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
@@ -3810,31 +3947,81 @@ async fn handle_restore_snapshot_lease(
     };
     prof_mark!("bind_before_expose_ms");
 
-    // 6. Bring the per-slot root proxy up BEFORE claiming a URL — a proxy that failed (or
-    // a slot with no URL to claim, or a session with no dialable workload address)
-    // reports ready WITHOUT a fabricated ready_url.
+    // 6. Bring the per-slot root proxy up and prove readiness THROUGH it BEFORE
+    // claiming a URL (v1.2 PR 3e-4). The supervisor guest restarts its workload
+    // with the real env after bind — the first accept can lag by 1-2s, so the
+    // probe retries on a backoff up to ATO_PROXY_READY_TIMEOUT_MS. For a web
+    // run the candidate URL IS the product: a probe timeout is a typed failure
+    // (teardown + fail), never a silent ready without ready_url.
     let candidate = public_ready_url(
         public_base_url.as_deref(),
         public_url_template.as_deref(),
         &slot,
     );
     let (proxy_handle, proxy_started) = match (candidate.as_deref(), workload_addr.as_deref()) {
-        (Some(_), Some(addr)) => match start_root_proxy_to(&slot.proxy_listen, addr.to_string()).await {
-            Ok(handle) => {
-                println!(
-                    "🔀 restore lease {lease_id}: slot {} proxy {} -> {}",
-                    slot.index, slot.proxy_listen, addr
-                );
-                (Some(handle), Some(true))
+        (Some(_), Some(addr)) => {
+            let probe_path = cmd.healthcheck_url_path.as_deref().unwrap_or("/");
+            let timeout = Duration::from_millis(proxy_ready_timeout_ms());
+            let (proxy, probe) =
+                start_root_proxy_ready(&slot.proxy_listen, addr.to_string(), probe_path, timeout)
+                    .await;
+            // One stable line per probe, both outcomes (grep: PROXY_READY_PROF).
+            println!(
+                "PROXY_READY_PROF lease={lease_id} slot={} attempts={} wait_ms={} result={}",
+                slot.index,
+                probe.attempts,
+                probe.wait_ms,
+                probe.result_label(),
+            );
+            prof_parts.push(format!("proxy_ready_wait_ms={}", probe.wait_ms));
+            prof_parts.push(format!("proxy_ready_attempts={}", probe.attempts));
+            match proxy {
+                Ok(handle) => {
+                    println!(
+                        "🔀 restore lease {lease_id}: slot {} proxy {} -> {} (ready after {} attempt(s))",
+                        slot.index, slot.proxy_listen, addr, probe.attempts
+                    );
+                    (Some(handle), Some(true))
+                }
+                Err(err) => {
+                    // Scrub + teardown mirror the stop path: the leases were
+                    // already delivered to the guest, so wipe them before the
+                    // VM (teardown destroys the tmpfs regardless; best-effort).
+                    eprintln!(
+                        "⚠️  restore lease {lease_id}: proxy readiness probe failed; failing the lease: {}",
+                        scrub_secrets(&format!("{err:#}"))
+                    );
+                    if let Some((uds, _)) = supervisor_bind {
+                        let scrub =
+                            tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+                        match scrub {
+                            Ok(Ok(())) => {
+                                println!("🧹 restore lease {lease_id}: guest bindings scrubbed")
+                            }
+                            Ok(Err(e)) => eprintln!(
+                                "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                                scrub_secrets(&format!("{e:#}"))
+                            ),
+                            Err(e) => eprintln!(
+                                "⚠️  restore lease {lease_id}: binding scrub task join error: {e}"
+                            ),
+                        }
+                    }
+                    let _ = teardown(backend.as_ref(), session);
+                    fail(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "proxy_ready_timeout",
+                        format!("{err:#}"),
+                    )
+                    .await;
+                    return;
+                }
             }
-            Err(err) => {
-                eprintln!(
-                    "⚠️  restore lease {lease_id}: proxy failed; reporting ready WITHOUT ready_url: {}",
-                    scrub_secrets(&format!("{err:#}"))
-                );
-                (None, Some(false))
-            }
-        },
+        }
         (Some(_), None) => {
             eprintln!(
                 "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
@@ -5840,6 +6027,117 @@ mod tests {
         assert!(
             start_root_proxy(&listen2, dead_port).await.is_err(),
             "proxy must refuse to come up in front of a dead workload"
+        );
+    }
+
+    // ── Proxy readiness probe (3e-4) ──
+
+    /// The 3e-4 race, fixed: the workload starts accepting AFTER proxy
+    /// bring-up (restart-with-env lag). First probe hits Connection refused,
+    /// a later one succeeds → the proxy comes up and the ready payload claims
+    /// the URL (the pre-3e-4 single check reported ready_url=none here).
+    #[tokio::test]
+    async fn proxy_ready_retries_until_late_upstream_accepts_then_claims_url() {
+        // Reserve an upstream port, but only start listening ~300ms later —
+        // the restart-with-env window in miniature.
+        let upstream_port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("upstream port");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let upstream = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let listener =
+                TcpListener::bind(format!("127.0.0.1:{upstream_port}")).expect("late upstream");
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 2\r\n\r\nok");
+            }
+        });
+        let listen = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+            let addr = l.local_addr().unwrap().to_string();
+            drop(l);
+            addr
+        };
+
+        let (result, probe) = start_root_proxy_ready(
+            &listen,
+            format!("127.0.0.1:{upstream_port}"),
+            "/health",
+            Duration::from_secs(5),
+        )
+        .await;
+        let handle = result.expect("proxy must come up once the workload starts accepting");
+        assert!(probe.ok, "probe must settle ok");
+        assert!(
+            probe.attempts >= 2,
+            "first attempt must have been refused (attempts={})",
+            probe.attempts
+        );
+        assert_eq!(probe.result_label(), "ok");
+
+        // The contract downstream: a started proxy claims the candidate URL.
+        let payload = decide_ready_payload(
+            "sha256:test".into(),
+            Some("https://runner.example:8420"),
+            Some(8080),
+            Some(true),
+        );
+        assert_eq!(payload.ready_url.as_deref(), Some("https://runner.example:8420"));
+
+        // And the proxy actually serves end-to-end after the probe.
+        let response = reqwest::Client::new()
+            .get(format!("http://{listen}/health"))
+            .send()
+            .await
+            .expect("request through proxy");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        drop(upstream);
+        handle.abort();
+    }
+
+    /// A workload that never accepts must exhaust the budget into a typed
+    /// error (the caller fails the lease) — never a silent ready_url=none.
+    #[tokio::test]
+    async fn proxy_ready_timeout_is_an_error_with_probe_counters() {
+        let dead_port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("dead");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let listen = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+            let addr = l.local_addr().unwrap().to_string();
+            drop(l);
+            addr
+        };
+        let started = std::time::Instant::now();
+        let (result, probe) = start_root_proxy_ready(
+            &listen,
+            format!("127.0.0.1:{dead_port}"),
+            "/health",
+            Duration::from_millis(500),
+        )
+        .await;
+        assert!(result.is_err(), "dead upstream must be a typed error");
+        assert!(!probe.ok);
+        assert_eq!(probe.result_label(), "timeout");
+        assert!(
+            probe.attempts >= 2,
+            "the budget must buy more than one attempt (attempts={})",
+            probe.attempts
+        );
+        assert!(probe.wait_ms >= 500, "budget must be spent (wait_ms={})", probe.wait_ms);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "timeout must not overshoot the budget by seconds"
         );
     }
 
