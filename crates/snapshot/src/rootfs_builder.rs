@@ -106,8 +106,11 @@ pub struct ServiceBuildSpec {
     /// ordering in a later slice — today every service starts together).
     pub depends_on: Vec<String>,
     /// Extra in-guest DNS aliases for this service (service aliasing; recorded for
-    /// the aliasing slice).
+    /// the aliasing slice). Validated DNS-safe at derive time.
     pub aliases: Vec<String>,
+    /// The service's declared HTTP readiness path (`readiness_probe.http_get`),
+    /// recorded for the readiness-graph slice. `None` = no HTTP probe declared.
+    pub readiness_http_path: Option<String>,
 }
 
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
@@ -345,7 +348,7 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // v1.5 (ato#973): when the capsule declares `[services.<name>]`, derive a
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
-    let services = derive_supervisor_services(m, &env_map)?;
+    let services = derive_supervisor_services(m, &env_map, spec.port)?;
     spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services });
     Ok(spec)
 }
@@ -418,6 +421,7 @@ fn valid_service_name(name: &str) -> bool {
 fn derive_supervisor_services(
     m: &CapsuleManifest,
     common_secret_env_map: &BTreeMap<String, String>,
+    target_port: u16,
 ) -> Result<Option<Vec<ServiceBuildSpec>>, String> {
     let Some(services) = m.services.as_ref().filter(|s| !s.is_empty()) else {
         return Ok(None);
@@ -490,7 +494,38 @@ fn derive_supervisor_services(
             }
             base_env.insert(k, v);
         }
+        // The runner proxies exactly ONE guest port — the build target's `port`. The
+        // PUBLIC service MUST listen there, so a service-declared `PORT` that differs
+        // is a config error (build would succeed, restore would succeed, but the
+        // proxy would front a port nothing is on → false/never ready). Fail closed
+        // rather than silently honour the target port and ignore the author's `PORT`.
+        // (Injected below in build_supervisor_json when absent.)
+        if public {
+            if let Some(declared) = base_env.get("PORT") {
+                if declared != &target_port.to_string() {
+                    return Err(format!(
+                        "public service '{name}': env PORT = {declared:?} but the build target \
+                         port is {target_port} — the public service must listen on the single \
+                         proxied port. Drop the explicit PORT (it is injected) or set it to {target_port}"
+                    ));
+                }
+            }
+        }
+        // DNS-safe aliases (they may become in-guest DNS labels in the aliasing slice).
         let aliases = svc.network.as_ref().map(|n| n.aliases.clone()).unwrap_or_default();
+        for alias in &aliases {
+            if !valid_service_name(alias) {
+                return Err(format!(
+                    "service '{name}': alias '{alias}' must be a DNS-safe label \
+                     (1–63 chars of lowercase [a-z0-9-], not leading/trailing '-')"
+                ));
+            }
+        }
+        let readiness_http_path = svc
+            .readiness_probe
+            .as_ref()
+            .and_then(|p| p.http_get.clone())
+            .filter(|s| !s.trim().is_empty());
         out.push(ServiceBuildSpec {
             name: (*name).clone(),
             // Wrap the entrypoint in a login shell, exactly like the single-service
@@ -502,6 +537,7 @@ fn derive_supervisor_services(
             public,
             depends_on,
             aliases,
+            readiness_http_path,
         });
     }
 
@@ -1283,6 +1319,71 @@ readiness_probe = { http_get = "/health" }
             "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\negress_proxy = false\n",
             "egress_proxy = false",
         );
+    }
+
+    #[test]
+    fn public_service_port_must_not_diverge_from_the_target_port() {
+        // A public service that declares a DIFFERENT PORT than the proxied target
+        // port would listen where the proxy is NOT — fail closed.
+        let mismatch = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"node server.js\"\n[services.api.env]\nPORT = \"3000\"\n\
+             [services.api.network]\npublish = true\n",
+            base_toml() // target port = 8080
+        );
+        let err = derive_supervisor_build_spec(&parse(&mismatch), &probe_python()).unwrap_err();
+        assert!(err.contains("proxied port") && err.contains("3000"), "{err}");
+
+        // Declaring the SAME port is fine (redundant but honest).
+        let same = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"node server.js\"\n[services.api.env]\nPORT = \"8080\"\n\
+             [services.api.network]\npublish = true\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&same), &probe_python()).unwrap();
+        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        assert_eq!(json["services"][0]["base_env"]["PORT"], "8080");
+
+        // Absent PORT → the builder injects the target port.
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        assert_eq!(json["services"][0]["base_env"]["PORT"], "8080");
+
+        // An INTERNAL service may listen wherever it likes — its PORT is untouched.
+        let internal_port = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"redis-server\"\n[services.redis.env]\nPORT = \"6379\"\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&internal_port), &probe_python()).unwrap();
+        let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
+        let redis = services.iter().find(|s| s.name == "redis").unwrap();
+        assert_eq!(redis.base_env.get("PORT").map(String::as_str), Some("6379"));
+    }
+
+    #[test]
+    fn service_aliases_must_be_dns_safe_and_readiness_path_is_recorded() {
+        let bad_alias = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\naliases = [\"Bad_Alias\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&bad_alias), &probe_python())
+            .unwrap_err()
+            .contains("DNS-safe"));
+
+        // A declared HTTP readiness path is recorded on the service spec.
+        let with_probe = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.api.readiness_probe]\nhttp_get = \"/healthz\"\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&with_probe), &probe_python()).unwrap();
+        let api = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap()[0].clone();
+        assert_eq!(api.readiness_http_path.as_deref(), Some("/healthz"));
     }
 
     #[test]
