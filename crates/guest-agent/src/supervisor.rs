@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use protocol::binding_lease::BindingName;
 use serde::{Deserialize, Serialize};
@@ -62,6 +63,28 @@ pub struct ServiceSpec {
     /// `<bindings_root>/<binding>` and sets `ENV_VAR` to its contents.
     #[serde(default)]
     pub bindings_env: BTreeMap<String, String>,
+    /// v1.5 readiness graph (ato#973): services this one must NOT start before —
+    /// each named dependency must be READY (its readiness probe passes, or it is
+    /// simply started when it declares no probe) first.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    /// v1.5: how to tell this service is READY (so dependents may start). `None` =
+    /// ready as soon as its process is started.
+    #[serde(default)]
+    pub readiness: Option<ReadinessSpec>,
+}
+
+/// v1.5 (ato#973): a service's readiness check. A dependent starts only once this
+/// passes. Baseline is a TCP connect to `127.0.0.1:<port>`; when `http_path` is set
+/// the probe additionally sends a minimal `GET <path>` and requires a response byte
+/// (the app answered, not just accepted). Non-secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessSpec {
+    /// The in-guest port the service listens on (loopback).
+    pub port: u16,
+    /// Optional HTTP path to GET; `None` = TCP-accept is enough.
+    #[serde(default)]
+    pub http_path: Option<String>,
 }
 
 /// `/etc/ato/supervisor.json` — how the guest-agent launches the workload(s).
@@ -114,6 +137,8 @@ impl SupervisorConfig {
             cwd: self.cwd.clone(),
             base_env: self.base_env.clone(),
             bindings_env: self.bindings_env.clone(),
+            depends_on: Vec::new(),
+            readiness: None,
         }]
     }
 }
@@ -207,7 +232,65 @@ impl SupervisorConfig {
                 return Err(format!("supervisor.json: duplicate service name {:?}", svc.name));
             }
         }
+        // v1.5 readiness graph: `depends_on` must reference declared services, must
+        // not self-loop, and the graph must be acyclic (the start order is a
+        // topological sort — a cycle has no valid order). Validate now, fail-closed.
+        self.start_order()?;
         Ok(())
+    }
+
+    /// v1.5 (ato#973): the deterministic START ORDER — a topological sort of the
+    /// services by `depends_on` (a service comes after everything it depends on).
+    /// Ties break by name for reproducibility. Errors fail-closed on an unknown or
+    /// self dependency and on a cycle. Returns names in start order.
+    pub fn start_order(&self) -> Result<Vec<String>, String> {
+        let services = self.services();
+        let names: std::collections::BTreeSet<String> =
+            services.iter().map(|s| s.name.clone()).collect();
+        // Adjacency (deps) validated against the declared set.
+        let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for svc in &services {
+            for d in &svc.depends_on {
+                if d == &svc.name {
+                    return Err(format!("supervisor.json: service {:?} depends on itself", svc.name));
+                }
+                if !names.contains(d) {
+                    return Err(format!(
+                        "supervisor.json: service {:?} depends_on {:?} which is not a declared service",
+                        svc.name, d
+                    ));
+                }
+            }
+            deps.insert(svc.name.clone(), svc.depends_on.clone());
+        }
+        // Kahn-ish DFS post-order over a name-sorted iteration (deterministic).
+        let mut order: Vec<String> = Vec::with_capacity(services.len());
+        let mut state: BTreeMap<String, u8> = BTreeMap::new(); // 0=unseen 1=in-progress 2=done
+        fn visit(
+            n: &str,
+            deps: &BTreeMap<String, Vec<String>>,
+            state: &mut BTreeMap<String, u8>,
+            order: &mut Vec<String>,
+        ) -> Result<(), String> {
+            match state.get(n).copied().unwrap_or(0) {
+                2 => return Ok(()),
+                1 => return Err(format!("supervisor.json: dependency cycle involving service {n:?}")),
+                _ => {}
+            }
+            state.insert(n.to_string(), 1);
+            let mut ds = deps.get(n).cloned().unwrap_or_default();
+            ds.sort();
+            for d in ds {
+                visit(&d, deps, state, order)?;
+            }
+            state.insert(n.to_string(), 2);
+            order.push(n.to_string());
+            Ok(())
+        }
+        for name in &names {
+            visit(name, &deps, &mut state, &mut order)?;
+        }
+        Ok(order)
     }
 
     /// Load from `path` (default `/etc/ato/supervisor.json`, or `ATO_SUPERVISOR_CONFIG`).
@@ -431,12 +514,65 @@ impl Workload for ChildWorkload {
 /// Workloads are produced by a factory so the caller controls the concrete type
 /// (production: `ChildWorkload::default`; tests: a shared-state spy). The group is
 /// empty until the first `on_bound_ready(true)`.
+/// v1.5 (ato#973): a single, non-blocking readiness check. The supervisor loops
+/// this (with a bounded budget) between dependency levels. Injected so tests can
+/// drive readiness deterministically without real sockets.
+pub trait ReadinessProbe {
+    /// One check: is the service described by `spec` accepting/answering NOW?
+    fn is_ready(&self, spec: &ReadinessSpec) -> bool;
+}
+
+/// Production probe: TCP connect to `127.0.0.1:<port>` and, when `http_path` is set,
+/// send a minimal `GET` and require a response byte (the app answered, not just
+/// accepted). Loopback only — a service is reached inside its own guest.
+pub struct TcpReadinessProbe;
+
+impl ReadinessProbe for TcpReadinessProbe {
+    fn is_ready(&self, spec: &ReadinessSpec) -> bool {
+        use std::io::{Read, Write};
+        let addr = format!("127.0.0.1:{}", spec.port);
+        let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>() else { return false };
+        let Ok(mut stream) =
+            std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_millis(500))
+        else {
+            return false;
+        };
+        let Some(path) = &spec.http_path else {
+            return true; // TCP accept is enough.
+        };
+        let p = if path.starts_with('/') { path.clone() } else { format!("/{path}") };
+        let req = format!("GET {p} HTTP/1.0\r\nHost: ato-readiness\r\n\r\n");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+        if stream.write_all(req.as_bytes()).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 1];
+        matches!(stream.read(&mut buf), Ok(n) if n > 0)
+    }
+}
+
+/// Default budget (ms) to wait for a dependency to become ready before failing the
+/// group. `ATO_READINESS_TIMEOUT_MS` overrides; clamped ≥ 1s.
+fn default_readiness_timeout() -> Duration {
+    let ms = std::env::var("ATO_READINESS_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.max(1_000))
+        .unwrap_or(30_000);
+    Duration::from_millis(ms)
+}
+
 pub struct Supervisor<W: Workload> {
     config: SupervisorConfig,
     bindings_root: PathBuf,
     make_workload: Box<dyn FnMut() -> W>,
     workloads: Vec<W>,
     started: bool,
+    probe: Box<dyn ReadinessProbe>,
+    readiness_timeout: Duration,
+    /// Poll interval while waiting for a dependency's readiness.
+    readiness_poll: Duration,
 }
 
 impl<W: Workload> Supervisor<W> {
@@ -451,7 +587,23 @@ impl<W: Workload> Supervisor<W> {
             make_workload: Box::new(make_workload),
             workloads: Vec::new(),
             started: false,
+            probe: Box::new(TcpReadinessProbe),
+            readiness_timeout: default_readiness_timeout(),
+            readiness_poll: Duration::from_millis(100),
         }
+    }
+
+    /// Override the readiness probe (tests). Chainable.
+    pub fn with_probe(mut self, probe: impl ReadinessProbe + 'static) -> Self {
+        self.probe = Box::new(probe);
+        self
+    }
+
+    /// Override the readiness wait budget + poll interval (tests). Chainable.
+    pub fn with_readiness_timing(mut self, timeout: Duration, poll: Duration) -> Self {
+        self.readiness_timeout = timeout;
+        self.readiness_poll = poll;
+        self
     }
 
     /// Start EVERY service exactly once, when the session is bound-ready. Each
@@ -463,8 +615,34 @@ impl<W: Workload> Supervisor<W> {
         if self.started || !bound_ready {
             return Ok(false);
         }
+        // v1.5 readiness graph: start in dependency (topological) order and, before
+        // starting a service, WAIT for each of its dependencies to be READY — a
+        // dependency with a readiness probe must actually answer, not merely have a
+        // process spawned. `start_order()` already fail-closed on cycle/unknown dep
+        // at validation; re-derive here for the concrete order.
+        let order = self
+            .config
+            .start_order()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
         let services = self.config.services();
-        for svc in &services {
+        let by_name: BTreeMap<&str, &ServiceSpec> =
+            services.iter().map(|s| (s.name.as_str(), s)).collect();
+        // Readiness of a started service, remembered so a later dependent can gate.
+        let mut ready: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+        for name in &order {
+            let svc = by_name[name.as_str()];
+            // Gate: every dependency must be READY first.
+            for dep in &svc.depends_on {
+                if !ready.contains(dep) {
+                    let dep_spec = by_name[dep.as_str()];
+                    if let Err(e) = self.wait_ready(dep, dep_spec) {
+                        self.stop_all_started();
+                        return Err(e);
+                    }
+                    ready.insert(dep.clone());
+                }
+            }
             let plan = match plan_spawn_service(svc, &self.bindings_root) {
                 Ok(p) => p,
                 Err(e) => {
@@ -481,6 +659,33 @@ impl<W: Workload> Supervisor<W> {
         }
         self.started = true;
         Ok(true)
+    }
+
+    /// Block until `svc` passes its readiness probe, up to the readiness budget. A
+    /// service with NO readiness spec is ready as soon as it is started (this is
+    /// only called for a started service). Fail-closed: a dependency that never
+    /// becomes ready is a `TimedOut` error (the caller rolls the group back).
+    fn wait_ready(&self, name: &str, svc: &ServiceSpec) -> std::io::Result<()> {
+        let Some(spec) = &svc.readiness else {
+            return Ok(()); // started == ready when no probe is declared.
+        };
+        let deadline = std::time::Instant::now() + self.readiness_timeout;
+        loop {
+            if self.probe.is_ready(spec) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!(
+                        "service {name:?} did not become ready on 127.0.0.1:{} within {}ms",
+                        spec.port,
+                        self.readiness_timeout.as_millis()
+                    ),
+                ));
+            }
+            std::thread::sleep(self.readiness_poll);
+        }
     }
 
     /// Stop the group (pre-snapshot at build, or teardown). Returns whether ANY
@@ -726,6 +931,116 @@ mod tests {
         assert_eq!(*st.live.borrow(), 0, "no service left running");
     }
 
+    // ── v1.5 (ato#973): readiness graph — dependency-ordered start + wait ──
+
+    #[test]
+    fn start_order_is_a_topological_sort_and_rejects_cycles() {
+        // api depends on redis → redis starts first. Ties break by name.
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"api","cmd":["true"],"depends_on":["redis"]},
+                {"name":"redis","cmd":["true"]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.start_order().unwrap(), vec!["redis", "api"]);
+
+        // Unknown dependency → rejected at parse (validate calls start_order).
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["ghost"]}]}"#
+        )
+        .is_err());
+        // Self dependency → rejected.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["api"]}]}"#
+        )
+        .is_err());
+        // Cycle → rejected.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"a","cmd":["true"],"depends_on":["b"]},
+                {"name":"b","cmd":["true"],"depends_on":["a"]}
+            ]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_dependent_waits_for_its_dependency_to_become_ready_before_starting() {
+        let dir = tempfile::tempdir().unwrap();
+        // api depends on redis; redis declares a readiness probe on 6379 that only
+        // passes after 3 checks. api must start AFTER redis is ready.
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"api","cmd":["api"],"depends_on":["redis"]},
+                {"name":"redis","cmd":["redis"],"readiness":{"port":6379}}
+            ]}"#,
+        )
+        .unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let probe = FakeProbe::ready_after(6379, 3);
+        let pst = probe.0.clone();
+        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+
+        assert!(sup.on_bound_ready(true).unwrap());
+        // Both started, redis before api (topological).
+        let starts = st.starts.borrow();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(starts[0].cmd, vec!["redis"], "redis starts first");
+        assert_eq!(starts[1].cmd, vec!["api"], "api starts after redis is ready");
+        // The probe was polled until redis answered (≥ the countdown of 3 + the
+        // final success = 4).
+        assert!(pst.borrow().calls.iter().filter(|p| **p == 6379).count() >= 4);
+    }
+
+    #[test]
+    fn a_dependency_that_never_becomes_ready_fails_the_group_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"api","cmd":["api"],"depends_on":["redis"]},
+                {"name":"redis","cmd":["redis"],"readiness":{"port":6379}}
+            ]}"#,
+        )
+        .unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        // Never ready → the readiness wait times out and the group rolls back.
+        let probe = FakeProbe::ready_after(6379, i32::MAX);
+        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+
+        let err = sup.on_bound_ready(true).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(!sup.is_running(), "the group rolled back");
+        assert!(!sup.started());
+        assert_eq!(*st.live.borrow(), 0);
+        // api NEVER started (its dependency never became ready).
+        assert!(st.starts.borrow().iter().all(|p| p.cmd != vec!["api".to_string()]));
+    }
+
+    #[test]
+    fn a_dependency_without_a_probe_is_ready_once_started() {
+        let dir = tempfile::tempdir().unwrap();
+        // redis has no readiness spec → ready as soon as started; api starts right after.
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"api","cmd":["api"],"depends_on":["redis"]},
+                {"name":"redis","cmd":["redis"]}
+            ]}"#,
+        )
+        .unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        // Probe should never be consulted for a probeless dependency.
+        let probe = FakeProbe::default();
+        let pst = probe.0.clone();
+        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert_eq!(st.starts.borrow().len(), 2);
+        assert!(pst.borrow().calls.is_empty(), "no probe for a probeless dependency");
+    }
+
     #[test]
     fn config_rejects_malformed_env_var_and_binding_names() {
         // A supervisor config is fail-closed: bad env var / binding names are
@@ -811,6 +1126,43 @@ mod tests {
         fn is_running(&self) -> bool {
             *self.0.live.borrow() > 0
         }
+    }
+
+    /// A controllable readiness probe (no real sockets): each probed port becomes
+    /// ready after a per-port countdown of `is_ready` calls (0 = ready immediately,
+    /// `i32::MAX` = never). Records every probed port so a test can assert a
+    /// dependent WAITED for its dependency.
+    #[derive(Clone, Default)]
+    struct FakeProbe(Rc<RefCell<FakeProbeState>>);
+    #[derive(Default)]
+    struct FakeProbeState {
+        ready_after: BTreeMap<u16, i32>,
+        calls: Vec<u16>,
+    }
+    impl FakeProbe {
+        fn ready_after(port: u16, n: i32) -> Self {
+            let p = FakeProbe::default();
+            p.0.borrow_mut().ready_after.insert(port, n);
+            p
+        }
+    }
+    impl ReadinessProbe for FakeProbe {
+        fn is_ready(&self, spec: &ReadinessSpec) -> bool {
+            let mut st = self.0.borrow_mut();
+            st.calls.push(spec.port);
+            let c = st.ready_after.entry(spec.port).or_insert(0);
+            if *c <= 0 {
+                true
+            } else {
+                *c -= 1;
+                false
+            }
+        }
+    }
+
+    fn fast_readiness<W: Workload>(sup: Supervisor<W>, probe: FakeProbe) -> Supervisor<W> {
+        sup.with_probe(probe)
+            .with_readiness_timing(Duration::from_millis(500), Duration::from_millis(1))
     }
 
     #[test]

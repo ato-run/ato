@@ -375,13 +375,28 @@ fn build_supervisor_json(
                             .entry("PORT".to_string())
                             .or_insert_with(|| port.to_string());
                     }
-                    serde_json::json!({
+                    let mut obj = serde_json::json!({
                         "name": s.name,
                         "cmd": s.cmd,
                         "cwd": s.cwd,
                         "base_env": base_env,
                         "bindings_env": s.env_map,
-                    })
+                    });
+                    if !s.depends_on.is_empty() {
+                        obj["depends_on"] = serde_json::json!(s.depends_on);
+                    }
+                    // Readiness (so a dependent can WAIT): emit when the service has a
+                    // determinable listen PORT. The guest probes 127.0.0.1:<port>
+                    // (plus the HTTP path when declared). A service with no port is
+                    // "ready once started" — no readiness block.
+                    if let Some(rport) = base_env.get("PORT").and_then(|p| p.parse::<u16>().ok()) {
+                        let mut r = serde_json::json!({ "port": rport });
+                        if let Some(path) = &s.readiness_http_path {
+                            r["http_path"] = serde_json::json!(path);
+                        }
+                        obj["readiness"] = r;
+                    }
+                    obj
                 })
                 .collect();
             serde_json::json!({ "services": svc_json })
@@ -1285,6 +1300,33 @@ readiness_probe = { http_get = "/health" }
         assert!(script.contains("\"name\": \"api\"") && script.contains("\"name\": \"redis\""), "{script}");
         assert!(script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"), "agent argv = binding");
         assert!(!script.contains("sk-"), "no secret value in the rootfs script");
+    }
+
+    #[test]
+    fn emitted_supervisor_json_carries_depends_on_and_readiness() {
+        // api (public, /health) depends_on redis (internal, PORT 6379). The emitted
+        // supervisor.json must carry the graph so the guest can order + wait.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"python3 api.py\"\ndepends_on = [\"redis\"]\n\
+             [services.api.network]\npublish = true\n\
+             [services.api.readiness_probe]\nhttp_get = \"/health\"\n\
+             [services.redis]\nentrypoint = \"redis-server\"\n[services.redis.env]\nPORT = \"6379\"\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        let arr = json["services"].as_array().unwrap();
+        let api = arr.iter().find(|s| s["name"] == "api").unwrap();
+        let redis = arr.iter().find(|s| s["name"] == "redis").unwrap();
+        // api depends on redis and probes its own public port over HTTP /health.
+        assert_eq!(api["depends_on"], serde_json::json!(["redis"]));
+        assert_eq!(api["readiness"]["port"], spec.port); // public → target port
+        assert_eq!(api["readiness"]["http_path"], "/health");
+        // redis is internal: readiness on its own PORT, TCP-accept (no http_path).
+        assert_eq!(redis["readiness"]["port"], 6379);
+        assert!(redis["readiness"].get("http_path").is_none());
+        assert!(redis.get("depends_on").is_none(), "no deps ⇒ field omitted");
     }
 
     #[test]
