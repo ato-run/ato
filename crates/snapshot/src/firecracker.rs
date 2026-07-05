@@ -173,11 +173,15 @@ impl FirecrackerConfig {
         c.ingress_ip = Some(format!("{prefix}.{index}.2"));
         // v1.4 (ato#970): each slot gets a private view of the baked vsock UDS
         // parent dir, so concurrent supervisor restores never share a socket path.
-        // The dir name is deliberately TERSE: the host-side dial path is
+        // Under `/run` (root-owned, NOT sticky world-writable like /tmp) so an
+        // unprivileged local user cannot pre-plant the path or a symlink — the
+        // bind-mount SOURCE must never be attacker-influencable (restore also
+        // verifies it at use, see `ensure_private_dir`). The dir name is
+        // deliberately TERSE: the host-side dial path is
         // `<dir>/blake3_<64-hex>.sock` (76 bytes of file name) and AF_UNIX caps
         // sun_path at ~108 bytes — `/tmp/ato-vsock-slots/ato-slot-0/…` was
         // exactly 108 and failed SUN_LEN on the first live restore.
-        c.vsock_slot_dir = Some(std::env::temp_dir().join("ato-vsk").join(index.to_string()));
+        c.vsock_slot_dir = Some(PathBuf::from("/run/ato/vsk").join(index.to_string()));
         c
     }
 }
@@ -813,6 +817,36 @@ fn vsock_enabled() -> bool {
 /// bind-mount TARGET for v1.4 per-slot vsock isolation (see `fc_command`).
 fn vsock_uds_parent_dir() -> PathBuf {
     std::env::temp_dir().join("ato-vsock")
+}
+
+/// v1.4 (ato#970): create-or-verify a directory that participates in the vsock
+/// bind mount, refusing symlinks. Both mount endpoints matter: a symlinked
+/// SOURCE would hand the socket to an attacker-chosen directory, a symlinked
+/// TARGET would redirect the mount inside the VMM's namespace. `/run/ato/vsk`
+/// is root-owned so unprivileged users cannot pre-plant it, but the baked
+/// TARGET lives under the sticky world-writable `$TMPDIR` — verify, never
+/// assume. `symlink_metadata` does not follow links, so a planted symlink is
+/// seen as such (fail-closed), and 0o700 keeps the slot dirs root-private.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(mode);
+    builder.create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} exists but is not a directory (symlink planted?)",
+            dir.display()
+        )));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_dir(dir: &Path, _mode: u32) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
 
 /// The vsock host UDS for a capsule — **deterministic** so build (which bakes it into
@@ -1516,9 +1550,12 @@ impl SnapshotBackend for FirecrackerBackend {
                 let slot_dir = self.config.vsock_slot_dir.as_ref().ok_or_else(|| {
                     self.backend_err("vsock isolation without a vsock_slot_dir (gate should have refused)")
                 })?;
-                std::fs::create_dir_all(slot_dir)
+                // Symlink-refusing creation for BOTH mount endpoints (see
+                // `ensure_private_dir`): the source is root-private, the baked
+                // target under $TMPDIR keeps legacy world-readable perms.
+                ensure_private_dir(slot_dir, 0o700)
                     .map_err(|e| self.backend_err(format!("vsock slot dir: {e}")))?;
-                std::fs::create_dir_all(vsock_uds_parent_dir())
+                ensure_private_dir(&vsock_uds_parent_dir(), 0o755)
                     .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
             }
             let fc = bench::time("restore.start_fc", || {
@@ -1831,15 +1868,15 @@ mod tests {
         let s1 = FirecrackerConfig::for_slot(1, true, &base);
         let (d0, d1) = (s0.vsock_slot_dir.unwrap(), s1.vsock_slot_dir.unwrap());
         assert_ne!(d0, d1);
-        assert!(d0.ends_with("ato-vsk/0"), "got {}", d0.display());
-        assert!(d1.ends_with("ato-vsk/1"), "got {}", d1.display());
+        assert_eq!(d0, PathBuf::from("/run/ato/vsk/0"));
+        assert_eq!(d1, PathBuf::from("/run/ato/vsk/1"));
         // AF_UNIX sun_path budget: the host-side dial path (slot dir + the
         // 76-byte `blake3_<64-hex>.sock` file name) must stay under SUN_LEN
         // (~108). `/tmp/ato-vsock-slots/ato-slot-0/…` was exactly 108 and
         // failed the first live restore — keep the dir terse. Budgeted against
         // `/tmp` (restore is Linux-only; this test also runs on macOS, where
         // `temp_dir()` is a long per-user path that never restores anything).
-        let dial = format!("/tmp/ato-vsk/99/blake3_{}.sock", "a".repeat(64));
+        let dial = format!("/run/ato/vsk/99/blake3_{}.sock", "a".repeat(64));
         assert!(
             dial.len() <= 100,
             "host dial path must fit sun_path with margin, got {} bytes: {dial}",
@@ -1873,7 +1910,7 @@ mod tests {
         assert_eq!(args[5], "sh");
         assert_eq!(args[6], "-c");
         assert!(args[7].contains(r#"mount --bind "$1" "$2""#) && args[7].contains(r#"exec "$@""#));
-        assert!(args[9].ends_with("ato-vsk/1"), "per-slot dir, got {}", args[9]);
+        assert_eq!(args[9], "/run/ato/vsk/1");
         assert_eq!(args[10], vsock_uds_parent_dir().to_string_lossy());
         assert_eq!(args[11], base.firecracker_bin);
         assert_eq!(args.len(), 12, "firecracker binary must be LAST so --api-sock appends into \"$@\"");
