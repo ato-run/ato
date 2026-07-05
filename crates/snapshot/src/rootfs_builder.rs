@@ -1672,9 +1672,20 @@ readiness_probe = { http_get = "/health" }
         let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
         let arr = json["services"].as_array().unwrap();
         let webj = arr.iter().find(|s| s["name"] == "web").unwrap();
+        let redisj = arr.iter().find(|s| s["name"] == "redis").unwrap();
+        let workerj = arr.iter().find(|s| s["name"] == "worker").unwrap();
+        // web waits on BOTH redis and worker; worker waits on redis — the real
+        // readiness graph, not just a single edge.
         assert_eq!(webj["depends_on"], serde_json::json!(["redis", "worker"]));
         assert_eq!(webj["readiness"]["port"], spec.port);
         assert_eq!(webj["readiness"]["http_path"], "/healthz");
+        assert_eq!(workerj["depends_on"], serde_json::json!(["redis"]));
+        // redis is depended-on, so a dependent WAITS for it — its readiness probes
+        // its own resolved REDIS_PORT (TCP-accept: no http_path), the very port
+        // web/worker were cross-injected with. This is what makes the wait reach it.
+        let redis_port: u16 = redis.base_env.get("REDIS_PORT").unwrap().parse().unwrap();
+        assert_eq!(redisj["readiness"]["port"], redis_port);
+        assert!(redisj["readiness"].get("http_path").is_none(), "redis readiness is TCP-accept");
         // No secret VALUE anywhere in the emitted config (names only).
         assert!(!json.to_string().contains("sk-") && !json.to_string().to_lowercase().contains("password="));
 
