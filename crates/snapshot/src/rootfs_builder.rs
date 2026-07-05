@@ -83,6 +83,13 @@ pub struct SupervisorBuildSpec {
     /// byte-identical to before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub services: Option<Vec<ServiceBuildSpec>>,
+    /// v1.5 app_url selection (ato#973): the ONE service that owns the proxied
+    /// public port — the app_url / ready_url target. Exactly the service with
+    /// `network.publish = true` (0 or 2+ are rejected at derive time). Recorded so
+    /// the receipt/diagnostic names which service the public URL points at. `None`
+    /// for the legacy single-service build (its sole service is implicitly public).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_service: Option<String>,
 }
 
 /// v1.5 (ato#973): one service in a multi-service supervisor build. Non-secret —
@@ -353,7 +360,12 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
     let services = derive_supervisor_services(m, &env_map, spec.port)?;
-    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services });
+    // app_url selection: the sole public service (exactly one, enforced in derive)
+    // is the app_url / ready_url target. Recorded in the receipt; None for legacy.
+    let public_service = services
+        .as_ref()
+        .and_then(|svcs| svcs.iter().find(|s| s.public).map(|s| s.name.clone()));
+    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services, public_service });
     Ok(spec)
 }
 
@@ -1535,6 +1547,63 @@ readiness_probe = { http_get = "/health" }
         assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
         assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
         assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+    }
+
+    // ── v1.5 (ato#973): app_url selection ──
+
+    #[test]
+    fn app_url_selection_records_the_public_service_and_targets_its_port() {
+        // api(public) + redis(internal) → the app_url target is api, on the proxied
+        // target port; redis is never the URL target and its port is not exposed.
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        // The receipt records WHICH service the public URL points at.
+        assert_eq!(sup.public_service.as_deref(), Some("api"), "public service recorded for app_url");
+        // That service owns the proxied target port (= the ready_url/app_url port).
+        let services = sup.services.as_ref().unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        assert!(api.public);
+        assert_eq!(api.port, Some(spec.port), "public service listens on the proxied port");
+        // The internal service is never selected, and it does not own the target port.
+        let redis = services.iter().find(|s| s.name == "redis").unwrap();
+        assert!(!redis.public);
+        assert_ne!(sup.public_service.as_deref(), Some("redis"));
+        assert_ne!(redis.port, Some(spec.port), "internal service is not on the public port");
+        // The recorded name is exactly the one public service.
+        assert_eq!(services.iter().filter(|s| s.public).count(), 1);
+    }
+
+    #[test]
+    fn app_url_selection_ignores_internal_expose_ports_and_aliases() {
+        // An internal service EXPOSES a port and declares an alias; neither becomes
+        // the app_url target — only the public service's proxied port is the URL.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n\
+             [services.redis.network]\naliases = [\"cache\"]\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert_eq!(sup.public_service.as_deref(), Some("api"));
+        let redis = sup.services.as_ref().unwrap().iter().find(|s| s.name == "redis").unwrap();
+        // redis's exposed port is a real allocated loopback port, but it is NOT the
+        // public/proxied port, and redis is not the URL target.
+        let rport = redis.base_env.get("REDIS_PORT").unwrap().parse::<u16>().unwrap();
+        assert_ne!(rport, spec.port, "internal expose port is not the public port");
+        assert!(!redis.aliases.is_empty(), "redis has an alias (cache) — internal, not a URL target");
+        assert!(!redis.public);
+    }
+
+    #[test]
+    fn legacy_single_service_has_no_recorded_public_service() {
+        // A legacy single-service build: no [services] → services None, and
+        // public_service is None (the sole workload is implicitly the URL target).
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert!(sup.services.is_none(), "legacy single-service build");
+        assert!(sup.public_service.is_none(), "no explicit public service selection for legacy");
     }
 
     #[test]
