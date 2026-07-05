@@ -18,7 +18,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use capsule::foundation::types::manifest::{CapsuleManifest, RuntimeType};
+use capsule::foundation::types::manifest::{
+    CapsuleManifest, RuntimeType, ServiceSpec as ManifestServiceSpec,
+};
 use capsule::foundation::types::ready_state::SecretDelivery;
 use protocol::binding_lease::BindingName;
 use serde::Serialize;
@@ -67,11 +69,45 @@ impl SourceProbe {
 /// guest-agent reads at exec. Non-secret; safe in a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SupervisorBuildSpec {
-    /// The binding names the guest-agent requires before it starts the workload
+    /// The binding names the guest-agent requires before it starts the workload(s)
     /// (the run gate delivers a lease per name). = the declared `[secrets.*]` names.
     pub binding_names: Vec<String>,
-    /// `ENV_VAR → binding name` (from each secret's `env` or its name).
+    /// `ENV_VAR → binding name` (from each secret's `env` or its name). For the
+    /// LEGACY single-service build this is the sole workload's injection map; for a
+    /// MULTI-service build (`services` is `Some`) each service carries its own.
     pub env_map: BTreeMap<String, String>,
+    /// v1.5 (ato#973): when `Some`, this is a MULTI-service build — the emitted
+    /// `supervisor.json` carries a `services[]` list (the guest supervisor starts
+    /// the whole group under one bound-ready/revoke/rotation gate). `None` = the
+    /// legacy single-service build, whose emitted `supervisor.json` stays
+    /// byte-identical to before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<ServiceBuildSpec>>,
+}
+
+/// v1.5 (ato#973): one service in a multi-service supervisor build. Non-secret —
+/// safe in a receipt. `env_map` maps an env var to the binding NAME (never a value).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServiceBuildSpec {
+    /// Stable service name (unique; keys per-service logs + diagnostics).
+    pub name: String,
+    /// The workload argv (already wrapped `["/bin/sh", "-lc", <entrypoint>]`).
+    pub cmd: Vec<String>,
+    /// Working directory.
+    pub cwd: String,
+    /// Non-secret env applied before bindings (e.g. `PORT`).
+    pub base_env: BTreeMap<String, String>,
+    /// `ENV_VAR → binding name` for this service's secret injection.
+    pub env_map: BTreeMap<String, String>,
+    /// Whether this service is the PUBLIC one (exposed via the runner proxy).
+    /// Exactly one service in a build is public; the rest are internal.
+    pub public: bool,
+    /// Declared start-ordering hints (recorded now; the readiness graph enforces
+    /// ordering in a later slice — today every service starts together).
+    pub depends_on: Vec<String>,
+    /// Extra in-guest DNS aliases for this service (service aliasing; recorded for
+    /// the aliasing slice).
+    pub aliases: Vec<String>,
 }
 
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
@@ -306,8 +342,182 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
         binding_names.push(name.clone());
     }
     binding_names.sort();
-    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map });
+    // v1.5 (ato#973): when the capsule declares `[services.<name>]`, derive a
+    // MULTI-service supervisor build; otherwise keep the legacy single-service
+    // shape (`services = None` → byte-identical emitted supervisor.json).
+    let services = derive_supervisor_services(m, &env_map)?;
+    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services });
     Ok(spec)
+}
+
+/// Build the `/etc/ato/supervisor.json` value from the supervisor spec. A
+/// MULTI-service build emits a `services[]` list (the guest group supervisor,
+/// ato#974); a legacy single-service build emits the byte-identical top-level
+/// shape. The PUBLIC service inherits the derived `PORT` so its listener matches
+/// the single proxied guest port; internal services keep only their own env. No
+/// secret value ever appears — only `ENV_VAR → binding name`.
+fn build_supervisor_json(
+    sup: &SupervisorBuildSpec,
+    port: u16,
+    start_cmd: &str,
+) -> serde_json::Value {
+    match &sup.services {
+        Some(services) => {
+            let svc_json: Vec<serde_json::Value> = services
+                .iter()
+                .map(|s| {
+                    let mut base_env = s.base_env.clone();
+                    if s.public {
+                        base_env
+                            .entry("PORT".to_string())
+                            .or_insert_with(|| port.to_string());
+                    }
+                    serde_json::json!({
+                        "name": s.name,
+                        "cmd": s.cmd,
+                        "cwd": s.cwd,
+                        "base_env": base_env,
+                        "bindings_env": s.env_map,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "services": svc_json })
+        }
+        None => serde_json::json!({
+            "cmd": ["/bin/sh", "-lc", start_cmd],
+            "cwd": "/app",
+            "base_env": { "PORT": port.to_string() },
+            "bindings_env": sup.env_map,
+        }),
+    }
+}
+
+/// A service name: 1–63 chars of lowercase `[a-z0-9-]`, not leading/trailing `-`
+/// (it keys per-service logs and may become an in-guest DNS label).
+fn valid_service_name(name: &str) -> bool {
+    let ok_len = (1..=63).contains(&name.len());
+    let ok_chars = name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let ends = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    ok_len && ok_chars && ends(name.bytes().next()) && ends(name.bytes().next_back())
+}
+
+/// v1.5 (ato#973): derive the multi-service build from `[services.<name>]`, or
+/// `Ok(None)` when the capsule declares no services (legacy single-service path).
+///
+/// Adopts the PROCESS-relevant subset of the existing manifest service schema
+/// (entrypoint / env / depends_on / readiness_probe / network.publish /
+/// network.aliases) and FAIL-CLOSES on everything that only makes sense for the
+/// OCI/container orchestration path — a single Firecracker VM cannot honour a
+/// cross-container volume mount, an egress-proxy opt-out, or a service-to-service
+/// ACL, so declaring them here is a config error, never silently ignored.
+///
+/// `common_secret_env_map` is the global `[secrets.*]` env injection (every
+/// service receives it — per-service secret scoping is a follow-up). The
+/// supervisor's required binding names (agent argv) stay the global secret set,
+/// so bound-ready still gates on every declared secret.
+fn derive_supervisor_services(
+    m: &CapsuleManifest,
+    common_secret_env_map: &BTreeMap<String, String>,
+) -> Result<Option<Vec<ServiceBuildSpec>>, String> {
+    let Some(services) = m.services.as_ref().filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    // NOTE on the target: a multi-service capsule still carries a `[targets.<label>]`
+    // — it is the build/runtime ANCHOR (runtime detection, base image, the single
+    // proxied guest PORT). Its `run` seeds the derivation; the RUNTIME processes come
+    // from `[services]` (emitted as the guest supervisor's `services[]`). They are
+    // complementary, not competing. (Schema 0.3 has no `[execution]` section — a
+    // legacy top-level entrypoint cannot even parse here.)
+
+    let mut out: Vec<ServiceBuildSpec> = Vec::with_capacity(services.len());
+    let mut public_count = 0usize;
+    // Deterministic order (BTree by name) so the emitted supervisor.json + receipt
+    // are reproducible regardless of the source map's iteration order.
+    let ordered: BTreeMap<&String, &ManifestServiceSpec> = services.iter().collect();
+    let names: std::collections::BTreeSet<&str> = ordered.keys().map(|k| k.as_str()).collect();
+
+    for (name, svc) in &ordered {
+        if !valid_service_name(name) {
+            return Err(format!(
+                "service '{name}': name must be 1–63 chars of lowercase [a-z0-9-], \
+                 not leading/trailing '-'"
+            ));
+        }
+        if svc.entrypoint.trim().is_empty() {
+            return Err(format!("service '{name}': `entrypoint` is empty"));
+        }
+        // Reject container-only fields (single-VM snapshot cannot honour them).
+        if !svc.state_bindings.is_empty() {
+            return Err(format!(
+                "service '{name}': `state_bindings` is a container/volume feature not \
+                 supported in a single-VM snapshot (v1.6 persistent state is out of scope here)"
+            ));
+        }
+        if let Some(net) = &svc.network {
+            if !net.allow_from.is_empty() {
+                return Err(format!(
+                    "service '{name}': `network.allow_from` (service-to-service ACL) is not \
+                     supported in a single-VM snapshot"
+                ));
+            }
+            if !net.egress_proxy {
+                return Err(format!(
+                    "service '{name}': `network.egress_proxy = false` is a container opt-out \
+                     not supported in a single-VM snapshot"
+                ));
+            }
+        }
+        // depends_on references must exist (validate the graph now; ordering is
+        // enforced by the later readiness-graph slice).
+        let depends_on = svc.depends_on.clone().unwrap_or_default();
+        for dep in &depends_on {
+            if !names.contains(dep.as_str()) {
+                return Err(format!("service '{name}': depends_on '{dep}' is not a declared service"));
+            }
+            if dep == *name {
+                return Err(format!("service '{name}': depends_on itself"));
+            }
+        }
+        let public = svc.network.as_ref().is_some_and(|n| n.publish);
+        if public {
+            public_count += 1;
+        }
+        // Non-secret env → base_env (validated as POSIX identifiers, like secrets).
+        let mut base_env: BTreeMap<String, String> = BTreeMap::new();
+        for (k, v) in svc.env.clone().unwrap_or_default() {
+            if !valid_env_var_name(&k) {
+                return Err(format!("service '{name}': env var {k:?} is not a POSIX identifier"));
+            }
+            base_env.insert(k, v);
+        }
+        let aliases = svc.network.as_ref().map(|n| n.aliases.clone()).unwrap_or_default();
+        out.push(ServiceBuildSpec {
+            name: (*name).clone(),
+            // Wrap the entrypoint in a login shell, exactly like the single-service
+            // path, so the same start semantics (PATH, `-l`) apply per service.
+            cmd: vec!["/bin/sh".into(), "-lc".into(), svc.entrypoint.clone()],
+            cwd: "/app".into(),
+            base_env,
+            env_map: common_secret_env_map.clone(),
+            public,
+            depends_on,
+            aliases,
+        });
+    }
+
+    // Exactly one PUBLIC service — the run gate proxies exactly one guest port.
+    match public_count {
+        1 => Ok(Some(out)),
+        0 => Err(
+            "no public service: exactly one service must set `network.publish = true` \
+             (the one exposed via the runner proxy)"
+                .into(),
+        ),
+        n => Err(format!(
+            "{n} services set `network.publish = true`; exactly one may be public in a \
+             single-VM snapshot (the rest are internal)"
+        )),
+    }
 }
 
 /// A conservative GitHub **owner** login: 1–39 chars, alphanumeric or single hyphens,
@@ -496,12 +706,7 @@ fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
         None => (String::new(), format!("/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &")),
         Some(sup) => {
             // supervisor.json (no secret value — env var → binding name only).
-            let cfg = serde_json::json!({
-                "cmd": ["/bin/sh", "-lc", spec.start_cmd],
-                "cwd": "/app",
-                "base_env": { "PORT": spec.port.to_string() },
-                "bindings_env": sup.env_map,
-            });
+            let cfg = build_supervisor_json(sup, spec.port, &spec.start_cmd);
             let cfg_json = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
             // Binding names become the agent's argv — shell-quote each defensively.
             let args = sup
@@ -988,5 +1193,121 @@ readiness_probe = { http_get = "/health" }
         assert!(script.contains("/bin/sh -lc 'python3 app.py' >/tmp/app.log"), "direct app launch");
         assert!(!script.contains("ato-guest-agent"), "no agent in a no-binding rootfs");
         assert!(!script.contains("supervisor.json"), "no supervisor config");
+    }
+
+    // ── v1.5 (ato#973): multi-service supervisor build ──
+
+    /// base target + secret + a two-service graph: a PUBLIC api that depends on an
+    /// INTERNAL redis.
+    fn multi_service_toml() -> String {
+        format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"python3 api.py\"\ndepends_on = [\"redis\"]\n\
+             [services.api.network]\npublish = true\n\
+             [services.redis]\nentrypoint = \"redis-server\"\n",
+            base_toml()
+        )
+    }
+
+    #[test]
+    fn multi_service_derives_a_service_group_with_one_public_service() {
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python())
+            .expect("multi-service supervisor spec");
+        let sup = spec.supervisor.as_ref().unwrap();
+        // Required bindings (agent argv) are still the global secret set.
+        assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+        let services = sup.services.as_ref().expect("services list present");
+        assert_eq!(services.len(), 2);
+        // Deterministic order (BTree by name): api before redis.
+        let api = &services[0];
+        let redis = &services[1];
+        assert_eq!(api.name, "api");
+        assert!(api.public, "api declared network.publish = true");
+        assert_eq!(api.cmd, vec!["/bin/sh", "-lc", "python3 api.py"]);
+        assert_eq!(api.depends_on, vec!["redis"]);
+        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert_eq!(redis.name, "redis");
+        assert!(!redis.public, "redis is internal (no publish)");
+
+        // Emitted supervisor.json: services[] shape, PUBLIC service gets PORT,
+        // internal one does not, and NO secret value appears.
+        let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+        let arr = json["services"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["name"], "api");
+        assert_eq!(arr[0]["base_env"]["PORT"], spec.port.to_string());
+        assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
+        assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
+        assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+    }
+
+    #[test]
+    fn multi_service_build_script_emits_services_and_no_legacy_top_level_cmd() {
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        assert!(script.contains("\"services\""), "emits a services[] supervisor.json");
+        assert!(script.contains("\"name\": \"api\"") && script.contains("\"name\": \"redis\""), "{script}");
+        assert!(script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"), "agent argv = binding");
+        assert!(!script.contains("sk-"), "no secret value in the rootfs script");
+    }
+
+    #[test]
+    fn multi_service_fail_closed_rules() {
+        let bad = |extra: &str, needle: &str| {
+            let toml = format!("{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{extra}", base_toml());
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains(needle), "expected {needle:?} in: {err}");
+        };
+        // No public service.
+        bad("[services.api]\nentrypoint = \"python3 api.py\"\n", "no public service");
+        // Two public services.
+        bad(
+            "[services.a]\nentrypoint = \"a\"\n[services.a.network]\npublish = true\n\
+             [services.b]\nentrypoint = \"b\"\n[services.b.network]\npublish = true\n",
+            "exactly one may be public",
+        );
+        // Empty entrypoint.
+        bad("[services.api]\nentrypoint = \"\"\n[services.api.network]\npublish = true\n", "`entrypoint` is empty");
+        // depends_on to an unknown service.
+        bad(
+            "[services.api]\nentrypoint = \"a\"\ndepends_on = [\"ghost\"]\n[services.api.network]\npublish = true\n",
+            "not a declared service",
+        );
+        // Container-only field: state_bindings.
+        bad(
+            "[services.api]\nentrypoint = \"a\"\nstate_bindings = [{ state = \"d\", target = \"/x\" }]\n[services.api.network]\npublish = true\n",
+            "state_bindings",
+        );
+        // Container-only field: egress_proxy opt-out.
+        bad(
+            "[services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\negress_proxy = false\n",
+            "egress_proxy = false",
+        );
+    }
+
+    #[test]
+    fn multi_service_coexists_with_the_build_target_which_supplies_the_public_port() {
+        // The [targets.app] anchor supplies runtime/port; [services] supply the
+        // runtime processes. The PUBLIC service inherits that derived port.
+        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        assert_eq!(spec.port, 8080, "port comes from the build target");
+        let sup = spec.supervisor.as_ref().unwrap();
+        let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+        let api = &json["services"].as_array().unwrap()[0];
+        assert_eq!(api["name"], "api");
+        assert_eq!(api["base_env"]["PORT"], "8080", "public service listens on the proxied port");
+    }
+
+    #[test]
+    fn single_service_supervisor_json_stays_byte_identical() {
+        // A legacy (no [services]) supervisor build must emit the OLD top-level shape.
+        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let sup = spec.supervisor.as_ref().unwrap();
+        assert!(sup.services.is_none(), "no [services] ⇒ legacy single-service build");
+        let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+        assert!(json.get("services").is_none(), "legacy build emits top-level cmd, not services[]");
+        assert_eq!(json["cmd"], serde_json::json!(["/bin/sh", "-lc", "python3 app.py"]));
+        assert_eq!(json["base_env"]["PORT"], spec.port.to_string());
+        assert_eq!(json["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
     }
 }
