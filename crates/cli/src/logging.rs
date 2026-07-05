@@ -37,7 +37,13 @@ pub fn build_env_filter() -> EnvFilter {
 }
 
 fn build_directives(ato_cli_log: Option<&str>) -> String {
-    let mut directives: Vec<String> = std::iter::once("cli=info".to_string())
+    // `ato=warn`: operational warnings from `ato::*` targets (e.g.
+    // `ato::ready_state`'s binding-lease revocation) are SAFETY signals — with
+    // only per-crate directives they matched nothing and were silently dropped,
+    // which made a live secret revocation invisible in `ato runner serve` logs
+    // (v1.4, ato#970). Warn-level only; INFO/DEBUG chatter stays opt-in.
+    let mut directives: Vec<String> = ["cli=info".to_string(), "ato=warn".to_string()]
+        .into_iter()
         .chain(FEATURE_TARGETS.iter().map(|t| format!("{t}=warn")))
         .collect();
 
@@ -48,7 +54,8 @@ fn build_directives(ato_cli_log: Option<&str>) -> String {
     for token in raw.split(',').map(str::trim).filter(|t| !t.is_empty()) {
         match token {
             "all" => {
-                directives = std::iter::once("cli=debug".to_string())
+                directives = ["cli=debug".to_string(), "ato=debug".to_string()]
+                    .into_iter()
                     .chain(FEATURE_TARGETS.iter().map(|t| format!("{t}=debug")))
                     .collect();
             }
@@ -88,6 +95,9 @@ mod tests {
         let directives = build_directives(None);
         assert!(directives.contains("cli=info"));
         assert!(directives.contains("node-compat=warn"));
+        // v1.4 (ato#970): ato::* warns (binding-lease revocation etc.) must be
+        // visible by DEFAULT — they were silently dropped before.
+        assert!(directives.contains("ato=warn"));
     }
 
     #[test]
