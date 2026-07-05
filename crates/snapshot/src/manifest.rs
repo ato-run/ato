@@ -56,6 +56,30 @@ pub struct ReadyStateManifest {
     /// Opaque id of the build receipt that produced this artifact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_receipt_id: Option<String>,
+    /// v1.2 PR 3d: supervisor-build facts (names + advisory hardening only, never a
+    /// value). `None` for no-binding artifacts — additive, default-safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_build: Option<SupervisorBuildReceipt>,
+}
+
+/// v1.2 PR 3d: what the supervisor build drive did, recorded into the sealed
+/// manifest. Binding NAMES and advisory hardening facts only — the placeholder
+/// values are generated per build, delivered over vsock, revoked before the
+/// snapshot, and never stored or logged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupervisorBuildReceipt {
+    /// The binding names the build drive delivered placeholders for.
+    pub binding_names: Vec<String>,
+    /// Whether the build-boot kernel cmdline carried the page-hygiene args
+    /// (`init_on_free=1 init_on_alloc=1 page_poison=1`). Restore inherits the
+    /// build cmdline, so this describes the artifact's whole lifetime.
+    pub page_hygiene_boot_args: bool,
+    /// ADVISORY (kernel-dependent, #947 finding): whether the revoked placeholder
+    /// values were absent from the sealed mem+vmstate bytes. `Some(false)` does NOT
+    /// gate — a kernel without `init_on_free` support leaves freed pages intact.
+    /// `None` = not evaluated (e.g. the Fake backend, which boots nothing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder_absent_from_seal: Option<bool>,
 }
 
 impl ReadyStateManifest {
@@ -269,6 +293,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             no_secret_proof: None,
             build_receipt_id: None,
+            supervisor_build: None,
         };
         (dir, m)
     }

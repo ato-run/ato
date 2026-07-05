@@ -151,6 +151,7 @@ mod tests {
             sanitizer_contract: Default::default(),
             no_secret_proof: None,
             build_receipt_id: None,
+            supervisor_build: None,
         };
         assert!(matches!(
             b.inspect(&store, &m),

@@ -145,6 +145,14 @@ impl SnapshotBackend for FakeSnapshotBackend {
             sanitizer_contract: input.sanitizer_contract,
             no_secret_proof: Some(no_secret_proof.clone()),
             build_receipt_id: None,
+            // v1.2 PR 3d: the Fake backend boots nothing, so it models the
+            // supervisor input as pure plumbing — names recorded, no hygiene
+            // cmdline, placeholder scan not evaluated (`None`, honestly).
+            supervisor_build: input.supervisor.as_ref().map(|s| crate::manifest::SupervisorBuildReceipt {
+                binding_names: s.binding_names.clone(),
+                page_hygiene_boot_args: false,
+                placeholder_absent_from_seal: None,
+            }),
         };
 
         Ok(BuildReadyStateReceipt {
@@ -290,6 +298,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: secret_markers,
             execution_id: None,
+            supervisor: None,
         }
     }
 
@@ -409,6 +418,35 @@ mod tests {
             );
         }
         assert!(receipt.no_secret_proof.is_clean());
+    }
+
+    #[test]
+    fn supervisor_input_is_recorded_honestly_in_the_manifest() {
+        // v1.2 PR 3d plumbing (T3): the Fake backend carries the supervisor input
+        // through build→manifest so KVM-less CI exercises the new field end to end —
+        // names recorded, and the boot-dependent facts honestly absent (no hygiene
+        // cmdline, placeholder scan not evaluated) because Fake boots nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let mut input = build_input(&store, vec![]);
+        input.supervisor = Some(crate::backend::SupervisorBindings {
+            binding_names: vec!["openai_api_key".to_string()],
+        });
+        let receipt = FakeSnapshotBackend::new().build_ready_state(input).unwrap();
+        let sup = receipt.manifest.supervisor_build.as_ref().expect("supervisor receipt");
+        assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+        assert!(!sup.page_hygiene_boot_args);
+        assert_eq!(sup.placeholder_absent_from_seal, None);
+        // The manifest round-trips through serde with the new optional field.
+        let json = serde_json::to_string(&receipt.manifest).unwrap();
+        let back: ReadyStateManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.supervisor_build, receipt.manifest.supervisor_build);
+        // A no-binding build stays byte-compatible: no supervisor_build key at all.
+        let plain = FakeSnapshotBackend::new()
+            .build_ready_state(build_input(&store, vec![]))
+            .unwrap();
+        assert!(plain.manifest.supervisor_build.is_none());
+        assert!(!serde_json::to_string(&plain.manifest).unwrap().contains("supervisor_build"));
     }
 
     #[test]

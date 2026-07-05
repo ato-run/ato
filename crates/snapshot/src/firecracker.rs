@@ -50,15 +50,19 @@ use capsulefs::{
 };
 use serde_json::json;
 
+use crate::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT};
 use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
-    TeardownReceipt,
+    SupervisorBindings, TeardownReceipt,
 };
 use crate::manifest::{
-    NoSecretProof, ReadyStateManifest, RestoreContract, SnapshotBackendInfo, READY_STATE_SCHEMA,
+    NoSecretProof, ReadyStateManifest, RestoreContract, SnapshotBackendInfo, SupervisorBuildReceipt,
+    READY_STATE_SCHEMA,
 };
+use protocol::binding_control::{AgentToHost, HostToAgent};
+use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 use crate::bench;
 use crate::scanner;
 #[cfg(test)]
@@ -238,9 +242,15 @@ impl FirecrackerBackend {
         }
     }
 
-    fn boot_args(&self) -> String {
+    /// The build-boot kernel cmdline. `page_hygiene` (v1.2 PR 3d, supervisor builds
+    /// only) appends `init_on_free=1 init_on_alloc=1 page_poison=1` so freed guest
+    /// pages — including the revoked placeholder binding — are zeroed before the
+    /// snapshot. Restore replays the baked-in cmdline, so this needs setting only
+    /// here. No-binding builds keep the exact historical string.
+    fn boot_args(&self, page_hygiene: bool) -> String {
+        let hygiene = if page_hygiene { " init_on_free=1 init_on_alloc=1 page_poison=1" } else { "" };
         format!(
-            "console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:{}::eth0:off",
+            "console=ttyS0 reboot=k panic=1 pci=off{hygiene} ip={}::{}:{}::eth0:off",
             self.config.guest_ip, self.config.host_ip, self.config.guest_mask
         )
     }
@@ -471,7 +481,7 @@ impl FirecrackerBackend {
         Err(self.backend_err("firecracker api socket never appeared"))
     }
 
-    fn configure_boot(&self, fc: &FcProcess, kernel: &Path, rootfs: &Path, read_only: bool) -> Result<(), SnapshotError> {
+    fn configure_boot(&self, fc: &FcProcess, kernel: &Path, rootfs: &Path, read_only: bool, page_hygiene: bool) -> Result<(), SnapshotError> {
         let mc = if let Some(t) = &self.config.cpu_template {
             json!({"vcpu_count": self.config.vcpu_count, "mem_size_mib": self.config.mem_size_mib, "cpu_template": t})
         } else {
@@ -479,7 +489,7 @@ impl FirecrackerBackend {
         };
         fc.api(self, "PUT", "/machine-config", Some(&mc.to_string()))?;
         fc.api(self, "PUT", "/boot-source", Some(&json!({
-            "kernel_image_path": kernel.to_string_lossy(), "boot_args": self.boot_args()
+            "kernel_image_path": kernel.to_string_lossy(), "boot_args": self.boot_args(page_hygiene)
         }).to_string()))?;
         fc.api(self, "PUT", "/drives/rootfs", Some(&json!({
             "drive_id": "rootfs", "path_on_host": rootfs.to_string_lossy(),
@@ -531,6 +541,152 @@ impl FirecrackerBackend {
             std::thread::sleep(Duration::from_millis(50));
         }
         Err(self.backend_err("guest never became healthy within timeout"))
+    }
+
+    /// v1.2 PR 3d step 1 of the supervisor build drive: connect the guest-agent
+    /// (retrying while the guest boots) and deliver every placeholder lease, then
+    /// poll bound-ready. The agent starts the workload at bound-ready, so the
+    /// caller's `wait_health` right after this is the placeholder health-verify.
+    fn supervisor_deliver_placeholders(&self, uds: &Path, drive: &SupervisorDrive) -> Result<(), SnapshotError> {
+        let mut ch = FirecrackerAgentChannel::connect_with_retry(
+            uds,
+            GUEST_AGENT_VSOCK_PORT,
+            self.config.boot_timeout,
+        )
+        .map_err(|e| self.backend_err(format!("supervisor build: {e:#}")))?;
+        for lease in &drive.leases {
+            match ch.request(HostToAgent::Deliver(lease.to_delivery())) {
+                Ok(AgentToHost::Ack { .. }) => {}
+                Ok(AgentToHost::Error { message }) => {
+                    return Err(self.backend_err(format!("supervisor build: placeholder delivery refused: {message}")));
+                }
+                Ok(other) => {
+                    return Err(self.backend_err(format!("supervisor build: unexpected Deliver response: {other:?}")));
+                }
+                Err(e) => return Err(self.backend_err(format!("supervisor build: deliver: {e:#}"))),
+            }
+        }
+        for _ in 0..10 {
+            match ch.request(HostToAgent::QueryBoundReady) {
+                Ok(AgentToHost::BoundReady { ready: true, .. }) => return Ok(()),
+                Ok(AgentToHost::BoundReady { ready: false, .. }) => {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Ok(other) => {
+                    return Err(self.backend_err(format!("supervisor build: unexpected BoundReady response: {other:?}")));
+                }
+                Err(e) => return Err(self.backend_err(format!("supervisor build: bound-ready poll: {e:#}"))),
+            }
+        }
+        Err(self.backend_err("supervisor build: agent never reached bound-ready after placeholder delivery"))
+    }
+
+    /// v1.2 PR 3d step 2, run AFTER health passed and BEFORE the pause/snapshot:
+    /// `StopWorkload` (the agent SIGTERM→SIGKILLs the app; bounded, ack'd) then
+    /// `Revoke` every placeholder lease (tmpfs scrub, ack'd) — so the snapshot is
+    /// taken with the workload down and no binding material in guest tmpfs. Order
+    /// is contract-fixed: StopWorkload FIRST, then Revoke (binding_control §v1.2).
+    fn supervisor_stop_and_revoke(&self, uds: &Path, drive: &SupervisorDrive) -> Result<(), SnapshotError> {
+        let mut ch = FirecrackerAgentChannel::connect(uds, GUEST_AGENT_VSOCK_PORT, Duration::from_secs(10))
+            .map_err(|e| self.backend_err(format!("supervisor build: reconnect for stop: {e:#}")))?;
+        match ch.request(HostToAgent::StopWorkload) {
+            Ok(AgentToHost::WorkloadStopped { was_running }) => {
+                if !was_running {
+                    // Health just passed, so the workload MUST have been running; a
+                    // false here means the drive raced or the agent lost it — refuse
+                    // to seal an unexplained state.
+                    return Err(self.backend_err("supervisor build: StopWorkload reported was_running=false after health passed"));
+                }
+            }
+            Ok(AgentToHost::Error { message }) => {
+                return Err(self.backend_err(format!("supervisor build: StopWorkload refused: {message}")));
+            }
+            Ok(other) => {
+                return Err(self.backend_err(format!("supervisor build: unexpected StopWorkload response: {other:?}")));
+            }
+            Err(e) => return Err(self.backend_err(format!("supervisor build: StopWorkload: {e:#}"))),
+        }
+        for name in &drive.binding_names {
+            match ch.request(HostToAgent::Revoke { id: BindingLeaseId::new(format!("lease-build-{name}")) }) {
+                Ok(AgentToHost::Scrubbed { .. }) => {}
+                Ok(AgentToHost::Error { message }) => {
+                    return Err(self.backend_err(format!("supervisor build: revoke refused: {message}")));
+                }
+                Ok(other) => {
+                    return Err(self.backend_err(format!("supervisor build: unexpected Revoke response: {other:?}")));
+                }
+                Err(e) => return Err(self.backend_err(format!("supervisor build: revoke: {e:#}"))),
+            }
+        }
+        Ok(())
+    }
+
+    /// v1.2 PR 3d: after StopWorkload+Revoke, verify the workload is actually DOWN
+    /// (its listener gone) before sealing. This caught a real bug: the agent acked
+    /// WorkloadStopped after killing only the wrapper shell while the orphaned app
+    /// kept serving — the acks alone are not proof. "Down" = TCP connect refused;
+    /// a still-accepting listener within the window fails the build closed.
+    fn wait_workload_down(&self, port: u16, timeout: Duration) -> Result<(), SnapshotError> {
+        let reachable = self.reachable_host();
+        let addr: std::net::SocketAddr = format!("{reachable}:{port}")
+            .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err(self.backend_err(
+            "supervisor build: workload still accepting connections after StopWorkload — \
+             refusing to seal a snapshot with the app running",
+        ))
+    }
+
+    /// v1.2 PR 3d: restore-readiness probe for a SUPERVISOR artifact. The workload is
+    /// down by design (StopWorkload+Revoke ran before the seal), so readiness =
+    /// "VM resumed + guest-agent reachable" — and, fail-closed, the agent must
+    /// report NOT bound-ready: a bound-ready session straight out of restore means
+    /// binding state survived the seal (a pre-bind-seal violation), never expose it.
+    fn probe_restored_agent_unbound(&self, uds: &Path) -> Result<(), SnapshotError> {
+        let mut ch = FirecrackerAgentChannel::connect_with_retry(
+            uds,
+            GUEST_AGENT_VSOCK_PORT,
+            self.config.boot_timeout,
+        )
+        .map_err(|e| self.backend_err(format!("supervisor restore: agent unreachable: {e:#}")))?;
+        match ch.request(HostToAgent::QueryBoundReady) {
+            Ok(AgentToHost::BoundReady { ready: false, .. }) => Ok(()),
+            Ok(AgentToHost::BoundReady { ready: true, .. }) => Err(self.backend_err(
+                "supervisor restore: session is ALREADY bound-ready after restore — \
+                 binding state survived the seal (pre-bind-seal violation); refusing to expose",
+            )),
+            Ok(other) => Err(self.backend_err(format!(
+                "supervisor restore: unexpected BoundReady response: {other:?}"
+            ))),
+            Err(e) => Err(self.backend_err(format!("supervisor restore: bound-ready probe: {e:#}"))),
+        }
+    }
+
+    /// v1.2 PR 3d: build-failure forensics. The guest console (`console.log`) was
+    /// being captured and then silently deleted with the build dir on EVERY outcome —
+    /// exactly why earlier guest failures were undiagnosable. On failure, always emit
+    /// the console tail; with ATO_FC_KEEP_BUILD_DIR=1 also announce the preserved dir
+    /// (the caller then skips the cleanup).
+    fn emit_build_failure_diagnostics(&self, build_dir: &Path) {
+        let console = build_dir.join("console.log");
+        if let Ok(bytes) = std::fs::read(&console) {
+            let tail = &bytes[bytes.len().saturating_sub(4096)..];
+            eprintln!(
+                "READY-STATE build failed — guest console tail ({} of {} bytes):\n{}",
+                tail.len(),
+                bytes.len(),
+                String::from_utf8_lossy(tail)
+            );
+        }
+        if keep_build_dir_enabled() {
+            eprintln!("READY-STATE: ATO_FC_KEEP_BUILD_DIR set — preserving {}", build_dir.display());
+        }
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
@@ -615,6 +771,68 @@ fn vsock_uds_path(capsule_manifest_hash: &str) -> PathBuf {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     std::env::temp_dir().join("ato-vsock").join(format!("{safe}.sock"))
+}
+
+/// v1.2 PR 3d: keep the transient build dir (incl. `console.log`) on disk instead of
+/// removing it — the failure-forensics escape hatch. Off by default.
+fn keep_build_dir_enabled() -> bool {
+    matches!(std::env::var("ATO_FC_KEEP_BUILD_DIR").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+}
+
+/// v1.2 PR 3d: a unique, never-stored placeholder value for one build-time binding.
+/// Not a secret — it exists only to let the supervisor start the workload once
+/// (health-verify) and to serve as an advisory memory-hygiene canary after revoke.
+/// Sourced from /dev/urandom (the FC backend is Linux-only).
+fn generate_build_placeholder() -> Result<String, std::io::Error> {
+    let mut buf = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("ATO-BUILD-PLACEHOLDER-{hex}"))
+}
+
+/// v1.2 PR 3d: the in-flight state of one supervisor build drive — the placeholder
+/// leases to deliver and (for the post-snapshot advisory scan) their raw values.
+/// Lives only for the duration of `build_ready_state`; nothing here is stored.
+struct SupervisorDrive {
+    binding_names: Vec<String>,
+    leases: Vec<BindingLease>,
+    placeholder_values: Vec<String>,
+}
+
+impl SupervisorDrive {
+    /// Parse + validate every binding name and mint one placeholder lease per name.
+    /// Fail-closed on an invalid name (the #961 emission gate should make this
+    /// unreachable, but the backend revalidates rather than trusting its caller).
+    fn prepare(sup: &SupervisorBindings) -> Result<Self, String> {
+        if sup.binding_names.is_empty() {
+            return Err("supervisor build requires at least one binding name".into());
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut leases = Vec::with_capacity(sup.binding_names.len());
+        let mut values = Vec::with_capacity(sup.binding_names.len());
+        for name in &sup.binding_names {
+            let bname = BindingName::parse(name.as_str())
+                .map_err(|e| format!("supervisor binding name '{name}': {e}"))?;
+            let value = generate_build_placeholder()
+                .map_err(|e| format!("generate build placeholder: {e}"))?;
+            leases.push(BindingLease::issue(
+                BindingLeaseId::new(format!("lease-build-{name}")),
+                bname,
+                SecretValue::new(value.clone()),
+                now_ms,
+                3_600_000, // 1h — outlives any sane build; revoked before the snapshot anyway
+            ));
+            values.push(value);
+        }
+        Ok(SupervisorDrive {
+            binding_names: sup.binding_names.clone(),
+            leases,
+            placeholder_values: values,
+        })
+    }
 }
 
 fn hotset_enabled() -> bool {
@@ -793,6 +1011,21 @@ impl SnapshotBackend for FirecrackerBackend {
             input.layers.app.as_deref(),
             &input.declared_secret_markers,
         )?;
+        // v1.2 PR 3d: supervisor prerequisites — fail closed BEFORE any boot. A
+        // supervisor rootfs starts its workload only at bound-ready, so building one
+        // without the vsock channel would just burn the boot timeout.
+        let supervisor_drive = match &input.supervisor {
+            Some(sup) => {
+                if !vsock_enabled() {
+                    return Err(self.backend_err(
+                        "supervisor build requires the vsock binding channel (set ATO_FC_VSOCK=1): \
+                         the guest-agent gates workload start on placeholder delivery",
+                    ));
+                }
+                Some(SupervisorDrive::prepare(sup).map_err(|e| self.backend_err(e))?)
+            }
+            None => None,
+        };
         self.ensure_available()?;
         self.acquire_lock("build")?;
         let _lock = BuildLock { path: self.lock_path() };
@@ -822,12 +1055,20 @@ impl SnapshotBackend for FirecrackerBackend {
             let fc = bench::time("build.start_fc", || {
                 self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
             })?;
-            self.configure_boot(&fc, &self.config.kernel_path, &rootfs_path, self.config.rootfs_read_only)?;
+            self.configure_boot(
+                &fc,
+                &self.config.kernel_path,
+                &rootfs_path,
+                self.config.rootfs_read_only,
+                // v1.2 PR 3d: supervisor builds get the page-hygiene cmdline so freed
+                // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
+                supervisor_drive.is_some(),
+            )?;
             // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
             // guest-agent binding channel is captured in the snapshot. The uds_path is
             // baked into the snapshot (FC forbids overriding it at load), so it is a
             // deterministic per-capsule path both build and restore compute.
-            if vsock_enabled() {
+            let vsock_uds = if vsock_enabled() {
                 let uds = vsock_uds_path(&input.capsule_manifest_hash);
                 if let Some(d) = uds.parent() {
                     std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
@@ -836,10 +1077,33 @@ impl SnapshotBackend for FirecrackerBackend {
                 fc.api(self, "PUT", "/vsock", Some(&json!({
                     "guest_cid": 3, "uds_path": uds.to_string_lossy()
                 }).to_string()))?;
-            }
+                Some(uds)
+            } else {
+                None
+            };
             bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
                 fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
-                self.wait_health(port, &path)?; // secret-free seal point
+                // v1.2 PR 3d: a supervisor guest starts its workload only at
+                // bound-ready — deliver the placeholder leases first, THEN health.
+                if let Some(drive) = &supervisor_drive {
+                    let uds = vsock_uds.as_ref().ok_or_else(|| {
+                        self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                    })?;
+                    self.supervisor_deliver_placeholders(uds, drive)?;
+                }
+                self.wait_health(port, &path)?; // secret-free seal point (placeholder-only for supervisor builds)
+                // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
+                // pause/snapshot, so the seal carries no running workload and no
+                // binding material in guest tmpfs (contract order: stop, then revoke).
+                // Then VERIFY the listener is gone — acks alone are not proof (a
+                // wrapper-shell kill once left the orphaned app serving).
+                if let Some(drive) = &supervisor_drive {
+                    let uds = vsock_uds.as_ref().ok_or_else(|| {
+                        self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                    })?;
+                    self.supervisor_stop_and_revoke(uds, drive)?;
+                    self.wait_workload_down(port, Duration::from_secs(10))?;
+                }
                 Ok(())
             })?;
             bench::time("build.snapshot_create", || -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
@@ -858,8 +1122,37 @@ impl SnapshotBackend for FirecrackerBackend {
         self.net_down();
         let (vmstate, mem) = match snap {
             Ok(v) => v,
-            Err(e) => { let _ = std::fs::remove_dir_all(&build_dir); return Err(e); }
+            Err(e) => {
+                // v1.2 PR 3d: surface the guest console before (conditionally)
+                // discarding the build dir — a silent delete made guest-side
+                // failures undiagnosable.
+                self.emit_build_failure_diagnostics(&build_dir);
+                if !keep_build_dir_enabled() {
+                    let _ = std::fs::remove_dir_all(&build_dir);
+                }
+                return Err(e);
+            }
         };
+
+        // v1.2 PR 3d: ADVISORY placeholder-hygiene scan (kernel init_on_free-
+        // dependent, #947 finding) — the revoked placeholder SHOULD be gone from the
+        // snapshot bytes on a hygiene-enabled kernel, but its residue is NOT a
+        // secret leak (the value is a build-scoped random token, discarded below),
+        // so this records honestly instead of gating.
+        let supervisor_receipt = supervisor_drive.as_ref().map(|drive| {
+            let secrets: Vec<&[u8]> = drive.placeholder_values.iter().map(|v| v.as_bytes()).collect();
+            let absent = crate::no_secret_scan::blob_is_clean(&mem, &secrets)
+                && crate::no_secret_scan::blob_is_clean(&vmstate, &secrets);
+            eprintln!(
+                "READY-STATE supervisor build: placeholder absent from sealed mem/vmstate = {absent} \
+                 (advisory; requires kernel init_on_free support)"
+            );
+            SupervisorBuildReceipt {
+                binding_names: drive.binding_names.clone(),
+                page_hygiene_boot_args: true,
+                placeholder_absent_from_seal: Some(absent),
+            }
+        });
 
         // ── seal + no-secret scan via the shared orchestration ───────────────
         // rootfs was already stored above (for the stable drive path) → pass it
@@ -889,7 +1182,10 @@ impl SnapshotBackend for FirecrackerBackend {
         let out = match out {
             Ok(o) => o,
             Err(e) => {
-                let _ = std::fs::remove_dir_all(&build_dir);
+                self.emit_build_failure_diagnostics(&build_dir);
+                if !keep_build_dir_enabled() {
+                    let _ = std::fs::remove_dir_all(&build_dir);
+                }
                 return Err(e);
             }
         };
@@ -925,8 +1221,11 @@ impl SnapshotBackend for FirecrackerBackend {
             sanitizer_contract: input.sanitizer_contract,
             no_secret_proof: Some(no_secret_proof.clone()),
             build_receipt_id: None,
+            supervisor_build: supervisor_receipt,
         };
-        let _ = std::fs::remove_dir_all(&build_dir);
+        if !keep_build_dir_enabled() {
+            let _ = std::fs::remove_dir_all(&build_dir);
+        }
         Ok(BuildReadyStateReceipt { manifest, sealed_bytes, no_secret_proof })
     }
 
@@ -1174,22 +1473,41 @@ impl SnapshotBackend for FirecrackerBackend {
             // Readiness: U1a (Zero) serves garbage pages, so the guest never reaches
             // health — confirm the fault loop fired instead. Everything else (File,
             // U1b Mem) waits for health as usual.
-            let time_to_health_ms: Option<u128> = match (uffd, &page_handle) {
-                // U1a: zero pages → never reaches health; confirm the loop fired.
-                (Some(UffdMode::Zero), Some(h)) => {
-                    h.wait_for_first_fault(Duration::from_secs(10));
-                    None
+            //
+            // v1.2 PR 3d: a SUPERVISOR artifact wakes with the workload down BY
+            // DESIGN (StopWorkload+Revoke ran before the seal), so a TCP health-wait
+            // can never pass until the caller delivers the REAL bindings. Its
+            // readiness gate is instead: guest-agent reachable over vsock AND not
+            // bound-ready (bound-ready out of restore = binding state survived the
+            // seal → fail closed).
+            let time_to_health_ms: Option<u128> = if input.manifest.supervisor_build.is_some() {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err(
+                        "supervisor artifact restored without a vsock uds \
+                         (manifest.has_vsock must be true for a supervisor build)",
+                    )
+                })?;
+                let probe_start = Instant::now();
+                bench::time("restore.probe_agent", || self.probe_restored_agent_unbound(uds))?;
+                Some(probe_start.elapsed().as_millis())
+            } else {
+                match (uffd, &page_handle) {
+                    // U1a: zero pages → never reaches health; confirm the loop fired.
+                    (Some(UffdMode::Zero), Some(h)) => {
+                        h.wait_for_first_fault(Duration::from_secs(10));
+                        None
+                    }
+                    // U1b/U2 (uffd mem/cas): wait for health but FAIL CLOSED FAST (U5) if
+                    // the page-server hits a fatal CAS miss/corrupt — don't burn the full
+                    // timeout booting a VM on memory that can never be served.
+                    (Some(_), Some(h)) => {
+                        let ms = self.wait_health_until(port, &path, || h.failed())?;
+                        h.mark_health_reached();
+                        Some(ms)
+                    }
+                    // File backend (default): unchanged.
+                    _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
                 }
-                // U1b/U2 (uffd mem/cas): wait for health but FAIL CLOSED FAST (U5) if
-                // the page-server hits a fatal CAS miss/corrupt — don't burn the full
-                // timeout booting a VM on memory that can never be served.
-                (Some(_), Some(h)) => {
-                    let ms = self.wait_health_until(port, &path, || h.failed())?;
-                    h.mark_health_reached();
-                    Some(ms)
-                }
-                // File backend (default): unchanged.
-                _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
             };
 
             // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
@@ -1486,10 +1804,89 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
             execution_id: None,
+            supervisor: None,
         };
         let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
         assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "preflight must reject before KVM/store: {err:?}");
         assert!(store.list_chunks().unwrap().is_empty(), "rejected build must persist no rootfs in CAS");
+    }
+
+    // ── v1.2 PR 3d: supervisor build drive ────────────────────────────────────
+
+    #[test]
+    fn boot_args_add_page_hygiene_only_for_supervisor_builds() {
+        let b = FirecrackerBackend::new();
+        let plain = b.boot_args(false);
+        // The no-binding cmdline is byte-identical to the historical string.
+        assert!(plain.starts_with("console=ttyS0 reboot=k panic=1 pci=off ip="), "{plain}");
+        assert!(!plain.contains("init_on_free"), "no hygiene args on the no-binding path: {plain}");
+        let hardened = b.boot_args(true);
+        assert!(hardened.contains("init_on_free=1 init_on_alloc=1 page_poison=1"), "{hardened}");
+        // Hygiene args are inserted, nothing else changes.
+        assert_eq!(hardened.replace(" init_on_free=1 init_on_alloc=1 page_poison=1", ""), plain);
+    }
+
+    #[test]
+    fn build_placeholders_are_unique_and_prefixed() {
+        let a = generate_build_placeholder().unwrap();
+        let b = generate_build_placeholder().unwrap();
+        assert!(a.starts_with("ATO-BUILD-PLACEHOLDER-"), "{a}");
+        assert_ne!(a, b, "placeholders must be unique per generation");
+    }
+
+    #[test]
+    fn supervisor_drive_validates_names_and_never_logs_values() {
+        // Valid lowercase binding names prepare fine; each gets a distinct placeholder.
+        let drive = SupervisorDrive::prepare(&SupervisorBindings {
+            binding_names: vec!["openai_api_key".into(), "db_url".into()],
+        })
+        .expect("prepare");
+        assert_eq!(drive.leases.len(), 2);
+        assert_eq!(drive.placeholder_values.len(), 2);
+        assert_ne!(drive.placeholder_values[0], drive.placeholder_values[1]);
+        // An invalid (uppercase) name fails closed — the backend revalidates
+        // rather than trusting the emission layer. (match, not unwrap_err: the
+        // drive deliberately has no Debug impl — it holds placeholder values.)
+        let err = match SupervisorDrive::prepare(&SupervisorBindings {
+            binding_names: vec!["OPENAI_API_KEY".into()],
+        }) {
+            Err(e) => e,
+            Ok(_) => panic!("uppercase binding name must fail closed"),
+        };
+        assert!(err.contains("OPENAI_API_KEY"), "{err}");
+        // Empty set is not a supervisor build.
+        assert!(SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![] }).is_err());
+    }
+
+    #[test]
+    fn supervisor_build_without_vsock_fails_closed_before_boot() {
+        // SAFETY: test-local var, removed before returning.
+        unsafe { std::env::remove_var("ATO_FC_VSOCK") };
+        use crate::manifest::{RestoreContract, SanitizerContract};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let input = BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: "blake3:supervisor-no-vsock".to_string(),
+            runner_class: None,
+            layers: BuildLayers {
+                rootfs: b"rootfs".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: vec![],
+            execution_id: None,
+            supervisor: Some(SupervisorBindings { binding_names: vec!["openai_api_key".into()] }),
+        };
+        let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("ATO_FC_VSOCK"), "must name the missing flag: {msg}");
+        assert!(store.list_chunks().unwrap().is_empty(), "no bytes stored on the fail-closed path");
     }
 
     #[test]
@@ -1629,6 +2026,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             no_secret_proof: None,
             build_receipt_id: None,
+            supervisor_build: None,
         }
     }
 }

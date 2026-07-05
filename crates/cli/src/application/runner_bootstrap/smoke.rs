@@ -293,6 +293,7 @@ async fn smoke_pipeline(
         // restore-lease verify stage exercises the execution_id gate too, exactly as
         // the runner does for a real sealed manifest.
         execution_id: Some("sha256:runner-smoke".into()),
+        supervisor: None,
     });
     let sealed = match built {
         Ok(r) => {

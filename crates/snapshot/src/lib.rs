@@ -27,6 +27,7 @@
 //! * **Fail-closed restore class** — `restore` rejects a host whose
 //!   `runner_class_id` differs from the one the snapshot was built for.
 
+pub mod agent_channel;
 mod backend;
 pub mod bench;
 mod fake;
@@ -48,7 +49,7 @@ pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
-    TeardownReceipt, ensure_gpu_not_in_snapshot,
+    SupervisorBindings, TeardownReceipt, ensure_gpu_not_in_snapshot,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
@@ -56,6 +57,7 @@ pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,
     RestoreContract, SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
+    SupervisorBuildReceipt,
 };
 pub use placement::{
     BackendRequirements, PlacementError, matches, ready_state_safe, select_ready_state_backend,
@@ -122,6 +124,7 @@ mod e2e_tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: None,
+                supervisor: None,
             })
             .expect("build");
         let manifest = receipt.manifest;
