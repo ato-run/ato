@@ -920,7 +920,9 @@ mod tests {
 
     /// Minimal localhost HTTP/1.1 fixture: serves `body` with `status` to every
     /// connection for the test's lifetime (thread parks on accept; dies with the
-    /// process).
+    /// process). The URL path mirrors the R2 object key shape
+    /// `<job_id>/<artifact_manifest_hash>/artifact.tar.gz` (ato#1002) — the runner
+    /// treats the presigned URL as opaque, so the path is representative only.
     fn spawn_http_fixture(status: &'static str, body: Vec<u8>) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -948,7 +950,7 @@ mod tests {
                 let _ = s.flush();
             }
         });
-        format!("http://{addr}/job/artifact.tar.gz?sig=presigned-fixture")
+        format!("http://{addr}/job/blake3:art/artifact.tar.gz?sig=presigned-fixture")
     }
 
     #[tokio::test]
