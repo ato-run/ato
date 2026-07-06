@@ -1290,6 +1290,42 @@ fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
                 }
                 None => String::new(),
             };
+            // v1.6 (ato#983) Slice 3 fix: the rootfs is mounted READ-ONLY at
+            // boot (Ready-State's whole model), so the guest-agent's
+            // `mkdir -p <target>` before mounting a durable volume can NEVER
+            // create a NEW directory there — only reuse one that already
+            // exists. Every declared durable-volume target must therefore be
+            // baked into the rootfs at BUILD time, here, alongside the other
+            // static paths (`/etc/ato`, `/run/ato/bindings`) already staged
+            // below. `target` is quoted as `"$BUILD"'<literal>'` (variable
+            // expansion for `$BUILD` only, everything else single-quoted) —
+            // never double-quoted-and-interpolated — because a manifest
+            // author's `state_bindings.target` is validated as a clean path
+            // shape (components, no `.`/`..`, under `/ato/state/`) but NOT
+            // for shell metacharacters within a component; single-quoting is
+            // what actually closes that off, matching the existing
+            // `reject_control_chars` discipline applied to run/build commands
+            // elsewhere in this same builder.
+            let state_dirs_prep = {
+                let mut targets: Vec<&str> = sup
+                    .services
+                    .iter()
+                    .flatten()
+                    .flat_map(|s| &s.volumes)
+                    .map(|v| v.target.as_str())
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                if targets.is_empty() {
+                    String::new()
+                } else {
+                    let args: Vec<String> = targets
+                        .iter()
+                        .map(|t| format!("\"$BUILD\"{}", shell_single_quote(&format!("/rootfs{t}"))))
+                        .collect();
+                    format!("\nmkdir -p {}", args.join(" "))
+                }
+            };
             let prep = format!(
                 r#"# v1.2 supervisor: stage the guest-agent + its config into the rootfs.
 : "${{ATO_GUEST_AGENT_BIN:?ATO_GUEST_AGENT_BIN must point to the guest-agent binary for a supervisor build}}"
@@ -1298,7 +1334,7 @@ cp "$ATO_GUEST_AGENT_BIN" "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
 chmod 0755 "$BUILD/rootfs/usr/local/bin/ato-guest-agent"
 cat > "$BUILD/rootfs/etc/ato/supervisor.json" <<'ATOSUPERVISORJSON'
 {cfg_json}
-ATOSUPERVISORJSON{hosts_prep}"#
+ATOSUPERVISORJSON{hosts_prep}{state_dirs_prep}"#
             );
             // The agent is the supervisor: vsock control plane on 1025, required
             // bindings as argv. It reads /etc/ato/supervisor.json and starts the app
@@ -1306,7 +1342,7 @@ ATOSUPERVISORJSON{hosts_prep}"#
             let launch = format!(
                 "mkdir -p /run/ato/bindings\n\
                  export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\n\
-                 /usr/local/bin/ato-guest-agent {args} >/tmp/agent.log 2>&1 &"
+                 /usr/local/bin/ato-guest-agent {args} 2>&1 | tee /tmp/agent.log > /dev/console &"
             );
             (prep, launch)
         }
@@ -1930,6 +1966,45 @@ readiness_probe = { http_get = "/health" }
         assert!(script.contains("supervisor.json"), "config is staged");
         assert!(script.contains("\"OPENAI_API_KEY\": \"openai_api_key\""), "env→binding map present");
         assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs still quoted");
+    }
+
+    /// v1.6 (ato#983) Slice 3 regression, found live on real KVM hardware: the
+    /// rootfs is mounted READ-ONLY at boot, so the guest-agent's
+    /// `mkdir -p <target>` before mounting a durable volume can never CREATE
+    /// a new directory there — it must already exist, baked in at build time.
+    #[test]
+    fn durable_state_target_directory_is_baked_into_the_rootfs_at_build_time() {
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [state.dbdata]\nkind = \"filesystem\"\ndurability = \"persistent\"\n\
+             purpose = \"x\"\nattach = \"explicit\"\nschema_id = \"sha256:{}\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n\
+             state_bindings = [{{ state = \"dbdata\", target = \"/ato/state/dbdata\" }}]\n\
+             [services.api.network]\npublish = true\n",
+            base_toml(),
+            "0".repeat(64)
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        assert!(
+            script.contains(r#"mkdir -p "$BUILD"'/rootfs/ato/state/dbdata'"#),
+            "durable-state target must be mkdir'd into the rootfs before it's sealed read-only: {script}"
+        );
+    }
+
+    #[test]
+    fn no_durable_state_script_stays_byte_identical_no_extra_mkdir() {
+        // A supervisor build with NO durable-state binding must not gain any
+        // new mkdir line for it.
+        let toml = format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n\
+             [services.api.network]\npublish = true\n",
+            base_toml()
+        );
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
+        let script = build_rootfs_script(&spec, 512);
+        assert!(!script.contains("/ato/state"), "no durable state declared, no /ato/state mkdir expected: {script}");
     }
 
     #[test]

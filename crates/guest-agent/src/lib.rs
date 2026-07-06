@@ -92,6 +92,12 @@ impl<S: BindingSink> BindingSession<S> {
             // ever arrives (a session with no supervisor), report the current
             // bound-ready state rather than error.
             HostToAgent::StopWorkload => self.bound_ready_response(now_ms),
+            // v1.6 (ato#983) Slice 3 revision: durable-state mounting, same
+            // treatment as StopWorkload above — the guest binary's dispatch()
+            // intercepts and answers `MountVolumes` before it ever reaches
+            // here (this session doesn't own the mounter). Defensive
+            // fallback only.
+            HostToAgent::MountVolumes => self.bound_ready_response(now_ms),
         }
     }
 
