@@ -25,6 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use guest_agent::supervisor::{
     bindings_root, config_path, ChildWorkload, Supervisor, SupervisorConfig, Workload,
 };
+use guest_agent::volume_mount::{mount_all_volumes, unmount_all_volumes, RealVolumeMounter, VolumeSpec};
 use guest_agent::vsock::{serve_vsock, DEFAULT_VSOCK_PORT};
 use guest_agent::{BindingSession, BindingSink, TmpfsBindingSink};
 use protocol::binding_control::AgentToHost;
@@ -55,16 +56,26 @@ struct AgentRuntime<S: BindingSink, W: Workload> {
     /// Digest snapshot the CURRENTLY RUNNING workload was started with
     /// (`None` = not running).
     running_digests: Option<std::collections::HashMap<BindingName, [u8; 32]>>,
+    /// v1.6 (ato#983) Slice 3: durable state volumes, mounted at boot (in
+    /// `main()`, before this runtime is ever driven) — kept here so a true
+    /// session-terminal `Stop` can unmount them on the way out.
+    volumes: Vec<VolumeSpec>,
 }
 
 impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
-    fn new(session: BindingSession<S>, supervisor: Option<Supervisor<W>>, required: Vec<BindingName>) -> Self {
+    fn new(
+        session: BindingSession<S>,
+        supervisor: Option<Supervisor<W>>,
+        required: Vec<BindingName>,
+        volumes: Vec<VolumeSpec>,
+    ) -> Self {
         AgentRuntime {
             session,
             supervisor,
             required,
             digests: std::collections::HashMap::new(),
             running_digests: None,
+            volumes,
         }
     }
 
@@ -209,6 +220,16 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
                 }
             }
         }
+        // v1.6 (ato#983) Slice 3: `Stop` (not `StopWorkload`, not a bound-ready
+        // → false revoke — both of those can be followed by a restart of the
+        // SAME session) is the true session-terminal message: the stdio loop
+        // `break`s on it (`is_stop` is this function's second return value)
+        // and vsock serving ends too. The workload is stopped FIRST (above),
+        // then every durable volume is unmounted — best-effort, logged, never
+        // fatal, since the host is about to kill this VM outright regardless.
+        if is_stop {
+            unmount_all_volumes(&RealVolumeMounter, &self.volumes);
+        }
         (serde_json::to_string(&resp).unwrap(), is_stop)
     }
 }
@@ -227,16 +248,28 @@ fn main() -> std::io::Result<()> {
     // Supervisor: present only when /etc/ato/supervisor.json exists. A malformed
     // config for a supervisor capsule fails closed (the agent exits) rather than
     // launching the workload unbound.
-    let supervisor = match SupervisorConfig::load(&config_path()) {
-        Ok(Some(cfg)) => Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default)),
-        Ok(None) => None,
+    let (supervisor, volumes) = match SupervisorConfig::load(&config_path()) {
+        Ok(Some(cfg)) => {
+            // v1.6 (ato#983) Slice 3: mount every durable state volume BEFORE
+            // any service can possibly start — this happens once, here, at
+            // boot, strictly before `runtime` is ever `dispatch()`-ed (no
+            // control message has been read yet). Fail-closed: never launch a
+            // workload that expected durable state to already be mounted.
+            if let Err(e) = mount_all_volumes(&RealVolumeMounter, &cfg.volumes) {
+                eprintln!("ato-guest-agent: durable state mount failed: {e}");
+                std::process::exit(2);
+            }
+            let volumes = cfg.volumes.clone();
+            (Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default)), volumes)
+        }
+        Ok(None) => (None, Vec::new()),
         Err(e) => {
             eprintln!("ato-guest-agent: {e}");
             std::process::exit(2);
         }
     };
 
-    let mut runtime = AgentRuntime::new(session, supervisor, required);
+    let mut runtime = AgentRuntime::new(session, supervisor, required, volumes);
 
     match mode.as_str() {
         "stdio" => {
@@ -332,13 +365,14 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
         // Factory yields state-sharing spies (SpyWorkload clones share the Rc), so a
         // multi-service group aggregates its starts/stops into the one `state`.
         let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
-        (AgentRuntime::new(session, Some(sup), required), state)
+        (AgentRuntime::new(session, Some(sup), required, vec![]), state)
     }
 
     #[test]
@@ -457,7 +491,7 @@ mod tests {
     fn stopworkload_without_a_supervisor_is_a_clean_no_op() {
         // A no-binding capsule has no supervisor; StopWorkload must not error.
         let mut rt: AgentRuntime<TmpfsBindingSink, ChildWorkload> =
-            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![]);
+            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![]);
         let (resp, _) = rt.dispatch(&serde_json::to_string(&HostToAgent::StopWorkload).unwrap());
         assert!(resp.contains("workload_stopped") && resp.contains("\"was_running\":false"), "{resp}");
     }
@@ -465,7 +499,7 @@ mod tests {
     #[test]
     fn malformed_line_never_echoes_input() {
         let mut rt: AgentRuntime<TmpfsBindingSink, ChildWorkload> =
-            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![]);
+            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![]);
         let (resp, _) = rt.dispatch("{\"kind\":\"deliver\",\"secret\":\"leak-me\"}");
         assert!(resp.contains("malformed"), "{resp}");
         assert!(!resp.contains("leak-me"), "a malformed control line must never be echoed");
