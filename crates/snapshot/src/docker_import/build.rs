@@ -341,6 +341,11 @@ pub struct DockerImageConfig {
     /// `Config.Healthcheck` present (not honored in v0 —
     /// `docker_healthcheck_ignored`).
     pub has_healthcheck: bool,
+    /// `Config.Volumes` keys (`VOLUME` directives). v0 REJECTS these at plan
+    /// derivation unless the author maps them to Ato `[state]` — an unmapped
+    /// volume would silently lose data on a frozen-snapshot resume (the exact
+    /// ato#983 lesson durable state exists to prevent).
+    pub volumes: Vec<String>,
 }
 
 /// Everything the build step proved about the image, for the receipt + the
@@ -459,6 +464,15 @@ fn parse_image_config(inspect_json: &str) -> Result<DockerImageConfig, String> {
             .filter(|s| !s.is_empty())
             .map(String::from),
         has_healthcheck: config.get("Healthcheck").is_some_and(|h| !h.is_null()),
+        volumes: {
+            let mut v: Vec<String> = config
+                .get("Volumes")
+                .and_then(|x| x.as_object())
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            v.sort();
+            v
+        },
     })
 }
 

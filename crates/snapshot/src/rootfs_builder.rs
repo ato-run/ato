@@ -1240,7 +1240,7 @@ fn reject_control_chars(label: &str, cmd: &str) -> Result<(), String> {
 /// so a manifest-derived command is passed as ONE literal argument to `/bin/sh -lc`,
 /// never re-parsed. Combined with quoted heredocs, capsule commands can never be expanded
 /// by the builder-host shell.
-fn shell_single_quote(s: &str) -> String {
+pub(crate) fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -1254,21 +1254,64 @@ fn shell_single_quote(s: &str) -> String {
 /// manifest-derived install/build/start commands are embedded as single-quoted arguments
 /// to `/bin/sh -lc`. So a capsule command containing `$(...)`/backticks runs only inside
 /// Docker's RUN (build) or the guest init (start) — never on the builder host.
-fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
+pub(crate) fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     let build_q = shell_single_quote(spec.build_cmd.as_deref().unwrap_or("true"));
-    let start_q = shell_single_quote(&spec.start_cmd);
 
-    // v1.2 supervisor build: init runs the guest-agent (which starts the workload with
-    // the composed env after bindings arrive) instead of launching the app; the agent
-    // binary + /etc/ato/supervisor.json are staged into the rootfs. `agent_prep` runs
-    // after `docker export`; `launch` replaces the direct app launch. Both are empty
-    // for the v1.0 no-binding path, so that script stays byte-identical.
-    let (agent_prep, launch) = match &spec.supervisor {
+    let (agent_prep, launch) = supervisor_prep_and_launch(spec.supervisor.as_ref(), spec.port, &spec.start_cmd);
+    // The legacy acquire step: copy the materialized source into the build dir and
+    // assemble the app image from a GENERATED Dockerfile. The Docker-import path
+    // (ato#994) replaces exactly this step with an already-built imported image —
+    // everything downstream (create → export → inject → init → pack) is shared via
+    // `rootfs_pack_script`, emitted byte-identically for this legacy path.
+    let acquire = format!(
+        r#"cp -a "$ATO_SRC/." "$BUILD/"
+# QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
+cat > "$BUILD/Dockerfile" <<'DOCKER'
+FROM {base}
+WORKDIR /app
+COPY . /app
+RUN /bin/sh -lc {install_q}
+RUN /bin/sh -lc {build_q}
+DOCKER
+docker build -q -t "$TAG" "$BUILD" >/dev/null
+"#,
+        base = spec.base_image,
+        install_q = install_q,
+        build_q = build_q,
+    );
+    rootfs_pack_script(&PackScriptInputs {
+        tool: "docker",
+        tag_init: "TAG=\"ato-rootfs-$$\"".into(),
+        acquire,
+        agent_prep,
+        launch,
+        init_cwd: "/app",
+        port: spec.port,
+        healthcheck: spec.healthcheck.clone(),
+        size_mib,
+    })
+}
+
+/// v1.2 supervisor staging + launch lines, shared between the legacy
+/// generated-Dockerfile path and the Docker-import path (ato#994): init runs the
+/// guest-agent (which starts the workload with the composed env after bindings
+/// arrive) instead of launching the app; the agent binary +
+/// /etc/ato/supervisor.json are staged into the rootfs. `agent_prep` runs after
+/// the image export; `launch` replaces the direct app launch. Both are empty/
+/// direct-launch for the v1.0 no-binding path, so that script stays
+/// byte-identical.
+pub(crate) fn supervisor_prep_and_launch(
+    supervisor: Option<&SupervisorBuildSpec>,
+    port: u16,
+    start_cmd: &str,
+) -> (String, String) {
+    let start_q = shell_single_quote(start_cmd);
+    match supervisor {
         None => (String::new(), format!("/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &")),
         Some(sup) => {
             // supervisor.json (no secret value — env var → binding name only).
-            let cfg = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+            let cfg = build_supervisor_json(sup, port, start_cmd);
             let cfg_json = serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".into());
             // Binding names become the agent's argv — shell-quote each defensively.
             let args = sup
@@ -1346,37 +1389,59 @@ ATOSUPERVISORJSON{hosts_prep}{state_dirs_prep}"#
             );
             (prep, launch)
         }
-    };
+    }
+}
+
+/// Inputs for the shared export→inject→init→pack pipeline. `acquire` is the
+/// only step that differs between the legacy generated-Dockerfile build
+/// (cp source + heredoc Dockerfile + `docker build`) and the Docker-import
+/// path (image already built — empty acquire, literal `TAG`).
+pub(crate) struct PackScriptInputs<'a> {
+    /// Container CLI to drive: `docker` (legacy builder hosts) or `podman`.
+    pub tool: &'a str,
+    /// The `TAG=…` line: process-unique for legacy, the imported tag for import.
+    pub tag_init: String,
+    /// Image-acquisition section (may be empty). Must end with a newline when
+    /// non-empty — it sits between `trap cleanup EXIT` and `CID=$(… create …)`.
+    pub acquire: String,
+    pub agent_prep: String,
+    pub launch: String,
+    /// Init's working directory before launch: `/app` for legacy builds (the
+    /// generated Dockerfile put the app there), `/` for imported images (their
+    /// own WORKDIR is honored per-service via supervisor.json `cwd`).
+    pub init_cwd: &'a str,
+    pub port: u16,
+    pub healthcheck: String,
+    pub size_mib: u64,
+}
+
+/// The bash pipeline that turns an app image into a read-only-bootable ext4:
+/// (acquire →) create → export → inject agent/config → install init → pack.
+/// Kept as a reviewable string; env: ATO_SRC (legacy acquire only), ATO_OUT.
+/// See `build_rootfs_script` for the legacy assembly (emitted byte-identically
+/// to the pre-#994 single template) and `docker_import::rootfs` for the import
+/// assembly.
+pub(crate) fn rootfs_pack_script(i: &PackScriptInputs<'_>) -> String {
     format!(
         r#"set -euo pipefail
-TAG="ato-rootfs-$$"
+{tag_init}
 CID=""
 MNT=""
 BUILD=$(mktemp -d)
 # Failure-safe cleanup: on ANY exit (success or a failed build/export/mount/cp) leave no
 # container, image, mount, or temp dir behind (Phase 8 orphan-hardening parity).
 cleanup() {{
-  [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1 || true
-  docker rmi -f "$TAG" >/dev/null 2>&1 || true
+  [ -n "$CID" ] && {tool} rm -f "$CID" >/dev/null 2>&1 || true
+  {tool} rmi -f "$TAG" >/dev/null 2>&1 || true
   if [ -n "$MNT" ] && mountpoint -q "$MNT" 2>/dev/null; then umount "$MNT" 2>/dev/null || umount -l "$MNT" 2>/dev/null || true; fi
   [ -n "$MNT" ] && rmdir "$MNT" 2>/dev/null || true
   [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
 }}
 trap cleanup EXIT
-cp -a "$ATO_SRC/." "$BUILD/"
-# QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
-cat > "$BUILD/Dockerfile" <<'DOCKER'
-FROM {base}
-WORKDIR /app
-COPY . /app
-RUN /bin/sh -lc {install_q}
-RUN /bin/sh -lc {build_q}
-DOCKER
-docker build -q -t "$TAG" "$BUILD" >/dev/null
-CID=$(docker create "$TAG")
+{acquire}CID=$({tool} create "$TAG")
 mkdir -p "$BUILD/rootfs"
-docker export "$CID" | tar -x -C "$BUILD/rootfs"
-docker rm -f "$CID" >/dev/null; CID=""
+{tool} export "$CID" | tar -x -C "$BUILD/rootfs"
+{tool} rm -f "$CID" >/dev/null; CID=""
 {agent_prep}
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
@@ -1393,7 +1458,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
-cd /app
+cd {init_cwd}
 {launch}
 while true; do sleep 1000; done
 INIT
@@ -1407,14 +1472,15 @@ cp -a "$BUILD/rootfs/." "$MNT/"
 sync; umount "$MNT"
 # MNT/BUILD are removed by the EXIT trap (also on any failure above).
 "#,
-        base = spec.base_image,
-        install_q = install_q,
-        build_q = build_q,
-        agent_prep = agent_prep,
-        launch = launch,
-        port = spec.port,
-        hc = spec.healthcheck,
-        size = size_mib,
+        tag_init = i.tag_init,
+        tool = i.tool,
+        acquire = i.acquire,
+        agent_prep = i.agent_prep,
+        launch = i.launch,
+        init_cwd = i.init_cwd,
+        port = i.port,
+        hc = i.healthcheck,
+        size = i.size_mib,
     )
 }
 
