@@ -182,7 +182,8 @@ pub struct DockerImportReceipt {
     pub resolved_base_images: Vec<ResolvedBaseImage>,
     /// Digest of the final built image (the multi-stage FINAL stage).
     pub final_image_digest: String,
-    /// Digest of the exported rootfs tree the injection step consumed.
+    /// sha256 of the packed ext4 rootfs artifact the injection step produced
+    /// (`sha256:<hex>`; the artifact the Ready-State build boots).
     pub exported_rootfs_digest: String,
     /// Build args used (already secret-screened at [`DockerImportSpec::new`]).
     pub build_args: BTreeMap<String, String>,
@@ -403,6 +404,133 @@ pub fn partition_dockerfile_env(
     Ok(EnvPartition { base_env, bindings_env })
 }
 
+/// The import-identity digest: `sha256:<hex>` over the JCS canonicalization of
+/// the import's INPUTS only — importer version, platform, Dockerfile path +
+/// sha256, build-context digest, digest-pinned base images (sorted by original
+/// ref), build args, AND the [`DockerImportOptions`] (secret policy, port
+/// override, readiness path, ext4 size — review finding on ato#994: each of
+/// these changes the plan or the packed artifact, so an identity that ignores
+/// them collides distinct artifacts in any cache/gate keyed on it).
+///
+/// Outputs (final image digest, rootfs digest, warnings) are deliberately
+/// excluded: this identity answers "would rebuilding produce the same
+/// artifact?", so it must be computable from declared inputs alone — the same
+/// discipline as `declared_execution_id` (never a job id, timestamp, or
+/// builder-host state). `effective_dockerfile_sha256` is also excluded: it is
+/// DERIVED from two included inputs (dockerfile sha256 + base digests), and
+/// renderer changes are covered by `importer_version`.
+pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
+    let mut bases: Vec<&ResolvedBaseImage> = receipt.resolved_base_images.iter().collect();
+    bases.sort_by(|a, b| a.original_ref.cmp(&b.original_ref));
+    let inputs = serde_json::json!({
+        "importer_version": receipt.importer_version,
+        "platform": receipt.platform,
+        "dockerfile_path": receipt.dockerfile_path,
+        "dockerfile_sha256": receipt.dockerfile_sha256,
+        "build_context_digest": receipt.build_context_digest,
+        "resolved_base_images": bases.iter().map(|b| serde_json::json!({
+            "original_ref": b.original_ref,
+            "resolved_digest": b.resolved_digest,
+        })).collect::<Vec<_>>(),
+        "build_args": receipt.build_args,
+        "import_options": serde_json::to_value(&receipt.import_options)
+            .unwrap_or(serde_json::Value::Null),
+    });
+    let canonical = serde_jcs::to_string(&inputs).unwrap_or_else(|_| inputs.to_string());
+    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
+}
+
+/// One end-to-end Dockerfile import request (builder-host side).
+#[derive(Debug)]
+pub struct DockerfileImportRequest<'a> {
+    /// The build context (a materialized checkout).
+    pub context_dir: &'a std::path::Path,
+    pub spec: DockerImportSpec,
+    pub policy: SecretEnvPolicy,
+    /// Explicit public port (wins over EXPOSE).
+    pub port_override: Option<u16>,
+    /// Explicit readiness path (`None` = synthesized `GET /`).
+    pub readiness_http_path: Option<String>,
+    /// Tag for the ephemeral built image (removed after export).
+    pub image_tag: String,
+    pub out_ext4: &'a std::path::Path,
+    pub size_mib: u64,
+}
+
+/// Everything a caller (dev CLI now; builder daemon later) needs from a
+/// completed import: the provenance receipt, the launch plan, and the packed
+/// rootfs artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerfileImportOutcome {
+    pub receipt: DockerImportReceipt,
+    pub plan: rootfs::ImportedServicePlan,
+    pub rootfs_path: String,
+    pub rootfs_bytes: u64,
+}
+
+/// Pure receipt assembly from the build + plan outputs (unit-tested; the
+/// executor below stays thin).
+fn assemble_receipt(
+    probe: &build::BuildToolProbe,
+    spec: &DockerImportSpec,
+    built: &build::DockerfileBuildOutput,
+    plan: &rootfs::ImportedServicePlan,
+    import_options: DockerImportOptions,
+    exported_rootfs_digest: String,
+) -> DockerImportReceipt {
+    DockerImportReceipt {
+        importer_version: DOCKER_IMPORTER_VERSION.to_string(),
+        build_tool: probe.tool,
+        build_tool_version: probe.version.clone(),
+        platform: spec.platform.clone(),
+        dockerfile_path: spec.dockerfile_path.clone(),
+        dockerfile_sha256: built.dockerfile_sha256.clone(),
+        effective_dockerfile_sha256: built.effective_dockerfile_sha256.clone(),
+        build_context_digest: built.build_context_digest.clone(),
+        resolved_base_images: built.resolved_base_images.clone(),
+        final_image_digest: built.final_image_digest.clone(),
+        exported_rootfs_digest,
+        build_args: spec.build_args.clone(),
+        import_options,
+        warnings: plan.warnings.clone(),
+    }
+}
+
+/// Drive one Dockerfile import end to end on the builder host:
+/// probe → build (+ digest-pin bases) → derive the service plan → pack the
+/// imported image into a bootable ext4 → assemble the provenance receipt.
+/// The output ext4 is a normal supervisor rootfs — it feeds the existing
+/// Ready-State build (boot → verify → snapshot → seal) unchanged.
+pub fn run_dockerfile_import(
+    runner: &dyn build::ImportCommandRunner,
+    req: &DockerfileImportRequest<'_>,
+) -> Result<DockerfileImportOutcome, String> {
+    let probe = build::probe_build_tool(runner)?;
+    let built = build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
+    let plan = rootfs::derive_imported_service_plan(
+        &built.image_config,
+        req.policy,
+        req.port_override,
+        req.readiness_http_path.clone(),
+    )?;
+    let rootfs_bytes =
+        rootfs::pack_imported_rootfs(probe.tool, &req.image_tag, &plan, req.out_ext4, req.size_mib)?;
+    let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
+    let import_options = DockerImportOptions {
+        secret_env_policy: req.policy,
+        port_override: req.port_override,
+        readiness_http_path: req.readiness_http_path.clone(),
+        size_mib: req.size_mib,
+    };
+    let receipt = assemble_receipt(&probe, &req.spec, &built, &plan, import_options, exported_rootfs_digest);
+    Ok(DockerfileImportOutcome {
+        receipt,
+        plan,
+        rootfs_path: req.out_ext4.display().to_string(),
+        rootfs_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,6 +735,101 @@ mod tests {
             json,
             r#"["docker_user_ignored","docker_healthcheck_ignored","exposed_port_inferred"]"#
         );
+    }
+
+    fn sample_receipt() -> DockerImportReceipt {
+        DockerImportReceipt {
+            importer_version: DOCKER_IMPORTER_VERSION.into(),
+            build_tool: BuildTool::Podman,
+            build_tool_version: "podman 4.9".into(),
+            platform: DOCKER_IMPORT_PLATFORM.into(),
+            dockerfile_path: "Dockerfile".into(),
+            dockerfile_sha256: "ab".repeat(32),
+            build_context_digest: "cd".repeat(32),
+            resolved_base_images: vec![
+                ResolvedBaseImage { original_ref: "node:20".into(), resolved_digest: format!("docker.io/library/node@sha256:{}", "ef".repeat(32)) },
+                ResolvedBaseImage { original_ref: "alpine:3.19".into(), resolved_digest: format!("docker.io/library/alpine@sha256:{}", "12".repeat(32)) },
+            ],
+            final_image_digest: format!("sha256:{}", "01".repeat(32)),
+            exported_rootfs_digest: format!("sha256:{}", "23".repeat(32)),
+            build_args: BTreeMap::new(),
+            effective_dockerfile_sha256: "fe".repeat(32),
+            import_options: DockerImportOptions {
+                secret_env_policy: SecretEnvPolicy::Reject,
+                port_override: None,
+                readiness_http_path: None,
+                size_mib: 2048,
+            },
+            warnings: vec![],
+        }
+    }
+
+    // --- import_identity_digest ---------------------------------------------------
+
+    #[test]
+    fn identity_digest_is_deterministic_and_input_only() {
+        let r = sample_receipt();
+        let a = import_identity_digest(&r);
+        assert!(a.starts_with("sha256:") && a.len() == 7 + 64, "{a}");
+        // Base image ORDER must not matter (canonicalized by original_ref).
+        let mut swapped = r.clone();
+        swapped.resolved_base_images.reverse();
+        assert_eq!(import_identity_digest(&swapped), a);
+        // OUTPUTS must not matter (identity = inputs only).
+        let mut outputs_differ = r.clone();
+        outputs_differ.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        outputs_differ.exported_rootfs_digest = format!("sha256:{}", "ee".repeat(32));
+        outputs_differ.warnings = vec![DockerImportWarning::DockerUserIgnored];
+        assert_eq!(import_identity_digest(&outputs_differ), a);
+        // INPUTS must matter.
+        let mut input_differs = r.clone();
+        input_differs.dockerfile_sha256 = "00".repeat(32);
+        assert_ne!(import_identity_digest(&input_differs), a);
+        let mut base_differs = r.clone();
+        base_differs.resolved_base_images[0].resolved_digest = format!("docker.io/library/node@sha256:{}", "aa".repeat(32));
+        assert_ne!(import_identity_digest(&base_differs), a);
+        // effective_dockerfile_sha256 is DERIVED (dockerfile sha + base digests)
+        // — by itself it must not shift the identity.
+        let mut derived_differs = r;
+        derived_differs.effective_dockerfile_sha256 = "dd".repeat(32);
+        assert_eq!(import_identity_digest(&derived_differs), a);
+    }
+
+    #[test]
+    fn identity_digest_covers_every_import_option() {
+        // Review blocker (ato#994 PR 5): same Dockerfile + different import
+        // options = different artifact, so each option must shift the identity.
+        let base = sample_receipt();
+        let a = import_identity_digest(&base);
+
+        let mut port = base.clone();
+        port.import_options.port_override = Some(8080);
+        assert_ne!(import_identity_digest(&port), a, "port_override must be identity input");
+
+        let mut readiness = base.clone();
+        readiness.import_options.readiness_http_path = Some("/healthz".into());
+        assert_ne!(import_identity_digest(&readiness), a, "readiness_http_path must be identity input");
+
+        let mut policy = base.clone();
+        policy.import_options.secret_env_policy = SecretEnvPolicy::ConvertPlaceholders;
+        assert_ne!(import_identity_digest(&policy), a, "secret_env_policy must be identity input");
+
+        let mut size = base.clone();
+        size.import_options.size_mib = 4096;
+        assert_ne!(import_identity_digest(&size), a, "size_mib must be identity input");
+
+        // And distinct option sets are pairwise distinct from one another.
+        let ids = [
+            import_identity_digest(&port),
+            import_identity_digest(&readiness),
+            import_identity_digest(&policy),
+            import_identity_digest(&size),
+        ];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j]);
+            }
+        }
     }
 
     #[test]
