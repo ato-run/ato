@@ -245,6 +245,81 @@ pub fn parse_dockerfile_base_refs(
     Ok(refs)
 }
 
+/// Rewrite the Dockerfile so every REGISTRY `FROM` uses its resolved digest —
+/// the digest pin becomes an enforced BUILD INPUT, not an advisory record
+/// (review blocker on ato#994 PR 3: building from the original Dockerfile only
+/// proved the digest was pulled, not that the build consumed it).
+///
+/// Rules: registry refs (after the same ARG substitution as
+/// [`parse_dockerfile_base_refs`]) are replaced by `digest_by_ref[ref]`
+/// (fail-closed when missing); `--platform` flags and `AS <stage>` aliases are
+/// preserved; prior-stage `FROM`s and `scratch` pass through verbatim; every
+/// non-FROM line is byte-preserved.
+pub fn render_effective_dockerfile(
+    dockerfile: &str,
+    build_args: &BTreeMap<String, String>,
+    digest_by_ref: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let mut args: BTreeMap<String, String> = BTreeMap::new();
+    let mut seen_from = false;
+    let mut stages: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for raw_line in dockerfile.lines() {
+        let line = raw_line.trim();
+        let mut rewritten: Option<String> = None;
+        if !line.is_empty() && !line.starts_with('#') {
+            let mut tokens = line.split_whitespace();
+            let instruction = tokens.next().unwrap_or_default();
+            if instruction.eq_ignore_ascii_case("ARG") && !seen_from {
+                // Same pre-FROM ARG collection as the parser (defaults feed FROM
+                // substitution; supplied build args win).
+                if let Some(decl) = tokens.next() {
+                    let (name, default) = match decl.split_once('=') {
+                        Some((n, d)) => (n.to_string(), Some(d.trim_matches('"').to_string())),
+                        None => (decl.to_string(), None),
+                    };
+                    if let Some(supplied) = build_args.get(&name) {
+                        args.insert(name, supplied.clone());
+                    } else if let Some(d) = default {
+                        args.insert(name, d);
+                    }
+                }
+            } else if instruction.eq_ignore_ascii_case("FROM") {
+                seen_from = true;
+                let rest: Vec<&str> = tokens.collect();
+                let mut idx = 0;
+                while rest.get(idx).is_some_and(|t| t.starts_with("--")) {
+                    idx += 1;
+                }
+                let raw_ref = rest.get(idx).ok_or("FROM with no image reference")?;
+                let resolved = substitute_from_ref(raw_ref, &args)?;
+                let is_prior_stage = is_stage_ref(&resolved, &stages);
+                let as_clause = if rest.len() >= idx + 3 && rest[idx + 1].eq_ignore_ascii_case("AS") {
+                    stages.push(rest[idx + 2].to_string());
+                    Some((rest[idx + 1], rest[idx + 2]))
+                } else {
+                    None
+                };
+                if !is_prior_stage && !resolved.eq_ignore_ascii_case("scratch") {
+                    let digest_ref = digest_by_ref.get(&resolved).ok_or_else(|| {
+                        format!("no resolved digest for base ref {resolved:?} — refusing to render an unpinned effective Dockerfile (fail-closed)")
+                    })?;
+                    let mut parts: Vec<String> = vec![instruction.to_string()];
+                    parts.extend(rest[..idx].iter().map(|s| s.to_string()));
+                    parts.push(digest_ref.clone());
+                    if let Some((as_kw, name)) = as_clause {
+                        parts.push(as_kw.to_string());
+                        parts.push(name.to_string());
+                    }
+                    rewritten = Some(parts.join(" "));
+                }
+            }
+        }
+        out.push(rewritten.unwrap_or_else(|| raw_line.to_string()));
+    }
+    Ok(out.join("\n") + "\n")
+}
+
 /// The final image's runtime config, extracted from `image inspect` — the
 /// input the next slice maps into `ServiceSpec` (CMD/ENTRYPOINT/WORKDIR/ENV/
 /// EXPOSE) and into the `docker_user_ignored` / `docker_healthcheck_ignored`
@@ -278,7 +353,11 @@ pub struct DockerfileBuildOutput {
     pub final_image_digest: String,
     pub resolved_base_images: Vec<ResolvedBaseImage>,
     pub image_config: DockerImageConfig,
+    /// sha256 of the ORIGINAL Dockerfile (as authored).
     pub dockerfile_sha256: String,
+    /// sha256 of the EFFECTIVE Dockerfile the build consumed (registry FROMs
+    /// digest-pinned via [`render_effective_dockerfile`]).
+    pub effective_dockerfile_sha256: String,
     pub build_context_digest: String,
 }
 
@@ -477,7 +556,30 @@ pub fn run_dockerfile_build(
 
     let context_digest = build_context_digest(&context_canon)?;
 
-    let dockerfile_arg = dockerfile_canon.to_string_lossy().to_string();
+    // Render + stage the EFFECTIVE Dockerfile (registry FROMs → resolved
+    // digests) OUTSIDE the context dir, so the context digest is unaffected
+    // and the author's Dockerfile is never touched. The build consumes this
+    // file — the digest pin is thereby enforced, not advisory.
+    let digest_by_ref: BTreeMap<String, String> = resolved_base_images
+        .iter()
+        .map(|r| (r.original_ref.clone(), r.resolved_digest.clone()))
+        .collect();
+    let effective = render_effective_dockerfile(&dockerfile_text, &spec.build_args, &digest_by_ref)?;
+    let effective_dockerfile_sha256 = sha256_hex(effective.as_bytes());
+    // Unique per invocation (pid + sequence): concurrent imports — including
+    // parallel tests sharing a tag — must never share/steal a staging dir.
+    static EFF_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let eff_dir = std::env::temp_dir().join(format!(
+        "ato-docker-import-{}-{}-{}",
+        image_tag.replace(['/', ':'], "-"),
+        std::process::id(),
+        EFF_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&eff_dir).map_err(|e| format!("create effective-Dockerfile dir: {e}"))?;
+    let eff_path = eff_dir.join("Dockerfile.effective");
+    std::fs::write(&eff_path, &effective).map_err(|e| format!("write effective Dockerfile: {e}"))?;
+
+    let dockerfile_arg = eff_path.to_string_lossy().to_string();
     let context_arg = context_canon.to_string_lossy().to_string();
     let mut build_args_flat: Vec<String> = Vec::new();
     for (k, v) in &spec.build_args {
@@ -488,7 +590,9 @@ pub fn run_dockerfile_build(
         vec!["build", "--platform", DOCKER_IMPORT_PLATFORM, "-f", &dockerfile_arg, "-t", image_tag];
     args.extend(build_args_flat.iter().map(|s| s.as_str()));
     args.push(&context_arg);
-    run_tool(runner, probe.tool, &args, "dockerfile build")?;
+    let build_result = run_tool(runner, probe.tool, &args, "dockerfile build");
+    let _ = std::fs::remove_dir_all(&eff_dir);
+    build_result?;
 
     let id_out = run_tool(
         runner,
@@ -519,6 +623,7 @@ pub fn run_dockerfile_build(
         resolved_base_images,
         image_config,
         dockerfile_sha256,
+        effective_dockerfile_sha256,
         build_context_digest: context_digest,
     })
 }
@@ -677,6 +782,63 @@ CMD ["/app/serve"]
         assert_eq!(parse_dockerfile_base_refs(df, &no_args()).unwrap(), vec!["alpine:3.19"]);
     }
 
+    // --- render_effective_dockerfile ------------------------------------------------
+
+    fn digests(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn effective_rewrites_registry_from_and_keeps_stage_alias() {
+        let out = render_effective_dockerfile(
+            "FROM node:20 AS builder\nRUN make\n",
+            &no_args(),
+            &digests(&[("node:20", "docker.io/library/node@sha256:aaaa")]),
+        )
+        .unwrap();
+        assert!(out.contains("FROM docker.io/library/node@sha256:aaaa AS builder"), "{out}");
+        assert!(!out.contains("FROM node:20 "), "{out}");
+        assert!(out.contains("RUN make"), "{out}");
+    }
+
+    #[test]
+    fn effective_leaves_prior_stage_from_untouched() {
+        let df = "FROM golang:1.22 AS builder\nFROM builder AS runtime\nCMD [\"/bin/x\"]\n";
+        let out = render_effective_dockerfile(
+            df,
+            &no_args(),
+            &digests(&[("golang:1.22", "docker.io/library/golang@sha256:bbbb")]),
+        )
+        .unwrap();
+        assert!(out.contains("FROM docker.io/library/golang@sha256:bbbb AS builder"), "{out}");
+        assert!(out.contains("FROM builder AS runtime"), "{out}"); // verbatim
+    }
+
+    #[test]
+    fn effective_pins_every_registry_ref_in_multi_stage_and_keeps_flags() {
+        let df = "ARG BASE=alpine:3.19\nFROM --platform=linux/amd64 golang:1.22 AS b\nFROM ${BASE}\nCOPY --from=b /out /app\n";
+        let out = render_effective_dockerfile(
+            df,
+            &no_args(),
+            &digests(&[
+                ("golang:1.22", "docker.io/library/golang@sha256:bbbb"),
+                ("alpine:3.19", "docker.io/library/alpine@sha256:cccc"),
+            ]),
+        )
+        .unwrap();
+        assert!(out.contains("FROM --platform=linux/amd64 docker.io/library/golang@sha256:bbbb AS b"), "{out}");
+        assert!(out.contains("FROM docker.io/library/alpine@sha256:cccc"), "{out}");
+        // scratch/comments/other lines byte-preserved; ARG line kept.
+        assert!(out.contains("ARG BASE=alpine:3.19"), "{out}");
+        assert!(out.contains("COPY --from=b /out /app"), "{out}");
+    }
+
+    #[test]
+    fn effective_fails_closed_on_a_missing_digest() {
+        let err = render_effective_dockerfile("FROM node:20\n", &no_args(), &digests(&[])).unwrap_err();
+        assert!(err.contains("no resolved digest") && err.contains("fail-closed"), "{err}");
+    }
+
     // --- parse_image_config --------------------------------------------------------
 
     const INSPECT_JSON: &str = r#"[
@@ -797,6 +959,52 @@ CMD ["/app/serve"]
         let idx = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap_or_else(|| panic!("missing call {prefix}: {calls:?}"));
         assert!(idx("podman pull --platform linux/amd64 node:20-slim") < idx("podman build"));
         assert!(idx("podman build --platform linux/amd64 -f") < idx("podman image inspect --format {{.Id}}"));
+        // The build consumes the EFFECTIVE Dockerfile, never the original.
+        let build_call = calls.iter().find(|c| c.starts_with("podman build")).unwrap();
+        assert!(build_call.contains("Dockerfile.effective"), "{build_call}");
+        assert!(!build_call.contains(&dir.join("Dockerfile").to_string_lossy().to_string()), "{build_call}");
+        assert_eq!(out.effective_dockerfile_sha256.len(), 64);
+        assert_ne!(out.effective_dockerfile_sha256, out.dockerfile_sha256); // digest-pinned rewrite differs
+        cleanup(dir);
+    }
+
+    /// A runner that captures the CONTENT of the `-f` file at build time —
+    /// proving the build input is the digest-pinned effective Dockerfile
+    /// (the file is cleaned up after the build, so read-at-call is the only
+    /// honest observation point).
+    struct EffectiveCapturingRunner {
+        inner: FakeRunner,
+        captured: Mutex<Option<String>>,
+    }
+    impl ImportCommandRunner for EffectiveCapturingRunner {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<ImportCommandOutput> {
+            if args.first() == Some(&"build") {
+                let f_idx = args.iter().position(|a| *a == "-f").unwrap();
+                let content = std::fs::read_to_string(args[f_idx + 1]).unwrap();
+                *self.captured.lock().unwrap() = Some(content);
+            }
+            self.inner.run(program, args)
+        }
+    }
+
+    #[test]
+    fn build_input_is_the_digest_pinned_effective_dockerfile() {
+        let dir = tempdir();
+        std::fs::write(dir.join("Dockerfile"), "FROM node:20-slim\nCMD [\"node\"]\n").unwrap();
+        let runner = EffectiveCapturingRunner {
+            inner: FakeRunner::new(full_build_script()),
+            captured: Mutex::new(None),
+        };
+        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
+        run_dockerfile_build(&runner, &probe, &dir, &spec, "t").unwrap();
+
+        let effective = runner.captured.lock().unwrap().clone().expect("build ran with -f");
+        assert!(effective.contains("FROM docker.io/library/node@sha256:aaaa"), "{effective}");
+        assert!(!effective.contains("node:20-slim"), "{effective}");
+        // The author's Dockerfile on disk is untouched.
+        let original = std::fs::read_to_string(dir.join("Dockerfile")).unwrap();
+        assert_eq!(original, "FROM node:20-slim\nCMD [\"node\"]\n");
         cleanup(dir);
     }
 
