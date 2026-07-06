@@ -34,6 +34,8 @@ use serde::Serialize;
 
 /// Build-tool probe + Dockerfile build execution (the importer's build stage).
 pub mod build;
+/// Imported-image → ServiceSpec mapping + rootfs export/injection/pack.
+pub mod rootfs;
 
 use crate::rootfs_builder::{valid_env_var_name, validate_subdir};
 use crate::scanner::{PROVIDER_KEY_PREFIXES, SENSITIVE_ENV_MARKERS};
