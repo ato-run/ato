@@ -3,7 +3,9 @@
 //!
 //! Transport packaging is ONE file per job: `artifact.tar.gz` containing exactly
 //! `manifest.json` and `cas/` at the archive root, uploaded to
-//! `<endpoint>/<bucket>/<job_id>/artifact.tar.gz` via shell-out `curl
+//! `<endpoint>/<bucket>/<job_id>/<artifact_manifest_hash>/artifact.tar.gz` —
+//! the object key carries the immutable content identity, so a re-run of a
+//! job id can never silently overwrite different bytes — via shell-out `curl
 //! --aws-sigv4` (curl signs SigV4 itself — no SDK dependency on a dev/ops
 //! daemon). The upload runs BEFORE the sealed ack: an upload failure becomes a
 //! failed ack at stage `artifact_upload`, never a sealed registry row without
@@ -32,7 +34,8 @@ pub const ENV_BUCKET: &str = "ATO_ARTIFACT_S3_BUCKET";
 pub const ENV_ACCESS_KEY_ID: &str = "ATO_ARTIFACT_S3_ACCESS_KEY_ID";
 pub const ENV_SECRET_ACCESS_KEY: &str = "ATO_ARTIFACT_S3_SECRET_ACCESS_KEY";
 
-/// The one transport file per job (contract: key `<job_id>/artifact.tar.gz`).
+/// The one transport file per job (contract: key
+/// `<job_id>/<artifact_manifest_hash>/artifact.tar.gz`).
 pub const ARTIFACT_ARCHIVE_NAME: &str = "artifact.tar.gz";
 
 /// Backoff BETWEEN upload attempts — attempts = `len + 1` = 3 total
@@ -123,9 +126,11 @@ impl ArtifactStore {
     }
 
     /// The S3-compatible object URL the archive is PUT to:
-    /// `<endpoint>/<bucket>/<job_id>/artifact.tar.gz`.
-    fn object_url(&self, job_id: &str) -> String {
-        format!("{}/{}/{job_id}/{ARTIFACT_ARCHIVE_NAME}", self.endpoint, self.bucket)
+    /// `<endpoint>/<bucket>/<job_id>/<artifact_manifest_hash>/artifact.tar.gz`
+    /// — the same `<job_id>/<artifact_manifest_hash>` identity the registry's
+    /// `r2://` location names, plus the fixed archive filename.
+    fn object_url(&self, job_id: &str, artifact_manifest_hash: &str) -> String {
+        format!("{}/{}/{job_id}/{artifact_manifest_hash}/{ARTIFACT_ARCHIVE_NAME}", self.endpoint, self.bucket)
     }
 
     /// Package + upload one sealed job artifact, returning the REMOTE
@@ -151,7 +156,7 @@ impl ArtifactStore {
         backoff: &[Duration],
     ) -> Result<String, String> {
         let archive = pack_artifact(runner, jobdir)?;
-        let uploaded = self.upload_with_backoff(runner, &archive, job_id, backoff);
+        let uploaded = self.upload_with_backoff(runner, &archive, job_id, artifact_manifest_hash, backoff);
         // The tar.gz is transport-only: remove it on success AND failure so the
         // local job layout stays {manifest.json, cas/} and a failed job never
         // leaves a stale archive to be confused for uploaded bytes.
@@ -170,9 +175,10 @@ impl ArtifactStore {
         runner: &dyn ImportCommandRunner,
         archive: &Path,
         job_id: &str,
+        artifact_manifest_hash: &str,
         backoff: &[Duration],
     ) -> Result<(), String> {
-        let url = self.object_url(job_id);
+        let url = self.object_url(job_id, artifact_manifest_hash);
         let user = format!("{}:{}", self.access_key_id, self.secret_access_key);
         let archive_arg = archive.to_string_lossy();
         let attempts = backoff.len() + 1;
@@ -299,7 +305,11 @@ mod tests {
         )
         .unwrap()
         .expect("fully configured store");
-        assert_eq!(s.object_url("job_9"), "https://acct.r2.example.com/ato-artifacts/job_9/artifact.tar.gz");
+        // The object key carries the immutable identity — <job_id>/<hash>/artifact.tar.gz.
+        assert_eq!(
+            s.object_url("job_9", "blake3:abc"),
+            "https://acct.r2.example.com/ato-artifacts/job_9/blake3:abc/artifact.tar.gz"
+        );
     }
 
     #[test]
@@ -373,7 +383,7 @@ mod tests {
         assert_eq!(
             r.calls()[1],
             "curl --fail --aws-sigv4 aws:amz:auto:s3 --user AKIDEXAMPLE:secret-value-7f3a9c \
-             -T /work/job_9/artifact.tar.gz https://acct.r2.example.com/ato-artifacts/job_9/artifact.tar.gz"
+             -T /work/job_9/artifact.tar.gz https://acct.r2.example.com/ato-artifacts/job_9/blake3:abc/artifact.tar.gz"
         );
     }
 
@@ -410,7 +420,7 @@ mod tests {
         assert!(err.contains("failed after 3 attempt(s)"), "{err}");
         assert!(err.contains("curl exited 7"), "{err}");
         // The reason reaches the failed ack: URL yes, credentials never.
-        assert!(err.contains("https://acct.r2.example.com/ato-artifacts/job_9/artifact.tar.gz"), "{err}");
+        assert!(err.contains("https://acct.r2.example.com/ato-artifacts/job_9/blake3:abc/artifact.tar.gz"), "{err}");
         assert!(!err.contains("secret-value-7f3a9c"), "{err}");
         assert_eq!(r.calls().len(), 4, "exactly one tar + three curl attempts");
     }
