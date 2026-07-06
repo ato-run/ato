@@ -1224,14 +1224,17 @@ pub fn build_rootfs(source_dir: &Path, spec: &RootfsBuildSpec, out_ext4: &Path, 
     Ok(RootfsReceipt { spec: spec.clone(), rootfs_path: out_ext4.display().to_string(), rootfs_bytes })
 }
 
-/// Reject NUL bytes and line breaks in a manifest-derived command (v1 requires a single
-/// shell command). A newline could escape the single-quoting / heredoc delimiter.
-fn reject_control_chars(label: &str, cmd: &str) -> Result<(), String> {
-    if cmd.contains('\0') {
+/// Reject NUL bytes and line breaks in a value interpolated into a builder-generated
+/// script (manifest-derived commands, import readiness paths). A newline could escape
+/// the single-quoting / heredoc delimiter — or a `#` comment — and run on the builder
+/// host. Pub so the snapshot-builder daemon applies the same gate to job params
+/// (ato#1002).
+pub fn reject_control_chars(label: &str, value: &str) -> Result<(), String> {
+    if value.contains('\0') {
         return Err(format!("{label} contains a NUL byte"));
     }
-    if cmd.contains('\n') || cmd.contains('\r') {
-        return Err(format!("{label} contains a newline (v1 requires a single-line command)"));
+    if value.contains('\n') || value.contains('\r') {
+        return Err(format!("{label} contains a newline (single-line value required)"));
     }
     Ok(())
 }

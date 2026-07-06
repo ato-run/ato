@@ -50,7 +50,7 @@ use snapshot::docker_import::{
 };
 use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
-    materialize_source, valid_github_owner, valid_github_repo,
+    materialize_source, reject_control_chars, valid_github_owner, valid_github_repo,
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
@@ -628,8 +628,17 @@ impl Default for DockerfileImportParams {
 /// Strict, fail-closed parse of `dockerfile_import` params — the same bounds the
 /// ato-api enqueue validation enforces (ato#1002): `dockerfile_path` relative, no
 /// `..` component, ≤200 chars (default `"Dockerfile"`); `port_override` an integer
-/// in 1..65535; `readiness_http_path` starting `/`, ≤256 chars. Unknown keys and
-/// non-object params are rejected; absent/null params mean all defaults.
+/// in 1..65535; `readiness_http_path` starting `/`, ≤200 chars, single-line.
+/// Unknown keys and non-object params are rejected; absent/null params mean all
+/// defaults.
+///
+/// The readiness bound is 200 — NOT the contract draft's 256 — because the value
+/// is acked verbatim as `healthcheck_url_path`, which ato-api's strict artifact
+/// schema caps at 200; a longer path would build an artifact whose sealed ack can
+/// never validate (rebuilt forever on claim expiry). And it must be single-line
+/// ([`reject_control_chars`]) because it is interpolated into the builder-host
+/// pack script — a newline would break out of its `#` comment and execute as
+/// root on the builder.
 fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Result<DockerfileImportParams, String> {
     let mut out = DockerfileImportParams::default();
     let Some(v) = params.filter(|v| !v.is_null()) else { return Ok(out) };
@@ -661,9 +670,13 @@ fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Resul
                 if !p.starts_with('/') {
                     return Err("params.readiness_http_path must start with '/'".into());
                 }
-                if p.chars().count() > 256 {
-                    return Err("params.readiness_http_path exceeds 256 characters".into());
+                if p.chars().count() > 200 {
+                    return Err("params.readiness_http_path exceeds 200 characters".into());
                 }
+                // Interpolated into the builder-host pack script (`{hc}` inside a
+                // `#` comment) — the same NUL/newline gate rootfs_builder applies
+                // to run/build commands, or a newline runs as root on the builder.
+                reject_control_chars("params.readiness_http_path", p)?;
                 out.readiness_http_path = Some(p.to_string());
             }
             other => return Err(format!("unknown dockerfile_import param {other:?} (rejected fail-closed)")),
@@ -1125,6 +1138,10 @@ mod tests {
         assert_eq!(p.dockerfile_path, "docker/app.Dockerfile");
         assert_eq!(p.port_override, Some(65535));
         assert_eq!(p.readiness_http_path.as_deref(), Some("/healthz"));
+        // Boundary: exactly 200 chars is legal (the ack schema's healthcheck_url_path max).
+        let max = format!("/{}", "x".repeat(199));
+        let v = serde_json::json!({ "readiness_http_path": max.as_str() });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().readiness_http_path.as_deref(), Some(max.as_str()));
     }
 
     #[test]
@@ -1143,8 +1160,15 @@ mod tests {
             (serde_json::json!({ "port_override": "8080" }), "integer"),
             (serde_json::json!({ "port_override": 8080.5 }), "integer"),
             (serde_json::json!({ "readiness_http_path": "health" }), "start with '/'"),
-            (serde_json::json!({ "readiness_http_path": format!("/{}", "x".repeat(256)) }), "256"),
+            // 200, not the contract draft's 256: the ack's healthcheck_url_path
+            // schema (ato-api, strict) caps at 200 — see parse_import_params.
+            (serde_json::json!({ "readiness_http_path": format!("/{}", "x".repeat(200)) }), "200"),
             (serde_json::json!({ "readiness_http_path": 1 }), "string"),
+            // Shell-injection gate: the value lands in the builder-host pack
+            // script, so NUL/CR/LF are rejected fail-closed (reject_control_chars).
+            (serde_json::json!({ "readiness_http_path": "/x\nid > /tmp/pwned\n#" }), "newline"),
+            (serde_json::json!({ "readiness_http_path": "/x\rid" }), "newline"),
+            (serde_json::json!({ "readiness_http_path": "/x\u{0}y" }), "NUL"),
             (serde_json::json!([1, 2]), "object"),
         ];
         for (v, needle) in cases {
