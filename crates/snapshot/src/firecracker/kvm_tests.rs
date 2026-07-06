@@ -1014,6 +1014,7 @@ fn fc_kvm_supervisor_full_e2e() {
         execution_id: None,
         supervisor: Some(crate::backend::SupervisorBindings {
             binding_names: vec!["openai_api_key".to_string()],
+            ..Default::default()
         }),
     };
     // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
