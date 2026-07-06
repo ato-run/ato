@@ -143,6 +143,27 @@ pub(crate) fn proxy_ready_timeout_ms() -> u64 {
     }
 }
 
+/// ato#1002 (UNIT C1): sanity cap for a fetched remote `r2://` artifact,
+/// `ATO_ARTIFACT_FETCH_MAX_BYTES` (default 8 GiB). Applied to BOTH the downloaded
+/// `artifact.tar.gz` byte count and the summed decompressed entry sizes during the
+/// safe extraction — a decompression bomb trips it, never fills the disk. A zero or
+/// non-numeric value falls back to the default with a warning (never a crash on the
+/// restore path).
+pub(crate) fn artifact_fetch_max_bytes() -> u64 {
+    const VAR: &str = "ATO_ARTIFACT_FETCH_MAX_BYTES";
+    const DEFAULT: u64 = 8 * 1024 * 1024 * 1024;
+    match std::env::var(VAR).ok().filter(|v| !v.trim().is_empty()) {
+        None => DEFAULT,
+        Some(raw) => match raw.trim().parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                tracing::warn!(target: "ato::ready_state", raw, "invalid {VAR}; using default");
+                DEFAULT
+            }
+        },
+    }
+}
+
 /// An explicitly selected snapshot backend id (`ATO_SNAPSHOT_BACKEND`), if any.
 pub(crate) fn selected_backend_id() -> Option<String> {
     std::env::var(BACKEND_VAR)
@@ -239,6 +260,28 @@ mod tests {
         assert!(uffd_auto_preview_enabled());
         set(Some("0"));
         assert!(!uffd_auto_preview_enabled());
+        set(prev.as_deref());
+    }
+
+    #[test]
+    fn artifact_fetch_max_bytes_defaults_and_overrides() {
+        const VAR: &str = "ATO_ARTIFACT_FETCH_MAX_BYTES";
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var(VAR).ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var(VAR, v),
+                None => std::env::remove_var(VAR),
+            }
+        };
+        set(None);
+        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "default 8 GiB");
+        set(Some("1048576"));
+        assert_eq!(artifact_fetch_max_bytes(), 1_048_576);
+        set(Some("0"));
+        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "zero falls back");
+        set(Some("not-a-number"));
+        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "junk falls back");
         set(prev.as_deref());
     }
 
