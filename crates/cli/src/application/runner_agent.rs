@@ -3630,11 +3630,11 @@ async fn handle_restore_snapshot_lease(
         bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal, stop_scrub_over_vsock,
     };
     use crate::application::ready_state::flags::{
-        binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
+        artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
-        RestoreArtifactClass, load_and_verify_manifest, locate_artifact, parse_restore_snapshot_command,
+        RestoreArtifactClass, ensure_artifact_local, load_and_verify_manifest, parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -3722,7 +3722,9 @@ async fn handle_restore_snapshot_lease(
     }
     prof_mark!("report_preparing_spawn_ms");
 
-    // 2. Locate the fetched artifact on this host (v1 same-host CAS, ato#928 layout).
+    // 2. Locate the artifact on this host (v1 same-host cas://, ato#928 layout) —
+    // or, for an r2:// location (ato#1002), fetch it via the lease's presigned
+    // artifact_fetch_url into the same layout first (idempotent: a local copy wins).
     let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
         Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
         _ => {
@@ -3739,13 +3741,22 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
-    let paths = match locate_artifact(&cmd.artifact_location, &artifact_root) {
+    let paths = match ensure_artifact_local(
+        client,
+        &cmd.artifact_location,
+        &artifact_root,
+        cmd.artifact_fetch_url.as_deref(),
+        artifact_fetch_max_bytes(),
+    )
+    .await
+    {
         Ok(p) => p,
         Err((code, message)) => {
             fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
             return;
         }
     };
+    // Key kept stable (Track R1); for an r2:// fetch this span includes the download.
     prof_mark!("locate_artifact_ms");
 
     // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate)
