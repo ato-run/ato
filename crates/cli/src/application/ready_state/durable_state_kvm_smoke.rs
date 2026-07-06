@@ -47,7 +47,7 @@ use snapshot::{
     SupervisorBindings,
 };
 
-use super::binding_host::{bind_before_expose, issue_leases, stop_scrub_over_vsock};
+use super::binding_host::{bind_before_expose, issue_leases, mount_volumes_before_expose, stop_scrub_over_vsock};
 
 /// `{name}` and `{schema_hex}` are substituted per capsule instance — only the
 /// capsule `name` differs between the two builds this smoke creates, which is
@@ -310,6 +310,11 @@ fn restore_and_bind(
         .map_err(|e| anyhow::anyhow!("restore({label}): {e}"))?;
     let session = restored.session;
     let vsock = session.vsock_uds.clone().ok_or_else(|| anyhow::anyhow!("({label}) no vsock_uds"))?;
+    // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND, every
+    // restore, fresh — the whole point of this fixture after the live-KVM
+    // finding. Mounting is never baked into the build-time snapshot.
+    mount_volumes_before_expose(&vsock, true, Duration::from_secs(10))
+        .map_err(|e| anyhow::anyhow!("mount_volumes_before_expose({label}): {e}"))?;
     let leases = issue_leases(vec![("openai_api_key".to_string(), SecretValue::new("sk-smoke-dummy"))], now_ms(), 60_000)
         .map_err(|e| anyhow::anyhow!("issue_leases({label}): {e}"))?;
     bind_before_expose(&vsock, &leases, Duration::from_secs(10))
