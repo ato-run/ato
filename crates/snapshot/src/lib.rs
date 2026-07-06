@@ -42,6 +42,7 @@ mod placement;
 mod qemu;
 pub mod rootfs_builder;
 mod scanner;
+pub mod state_volume;
 mod uffd;
 mod uffd_page_server;
 
