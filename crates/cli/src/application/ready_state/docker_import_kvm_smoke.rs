@@ -25,9 +25,13 @@
 //! supervisor):
 //!
 //! ```sh
-//! cargo build --release -p guest-agent
+//! # MUSL-STATIC agent, not the host-glibc build: an imported image picks its
+//! # own base (2 of the 3 apps below are alpine/musl), and a glibc-linked
+//! # agent cannot exec inside a musl rootfs. Static works everywhere.
+//! rustup target add x86_64-unknown-linux-musl
+//! cargo build --release -p guest-agent --target x86_64-unknown-linux-musl
 //! sudo -E env ATO_LIVE_KVM=1 ATO_SMOKE_DOCKER_IMPORT=1 \
-//!   ATO_GUEST_AGENT_BIN=target/release/ato-guest-agent \
+//!   ATO_GUEST_AGENT_BIN=target/x86_64-unknown-linux-musl/release/guest-agent \
 //!   cargo test --release -p cli -- --ignored --test-threads=1 --nocapture \
 //!   docker_import_live_smoke
 //! ```
@@ -243,10 +247,20 @@ fn import_and_seal(
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(identity.clone()),
-            supervisor: Some(SupervisorBindings {
-                binding_names: outcome.plan.supervisor.binding_names.clone(),
-                state_volumes: vec![],
-                state_owner_scope: None,
+            // A v0 import with ZERO bindings is an honest NO-BINDING artifact:
+            // the backend's supervisor path requires ≥1 binding name (it exists
+            // to gate on them), while the in-guest agent with an empty required
+            // set is vacuously bound-ready and starts the service immediately —
+            // so the v1.0 no-binding seal contract ("boot, healthcheck answers")
+            // is exactly what holds. A WITH-bindings import exercises the
+            // supervisor path once a Store job shape carries secrets (later
+            // slice); this smoke's three apps are all zero-binding.
+            supervisor: (!outcome.plan.supervisor.binding_names.is_empty()).then(|| {
+                SupervisorBindings {
+                    binding_names: outcome.plan.supervisor.binding_names.clone(),
+                    state_volumes: vec![],
+                    state_owner_scope: None,
+                }
             }),
         })
         .map_err(|e| anyhow::anyhow!("build_ready_state({}): {e}", app.slug))?;
