@@ -420,6 +420,25 @@ pub fn partition_dockerfile_env(
 /// DERIVED from two included inputs (dockerfile sha256 + base digests), and
 /// renderer changes are covered by `importer_version`.
 pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
+    format!("sha256:{}", build::sha256_hex(import_descriptor_canonical_json(receipt).as_bytes()))
+}
+
+/// The import DESCRIPTOR hash: `blake3:<hex>` over the **same** JCS input envelope
+/// as [`import_identity_digest`] (ato#1002). An import job has no `capsule.toml`,
+/// so the registry's `capsule_manifest_hash` column carries this instead — it is a
+/// hash of the input-only import DESCRIPTOR ("what was asked to be built"), NOT of
+/// a capsule manifest; there is no manifest to hash. Same input-only discipline:
+/// outputs and derived fields never shift it. The envelope construction is shared
+/// ([`import_descriptor_canonical_json`]) so the two digests hash identical bytes
+/// by construction and cannot drift.
+pub fn import_descriptor_blake3(receipt: &DockerImportReceipt) -> String {
+    format!("blake3:{}", blake3::hash(import_descriptor_canonical_json(receipt).as_bytes()).to_hex())
+}
+
+/// The JCS-canonicalized input-only import descriptor both digests hash — factored
+/// so [`import_identity_digest`] (sha256, the execution identity) and
+/// [`import_descriptor_blake3`] (blake3, the registry descriptor hash) cannot drift.
+fn import_descriptor_canonical_json(receipt: &DockerImportReceipt) -> String {
     let mut bases: Vec<&ResolvedBaseImage> = receipt.resolved_base_images.iter().collect();
     bases.sort_by(|a, b| a.original_ref.cmp(&b.original_ref));
     let inputs = serde_json::json!({
@@ -436,8 +455,7 @@ pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
         "import_options": serde_json::to_value(&receipt.import_options)
             .unwrap_or(serde_json::Value::Null),
     });
-    let canonical = serde_jcs::to_string(&inputs).unwrap_or_else(|_| inputs.to_string());
-    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
+    serde_jcs::to_string(&inputs).unwrap_or_else(|_| inputs.to_string())
 }
 
 /// One end-to-end Dockerfile import request (builder-host side).
@@ -830,6 +848,39 @@ mod tests {
                 assert_ne!(ids[i], ids[j]);
             }
         }
+    }
+
+    #[test]
+    fn descriptor_blake3_shares_the_identity_envelope() {
+        // ato#1002: import_descriptor_blake3 hashes the SAME input-only JCS envelope
+        // as import_identity_digest — same determinism, same input/output split.
+        let r = sample_receipt();
+        let d = import_descriptor_blake3(&r);
+        assert!(d.starts_with("blake3:") && d.len() == 7 + 64, "{d}");
+        assert_eq!(import_descriptor_blake3(&r.clone()), d, "must be deterministic");
+        // Base image ORDER must not matter (canonicalized by original_ref).
+        let mut swapped = r.clone();
+        swapped.resolved_base_images.reverse();
+        assert_eq!(import_descriptor_blake3(&swapped), d);
+        // OUTPUTS + derived fields must not matter (descriptor = inputs only).
+        let mut outputs_differ = r.clone();
+        outputs_differ.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        outputs_differ.exported_rootfs_digest = format!("sha256:{}", "ee".repeat(32));
+        outputs_differ.effective_dockerfile_sha256 = "dd".repeat(32);
+        outputs_differ.warnings = vec![DockerImportWarning::DockerUserIgnored];
+        assert_eq!(import_descriptor_blake3(&outputs_differ), d);
+        // INPUTS must matter — including every import option (identity discipline).
+        let mut input_differs = r.clone();
+        input_differs.dockerfile_sha256 = "00".repeat(32);
+        assert_ne!(import_descriptor_blake3(&input_differs), d);
+        let mut option_differs = r.clone();
+        option_differs.import_options.port_override = Some(8080);
+        assert_ne!(import_descriptor_blake3(&option_differs), d);
+        // A different hash family over the same bytes — never the sha256 relabeled.
+        assert_ne!(
+            d.trim_start_matches("blake3:"),
+            import_identity_digest(&r).trim_start_matches("sha256:")
+        );
     }
 
     #[test]
