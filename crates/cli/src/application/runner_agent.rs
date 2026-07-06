@@ -3626,7 +3626,9 @@ async fn handle_restore_snapshot_lease(
 ) {
     use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::binding_grants::{binding_namespace, preflight_resolve_names};
-    use crate::application::ready_state::binding_host::{bind_before_expose, issue_leases, spawn_lease_renewal, stop_scrub_over_vsock};
+    use crate::application::ready_state::binding_host::{
+        bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal, stop_scrub_over_vsock,
+    };
     use crate::application::ready_state::flags::{
         binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
@@ -3762,6 +3764,12 @@ async fn handle_restore_snapshot_lease(
         RestoreArtifactClass::Supervisor { binding_names } => Some(binding_names.clone()),
         RestoreArtifactClass::NoBinding => None,
     };
+    // v1.6 (ato#983) Slice 3 revision: whether this sealed artifact declares
+    // any durable state volumes — captured now (same "manifest is the single
+    // source of truth, moved into restore below" reasoning as above) so
+    // MountVolumes can be sent before any binding delivery.
+    let has_durable_state =
+        manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
     prof_mark!("verify_manifest_ms");
 
     // 4. Open the artifact's CAS + select the host backend (both fail-closed).
@@ -3929,8 +3937,12 @@ async fn handle_restore_snapshot_lease(
                 binding_ttl_ms(),
             )?;
             let bind_uds = uds.clone();
+            // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND —
+            // durable state is a restore-time binding too, and must be
+            // fresh-mounted before ANY binding delivery / bound-ready.
             // Blocking vsock connect + delivery — keep it off the async reactor.
             tokio::task::spawn_blocking(move || {
+                mount_volumes_before_expose(&bind_uds, has_durable_state, Duration::from_secs(10))?;
                 bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
             })
             .await

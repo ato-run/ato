@@ -25,7 +25,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use guest_agent::supervisor::{
     bindings_root, config_path, ChildWorkload, Supervisor, SupervisorConfig, Workload,
 };
-use guest_agent::volume_mount::{mount_all_volumes, unmount_all_volumes, RealVolumeMounter, VolumeSpec};
+use guest_agent::volume_mount::{
+    mount_all_volumes, unmount_all_volumes, RealVolumeMounter, VolumeMounter, VolumeSpec,
+};
 use guest_agent::vsock::{serve_vsock, DEFAULT_VSOCK_PORT};
 use guest_agent::{BindingSession, BindingSink, TmpfsBindingSink};
 use protocol::binding_control::AgentToHost;
@@ -56,10 +58,28 @@ struct AgentRuntime<S: BindingSink, W: Workload> {
     /// Digest snapshot the CURRENTLY RUNNING workload was started with
     /// (`None` = not running).
     running_digests: Option<std::collections::HashMap<BindingName, [u8; 32]>>,
-    /// v1.6 (ato#983) Slice 3: durable state volumes, mounted at boot (in
-    /// `main()`, before this runtime is ever driven) — kept here so a true
-    /// session-terminal `Stop` can unmount them on the way out.
+    /// v1.6 (ato#983) Slice 3: durable state volumes this capsule declares.
     volumes: Vec<VolumeSpec>,
+    /// v1.6 (ato#983) Slice 3 revision: whether `volumes` is currently
+    /// mounted. Mounting is a RESTORE-TIME binding (`MountVolumes`), never
+    /// done at boot/build — see `MountVolumes`'s doc comment for why. Starts
+    /// `true` when there is nothing to mount (a capsule with no durable
+    /// state needs no trigger at all). Tracked for idempotency (a repeat
+    /// `MountVolumes` is a no-op success) and so `Stop` only attempts to
+    /// unmount what was actually mounted — NOT used to gate workload start:
+    /// the host's own call ordering (always `MountVolumes` before any
+    /// `Deliver` on restore — see `mount_volumes_before_expose`) is what
+    /// keeps a real session from starting unmounted. A guest-side hard gate
+    /// here would be indistinguishable from BUILD's own placeholder-delivery
+    /// flow, which deliberately never sends `MountVolumes` at all (that's
+    /// the whole fix — mounting must never happen at build/boot) and must
+    /// still be able to start the workload to pass its health check.
+    volumes_mounted: bool,
+    /// v1.6 (ato#983) Slice 3 revision: injectable so tests can exercise the
+    /// full MountVolumes flow (success, failure, idempotent retry) without a
+    /// real Linux mount syscall or `blkid` — mirrors `S: BindingSink` /
+    /// `W: Workload` already being generic for exactly this reason.
+    mounter: Box<dyn VolumeMounter>,
 }
 
 impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
@@ -68,7 +88,9 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
         supervisor: Option<Supervisor<W>>,
         required: Vec<BindingName>,
         volumes: Vec<VolumeSpec>,
+        mounter: Box<dyn VolumeMounter>,
     ) -> Self {
+        let volumes_mounted = volumes.is_empty();
         AgentRuntime {
             session,
             supervisor,
@@ -76,6 +98,8 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
             digests: std::collections::HashMap::new(),
             running_digests: None,
             volumes,
+            volumes_mounted,
+            mounter,
         }
     }
 
@@ -108,6 +132,26 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
                 );
             }
         };
+
+        // v1.6 (ato#983) Slice 3 revision: MountVolumes is a restore-time
+        // binding, handled independently of the session/supervisor state
+        // machine below (mirrors StopWorkload's own early-return shape).
+        // Idempotent: a retry (or a capsule with nothing declared) is a
+        // harmless no-op success, never a re-mount-over-mounted attempt.
+        if let HostToAgent::MountVolumes = msg {
+            let resp = if self.volumes_mounted {
+                AgentToHost::VolumesMounted
+            } else {
+                match mount_all_volumes(self.mounter.as_ref(), &self.volumes) {
+                    Ok(()) => {
+                        self.volumes_mounted = true;
+                        AgentToHost::VolumesMounted
+                    }
+                    Err(e) => AgentToHost::Error { message: format!("mount volumes: {e}") },
+                }
+            };
+            return (serde_json::to_string(&resp).unwrap(), false);
+        }
 
         if let HostToAgent::StopWorkload = msg {
             let resp = match self.supervisor.as_mut() {
@@ -227,8 +271,12 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
         // and vsock serving ends too. The workload is stopped FIRST (above),
         // then every durable volume is unmounted — best-effort, logged, never
         // fatal, since the host is about to kill this VM outright regardless.
-        if is_stop {
-            unmount_all_volumes(&RealVolumeMounter, &self.volumes);
+        // Guarded on `volumes_mounted`: a session stopped before MountVolumes
+        // ever arrived (e.g. BUILD's own pre-seal StopWorkload/Stop sequence,
+        // where mounting deliberately never happens — see `MountVolumes`'s
+        // doc comment) has nothing to unmount.
+        if is_stop && self.volumes_mounted {
+            unmount_all_volumes(self.mounter.as_ref(), &self.volumes);
         }
         (serde_json::to_string(&resp).unwrap(), is_stop)
     }
@@ -250,15 +298,16 @@ fn main() -> std::io::Result<()> {
     // launching the workload unbound.
     let (supervisor, volumes) = match SupervisorConfig::load(&config_path()) {
         Ok(Some(cfg)) => {
-            // v1.6 (ato#983) Slice 3: mount every durable state volume BEFORE
-            // any service can possibly start — this happens once, here, at
-            // boot, strictly before `runtime` is ever `dispatch()`-ed (no
-            // control message has been read yet). Fail-closed: never launch a
-            // workload that expected durable state to already be mounted.
-            if let Err(e) = mount_all_volumes(&RealVolumeMounter, &cfg.volumes) {
-                eprintln!("ato-guest-agent: durable state mount failed: {e}");
-                std::process::exit(2);
-            }
+            // v1.6 (ato#983) Slice 3 revision: mounting durable state does
+            // NOT happen here anymore. This runs during BUILD's own cold
+            // boot too, and whatever happens here gets frozen into the
+            // snapshot — mounting at boot would freeze this restore-time-
+            // only filesystem state (page cache, block bitmaps) into that
+            // snapshot forever. Every later restore instead sends
+            // `HostToAgent::MountVolumes` fresh (see `AgentRuntime::dispatch`),
+            // the same restore-time-binding treatment already used for
+            // secrets. `cfg.volumes` is only carried through here so the
+            // runtime knows what to mount WHEN that arrives.
             let volumes = cfg.volumes.clone();
             (Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default)), volumes)
         }
@@ -269,7 +318,7 @@ fn main() -> std::io::Result<()> {
         }
     };
 
-    let mut runtime = AgentRuntime::new(session, supervisor, required, volumes);
+    let mut runtime = AgentRuntime::new(session, supervisor, required, volumes, Box::new(RealVolumeMounter));
 
     match mode.as_str() {
         "stdio" => {
@@ -372,7 +421,156 @@ mod tests {
         // Factory yields state-sharing spies (SpyWorkload clones share the Rc), so a
         // multi-service group aggregates its starts/stops into the one `state`.
         let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
-        (AgentRuntime::new(session, Some(sup), required, vec![]), state)
+        (AgentRuntime::new(session, Some(sup), required, vec![], Box::new(RealVolumeMounter)), state)
+    }
+
+    // ── v1.6 (ato#983) Slice 3 revision: MountVolumes as a restore-time binding ──
+
+    /// Records mount/unmount calls instead of shelling out to `blkid`/`mount`
+    /// (which don't exist on non-Linux dev/CI hosts) — same style as
+    /// `volume_mount.rs`'s own test-only `FakeMounter`, duplicated locally
+    /// here since that one is private to its module.
+    #[derive(Clone, Default)]
+    struct FakeMounter {
+        fail_mount: bool,
+        mounts: Rc<RefCell<Vec<(String, String)>>>,
+    }
+    impl guest_agent::volume_mount::VolumeMounter for FakeMounter {
+        fn resolve_device(&self, fs_label: &str) -> Result<std::path::PathBuf, String> {
+            Ok(std::path::PathBuf::from(format!("/dev/fake-{fs_label}")))
+        }
+        fn mount(&self, device: &std::path::Path, target: &std::path::Path) -> Result<(), String> {
+            if self.fail_mount {
+                return Err("fake: injected mount failure".to_string());
+            }
+            self.mounts.borrow_mut().push((device.display().to_string(), target.display().to_string()));
+            Ok(())
+        }
+        fn sync_and_umount(&self, _target: &std::path::Path) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn runtime_with_supervisor_and_volume(
+        dir: &std::path::Path,
+        mounter: FakeMounter,
+    ) -> (AgentRuntime<TmpfsBindingSink, SpyWorkload>, Rc<SpyState>) {
+        let spy = SpyWorkload::default();
+        let state = spy.0.clone();
+        let volumes = vec![guest_agent::volume_mount::VolumeSpec {
+            state_name: "dbdata".to_string(),
+            target: "/ato/state/dbdata".to_string(),
+            fs_label: "ASdeadbeefcafe01".to_string(),
+            drive_id: "state0".to_string(),
+            size_mb: 64,
+        }];
+        let cfg = SupervisorConfig {
+            cmd: vec!["python3".into(), "app.py".into()],
+            cwd: "/app".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
+            services: Vec::new(),
+            volumes: volumes.clone(),
+        };
+        let required = vec![BindingName::parse("openai").unwrap()];
+        let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
+        let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
+        (AgentRuntime::new(session, Some(sup), required, volumes, Box::new(mounter)), state)
+    }
+
+    #[test]
+    fn deliver_without_ever_sending_mount_volumes_still_starts_the_workload() {
+        // Deliberately NOT gated on the guest side: BUILD's own placeholder-
+        // delivery flow (firecracker.rs) never sends MountVolumes at all —
+        // by design, since mounting there would freeze filesystem state into
+        // the snapshot (the original bug) — and it MUST still be able to
+        // start the workload to pass its health check. The guest cannot
+        // distinguish that flow from a real restore that skipped
+        // MountVolumes by mistake, so this responsibility lives entirely in
+        // the HOST's call ordering (see `mount_volumes_before_expose`'s doc
+        // comment) — always MountVolumes before Deliver on an actual
+        // restore, never on build.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, spy) = runtime_with_supervisor_and_volume(dir.path(), FakeMounter::default());
+        let (resp, _) = rt.dispatch(&deliver_line("openai", "sk-KEY"));
+        assert!(resp.contains("ack"), "{resp}");
+        assert!(spy.running.borrow().to_owned(), "matches BUILD's own flow, which never mounts");
+    }
+
+    #[test]
+    fn mount_volumes_then_deliver_starts_the_workload() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounter = FakeMounter::default();
+        let mounts = mounter.mounts.clone();
+        let (mut rt, spy) = runtime_with_supervisor_and_volume(dir.path(), mounter);
+
+        let (resp, stop) =
+            rt.dispatch(&serde_json::to_string(&HostToAgent::MountVolumes).unwrap());
+        assert!(!stop);
+        assert!(resp.contains("volumes_mounted"), "{resp}");
+        assert_eq!(mounts.borrow().len(), 1, "the durable volume was actually mounted");
+        assert_eq!(mounts.borrow()[0].1, "/ato/state/dbdata");
+
+        let (resp, _) = rt.dispatch(&deliver_line("openai", "sk-KEY"));
+        assert!(resp.contains("ack"), "{resp}");
+        assert!(spy.running.borrow().to_owned(), "workload starts once mounted AND bound-ready");
+    }
+
+    #[test]
+    fn mount_volumes_is_idempotent_a_second_call_does_not_remount() {
+        let dir = tempfile::tempdir().unwrap();
+        let mounter = FakeMounter::default();
+        let mounts = mounter.mounts.clone();
+        let (mut rt, _spy) = runtime_with_supervisor_and_volume(dir.path(), mounter);
+
+        rt.dispatch(&serde_json::to_string(&HostToAgent::MountVolumes).unwrap());
+        let (resp, _) = rt.dispatch(&serde_json::to_string(&HostToAgent::MountVolumes).unwrap());
+        assert!(resp.contains("volumes_mounted"), "a repeat call is still a success, not an error: {resp}");
+        assert_eq!(mounts.borrow().len(), 1, "the second MountVolumes must not re-mount");
+    }
+
+    #[test]
+    fn mount_volumes_failure_is_reported_and_does_not_flip_mounted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, _spy) =
+            runtime_with_supervisor_and_volume(dir.path(), FakeMounter { fail_mount: true, ..Default::default() });
+
+        let (resp, _) = rt.dispatch(&serde_json::to_string(&HostToAgent::MountVolumes).unwrap());
+        assert!(resp.contains("error"), "{resp}");
+        assert!(resp.contains("injected mount failure"), "{resp}");
+        assert!(!rt.volumes_mounted, "a failed mount must not be recorded as mounted");
+
+        // A retry (e.g. the host reconnecting after fixing the underlying
+        // issue) must actually attempt the mount again, not short-circuit
+        // on a false "already mounted" idempotency check.
+        rt.mounter = Box::new(FakeMounter::default());
+        let (resp, _) = rt.dispatch(&serde_json::to_string(&HostToAgent::MountVolumes).unwrap());
+        assert!(resp.contains("volumes_mounted"), "a retry with a working mounter must succeed: {resp}");
+    }
+
+    #[test]
+    fn no_volumes_declared_needs_no_mount_volumes_call() {
+        // A capsule with no durable state is trivially "mounted" from the
+        // start (volumes.is_empty()) — the ordinary no-volume tests already
+        // cover this via `runtime_with_supervisor`, exercised here again
+        // explicitly as the documented contract.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, spy) = runtime_with_supervisor(dir.path());
+        rt.dispatch(&deliver_line("openai", "sk-KEY"));
+        assert!(spy.running.borrow().to_owned(), "no volumes declared ⇒ nothing blocks start");
+    }
+
+    #[test]
+    fn build_flow_never_mounts_volumes_at_construction() {
+        // The bug this whole revision exists to fix: mounting must never
+        // happen implicitly at AgentRuntime construction (which mirrors
+        // main()'s boot sequence, frozen into the BUILD-time snapshot) —
+        // only an explicit MountVolumes control message may trigger it.
+        let dir = tempfile::tempdir().unwrap();
+        let mounter = FakeMounter::default();
+        let mounts = mounter.mounts.clone();
+        let (_rt, _spy) = runtime_with_supervisor_and_volume(dir.path(), mounter);
+        assert!(mounts.borrow().is_empty(), "constructing the runtime must not mount anything");
     }
 
     #[test]
@@ -491,7 +689,7 @@ mod tests {
     fn stopworkload_without_a_supervisor_is_a_clean_no_op() {
         // A no-binding capsule has no supervisor; StopWorkload must not error.
         let mut rt: AgentRuntime<TmpfsBindingSink, ChildWorkload> =
-            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![]);
+            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![], Box::new(RealVolumeMounter));
         let (resp, _) = rt.dispatch(&serde_json::to_string(&HostToAgent::StopWorkload).unwrap());
         assert!(resp.contains("workload_stopped") && resp.contains("\"was_running\":false"), "{resp}");
     }
@@ -499,7 +697,7 @@ mod tests {
     #[test]
     fn malformed_line_never_echoes_input() {
         let mut rt: AgentRuntime<TmpfsBindingSink, ChildWorkload> =
-            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![]);
+            AgentRuntime::new(BindingSession::new(vec![], TmpfsBindingSink::at_default()), None, vec![], vec![], Box::new(RealVolumeMounter));
         let (resp, _) = rt.dispatch("{\"kind\":\"deliver\",\"secret\":\"leak-me\"}");
         assert!(resp.contains("malformed"), "{resp}");
         assert!(!resp.contains("leak-me"), "a malformed control line must never be echoed");

@@ -149,6 +149,37 @@ pub(crate) fn issue_leases(
     Ok(leases)
 }
 
+/// v1.6 (ato#983) Slice 3 revision: mount every durable-state volume this
+/// capsule declares — a RESTORE-TIME binding, exactly like `Deliver`, sent
+/// BEFORE any binding delivery and BEFORE bound-ready can ever become true.
+/// Found live on real KVM hardware: mounting during BUILD (frozen into the
+/// snapshot) leaves the guest kernel's ext4 metadata/page cache stuck at
+/// build-time content; a LATER restore attaches a backing file whose real
+/// bytes have since changed (a prior run's writes), and the stale cache
+/// reading fresh disk blocks trips ext4's metadata checksum validation
+/// (`EBADMSG`). Treating the mount as a restore-time binding — never baked
+/// into the snapshot, always fresh against whatever is on disk right now —
+/// closes that gap. A no-op (`Ok`, no vsock round trip) for a capsule that
+/// declares no durable state at all; the caller must still call this
+/// unconditionally rather than branching on "does this capsule have state",
+/// since that decision already lives here.
+pub(crate) fn mount_volumes_before_expose(
+    vsock_uds: &std::path::Path,
+    has_durable_state: bool,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    if !has_durable_state {
+        return Ok(());
+    }
+    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, timeout)
+        .context("connect guest-agent over vsock (mount volumes)")?;
+    match channel.request(HostToAgent::MountVolumes)? {
+        AgentToHost::VolumesMounted => Ok(()),
+        AgentToHost::Error { message } => bail!("durable state mount failed: {message}"),
+        other => bail!("unexpected agent response to MountVolumes: {other:?}"),
+    }
+}
+
 /// PR D2: connect the guest-agent over the restored session's vsock UDS, deliver the
 /// leases, and block until bound-ready — **fail closed** on any failure. The caller
 /// must NOT expose traffic unless this returns `Ok`.
