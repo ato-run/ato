@@ -103,6 +103,45 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
         }
     }
 
+    /// v1.7 (ato#994): a ZERO-binding, ZERO-volume supervisor config — a
+    /// Dockerfile import with no secrets — is vacuously bound-ready with
+    /// nothing left to mount, and NO host message will ever arrive to trigger
+    /// the start (Deliver and MountVolumes are the existing triggers, and
+    /// there is nothing to deliver or mount). Evaluate the gate ONCE at
+    /// startup so the workload starts immediately. Deliberately scoped to
+    /// exactly the vacuous case: any required binding keeps the v1.2 bind
+    /// gate (`bound_ready` false here), any declared volume keeps the v1.6
+    /// mount-before-start contract (`volumes_mounted` false here) — both
+    /// no-op this method and stay message-driven, byte-for-byte as before.
+    /// A start failure is surfaced on the console and left to the host's
+    /// health verification (which fails honestly) — there is no host channel
+    /// to report an Error to yet.
+    fn drive_initial_start(&mut self) {
+        if !self.volumes_mounted || !self.session.bound_ready(now_ms()) {
+            return;
+        }
+        if let Some(sup) = self.supervisor.as_mut() {
+            if !sup.started() {
+                match sup.on_bound_ready(true) {
+                    Ok(started) => {
+                        if started {
+                            self.running_digests = Some(
+                                self.required
+                                    .iter()
+                                    .filter_map(|n| self.digests.get(n).map(|d| (n.clone(), *d)))
+                                    .collect(),
+                            );
+                            eprintln!("ato-guest-agent: vacuously bound-ready — workload started at boot");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ato-guest-agent: initial workload start failed: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle one control message → (response JSON, should-stop). `StopWorkload` is
     /// routed to the supervisor (not the binding session); every other message goes
     /// to the session, after which the supervisor is driven from the settled binding
@@ -319,6 +358,9 @@ fn main() -> std::io::Result<()> {
     };
 
     let mut runtime = AgentRuntime::new(session, supervisor, required, volumes, Box::new(RealVolumeMounter));
+    // v1.7 (ato#994): zero-binding/zero-volume configs start their workload
+    // now; every other config no-ops here and stays message-driven.
+    runtime.drive_initial_start();
 
     match mode.as_str() {
         "stdio" => {
@@ -401,6 +443,59 @@ mod tests {
             100_000_000_000_000, // ~year 5138
         );
         serde_json::to_string(&HostToAgent::Deliver(lease.to_delivery())).unwrap()
+    }
+
+    /// v1.7 (ato#994): a ZERO-binding, ZERO-volume supervisor runtime — the
+    /// Dockerfile-import shape (no secrets, no durable state).
+    fn runtime_with_vacuous_supervisor(
+        dir: &std::path::Path,
+    ) -> (AgentRuntime<TmpfsBindingSink, SpyWorkload>, Rc<SpyState>) {
+        let spy = SpyWorkload::default();
+        let state = spy.0.clone();
+        let cfg = SupervisorConfig {
+            cmd: vec!["/app/serve".into()],
+            cwd: "/".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::new(),
+            services: Vec::new(),
+            volumes: Vec::new(),
+        };
+        let session = BindingSession::new(vec![], TmpfsBindingSink::new(dir));
+        let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
+        (AgentRuntime::new(session, Some(sup), vec![], vec![], Box::new(RealVolumeMounter)), state)
+    }
+
+    #[test]
+    fn vacuous_supervisor_starts_workload_at_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, state) = runtime_with_vacuous_supervisor(dir.path());
+        assert_eq!(state.starts.borrow().len(), 0, "nothing started before the initial drive");
+        rt.drive_initial_start();
+        assert_eq!(state.starts.borrow().len(), 1, "zero-binding/zero-volume config must start at boot");
+        assert!(rt.running_digests.as_ref().is_some_and(|d| d.is_empty()));
+        // Idempotent: a second drive never double-starts.
+        rt.drive_initial_start();
+        assert_eq!(state.starts.borrow().len(), 1);
+    }
+
+    #[test]
+    fn initial_drive_noops_when_bindings_are_required() {
+        // The v1.2 bind gate is untouched: a required binding keeps the start
+        // message-driven (placeholder/real delivery), never at boot.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, state) = runtime_with_supervisor(dir.path());
+        rt.drive_initial_start();
+        assert_eq!(state.starts.borrow().len(), 0, "a required binding must keep the bind gate");
+    }
+
+    #[test]
+    fn initial_drive_noops_when_volumes_are_declared() {
+        // The v1.6 mount-before-start contract is untouched: a declared volume
+        // keeps the start behind MountVolumes.
+        let dir = tempfile::tempdir().unwrap();
+        let (mut rt, state) = runtime_with_supervisor_and_volume(dir.path(), FakeMounter::default());
+        rt.drive_initial_start();
+        assert_eq!(state.starts.borrow().len(), 0, "a declared volume must keep mount-before-start");
     }
 
     fn runtime_with_supervisor(
