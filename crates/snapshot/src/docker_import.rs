@@ -129,11 +129,29 @@ impl DockerImportSpec {
     }
 }
 
+/// The import-request options that shape the produced artifact BEYOND the
+/// Dockerfile/context/base inputs. Every field here changes the plan or the
+/// packed rootfs, so all of them are IDENTITY inputs (review finding on
+/// ato#994 PR 5: the same Dockerfile with `--port 8080` vs `--port 3000`, a
+/// different readiness path, a different secret policy, or a different ext4
+/// size is a DIFFERENT artifact — an identity that ignores them poisons any
+/// artifact cache / receipt gate keyed on it). Non-secret; safe in a receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DockerImportOptions {
+    pub secret_env_policy: SecretEnvPolicy,
+    /// Explicit public port (wins over EXPOSE). `None` = derived from EXPOSE.
+    pub port_override: Option<u16>,
+    /// Explicit readiness path. `None` = synthesized `GET /`.
+    pub readiness_http_path: Option<String>,
+    /// Packed ext4 size — changes the artifact bytes, therefore identity.
+    pub size_mib: u64,
+}
+
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
 /// (not replacing) the existing [`crate::rootfs_builder::RootfsReceipt`]; the artifact
 /// identity for a Snapshot Ready candidate must cover every field that changes what
 /// was built: dockerfile sha256, build context digest, resolved base digests, build
-/// args, importer version.
+/// args, import options, importer version.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DockerImportReceipt {
     /// [`DOCKER_IMPORTER_VERSION`] at build time.
@@ -143,8 +161,14 @@ pub struct DockerImportReceipt {
     /// [`DOCKER_IMPORT_PLATFORM`] in v0.
     pub platform: String,
     pub dockerfile_path: String,
-    /// sha256 (lowercase hex) of the Dockerfile bytes actually built.
+    /// sha256 (lowercase hex) of the ORIGINAL Dockerfile bytes (as authored).
     pub dockerfile_sha256: String,
+    /// sha256 (lowercase hex) of the EFFECTIVE Dockerfile the build actually
+    /// consumed: the original with every registry `FROM` rewritten to its
+    /// resolved digest (stage aliases preserved, prior-stage `FROM`s
+    /// untouched). Populated by the build slice — this is what makes the
+    /// digest pin an enforced BUILD INPUT, not an advisory record.
+    pub effective_dockerfile_sha256: String,
     /// Digest over the build context actually sent to the build (deterministic walk;
     /// computed by the importer PR).
     pub build_context_digest: String,
@@ -157,6 +181,8 @@ pub struct DockerImportReceipt {
     pub exported_rootfs_digest: String,
     /// Build args used (already secret-screened at [`DockerImportSpec::new`]).
     pub build_args: BTreeMap<String, String>,
+    /// The request options that shaped the plan/rootfs — identity inputs.
+    pub import_options: DockerImportOptions,
     pub warnings: Vec<DockerImportWarning>,
 }
 
@@ -253,7 +279,10 @@ pub enum EnvSecretClass {
 }
 
 /// Import policy for secret-looking `ENV` keys with placeholder/empty values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serialized snake_case: it is part of [`DockerImportOptions`] — an IDENTITY
+/// input (the policy changes which env vars become bindings, i.e. the artifact).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretEnvPolicy {
     /// Default: any secret-looking ENV (literal OR placeholder) rejects the import.
     Reject,
@@ -584,6 +613,7 @@ mod tests {
             platform: DOCKER_IMPORT_PLATFORM.into(),
             dockerfile_path: "Dockerfile".into(),
             dockerfile_sha256: "ab".repeat(32),
+            effective_dockerfile_sha256: "ab".repeat(32),
             build_context_digest: "cd".repeat(32),
             resolved_base_images: vec![ResolvedBaseImage {
                 original_ref: "node:20".into(),
@@ -592,6 +622,12 @@ mod tests {
             final_image_digest: "sha256:".to_string() + &"01".repeat(32),
             exported_rootfs_digest: "sha256:".to_string() + &"23".repeat(32),
             build_args: BTreeMap::new(),
+            import_options: DockerImportOptions {
+                secret_env_policy: SecretEnvPolicy::ConvertPlaceholders,
+                port_override: Some(8080),
+                readiness_http_path: Some("/health".into()),
+                size_mib: 2048,
+            },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
         let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&receipt).unwrap()).unwrap();
@@ -599,5 +635,11 @@ mod tests {
         assert_eq!(v["build_tool"], "buildah");
         assert_eq!(v["resolved_base_images"][0]["original_ref"], "node:20");
         assert_eq!(v["warnings"][0], "docker_user_ignored");
+        // Import options are identity inputs and must serialize stably.
+        assert_eq!(v["import_options"]["secret_env_policy"], "convert_placeholders");
+        assert_eq!(v["import_options"]["port_override"], 8080);
+        assert_eq!(v["import_options"]["readiness_http_path"], "/health");
+        assert_eq!(v["import_options"]["size_mib"], 2048);
+        assert_eq!(v["effective_dockerfile_sha256"], "ab".repeat(32));
     }
 }
