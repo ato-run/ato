@@ -58,6 +58,8 @@ use snapshot::{
     SanitizerContract, SnapshotBackend, SupervisorBindings, no_secret_scan,
 };
 
+mod upload;
+
 /// PEM-marker literals: a GATE for the sealed `manifest.json` (small, structured,
 /// builder-authored — a PEM marker there is always wrong) and an ADVISORY sweep over
 /// the CAS.
@@ -95,6 +97,10 @@ impl Config {
         let args: Vec<String> = std::env::args().collect();
         let flag = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
         let has = |name: &str| args.iter().any(|a| a == name);
+        // ato#1002: the artifact-store env (ATO_ARTIFACT_S3_*) is all-or-nothing;
+        // a PARTIAL set is an operator error that must stop the daemon at
+        // startup, never surface per-job (process_job re-reads the same env).
+        upload::ArtifactStore::from_env().map_err(|e| anyhow!(e))?;
         Ok(Config {
             api_url: std::env::var("ATO_API_URL").ok().or_else(|| flag("--api-url")).context("ATO_API_URL (or --api-url) required")?,
             token: std::env::var("SNAPSHOT_BUILDER_AGENT_TOKEN").context("SNAPSHOT_BUILDER_AGENT_TOKEN required")?,
@@ -843,7 +849,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         manifest_out.execution_id.as_deref(),
         manifest_out.runner_class_id.as_ref().map(|c| c.to_string()),
     )?;
-    let artifact_location = format!("cas://{}/{}", job.id, artifact_manifest_hash);
+    let artifact_location = upload::cas_location(&job.id, &artifact_manifest_hash);
 
     // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
     // names <work>/<job_id>/{manifest.json, cas/}, and a runner restores by loading
@@ -856,6 +862,21 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         return Err(fail("no_secret_scan", "sealed manifest json failed the no-secret scan".into()));
     }
     std::fs::write(jobdir.join("manifest.json"), &manifest_json).map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
+
+    // 8. ato#1002 Snapshot Serving v1: with the artifact store configured (all
+    // four ATO_ARTIFACT_S3_* vars — validated all-or-nothing at startup),
+    // package {manifest.json, cas/} into one artifact.tar.gz and upload it
+    // BEFORE the sealed ack; the registered location then names the remote
+    // store ("r2://<bucket>/<job_id>/<artifact_manifest_hash>"). Upload failure
+    // ⇒ failed ack at artifact_upload — never sealed-without-bytes. Absent
+    // config keeps v1 byte-identical: the same-host cas:// location above, no
+    // packing, no upload.
+    let artifact_location = match upload::ArtifactStore::from_env().map_err(|e| fail("artifact_upload", e))? {
+        Some(store) => store
+            .pack_and_upload(&upload::SystemImportCommandRunner, &jobdir, &job.id, &artifact_manifest_hash)
+            .map_err(|e| fail("artifact_upload", e))?,
+        None => artifact_location,
+    };
 
     Ok(Artifact {
         capsule_manifest_hash: produced.capsule_manifest_hash,
