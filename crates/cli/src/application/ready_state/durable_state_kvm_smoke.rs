@@ -184,6 +184,28 @@ fn wait_for_health(addr: &str, tries: u32) -> anyhow::Result<()> {
     anyhow::bail!("/healthz never returned 200 after {tries} tries")
 }
 
+/// A fresh guest network path (tap re-up after the previous session's
+/// teardown) can drop the very first connection attempt even once
+/// `/healthz` has already answered once — this retries a plain connection-
+/// level failure (not a non-200 status, which is a real application-level
+/// answer and returned immediately) a few times before giving up, so a
+/// transient reconnect blip doesn't fail the whole smoke.
+fn http_get_retrying(addr: &str, path: &str, timeout: Duration, tries: u32) -> anyhow::Result<(u16, String)> {
+    let mut last_err = None;
+    for attempt in 0..tries {
+        match http_get(addr, path, timeout) {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < tries {
+                    std::thread::sleep(Duration::from_millis(300));
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{path}: no attempts made")))
+}
+
 struct BuiltCapsule {
     sealed: BuildReadyStateReceipt,
     owner_scope: String,
@@ -280,7 +302,7 @@ fn restore_and_bind(
         .map_err(|e| anyhow::anyhow!("bind_before_expose({label}): {e}"))?;
     let addr = session.workload_addr.clone().ok_or_else(|| anyhow::anyhow!("({label}) no workload_addr"))?;
     wait_for_health(&addr, 20).map_err(|e| anyhow::anyhow!("({label}) {e}"))?;
-    let (code, body) = http_get(&addr, "/secret-check", Duration::from_secs(2))?;
+    let (code, body) = http_get_retrying(&addr, "/secret-check", Duration::from_secs(2), 5)?;
     anyhow::ensure!(code == 200 && body == "yes", "({label}) real secret did not reach the service (got {body:?})");
     Ok(session)
 }
@@ -361,9 +383,9 @@ fn durable_state_live_smoke() {
     let marker = format!("durable-state-smoke-marker-{}", now_ms());
     let session = restore_and_bind(&backend, &store, workdir, "a-run1", &a.sealed).expect("restore a run1");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, _) = http_get(&addr, &format!("/write?value={marker}"), Duration::from_secs(5)).expect("write");
+    let (code, _) = http_get_retrying(&addr, &format!("/write?value={marker}"), Duration::from_secs(5), 5).expect("write");
     assert_eq!(code, 200, "write must succeed");
-    let (code, body) = http_get(&addr, "/read", Duration::from_secs(5)).expect("read back");
+    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read back");
     assert_eq!((code, body.as_str()), (200, marker.as_str()), "read-after-write within the same run");
     stop_session(&backend, session).expect("stop a run1");
 
@@ -371,7 +393,7 @@ fn durable_state_live_smoke() {
     // survived stop/restore (the whole point of durable state). ──
     let session = restore_and_bind(&backend, &store, workdir, "a-run2", &a.sealed).expect("restore a run2");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, body) = http_get(&addr, "/read", Duration::from_secs(5)).expect("read after restore");
+    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read after restore");
     assert_eq!(
         (code, body.as_str()),
         (200, marker.as_str()),
@@ -384,7 +406,7 @@ fn durable_state_live_smoke() {
     // into the (shared, content-addressed) rootfs and never globally shared. ──
     let session = restore_and_bind(&backend, &store, workdir, "b-run1", &b.sealed).expect("restore b run1");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, body) = http_get(&addr, "/read", Duration::from_secs(5)).expect("read from b");
+    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read from b");
     assert_eq!((code, body.as_str()), (200, ""), "a differently-scoped capsule must never see another's durable state");
     stop_session(&backend, session).expect("stop b run1");
 
