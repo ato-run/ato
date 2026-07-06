@@ -30,6 +30,7 @@
 pub mod agent_channel;
 mod backend;
 pub mod bench;
+pub mod docker_import;
 mod fake;
 mod firecracker;
 mod kata;

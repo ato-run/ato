@@ -42,14 +42,17 @@ const MIN_ENTROPY_CLASS_COUNT: usize = 2;
 const ENTROPY_BITS_THRESHOLD: f64 = 3.5;
 
 /// Known provider-key prefixes (mirrors cli `leip` + capsule publisher tables).
-const PROVIDER_KEY_PREFIXES: &[&str] = &[
+/// `pub(crate)`: also the single source of truth for the Docker-import ENV
+/// secret-safety classifier (`docker_import`), so the two policies cannot drift.
+pub(crate) const PROVIDER_KEY_PREFIXES: &[&str] = &[
     "sk-", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "AKIA", "ASIA", "xoxb-", "xoxp-",
     "AIza", "ya29.", "glpat-",
 ];
 
 /// Env-NAME substrings that mark a value as sensitive (mirrors capsule
-/// `SENSITIVE_ENV_MARKERS`). Matched ASCII-uppercased.
-const SENSITIVE_ENV_MARKERS: &[&str] = &[
+/// `SENSITIVE_ENV_MARKERS`). Matched ASCII-uppercased. `pub(crate)`: shared
+/// with the Docker-import ENV secret-safety classifier (`docker_import`).
+pub(crate) const SENSITIVE_ENV_MARKERS: &[&str] = &[
     "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "ACCESS",
 ];
 
