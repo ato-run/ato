@@ -37,6 +37,7 @@ use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
     materialize_source,
 };
+use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
     SanitizerContract, SnapshotBackend, SupervisorBindings, no_secret_scan,
@@ -410,10 +411,26 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(declared_execution_id),
-            supervisor: spec
-                .supervisor
-                .as_ref()
-                .map(|s| SupervisorBindings { binding_names: s.binding_names.clone() }),
+            supervisor: spec.supervisor.as_ref().map(|s| {
+                // v1.6 (ato#983) Slice 2: flatten every service's durable state
+                // volumes into one list (the backend attaches them as drives; it
+                // doesn't need per-service association — that's Slice 3's job,
+                // via the target path baked into supervisor.json). owner_scope
+                // reuses the SAME identity the OCI/container persistent-state
+                // path already keys its registry on
+                // (`capsule::foundation::types::manifest_validation::persistent_state_owner_scope`)
+                // — one definition of "whose durable state is this", not two.
+                let volumes: Vec<DurableVolumeSpec> = s
+                    .services
+                    .iter()
+                    .flatten()
+                    .flat_map(|svc| &svc.volumes)
+                    .map(|v| DurableVolumeSpec { state_name: v.state_name.clone(), size_mb: v.size_mb })
+                    .collect();
+                let state_owner_scope =
+                    if volumes.is_empty() { None } else { manifest.persistent_state_owner_scope() };
+                SupervisorBindings { binding_names: s.binding_names.clone(), state_volumes: volumes, state_owner_scope }
+            }),
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
     let manifest_out = receipt.manifest.clone();

@@ -152,6 +152,11 @@ impl SnapshotBackend for FakeSnapshotBackend {
                 binding_names: s.binding_names.clone(),
                 page_hygiene_boot_args: false,
                 placeholder_absent_from_seal: None,
+                // v1.6 (ato#983) Slice 2: recorded honestly (round-trip fidelity for
+                // tests asserting receipt content) — the Fake backend attaches no
+                // real device, same as it boots no real kernel.
+                state_volumes: s.state_volumes.clone(),
+                state_owner_scope: s.state_owner_scope.clone(),
             }),
         };
 
@@ -431,6 +436,8 @@ mod tests {
         let mut input = build_input(&store, vec![]);
         input.supervisor = Some(crate::backend::SupervisorBindings {
             binding_names: vec!["openai_api_key".to_string()],
+            state_volumes: vec![],
+            state_owner_scope: None,
         });
         let receipt = FakeSnapshotBackend::new().build_ready_state(input).unwrap();
         let sup = receipt.manifest.supervisor_build.as_ref().expect("supervisor receipt");

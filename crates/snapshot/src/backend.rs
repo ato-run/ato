@@ -214,10 +214,22 @@ pub struct BuildLayers {
 /// health, then `StopWorkload` + `Revoke` every placeholder so the snapshot is
 /// taken with the workload down and the tmpfs bindings scrubbed. Names only —
 /// the placeholder values are generated inside the backend and never stored.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupervisorBindings {
     /// The binding names the guest rootfs requires (its agent argv), verbatim.
     pub binding_names: Vec<String>,
+    /// v1.6 (ato#983) Slice 2: this build's durable state volumes (from
+    /// `ServiceBuildSpec.volumes`, flattened across services), if any. Each is
+    /// attached as a writable, non-root Firecracker drive — see
+    /// [`crate::state_volume`]. Empty ⇒ no behavior change (no drives beyond
+    /// rootfs are attached, identical to before this slice).
+    pub state_volumes: Vec<crate::state_volume::DurableVolumeSpec>,
+    /// v1.6 (ato#983) Slice 2: the stable identity a durable volume's backing
+    /// file/lock path is keyed on (owner + capsule instance, NOT any
+    /// session/run/execution id — see `state_volume::volume_path`). Required
+    /// (fail-closed) whenever `state_volumes` is non-empty; a path could
+    /// otherwise not be recomputed identically at the next restore.
+    pub state_owner_scope: Option<String>,
 }
 
 /// Inputs to [`SnapshotBackend::build_ready_state`].

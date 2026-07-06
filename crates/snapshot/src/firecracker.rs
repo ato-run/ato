@@ -363,6 +363,22 @@ impl Drop for BuildLock {
     }
 }
 
+/// v1.6 (ato#983) Slice 2: releases every held durable-state-volume lock when
+/// dropped. Used ONLY for the scope of a single `build_ready_state` call
+/// (like `BuildLock` above) — a build is a temporary boot-to-snapshot, not a
+/// live session, so its volume locks are released the moment it returns
+/// (success or error) rather than surviving until `stop()` (that longer-lived
+/// case is `restore()`'s job — see the `.fc-session.json`-recorded locks
+/// released in `stop()`).
+struct VolumeLocksGuard(Vec<PathBuf>);
+impl Drop for VolumeLocksGuard {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            crate::state_volume::release_volume_lock(p);
+        }
+    }
+}
+
 impl FirecrackerBackend {
     fn acquire_lock(&self, owner: &str) -> Result<(), SnapshotError> {
         std::fs::create_dir_all(&self.config.work_root).map_err(|e| self.backend_err(e.to_string()))?;
@@ -550,6 +566,19 @@ impl FirecrackerBackend {
         fc.api(self, "PUT", "/network-interfaces/eth0", Some(&json!({
             "iface_id": "eth0", "host_dev_name": self.config.tap_dev
         }).to_string()))?;
+        Ok(())
+    }
+
+    /// v1.6 (ato#983) Slice 2: attach each durable state volume as a writable,
+    /// non-root drive, in the SAME deterministic order (`state0`, `state1`, ...)
+    /// as [`crate::state_volume::state_drive_configs`]. A no-op when `paths` is
+    /// empty — `configure_boot` above is untouched, so a no-state-volume build
+    /// PUTs the exact same drives as before this slice (byte-identical).
+    fn configure_state_drives(&self, fc: &FcProcess, paths: &[PathBuf]) -> Result<(), SnapshotError> {
+        for cfg in crate::state_volume::state_drive_configs(paths) {
+            let drive_id = cfg["drive_id"].as_str().expect("state_drive_configs always sets drive_id");
+            fc.api(self, "PUT", &format!("/drives/{drive_id}"), Some(&cfg.to_string()))?;
+        }
         Ok(())
     }
 
@@ -1137,6 +1166,50 @@ impl SnapshotBackend for FirecrackerBackend {
         let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
         let path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
 
+        // v1.6 (ato#983) Slice 2: ensure + lock every durable state volume BEFORE
+        // boot, so the backing file exists when Firecracker attaches it as a
+        // drive. Sorted by state_name for deterministic drive_id assignment
+        // (state0, state1, ...) — same order `state_volume::state_drive_configs`
+        // and restore both use. The lock is held only for this build call (like
+        // the existing `_lock`/`BuildLock` above) via `_state_volume_locks`
+        // (Drop-released on ANY return path, success or error) — a build here is
+        // a temporary boot-to-snapshot, not the long-lived session; `restore()`
+        // acquires its OWN lock, held until `stop()`.
+        let mut state_drive_paths: Vec<PathBuf> = Vec::new();
+        let mut state_volume_lock_paths: Vec<PathBuf> = Vec::new();
+        if let Some(sup) = &input.supervisor
+            && !sup.state_volumes.is_empty()
+        {
+            let owner_scope = sup.state_owner_scope.as_deref().ok_or_else(|| {
+                self.backend_err(
+                    "durable state volumes require state_owner_scope (cannot compute a stable \
+                     backing-file path without it)",
+                )
+            })?;
+            let mut volumes = sup.state_volumes.clone();
+            volumes.sort_by(|a, b| a.state_name.cmp(&b.state_name));
+            for vol in &volumes {
+                let vpath = crate::state_volume::volume_path(&self.config.work_root, owner_scope, &vol.state_name);
+                let lpath = crate::state_volume::lock_path(&self.config.work_root, owner_scope, &vol.state_name);
+                crate::state_volume::acquire_volume_lock(&lpath).map_err(|e| self.backend_err(e))?;
+                state_volume_lock_paths.push(lpath);
+                let label = crate::state_volume::volume_label(owner_scope, &vol.state_name);
+                if let Err(e) = crate::state_volume::ensure_state_volume(
+                    &crate::state_volume::Mkfsext4Formatter,
+                    &vpath,
+                    vol.size_mb,
+                    &label,
+                ) {
+                    for l in &state_volume_lock_paths {
+                        crate::state_volume::release_volume_lock(l);
+                    }
+                    return Err(self.backend_err(e));
+                }
+                state_drive_paths.push(vpath);
+            }
+        }
+        let _state_volume_locks = VolumeLocksGuard(state_volume_lock_paths);
+
         // Build always runs in the root namespace (default config, netns=None).
         self.net_up(port)?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
@@ -1152,6 +1225,12 @@ impl SnapshotBackend for FirecrackerBackend {
                 // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
                 supervisor_drive.is_some(),
             )?;
+            // v1.6 (ato#983) Slice 2: attach each durable state volume as a
+            // writable, non-root drive BEFORE boot/snapshot — Firecracker records
+            // the whole device set (incl. these) into the snapshot it takes below,
+            // so restore's `PUT /snapshot/load` recreates them without any new
+            // `PUT /drives` call (mirrors how the rootfs drive itself works).
+            self.configure_state_drives(&fc, &state_drive_paths)?;
             // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
             // guest-agent binding channel is captured in the snapshot. The uds_path is
             // baked into the snapshot (FC forbids overriding it at load), so it is a
@@ -1239,6 +1318,10 @@ impl SnapshotBackend for FirecrackerBackend {
                 binding_names: drive.binding_names.clone(),
                 page_hygiene_boot_args: true,
                 placeholder_absent_from_seal: Some(absent),
+                // v1.6 (ato#983) Slice 2: persist so restore recomputes the SAME
+                // backing-file/lock paths without the caller resupplying them.
+                state_volumes: input.supervisor.as_ref().map(|s| s.state_volumes.clone()).unwrap_or_default(),
+                state_owner_scope: input.supervisor.as_ref().and_then(|s| s.state_owner_scope.clone()),
             }
         });
 
@@ -1396,6 +1479,50 @@ impl SnapshotBackend for FirecrackerBackend {
         }
 
         self.acquire_lock("restore")?;
+
+        // v1.6 (ato#983) Slice 2: ensure + lock every durable state volume the
+        // sealed manifest recorded, BEFORE `PUT /snapshot/load` — Firecracker
+        // restores the WHOLE device set from the snapshot (no new `PUT /drives`
+        // call, mirrors rootfs), so the backing files must simply exist at the
+        // same paths the build attached. Locks are held for the LIVE SESSION
+        // (unlike build's, which release when that call returns) — released in
+        // `stop()`, via paths recorded into `.fc-session.json` below so a
+        // cross-process `ato stop` (fresh backend) can find and release them too.
+        let mut state_volume_lock_paths: Vec<PathBuf> = Vec::new();
+        if let Some(sup) = &input.manifest.supervisor_build
+            && !sup.state_volumes.is_empty()
+        {
+            let prep: Result<(), SnapshotError> = (|| {
+                let owner_scope = sup.state_owner_scope.as_deref().ok_or_else(|| {
+                    self.backend_err("sealed manifest has durable state volumes but no state_owner_scope")
+                })?;
+                let mut volumes = sup.state_volumes.clone();
+                volumes.sort_by(|a, b| a.state_name.cmp(&b.state_name));
+                for vol in &volumes {
+                    let vpath = crate::state_volume::volume_path(&self.config.work_root, owner_scope, &vol.state_name);
+                    let lpath = crate::state_volume::lock_path(&self.config.work_root, owner_scope, &vol.state_name);
+                    crate::state_volume::acquire_volume_lock(&lpath).map_err(|e| self.backend_err(e))?;
+                    state_volume_lock_paths.push(lpath);
+                    let label = crate::state_volume::volume_label(owner_scope, &vol.state_name);
+                    crate::state_volume::ensure_state_volume(
+                        &crate::state_volume::Mkfsext4Formatter,
+                        &vpath,
+                        vol.size_mb,
+                        &label,
+                    )
+                    .map_err(|e| self.backend_err(e))?;
+                }
+                Ok(())
+            })();
+            if let Err(e) = prep {
+                for l in &state_volume_lock_paths {
+                    crate::state_volume::release_volume_lock(l);
+                }
+                self.release_lock();
+                return Err(e);
+            }
+        }
+
         // From here, on any error we must release the lock + net before returning.
         let result = (|| -> Result<(RestoredSession, Child, Option<crate::uffd_page_server::PageServerHandle>), SnapshotError> {
             std::fs::create_dir_all(&input.overlay_root).map_err(|e| self.backend_err(e.to_string()))?;
@@ -1701,6 +1828,9 @@ impl SnapshotBackend for FirecrackerBackend {
                 // per-slot network state this restore created.
                 "netns": self.config.netns,
                 "veth_root": self.config.veth_root,
+                // v1.6 (ato#983) Slice 2: so a cross-process `ato stop` (fresh
+                // backend, empty in-memory registry) can release these too.
+                "state_volume_locks": state_volume_lock_paths.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
             }).to_string());
             let session = RestoredSession {
                 session_id,
@@ -1730,6 +1860,9 @@ impl SnapshotBackend for FirecrackerBackend {
             Err(e) => {
                 self.net_down();
                 self.release_lock();
+                for l in &state_volume_lock_paths {
+                    crate::state_volume::release_volume_lock(l);
+                }
                 Err(e)
             }
         }
@@ -1791,6 +1924,16 @@ impl SnapshotBackend for FirecrackerBackend {
         {
             let _ = std::fs::remove_file(&uds);
         }
+        // v1.6 (ato#983) Slice 2: release every durable-state-volume lock this
+        // session held (recorded at restore, read back the same cross-process
+        // way as pid/tap/vsock above). The BACKING FILE is deliberately never
+        // touched here — it lives under `<work_root>/state/...`, a sibling of
+        // (never inside) `overlay_root`, so the `remove_dir_all` below cannot
+        // reach it even by accident. Durable state survives stop() by
+        // construction, not by a conditional check.
+        for lock in json_str_array(&meta, "state_volume_locks") {
+            crate::state_volume::release_volume_lock(Path::new(&lock));
+        }
         let overlay_removed = session.overlay_root.exists() && std::fs::remove_dir_all(&session.overlay_root).is_ok();
         Ok(TeardownReceipt { session_id: session.session_id, overlay_removed })
     }
@@ -1814,6 +1957,23 @@ fn json_str(s: &str, key: &str) -> Option<String> {
     let rest = rest.strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(rest[..end].to_string())
+}
+/// v1.6 (ato#983) Slice 2: extract a JSON array-of-strings value for `key`
+/// from a flat JSON object (no deps, same minimal style as `json_str` above).
+/// Returns an empty vec (not an error) when `key` is absent — an artifact
+/// sealed before this slice has no `state_volume_locks` field at all.
+fn json_str_array(s: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\":[");
+    let Some(i) = s.find(&needle) else { return Vec::new() };
+    let rest = &s[i + needle.len()..];
+    let Some(end) = rest.find(']') else { return Vec::new() };
+    rest[..end]
+        .split(',')
+        .filter_map(|piece| {
+            let piece = piece.trim().strip_prefix('"')?.strip_suffix('"')?;
+            (!piece.is_empty()).then(|| piece.to_string())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2036,6 +2196,7 @@ mod tests {
         // Valid lowercase binding names prepare fine; each gets a distinct placeholder.
         let drive = SupervisorDrive::prepare(&SupervisorBindings {
             binding_names: vec!["openai_api_key".into(), "db_url".into()],
+            ..Default::default()
         })
         .expect("prepare");
         assert_eq!(drive.leases.len(), 2);
@@ -2046,13 +2207,14 @@ mod tests {
         // drive deliberately has no Debug impl — it holds placeholder values.)
         let err = match SupervisorDrive::prepare(&SupervisorBindings {
             binding_names: vec!["OPENAI_API_KEY".into()],
+            ..Default::default()
         }) {
             Err(e) => e,
             Ok(_) => panic!("uppercase binding name must fail closed"),
         };
         assert!(err.contains("OPENAI_API_KEY"), "{err}");
         // Empty set is not a supervisor build.
-        assert!(SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![] }).is_err());
+        assert!(SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![], ..Default::default() }).is_err());
     }
 
     #[test]
@@ -2078,7 +2240,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: None,
-            supervisor: Some(SupervisorBindings { binding_names: vec!["openai_api_key".into()] }),
+            supervisor: Some(SupervisorBindings { binding_names: vec!["openai_api_key".into()], ..Default::default() }),
         };
         let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
         let msg = format!("{err}");
@@ -2225,6 +2387,64 @@ mod tests {
             build_receipt_id: None,
             supervisor_build: None,
         }
+    }
+
+    /// v1.6 (ato#983) Slice 2: `stop()` must release a session's recorded
+    /// state-volume locks but must NEVER touch the backing file itself — it
+    /// lives outside `overlay_root` (the only thing `stop()` `remove_dir_all`s).
+    /// This runs `stop()` for real (no KVM/firecracker binary needed: the pid
+    /// doesn't exist so `kill -9` is a no-op, there's no netns/tap to tear
+    /// down, and the session record comes entirely from a hand-written
+    /// `.fc-session.json`, exactly as a cross-process `ato stop` would read it).
+    #[test]
+    fn stop_releases_state_volume_locks_but_never_touches_the_backing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_root = dir.path().join("overlay");
+        std::fs::create_dir_all(&overlay_root).unwrap();
+        let work_root = dir.path().join("work");
+
+        let vpath = crate::state_volume::volume_path(&work_root, "owner-x", "dbdata");
+        let lpath = crate::state_volume::lock_path(&work_root, "owner-x", "dbdata");
+        std::fs::create_dir_all(vpath.parent().unwrap()).unwrap();
+        std::fs::write(&vpath, b"durable-bytes").unwrap();
+        crate::state_volume::acquire_volume_lock(&lpath).unwrap();
+
+        // What restore() would have written — a cross-process `ato stop` reads
+        // this, not any in-memory state.
+        std::fs::write(
+            overlay_root.join(".fc-session.json"),
+            json!({
+                "pid": 4_100_000_000u64, "tap": "does-not-exist0", "session_id": "fc-test",
+                "vsock_uds": serde_json::Value::Null, "netns": serde_json::Value::Null,
+                "veth_root": serde_json::Value::Null,
+                "state_volume_locks": [lpath.to_string_lossy()],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let backend = FirecrackerBackend {
+            config: FirecrackerConfig { work_root, ..Default::default() },
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            page_servers: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let session = RestoredSession {
+            session_id: "fc-test".to_string(),
+            backend_id: FIRECRACKER_BACKEND_ID.to_string(),
+            guest_port: None,
+            overlay_root: overlay_root.clone(),
+            restored_bytes: 0,
+            vmm_pid: None, // absent from the in-memory `sessions` map too — forces the cross-process pid path
+            vsock_uds: None,
+            workload_addr: None,
+        };
+        let receipt = backend.stop(session).unwrap();
+
+        assert!(receipt.overlay_removed, "overlay must still be removed as before this slice");
+        assert!(!overlay_root.exists());
+        assert!(vpath.exists(), "the durable state backing file must survive stop()");
+        assert_eq!(std::fs::read(&vpath).unwrap(), b"durable-bytes", "content must be untouched");
+        assert!(!lpath.exists(), "the volume lock must be released");
     }
 }
 
