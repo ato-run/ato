@@ -587,4 +587,140 @@ mod tests {
         // A full renew (assert_bound_ready) must FAIL CLOSED in this state.
         assert!(renew_over_channel(&mut ch, &[lease("api_key", "l2")], true).is_err());
     }
+
+    // ── v1.6 (ato#983) Slice 3 revision review fix (PR#992): mount_volumes_before_expose ──
+    //
+    // `mount_volumes_before_expose`/`bind_before_expose` connect over a REAL
+    // Unix domain socket (`FirecrackerAgentChannel::connect` is not injectable
+    // via `AgentChannel` — it hardcodes the transport), so `MockChannel`
+    // above can't exercise them. A plain `UnixListener` replaying the exact
+    // Firecracker vsock handshake (`CONNECT <port>\n` / `OK <port>\n`, then
+    // newline-delimited JSON) stands in for the guest-agent without any real
+    // KVM/Firecracker — the same handshake `crates/snapshot/src/firecracker/
+    // kvm_tests.rs`'s `#[ignore]`d real-hardware tests use, here driven from
+    // a background thread instead.
+    //
+    // This proves `mount_volumes_before_expose` and `bind_before_expose`
+    // work correctly in isolation, and that calling them in the SAME
+    // sequence `handle_restore_snapshot_lease`/the local run pipeline now
+    // use (mount, then — only if that succeeded — bind) behaves correctly
+    // end to end. It does NOT replace an integration test of
+    // `handle_restore_snapshot_lease` itself (no test anywhere calls that
+    // function directly; `snapshot::FakeSnapshotBackend::restore()` always
+    // returns `vsock_uds: None`, so building one would require first
+    // extending that shared fake) — flagged here rather than silently
+    // treated as full coverage of the review's exact call site.
+    struct FakeVsockAgent {
+        received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        _handle: std::thread::JoinHandle<()>,
+    }
+
+    impl FakeVsockAgent {
+        /// `fail_mount`: replies `Error` to `MountVolumes` instead of `VolumesMounted`.
+        fn spawn(uds_path: std::path::PathBuf, fail_mount: bool) -> Self {
+            use std::io::{BufRead, BufReader, Write};
+            use std::os::unix::net::UnixListener;
+
+            let listener = UnixListener::bind(&uds_path).expect("bind fake vsock uds");
+            let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let received_thread = received.clone();
+            let handle = std::thread::spawn(move || {
+                let Ok((stream, _)) = listener.accept() else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut writer = stream;
+                // Firecracker guest→host CONNECT handshake ack.
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                writeln!(writer, "OK {}", line.trim_start_matches("CONNECT ").trim()).ok();
+                writer.flush().ok();
+                loop {
+                    let mut req = String::new();
+                    if reader.read_line(&mut req).unwrap_or(0) == 0 || req.trim().is_empty() {
+                        return;
+                    }
+                    let msg: HostToAgent = serde_json::from_str(req.trim()).expect("parse request");
+                    let kind = match &msg {
+                        HostToAgent::MountVolumes => "mount_volumes",
+                        HostToAgent::Deliver(_) => "deliver",
+                        HostToAgent::QueryBoundReady => "query_bound_ready",
+                        HostToAgent::Revoke { .. } => "revoke",
+                        HostToAgent::StopWorkload => "stop_workload",
+                        HostToAgent::Stop => "stop",
+                    };
+                    received_thread.lock().unwrap().push(kind.to_string());
+                    let resp = match &msg {
+                        HostToAgent::MountVolumes if fail_mount => {
+                            AgentToHost::Error { message: "fake: injected mount failure".to_string() }
+                        }
+                        HostToAgent::MountVolumes => AgentToHost::VolumesMounted,
+                        HostToAgent::Deliver(d) => AgentToHost::Ack { id: d.id.clone(), name: d.name.clone() },
+                        HostToAgent::QueryBoundReady => AgentToHost::BoundReady { ready: true, pending: vec![] },
+                        other => panic!("fake vsock agent: unhandled request in this test: {other:?}"),
+                    };
+                    let json = serde_json::to_string(&resp).unwrap();
+                    if writeln!(writer, "{json}").is_err() || writer.flush().is_err() {
+                        return;
+                    }
+                }
+            });
+            FakeVsockAgent { received, _handle: handle }
+        }
+
+        fn received(&self) -> Vec<String> {
+            self.received.lock().unwrap().clone()
+        }
+    }
+
+    #[test]
+    fn mount_volumes_before_expose_succeeds_with_no_binding_at_all() {
+        // The exact scenario PR#992's review flagged: a state-only capsule
+        // has durable state but NO secret bindings (supervisor_names ==
+        // None in the caller) — MountVolumes must still be attempted and
+        // must succeed, entirely independent of any Deliver call.
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("vsock.sock");
+        let agent = FakeVsockAgent::spawn(uds.clone(), false);
+        mount_volumes_before_expose(&uds, true, std::time::Duration::from_secs(2)).expect("mount must succeed");
+        assert_eq!(agent.received(), vec!["mount_volumes"], "only MountVolumes, no Deliver — no bindings exist");
+    }
+
+    #[test]
+    fn mount_volumes_before_expose_is_a_pure_noop_when_no_durable_state_is_declared() {
+        // has_durable_state=false must never even connect — asserted by
+        // binding to the uds path but never spawning an agent to accept it;
+        // a connection attempt would hang/timeout the test if this regressed.
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("vsock.sock");
+        mount_volumes_before_expose(&uds, false, std::time::Duration::from_millis(200))
+            .expect("no durable state ⇒ no-op, regardless of whether anything is listening");
+    }
+
+    #[test]
+    fn mount_failure_prevents_bind_from_ever_being_attempted() {
+        // Mirrors the FIXED call-site structure in both `handle_restore_
+        // snapshot_lease` and `pipeline/phases/run.rs`: mount first via `?`,
+        // bind only reached on success. A mount failure must short-circuit
+        // before any Deliver is ever sent.
+        let dir = tempfile::tempdir().unwrap();
+        let uds = dir.path().join("vsock.sock");
+        let agent = FakeVsockAgent::spawn(uds.clone(), true);
+        let leases =
+            vec![lease("openai_api_key", "l1")];
+        let result: Result<()> = (|| {
+            mount_volumes_before_expose(&uds, true, std::time::Duration::from_secs(2))?;
+            bind_before_expose(&uds, &leases, std::time::Duration::from_secs(2))
+        })();
+        assert!(result.is_err(), "mount failure must propagate as an error");
+        assert!(
+            result.unwrap_err().to_string().contains("injected mount failure"),
+            "the mount failure itself must be the reported error"
+        );
+        assert_eq!(
+            agent.received(),
+            vec!["mount_volumes"],
+            "bind_before_expose (Deliver) must never be attempted after a mount failure"
+        );
+    }
 }

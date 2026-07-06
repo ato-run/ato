@@ -3915,6 +3915,44 @@ async fn handle_restore_snapshot_lease(
     // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
     let workload_addr = session.workload_addr.clone();
 
+    // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND/EXPOSE —
+    // durable state is a restore-time binding, independent of whether this
+    // capsule has any secret bindings at all (a state-only capsule can have
+    // durable state with `supervisor_names == None`). Deliberately its OWN
+    // block, not nested inside the `supervisor_names` branch below — review
+    // finding (PR#992): nesting it there meant a state-only capsule that
+    // never went through the binding-required classification would skip
+    // MountVolumes entirely and fall through to proxy/expose unmounted.
+    // ANY failure = teardown + typed fail, exactly like the binding gate.
+    if has_durable_state {
+        let mount_result: anyhow::Result<()> = async {
+            let uds = session
+                .vsock_uds
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("restored session declares durable state but exposes no vsock uds"))?;
+            tokio::task::spawn_blocking(move || {
+                mount_volumes_before_expose(&uds, true, Duration::from_secs(10))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("mount task join: {e}"))?
+        }
+        .await;
+        if let Err(e) = mount_result {
+            let _ = teardown(backend.as_ref(), session);
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "mount_failed",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    }
+
     // v1.2 PR 3e (supervisor only): BIND BEFORE EXPOSE. Issue leases from the
     // pre-resolved values and deliver them over the restored session's vsock; the
     // gate returns Ok only at bound-ready (the guest-agent then restarts the
@@ -3937,12 +3975,8 @@ async fn handle_restore_snapshot_lease(
                 binding_ttl_ms(),
             )?;
             let bind_uds = uds.clone();
-            // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND —
-            // durable state is a restore-time binding too, and must be
-            // fresh-mounted before ANY binding delivery / bound-ready.
             // Blocking vsock connect + delivery — keep it off the async reactor.
             tokio::task::spawn_blocking(move || {
-                mount_volumes_before_expose(&bind_uds, has_durable_state, Duration::from_secs(10))?;
                 bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
             })
             .await
