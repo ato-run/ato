@@ -708,11 +708,13 @@ impl FirecrackerBackend {
         ))
     }
 
-    /// v1.2 PR 3d: restore-readiness probe for a SUPERVISOR artifact. The workload is
-    /// down by design (StopWorkload+Revoke ran before the seal), so readiness =
-    /// "VM resumed + guest-agent reachable" — and, fail-closed, the agent must
-    /// report NOT bound-ready: a bound-ready session straight out of restore means
-    /// binding state survived the seal (a pre-bind-seal violation), never expose it.
+    /// v1.2 PR 3d: restore-readiness probe for a SUPERVISOR artifact with REQUIRED
+    /// bindings (zero-binding supervisor artifacts health-wait instead — see
+    /// [`restore_uses_agent_probe`]). The workload is down by design
+    /// (StopWorkload+Revoke ran before the seal), so readiness = "VM resumed +
+    /// guest-agent reachable" — and, fail-closed, the agent must report NOT
+    /// bound-ready: a bound-ready session straight out of restore means binding
+    /// state survived the seal (a pre-bind-seal violation), never expose it.
     fn probe_restored_agent_unbound(&self, uds: &Path) -> Result<(), SnapshotError> {
         let mut ch = FirecrackerAgentChannel::connect_with_retry(
             uds,
@@ -904,10 +906,12 @@ impl SupervisorDrive {
     /// Parse + validate every binding name and mint one placeholder lease per name.
     /// Fail-closed on an invalid name (the #961 emission gate should make this
     /// unreachable, but the backend revalidates rather than trusting its caller).
+    ///
+    /// An EMPTY set is a valid supervisor build (ato#1002 D4: a zero-binding
+    /// dockerfile import still runs guest-agent + supervisor in the rootfs): it
+    /// prepares zero leases and the build drive skips the placeholder protocol
+    /// entirely — see [`SupervisorDrive::has_placeholders`] and `build_ready_state`.
     fn prepare(sup: &SupervisorBindings) -> Result<Self, String> {
-        if sup.binding_names.is_empty() {
-            return Err("supervisor build requires at least one binding name".into());
-        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
@@ -934,6 +938,28 @@ impl SupervisorDrive {
             placeholder_values: values,
         })
     }
+
+    /// Whether this drive has placeholders to deliver/revoke. Empty (a
+    /// zero-binding import, ato#1002 D4) ⇒ the guest started its workload at
+    /// boot (vacuously bound-ready, ato#1001), so the build runs NO vsock
+    /// protocol step and the artifact seals with the workload RUNNING under
+    /// the v1.0 no-binding contract ("boot, healthcheck answers").
+    fn has_placeholders(&self) -> bool {
+        !self.binding_names.is_empty()
+    }
+}
+
+/// Which restore-readiness lane a sealed artifact uses (v1.2 PR 3d, revised by
+/// ato#1002 D4). The agent probe applies ONLY to a supervisor artifact WITH
+/// required bindings — sealed workload-down by design, so readiness = agent
+/// reachable + NOT bound-ready. A ZERO-binding supervisor artifact (dockerfile
+/// import) sealed with the workload RUNNING, and its agent is VACUOUSLY
+/// bound-ready (empty required set) — the probe's "not bound-ready" gate would
+/// fail closed on a state that is not a pre-bind-seal violation (nothing was
+/// ever bound), so it takes the ordinary health wait, exactly like a no-binding
+/// artifact.
+fn restore_uses_agent_probe(supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>) -> bool {
+    supervisor_build.is_some_and(|s| !s.binding_names.is_empty())
 }
 
 fn hotset_enabled() -> bool {
@@ -1224,9 +1250,13 @@ impl SnapshotBackend for FirecrackerBackend {
             };
             bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
                 fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
-                // v1.2 PR 3d: a supervisor guest starts its workload only at
-                // bound-ready — deliver the placeholder leases first, THEN health.
-                if let Some(drive) = &supervisor_drive {
+                // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
+                // workload only at bound-ready — deliver the placeholder leases
+                // first, THEN health. A ZERO-binding supervisor build (dockerfile
+                // import, ato#1002 D4) skips delivery entirely: the agent is
+                // vacuously bound-ready and started the workload at boot (ato#1001),
+                // so the health wait below is reached directly.
+                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
                     let uds = vsock_uds.as_ref().ok_or_else(|| {
                         self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
                     })?;
@@ -1238,7 +1268,16 @@ impl SnapshotBackend for FirecrackerBackend {
                 // binding material in guest tmpfs (contract order: stop, then revoke).
                 // Then VERIFY the listener is gone — acks alone are not proof (a
                 // wrapper-shell kill once left the orphaned app serving).
-                if let Some(drive) = &supervisor_drive {
+                //
+                // ato#1002 D4: the ZERO-binding supervisor build SKIPS stop+revoke
+                // and seals with the workload RUNNING — there is no placeholder to
+                // scrub (nothing was delivered, so the seal is secret-free by
+                // construction), and a workload-down seal could never start again
+                // after restore: nothing is ever delivered to a zero-binding
+                // session, so no bound-ready transition would relaunch it. Its
+                // seal contract is exactly v1.0 no-binding: boot, healthcheck
+                // answers — see `restore_uses_agent_probe` for the restore side.
+                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
                     let uds = vsock_uds.as_ref().ok_or_else(|| {
                         self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
                     })?;
@@ -1722,13 +1761,16 @@ impl SnapshotBackend for FirecrackerBackend {
             // health — confirm the fault loop fired instead. Everything else (File,
             // U1b Mem) waits for health as usual.
             //
-            // v1.2 PR 3d: a SUPERVISOR artifact wakes with the workload down BY
-            // DESIGN (StopWorkload+Revoke ran before the seal), so a TCP health-wait
-            // can never pass until the caller delivers the REAL bindings. Its
-            // readiness gate is instead: guest-agent reachable over vsock AND not
-            // bound-ready (bound-ready out of restore = binding state survived the
-            // seal → fail closed).
-            let time_to_health_ms: Option<u128> = if input.manifest.supervisor_build.is_some() {
+            // v1.2 PR 3d: a SUPERVISOR artifact with REQUIRED bindings wakes with
+            // the workload down BY DESIGN (StopWorkload+Revoke ran before the
+            // seal), so a TCP health-wait can never pass until the caller delivers
+            // the REAL bindings. Its readiness gate is instead: guest-agent
+            // reachable over vsock AND not bound-ready (bound-ready out of restore
+            // = binding state survived the seal → fail closed). ato#1002 D4: a
+            // ZERO-binding supervisor artifact (dockerfile import) sealed RUNNING
+            // and wakes vacuously bound-ready — it health-waits like a no-binding
+            // artifact (see `restore_uses_agent_probe`).
+            let time_to_health_ms: Option<u128> = if restore_uses_agent_probe(input.manifest.supervisor_build.as_ref()) {
                 let uds = vsock_uds.as_ref().ok_or_else(|| {
                     self.backend_err(
                         "supervisor artifact restored without a vsock uds \
@@ -2219,8 +2261,44 @@ mod tests {
             Ok(_) => panic!("uppercase binding name must fail closed"),
         };
         assert!(err.contains("OPENAI_API_KEY"), "{err}");
-        // Empty set is not a supervisor build.
-        assert!(SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![], ..Default::default() }).is_err());
+        // ato#1002 D4: an EMPTY set is an accepted supervisor build (zero-binding
+        // dockerfile import) — zero leases, and the drive reports no placeholders
+        // so the build skips the delivery/stop protocol entirely.
+        let empty = SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![], ..Default::default() })
+            .expect("empty supervisor set must be accepted (ato#1002 D4)");
+        assert!(empty.leases.is_empty());
+        assert!(empty.placeholder_values.is_empty());
+        assert!(!empty.has_placeholders());
+        // Non-empty invariance: the prepared drive above still drives the protocol.
+        assert!(drive.has_placeholders());
+    }
+
+    #[test]
+    fn restore_lane_gates_on_required_bindings_not_mere_supervisor_presence() {
+        use crate::manifest::SupervisorBuildReceipt;
+        // No supervisor_build at all (recipe no-binding artifact) → health wait.
+        assert!(!restore_uses_agent_probe(None));
+        // ato#1002 D4: a ZERO-binding supervisor artifact (dockerfile import)
+        // sealed with the workload RUNNING and wakes vacuously bound-ready — the
+        // agent probe's "not bound-ready" gate would fail closed on a state that
+        // is NOT a pre-bind-seal violation, so it must health-wait instead.
+        let empty = SupervisorBuildReceipt {
+            binding_names: vec![],
+            page_hygiene_boot_args: true,
+            placeholder_absent_from_seal: Some(true),
+            state_volumes: vec![],
+            state_owner_scope: None,
+        };
+        assert!(!restore_uses_agent_probe(Some(&empty)));
+        // Non-empty invariance: a binding-required artifact keeps the agent probe.
+        let bound = SupervisorBuildReceipt {
+            binding_names: vec!["openai_api_key".into()],
+            page_hygiene_boot_args: true,
+            placeholder_absent_from_seal: Some(true),
+            state_volumes: vec![],
+            state_owner_scope: None,
+        };
+        assert!(restore_uses_agent_probe(Some(&bound)));
     }
 
     #[test]

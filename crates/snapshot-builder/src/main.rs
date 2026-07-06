@@ -19,12 +19,22 @@
 //! eligibility exactly as before. No secret VALUE ever reaches this daemon either way —
 //! the build uses backend-internal placeholders and the seal stays pre-bind.
 //!
+//! ato#1002: jobs carry a `kind`. `recipe` (the default, and the only pre-#1002 kind)
+//! keeps the exact pipeline above. `dockerfile_import` clones the server-resolved
+//! pinned commit WITHOUT a capsule.toml (an import candidate by definition has none),
+//! validates the job's strict `params` fail-closed, runs the v1.7 Dockerfile import
+//! (`snapshot::docker_import`, secret policy fixed to Reject), and feeds the packed
+//! ext4 into the SAME seal → restore-verify → scan → ack tail. The daemon advertises
+//! both kinds via `supported_kinds` on the claim.
+//!
 //! ```sh
 //! ATO_API_URL=https://api… SNAPSHOT_BUILDER_AGENT_TOKEN=… ATO_FC_BIN=… ATO_FC_KERNEL=… \
 //!   snapshot-builder --agent-id builder-1 [--once]
 //! ```
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
@@ -33,9 +43,14 @@ use capsule::engine::execution_graph::{
 use capsule::foundation::types::manifest::CapsuleManifest;
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
+use snapshot::docker_import::build::SystemImportCommandRunner;
+use snapshot::docker_import::{
+    DockerImportSpec, DockerfileImportRequest, SecretEnvPolicy, import_descriptor_blake3,
+    import_execution_id, run_dockerfile_import, validate_dockerfile_path,
+};
 use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
-    materialize_source,
+    materialize_source, reject_control_chars, valid_github_owner, valid_github_repo,
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
@@ -118,9 +133,26 @@ struct ClaimedJob {
     /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
     /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
     /// Absent/None (older ato-api, or a recipe with no stored toml) ⇒ the repo's own
-    /// capsule.toml is required, fail-closed exactly as before.
+    /// capsule.toml is required, fail-closed exactly as before. Always null for a
+    /// `dockerfile_import` job (there is no recipe manifest to carry).
     #[serde(default)]
     recipe_toml: Option<String>,
+    /// ato#1002: which build lane this job takes — `"recipe"` (default; the only
+    /// pre-#1002 kind, so an older ato-api parses as it) or `"dockerfile_import"`.
+    /// The daemon advertises what it supports via `supported_kinds` on the claim,
+    /// so any OTHER value here is a server/daemon contract skew — fail the job
+    /// closed (`claim_kind`), never guess.
+    #[serde(default = "default_job_kind")]
+    kind: String,
+    /// ato#1002: kind-specific parameters (`dockerfile_import` only). Strict-
+    /// validated server-side at enqueue AND revalidated fail-closed here before
+    /// any use ([`parse_import_params`]).
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
+fn default_job_kind() -> String {
+    "recipe".into()
 }
 
 /// The narrow v1 target/profile gate: a job may only build when it requests the
@@ -164,7 +196,9 @@ struct Artifact {
     mem_bytes: u64,
     vmstate_bytes: u64,
     // ── #932 non-secret build provenance (diagnostics; never registry identity) ──
-    /// Which manifest built this artifact: "recipe_toml" | "repo_capsule_toml".
+    /// Which manifest built this artifact: "recipe_toml" | "repo_capsule_toml" |
+    /// "dockerfile_import" (ato#1002 — an import has no manifest; the value names
+    /// the lane).
     manifest_source: String,
     /// True when the readiness probe was synthesized from the declared port.
     synthesized_probe: bool,
@@ -172,14 +206,26 @@ struct Artifact {
     declared_command: String,
     /// The command actually embedded into the guest init (post normalization).
     normalized_guest_command: String,
-    /// v1.2 PR 3e-2c: SUPERVISOR (binding-required) artifact facts — binding NAMES
-    /// only, never a value. `Some` ⇒ ato-api registers the row with
+    /// v1.2 PR 3e-2c: SUPERVISOR artifact facts — binding NAMES only, never a
+    /// value. `Some` with NON-EMPTY names ⇒ ato-api registers the row with
     /// `no_binding_required=false` (+ persists the names) and the firewall CHECK
-    /// keeps it permanently non-public. Omitted entirely for a no-binding artifact
+    /// keeps it permanently non-public. ato#1002 review (D4): a dockerfile-import
+    /// ack ALWAYS carries this field — with an EMPTY name set for a zero-binding
+    /// import (the rootfs still runs guest-agent + supervisor), which ato-api maps
+    /// to `no_binding_required=true` + NULL `binding_names_json`, so the existing
+    /// publish firewall passes unchanged. Omitted entirely for a no-binding
+    /// RECIPE artifact (`skip_serializing_if`), so those acks stay byte-identical
+    /// against the `.strict()` ack schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_build: Option<SupervisorAck>,
+    /// ato#1002: non-secret Dockerfile-import provenance — the full
+    /// `DockerImportReceipt` (importer version, digest-pinned bases, options,
+    /// warnings; already secret-screened at import time). Present ONLY on a
+    /// `dockerfile_import` artifact; omitted entirely for recipe builds
     /// (`skip_serializing_if`), so those acks stay byte-identical against the
     /// `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
-    supervisor_build: Option<SupervisorAck>,
+    docker_import_receipt: Option<serde_json::Value>,
 }
 
 /// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
@@ -205,7 +251,10 @@ fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1 }))
+        // ato#1002: advertise both build lanes — the server hands a job ONLY if its
+        // kind is listed here (an older ato-api ignores the field and keeps handing
+        // recipe jobs exactly as before).
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import"] }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -315,12 +364,52 @@ fn derive_job_spec(
     derive_supervisor_build_spec(manifest, probe).map_err(fail)
 }
 
-/// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
-/// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
-fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> std::result::Result<Artifact, (String, String)> {
+/// ato#1002: everything the SHARED job tail (Ready-State build → restore-verify →
+/// no-secret scan → sealed ack) needs from a producer branch. Steps 1-3 differ by
+/// job kind — `recipe`: materialize + manifest + rootfs build, exactly the pre-#1002
+/// pipeline; `dockerfile_import`: clone + params + Dockerfile import — and everything
+/// downstream consumes only this struct, so the tail stays one code path.
+#[derive(Debug)]
+struct ProducedBuild {
+    /// The bootable ext4 rootfs bytes.
+    rootfs: Vec<u8>,
+    port: u16,
+    healthcheck: String,
+    /// Fed to `BuildReadyStateInput.execution_id` (recipe: the declared execution
+    /// id from the graph envelope; import: `import_execution_id` over the import
+    /// execution envelope — ato#1002 review D3). Always the Ato EXECUTION identity
+    /// (what executes), never a rebuild-inputs / job identity.
+    execution_id: String,
+    capsule_manifest_hash: String,
+    supervisor: Option<SupervisorBindings>,
+    // ── sealed-ack facts (Artifact provenance) ──
+    supervisor_ack: Option<SupervisorAck>,
+    manifest_source: String,
+    synthesized_probe: bool,
+    declared_command: String,
+    normalized_guest_command: String,
+    docker_import_receipt: Option<serde_json::Value>,
+}
+
+/// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
+/// is a server/daemon contract skew (the claim advertised `supported_kinds`) — fail
+/// the job closed at `claim_kind`, never guess a lane.
+fn produce_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::result::Result<ProducedBuild, (String, String)> {
+    match job.kind.as_str() {
+        "recipe" => produce_recipe_build(cfg, job, jobdir),
+        "dockerfile_import" => produce_import_build(cfg, job, jobdir),
+        other => Err((
+            "claim_kind".into(),
+            format!("unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import)"),
+        )),
+    }
+}
+
+/// The pre-#1002 pipeline, steps 1-3, byte-for-byte: materialize the server-resolved
+/// source, parse + gate the manifest, derive the fail-closed build spec, compute the
+/// declared execution identity, and build the bootable rootfs.
+fn produce_recipe_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::result::Result<ProducedBuild, (String, String)> {
     let fail = |stage: &str, e: String| (stage.to_string(), e);
-    let jobdir = cfg.work.join(&job.id);
-    let _ = std::fs::remove_dir_all(&jobdir);
 
     // 1. Materialize the SERVER-RESOLVED source (pinned commit; identity/subdir validated).
     // #932: a Store-recipe job carries the APPROVED recipe manifest on the claim — it is
@@ -386,12 +475,6 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     build_rootfs(&src, &spec, &ext4, cfg.rootfs_size_mib).map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
 
-    // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
-    // a supervisor spec the backend drives the whole placeholder protocol itself
-    // (deliver → health → StopWorkload → Revoke → seal, #962); the daemon only passes
-    // the binding NAMES — no secret value exists anywhere in this process.
-    let store = CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
-    let capsule_manifest_hash = format!("blake3:{}", blake3::hash(&toml_bytes).to_hex());
     // v1.2 PR 3e-2c: capture the supervisor binding names for the SEALED ACK. ato-api's
     // artifactSchema now accepts an optional `supervisor_build` (3e-2), so the ack must
     // carry the names — otherwise ato-api registers the row as no-binding + PUBLIC
@@ -401,43 +484,313 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         .supervisor
         .as_ref()
         .map(|s| SupervisorAck { binding_names: s.binding_names.clone() });
+    let supervisor = spec.supervisor.as_ref().map(|s| {
+        // v1.6 (ato#983) Slice 2: flatten every service's durable state
+        // volumes into one list (the backend attaches them as drives; it
+        // doesn't need per-service association — that's Slice 3's job,
+        // via the target path baked into supervisor.json). owner_scope
+        // reuses the SAME identity the OCI/container persistent-state
+        // path already keys its registry on
+        // (`capsule::foundation::types::manifest_validation::persistent_state_owner_scope`)
+        // — one definition of "whose durable state is this", not two.
+        let volumes: Vec<DurableVolumeSpec> = s
+            .services
+            .iter()
+            .flatten()
+            .flat_map(|svc| &svc.volumes)
+            .map(|v| DurableVolumeSpec { state_name: v.state_name.clone(), size_mb: v.size_mb })
+            .collect();
+        let state_owner_scope =
+            if volumes.is_empty() { None } else { manifest.persistent_state_owner_scope() };
+        SupervisorBindings { binding_names: s.binding_names.clone(), state_volumes: volumes, state_owner_scope }
+    });
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: spec.port,
+        healthcheck: spec.healthcheck.clone(),
+        execution_id: declared_execution_id,
+        capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
+        supervisor,
+        supervisor_ack,
+        manifest_source: manifest_source.to_string(),
+        synthesized_probe: spec.probe_synthesized,
+        declared_command: spec.declared_start_cmd,
+        normalized_guest_command: spec.start_cmd,
+        docker_import_receipt: None,
+    })
+}
+
+/// ato#1002 `dockerfile_import` producer: validate the job params fail-closed, clone
+/// the server-resolved pinned commit WITHOUT a capsule.toml (an import candidate by
+/// definition has none — this deliberately does not go through `materialize_source`,
+/// whose manifest gate stays intact for recipe jobs), then run the v1.7 Dockerfile
+/// import (secret policy fixed to `Reject`: the Store job shape carries no secret
+/// conversion opt-in) and hand the packed ext4 to the SAME steps 4-7 as a recipe job.
+fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::result::Result<ProducedBuild, (String, String)> {
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+
+    // 1. Strict params validation BEFORE any network/build work (same bounds as the
+    // ato-api enqueue validation; a violation here means the server-side gate was
+    // bypassed or skewed — fail closed at eligibility).
+    let params = parse_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+
+    // 2. Clone the SERVER-RESOLVED pinned commit (identity/subdir validated; no
+    // capsule.toml requirement).
+    let src = clone_pinned_source(&job.source, &jobdir.join("src")).map_err(|e| fail("source", e))?;
+
+    // 3. Run the Dockerfile import: probe tool → digest-pinned build → service plan →
+    // pack the imported image into a bootable supervisor ext4. DockerImportSpec::new
+    // revalidates the Dockerfile path (containment discipline, defense in depth).
+    let spec = DockerImportSpec::new(&params.dockerfile_path, BTreeMap::new()).map_err(|e| fail("eligibility", e))?;
+    let ext4 = jobdir.join("rootfs.ext4");
+    // The ephemeral image tag must be a valid container reference — job ids are
+    // sanitized (the import's pack script removes the tag after export).
+    let tag_suffix: String = job
+        .id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .take(64)
+        .collect();
+    let req = DockerfileImportRequest {
+        context_dir: &src,
+        spec,
+        policy: SecretEnvPolicy::Reject,
+        port_override: params.port_override,
+        readiness_http_path: params.readiness_http_path.clone(),
+        image_tag: format!("ato-import-{tag_suffix}"),
+        out_ext4: &ext4,
+        size_mib: cfg.rootfs_size_mib,
+    };
+    let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req).map_err(|e| fail("rootfs_build", e))?;
+    let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+
+    // Import identity (ato#1002 review D3): execution_id = the import EXECUTION
+    // identity — what executes (the derived service argv/cwd/env/port/readiness +
+    // platform + final image digest), aligned in meaning with the recipe path's
+    // declared_execution_id; host-independent, never a job id / timestamp. The
+    // REBUILD-INPUTS identity (import_identity_digest) deliberately does NOT
+    // become the execution id — it lives only inside the docker_import_receipt /
+    // import descriptor lane. capsule_manifest_hash = the blake3 import
+    // DESCRIPTOR hash over that input-only envelope (an import has no
+    // capsule.toml — a descriptor hash, not a manifest hash).
+    let execution_id = import_execution_id(&outcome.plan, &outcome.receipt);
+    let capsule_manifest_hash = import_descriptor_blake3(&outcome.receipt);
+    let docker_import_receipt = serde_json::to_value(&outcome.receipt)
+        .map_err(|e| fail("artifact_metadata", format!("serialize docker import receipt: {e}")))?;
+
+    // v0 imports emit exactly ONE public service; its argv (ENTRYPOINT+CMD, exec
+    // form) lands in supervisor.json verbatim — no sh -lc normalization — so the
+    // declared and guest commands are the same string (diagnostics only).
+    let argv_display = outcome
+        .plan
+        .supervisor
+        .services
+        .as_ref()
+        .and_then(|s| s.first())
+        .map(|s| s.cmd.join(" "))
+        .unwrap_or_default();
+
+    // ato#1002 review (D4): a dockerfile import is a SUPERVISOR artifact end to
+    // end — the packed rootfs runs guest-agent + supervisor even with ZERO
+    // bindings (ato#1001 starts the vacuously bound-ready workload at boot, so
+    // the backend's health wait passes with nothing delivered, and the backend
+    // accepts the empty set: no placeholder protocol, sealed per the no-binding
+    // contract). The sealed ack therefore ALWAYS carries supervisor_build for an
+    // import (binding_names may be []) so ato-api records honest supervisor
+    // provenance; server-side an EMPTY set still registers as
+    // no_binding_required=true with NULL binding_names_json, keeping the publish
+    // firewall unchanged. Under the fixed Reject policy the set is always empty
+    // today; the mapping stays general for a future with-bindings job shape.
+    let binding_names = outcome.plan.supervisor.binding_names.clone();
+    let supervisor = Some(SupervisorBindings {
+        binding_names: binding_names.clone(),
+        state_volumes: vec![],
+        state_owner_scope: None,
+    });
+    let supervisor_ack = Some(SupervisorAck { binding_names });
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: outcome.plan.port,
+        healthcheck: outcome.plan.readiness_http_path.clone().unwrap_or_else(|| "/".to_string()),
+        execution_id,
+        capsule_manifest_hash,
+        supervisor,
+        supervisor_ack,
+        manifest_source: "dockerfile_import".to_string(),
+        synthesized_probe: outcome.plan.readiness_http_path.is_none(),
+        declared_command: argv_display.clone(),
+        normalized_guest_command: argv_display,
+        docker_import_receipt: Some(docker_import_receipt),
+    })
+}
+
+/// ato#1002: validated `dockerfile_import` job params (defaults applied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DockerfileImportParams {
+    dockerfile_path: String,
+    port_override: Option<u16>,
+    readiness_http_path: Option<String>,
+}
+
+impl Default for DockerfileImportParams {
+    fn default() -> Self {
+        DockerfileImportParams { dockerfile_path: "Dockerfile".into(), port_override: None, readiness_http_path: None }
+    }
+}
+
+/// Strict, fail-closed parse of `dockerfile_import` params — the same bounds the
+/// ato-api enqueue validation enforces (ato#1002): `dockerfile_path` relative, no
+/// `..` component, ≤200 chars (default `"Dockerfile"`); `port_override` an integer
+/// in 1..65535; `readiness_http_path` starting `/`, ≤200 chars, single-line.
+/// Unknown keys and non-object params are rejected; absent/null params mean all
+/// defaults.
+///
+/// The readiness bound is 200 — NOT the contract draft's 256 — because the value
+/// is acked verbatim as `healthcheck_url_path`, which ato-api's strict artifact
+/// schema caps at 200; a longer path would build an artifact whose sealed ack can
+/// never validate (rebuilt forever on claim expiry). And it must be single-line
+/// ([`reject_control_chars`]) because it is interpolated into the builder-host
+/// pack script — a newline would break out of its `#` comment and execute as
+/// root on the builder.
+fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Result<DockerfileImportParams, String> {
+    let mut out = DockerfileImportParams::default();
+    let Some(v) = params.filter(|v| !v.is_null()) else { return Ok(out) };
+    let obj = v.as_object().ok_or("dockerfile_import params must be a JSON object")?;
+    for (key, val) in obj {
+        match key.as_str() {
+            "dockerfile_path" => {
+                let p = val.as_str().ok_or("params.dockerfile_path must be a string")?;
+                if p.chars().count() > 200 {
+                    return Err("params.dockerfile_path exceeds 200 characters".into());
+                }
+                if p.starts_with('/') {
+                    return Err("params.dockerfile_path must be relative (no leading '/')".into());
+                }
+                // Full containment discipline (empty, absolute, `..`, prefix) — the
+                // same gate DockerImportSpec::new re-applies later.
+                validate_dockerfile_path(p)?;
+                out.dockerfile_path = p.to_string();
+            }
+            "port_override" => {
+                let n = val
+                    .as_u64()
+                    .filter(|n| (1..=65535).contains(n))
+                    .ok_or("params.port_override must be an integer in 1..65535")?;
+                out.port_override = Some(n as u16);
+            }
+            "readiness_http_path" => {
+                let p = val.as_str().ok_or("params.readiness_http_path must be a string")?;
+                if !p.starts_with('/') {
+                    return Err("params.readiness_http_path must start with '/'".into());
+                }
+                if p.chars().count() > 200 {
+                    return Err("params.readiness_http_path exceeds 200 characters".into());
+                }
+                // Interpolated into the builder-host pack script (`{hc}` inside a
+                // `#` comment) — the same NUL/newline gate rootfs_builder applies
+                // to run/build commands, or a newline runs as root on the builder.
+                reject_control_chars("params.readiness_http_path", p)?;
+                out.readiness_http_path = Some(p.to_string());
+            }
+            other => return Err(format!("unknown dockerfile_import param {other:?} (rejected fail-closed)")),
+        }
+    }
+    Ok(out)
+}
+
+/// ato#1002: shallow-clone the SERVER-RESOLVED pinned commit for a
+/// `dockerfile_import` job. Mirrors `materialize_source`'s identity validation +
+/// subdir containment (lexical + canonical) but deliberately WITHOUT its
+/// capsule.toml gate — an import candidate by definition carries none (the same
+/// reasoning as `docker_import_kvm_smoke`'s `clone_pinned`). `materialize_source`
+/// keeps its manifest gate untouched for recipe jobs.
+fn clone_pinned_source(source: &ClaimedSource, dest: &Path) -> std::result::Result<PathBuf, String> {
+    if !valid_github_owner(&source.github_owner) {
+        return Err(format!("invalid github owner {:?}", source.github_owner));
+    }
+    if !valid_github_repo(&source.github_repo) {
+        return Err(format!("invalid github repo {:?}", source.github_repo));
+    }
+    let commit = source.commit_sha.as_str();
+    if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("refusing non-pinned commit {commit:?} (need a full 40-char sha)"));
+    }
+    let sub = source.subdirectory.as_deref().filter(|s| !s.is_empty());
+    if let Some(s) = sub {
+        // Lexical containment first (relative, no `..`, no prefix) — the same rule
+        // materialize_source applies, via the docker_import path validator.
+        validate_dockerfile_path(s).map_err(|e| format!("invalid subdirectory: {e}"))?;
+    }
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let run = |args: &[&str]| -> std::result::Result<(), String> {
+        let out = Command::new("git").args(args).current_dir(dest).output().map_err(|e| format!("git {args:?}: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(())
+    };
+    run(&["init", "-q"])?;
+    run(&["remote", "add", "origin", &format!("https://github.com/{}/{}.git", source.github_owner, source.github_repo)])?;
+    run(&["fetch", "-q", "--depth", "1", "origin", commit])?;
+    run(&["checkout", "-q", "FETCH_HEAD"])?;
+
+    // Canonical containment after checkout (closes symlink traversal), exactly like
+    // materialize_source's contained_source_root — minus the manifest requirement.
+    let root = match sub {
+        Some(s) => dest.join(s),
+        None => dest.to_path_buf(),
+    };
+    let dest_canon = dest.canonicalize().map_err(|e| format!("canonicalize checkout: {e}"))?;
+    let root_canon = root.canonicalize().map_err(|e| format!("resolved source root {} not found: {e}", root.display()))?;
+    if !root_canon.starts_with(&dest_canon) {
+        return Err(format!("subdirectory escapes the checkout: {} is outside {}", root_canon.display(), dest_canon.display()));
+    }
+    Ok(root_canon)
+}
+
+/// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
+/// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
+fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> std::result::Result<Artifact, (String, String)> {
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+    let jobdir = cfg.work.join(&job.id);
+    let _ = std::fs::remove_dir_all(&jobdir);
+
+    // Steps 1-3 branch by job kind (ato#1002): recipe = materialize + manifest +
+    // rootfs build (pre-#1002, byte-for-byte); dockerfile_import = clone + params +
+    // Dockerfile import. Steps 4-7 below are SHARED and unchanged.
+    let produced = produce_build(cfg, job, &jobdir)?;
+
+    // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
+    // a supervisor spec the backend drives the whole placeholder protocol itself
+    // (deliver → health → StopWorkload → Revoke → seal, #962); the daemon only passes
+    // the binding NAMES — no secret value exists anywhere in this process. A
+    // ZERO-binding supervisor build (dockerfile import, ato#1002 D4) has no
+    // placeholder protocol: the workload starts at boot (vacuously bound-ready,
+    // ato#1001) and the artifact seals per the no-binding contract.
+    let store = CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
-            capsule_manifest_hash: capsule_manifest_hash.clone(),
+            capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
             runner_class: None,
-            layers: BuildLayers { rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
-            restore_contract: RestoreContract { ports: vec![spec.port], healthcheck: Some(spec.healthcheck.clone()), expected_ready_ms: Some(8000) },
+            layers: BuildLayers { rootfs: produced.rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
+            restore_contract: RestoreContract { ports: vec![produced.port], healthcheck: Some(produced.healthcheck.clone()), expected_ready_ms: Some(8000) },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(declared_execution_id),
-            supervisor: spec.supervisor.as_ref().map(|s| {
-                // v1.6 (ato#983) Slice 2: flatten every service's durable state
-                // volumes into one list (the backend attaches them as drives; it
-                // doesn't need per-service association — that's Slice 3's job,
-                // via the target path baked into supervisor.json). owner_scope
-                // reuses the SAME identity the OCI/container persistent-state
-                // path already keys its registry on
-                // (`capsule::foundation::types::manifest_validation::persistent_state_owner_scope`)
-                // — one definition of "whose durable state is this", not two.
-                let volumes: Vec<DurableVolumeSpec> = s
-                    .services
-                    .iter()
-                    .flatten()
-                    .flat_map(|svc| &svc.volumes)
-                    .map(|v| DurableVolumeSpec { state_name: v.state_name.clone(), size_mb: v.size_mb })
-                    .collect();
-                let state_owner_scope =
-                    if volumes.is_empty() { None } else { manifest.persistent_state_owner_scope() };
-                SupervisorBindings { binding_names: s.binding_names.clone(), state_volumes: volumes, state_owner_scope }
-            }),
+            execution_id: Some(produced.execution_id),
+            supervisor: produced.supervisor,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
     let manifest_out = receipt.manifest.clone();
 
     // 5. Verify the sealed artifact RESTORES before we call it sealed (no traffic
-    // exposed). A supervisor artifact's restore-readiness is the backend's agent
-    // probe (reachable + NOT bound-ready, #962) — no health wait, no binding needed.
+    // exposed). A supervisor artifact WITH required bindings restore-verifies via
+    // the backend's agent probe (reachable + NOT bound-ready, #962) — no health
+    // wait, no binding needed; a ZERO-binding supervisor artifact (import) sealed
+    // its workload RUNNING, so the backend health-waits like any no-binding
+    // artifact (ato#1002 D4).
     let restored = backend
         .restore(RestoreReadyStateInput { store: &store, manifest: manifest_out.clone(), overlay_root: jobdir.join("verify-ov"), host_runner_class: None, uffd_preview: false })
         .map_err(|e| fail("restore_verify", e.to_string()))?;
@@ -505,24 +858,25 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     std::fs::write(jobdir.join("manifest.json"), &manifest_json).map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
 
     Ok(Artifact {
-        capsule_manifest_hash,
+        capsule_manifest_hash: produced.capsule_manifest_hash,
         execution_id,
         artifact_manifest_hash,
         runner_class_id,
         snapshot_backend: manifest_out.snapshot_backend.kind.clone(),
         artifact_location,
-        healthcheck_url_path: spec.healthcheck,
+        healthcheck_url_path: produced.healthcheck,
         no_secret_scan_clean: true,
         rootfs_bytes: manifest_out.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
         mem_bytes: manifest_out.layers.memory.as_ref().map(|m| m.total_len).unwrap_or(0),
         vmstate_bytes: manifest_out.layers.vmstate.as_ref().map(|m| m.total_len).unwrap_or(0),
         // #932 build provenance — lands in receipt_json via the sealed ack (diagnostics
         // only; the ato-api registry identity comparison never reads these).
-        manifest_source: manifest_source.to_string(),
-        synthesized_probe: spec.probe_synthesized,
-        declared_command: spec.declared_start_cmd,
-        normalized_guest_command: spec.start_cmd,
-        supervisor_build: supervisor_ack,
+        manifest_source: produced.manifest_source,
+        synthesized_probe: produced.synthesized_probe,
+        declared_command: produced.declared_command,
+        normalized_guest_command: produced.normalized_guest_command,
+        supervisor_build: produced.supervisor_ack,
+        docker_import_receipt: produced.docker_import_receipt,
     })
 }
 
@@ -599,6 +953,31 @@ mod tests {
         assert_eq!(resp.jobs[0].profile, "default");
         // #932: an OLDER ato-api without recipe_toml parses as None (repo-manifest path).
         assert!(resp.jobs[0].recipe_toml.is_none());
+        // ato#1002: an OLDER ato-api without kind/params parses as the recipe lane.
+        assert_eq!(resp.jobs[0].kind, "recipe");
+        assert!(resp.jobs[0].params.is_none());
+    }
+
+    #[test]
+    fn parses_a_dockerfile_import_claim() {
+        // ato#1002: an import job carries kind + params (and a null recipe_toml).
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_4", "capsule_id": "cap_4",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "d".repeat(40), "subdirectory": null },
+                "recipe_toml": null,
+                "kind": "dockerfile_import",
+                "params": { "dockerfile_path": "docker/prod.Dockerfile", "port_override": 8080 },
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.jobs[0].kind, "dockerfile_import");
+        assert!(resp.jobs[0].recipe_toml.is_none());
+        let params = parse_import_params(resp.jobs[0].params.as_ref()).unwrap();
+        assert_eq!(params.dockerfile_path, "docker/prod.Dockerfile");
+        assert_eq!(params.port_override, Some(8080));
+        assert!(params.readiness_http_path.is_none());
     }
 
     #[test]
@@ -706,6 +1085,139 @@ mod tests {
         assert_eq!(spec.start_cmd, "python3 app.py");
         assert_eq!(spec.port, 8080);
         assert_eq!(spec.healthcheck, "/health");
+    }
+
+    // ── ato#1002: producer branch selection + import params ──────────────────
+
+    fn test_cfg() -> Config {
+        Config {
+            api_url: "https://api".into(),
+            token: "t".into(),
+            agent_id: "a".into(),
+            work: std::env::temp_dir(),
+            rootfs_size_mib: 1024,
+            once: true,
+            poll_secs: 15,
+        }
+    }
+
+    fn import_job(kind: &str, params: Option<serde_json::Value>) -> ClaimedJob {
+        ClaimedJob {
+            id: "job_x".into(),
+            capsule_id: "cap_x".into(),
+            target_label: "app".into(),
+            profile: "default".into(),
+            source: ClaimedSource {
+                github_owner: "acme".into(),
+                github_repo: "app".into(),
+                commit_sha: "a".repeat(40),
+                subdirectory: None,
+            },
+            recipe_toml: None,
+            kind: kind.into(),
+            params,
+        }
+    }
+
+    #[test]
+    fn unknown_job_kind_fails_closed_at_claim_kind() {
+        // Server/daemon contract skew (the claim advertised supported_kinds): an
+        // unknown kind never guesses a lane — ack failed at stage claim_kind.
+        let err = produce_build(&test_cfg(), &import_job("oci_image", None), Path::new("/nonexistent")).unwrap_err();
+        assert_eq!(err.0, "claim_kind");
+        assert!(err.1.contains("oci_image"), "{}", err.1);
+    }
+
+    #[test]
+    fn import_params_validation_failures_fail_at_eligibility() {
+        // Params are validated BEFORE any clone/build work, so a bad-params job
+        // acks failed at the eligibility stage without touching the network.
+        for bad in [
+            serde_json::json!({ "port_override": 0 }),
+            serde_json::json!({ "dockerfile_path": "../evil" }),
+            serde_json::json!({ "unknown_key": true }),
+            serde_json::json!("not-an-object"),
+        ] {
+            let err = produce_build(&test_cfg(), &import_job("dockerfile_import", Some(bad.clone())), Path::new("/nonexistent")).unwrap_err();
+            assert_eq!(err.0, "eligibility", "{bad}");
+        }
+    }
+
+    #[test]
+    fn import_params_parse_defaults_and_full_shape() {
+        // Absent or null ⇒ all defaults (dockerfile_path = "Dockerfile").
+        assert_eq!(parse_import_params(None).unwrap(), DockerfileImportParams::default());
+        assert_eq!(parse_import_params(Some(&serde_json::Value::Null)).unwrap(), DockerfileImportParams::default());
+        assert_eq!(parse_import_params(None).unwrap().dockerfile_path, "Dockerfile");
+        // Full object parses with the bounds applied (65535 is a legal port).
+        let v = serde_json::json!({
+            "dockerfile_path": "docker/app.Dockerfile",
+            "port_override": 65535,
+            "readiness_http_path": "/healthz",
+        });
+        let p = parse_import_params(Some(&v)).unwrap();
+        assert_eq!(p.dockerfile_path, "docker/app.Dockerfile");
+        assert_eq!(p.port_override, Some(65535));
+        assert_eq!(p.readiness_http_path.as_deref(), Some("/healthz"));
+        // Boundary: exactly 200 chars is legal (the ack schema's healthcheck_url_path max).
+        let max = format!("/{}", "x".repeat(199));
+        let v = serde_json::json!({ "readiness_http_path": max.as_str() });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().readiness_http_path.as_deref(), Some(max.as_str()));
+    }
+
+    #[test]
+    fn import_params_reject_every_out_of_bounds_shape() {
+        // The same strict bounds the ato-api enqueue validation enforces (ato#1002):
+        // unknown keys, non-object params, path escape/length, port range/type,
+        // readiness shape/length — each rejected with an actionable reason.
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (serde_json::json!({ "extra": 1 }), "unknown"),
+            (serde_json::json!({ "dockerfile_path": "/abs/Dockerfile" }), "relative"),
+            (serde_json::json!({ "dockerfile_path": "a/../../Dockerfile" }), ".."),
+            (serde_json::json!({ "dockerfile_path": "x".repeat(201) }), "200"),
+            (serde_json::json!({ "dockerfile_path": 7 }), "string"),
+            (serde_json::json!({ "port_override": 0 }), "1..65535"),
+            (serde_json::json!({ "port_override": 65536 }), "1..65535"),
+            (serde_json::json!({ "port_override": "8080" }), "integer"),
+            (serde_json::json!({ "port_override": 8080.5 }), "integer"),
+            (serde_json::json!({ "readiness_http_path": "health" }), "start with '/'"),
+            // 200, not the contract draft's 256: the ack's healthcheck_url_path
+            // schema (ato-api, strict) caps at 200 — see parse_import_params.
+            (serde_json::json!({ "readiness_http_path": format!("/{}", "x".repeat(200)) }), "200"),
+            (serde_json::json!({ "readiness_http_path": 1 }), "string"),
+            // Shell-injection gate: the value lands in the builder-host pack
+            // script, so NUL/CR/LF are rejected fail-closed (reject_control_chars).
+            (serde_json::json!({ "readiness_http_path": "/x\nid > /tmp/pwned\n#" }), "newline"),
+            (serde_json::json!({ "readiness_http_path": "/x\rid" }), "newline"),
+            (serde_json::json!({ "readiness_http_path": "/x\u{0}y" }), "NUL"),
+            (serde_json::json!([1, 2]), "object"),
+        ];
+        for (v, needle) in cases {
+            let err = parse_import_params(Some(&v)).unwrap_err();
+            assert!(err.contains(needle), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn import_clone_rejects_invalid_identities_before_any_git() {
+        let src = |owner: &str, repo: &str, commit: &str, sub: Option<&str>| ClaimedSource {
+            github_owner: owner.into(),
+            github_repo: repo.into(),
+            commit_sha: commit.into(),
+            subdirectory: sub.map(String::from),
+        };
+        let dest = std::env::temp_dir().join(format!("never-created-clone-dest-{}", std::process::id()));
+        let full = "a".repeat(40);
+        // Bad owner / repo / non-pinned commit / escaping subdir — each fails BEFORE
+        // any git command or directory creation (same gates as materialize_source;
+        // only the capsule.toml requirement is deliberately absent).
+        assert!(clone_pinned_source(&src("bad owner", "app", &full, None), &dest).unwrap_err().contains("owner"));
+        assert!(clone_pinned_source(&src("acme", "bad repo", &full, None), &dest).unwrap_err().contains("repo"));
+        assert!(clone_pinned_source(&src("acme", "app", "main", None), &dest).unwrap_err().contains("non-pinned"));
+        assert!(clone_pinned_source(&src("acme", "app", &full[..12], None), &dest).unwrap_err().contains("non-pinned"));
+        let err = clone_pinned_source(&src("acme", "app", &full, Some("../up")), &dest).unwrap_err();
+        assert!(err.contains("subdirectory"), "{err}");
+        assert!(!dest.exists(), "validation must reject before any clone IO");
     }
 
     #[test]
@@ -831,13 +1343,15 @@ mod tests {
             declared_command: "app.py".into(),
             normalized_guest_command: "python3 app.py".into(),
             supervisor_build: None,
+            docker_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        // A NO-BINDING ack omits supervisor_build entirely (byte-identical vs the
-        // pre-3e-2c schema, which the .strict() ato-api validator requires).
+        // A NO-BINDING recipe ack omits supervisor_build AND docker_import_receipt
+        // entirely (byte-identical vs the pre-3e-2c / pre-#1002 schema, which the
+        // .strict() ato-api validator requires).
         assert_eq!(
             keys,
             [
@@ -853,6 +1367,52 @@ mod tests {
         for k in ["execution_id", "runner_class_id", "artifact_location"] {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");
         }
+    }
+
+    #[test]
+    fn dockerfile_import_ack_carries_the_receipt_and_the_new_manifest_source() {
+        // ato#1002: an import ack adds docker_import_receipt (an arbitrary
+        // non-secret JSON object) and manifest_source = "dockerfile_import";
+        // both are OPTIONAL server-side, so old recipe acks keep validating.
+        // Review D4: an import ack ALWAYS carries supervisor_build too — a
+        // zero-binding import is still a supervisor artifact, acked with an
+        // EMPTY name set (ato-api maps [] to no_binding_required=true + NULL
+        // binding_names_json, so the publish firewall passes unchanged).
+        let a = Artifact {
+            capsule_manifest_hash: "blake3:d".into(),
+            execution_id: "sha256:i".into(),
+            artifact_manifest_hash: "blake3:a".into(),
+            runner_class_id: "rc".into(),
+            snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
+            healthcheck_url_path: "/".into(),
+            no_secret_scan_clean: true,
+            rootfs_bytes: 1,
+            mem_bytes: 2,
+            vmstate_bytes: 3,
+            manifest_source: "dockerfile_import".into(),
+            synthesized_probe: true,
+            declared_command: "docker-entrypoint.sh node server.js".into(),
+            normalized_guest_command: "docker-entrypoint.sh node server.js".into(),
+            supervisor_build: Some(SupervisorAck { binding_names: vec![] }),
+            docker_import_receipt: Some(serde_json::json!({
+                "importer_version": "ato-docker-import/0.1.0",
+                "build_tool": "podman",
+                "resolved_base_images": [{ "original_ref": "node:20", "resolved_digest": "docker.io/library/node@sha256:ab" }],
+            })),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["manifest_source"], "dockerfile_import");
+        assert!(v["docker_import_receipt"].is_object());
+        assert_eq!(v["docker_import_receipt"]["build_tool"], "podman");
+        // The zero-binding supervisor facet serializes as an EXPLICIT empty set —
+        // present, never omitted, never null.
+        assert_eq!(v["supervisor_build"], serde_json::json!({ "binding_names": [] }));
+        // The keys are present ONLY when Some — a recipe ack (None) never carries
+        // docker_import_receipt.
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert!(keys.contains(&"docker_import_receipt"));
+        assert!(keys.contains(&"supervisor_build"));
     }
 
     #[test]
@@ -876,6 +1436,7 @@ mod tests {
             declared_command: "app.py".into(),
             normalized_guest_command: "python3 app.py".into(),
             supervisor_build: Some(SupervisorAck { binding_names: vec!["openai_api_key".into()] }),
+            docker_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(
