@@ -587,8 +587,20 @@ fn derive_supervisor_services(
         // trusts that validation ran; a config error here still fails closed
         // instead of silently building an unmountable/oversized volume.
         let mut volumes: Vec<DurableVolumeBuildSpec> = Vec::new();
+        // Review fix (ato#991): the existing cross-service check below only
+        // fires when the SAME state_name is bound by a DIFFERENT service
+        // (`prev != r.name`) — the same service binding the same state_name
+        // twice was silently accepted, producing two `DurableVolumeBuildSpec`
+        // entries that would collide on the SAME drive_id/fs_label in the
+        // global assignment pass (both keyed by that one state_name), baking
+        // an ambiguous/unmountable `supervisor.json`. Reject it here, at
+        // derive time, before it can reach that pass.
+        let mut bound_states_this_service = std::collections::BTreeSet::new();
         for binding in &svc.state_bindings {
             let state_name = binding.state.trim();
+            if !bound_states_this_service.insert(state_name.to_string()) {
+                return Err(format!("service '{name}': state '{state_name}' is bound more than once"));
+            }
             if binding.service_target.is_some() {
                 return Err(format!(
                     "service '{name}': `state_bindings.service_target` is not applicable to a \
@@ -2539,6 +2551,26 @@ readiness_probe = { http_get = "/health" }
             );
             let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
             assert!(err.contains("exactly one owning service"), "{err}");
+        }
+
+        // Review fix (ato#991): the SAME service binding the SAME state name
+        // twice (even at different targets) must also be rejected — left
+        // unchecked, both entries would collide on the same drive_id/fs_label
+        // in the global assignment pass, baking an ambiguous supervisor.json.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [\
+                     {{ state = \"dbdata\", target = \"/ato/state/dbdata\" }}, \
+                     {{ state = \"dbdata\", target = \"/ato/state/dbdata2\" }}\
+                 ]\n\
+                 [services.api.network]\npublish = true\n",
+                base_toml(),
+                state_decl("dbdata", "")
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("bound more than once"), "{err}");
         }
 
         // Two DIFFERENT state names whose targets are identical → rejected.

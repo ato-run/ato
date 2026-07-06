@@ -111,12 +111,25 @@ impl VolumeMounter for RealVolumeMounter {
     }
 }
 
+/// The one prefix every durable-mount target must be a strict subpath of.
+const STATE_ROOT: &str = "/ato/state";
+
 /// Fail-closed target validation, independent of any real mount call —
 /// defense in depth even though the builder already restricts `target` to
 /// under `/ato/state/`: this agent never trusts a config it didn't produce
-/// itself. Rejects a target that is a symlink (mounting through it could
-/// shadow whatever it points at, e.g. `/app` or `/etc`) or an existing
-/// regular file (mounting there fails confusingly instead of cleanly).
+/// itself.
+///
+/// Review fix (ato#991): the prefix check uses `strip_prefix` on a
+/// COMPONENT basis (not a string comparison) — `/ato/state` must be a whole
+/// path component, so `/ato/stateevil/db` or `/ato/state2/db` are rejected,
+/// and the empty remainder case (`target == "/ato/state"` exactly) is
+/// rejected too, not just "shares the prefix". And the symlink check now
+/// walks EVERY ancestor from `/ato/state` down to the target itself, not
+/// only the leaf: `create_dir_all` + `mount` follow symlinks at any
+/// intermediate component, so an attacker-controlled rootfs making
+/// `/ato/state` (or any directory under it) a symlink could otherwise
+/// redirect the mount to an arbitrary path even though the leaf target
+/// itself is a plain, never-before-seen directory.
 pub fn validate_mount_target(target: &str) -> Result<PathBuf, String> {
     let path = Path::new(target);
     if !path.is_absolute() {
@@ -127,29 +140,61 @@ pub fn validate_mount_target(target: &str) -> Result<PathBuf, String> {
             return Err(format!("volume target {target:?} must not contain '.' or '..'"));
         }
     }
-    if !path.starts_with("/ato/state") {
-        return Err(format!("volume target {target:?} must be under /ato/state/"));
+    match path.strip_prefix(STATE_ROOT) {
+        Ok(rest) if rest.as_os_str().is_empty() => {
+            return Err(format!(
+                "volume target {target:?} must be a subpath under '{STATE_ROOT}/', not '{STATE_ROOT}' itself"
+            ));
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return Err(format!("volume target {target:?} must be under '{STATE_ROOT}/'"));
+        }
     }
-    reject_if_not_a_plain_mount_point(path)?;
+    reject_if_any_ancestor_is_not_a_plain_directory(path)?;
     Ok(path.to_path_buf())
 }
 
-/// Refuses a target that already exists as a symlink (mounting through it
-/// could shadow whatever it points at, e.g. `/app` or `/etc`) or as a regular
-/// file (mounting there fails confusingly instead of cleanly). Split out from
-/// `validate_mount_target` so this check is independently testable without
-/// needing a real path under the hardcoded `/ato/state` prefix (which a
-/// sandboxed test can't create on the real filesystem).
-fn reject_if_not_a_plain_mount_point(path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.file_type().is_symlink() => {
-            Err(format!("volume target {} is a symlink — refusing to mount through it", path.display()))
+/// Walks every ancestor of `path` from `/ato/state` down to (and including)
+/// `path` itself, rejecting the first one that is a symlink (mounting
+/// through it could redirect the mount to whatever it points at — e.g.
+/// `/app` or `/etc`) or — for the leaf only — an existing regular file
+/// (mounting there fails confusingly instead of cleanly; an intermediate
+/// ancestor being a file would already fail `create_dir_all`, so it isn't
+/// specially distinguished here). A missing ancestor is fine — it gets
+/// created by `mkdir -p` at mount time.
+fn reject_if_any_ancestor_is_not_a_plain_directory(path: &Path) -> Result<(), String> {
+    // `ancestors()` yields `path` itself first, then each parent up to `/` —
+    // collect + reverse so we walk top-down (`/ato`, then `/ato/state`, then
+    // deeper), matching the order an attacker-controlled symlink would
+    // actually be resolved in. `/` itself is skipped (always exists, never a
+    // symlink, not ours to gate) — everything under it, INCLUDING `/ato`
+    // itself, is checked: if `/ato` were a symlink, `/ato/state/...` would
+    // resolve through it just as much as if `/ato/state` were.
+    let mut chain: Vec<&Path> = path.ancestors().collect();
+    chain.reverse();
+    for ancestor in chain {
+        if ancestor == Path::new("/") {
+            continue;
         }
-        Ok(meta) if meta.is_file() => {
-            Err(format!("volume target {} already exists as a regular file, not a directory", path.display()))
+        match std::fs::symlink_metadata(ancestor) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(format!(
+                    "volume target {}: ancestor {} is a symlink — refusing to mount through it",
+                    path.display(),
+                    ancestor.display()
+                ));
+            }
+            Ok(meta) if meta.is_file() && ancestor == path => {
+                return Err(format!(
+                    "volume target {} already exists as a regular file, not a directory",
+                    path.display()
+                ));
+            }
+            _ => {}
         }
-        _ => Ok(()),
     }
+    Ok(())
 }
 
 /// Mount every declared volume, sorted by `state_name` for a deterministic
@@ -158,11 +203,33 @@ fn reject_if_not_a_plain_mount_point(path: &Path) -> Result<(), String> {
 pub fn mount_all_volumes(mounter: &dyn VolumeMounter, volumes: &[VolumeSpec]) -> Result<(), String> {
     let mut sorted: Vec<&VolumeSpec> = volumes.iter().collect();
     sorted.sort_by(|a, b| a.state_name.cmp(&b.state_name));
+    // Review fix (ato#991): track every volume ALREADY mounted so a LATER
+    // volume's failure rolls them back before returning — otherwise volume A
+    // stays mounted while the agent reports the whole mount step failed
+    // (main() exits(2) on that failure, but a fresh init/supervisor restart
+    // on the SAME guest could then see A already mounted from a half-applied
+    // previous attempt; a durable-state agent must never leave a partially
+    // applied mount set lying around).
+    let mut mounted: Vec<&VolumeSpec> = Vec::new();
     for vol in sorted {
-        let target = validate_mount_target(&vol.target).map_err(|e| format!("state '{}': {e}", vol.state_name))?;
-        let device =
-            mounter.resolve_device(&vol.fs_label).map_err(|e| format!("state '{}': {e}", vol.state_name))?;
-        mounter.mount(&device, &target).map_err(|e| format!("state '{}': {e}", vol.state_name))?;
+        let target = match validate_mount_target(&vol.target) {
+            Ok(t) => t,
+            Err(e) => {
+                rollback_mounted(mounter, &mounted);
+                return Err(format!("state '{}': {e}", vol.state_name));
+            }
+        };
+        let device = match mounter.resolve_device(&vol.fs_label) {
+            Ok(d) => d,
+            Err(e) => {
+                rollback_mounted(mounter, &mounted);
+                return Err(format!("state '{}': {e}", vol.state_name));
+            }
+        };
+        if let Err(e) = mounter.mount(&device, &target) {
+            rollback_mounted(mounter, &mounted);
+            return Err(format!("state '{}': {e}", vol.state_name));
+        }
         eprintln!(
             "ato-guest-agent: mounted state '{}' ({}) at {} [drive {}]",
             vol.state_name,
@@ -170,8 +237,24 @@ pub fn mount_all_volumes(mounter: &dyn VolumeMounter, volumes: &[VolumeSpec]) ->
             target.display(),
             vol.drive_id
         );
+        mounted.push(vol);
     }
     Ok(())
+}
+
+/// Best-effort unmount, in REVERSE (most-recently-mounted first) order, of
+/// every volume already mounted before a later one failed. Logged, never
+/// panics — the caller is already returning the ORIGINAL failure; a rollback
+/// hiccup must not mask it or abort partway through the rest of the rollback.
+fn rollback_mounted(mounter: &dyn VolumeMounter, mounted: &[&VolumeSpec]) {
+    for vol in mounted.iter().rev() {
+        if let Err(e) = mounter.sync_and_umount(Path::new(&vol.target)) {
+            eprintln!(
+                "ato-guest-agent: rollback umount state '{}' at {}: {e}",
+                vol.state_name, vol.target
+            );
+        }
+    }
 }
 
 /// Best-effort unmount of every volume on shutdown — logged, never fatal (VM
@@ -246,29 +329,72 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn reject_if_not_a_plain_mount_point_rejects_a_symlink_and_a_regular_file() {
+    fn validate_mount_target_rejects_exact_root_and_component_boundary_lookalikes() {
+        // Review fix (ato#991): `/ato/state` itself is not a valid mount
+        // target (needs a real subpath), and a naive STRING prefix check
+        // would wrongly accept "/ato/stateevil/..." / "/ato/state2/..." —
+        // these must be rejected on a COMPONENT boundary, not a string match.
+        assert!(validate_mount_target("/ato/state/dbdata").is_ok());
+        assert!(validate_mount_target("/ato/state").is_err(), "exact /ato/state must be rejected");
+        assert!(validate_mount_target("/ato/stateevil/db").is_err(), "component lookalike must be rejected");
+        assert!(validate_mount_target("/ato/state2/db").is_err(), "component lookalike must be rejected");
+    }
+
+    /// `tempfile::tempdir()`'s path can itself sit under an OS-level symlink
+    /// unrelated to anything the test sets up (e.g. macOS's `/var` ->
+    /// `/private/var`) — canonicalize it first so the ancestor walk only
+    /// ever sees symlinks THIS test deliberately created.
+    fn canonical_tmpdir() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let real_dir = dir.path().join("real");
+        let resolved = std::fs::canonicalize(dir.path()).unwrap();
+        (dir, resolved)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_a_symlinked_leaf_or_an_existing_regular_file_at_the_leaf() {
+        let (_dir, root) = canonical_tmpdir();
+        let real_dir = root.join("real");
         std::fs::create_dir_all(&real_dir).unwrap();
-        let link = dir.path().join("link");
+        let link = root.join("link");
         std::os::unix::fs::symlink(&real_dir, &link).unwrap();
-        let err = reject_if_not_a_plain_mount_point(&link).unwrap_err();
+        let err = reject_if_any_ancestor_is_not_a_plain_directory(&link).unwrap_err();
         assert!(err.contains("symlink"), "{err}");
 
-        let regular_file = dir.path().join("file");
+        let regular_file = root.join("file");
         std::fs::write(&regular_file, b"x").unwrap();
-        let err = reject_if_not_a_plain_mount_point(&regular_file).unwrap_err();
+        let err = reject_if_any_ancestor_is_not_a_plain_directory(&regular_file).unwrap_err();
         assert!(err.contains("regular file"), "{err}");
     }
 
     #[test]
-    fn reject_if_not_a_plain_mount_point_accepts_a_directory_or_missing_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let existing_dir = dir.path().join("real");
+    #[cfg(unix)]
+    fn rejects_an_intermediate_ancestor_that_is_a_symlink_even_when_the_leaf_itself_is_fine() {
+        // Review fix (ato#991): mounting/mkdir follows symlinks at ANY
+        // component, not just the leaf — if an ancestor directory were a
+        // symlink, the mount could land somewhere entirely different even
+        // though the leaf path string looks like a fresh, never-before-seen
+        // directory.
+        let (_dir, root) = canonical_tmpdir();
+        let real_parent = root.join("real-parent");
+        std::fs::create_dir_all(&real_parent).unwrap();
+        let symlinked_ancestor = root.join("state-link");
+        std::os::unix::fs::symlink(&real_parent, &symlinked_ancestor).unwrap();
+        // The LEAF itself doesn't exist yet (a fresh subdir under the
+        // symlinked ancestor) — only the ancestor is a symlink.
+        let leaf = symlinked_ancestor.join("dbdata");
+        let err = reject_if_any_ancestor_is_not_a_plain_directory(&leaf).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("state-link"), "the error must name the offending ancestor: {err}");
+    }
+
+    #[test]
+    fn accepts_an_existing_plain_directory_or_a_fully_missing_path() {
+        let (_dir, root) = canonical_tmpdir();
+        let existing_dir = root.join("real");
         std::fs::create_dir_all(&existing_dir).unwrap();
-        assert!(reject_if_not_a_plain_mount_point(&existing_dir).is_ok());
-        assert!(reject_if_not_a_plain_mount_point(&dir.path().join("does-not-exist-yet")).is_ok());
+        assert!(reject_if_any_ancestor_is_not_a_plain_directory(&existing_dir).is_ok());
+        assert!(reject_if_any_ancestor_is_not_a_plain_directory(&root.join("does-not-exist-yet")).is_ok());
     }
 
     #[test]
@@ -293,21 +419,28 @@ mod tests {
     }
 
     #[test]
-    fn mount_all_volumes_fails_closed_on_invalid_target_before_any_mount_call() {
-        let m = FakeMounter::default();
+    fn mount_all_volumes_fails_closed_on_invalid_target_and_rolls_back_the_earlier_success() {
+        let mut m = FakeMounter::default();
+        m.devices.insert("LBL_GOOD".to_string(), "/dev/vdb".to_string());
+        // "agood" < "zbad" lexicographically, so "agood" sorts (and mounts)
+        // first, THEN "zbad"'s invalid target fails.
         let volumes = vec![
-            vol("good", "/ato/state/good", "LBL_GOOD"),
-            vol("bad", "/etc/passwd", "LBL_BAD"), // sorts AFTER "good" alphabetically
+            vol("agood", "/ato/state/good", "LBL_GOOD"),
+            vol("zbad", "/etc/passwd", "LBL_BAD"),
         ];
-        // "bad" > "good" so "good" would mount first if we didn't fail before
-        // attempting anything with an invalid target in the set — but the
-        // invalid target must still be caught; assert the overall call fails.
+        // Review fix (ato#991): "agood" must be rolled back, not left mounted.
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
-        assert!(err.contains("bad"), "{err}");
+        assert!(err.contains("zbad"), "{err}");
+        assert_eq!(m.mount_calls.lock().unwrap().len(), 1, "agood WAS mounted before zbad failed");
+        assert_eq!(
+            m.umount_calls.lock().unwrap().as_slice(),
+            [PathBuf::from("/ato/state/good")],
+            "agood must be rolled back"
+        );
     }
 
     #[test]
-    fn mount_all_volumes_stops_at_the_first_failure_not_partial() {
+    fn mount_all_volumes_stops_at_the_first_mount_failure_with_nothing_to_roll_back() {
         let mut m = FakeMounter { fail_mount_for: Some(PathBuf::from("/ato/state/aaa")), ..Default::default() };
         m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
         m.devices.insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
@@ -315,6 +448,43 @@ mod tests {
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
         assert!(err.contains("aaa"), "{err}");
         assert!(m.mount_calls.lock().unwrap().is_empty(), "aaa failed before any successful mount call recorded");
+        assert!(m.umount_calls.lock().unwrap().is_empty(), "nothing succeeded yet, so nothing to roll back");
+    }
+
+    #[test]
+    fn mount_all_volumes_rolls_back_an_earlier_success_when_a_later_devices_resolve_fails() {
+        // The exact scenario from review: aaa mounts successfully, bbb's
+        // device resolution (blkid) then fails — aaa must be rolled back.
+        let mut m = FakeMounter { fail_resolve_for: Some("LBL_BBB".to_string()), ..Default::default() };
+        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        let volumes = vec![vol("aaa", "/ato/state/aaa", "LBL_AAA"), vol("bbb", "/ato/state/bbb", "LBL_BBB")];
+        let err = mount_all_volumes(&m, &volumes).unwrap_err();
+        assert!(err.contains("bbb"), "{err}");
+        assert_eq!(m.mount_calls.lock().unwrap().len(), 1, "aaa mounted before bbb's resolve failed");
+        assert_eq!(
+            m.umount_calls.lock().unwrap().as_slice(),
+            [PathBuf::from("/ato/state/aaa")],
+            "aaa must be rolled back"
+        );
+    }
+
+    #[test]
+    fn mount_all_volumes_rolls_back_in_reverse_order_for_multiple_earlier_successes() {
+        let mut m = FakeMounter { fail_resolve_for: Some("LBL_CCC".to_string()), ..Default::default() };
+        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        m.devices.insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
+        let volumes = vec![
+            vol("aaa", "/ato/state/aaa", "LBL_AAA"),
+            vol("bbb", "/ato/state/bbb", "LBL_BBB"),
+            vol("ccc", "/ato/state/ccc", "LBL_CCC"),
+        ];
+        let err = mount_all_volumes(&m, &volumes).unwrap_err();
+        assert!(err.contains("ccc"), "{err}");
+        assert_eq!(
+            m.umount_calls.lock().unwrap().as_slice(),
+            [PathBuf::from("/ato/state/bbb"), PathBuf::from("/ato/state/aaa")],
+            "rollback unwinds most-recently-mounted first"
+        );
     }
 
     #[test]
