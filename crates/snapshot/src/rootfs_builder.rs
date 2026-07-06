@@ -2328,7 +2328,8 @@ readiness_probe = { http_get = "/health" }
             // sub-table instead of `[services.api]`.
             let toml = format!(
                 "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-                 {extra_state}\n[services.api]\nentrypoint = \"a\"\n{extra_service}\
+                 {extra_state}\n[services.api]\nentrypoint = \"a\"\n\
+                 secrets = [\"openai_api_key\"]\n{extra_service}\
                  [services.api.network]\npublish = true\n",
                 base_toml()
             );
@@ -2491,7 +2492,7 @@ readiness_probe = { http_get = "/health" }
         {
             let toml = format!(
                 "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n{}\n\
-                 [services.api]\nentrypoint = \"a\"\n\
+                 [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n\
                  state_bindings = [{{ state = \"dba\", target = \"/ato/state/api-data\" }}]\n\
                  [services.api.network]\npublish = true\n\
                  [services.worker]\nentrypoint = \"w\"\n\
@@ -2518,7 +2519,8 @@ readiness_probe = { http_get = "/health" }
         {
             let toml = format!(
                 "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
-                 [services.api]\nentrypoint = \"a\"\n[services.api.network]\npublish = true\n",
+                 [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n\
+                 [services.api.network]\npublish = true\n",
                 base_toml()
             );
             let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
