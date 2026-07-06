@@ -314,7 +314,7 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
 /// interpolated into the generated `supervisor.json` + the guest spawn script, so a
 /// malformed name is **rejected at emission** (fail-closed), never emitted — mirroring
 /// the guest-agent's own validation (#947) so a broken `supervisor.json` is never built.
-fn valid_env_var_name(name: &str) -> bool {
+pub(crate) fn valid_env_var_name(name: &str) -> bool {
     let mut cs = name.chars();
     matches!(cs.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -1102,7 +1102,7 @@ pub fn valid_github_repo(repo: &str) -> bool {
 /// Validate a relative `subdir` **before** it is joined to the checkout: reject absolute
 /// paths, any `..` component, and non-normal components (root/prefix). The canonical
 /// containment check after checkout closes symlink traversal.
-fn validate_subdir(subdir: &str) -> Result<(), String> {
+pub(crate) fn validate_subdir(subdir: &str) -> Result<(), String> {
     use std::path::Component;
     let p = Path::new(subdir);
     if p.is_absolute() {
