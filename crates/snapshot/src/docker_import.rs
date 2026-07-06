@@ -32,6 +32,9 @@ use std::collections::BTreeMap;
 use protocol::binding_lease::BindingName;
 use serde::Serialize;
 
+/// Build-tool probe + Dockerfile build execution (the importer's build stage).
+pub mod build;
+
 use crate::rootfs_builder::{valid_env_var_name, validate_subdir};
 use crate::scanner::{PROVIDER_KEY_PREFIXES, SENSITIVE_ENV_MARKERS};
 
