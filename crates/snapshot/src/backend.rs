@@ -214,6 +214,13 @@ pub struct BuildLayers {
 /// health, then `StopWorkload` + `Revoke` every placeholder so the snapshot is
 /// taken with the workload down and the tmpfs bindings scrubbed. Names only —
 /// the placeholder values are generated inside the backend and never stored.
+///
+/// ato#1002 D4: `binding_names` MAY be empty — a zero-binding dockerfile import
+/// is still a supervisor artifact (the rootfs runs guest-agent + supervisor).
+/// With an empty set there is no placeholder protocol: the workload starts at
+/// boot (vacuously bound-ready, ato#1001) and the artifact seals RUNNING under
+/// the v1.0 no-binding contract; the manifest still records `supervisor_build`
+/// honestly (with the empty name set).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupervisorBindings {
     /// The binding names the guest rootfs requires (its agent argv), verbatim.
