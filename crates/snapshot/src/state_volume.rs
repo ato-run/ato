@@ -139,7 +139,23 @@ pub fn ensure_state_volume(
         let _ = std::fs::remove_file(&tmp);
         return result;
     }
-    std::fs::rename(&tmp, path).map_err(|e| format!("rename {} -> {}: {e}", tmp.display(), path.display()))?;
+    commit_or_cleanup(&tmp, path)
+}
+
+/// The final atomic-create step: promote `tmp` to `path` via `rename`, or —
+/// review fix (ato#990) — clean up `tmp` if the rename itself fails. The doc
+/// comment on `ensure_state_volume` promises "any failure removes the .tmp";
+/// before this fix that only covered the create/set_len/format failures
+/// above it, not this last step. Split out so the rename-failure cleanup is
+/// unit-testable directly (constructing a real OS-level rename failure via
+/// `ensure_state_volume`'s public entry point isn't possible: its own
+/// `path.exists()` check intercepts a directory at `path` first, by design,
+/// before ever reaching this step).
+fn commit_or_cleanup(tmp: &Path, path: &Path) -> Result<(), String> {
+    if let Err(e) = std::fs::rename(tmp, path) {
+        let _ = std::fs::remove_file(tmp);
+        return Err(format!("rename {} -> {}: {e}", tmp.display(), path.display()));
+    }
     Ok(())
 }
 
@@ -172,6 +188,58 @@ pub fn acquire_volume_lock(lock_path: &Path) -> Result<(), String> {
 /// `release_lock` convention in `firecracker.rs`).
 pub fn release_volume_lock(lock_path: &Path) {
     let _ = std::fs::remove_file(lock_path);
+}
+
+/// Releases every held durable-state-volume lock when dropped.
+#[derive(Debug)]
+pub struct VolumeLockGuard(pub Vec<PathBuf>);
+impl Drop for VolumeLockGuard {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            release_volume_lock(p);
+        }
+    }
+}
+
+/// Ensure + lock every volume in `volumes`, sorted by `state_name` for
+/// deterministic `drive_id` assignment, returning the ordered backing-file
+/// paths and a guard holding every lock acquired.
+///
+/// The guard is built INCREMENTALLY: each lock is pushed into it the instant
+/// it is acquired, not collected into a plain `Vec` and wrapped in a guard
+/// only after the whole loop finishes. That distinction is the fix for
+/// ato#990's review finding — if a LATER volume's `acquire_volume_lock` or
+/// `ensure_state_volume` fails and this function returns early via `?`, the
+/// (local, already-partially-filled) guard goes out of scope right there and
+/// its `Drop` releases every lock already acquired. Building the guard only
+/// at the end would have left an earlier volume's lock held forever whenever
+/// a later one failed — exactly the leak this shape prevents by construction
+/// rather than by remembering to clean up on every error path by hand.
+///
+/// Shared by both `build_ready_state` (guard dropped when that call returns —
+/// a build is a temporary boot-to-snapshot) and `restore` (the returned guard
+/// is `mem::forget`-ed on success so the locks survive for the live session,
+/// released later by `stop()` from paths recorded in `.fc-session.json`).
+pub fn prepare_volumes(
+    formatter: &dyn VolumeFormatter,
+    work_root: &Path,
+    owner_scope: &str,
+    volumes: &[DurableVolumeSpec],
+) -> Result<(Vec<PathBuf>, VolumeLockGuard), String> {
+    let mut paths = Vec::new();
+    let mut guard = VolumeLockGuard(Vec::new());
+    let mut sorted = volumes.to_vec();
+    sorted.sort_by(|a, b| a.state_name.cmp(&b.state_name));
+    for vol in &sorted {
+        let vpath = volume_path(work_root, owner_scope, &vol.state_name);
+        let lpath = lock_path(work_root, owner_scope, &vol.state_name);
+        acquire_volume_lock(&lpath)?;
+        guard.0.push(lpath);
+        let label = volume_label(owner_scope, &vol.state_name);
+        ensure_state_volume(formatter, &vpath, vol.size_mb, &label)?;
+        paths.push(vpath);
+    }
+    Ok((paths, guard))
 }
 
 /// The `PUT /drives/<id>` JSON payload for each volume, in the SAME
@@ -321,6 +389,25 @@ mod tests {
     }
 
     #[test]
+    fn rename_failure_also_cleans_the_tmp_file() {
+        // Review fix (ato#990): `commit_or_cleanup` is the extracted final
+        // rename-or-cleanup step. Force a real OS-level rename failure by
+        // making the destination an existing DIRECTORY (renaming a regular
+        // file onto a directory fails on every platform) — a real tmp FILE is
+        // created first so this proves the cleanup, not just the error path.
+        let dir = tmpdir();
+        let tmp = dir.path().join("dbdata.img.tmp");
+        std::fs::write(&tmp, b"contents").unwrap();
+        let path = dir.path().join("dbdata.img");
+        std::fs::create_dir_all(&path).unwrap(); // destination exists as a directory
+
+        let err = commit_or_cleanup(&tmp, &path).unwrap_err();
+        assert!(err.contains("rename"), "{err}");
+        assert!(!tmp.exists(), "tmp must not remain after a rename failure");
+        assert!(path.is_dir(), "the pre-existing destination directory is untouched");
+    }
+
+    #[test]
     fn zero_size_mb_produces_a_zero_length_file_bounds_are_the_manifest_layers_job() {
         // state_volume.rs trusts its caller (the shared capsule-crate bounds
         // check already rejects size_mb=0 at the manifest/builder layer); this
@@ -353,6 +440,54 @@ mod tests {
         acquire_volume_lock(&lock).unwrap();
         release_volume_lock(&lock);
         release_volume_lock(&lock); // double release — must not panic/error
+    }
+
+    #[test]
+    fn prepare_volumes_releases_earlier_locks_when_a_later_one_fails() {
+        // Review fix (ato#990) regression test: with 2 volumes, the FIRST
+        // volume's lock acquire succeeds; the SECOND's fails because its lock
+        // file already exists (simulating another session already holding
+        // it). `prepare_volumes` must return an error AND the first volume's
+        // lock file must be gone — not leaked because the guard was built
+        // "too late" (only after the whole loop, from a plain Vec).
+        let dir = tmpdir();
+        let work_root = dir.path().to_path_buf();
+        let fmt = FakeFormatter::default();
+        let volumes = vec![
+            DurableVolumeSpec { state_name: "aaa".to_string(), size_mb: 64 },
+            DurableVolumeSpec { state_name: "bbb".to_string(), size_mb: 64 },
+        ];
+        // Pre-acquire "bbb"'s lock (sorted after "aaa") so its acquire fails.
+        let bbb_lock = lock_path(&work_root, "owner-x", "bbb");
+        acquire_volume_lock(&bbb_lock).unwrap();
+
+        let aaa_lock = lock_path(&work_root, "owner-x", "aaa");
+        assert!(!aaa_lock.exists(), "sanity: aaa's lock is not held yet");
+
+        let err = prepare_volumes(&fmt, &work_root, "owner-x", &volumes).unwrap_err();
+        assert!(err.contains("busy"), "{err}");
+        assert!(!aaa_lock.exists(), "aaa's lock (acquired before bbb failed) must be released, not leaked");
+
+        release_volume_lock(&bbb_lock);
+    }
+
+    #[test]
+    fn prepare_volumes_holds_every_lock_on_success_until_the_guard_drops() {
+        let dir = tmpdir();
+        let work_root = dir.path().to_path_buf();
+        let fmt = FakeFormatter::default();
+        let volumes = vec![
+            DurableVolumeSpec { state_name: "aaa".to_string(), size_mb: 64 },
+            DurableVolumeSpec { state_name: "bbb".to_string(), size_mb: 64 },
+        ];
+        let aaa_lock = lock_path(&work_root, "owner-x", "aaa");
+        let bbb_lock = lock_path(&work_root, "owner-x", "bbb");
+
+        let (paths, guard) = prepare_volumes(&fmt, &work_root, "owner-x", &volumes).unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(aaa_lock.exists() && bbb_lock.exists(), "both locks held while the guard is alive");
+        drop(guard);
+        assert!(!aaa_lock.exists() && !bbb_lock.exists(), "both locks released once the guard drops");
     }
 
     #[test]

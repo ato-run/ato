@@ -363,22 +363,6 @@ impl Drop for BuildLock {
     }
 }
 
-/// v1.6 (ato#983) Slice 2: releases every held durable-state-volume lock when
-/// dropped. Used ONLY for the scope of a single `build_ready_state` call
-/// (like `BuildLock` above) — a build is a temporary boot-to-snapshot, not a
-/// live session, so its volume locks are released the moment it returns
-/// (success or error) rather than surviving until `stop()` (that longer-lived
-/// case is `restore()`'s job — see the `.fc-session.json`-recorded locks
-/// released in `stop()`).
-struct VolumeLocksGuard(Vec<PathBuf>);
-impl Drop for VolumeLocksGuard {
-    fn drop(&mut self) {
-        for p in &self.0 {
-            crate::state_volume::release_volume_lock(p);
-        }
-    }
-}
-
 impl FirecrackerBackend {
     fn acquire_lock(&self, owner: &str) -> Result<(), SnapshotError> {
         std::fs::create_dir_all(&self.config.work_root).map_err(|e| self.backend_err(e.to_string()))?;
@@ -1168,15 +1152,18 @@ impl SnapshotBackend for FirecrackerBackend {
 
         // v1.6 (ato#983) Slice 2: ensure + lock every durable state volume BEFORE
         // boot, so the backing file exists when Firecracker attaches it as a
-        // drive. Sorted by state_name for deterministic drive_id assignment
-        // (state0, state1, ...) — same order `state_volume::state_drive_configs`
-        // and restore both use. The lock is held only for this build call (like
-        // the existing `_lock`/`BuildLock` above) via `_state_volume_locks`
-        // (Drop-released on ANY return path, success or error) — a build here is
-        // a temporary boot-to-snapshot, not the long-lived session; `restore()`
-        // acquires its OWN lock, held until `stop()`.
+        // drive. `state_volume::prepare_volumes` is shared with `restore()` and
+        // is the tested fix for ato#990's review finding — it builds its lock
+        // guard INCREMENTALLY (pushing each lock the instant it's acquired), so
+        // a later volume's acquire/ensure failure still releases every earlier
+        // lock via Drop, rather than leaking them (which a "collect into a
+        // plain Vec, wrap in a guard only after the loop" shape would have).
+        // `_state_volume_locks`'s guard is dropped when this CALL returns
+        // (success or error) — a build here is a temporary boot-to-snapshot,
+        // not the long-lived session; `restore()` acquires its OWN lock
+        // lifetime, held until `stop()`.
         let mut state_drive_paths: Vec<PathBuf> = Vec::new();
-        let mut state_volume_lock_paths: Vec<PathBuf> = Vec::new();
+        let mut _state_volume_locks: Option<crate::state_volume::VolumeLockGuard> = None;
         if let Some(sup) = &input.supervisor
             && !sup.state_volumes.is_empty()
         {
@@ -1186,29 +1173,16 @@ impl SnapshotBackend for FirecrackerBackend {
                      backing-file path without it)",
                 )
             })?;
-            let mut volumes = sup.state_volumes.clone();
-            volumes.sort_by(|a, b| a.state_name.cmp(&b.state_name));
-            for vol in &volumes {
-                let vpath = crate::state_volume::volume_path(&self.config.work_root, owner_scope, &vol.state_name);
-                let lpath = crate::state_volume::lock_path(&self.config.work_root, owner_scope, &vol.state_name);
-                crate::state_volume::acquire_volume_lock(&lpath).map_err(|e| self.backend_err(e))?;
-                state_volume_lock_paths.push(lpath);
-                let label = crate::state_volume::volume_label(owner_scope, &vol.state_name);
-                if let Err(e) = crate::state_volume::ensure_state_volume(
-                    &crate::state_volume::Mkfsext4Formatter,
-                    &vpath,
-                    vol.size_mb,
-                    &label,
-                ) {
-                    for l in &state_volume_lock_paths {
-                        crate::state_volume::release_volume_lock(l);
-                    }
-                    return Err(self.backend_err(e));
-                }
-                state_drive_paths.push(vpath);
-            }
+            let (paths, guard) = crate::state_volume::prepare_volumes(
+                &crate::state_volume::Mkfsext4Formatter,
+                &self.config.work_root,
+                owner_scope,
+                &sup.state_volumes,
+            )
+            .map_err(|e| self.backend_err(e))?;
+            state_drive_paths = paths;
+            _state_volume_locks = Some(guard);
         }
-        let _state_volume_locks = VolumeLocksGuard(state_volume_lock_paths);
 
         // Build always runs in the root namespace (default config, netns=None).
         self.net_up(port)?;
@@ -1488,38 +1462,40 @@ impl SnapshotBackend for FirecrackerBackend {
         // (unlike build's, which release when that call returns) — released in
         // `stop()`, via paths recorded into `.fc-session.json` below so a
         // cross-process `ato stop` (fresh backend) can find and release them too.
+        // `prepare_volumes` (shared with `build_ready_state` above) releases
+        // every lock it acquired so far, via its guard's `Drop`, the moment
+        // ANY volume's acquire/ensure fails — the ato#990 review fix. On
+        // SUCCESS the guard is `mem::forget`-ed: unlike build's temporary
+        // boot-to-snapshot, these locks must outlive this function call, for
+        // the whole live session — released later by `stop()`, from the paths
+        // recorded into `.fc-session.json` below (same cross-process pattern
+        // already used for pid/tap/vsock), not by Drop.
         let mut state_volume_lock_paths: Vec<PathBuf> = Vec::new();
         if let Some(sup) = &input.manifest.supervisor_build
             && !sup.state_volumes.is_empty()
         {
-            let prep: Result<(), SnapshotError> = (|| {
+            let prep = (|| -> Result<crate::state_volume::VolumeLockGuard, SnapshotError> {
                 let owner_scope = sup.state_owner_scope.as_deref().ok_or_else(|| {
                     self.backend_err("sealed manifest has durable state volumes but no state_owner_scope")
                 })?;
-                let mut volumes = sup.state_volumes.clone();
-                volumes.sort_by(|a, b| a.state_name.cmp(&b.state_name));
-                for vol in &volumes {
-                    let vpath = crate::state_volume::volume_path(&self.config.work_root, owner_scope, &vol.state_name);
-                    let lpath = crate::state_volume::lock_path(&self.config.work_root, owner_scope, &vol.state_name);
-                    crate::state_volume::acquire_volume_lock(&lpath).map_err(|e| self.backend_err(e))?;
-                    state_volume_lock_paths.push(lpath);
-                    let label = crate::state_volume::volume_label(owner_scope, &vol.state_name);
-                    crate::state_volume::ensure_state_volume(
-                        &crate::state_volume::Mkfsext4Formatter,
-                        &vpath,
-                        vol.size_mb,
-                        &label,
-                    )
-                    .map_err(|e| self.backend_err(e))?;
-                }
-                Ok(())
+                let (_, guard) = crate::state_volume::prepare_volumes(
+                    &crate::state_volume::Mkfsext4Formatter,
+                    &self.config.work_root,
+                    owner_scope,
+                    &sup.state_volumes,
+                )
+                .map_err(|e| self.backend_err(e))?;
+                Ok(guard)
             })();
-            if let Err(e) = prep {
-                for l in &state_volume_lock_paths {
-                    crate::state_volume::release_volume_lock(l);
+            match prep {
+                Ok(guard) => {
+                    state_volume_lock_paths = guard.0.clone();
+                    std::mem::forget(guard);
                 }
-                self.release_lock();
-                return Err(e);
+                Err(e) => {
+                    self.release_lock();
+                    return Err(e);
+                }
             }
         }
 
