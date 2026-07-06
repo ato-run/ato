@@ -1471,24 +1471,32 @@ impl SnapshotBackend for FirecrackerBackend {
         // recorded into `.fc-session.json` below (same cross-process pattern
         // already used for pid/tap/vsock), not by Drop.
         let mut state_volume_lock_paths: Vec<PathBuf> = Vec::new();
+        // v1.6 (ato#983) Slice 4 fix: recorded so `stop()` can fsync each
+        // backing file from the HOST side before this session's lock is
+        // released (see the fsync note on `stop()` below) — found live on
+        // real KVM hardware as ext4 `EBADMSG` (metadata checksum mismatch) on
+        // a second restore of the same capsule, i.e. the guest's own clean
+        // `sync`+`umount` was not sufficient by itself for durability across
+        // a hard-killed VMM.
+        let mut state_volume_paths: Vec<PathBuf> = Vec::new();
         if let Some(sup) = &input.manifest.supervisor_build
             && !sup.state_volumes.is_empty()
         {
-            let prep = (|| -> Result<crate::state_volume::VolumeLockGuard, SnapshotError> {
+            let prep = (|| -> Result<(Vec<PathBuf>, crate::state_volume::VolumeLockGuard), SnapshotError> {
                 let owner_scope = sup.state_owner_scope.as_deref().ok_or_else(|| {
                     self.backend_err("sealed manifest has durable state volumes but no state_owner_scope")
                 })?;
-                let (_, guard) = crate::state_volume::prepare_volumes(
+                crate::state_volume::prepare_volumes(
                     &crate::state_volume::Mkfsext4Formatter,
                     &self.config.work_root,
                     owner_scope,
                     &sup.state_volumes,
                 )
-                .map_err(|e| self.backend_err(e))?;
-                Ok(guard)
+                .map_err(|e| self.backend_err(e))
             })();
             match prep {
-                Ok(guard) => {
+                Ok((paths, guard)) => {
+                    state_volume_paths = paths;
                     state_volume_lock_paths = guard.0.clone();
                     std::mem::forget(guard);
                 }
@@ -1807,6 +1815,9 @@ impl SnapshotBackend for FirecrackerBackend {
                 // v1.6 (ato#983) Slice 2: so a cross-process `ato stop` (fresh
                 // backend, empty in-memory registry) can release these too.
                 "state_volume_locks": state_volume_lock_paths.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
+                // v1.6 (ato#983) Slice 4 fix: so `stop()` can fsync each backing
+                // file from the host side (see `stop()`'s fsync note).
+                "state_volume_paths": state_volume_paths.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>(),
             }).to_string());
             let session = RestoredSession {
                 session_id,
@@ -1868,6 +1879,25 @@ impl SnapshotBackend for FirecrackerBackend {
             let _ = child.wait();
         } else if let Some(pid) = session.vmm_pid.map(|p| p as u32).or_else(|| json_u32(&meta, "pid")) {
             let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
+        // v1.6 (ato#983) Slice 4 fix: fsync every durable-state backing file
+        // from the HOST side now that the VMM is confirmed dead (`wait()`
+        // above returned) — found live on real KVM hardware: a second
+        // restore of the same capsule read back ext4 EBADMSG (metadata
+        // checksum mismatch) on the file the FIRST run wrote through, i.e.
+        // the guest's own clean `sync`+`umount` (done over vsock before this
+        // `stop()` call, see `binding_host::stop_scrub`) was not sufficient
+        // by itself — nothing guaranteed Firecracker's own virtio-blk
+        // backing-file writes were flushed past the HOST's page cache before
+        // the VMM process was killed. This is a plain `File::sync_all()` on
+        // the same path `prepare_volumes` formatted/attached; failure is
+        // logged, not fatal (stop must never fail because a diagnostic-only
+        // durability belt-and-suspenders step couldn't run).
+        for p in json_str_array(&meta, "state_volume_paths") {
+            match std::fs::OpenOptions::new().write(true).open(&p).and_then(|f| f.sync_all()) {
+                Ok(()) => {}
+                Err(e) => eprintln!("stop(): fsync durable-state backing file {p}: {e}"),
+            }
         }
         // U1 (#854): stop + join the page-server thread (if any) AFTER killing the
         // child, so the guest stops faulting and the uffd read hits EOF. The
@@ -2394,6 +2424,7 @@ mod tests {
                 "vsock_uds": serde_json::Value::Null, "netns": serde_json::Value::Null,
                 "veth_root": serde_json::Value::Null,
                 "state_volume_locks": [lpath.to_string_lossy()],
+                "state_volume_paths": [vpath.to_string_lossy()],
             })
             .to_string(),
         )
@@ -2419,8 +2450,54 @@ mod tests {
         assert!(receipt.overlay_removed, "overlay must still be removed as before this slice");
         assert!(!overlay_root.exists());
         assert!(vpath.exists(), "the durable state backing file must survive stop()");
-        assert_eq!(std::fs::read(&vpath).unwrap(), b"durable-bytes", "content must be untouched");
+        assert_eq!(std::fs::read(&vpath).unwrap(), b"durable-bytes", "content untouched by the fsync");
         assert!(!lpath.exists(), "the volume lock must be released");
+    }
+
+    #[test]
+    fn stop_tolerates_a_missing_state_volume_path_without_failing() {
+        // v1.6 (ato#983) Slice 4 fix: an artifact sealed before this fix has
+        // no `state_volume_paths` field at all (json_str_array returns
+        // empty); a path that WAS recorded but no longer exists (e.g. an
+        // operator manually cleaned it up) must log, not fail `stop()` — the
+        // fsync is a best-effort durability belt-and-suspenders step, never
+        // a hard requirement for teardown to succeed.
+        let dir = tempfile::tempdir().unwrap();
+        let overlay_root = dir.path().join("overlay");
+        std::fs::create_dir_all(&overlay_root).unwrap();
+        let work_root = dir.path().join("work");
+        let missing = work_root.join("state").join("does-not-exist.img");
+
+        std::fs::write(
+            overlay_root.join(".fc-session.json"),
+            json!({
+                "pid": 4_100_000_001u64, "tap": "does-not-exist1", "session_id": "fc-test-missing",
+                "vsock_uds": serde_json::Value::Null, "netns": serde_json::Value::Null,
+                "veth_root": serde_json::Value::Null,
+                "state_volume_locks": Vec::<String>::new(),
+                "state_volume_paths": [missing.to_string_lossy()],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let backend = FirecrackerBackend {
+            config: FirecrackerConfig { work_root, ..Default::default() },
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            page_servers: Arc::new(Mutex::new(HashMap::new())),
+        };
+        let session = RestoredSession {
+            session_id: "fc-test-missing".to_string(),
+            backend_id: FIRECRACKER_BACKEND_ID.to_string(),
+            guest_port: None,
+            overlay_root: overlay_root.clone(),
+            restored_bytes: 0,
+            vmm_pid: None,
+            vsock_uds: None,
+            workload_addr: None,
+        };
+        let receipt = backend.stop(session).expect("stop must not fail on a missing fsync target");
+        assert!(receipt.overlay_removed);
     }
 }
 

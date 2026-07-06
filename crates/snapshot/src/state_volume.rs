@@ -245,6 +245,20 @@ pub fn prepare_volumes(
 /// The `PUT /drives/<id>` JSON payload for each volume, in the SAME
 /// deterministic order as `drive_id()` — a pure function so the drive-list
 /// shape is unit-testable without a real Firecracker process.
+///
+/// `cache_type: "Writeback"` (found live on real KVM hardware, ato#983 slice
+/// 4: without it, Firecracker's default `"Unsafe"` cache mode does not
+/// advertise `VIRTIO_BLK_F_FLUSH` to the guest at all — the guest's own
+/// clean `sync`+`umount` before stop has no way to force a real flush of
+/// this drive's writes to the host-side backing file, so a hard `kill()` of
+/// the VMM (`stop()`, no graceful shutdown) can lose or partially apply
+/// writes that the guest already believes are durable. Symptom observed:
+/// ext4 `EBADMSG` (metadata checksum mismatch) reading a file the previous
+/// session had written and cleanly unmounted, on the very next restore of
+/// the same backing file). The boot/rootfs drive (`configure_boot` in
+/// firecracker.rs) is deliberately left at the default — it's read-only
+/// content baked once at build time, never written by a running guest, so
+/// this durability gap does not apply to it.
 pub fn state_drive_configs(paths_in_order: &[PathBuf]) -> Vec<serde_json::Value> {
     paths_in_order
         .iter()
@@ -255,6 +269,7 @@ pub fn state_drive_configs(paths_in_order: &[PathBuf]) -> Vec<serde_json::Value>
                 "path_on_host": path.to_string_lossy(),
                 "is_root_device": false,
                 "is_read_only": false,
+                "cache_type": "Writeback",
             })
         })
         .collect()
@@ -505,6 +520,10 @@ mod tests {
         for c in &cfgs {
             assert_eq!(c["is_root_device"], false);
             assert_eq!(c["is_read_only"], false);
+            assert_eq!(
+                c["cache_type"], "Writeback",
+                "durable state must honor guest flush/sync, not Firecracker's default Unsafe cache"
+            );
         }
         assert_eq!(cfgs[0]["path_on_host"], "/work/state/a/dbdata.img");
     }

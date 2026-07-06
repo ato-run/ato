@@ -3765,6 +3765,11 @@ where
             let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
             let binding_preview = ready_state::flags::bindings_preview_enabled();
             let binding_gate_active = binding_preview && !binding_names.is_empty();
+            // v1.6 (ato#983) Slice 3 revision: captured now — `plan.manifest`
+            // is moved into `restore_and_expose` below — so MountVolumes can
+            // be sent before any binding delivery.
+            let has_durable_state =
+                plan.manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
             // v1.2 PR 2: the grant-scoped resolver (default: host-local SecretStore,
             // namespace rs-<hash16>) + LAUNCH PREFLIGHT. Every declared binding must
             // resolve BEFORE anything is restored — a missing grant blocks the launch
@@ -3928,6 +3933,32 @@ where
                 uffd_preview,
             )?;
             let session = receipt.session;
+            // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND —
+            // durable state is a restore-time binding too (never baked into
+            // the build-time snapshot — see `mount_volumes_before_expose`'s
+            // doc comment), independent of the secret binding-preview flag
+            // below (a state-only capsule may have no secrets to preview at
+            // all). Same fail-closed shape: any failure tears the restored
+            // VM down and never exposes traffic.
+            if has_durable_state {
+                let uds = session.vsock_uds.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "durable state declared but the restored session has no vsock channel \
+                         (the artifact was not built with vsock) — cannot mount"
+                    )
+                });
+                let mount = uds.and_then(|uds| {
+                    ready_state::binding_host::mount_volumes_before_expose(
+                        &uds,
+                        true,
+                        std::time::Duration::from_secs(10),
+                    )
+                });
+                if let Err(e) = mount {
+                    let _ = backend.stop(session.clone());
+                    anyhow::bail!("Ready-State durable-state mount failed closed (no traffic exposed): {e}");
+                }
+            }
             // Phase 8a-RunGate PR D2 (#912): BIND BEFORE EXPOSE. For a binding-required
             // capsule under the preview flag, connect the guest-agent over vsock,
             // deliver the leases, and block until bound-ready — BEFORE any traffic is
