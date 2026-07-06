@@ -415,17 +415,25 @@ pub(crate) enum RestoreArtifactClass {
 }
 
 /// v1.2 PR 3e: the NARROW supervisor exception to the "no vsock artifact" rule.
-/// A supervisor restore is allowed ONLY when every one of these holds — anything
-/// else fails closed:
+/// A BINDING-REQUIRED supervisor restore is allowed ONLY when every one of these
+/// holds — anything else fails closed:
 /// - the lease kind is `restore_snapshot_with_bindings` (the capability-gated kind);
 /// - this runner is opted in (`ATO_RUNNER_SUPERVISOR=1`);
 /// - `manifest.has_vsock == true` AND `manifest.supervisor_build` is present
 ///   (either without the other = an inconsistent artifact, rejected);
-/// - `binding_names` is non-empty and every name parses as a `BindingName`.
-/// The plain `restore_snapshot` kind still restores ONLY a no-binding artifact
-/// (`!has_vsock`, no supervisor receipt) — the old rejection is unchanged for it.
-/// (The backend binding capability is re-checked in the handler, where a backend
-/// exists to probe.)
+/// - every `binding_names` entry parses as a `BindingName`.
+///
+/// v1.7 (ato#1002 D4): a supervisor artifact with an EMPTY `binding_names` — a
+/// Dockerfile import with no secrets, honestly registered as a supervisor build —
+/// restores on the ordinary NO-BINDING public lane: the guest-agent is vacuously
+/// bound-ready at boot (ato#1001) and there is nothing to deliver, so it takes
+/// the plain `restore_snapshot` kind with no supervisor opt-in required, and a
+/// `restore_snapshot_with_bindings` lease against it is a kind/artifact mismatch.
+///
+/// The plain `restore_snapshot` kind otherwise still restores ONLY a no-binding
+/// artifact (`!has_vsock`, no supervisor receipt) — the old rejection is
+/// unchanged for it. (The backend binding capability is re-checked in the
+/// handler, where a backend exists to probe.)
 pub(crate) fn classify_restore_artifact(
     manifest: &ReadyStateManifest,
     with_bindings_kind: bool,
@@ -454,6 +462,19 @@ pub(crate) fn classify_restore_artifact(
                 .to_string(),
         )),
         (Some(sup), true) => {
+            // v1.7 (ato#1002 D4): zero-binding supervisor artifact = the
+            // ordinary no-binding public restore lane (see the doc comment).
+            if sup.binding_names.is_empty() {
+                if with_bindings_kind {
+                    return Err(err(
+                        "restore_snapshot_with_bindings lease references a zero-binding \
+                         supervisor artifact (nothing to bind) — use the ordinary \
+                         restore_snapshot kind (kind/artifact mismatch)"
+                            .to_string(),
+                    ));
+                }
+                return Ok(RestoreArtifactClass::NoBinding);
+            }
             if !with_bindings_kind {
                 return Err(err(
                     "supervisor (binding-required) artifact needs a restore_snapshot_with_bindings \
@@ -465,13 +486,6 @@ pub(crate) fn classify_restore_artifact(
                 return Err(err(
                     "supervisor artifact refused: this runner is not opted into supervisor \
                      restores (set ATO_RUNNER_SUPERVISOR=1)"
-                        .to_string(),
-                ));
-            }
-            if sup.binding_names.is_empty() {
-                return Err(err(
-                    "supervisor artifact carries an empty binding_names list; refusing to \
-                     restore (nothing to bind = inconsistent artifact)"
                         .to_string(),
                 ));
             }
@@ -662,12 +676,47 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_binding_names_must_be_non_empty_and_valid() {
-        let m = manifest_with(Some(vec![]), true);
-        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("empty binding_names"));
+    fn supervisor_binding_names_must_be_valid() {
         // An uppercase (invalid BindingName) name fails closed.
         let m = manifest_with(Some(vec!["OPENAI_API_KEY"]), true);
         assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("OPENAI_API_KEY"));
+    }
+
+    // ── v1.7 (ato#1002 D4): zero-binding supervisor artifact = the no-binding lane ──
+
+    #[test]
+    fn zero_binding_supervisor_artifact_restores_on_the_plain_no_binding_lane() {
+        // A Dockerfile import with no secrets: supervisor_build present +
+        // has_vsock, EMPTY binding_names. Ordinary restore_snapshot kind,
+        // NO supervisor opt-in required (guest is vacuously bound-ready,
+        // ato#1001) — this is the artifact PR D's managed restore serves.
+        let m = manifest_with(Some(vec![]), true);
+        assert_eq!(classify_restore_artifact(&m, false, false).unwrap(), RestoreArtifactClass::NoBinding);
+        assert_eq!(classify_restore_artifact(&m, false, true).unwrap(), RestoreArtifactClass::NoBinding);
+    }
+
+    #[test]
+    fn zero_binding_supervisor_artifact_rejects_the_with_bindings_kind() {
+        let m = manifest_with(Some(vec![]), true);
+        let e = classify_restore_artifact(&m, true, true).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+        assert!(e.1.contains("restore_snapshot"), "{}", e.1);
+        // supervisor_enabled makes no difference — nothing to bind either way.
+        let e = classify_restore_artifact(&m, true, false).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+    }
+
+    #[test]
+    fn non_empty_supervisor_artifact_still_requires_the_with_bindings_kind() {
+        // Invariance: the zero-binding lane must not have loosened the
+        // binding-required gate (reviewer matrix cases 3 and 4).
+        let m = manifest_with(Some(vec!["openai_api_key"]), true);
+        let e = classify_restore_artifact(&m, false, true).unwrap_err();
+        assert!(e.1.contains("restore_snapshot_with_bindings"), "{}", e.1);
+        assert_eq!(
+            classify_restore_artifact(&m, true, true).unwrap(),
+            RestoreArtifactClass::Supervisor { binding_names: vec!["openai_api_key".into()] }
+        );
     }
 
     #[test]
