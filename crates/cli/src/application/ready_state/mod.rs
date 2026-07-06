@@ -24,6 +24,8 @@ pub(crate) mod secret_resolver;
 pub(crate) mod store;
 
 #[cfg(test)]
+mod docker_import_kvm_smoke;
+#[cfg(test)]
 mod durable_state_kvm_smoke;
 #[cfg(test)]
 mod kvm_smoke;
