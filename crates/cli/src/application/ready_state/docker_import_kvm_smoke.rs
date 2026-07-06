@@ -8,15 +8,21 @@
 //!
 //! Evidence fixture ONLY — no runtime semantics change in this slice (the
 //! split-live-fixture discipline). The three apps are chosen to cover distinct
-//! import shapes:
-//! * `Tanq16/local-content-share` — single-binary Go, alpine final, one
-//!   EXPOSE, bare CMD: the baseline shape.
-//! * `nirui/sshwifty` — 4-stage build with PRIOR-STAGE `FROM`s (`FROM base AS
-//!   libbase`, `FROM libbase AS builder`) + `USER` → exercises stage-ref
-//!   passthrough and the `docker_user_ignored` warning.
-//! * `taleshape-com/shaper` — `FROM debian@sha256:…` (ALREADY digest-pinned) +
-//!   `ENTRYPOINT`+`CMD` concat + `HEALTHCHECK` → exercises digest-ref
-//!   passthrough, argv concatenation, and `docker_healthcheck_ignored`.
+//! import shapes, and are PREFLIGHTED for the v0 read-only-rootfs constraint
+//! (see `ImportApp`'s doc):
+//! * `jarun/buku` — ENTRYPOINT-only argv, `HEALTHCHECK` →
+//!   `docker_healthcheck_ignored`, single env-resolved `EXPOSE` → the
+//!   derived-port lane.
+//! * `miroslavpejic85/mirotalkc2c` — single-stage node image with NO `EXPOSE`
+//!   → exercises the explicit port-override lane.
+//! * `miroslavpejic85/mirotalk` (P2P) — second no-EXPOSE app on a different
+//!   default port → the override lane is per-app, not a one-off.
+//!
+//! v0 spec boundary this smoke enforces by selection (documented in #994):
+//! Dockerfile Import v0 supports images that can run with a READ-ONLY rootfs.
+//! Images that write to their own application directory at startup are not
+//! Snapshot Ready unless those writes move to `/tmp`, a declared Ato state
+//! binding under `/ato/state/…`, or a future writable-scratch mapping.
 //!
 //! `#[ignore]`d and self-skips unless `/dev/kvm` + `ATO_LIVE_KVM=1` +
 //! `ATO_SMOKE_DOCKER_IMPORT=1` + a container build tool are present (same
@@ -63,12 +69,22 @@ use snapshot::{
 use super::binding_host::stop_scrub_over_vsock;
 
 /// One pinned import-queue app + what the import of it must prove.
+///
+/// Selection is PREFLIGHTED: v0 Snapshot-Ready imports must tolerate a
+/// READ-ONLY rootfs (Ready-State's boot model) — an app that writes its own
+/// application directory at startup crashes before readiness. Candidates are
+/// screened with `docker run --rm -d --read-only --tmpfs /tmp <img>` + a
+/// still-running check; the full candidate table lives in the PR discussion,
+/// this fixture carries only the green trio (a live fixture is a capability
+/// proof, not an exploration log).
 struct ImportApp {
     slug: &'static str,
     owner: &'static str,
     repo: &'static str,
     /// Full 40-hex commit — the smoke must be reproducible, never HEAD.
     commit: &'static str,
+    /// Explicit public port (`None` = derived from the single EXPOSE).
+    port_override: Option<u16>,
     /// Explicit readiness path (`None` = the synthesized `GET /`).
     readiness: Option<&'static str>,
     expect_user_warning: bool,
@@ -77,31 +93,44 @@ struct ImportApp {
 
 const APPS: &[ImportApp] = &[
     ImportApp {
-        slug: "community/local-content-share",
-        owner: "Tanq16",
-        repo: "local-content-share",
-        commit: "4b0fae2720fef7dbb2dc9a9c78c955919d91d624",
+        // Single-stage python/alpine, ENTRYPOINT-only argv, HEALTHCHECK ->
+        // docker_healthcheck_ignored, single env-resolved EXPOSE -> the
+        // DERIVED-port lane (no override).
+        slug: "community/buku",
+        owner: "jarun",
+        repo: "buku",
+        commit: "c1e2968c4b613337bef758853c8cfd1e562be518",
+        port_override: None,
         readiness: None,
-        expect_user_warning: false,
-        expect_healthcheck_warning: false,
-    },
-    ImportApp {
-        slug: "community/sshwifty",
-        owner: "nirui",
-        repo: "sshwifty",
-        commit: "39d32314de2b37f329c07c175750fa97257ce047",
-        readiness: None,
-        expect_user_warning: true,
-        expect_healthcheck_warning: false,
-    },
-    ImportApp {
-        slug: "community/shaper",
-        owner: "taleshape-com",
-        repo: "shaper",
-        commit: "17348e771ec118a9561f2af073e98d2b15536c82",
-        readiness: Some("/health"),
         expect_user_warning: false,
         expect_healthcheck_warning: true,
+    },
+    ImportApp {
+        // Single-stage node image with NO EXPOSE — exercises the explicit
+        // --port lane (the app listens on its default 8080).
+        slug: "community/mirotalk-c2c",
+        owner: "miroslavpejic85",
+        repo: "mirotalkc2c",
+        commit: "d7be5baa43103d3f9eebfa30a26f1d68c350c35f",
+        port_override: Some(8080),
+        readiness: None,
+        expect_user_warning: false,
+        expect_healthcheck_warning: false,
+    },
+    ImportApp {
+        // Second no-EXPOSE node app on a DIFFERENT default port — proves the
+        // port-override lane is per-app, not a one-off. (The ARG-FROM +
+        // heavy-multi-stage candidate, manage-my-damn-life, exceeded the
+        // preflight build budget and moved to the follow-up queue; the
+        // ARG-substitution lane is unit-covered in the snapshot crate.)
+        slug: "community/mirotalk-p2p",
+        owner: "miroslavpejic85",
+        repo: "mirotalk",
+        commit: "67a541019bf2956b8e7ddef08aab2cd665edb4fe",
+        port_override: Some(3000),
+        readiness: None,
+        expect_user_warning: false,
+        expect_healthcheck_warning: false,
     },
 ];
 
@@ -173,9 +202,11 @@ fn import_and_seal(
     workdir: &Path,
     app: &ImportApp,
 ) -> anyhow::Result<(BuildReadyStateReceipt, u16, String)> {
+    let t_clone = std::time::Instant::now();
     let src = workdir.join(format!("src-{}", app.repo));
     clone_pinned(app.owner, app.repo, app.commit, &src)?;
 
+    let t_import = std::time::Instant::now();
     let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new())
         .map_err(|e| anyhow::anyhow!("spec({}): {e}", app.slug))?;
     let ext4 = workdir.join(format!("{}.ext4", app.repo));
@@ -183,7 +214,7 @@ fn import_and_seal(
         context_dir: &src,
         spec,
         policy: SecretEnvPolicy::Reject,
-        port_override: None,
+        port_override: app.port_override,
         readiness_http_path: app.readiness.map(String::from),
         image_tag: format!("ato-import-smoke-{}", app.repo),
         out_ext4: &ext4,
@@ -191,6 +222,8 @@ fn import_and_seal(
     };
     let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req)
         .map_err(|e| anyhow::anyhow!("import({}): {e}", app.slug))?;
+    let clone_ms = t_import.duration_since(t_clone).as_millis();
+    let import_ms = t_import.elapsed().as_millis();
 
     // ── Provenance assertions: every base digest-pinned; identity computable;
     // the expected per-app warnings (and no unexpected rejections). ──
@@ -218,12 +251,13 @@ fn import_and_seal(
         app.slug
     );
     eprintln!(
-        "  [{slug}] imported: port={port} identity={identity} bases={bases:?} warnings={warns:?}",
+        "  [{slug}] imported ({clone_ms} ms clone, {import_ms} ms import): port={port} identity={identity} bases={bases:?} warnings={warns:?}",
         slug = app.slug,
         port = outcome.plan.port,
         bases = outcome.receipt.resolved_base_images.iter().map(|b| b.resolved_digest.as_str()).collect::<Vec<_>>(),
     );
 
+    let t_seal = std::time::Instant::now();
     let readiness = app.readiness.unwrap_or("/").to_string();
     let rootfs_bytes = std::fs::read(&ext4)?;
     let sealed = backend
@@ -264,6 +298,7 @@ fn import_and_seal(
             }),
         })
         .map_err(|e| anyhow::anyhow!("build_ready_state({}): {e}", app.slug))?;
+    eprintln!("  [{}] sealed ({} ms seal)", app.slug, t_seal.elapsed().as_millis());
     Ok((sealed, outcome.plan.port, readiness))
 }
 
@@ -359,9 +394,9 @@ fn docker_import_live_smoke() {
     for app in APPS {
         eprintln!("── {} ({}@{}) ──", app.slug, app.repo, &app.commit[..12]);
         let (sealed, port, readiness) = import_and_seal(&backend, &store, workdir, app).expect(app.slug);
-        eprintln!("  [{}] sealed (port={port}, readiness={readiness})", app.slug);
+        let t_restore = std::time::Instant::now();
         let session = restore_and_verify(&backend, &store, workdir, app.slug, &sealed, &readiness).expect(app.slug);
-        eprintln!("  [{}] restored + ready", app.slug);
+        eprintln!("  [{}] restored + ready on port {port} ({} ms restore->ready)", app.slug, t_restore.elapsed().as_millis());
         stop_session(&backend, session).expect(app.slug);
         eprintln!("  [{}] stopped, overlay removed", app.slug);
         passed.push(app.slug);
