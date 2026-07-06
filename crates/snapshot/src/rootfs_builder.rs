@@ -27,6 +27,8 @@ use capsule::foundation::types::ready_state::SecretDelivery;
 use protocol::binding_lease::BindingName;
 use serde::Serialize;
 
+use crate::state_volume::{drive_id as state_drive_id, volume_label};
+
 /// The narrow runtime subset the v1 Docker builder supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -145,6 +147,20 @@ pub struct DurableVolumeBuildSpec {
     /// Normalized absolute in-guest mount path, always under `/ato/state/`.
     pub target: String,
     pub size_mb: u32,
+    /// v1.6 (ato#983) Slice 3: `crate::state_volume::drive_id(i)` for this
+    /// volume, `i` = its index in the GLOBAL (cross-service) list of every
+    /// declared volume in the capsule, sorted by `state_name` — assigned here,
+    /// once, for the WHOLE capsule (not per service), so it matches EXACTLY
+    /// what `firecracker.rs`'s `state_volume::prepare_volumes` (Slice 2)
+    /// independently computes at attach time from the same
+    /// (owner_scope, state_name) pairs sorted the same way. Diagnostic only —
+    /// the guest resolves its device by `fs_label`, not this id.
+    pub drive_id: String,
+    /// v1.6 (ato#983) Slice 3: `crate::state_volume::volume_label(owner_scope,
+    /// state_name)` — the guest resolves its actual block device with this
+    /// (e.g. `blkid -L <fs_label>`), never by a `/dev/vdN` index (device
+    /// enumeration order is not a contract Slice 2 makes).
+    pub fs_label: String,
 }
 
 /// A resolved, buildable rootfs spec. Non-secret — safe to record in a receipt.
@@ -455,7 +471,31 @@ fn build_supervisor_json(
                     obj
                 })
                 .collect();
-            serde_json::json!({ "services": svc_json })
+            let mut obj = serde_json::json!({ "services": svc_json });
+            // v1.6 (ato#983) Slice 3: durable state volumes are VM-WIDE — the
+            // guest-agent mounts every one of them once at boot, before any
+            // service starts (not tied to a particular service's lifecycle) —
+            // so this is a top-level array, mirroring the guest's own
+            // `SupervisorConfig.volumes` shape, not nested under a service.
+            // Flattened across every service and ordered by drive_id (already
+            // assigned in one global, deterministic pass above).
+            let mut volumes: Vec<&DurableVolumeBuildSpec> = services.iter().flat_map(|s| &s.volumes).collect();
+            volumes.sort_by(|a, b| a.drive_id.cmp(&b.drive_id));
+            if !volumes.is_empty() {
+                obj["volumes"] = serde_json::json!(
+                    volumes
+                        .iter()
+                        .map(|v| serde_json::json!({
+                            "state_name": v.state_name,
+                            "target": v.target,
+                            "drive_id": v.drive_id,
+                            "fs_label": v.fs_label,
+                            "size_mb": v.size_mb,
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
+            obj
         }
         None => serde_json::json!({
             "cmd": ["/bin/sh", "-lc", start_cmd],
@@ -547,8 +587,20 @@ fn derive_supervisor_services(
         // trusts that validation ran; a config error here still fails closed
         // instead of silently building an unmountable/oversized volume.
         let mut volumes: Vec<DurableVolumeBuildSpec> = Vec::new();
+        // Review fix (ato#991): the existing cross-service check below only
+        // fires when the SAME state_name is bound by a DIFFERENT service
+        // (`prev != r.name`) — the same service binding the same state_name
+        // twice was silently accepted, producing two `DurableVolumeBuildSpec`
+        // entries that would collide on the SAME drive_id/fs_label in the
+        // global assignment pass (both keyed by that one state_name), baking
+        // an ambiguous/unmountable `supervisor.json`. Reject it here, at
+        // derive time, before it can reach that pass.
+        let mut bound_states_this_service = std::collections::BTreeSet::new();
         for binding in &svc.state_bindings {
             let state_name = binding.state.trim();
+            if !bound_states_this_service.insert(state_name.to_string()) {
+                return Err(format!("service '{name}': state '{state_name}' is bound more than once"));
+            }
             if binding.service_target.is_some() {
                 return Err(format!(
                     "service '{name}': `state_bindings.service_target` is not applicable to a \
@@ -575,7 +627,16 @@ fn derive_supervisor_services(
                 .map_err(|e| format!("service '{name}': {e}"))?;
             let target = validate_and_normalize_state_mount_target(&binding.target)
                 .map_err(|e| format!("service '{name}': {e}"))?;
-            volumes.push(DurableVolumeBuildSpec { state_name: state_name.to_string(), target, size_mb });
+            // drive_id/fs_label are placeholders here — assigned in one global
+            // (cross-service) pass below, sorted by state_name across the
+            // WHOLE capsule, to match firecracker.rs's attach-time ordering.
+            volumes.push(DurableVolumeBuildSpec {
+                state_name: state_name.to_string(),
+                target,
+                size_mb,
+                drive_id: String::new(),
+                fs_label: String::new(),
+            });
         }
         if let Some(net) = &svc.network {
             if !net.allow_from.is_empty() {
@@ -732,6 +793,33 @@ fn derive_supervisor_services(
                          durable mount targets must not be identical or nested under one another"
                     ));
                 }
+            }
+        }
+    }
+
+    // v1.6 (ato#983) Slice 3: assign each volume's drive_id + fs_label in ONE
+    // GLOBAL pass — sorted by state_name across every service in the capsule,
+    // exactly the same rule `state_volume::prepare_volumes` (firecracker.rs,
+    // Slice 2) applies to the flattened cross-service list it attaches at
+    // build/restore time. Computing it here, from the manifest alone (no
+    // host/runtime input), guarantees the id/label BAKED into supervisor.json
+    // below is the SAME one the host actually attaches — the two are never
+    // computed from a different ordering rule that could drift apart.
+    if collected.iter().any(|r| !r.volumes.is_empty()) {
+        let owner_scope = m.persistent_state_owner_scope().ok_or_else(|| {
+            "capsule declares durable state volumes but has no name/state_owner_scope to derive \
+             a stable identity from"
+                .to_string()
+        })?;
+        let mut state_names: Vec<String> = collected.iter().flat_map(|r| &r.volumes).map(|v| v.state_name.clone()).collect();
+        state_names.sort();
+        let index_of: BTreeMap<String, usize> =
+            state_names.into_iter().enumerate().map(|(i, name)| (name, i)).collect();
+        for r in &mut collected {
+            for v in &mut r.volumes {
+                let i = index_of[&v.state_name];
+                v.drive_id = state_drive_id(i);
+                v.fs_label = volume_label(&owner_scope, &v.state_name);
             }
         }
     }
@@ -2353,13 +2441,24 @@ readiness_probe = { http_get = "/health" }
             assert_eq!(api.volumes[0].state_name, "dbdata");
             assert_eq!(api.volumes[0].target, "/ato/state/dbdata");
             assert_eq!(api.volumes[0].size_mb, DEFAULT_STATE_VOLUME_SIZE_MB);
+            // v1.6 Slice 3: drive_id/fs_label are assigned globally, from the
+            // manifest's name (no explicit state_owner_scope declared here).
+            assert_eq!(api.volumes[0].drive_id, "state0");
+            assert_eq!(api.volumes[0].fs_label.len(), 16, "ext4 label must be 16 bytes");
+            assert!(api.volumes[0].fs_label.starts_with("AS"));
         }
         // And it DOES appear in the receipt when non-empty.
         let receipt = serde_json::to_value(&spec).unwrap();
         assert_eq!(receipt["supervisor"]["services"][0]["volumes"][0]["state_name"], "dbdata");
-        // Not emitted into the guest-facing supervisor.json in this slice.
+        // v1.6 Slice 3: NOW emitted into the guest-facing supervisor.json too —
+        // as a VM-WIDE top-level array (mounts happen once at boot, before any
+        // service; not nested under the owning service).
         let sup_json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
-        assert!(sup_json["services"][0].get("volumes").is_none());
+        assert!(sup_json["services"][0].get("volumes").is_none(), "volumes are top-level, not per-service");
+        assert_eq!(sup_json["volumes"][0]["state_name"], "dbdata");
+        assert_eq!(sup_json["volumes"][0]["target"], "/ato/state/dbdata");
+        assert_eq!(sup_json["volumes"][0]["drive_id"], "state0");
+        assert_eq!(sup_json["volumes"][0]["size_mb"], DEFAULT_STATE_VOLUME_SIZE_MB);
 
         // Accepted: custom in-bounds size_mb, and lexical normalization (trailing
         // slash + repeated slash) both collapse to the same target string.
@@ -2454,6 +2553,26 @@ readiness_probe = { http_get = "/health" }
             assert!(err.contains("exactly one owning service"), "{err}");
         }
 
+        // Review fix (ato#991): the SAME service binding the SAME state name
+        // twice (even at different targets) must also be rejected — left
+        // unchecked, both entries would collide on the same drive_id/fs_label
+        // in the global assignment pass, baking an ambiguous supervisor.json.
+        {
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{}\n\
+                 [services.api]\nentrypoint = \"a\"\n\
+                 state_bindings = [\
+                     {{ state = \"dbdata\", target = \"/ato/state/dbdata\" }}, \
+                     {{ state = \"dbdata\", target = \"/ato/state/dbdata2\" }}\
+                 ]\n\
+                 [services.api.network]\npublish = true\n",
+                base_toml(),
+                state_decl("dbdata", "")
+            );
+            let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+            assert!(err.contains("bound more than once"), "{err}");
+        }
+
         // Two DIFFERENT state names whose targets are identical → rejected.
         {
             let toml = format!(
@@ -2509,6 +2628,12 @@ readiness_probe = { http_get = "/health" }
             assert_eq!(worker.volumes.len(), 1);
             assert_eq!(api.volumes[0].target, "/ato/state/api-data");
             assert_eq!(worker.volumes[0].target, "/ato/state/worker-data");
+            // v1.6 Slice 3: drive_id assigned GLOBALLY across services, sorted
+            // by state_name ("dba" < "dbb") — not per-service, not declaration
+            // order (worker is declared after api but "dbb" > "dba").
+            assert_eq!(api.volumes[0].drive_id, "state0");
+            assert_eq!(worker.volumes[0].drive_id, "state1");
+            assert_ne!(api.volumes[0].fs_label, worker.volumes[0].fs_label);
         }
 
         // No declared state at all → volumes stays empty (no behavior change), and

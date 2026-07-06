@@ -22,6 +22,7 @@ use protocol::binding_lease::{BindingLeaseId, BindingName};
 
 pub mod supervisor;
 pub mod tmpfs;
+pub mod volume_mount;
 pub mod vsock;
 pub use tmpfs::TmpfsBindingSink;
 

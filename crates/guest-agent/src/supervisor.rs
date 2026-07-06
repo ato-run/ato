@@ -26,6 +26,7 @@ use protocol::binding_lease::BindingName;
 use serde::{Deserialize, Serialize};
 
 use crate::tmpfs::DEFAULT_BINDINGS_ROOT;
+use crate::volume_mount::VolumeSpec;
 
 /// Grace window between SIGTERM and SIGKILL when stopping the workload. Bounded so
 /// `StopWorkload` (the pre-snapshot build boundary) always returns even if the
@@ -113,6 +114,12 @@ pub struct SupervisorConfig {
     /// legacy top-level fields are ignored.
     #[serde(default)]
     pub services: Vec<ServiceSpec>,
+    /// v1.6 (ato#983) Slice 3: durable state volumes to mount BEFORE any
+    /// service starts. VM-wide (not nested under a service — mounted once at
+    /// agent boot, unconditionally, regardless of which service's
+    /// `state_bindings` declared the need for it at build time).
+    #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
 }
 
 fn default_cwd() -> String {
@@ -236,6 +243,45 @@ impl SupervisorConfig {
         // not self-loop, and the graph must be acyclic (the start order is a
         // topological sort — a cycle has no valid order). Validate now, fail-closed.
         self.start_order()?;
+        // v1.6 (ato#983) Slice 3: durable state volumes. Fail-closed at LOAD
+        // time — before ever attempting a real mount — on anything the
+        // builder should never have produced: an empty state_name/fs_label, a
+        // malformed target (re-validated independently of the builder's own
+        // check — this agent never trusts a config it did not produce
+        // itself), a duplicate state_name, a duplicate fs_label (would make
+        // device resolution ambiguous), or two targets that are identical or
+        // nested under one another (mounting one under/over another).
+        let mut seen_states = std::collections::BTreeSet::new();
+        let mut seen_labels = std::collections::BTreeSet::new();
+        let mut targets: Vec<std::path::PathBuf> = Vec::new();
+        for vol in &self.volumes {
+            if vol.state_name.trim().is_empty() {
+                return Err("supervisor.json: a volume has an empty state_name".into());
+            }
+            if vol.fs_label.trim().is_empty() {
+                return Err(format!("supervisor.json: volume {:?} has an empty fs_label", vol.state_name));
+            }
+            if !seen_states.insert(vol.state_name.clone()) {
+                return Err(format!("supervisor.json: duplicate volume state_name {:?}", vol.state_name));
+            }
+            if !seen_labels.insert(vol.fs_label.clone()) {
+                return Err(format!("supervisor.json: duplicate volume fs_label {:?}", vol.fs_label));
+            }
+            let target = crate::volume_mount::validate_mount_target(&vol.target)
+                .map_err(|e| format!("supervisor.json: volume {:?}: {e}", vol.state_name))?;
+            for prev in &targets {
+                if *prev == target || prev.starts_with(&target) || target.starts_with(prev.as_path()) {
+                    return Err(format!(
+                        "supervisor.json: volume {:?} target {} conflicts with another volume's \
+                         target {} — targets must not be identical or nested under one another",
+                        vol.state_name,
+                        target.display(),
+                        prev.display()
+                    ));
+                }
+            }
+            targets.push(target);
+        }
         Ok(())
     }
 
@@ -913,6 +959,87 @@ mod tests {
         );
     }
 
+    /// v1.6 (ato#983) Slice 3: `SupervisorConfig.volumes` validation.
+    #[test]
+    fn config_accepts_a_valid_volume() {
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[{"name":"x","cmd":["a"]}],
+                "volumes":[{"state_name":"dbdata","target":"/ato/state/dbdata","fs_label":"ASlabel0000000"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.volumes.len(), 1);
+        assert_eq!(cfg.volumes[0].state_name, "dbdata");
+    }
+
+    #[test]
+    fn config_rejects_a_volume_with_an_empty_state_name_or_fs_label() {
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[{"state_name":"","target":"/ato/state/dbdata","fs_label":"ASlabel"}]}"#
+            )
+            .is_err(),
+            "empty state_name rejected"
+        );
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[{"state_name":"dbdata","target":"/ato/state/dbdata","fs_label":""}]}"#
+            )
+            .is_err(),
+            "empty fs_label rejected"
+        );
+    }
+
+    #[test]
+    fn config_rejects_duplicate_volume_state_name_or_fs_label() {
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[
+                        {"state_name":"dbdata","target":"/ato/state/a","fs_label":"LBL_A"},
+                        {"state_name":"dbdata","target":"/ato/state/b","fs_label":"LBL_B"}
+                    ]}"#
+            )
+            .is_err(),
+            "duplicate state_name rejected"
+        );
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[
+                        {"state_name":"aaa","target":"/ato/state/a","fs_label":"LBL_SAME"},
+                        {"state_name":"bbb","target":"/ato/state/b","fs_label":"LBL_SAME"}
+                    ]}"#
+            )
+            .is_err(),
+            "duplicate fs_label rejected (device resolution would be ambiguous)"
+        );
+    }
+
+    #[test]
+    fn config_rejects_a_malformed_or_conflicting_volume_target() {
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[{"state_name":"dbdata","target":"/etc/passwd","fs_label":"LBL_A"}]}"#
+            )
+            .is_err(),
+            "target outside /ato/state/ rejected"
+        );
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"x","cmd":["a"]}],
+                    "volumes":[
+                        {"state_name":"aaa","target":"/ato/state/db","fs_label":"LBL_A"},
+                        {"state_name":"bbb","target":"/ato/state/db/backup","fs_label":"LBL_B"}
+                    ]}"#
+            )
+            .is_err(),
+            "nested/overlapping targets rejected"
+        );
+    }
+
     #[test]
     fn supervisor_starts_and_stops_the_WHOLE_group_as_a_unit() {
         let dir = tempfile::tempdir().unwrap();
@@ -1221,6 +1348,7 @@ mod tests {
             base_env: BTreeMap::from([("PORT".to_string(), "8080".to_string())]),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let plan = plan_spawn(&cfg, dir.path()).unwrap();
         assert_eq!(plan.base_env.get("PORT").map(String::as_str), Some("8080"));
@@ -1324,6 +1452,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let fake = FakeWorkload::default();
         let st = fake.0.clone();
@@ -1361,6 +1490,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default);
         assert!(!sup.stop_workload().unwrap(), "nothing to stop ⇒ was_running=false");
@@ -1384,6 +1514,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -1411,6 +1542,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -1433,6 +1565,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -1458,6 +1591,7 @@ mod tests {
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
+            volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
