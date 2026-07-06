@@ -110,6 +110,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_GET(self):
+        # Diagnostic-only: any unhandled exception here would otherwise kill
+        # the connection with an EMPTY response (http.server's default on an
+        # unhandled handler exception is to log to stderr and drop the
+        # connection, never calling send_response) — that reads as a bare
+        # connection failure with no clue why. Surface it as a real 500 body
+        # instead so a live-smoke failure is diagnosable from the HTTP layer
+        # alone, without needing guest console access.
+        try:
+            self._do_get_inner()
+        except Exception as e:
+            import traceback
+            self._reply(500, f"{type(e).__name__}: {e}\n{traceback.format_exc()}".encode())
+
+    def _do_get_inner(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/healthz":
             self._reply(200, b"ok")
