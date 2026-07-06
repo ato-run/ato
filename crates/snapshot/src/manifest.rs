@@ -80,6 +80,18 @@ pub struct SupervisorBuildReceipt {
     /// `None` = not evaluated (e.g. the Fake backend, which boots nothing).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placeholder_absent_from_seal: Option<bool>,
+    /// v1.6 (ato#983) Slice 2: the durable state volumes this build attached
+    /// (writable, non-root drives — see `crate::state_volume`), persisted so
+    /// restore recomputes the IDENTICAL backing-file/lock paths without the
+    /// caller resupplying them. Empty for a build with no durable state
+    /// (additive — an artifact sealed before this slice has no such field and
+    /// deserializes to the empty default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_volumes: Vec<crate::state_volume::DurableVolumeSpec>,
+    /// v1.6 (ato#983) Slice 2: paired with `state_volumes` — see
+    /// `SupervisorBindings::state_owner_scope`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_owner_scope: Option<String>,
 }
 
 impl ReadyStateManifest {
