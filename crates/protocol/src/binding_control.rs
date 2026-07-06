@@ -34,6 +34,17 @@ pub enum HostToAgent {
     StopWorkload,
     /// Session teardown: revoke + scrub all bindings, then the host tears the VM down.
     Stop,
+    /// v1.6 (ato#983) Slice 3 revision: mount every durable-state volume this
+    /// capsule declared (in `/etc/ato/supervisor.json`) — a RESTORE-TIME
+    /// binding, exactly like `Deliver`, sent once per restore BEFORE any
+    /// `Deliver`/bound-ready. No payload: the guest already knows its own
+    /// declared volumes (state_name/target/fs_label/drive_id, computed
+    /// identically host- and guest-side) from that file; this message is
+    /// purely the "now" trigger. Never sent during BUILD — mounting there
+    /// would freeze this restore-time-only filesystem state into the
+    /// snapshot, which is exactly the bug this message exists to avoid (see
+    /// `AgentToHost::VolumesMounted`'s doc comment).
+    MountVolumes,
 }
 
 /// Guest-agent → host responses. **Never** contains a secret value.
@@ -52,6 +63,23 @@ pub enum AgentToHost {
     WorkloadStopped { was_running: bool },
     /// An error — must never carry a secret.
     Error { message: String },
+    /// v1.6 (ato#983) Slice 3 revision: every durable-state volume this
+    /// capsule declares is now mounted (or there were none to mount) —
+    /// answers `MountVolumes`. Found live on real KVM hardware: mounting
+    /// during BUILD (frozen into the snapshot) leaves the guest kernel's
+    /// filesystem metadata/page cache stuck at build-time content forever;
+    /// a LATER restore attaches a backing file whose real bytes have since
+    /// changed (a prior run's writes), and the stale cache reading fresh
+    /// disk blocks trips ext4's metadata checksum validation (`EBADMSG`).
+    /// Treating the mount as a restore-time binding — like a secret value,
+    /// never baked into the snapshot — means every restore always mounts
+    /// fresh against whatever is actually on disk right now. The caller must
+    /// send `MountVolumes` and get this back BEFORE any `Deliver` on a
+    /// restore that has durable state — the guest itself does not gate
+    /// workload-start on this (it can't tell a real restore from BUILD's own
+    /// placeholder-delivery flow, which must still start the workload for
+    /// its health check, and which never sends `MountVolumes` at all).
+    VolumesMounted,
 }
 
 #[cfg(test)]
@@ -90,6 +118,18 @@ mod tests {
         let resp = AgentToHost::WorkloadStopped { was_running: true };
         let rj = serde_json::to_string(&resp).unwrap();
         assert_eq!(rj, r#"{"kind":"workload_stopped","was_running":true}"#);
+        let back: AgentToHost = serde_json::from_str(&rj).unwrap();
+        assert_eq!(back, resp);
+    }
+
+    #[test]
+    fn mount_volumes_round_trips_and_is_value_free() {
+        let msg = HostToAgent::MountVolumes;
+        let j = serde_json::to_string(&msg).unwrap();
+        assert_eq!(j, r#"{"kind":"mount_volumes"}"#, "no payload — the guest already knows its own volumes");
+        let resp = AgentToHost::VolumesMounted;
+        let rj = serde_json::to_string(&resp).unwrap();
+        assert_eq!(rj, r#"{"kind":"volumes_mounted"}"#);
         let back: AgentToHost = serde_json::from_str(&rj).unwrap();
         assert_eq!(back, resp);
     }

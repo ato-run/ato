@@ -3626,7 +3626,9 @@ async fn handle_restore_snapshot_lease(
 ) {
     use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::binding_grants::{binding_namespace, preflight_resolve_names};
-    use crate::application::ready_state::binding_host::{bind_before_expose, issue_leases, spawn_lease_renewal, stop_scrub_over_vsock};
+    use crate::application::ready_state::binding_host::{
+        bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal, stop_scrub_over_vsock,
+    };
     use crate::application::ready_state::flags::{
         binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
@@ -3762,6 +3764,12 @@ async fn handle_restore_snapshot_lease(
         RestoreArtifactClass::Supervisor { binding_names } => Some(binding_names.clone()),
         RestoreArtifactClass::NoBinding => None,
     };
+    // v1.6 (ato#983) Slice 3 revision: whether this sealed artifact declares
+    // any durable state volumes — captured now (same "manifest is the single
+    // source of truth, moved into restore below" reasoning as above) so
+    // MountVolumes can be sent before any binding delivery.
+    let has_durable_state =
+        manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
     prof_mark!("verify_manifest_ms");
 
     // 4. Open the artifact's CAS + select the host backend (both fail-closed).
@@ -3906,6 +3914,44 @@ async fn handle_restore_snapshot_lease(
     // (Firecracker serves on the TAP guest IP, e.g. 172.16.0.2:8080, not host loopback).
     // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
     let workload_addr = session.workload_addr.clone();
+
+    // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND/EXPOSE —
+    // durable state is a restore-time binding, independent of whether this
+    // capsule has any secret bindings at all (a state-only capsule can have
+    // durable state with `supervisor_names == None`). Deliberately its OWN
+    // block, not nested inside the `supervisor_names` branch below — review
+    // finding (PR#992): nesting it there meant a state-only capsule that
+    // never went through the binding-required classification would skip
+    // MountVolumes entirely and fall through to proxy/expose unmounted.
+    // ANY failure = teardown + typed fail, exactly like the binding gate.
+    if has_durable_state {
+        let mount_result: anyhow::Result<()> = async {
+            let uds = session
+                .vsock_uds
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("restored session declares durable state but exposes no vsock uds"))?;
+            tokio::task::spawn_blocking(move || {
+                mount_volumes_before_expose(&uds, true, Duration::from_secs(10))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("mount task join: {e}"))?
+        }
+        .await;
+        if let Err(e) = mount_result {
+            let _ = teardown(backend.as_ref(), session);
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "mount_failed",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    }
 
     // v1.2 PR 3e (supervisor only): BIND BEFORE EXPOSE. Issue leases from the
     // pre-resolved values and deliver them over the restored session's vsock; the
