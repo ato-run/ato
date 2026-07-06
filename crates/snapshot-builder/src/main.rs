@@ -46,7 +46,7 @@ use serde::{Deserialize, Serialize};
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
     DockerImportSpec, DockerfileImportRequest, SecretEnvPolicy, import_descriptor_blake3,
-    import_identity_digest, run_dockerfile_import, validate_dockerfile_path,
+    import_execution_id, run_dockerfile_import, validate_dockerfile_path,
 };
 use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
@@ -206,12 +206,16 @@ struct Artifact {
     declared_command: String,
     /// The command actually embedded into the guest init (post normalization).
     normalized_guest_command: String,
-    /// v1.2 PR 3e-2c: SUPERVISOR (binding-required) artifact facts — binding NAMES
-    /// only, never a value. `Some` ⇒ ato-api registers the row with
+    /// v1.2 PR 3e-2c: SUPERVISOR artifact facts — binding NAMES only, never a
+    /// value. `Some` with NON-EMPTY names ⇒ ato-api registers the row with
     /// `no_binding_required=false` (+ persists the names) and the firewall CHECK
-    /// keeps it permanently non-public. Omitted entirely for a no-binding artifact
-    /// (`skip_serializing_if`), so those acks stay byte-identical against the
-    /// `.strict()` ack schema.
+    /// keeps it permanently non-public. ato#1002 review (D4): a dockerfile-import
+    /// ack ALWAYS carries this field — with an EMPTY name set for a zero-binding
+    /// import (the rootfs still runs guest-agent + supervisor), which ato-api maps
+    /// to `no_binding_required=true` + NULL `binding_names_json`, so the existing
+    /// publish firewall passes unchanged. Omitted entirely for a no-binding
+    /// RECIPE artifact (`skip_serializing_if`), so those acks stay byte-identical
+    /// against the `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     supervisor_build: Option<SupervisorAck>,
     /// ato#1002: non-secret Dockerfile-import provenance — the full
@@ -372,7 +376,9 @@ struct ProducedBuild {
     port: u16,
     healthcheck: String,
     /// Fed to `BuildReadyStateInput.execution_id` (recipe: the declared execution
-    /// id from the graph envelope; import: `import_identity_digest` of the receipt).
+    /// id from the graph envelope; import: `import_execution_id` over the import
+    /// execution envelope — ato#1002 review D3). Always the Ato EXECUTION identity
+    /// (what executes), never a rebuild-inputs / job identity.
     execution_id: String,
     capsule_manifest_hash: String,
     supervisor: Option<SupervisorBindings>,
@@ -559,12 +565,16 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
     let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req).map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
 
-    // Import identity (ato#1002): execution_id = the input-only import identity
-    // digest; capsule_manifest_hash = the blake3 import DESCRIPTOR hash over the
-    // SAME JCS envelope (an import has no capsule.toml — this is a descriptor
-    // hash, not a manifest hash). Both computable from declared inputs alone,
-    // never from the job id / builder-host state.
-    let execution_id = import_identity_digest(&outcome.receipt);
+    // Import identity (ato#1002 review D3): execution_id = the import EXECUTION
+    // identity — what executes (the derived service argv/cwd/env/port/readiness +
+    // platform + final image digest), aligned in meaning with the recipe path's
+    // declared_execution_id; host-independent, never a job id / timestamp. The
+    // REBUILD-INPUTS identity (import_identity_digest) deliberately does NOT
+    // become the execution id — it lives only inside the docker_import_receipt /
+    // import descriptor lane. capsule_manifest_hash = the blake3 import
+    // DESCRIPTOR hash over that input-only envelope (an import has no
+    // capsule.toml — a descriptor hash, not a manifest hash).
+    let execution_id = import_execution_id(&outcome.plan, &outcome.receipt);
     let capsule_manifest_hash = import_descriptor_blake3(&outcome.receipt);
     let docker_import_receipt = serde_json::to_value(&outcome.receipt)
         .map_err(|e| fail("artifact_metadata", format!("serialize docker import receipt: {e}")))?;
@@ -581,19 +591,24 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
         .map(|s| s.cmd.join(" "))
         .unwrap_or_default();
 
-    // Empty binding set ⇒ an honest NO-BINDING artifact (supervisor None), exactly
-    // like the docker_import_live_smoke: the in-guest agent with an empty required
-    // set is vacuously bound-ready and starts the service immediately, so the v1.0
-    // no-binding seal contract ("boot, healthcheck answers") is what holds. Under
-    // the fixed Reject policy the set is always empty today; the mapping stays
-    // general for a future with-bindings job shape.
+    // ato#1002 review (D4): a dockerfile import is a SUPERVISOR artifact end to
+    // end — the packed rootfs runs guest-agent + supervisor even with ZERO
+    // bindings (ato#1001 starts the vacuously bound-ready workload at boot, so
+    // the backend's health wait passes with nothing delivered, and the backend
+    // accepts the empty set: no placeholder protocol, sealed per the no-binding
+    // contract). The sealed ack therefore ALWAYS carries supervisor_build for an
+    // import (binding_names may be []) so ato-api records honest supervisor
+    // provenance; server-side an EMPTY set still registers as
+    // no_binding_required=true with NULL binding_names_json, keeping the publish
+    // firewall unchanged. Under the fixed Reject policy the set is always empty
+    // today; the mapping stays general for a future with-bindings job shape.
     let binding_names = outcome.plan.supervisor.binding_names.clone();
-    let supervisor = (!binding_names.is_empty()).then(|| SupervisorBindings {
+    let supervisor = Some(SupervisorBindings {
         binding_names: binding_names.clone(),
         state_volumes: vec![],
         state_owner_scope: None,
     });
-    let supervisor_ack = (!binding_names.is_empty()).then_some(SupervisorAck { binding_names });
+    let supervisor_ack = Some(SupervisorAck { binding_names });
 
     Ok(ProducedBuild {
         rootfs,
@@ -750,7 +765,10 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
     // a supervisor spec the backend drives the whole placeholder protocol itself
     // (deliver → health → StopWorkload → Revoke → seal, #962); the daemon only passes
-    // the binding NAMES — no secret value exists anywhere in this process.
+    // the binding NAMES — no secret value exists anywhere in this process. A
+    // ZERO-binding supervisor build (dockerfile import, ato#1002 D4) has no
+    // placeholder protocol: the workload starts at boot (vacuously bound-ready,
+    // ato#1001) and the artifact seals per the no-binding contract.
     let store = CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
@@ -768,8 +786,11 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
     let manifest_out = receipt.manifest.clone();
 
     // 5. Verify the sealed artifact RESTORES before we call it sealed (no traffic
-    // exposed). A supervisor artifact's restore-readiness is the backend's agent
-    // probe (reachable + NOT bound-ready, #962) — no health wait, no binding needed.
+    // exposed). A supervisor artifact WITH required bindings restore-verifies via
+    // the backend's agent probe (reachable + NOT bound-ready, #962) — no health
+    // wait, no binding needed; a ZERO-binding supervisor artifact (import) sealed
+    // its workload RUNNING, so the backend health-waits like any no-binding
+    // artifact (ato#1002 D4).
     let restored = backend
         .restore(RestoreReadyStateInput { store: &store, manifest: manifest_out.clone(), overlay_root: jobdir.join("verify-ov"), host_runner_class: None, uffd_preview: false })
         .map_err(|e| fail("restore_verify", e.to_string()))?;
@@ -1350,9 +1371,13 @@ mod tests {
 
     #[test]
     fn dockerfile_import_ack_carries_the_receipt_and_the_new_manifest_source() {
-        // ato#1002: an import ack adds exactly ONE key (docker_import_receipt, an
-        // arbitrary non-secret JSON object) and manifest_source = "dockerfile_import";
+        // ato#1002: an import ack adds docker_import_receipt (an arbitrary
+        // non-secret JSON object) and manifest_source = "dockerfile_import";
         // both are OPTIONAL server-side, so old recipe acks keep validating.
+        // Review D4: an import ack ALWAYS carries supervisor_build too — a
+        // zero-binding import is still a supervisor artifact, acked with an
+        // EMPTY name set (ato-api maps [] to no_binding_required=true + NULL
+        // binding_names_json, so the publish firewall passes unchanged).
         let a = Artifact {
             capsule_manifest_hash: "blake3:d".into(),
             execution_id: "sha256:i".into(),
@@ -1369,7 +1394,7 @@ mod tests {
             synthesized_probe: true,
             declared_command: "docker-entrypoint.sh node server.js".into(),
             normalized_guest_command: "docker-entrypoint.sh node server.js".into(),
-            supervisor_build: None,
+            supervisor_build: Some(SupervisorAck { binding_names: vec![] }),
             docker_import_receipt: Some(serde_json::json!({
                 "importer_version": "ato-docker-import/0.1.0",
                 "build_tool": "podman",
@@ -1380,9 +1405,14 @@ mod tests {
         assert_eq!(v["manifest_source"], "dockerfile_import");
         assert!(v["docker_import_receipt"].is_object());
         assert_eq!(v["docker_import_receipt"]["build_tool"], "podman");
-        // The key is present ONLY when Some — a recipe ack (None) never carries it.
+        // The zero-binding supervisor facet serializes as an EXPLICIT empty set —
+        // present, never omitted, never null.
+        assert_eq!(v["supervisor_build"], serde_json::json!({ "binding_names": [] }));
+        // The keys are present ONLY when Some — a recipe ack (None) never carries
+        // docker_import_receipt.
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         assert!(keys.contains(&"docker_import_receipt"));
+        assert!(keys.contains(&"supervisor_build"));
     }
 
     #[test]

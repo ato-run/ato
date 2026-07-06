@@ -404,23 +404,75 @@ pub fn partition_dockerfile_env(
     Ok(EnvPartition { base_env, bindings_env })
 }
 
-/// The import-identity digest: `sha256:<hex>` over the JCS canonicalization of
-/// the import's INPUTS only — importer version, platform, Dockerfile path +
-/// sha256, build-context digest, digest-pinned base images (sorted by original
-/// ref), build args, AND the [`DockerImportOptions`] (secret policy, port
-/// override, readiness path, ext4 size — review finding on ato#994: each of
-/// these changes the plan or the packed artifact, so an identity that ignores
-/// them collides distinct artifacts in any cache/gate keyed on it).
+/// The REBUILD-INPUTS identity digest: `sha256:<hex>` over the JCS
+/// canonicalization of the import's INPUTS only — importer version, platform,
+/// Dockerfile path + sha256, build-context digest, digest-pinned base images
+/// (sorted by original ref), build args, AND the [`DockerImportOptions`]
+/// (secret policy, port override, readiness path, ext4 size — review finding
+/// on ato#994: each of these changes the plan or the packed artifact, so an
+/// identity that ignores them collides distinct artifacts in any cache/gate
+/// keyed on it).
 ///
 /// Outputs (final image digest, rootfs digest, warnings) are deliberately
 /// excluded: this identity answers "would rebuilding produce the same
-/// artifact?", so it must be computable from declared inputs alone — the same
-/// discipline as `declared_execution_id` (never a job id, timestamp, or
-/// builder-host state). `effective_dockerfile_sha256` is also excluded: it is
-/// DERIVED from two included inputs (dockerfile sha256 + base digests), and
-/// renderer changes are covered by `importer_version`.
+/// artifact?", so it must be computable from declared inputs alone (never a
+/// job id, timestamp, or builder-host state). `effective_dockerfile_sha256`
+/// is also excluded: it is DERIVED from two included inputs (dockerfile
+/// sha256 + base digests), and renderer changes are covered by
+/// `importer_version`.
+///
+/// This is NOT the Ato execution identity (ato#1002 review): it lives only in
+/// the [`DockerImportReceipt`] / import descriptor lane
+/// ([`import_descriptor_blake3`] shares its envelope). The execution identity
+/// an import build stamps into the sealed manifest is [`import_execution_id`].
 pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
     format!("sha256:{}", build::sha256_hex(import_descriptor_canonical_json(receipt).as_bytes()))
+}
+
+/// The import EXECUTION identity: `sha256:<hex>` over the JCS canonicalization
+/// of the execution ENVELOPE
+///
+/// ```text
+/// { v: "ato-import-exec/1",
+///   service: { name, cmd, cwd, base_env, bindings_env, port, readiness_http_path },
+///   platform, final_image_digest, secret_env_policy }
+/// ```
+///
+/// — WHAT EXECUTES (ato#1002 review): the derived service (argv, cwd, env
+/// split, public port, readiness) pinned to the exact image that runs it
+/// (`final_image_digest`), all host-independent — aligned in MEANING with the
+/// recipe path's `declared_execution_id` (never a job id, timestamp, or
+/// builder-host state) and emitted in the same `sha256:<hex>` format
+/// convention. Contrast with [`import_identity_digest`], the REBUILD-INPUTS
+/// identity: rebuilding the same declared inputs keeps the rebuild identity by
+/// construction, while the execution identity commits to what the sealed
+/// artifact actually executes.
+pub fn import_execution_id(plan: &rootfs::ImportedServicePlan, receipt: &DockerImportReceipt) -> String {
+    // v0 emits exactly ONE service ([`rootfs::IMPORTED_SERVICE_NAME`]); the
+    // envelope is folded over the plan's first service so a future
+    // multi-service import must extend it DELIBERATELY (new envelope version),
+    // never silently. The fallbacks mirror the derive defaults and are
+    // unreachable for plans produced by `derive_imported_service_plan`.
+    let svc = plan.supervisor.services.as_deref().and_then(|s| s.first());
+    let envelope = serde_json::json!({
+        "v": "ato-import-exec/1",
+        "service": {
+            "name": svc.map(|s| s.name.clone()).unwrap_or_else(|| rootfs::IMPORTED_SERVICE_NAME.to_string()),
+            "cmd": svc.map(|s| s.cmd.clone()).unwrap_or_default(),
+            "cwd": svc.map(|s| s.cwd.clone()).unwrap_or_else(|| "/".to_string()),
+            "base_env": svc.map(|s| s.base_env.clone()).unwrap_or_default(),
+            "bindings_env": svc.map(|s| s.env_map.clone()).unwrap_or_default(),
+            "port": plan.port,
+            "readiness_http_path": plan.readiness_http_path,
+        },
+        "platform": receipt.platform,
+        "final_image_digest": receipt.final_image_digest,
+        // Serde form ("reject" / "convert_placeholders") — the same stable
+        // literal the receipt records.
+        "secret_env_policy": receipt.import_options.secret_env_policy,
+    });
+    let canonical = serde_jcs::to_string(&envelope).unwrap_or_else(|_| envelope.to_string());
+    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
 }
 
 /// The import DESCRIPTOR hash: `blake3:<hex>` over the **same** JCS input envelope
@@ -436,7 +488,7 @@ pub fn import_descriptor_blake3(receipt: &DockerImportReceipt) -> String {
 }
 
 /// The JCS-canonicalized input-only import descriptor both digests hash — factored
-/// so [`import_identity_digest`] (sha256, the execution identity) and
+/// so [`import_identity_digest`] (sha256, the rebuild-inputs identity) and
 /// [`import_descriptor_blake3`] (blake3, the registry descriptor hash) cannot drift.
 fn import_descriptor_canonical_json(receipt: &DockerImportReceipt) -> String {
     let mut bases: Vec<&ResolvedBaseImage> = receipt.resolved_base_images.iter().collect();
@@ -848,6 +900,92 @@ mod tests {
                 assert_ne!(ids[i], ids[j]);
             }
         }
+    }
+
+    // --- import_execution_id --------------------------------------------------
+
+    fn sample_image_config() -> build::DockerImageConfig {
+        build::DockerImageConfig {
+            entrypoint: vec!["docker-entrypoint.sh".into()],
+            cmd: vec!["node".into(), "server.js".into()],
+            working_dir: Some("/srv".into()),
+            env: env(&[("NODE_ENV", "production")]),
+            exposed_tcp_ports: vec![3000],
+            user: None,
+            has_healthcheck: false,
+            volumes: vec![],
+        }
+    }
+
+    fn sample_plan() -> rootfs::ImportedServicePlan {
+        rootfs::derive_imported_service_plan(&sample_image_config(), SecretEnvPolicy::Reject, None, None)
+            .expect("sample plan derives")
+    }
+
+    #[test]
+    fn execution_id_is_deterministic_and_execution_scoped() {
+        // ato#1002 review (D3): the execution id hashes WHAT EXECUTES — the derived
+        // service + platform + final image digest — in the recipe path's
+        // `sha256:<hex>` format convention, stable across recomputations.
+        let receipt = sample_receipt();
+        let a = import_execution_id(&sample_plan(), &receipt);
+        assert!(a.starts_with("sha256:") && a.len() == 7 + 64, "{a}");
+        assert_eq!(import_execution_id(&sample_plan(), &receipt), a, "stable across runs");
+
+        // cmd changes the id (a different argv is a different execution).
+        let mut cfg = sample_image_config();
+        cfg.cmd = vec!["node".into(), "other.js".into()];
+        let cmd_differs = rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None).unwrap();
+        assert_ne!(import_execution_id(&cmd_differs, &receipt), a, "cmd must shift the execution id");
+
+        // env changes the id.
+        let mut cfg = sample_image_config();
+        cfg.env.insert("WORKERS".into(), "4".into());
+        let env_differs = rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None).unwrap();
+        assert_ne!(import_execution_id(&env_differs, &receipt), a, "env must shift the execution id");
+
+        // port changes the id.
+        let port_differs =
+            rootfs::derive_imported_service_plan(&sample_image_config(), SecretEnvPolicy::Reject, Some(8080), None)
+                .unwrap();
+        assert_ne!(import_execution_id(&port_differs, &receipt), a, "port must shift the execution id");
+
+        // readiness path changes the id.
+        let readiness_differs = rootfs::derive_imported_service_plan(
+            &sample_image_config(),
+            SecretEnvPolicy::Reject,
+            None,
+            Some("/healthz".into()),
+        )
+        .unwrap();
+        assert_ne!(import_execution_id(&readiness_differs, &receipt), a, "readiness must shift the execution id");
+
+        // final_image_digest changes the id (the exact image that executes).
+        let mut image_differs = receipt.clone();
+        image_differs.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        assert_ne!(import_execution_id(&sample_plan(), &image_differs), a, "image digest must shift the execution id");
+    }
+
+    #[test]
+    fn execution_id_and_rebuild_identity_are_distinct_identities() {
+        // ato#1002 review (D3): for the SAME outcome the two ids differ (different
+        // envelopes, both sha256 — never one relabeled as the other), and they
+        // respond to DIFFERENT facts: the final image digest is an execution fact
+        // (not a rebuild input), the dockerfile sha256 a rebuild input (not an
+        // execution fact).
+        let receipt = sample_receipt();
+        let plan = sample_plan();
+        assert_ne!(import_execution_id(&plan, &receipt), import_identity_digest(&receipt));
+
+        let mut image_differs = receipt.clone();
+        image_differs.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        assert_ne!(import_execution_id(&plan, &image_differs), import_execution_id(&plan, &receipt));
+        assert_eq!(import_identity_digest(&image_differs), import_identity_digest(&receipt));
+
+        let mut dockerfile_differs = receipt.clone();
+        dockerfile_differs.dockerfile_sha256 = "00".repeat(32);
+        assert_eq!(import_execution_id(&plan, &dockerfile_differs), import_execution_id(&plan, &receipt));
+        assert_ne!(import_identity_digest(&dockerfile_differs), import_identity_digest(&receipt));
     }
 
     #[test]

@@ -454,6 +454,23 @@ mod tests {
             .unwrap();
         assert!(plain.manifest.supervisor_build.is_none());
         assert!(!serde_json::to_string(&plain.manifest).unwrap().contains("supervisor_build"));
+        // ato#1002 D4: an EMPTY binding set is an accepted supervisor build (a
+        // zero-binding dockerfile import still runs guest-agent + supervisor) —
+        // the manifest records supervisor_build honestly with the empty name set,
+        // distinct from the no-binding recipe shape above (field absent).
+        let mut empty_input = build_input(&store, vec![]);
+        empty_input.supervisor = Some(crate::backend::SupervisorBindings {
+            binding_names: vec![],
+            state_volumes: vec![],
+            state_owner_scope: None,
+        });
+        let empty = FakeSnapshotBackend::new().build_ready_state(empty_input).unwrap();
+        let sup = empty.manifest.supervisor_build.as_ref().expect("empty supervisor receipt recorded");
+        assert!(sup.binding_names.is_empty());
+        let json = serde_json::to_string(&empty.manifest).unwrap();
+        assert!(json.contains(r#""supervisor_build""#), "{json}");
+        let back: ReadyStateManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.supervisor_build, empty.manifest.supervisor_build);
     }
 
     #[test]
