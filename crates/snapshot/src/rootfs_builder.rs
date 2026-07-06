@@ -1306,7 +1306,7 @@ ATOSUPERVISORJSON{hosts_prep}"#
             let launch = format!(
                 "mkdir -p /run/ato/bindings\n\
                  export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\n\
-                 /usr/local/bin/ato-guest-agent {args} >/tmp/agent.log 2>&1 &"
+                 /usr/local/bin/ato-guest-agent {args} 2>&1 | tee /tmp/agent.log > /dev/console &"
             );
             (prep, launch)
         }
