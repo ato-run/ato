@@ -11,6 +11,13 @@
 //! manifest's blake3 id and requiring it to equal the lease's `artifact_manifest_hash`.
 //! Without it, a runner would trust whatever manifest happened to be on disk at the
 //! CAS path — this module closes that hole (fail-closed).
+//!
+//! ato#1002 (Snapshot Serving v1): `artifact_location` may now also be
+//! `r2://<bucket>/<job_id>/<hash>` — a remote object store. The bytes are fetched via
+//! the lease's short-lived presigned `artifact_fetch_url` into the SAME
+//! `<artifact_root>/<job_id>/{manifest.json, cas/}` layout ([`ensure_artifact_local`]),
+//! then verified by the SAME [`load_and_verify_manifest`] gate — the fetch adds no
+//! parallel verification, it only lands bytes where the existing gate inspects them.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +44,11 @@ pub(crate) struct RestoreSnapshotCommand {
     pub target_label: String,
     pub profile: String,
     pub artifact_location: String,
+    /// ato#1002: short-lived presigned GET for an `r2://` artifact — set by ato-api
+    /// only when the artifact lives in the remote object store. A HINT like
+    /// `artifact_location`: the fetched bytes still pass the full
+    /// [`load_and_verify_manifest`] gate before anything is restored.
+    pub artifact_fetch_url: Option<String>,
     pub artifact_manifest_hash: String,
     pub capsule_manifest_hash: String,
     pub execution_id: String,
@@ -77,6 +89,11 @@ pub(crate) fn parse_restore_snapshot_command(
         target_label: req("target_label")?,
         profile: req("profile")?,
         artifact_location: req("artifact_location")?,
+        artifact_fetch_url: command
+            .get("artifact_fetch_url")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty()),
         artifact_manifest_hash: req("artifact_manifest_hash")?,
         capsule_manifest_hash: req("capsule_manifest_hash")?,
         execution_id: req("execution_id")?,
@@ -98,27 +115,48 @@ pub(crate) struct ArtifactPaths {
     pub cas_dir: PathBuf,
 }
 
-/// Resolve `cas://<job_id>/<artifact_hash>` to on-disk paths under `artifact_root`
-/// (v1 same-host: the builder wrote `<artifact_root>/<job_id>/{manifest.json, cas/}`).
+/// Resolve an artifact location to on-disk paths under `artifact_root`. Every host
+/// uses the SAME local layout `<artifact_root>/<job_id>/{manifest.json, cas/}`:
+/// - `cas://<job_id>/<artifact_hash>` — v1 same-host: the builder already wrote it;
+/// - `r2://<bucket>/<job_id>/<artifact_hash>` — ato#1002 remote object store: the
+///   bytes may still need fetching ([`ensure_artifact_local`] owns that; this
+///   function is pure path mapping and touches no filesystem).
 ///
-/// Fail-closed: only the `cas://` scheme is accepted (a remote `r2://`/`https://`
-/// artifact store is a later phase), the job segment must be a single safe path
-/// component (no `/`, `..`, or absolute escape), and the resolved dir must stay under
-/// `artifact_root`.
+/// Fail-closed: any other scheme (incl. bare `https://`) is rejected, the job
+/// segment must be a single NORMAL path component (no `/`, `..`, `.`, absolute
+/// escape, or Windows drive prefix), and the resolved dir must stay strictly
+/// under `artifact_root`.
 pub(crate) fn locate_artifact(
     artifact_location: &str,
     artifact_root: &Path,
 ) -> std::result::Result<ArtifactPaths, (String, String)> {
     let err = |m: String| ("artifact_unavailable".to_string(), m);
-    let rest = artifact_location
-        .strip_prefix("cas://")
-        .ok_or_else(|| err(format!("unsupported artifact scheme in {artifact_location:?} (v1 restores cas:// only)")))?;
-    let job = rest.split('/').next().unwrap_or("");
+    let job = if let Some(rest) = artifact_location.strip_prefix("cas://") {
+        rest.split('/').next().unwrap_or("")
+    } else if let Some(rest) = artifact_location.strip_prefix("r2://") {
+        // r2://<bucket>/<job_id>/<hash> — the bucket names the builder's upload
+        // target; only <job_id> shapes the local path.
+        let mut parts = rest.split('/');
+        if parts.next().unwrap_or("").is_empty() {
+            return Err(err(format!("missing bucket segment in {artifact_location:?}")));
+        }
+        parts.next().unwrap_or("")
+    } else {
+        return Err(err(format!(
+            "unsupported artifact scheme in {artifact_location:?} (cas:// and r2:// only)"
+        )));
+    };
+    // Exactly ONE Normal component: rejects empty, absolute paths, "." (CurDir —
+    // which would resolve the job dir to artifact_root ITSELF, and the r2:// fetch
+    // path clears a pre-existing job dir before publishing), and Windows drive
+    // prefixes like "C:" (a Prefix component that `root.join` would escape with).
     if job.is_empty()
         || job.contains("..")
         || job.contains('\\')
-        || Path::new(job).components().count() != 1
-        || Path::new(job).is_absolute()
+        || !matches!(
+            Path::new(job).components().collect::<Vec<_>>().as_slice(),
+            [std::path::Component::Normal(_)]
+        )
     {
         return Err(err(format!("unsafe artifact job segment in {artifact_location:?}")));
     }
@@ -127,6 +165,240 @@ pub(crate) fn locate_artifact(
         manifest_json: dir.join("manifest.json"),
         cas_dir: dir.join("cas"),
     })
+}
+
+/// ato#1002: make an artifact's bytes present at the [`locate_artifact`] paths,
+/// fetching them for a remote `r2://` location when needed. `cas://` is untouched
+/// (same-host: the builder already wrote the bytes — behavior identical to before).
+///
+/// For `r2://`:
+/// - if `<artifact_root>/<job_id>/manifest.json` already exists, use it (idempotent —
+///   a re-dispatched lease or a restart never re-downloads);
+/// - else the lease MUST have carried `artifact_fetch_url` (a short-lived presigned
+///   GET). The archive is downloaded to a temp file inside `artifact_root` (same
+///   filesystem), safe-extracted ([`safe_extract_artifact_tar_gz`]) into a temp dir,
+///   then atomically renamed into place — the job dir only ever appears complete.
+///
+/// Byte VERIFICATION stays entirely in [`load_and_verify_manifest`] (the
+/// `manifest.id()` recompute) — this function adds no parallel verification.
+/// Error messages never include the URL: a presigned GET carries its authorization
+/// in the query string.
+pub(crate) async fn ensure_artifact_local(
+    client: &reqwest::Client,
+    artifact_location: &str,
+    artifact_root: &Path,
+    artifact_fetch_url: Option<&str>,
+    max_fetch_bytes: u64,
+) -> std::result::Result<ArtifactPaths, (String, String)> {
+    let err = |m: String| ("artifact_unavailable".to_string(), m);
+    let paths = locate_artifact(artifact_location, artifact_root)?;
+    if !artifact_location.starts_with("r2://") {
+        return Ok(paths);
+    }
+    if paths.manifest_json.exists() {
+        return Ok(paths);
+    }
+    let url = artifact_fetch_url.ok_or_else(|| {
+        err(format!(
+            "remote artifact {artifact_location:?} is not on this host and the lease carried \
+             no artifact_fetch_url"
+        ))
+    })?;
+    std::fs::create_dir_all(artifact_root)
+        .map_err(|e| err(format!("create artifact root {}: {e}", artifact_root.display())))?;
+    // Temp file + staging dir live INSIDE artifact_root so the final rename is an
+    // atomic same-filesystem move (never a cross-device copy).
+    let archive = tempfile::Builder::new()
+        .prefix(".artifact-fetch-")
+        .suffix(".tar.gz")
+        .tempfile_in(artifact_root)
+        .map_err(|e| err(format!("create artifact download temp file: {e}")))?;
+    download_artifact_archive(client, url, archive.path(), max_fetch_bytes)
+        .await
+        .map_err(err)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".artifact-extract-")
+        .tempdir_in(artifact_root)
+        .map_err(|e| err(format!("create artifact staging dir: {e}")))?;
+    {
+        // Extraction can decompress GiBs — keep it off the async workers.
+        let tar_gz = archive.path().to_path_buf();
+        let dest = staging.path().to_path_buf();
+        tokio::task::spawn_blocking(move || safe_extract_artifact_tar_gz(&tar_gz, &dest, max_fetch_bytes))
+            .await
+            .map_err(|e| err(format!("artifact extraction task failed: {e}")))?
+            .map_err(err)?;
+    }
+    let job_dir = paths
+        .manifest_json
+        .parent()
+        .expect("locate_artifact paths always have a job dir")
+        .to_path_buf();
+    // Atomic publish. A leftover job dir here has no manifest.json (checked above) —
+    // a crashed partial extract from a PREVIOUS layout, safe to replace.
+    if job_dir.exists() {
+        std::fs::remove_dir_all(&job_dir)
+            .map_err(|e| err(format!("clear partial artifact dir {}: {e}", job_dir.display())))?;
+    }
+    let staging = staging.keep(); // rename takes ownership of the dir
+    if let Err(e) = std::fs::rename(&staging, &job_dir) {
+        let _ = std::fs::remove_dir_all(&staging);
+        // A concurrent restore of the same job may have published first — then its
+        // bytes are the same sealed artifact and the verify gate still runs.
+        if !paths.manifest_json.exists() {
+            return Err(err(format!("publish artifact dir {}: {e}", job_dir.display())));
+        }
+    }
+    Ok(paths)
+}
+
+/// Stream a presigned GET to `dest`, capped at `max_bytes`. The URL is never echoed
+/// into errors (reqwest errors are stripped via `without_url`).
+async fn download_artifact_archive(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    max_bytes: u64,
+) -> std::result::Result<(), String> {
+    use futures::StreamExt;
+    use std::io::Write;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("artifact fetch request failed: {}", e.without_url()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("artifact fetch returned HTTP {status}"));
+    }
+    let mut file = std::fs::File::create(dest)
+        .map_err(|e| format!("create artifact archive {}: {e}", dest.display()))?;
+    let mut total: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read artifact body: {}", e.without_url()))?;
+        total = total.saturating_add(chunk.len() as u64);
+        if total > max_bytes {
+            return Err(format!(
+                "artifact archive exceeds the {max_bytes}-byte fetch cap (ATO_ARTIFACT_FETCH_MAX_BYTES)"
+            ));
+        }
+        file.write_all(&chunk)
+            .map_err(|e| format!("write artifact archive {}: {e}", dest.display()))?;
+    }
+    file.flush()
+        .map_err(|e| format!("flush artifact archive {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+/// ato#1002: extract a transport `artifact.tar.gz` into `dest_dir`, fail-closed.
+///
+/// The archive must contain exactly the #928 layout at its root: `manifest.json`
+/// and `cas/*`. Everything else is rejected — absolute paths, `..` traversal,
+/// backslashed components, symlinks/hardlinks/devices/fifos, files outside the
+/// allowlist — and the summed entry sizes are capped by `max_total_bytes` (a tar
+/// entry cannot lie past its header size: the tar layer reads exactly that many
+/// bytes). Permissions/mtimes are NOT propagated from the archive — entries are
+/// re-created as plain files, another reason `Entry::unpack` is deliberately not
+/// used here.
+pub(crate) fn safe_extract_artifact_tar_gz(
+    tar_gz: &Path,
+    dest_dir: &Path,
+    max_total_bytes: u64,
+) -> std::result::Result<(), String> {
+    let file = std::fs::File::open(tar_gz)
+        .map_err(|e| format!("open artifact archive {}: {e}", tar_gz.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("create extract dir {}: {e}", dest_dir.display()))?;
+    let mut total: u64 = 0;
+    let mut saw_manifest = false;
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("read artifact archive: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("read artifact archive entry: {e}"))?;
+        let raw = entry
+            .path()
+            .map_err(|e| format!("artifact archive entry path: {e}"))?
+            .into_owned();
+        let parts = validate_artifact_entry_path(&raw)?;
+        match entry.header().entry_type() {
+            tar::EntryType::Directory => {
+                // Only the root itself ("./") or cas/ subtrees may appear as dirs —
+                // a directory named manifest.json would shadow the required file.
+                if !(parts.is_empty() || parts[0] == "cas") {
+                    return Err(format!("unexpected directory entry {raw:?} in artifact archive"));
+                }
+                let dir = parts.iter().fold(dest_dir.to_path_buf(), |d, p| d.join(p));
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| format!("create {}: {e}", dir.display()))?;
+            }
+            tar::EntryType::Regular => {
+                let ok = (parts.len() == 1 && parts[0] == "manifest.json")
+                    || (parts.len() >= 2 && parts[0] == "cas");
+                if !ok {
+                    return Err(format!(
+                        "artifact archive entry {raw:?} is outside manifest.json|cas/"
+                    ));
+                }
+                total = total.saturating_add(entry.size());
+                if total > max_total_bytes {
+                    return Err(format!(
+                        "artifact archive contents exceed the {max_total_bytes}-byte extraction cap \
+                         (ATO_ARTIFACT_FETCH_MAX_BYTES)"
+                    ));
+                }
+                let dest = parts.iter().fold(dest_dir.to_path_buf(), |d, p| d.join(p));
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("create {}: {e}", parent.display()))?;
+                }
+                let mut out = std::fs::File::create(&dest)
+                    .map_err(|e| format!("create {}: {e}", dest.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| format!("extract {}: {e}", dest.display()))?;
+                saw_manifest |= parts.len() == 1 && parts[0] == "manifest.json";
+            }
+            other => {
+                return Err(format!(
+                    "refusing artifact archive entry {raw:?} of type {other:?} \
+                     (regular files and cas/ directories only)"
+                ));
+            }
+        }
+    }
+    if !saw_manifest {
+        return Err("artifact archive carries no manifest.json at its root".to_string());
+    }
+    Ok(())
+}
+
+/// Validate one archive entry path: relative, no `..`/root/prefix components, no
+/// backslashes. Returns the clean components (empty = the archive root `./`).
+fn validate_artifact_entry_path(raw: &Path) -> std::result::Result<Vec<String>, String> {
+    use std::path::Component;
+    let mut parts: Vec<String> = Vec::new();
+    for comp in raw.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(os) => {
+                let s = os
+                    .to_str()
+                    .ok_or_else(|| format!("non-UTF-8 entry path {raw:?} in artifact archive"))?;
+                if s.contains('\\') {
+                    return Err(format!("backslashed entry path {raw:?} in artifact archive"));
+                }
+                parts.push(s.to_string());
+            }
+            _ => {
+                return Err(format!(
+                    "unsafe entry path {raw:?} in artifact archive (absolute or traversal)"
+                ));
+            }
+        }
+    }
+    Ok(parts)
 }
 
 /// v1.2 PR 3e: what kind of restore this artifact is, decided fail-closed by
@@ -143,17 +415,25 @@ pub(crate) enum RestoreArtifactClass {
 }
 
 /// v1.2 PR 3e: the NARROW supervisor exception to the "no vsock artifact" rule.
-/// A supervisor restore is allowed ONLY when every one of these holds — anything
-/// else fails closed:
+/// A BINDING-REQUIRED supervisor restore is allowed ONLY when every one of these
+/// holds — anything else fails closed:
 /// - the lease kind is `restore_snapshot_with_bindings` (the capability-gated kind);
 /// - this runner is opted in (`ATO_RUNNER_SUPERVISOR=1`);
 /// - `manifest.has_vsock == true` AND `manifest.supervisor_build` is present
 ///   (either without the other = an inconsistent artifact, rejected);
-/// - `binding_names` is non-empty and every name parses as a `BindingName`.
-/// The plain `restore_snapshot` kind still restores ONLY a no-binding artifact
-/// (`!has_vsock`, no supervisor receipt) — the old rejection is unchanged for it.
-/// (The backend binding capability is re-checked in the handler, where a backend
-/// exists to probe.)
+/// - every `binding_names` entry parses as a `BindingName`.
+///
+/// v1.7 (ato#1002 D4): a supervisor artifact with an EMPTY `binding_names` — a
+/// Dockerfile import with no secrets, honestly registered as a supervisor build —
+/// restores on the ordinary NO-BINDING public lane: the guest-agent is vacuously
+/// bound-ready at boot (ato#1001) and there is nothing to deliver, so it takes
+/// the plain `restore_snapshot` kind with no supervisor opt-in required, and a
+/// `restore_snapshot_with_bindings` lease against it is a kind/artifact mismatch.
+///
+/// The plain `restore_snapshot` kind otherwise still restores ONLY a no-binding
+/// artifact (`!has_vsock`, no supervisor receipt) — the old rejection is
+/// unchanged for it. (The backend binding capability is re-checked in the
+/// handler, where a backend exists to probe.)
 pub(crate) fn classify_restore_artifact(
     manifest: &ReadyStateManifest,
     with_bindings_kind: bool,
@@ -182,6 +462,19 @@ pub(crate) fn classify_restore_artifact(
                 .to_string(),
         )),
         (Some(sup), true) => {
+            // v1.7 (ato#1002 D4): zero-binding supervisor artifact = the
+            // ordinary no-binding public restore lane (see the doc comment).
+            if sup.binding_names.is_empty() {
+                if with_bindings_kind {
+                    return Err(err(
+                        "restore_snapshot_with_bindings lease references a zero-binding \
+                         supervisor artifact (nothing to bind) — use the ordinary \
+                         restore_snapshot kind (kind/artifact mismatch)"
+                            .to_string(),
+                    ));
+                }
+                return Ok(RestoreArtifactClass::NoBinding);
+            }
             if !with_bindings_kind {
                 return Err(err(
                     "supervisor (binding-required) artifact needs a restore_snapshot_with_bindings \
@@ -193,13 +486,6 @@ pub(crate) fn classify_restore_artifact(
                 return Err(err(
                     "supervisor artifact refused: this runner is not opted into supervisor \
                      restores (set ATO_RUNNER_SUPERVISOR=1)"
-                        .to_string(),
-                ));
-            }
-            if sup.binding_names.is_empty() {
-                return Err(err(
-                    "supervisor artifact carries an empty binding_names list; refusing to \
-                     restore (nothing to bind = inconsistent artifact)"
                         .to_string(),
                 ));
             }
@@ -315,9 +601,19 @@ mod tests {
         assert_eq!(c.artifact_manifest_hash, "blake3:art");
         assert_eq!(c.healthcheck_url_path.as_deref(), Some("/health"));
         assert!(!c.with_bindings);
+        // ato#1002: artifact_fetch_url is OPTIONAL — absent (old leases) parses as None.
+        assert!(c.artifact_fetch_url.is_none());
         // v1.2 PR 3e: the with-bindings kind parses identically, flagged.
         let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "kind": "restore_snapshot_with_bindings" }))).unwrap();
         assert!(c.with_bindings);
+        // ato#1002: a present artifact_fetch_url is carried through; blank is None.
+        let c = parse_restore_snapshot_command(&cmd_json(
+            serde_json::json!({ "artifact_fetch_url": "https://r2.example/presigned?sig=x" }),
+        ))
+        .unwrap();
+        assert_eq!(c.artifact_fetch_url.as_deref(), Some("https://r2.example/presigned?sig=x"));
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "artifact_fetch_url": "  " }))).unwrap();
+        assert!(c.artifact_fetch_url.is_none());
     }
 
     // ── v1.2 PR 3e: the narrow supervisor gate matrix ─────────────────────────
@@ -380,12 +676,47 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_binding_names_must_be_non_empty_and_valid() {
-        let m = manifest_with(Some(vec![]), true);
-        assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("empty binding_names"));
+    fn supervisor_binding_names_must_be_valid() {
         // An uppercase (invalid BindingName) name fails closed.
         let m = manifest_with(Some(vec!["OPENAI_API_KEY"]), true);
         assert!(classify_restore_artifact(&m, true, true).unwrap_err().1.contains("OPENAI_API_KEY"));
+    }
+
+    // ── v1.7 (ato#1002 D4): zero-binding supervisor artifact = the no-binding lane ──
+
+    #[test]
+    fn zero_binding_supervisor_artifact_restores_on_the_plain_no_binding_lane() {
+        // A Dockerfile import with no secrets: supervisor_build present +
+        // has_vsock, EMPTY binding_names. Ordinary restore_snapshot kind,
+        // NO supervisor opt-in required (guest is vacuously bound-ready,
+        // ato#1001) — this is the artifact PR D's managed restore serves.
+        let m = manifest_with(Some(vec![]), true);
+        assert_eq!(classify_restore_artifact(&m, false, false).unwrap(), RestoreArtifactClass::NoBinding);
+        assert_eq!(classify_restore_artifact(&m, false, true).unwrap(), RestoreArtifactClass::NoBinding);
+    }
+
+    #[test]
+    fn zero_binding_supervisor_artifact_rejects_the_with_bindings_kind() {
+        let m = manifest_with(Some(vec![]), true);
+        let e = classify_restore_artifact(&m, true, true).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+        assert!(e.1.contains("restore_snapshot"), "{}", e.1);
+        // supervisor_enabled makes no difference — nothing to bind either way.
+        let e = classify_restore_artifact(&m, true, false).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+    }
+
+    #[test]
+    fn non_empty_supervisor_artifact_still_requires_the_with_bindings_kind() {
+        // Invariance: the zero-binding lane must not have loosened the
+        // binding-required gate (reviewer matrix cases 3 and 4).
+        let m = manifest_with(Some(vec!["openai_api_key"]), true);
+        let e = classify_restore_artifact(&m, false, true).unwrap_err();
+        assert!(e.1.contains("restore_snapshot_with_bindings"), "{}", e.1);
+        assert_eq!(
+            classify_restore_artifact(&m, true, true).unwrap(),
+            RestoreArtifactClass::Supervisor { binding_names: vec!["openai_api_key".into()] }
+        );
     }
 
     #[test]
@@ -421,12 +752,40 @@ mod tests {
         let p = locate_artifact("cas://job-1/blake3:art", root).unwrap();
         assert_eq!(p.manifest_json, root.join("job-1").join("manifest.json"));
         assert_eq!(p.cas_dir, root.join("job-1").join("cas"));
-        // Non-cas scheme.
+        // Unsupported schemes (a bare https:// location stays rejected).
         assert!(locate_artifact("https://evil/x", root).unwrap_err().1.contains("scheme"));
-        assert!(locate_artifact("r2://bucket/x", root).unwrap_err().1.contains("scheme"));
+        assert!(locate_artifact("s3://bucket/job/x", root).unwrap_err().1.contains("scheme"));
         // Traversal / absolute / multi-segment job.
         assert!(locate_artifact("cas://../etc/x", root).is_err());
         assert!(locate_artifact("cas:///abs/x", root).is_err());
+        // "." is a CurDir component, NOT Normal — it would resolve the job dir to
+        // artifact_root itself.
+        assert!(locate_artifact("cas://./x", root).is_err());
+        // Windows drive prefix is a Prefix component, NOT Normal — `root.join("C:")`
+        // would escape artifact_root entirely.
+        #[cfg(windows)]
+        assert!(locate_artifact("cas://C:/x", root).is_err());
+    }
+
+    #[test]
+    fn locate_artifact_maps_r2_uri_and_rejects_escapes() {
+        // ato#1002: r2://<bucket>/<job_id>/<hash> maps to the SAME local layout —
+        // the bucket never shapes the path.
+        let root = Path::new("/var/lib/ato/artifacts");
+        let p = locate_artifact("r2://ato-artifacts/job-9/blake3:art", root).unwrap();
+        assert_eq!(p.manifest_json, root.join("job-9").join("manifest.json"));
+        assert_eq!(p.cas_dir, root.join("job-9").join("cas"));
+        // Missing job / missing bucket / traversal / absolute job.
+        assert!(locate_artifact("r2://bucket", root).is_err());
+        assert!(locate_artifact("r2:///job/x", root).unwrap_err().1.contains("bucket"));
+        assert!(locate_artifact("r2://bucket/../x", root).is_err());
+        assert!(locate_artifact("r2://bucket//abs", root).is_err());
+        // "." job segment: without the Component::Normal requirement this resolved
+        // the job dir to artifact_root itself, and ensure_artifact_local's
+        // pre-publish cleanup would remove_dir_all the ENTIRE artifact root.
+        assert!(locate_artifact("r2://bucket/./x", root).is_err());
+        #[cfg(windows)]
+        assert!(locate_artifact("r2://bucket/C:/x", root).is_err());
     }
 
     #[test]
@@ -460,6 +819,7 @@ mod tests {
             target_label: "web".into(),
             profile: "default".into(),
             artifact_location: "cas://job/blake3".into(),
+            artifact_fetch_url: None,
             artifact_manifest_hash: m.id(),
             capsule_manifest_hash: "blake3:cap".into(),
             execution_id: "sha256:exec".into(),
@@ -486,5 +846,259 @@ mod tests {
             mutate(&mut c);
             assert!(load_and_verify_manifest(&mpath, &c, false).is_err());
         }
+    }
+
+    // ── ato#1002: safe transport-archive extraction + remote fetch ───────────
+
+    /// Build an `artifact.tar.gz` through the NORMAL Builder API (which validates
+    /// paths — hostile shapes are crafted via [`append_raw`] instead).
+    fn artifact_targz(files: &[(&str, &[u8])], dirs: &[&str]) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut b = tar::Builder::new(enc);
+        for d in dirs {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Directory);
+            h.set_size(0);
+            h.set_mode(0o755);
+            b.append_data(&mut h, *d, std::io::empty()).unwrap();
+        }
+        for (path, bytes) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(bytes.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, *path, *bytes).unwrap();
+        }
+        b.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// Append a RAW entry, bypassing Builder path validation — models a hostile
+    /// archive (absolute/traversal names, forbidden entry types).
+    fn append_raw<W: std::io::Write>(b: &mut tar::Builder<W>, name: &[u8], ty: tar::EntryType, data: &[u8]) {
+        let mut h = tar::Header::new_gnu();
+        h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name);
+        h.set_entry_type(ty);
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        b.append(&h, data).unwrap();
+    }
+
+    fn hostile_targz(build: impl FnOnce(&mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>)) -> Vec<u8> {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut b = tar::Builder::new(enc);
+        build(&mut b);
+        b.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn safe_extract_accepts_the_canonical_artifact_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gz = tmp.path().join("artifact.tar.gz");
+        std::fs::write(
+            &gz,
+            artifact_targz(
+                &[("manifest.json", br#"{"k":1}"#), ("cas/ab/cdef", b"blob")],
+                &["cas/", "cas/ab/"],
+            ),
+        )
+        .unwrap();
+        let dest = tmp.path().join("out");
+        safe_extract_artifact_tar_gz(&gz, &dest, 8 * 1024).unwrap();
+        assert_eq!(std::fs::read(dest.join("manifest.json")).unwrap(), br#"{"k":1}"#);
+        assert_eq!(std::fs::read(dest.join("cas").join("ab").join("cdef")).unwrap(), b"blob");
+    }
+
+    #[test]
+    fn safe_extract_rejects_traversal_absolute_and_type_escapes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let case = |name: &str, bytes: Vec<u8>| {
+            let gz = tmp.path().join(name);
+            std::fs::write(&gz, bytes).unwrap();
+            safe_extract_artifact_tar_gz(&gz, &tmp.path().join(format!("{name}.out")), 1024).unwrap_err()
+        };
+        // '..' traversal.
+        let e = case("trav.tar.gz", hostile_targz(|b| append_raw(b, b"../evil", tar::EntryType::Regular, b"boom")));
+        assert!(e.contains("unsafe entry path"), "{e}");
+        // Absolute path.
+        let e = case("abs.tar.gz", hostile_targz(|b| append_raw(b, b"/abs/evil", tar::EntryType::Regular, b"boom")));
+        assert!(e.contains("unsafe entry path"), "{e}");
+        // Regular file outside the manifest.json|cas/ allowlist.
+        let e = case("root.tar.gz", artifact_targz(&[("manifest.json", b"{}"), ("evil.sh", b"#!")], &[]));
+        assert!(e.contains("outside manifest.json|cas/"), "{e}");
+        // Unexpected directory outside cas/.
+        let e = case("dir.tar.gz", hostile_targz(|b| append_raw(b, b"weird", tar::EntryType::Directory, b"")));
+        assert!(e.contains("unexpected directory"), "{e}");
+        // Symlink entry.
+        let e = case(
+            "link.tar.gz",
+            hostile_targz(|b| {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_size(0);
+                b.append_link(&mut h, "cas/evil-link", "target").unwrap();
+            }),
+        );
+        assert!(e.contains("refusing artifact archive entry"), "{e}");
+        // Hardlink entry.
+        let e = case(
+            "hard.tar.gz",
+            hostile_targz(|b| {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Link);
+                h.set_size(0);
+                b.append_link(&mut h, "cas/evil-hard", "manifest.json").unwrap();
+            }),
+        );
+        assert!(e.contains("refusing artifact archive entry"), "{e}");
+    }
+
+    #[test]
+    fn safe_extract_enforces_the_size_cap_and_requires_a_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Summed entry sizes above the cap are refused mid-walk.
+        let gz = tmp.path().join("big.tar.gz");
+        std::fs::write(&gz, artifact_targz(&[("manifest.json", b"{}"), ("cas/big", &[0u8; 64])], &[])).unwrap();
+        let e = safe_extract_artifact_tar_gz(&gz, &tmp.path().join("o1"), 32).unwrap_err();
+        assert!(e.contains("extraction cap"), "{e}");
+        // An archive with no root manifest.json is refused.
+        let gz = tmp.path().join("nomanifest.tar.gz");
+        std::fs::write(&gz, artifact_targz(&[("cas/only", b"x")], &[])).unwrap();
+        let e = safe_extract_artifact_tar_gz(&gz, &tmp.path().join("o2"), 1024).unwrap_err();
+        assert!(e.contains("no manifest.json"), "{e}");
+    }
+
+    /// Minimal localhost HTTP/1.1 fixture: serves `body` with `status` to every
+    /// connection for the test's lifetime (thread parks on accept; dies with the
+    /// process). The URL path mirrors the R2 object key shape
+    /// `<job_id>/<artifact_manifest_hash>/artifact.tar.gz` (ato#1002) — the runner
+    /// treats the presigned URL as opaque, so the path is representative only.
+    fn spawn_http_fixture(status: &'static str, body: Vec<u8>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut head = Vec::new();
+                let mut buf = [0u8; 4096];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                    if head.len() > 64 * 1024 {
+                        break;
+                    }
+                }
+                let _ = write!(
+                    s,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = s.write_all(&body);
+                let _ = s.flush();
+            }
+        });
+        format!("http://{addr}/job/blake3:art/artifact.tar.gz?sig=presigned-fixture")
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_cas_is_a_pure_passthrough() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        // Nothing on disk, no URL: the cas:// mapping comes back untouched
+        // (existence is the verify gate's problem, exactly as before).
+        let p = ensure_artifact_local(&client, "cas://job-1/blake3:art", tmp.path(), None, 1024)
+            .await
+            .unwrap();
+        assert_eq!(p.manifest_json, tmp.path().join("job-1").join("manifest.json"));
+        assert!(!p.manifest_json.exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_uses_a_local_copy_without_a_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("job-1").join("cas")).unwrap();
+        std::fs::write(tmp.path().join("job-1").join("manifest.json"), b"{}").unwrap();
+        let client = reqwest::Client::new();
+        let p = ensure_artifact_local(&client, "r2://bucket/job-1/blake3:art", tmp.path(), None, 1024)
+            .await
+            .unwrap();
+        assert!(p.manifest_json.exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_without_url_or_local_copy_is_a_clear_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = reqwest::Client::new();
+        let (code, msg) =
+            ensure_artifact_local(&client, "r2://bucket/job-1/blake3:art", tmp.path(), None, 1024)
+                .await
+                .unwrap_err();
+        assert_eq!(code, "artifact_unavailable");
+        assert!(msg.contains("artifact_fetch_url"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_downloads_extracts_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = artifact_targz(&[("manifest.json", br#"{"k":1}"#), ("cas/aa/blob", b"bytes")], &["cas/"]);
+        let url = spawn_http_fixture("200 OK", body);
+        let client = reqwest::Client::new();
+        let p = ensure_artifact_local(&client, "r2://bucket/job-7/blake3:art", tmp.path(), Some(&url), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&p.manifest_json).unwrap(), br#"{"k":1}"#);
+        assert_eq!(std::fs::read(p.cas_dir.join("aa").join("blob")).unwrap(), b"bytes");
+        // Atomic publish left no staging temp files beside the job dir.
+        let names: Vec<String> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec!["job-7".to_string()]);
+        // Second call: idempotent local hit, no URL required.
+        let p2 = ensure_artifact_local(&client, "r2://bucket/job-7/blake3:art", tmp.path(), None, 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(p, p2);
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_rejects_a_bad_archive_and_leaves_no_partial_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No root manifest.json → the extractor refuses; the job dir must NOT appear.
+        let url = spawn_http_fixture("200 OK", artifact_targz(&[("cas/only", b"x")], &[]));
+        let client = reqwest::Client::new();
+        let (code, msg) =
+            ensure_artifact_local(&client, "r2://bucket/job-3/x", tmp.path(), Some(&url), 1 << 20)
+                .await
+                .unwrap_err();
+        assert_eq!(code, "artifact_unavailable");
+        assert!(msg.contains("manifest.json"), "{msg}");
+        assert!(!tmp.path().join("job-3").exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_enforces_the_download_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = spawn_http_fixture("200 OK", vec![0u8; 4096]);
+        let client = reqwest::Client::new();
+        let (_, msg) = ensure_artifact_local(&client, "r2://bucket/job-5/x", tmp.path(), Some(&url), 1024)
+            .await
+            .unwrap_err();
+        assert!(msg.contains("fetch cap"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn ensure_artifact_local_r2_surfaces_http_failures_without_the_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = spawn_http_fixture("404 Not Found", Vec::new());
+        let client = reqwest::Client::new();
+        let (_, msg) = ensure_artifact_local(&client, "r2://bucket/job-4/x", tmp.path(), Some(&url), 1024)
+            .await
+            .unwrap_err();
+        assert!(msg.contains("HTTP 404"), "{msg}");
+        // The presigned URL (query = authorization) must never leak into errors.
+        assert!(!msg.contains("127.0.0.1") && !msg.contains("sig="), "URL leaked: {msg}");
     }
 }

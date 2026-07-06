@@ -331,6 +331,7 @@ async fn smoke_pipeline(
             target_label: "app".into(),
             profile: "default".into(),
             artifact_location: format!("cas://{job}/{hash}"),
+            artifact_fetch_url: None,
             artifact_manifest_hash: hash.clone(),
             capsule_manifest_hash: sealed.manifest.capsule_manifest_hash.clone(),
             execution_id: sealed.manifest.execution_id.clone().unwrap_or_default(),
