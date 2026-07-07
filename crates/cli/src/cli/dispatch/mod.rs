@@ -790,13 +790,34 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 } => rt.block_on(crate::application::gpu_provision::run_provision(
                     &profile, force, resume, enroll, json, dry_run,
                 )),
-                crate::cli::RunnerCommands::Setup { fix, yes, artifact_root, api_url } => {
+                crate::cli::RunnerCommands::Setup {
+                    fix,
+                    yes,
+                    artifact_root,
+                    api_url,
+                    official_preview,
+                    public_base_url,
+                    max_slots,
+                    caddyfile,
+                } => {
+                    // clap enforces official_preview ⇔ public_base_url via `requires`.
+                    let official = official_preview.then(|| {
+                        crate::application::runner_bootstrap::official_preview::OfficialPreviewConfig {
+                            public_base_url: public_base_url.unwrap_or_default(),
+                            max_slots: max_slots.unwrap_or(1),
+                            caddyfile_path: caddyfile.unwrap_or_else(|| {
+                                crate::application::runner_bootstrap::official_preview::DEFAULT_CADDYFILE_PATH
+                                    .to_string()
+                            }),
+                        }
+                    });
                     crate::application::runner_bootstrap::setup::run(
                         crate::application::runner_bootstrap::setup::SetupOptions {
                             fix,
                             yes,
                             artifact_root,
                             api_url,
+                            official,
                         },
                     )
                 }

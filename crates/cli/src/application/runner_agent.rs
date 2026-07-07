@@ -1529,16 +1529,25 @@ fn public_ready_url(
     slot: &SlotLease,
 ) -> Option<String> {
     if let Some(template) = public_url_template {
-        return Some(
-            template
-                .replace("{port}", &slot.proxy_port.to_string())
-                .replace("{slot}", &slot.index.to_string()),
-        );
+        return Some(render_public_url_template(template, slot.proxy_port, slot.index));
     }
     match public_base_url {
         Some(base) if slot.index == 0 => Some(format!("{}/", base.trim_end_matches('/'))),
         _ => None,
     }
+}
+
+/// Fill a public URL template's `{port}` / `{slot}` placeholders for one slot.
+/// Pure — split out so the official-preview setup tests can assert the exact
+/// per-slot URLs the template it writes will render to.
+pub(crate) fn render_public_url_template(
+    template: &str,
+    proxy_port: u16,
+    slot_index: usize,
+) -> String {
+    template
+        .replace("{port}", &proxy_port.to_string())
+        .replace("{slot}", &slot_index.to_string())
 }
 
 #[derive(Debug, Deserialize)]
