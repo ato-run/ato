@@ -20,6 +20,7 @@ use serde::Serialize;
 
 pub(crate) mod checks;
 pub(crate) mod doctor;
+pub(crate) mod official_preview;
 pub(crate) mod setup;
 pub(crate) mod smoke;
 

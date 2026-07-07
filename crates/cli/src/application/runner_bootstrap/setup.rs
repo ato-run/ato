@@ -25,14 +25,20 @@ use super::{
     ATO_CLI_INSTALL_PATH, BUILDER_INSTALL_PATH, BUILDER_UNIT, Check, CheckStatus,
     DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH, FC_TGZ_SHA256, FC_TGZ_URL, FC_VERSION,
     GUEST_KERNEL_INSTALL_PATH, GUEST_KERNEL_SHA256, GUEST_KERNEL_URL, RUNNER_UNIT, SYSTEMD_DIR,
-    checks,
+    checks, official_preview,
 };
+use super::official_preview::OfficialPreviewConfig;
 
 pub(crate) struct SetupOptions {
     pub fix: bool,
     pub yes: bool,
     pub artifact_root: Option<String>,
     pub api_url: Option<String>,
+    /// `--official-preview`: additionally prepare this host as an OFFICIAL
+    /// preview runner behind Caddy (ato-managed slot hostnames, loopback-only
+    /// slot ports, ATO_RUNNER_PREVIEW=1). None = the classic builder+runner
+    /// setup, byte-identical to before.
+    pub official: Option<OfficialPreviewConfig>,
 }
 
 /// The on-disk sources setup would copy the Ato binaries FROM (None when none is
@@ -276,6 +282,69 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
             commands,
         });
     }
+
+    // ── Official-preview extras (ato#1006 ingress PR C) ──
+    if let Some(cfg) = &opts.official {
+        if failed("caddy") {
+            plan.push(FixAction {
+                id: "caddy_install",
+                title: "Install Caddy (public HTTPS terminator)".to_string(),
+                commands: vec![
+                    "apt-get update -qq".to_string(),
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy".to_string(),
+                ],
+            });
+        }
+        let caddyfile_written = failed("caddyfile");
+        if caddyfile_written {
+            plan.push(FixAction {
+                id: "caddyfile",
+                title: format!(
+                    "Write {} — base + s0..s{} vhosts → loopback slot ports (existing file backed up)",
+                    cfg.caddyfile_path,
+                    cfg.max_slots.saturating_sub(1),
+                ),
+                commands: vec![format!("<write> {}", cfg.caddyfile_path)],
+            });
+        }
+        // A runner unit with a PUBLIC --proxy-listen is rewritten to the
+        // loopback default — slot ports must never bypass Caddy.
+        if failed("unit_runner_loopback") {
+            plan.push(FixAction {
+                id: "unit_runner_loopback",
+                title: format!(
+                    "Rewrite {RUNNER_UNIT}: remove the public --proxy-listen (loopback slot ports only)"
+                ),
+                commands: vec![
+                    format!("<write> {SYSTEMD_DIR}/{RUNNER_UNIT}"),
+                    "systemctl daemon-reload".to_string(),
+                ],
+            });
+        }
+        if failed("env_official") {
+            plan.push(FixAction {
+                id: "env_official",
+                title: format!(
+                    "Append official-preview keys to {ENV_FILE} (ATO_RUNNER_PREVIEW=1, PUBLIC_BASE_URL, MAX_SLOTS)"
+                ),
+                commands: vec![format!("<write> {ENV_FILE}")],
+            });
+        }
+        // Enable/reload LAST, after the Caddyfile it serves exists.
+        if failed("caddy_service") {
+            plan.push(FixAction {
+                id: "caddy_service",
+                title: "Enable + start Caddy".to_string(),
+                commands: vec!["systemctl enable --now caddy".to_string()],
+            });
+        } else if caddyfile_written {
+            plan.push(FixAction {
+                id: "caddy_reload",
+                title: "Reload Caddy with the regenerated Caddyfile".to_string(),
+                commands: vec!["systemctl reload caddy".to_string()],
+            });
+        }
+    }
     plan
 }
 
@@ -409,6 +478,9 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
     if let Some(url) = &opts.api_url {
         validate_api_url(url)?;
     }
+    if let Some(cfg) = &opts.official {
+        official_preview::validate_config(cfg)?;
+    }
     // Converge on the SAME artifact root the doctor probes (env → env-file →
     // default) when the operator did not override it, so `setup --fix` repairs the
     // directory doctor flagged rather than silently creating the default elsewhere.
@@ -422,7 +494,22 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
     if let Some(root) = &opts.artifact_root {
         validate_artifact_root(root)?;
     }
-    let checks = checks::gather();
+    let mut checks = checks::gather();
+    if let Some(cfg) = &opts.official {
+        checks.extend(official_preview::gather(cfg));
+        // Append-only cannot fix a disagreeing operator-set env line — surface
+        // the exact manual edit up front (dry-run included).
+        let env_vals = std::fs::read_to_string(ENV_FILE)
+            .map(|t| checks::env_file_values(&t))
+            .unwrap_or_default();
+        let (_missing, conflicts) = official_preview::official_env_lines(&env_vals, cfg);
+        for c in &conflicts {
+            println!("⚠️  {c}");
+        }
+        if !conflicts.is_empty() {
+            println!();
+        }
+    }
     let bins = BinaryPlan::resolve();
     let blocked: Vec<&Check> =
         checks.iter().filter(|c| c.status == CheckStatus::Blocked).collect();
@@ -506,9 +593,11 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                     println!("   (previous {dest} backed up to {})", b.display());
                 }
             }
-            "systemd_units" => {
+            "systemd_units" | "unit_runner_loopback" => {
                 // Write EXACTLY the units the plan chose (only those whose ExecStart
                 // binary exists / was just installed) — parsed from the plan commands.
+                // unit_runner_loopback rewrites the runner unit to the flagless
+                // (loopback-default) template through the same path.
                 for cmd in &a.commands {
                     if let Some(rest) = cmd.strip_prefix("<write> ") {
                         let path = Path::new(rest);
@@ -520,6 +609,35 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                     } else {
                         run_shell(cmd)?;
                     }
+                }
+            }
+            "caddyfile" => {
+                let cfg = opts.official.as_ref().expect("caddyfile action only in official mode");
+                let content = official_preview::render_caddyfile(
+                    &official_preview::base_hostname(&cfg.public_base_url),
+                    cfg.max_slots,
+                );
+                let bak = backup_then_write(Path::new(&cfg.caddyfile_path), &content)?;
+                if let Some(b) = bak {
+                    println!("   (previous Caddyfile backed up to {})", b.display());
+                }
+            }
+            "env_official" => {
+                let cfg = opts.official.as_ref().expect("env_official action only in official mode");
+                let existing_text = std::fs::read_to_string(ENV_FILE).unwrap_or_default();
+                let existing = checks::env_file_values(&existing_text);
+                let (lines, _conflicts) = official_preview::official_env_lines(&existing, cfg);
+                let mut content = existing_text;
+                if !content.is_empty() && !content.ends_with('\n') {
+                    content.push('\n');
+                }
+                for l in &lines {
+                    content.push_str(l);
+                    content.push('\n');
+                }
+                let bak = backup_then_write(Path::new(ENV_FILE), &content)?;
+                if let Some(b) = bak {
+                    println!("   (previous file backed up to {})", b.display());
                 }
             }
             _ => {
@@ -561,6 +679,21 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
     }
     println!("  {n}. ato runner smoke                      # verify the full local path");
     println!("  {}. ato doctor runner                     # confirm everything is green", n + 1);
+    if let Some(cfg) = &opts.official {
+        println!();
+        println!("Official-preview firewall (this host must expose ONLY Caddy):");
+        println!("  • allow inbound TCP 80 + 443 (Caddy: ACME challenge + public HTTPS)");
+        println!("  • do NOT open 8420+ — slot ports are loopback-only; a public slot port");
+        println!("    would bypass Caddy, TLS, and the slot-hostname allowlist");
+        println!("  • restrict SSH to the admin IP / a private network (e.g. Tailscale)");
+        println!();
+        println!(
+            "Then run Validate on this runner's ingress in the admin console — it probes\n\
+             https://{}{} on the base + every slot hostname.",
+            official_preview::base_hostname(&cfg.public_base_url),
+            official_preview::WELLKNOWN_PATH,
+        );
+    }
     Ok(())
 }
 
@@ -581,7 +714,17 @@ mod tests {
         Check { id, label: "x", status, detail: "not installed".into(), fix: None }
     }
     fn opts() -> SetupOptions {
-        SetupOptions { fix: false, yes: false, artifact_root: None, api_url: None }
+        SetupOptions { fix: false, yes: false, artifact_root: None, api_url: None, official: None }
+    }
+    fn official_opts() -> SetupOptions {
+        SetupOptions {
+            official: Some(OfficialPreviewConfig {
+                public_base_url: "https://runner-abc.runner.ato.run".into(),
+                max_slots: 2,
+                caddyfile_path: "/etc/caddy/Caddyfile".into(),
+            }),
+            ..opts()
+        }
     }
     /// Both binaries available (release layout) — the common case.
     fn bins() -> BinaryPlan {
@@ -641,6 +784,46 @@ mod tests {
         assert!(k.commands.iter().any(|c| c.contains(GUEST_KERNEL_SHA256) && c.contains("sha256sum -c")));
         // Nothing in the plan touches the Blocked check.
         assert!(plan.iter().all(|a| a.id != "cpu_virt"));
+    }
+
+    #[test]
+    fn official_preview_plan_orders_caddy_actions_and_never_leaks_into_classic_mode() {
+        let failing = vec![
+            check("caddy", CheckStatus::Missing),
+            check("caddyfile", CheckStatus::Missing),
+            check("caddy_service", CheckStatus::Missing),
+            check("unit_runner_loopback", CheckStatus::Missing),
+            check("env_official", CheckStatus::Missing),
+        ];
+        // Classic mode: official check ids derive NOTHING (byte-identical plans).
+        assert!(derive_plan(&failing, &opts(), &bins()).is_empty());
+
+        let plan = derive_plan(&failing, &official_opts(), &bins());
+        let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
+        assert_eq!(
+            ids,
+            vec!["caddy_install", "caddyfile", "unit_runner_loopback", "env_official", "caddy_service"]
+        );
+        // Caddy is enabled AFTER the Caddyfile it serves is written.
+        let pos = |id: &str| ids.iter().position(|x| *x == id).unwrap();
+        assert!(pos("caddyfile") < pos("caddy_service"));
+        // The loopback rewrite reloads systemd.
+        let loopback = plan.iter().find(|a| a.id == "unit_runner_loopback").unwrap();
+        assert!(loopback.commands.iter().any(|c| c == "systemctl daemon-reload"));
+    }
+
+    #[test]
+    fn official_preview_reloads_caddy_when_only_the_caddyfile_changed() {
+        // Caddy installed + active, but the Caddyfile needs regenerating (e.g.
+        // max_slots changed): plan = write + reload, NOT enable.
+        let failing = vec![
+            check("caddy", CheckStatus::Ok),
+            check("caddyfile", CheckStatus::Missing),
+            check("caddy_service", CheckStatus::Ok),
+        ];
+        let plan = derive_plan(&failing, &official_opts(), &bins());
+        let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
+        assert_eq!(ids, vec!["caddyfile", "caddy_reload"]);
     }
 
     #[test]
