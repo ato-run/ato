@@ -95,6 +95,13 @@ pub(crate) fn validate_public_base_url(url: &str) -> Result<()> {
     {
         bail!("--public-base-url hostname may only contain [a-z0-9.-] and must be a dotted DNS name (got {url:?})");
     }
+    // DNS label boundaries: no empty label (leading/trailing/double dot), no
+    // leading/trailing hyphen per label, ≤63 chars per label.
+    for label in h.split('.') {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            bail!("--public-base-url hostname has an invalid DNS label {label:?} (got {url:?})");
+        }
+    }
     Ok(())
 }
 
@@ -152,10 +159,18 @@ pub(crate) fn official_env_lines(
     existing: &BTreeMap<String, String>,
     cfg: &OfficialPreviewConfig,
 ) -> (Vec<String>, Vec<String>) {
+    let base_host = base_hostname(&cfg.public_base_url);
     let wanted: Vec<(&str, String)> = vec![
         ("ATO_RUNNER_PREVIEW", "1".to_string()),
         ("ATO_RUNNER_PUBLIC_BASE_URL", cfg.public_base_url.trim_end_matches('/').to_string()),
         ("ATO_RUNNER_MAX_SLOTS", cfg.max_slots.to_string()),
+        // Per-slot READY URLs. Without this, serve (a) refuses to start at
+        // max_slots >= 2 (validate_multi_slot_public_url requires a template)
+        // and (b) at max_slots = 1 reports slot 0 ready at the BASE host —
+        // which the control plane's slot-hostname allowlist (s0.<base>…)
+        // rejects at /ready. The template renders exactly the s{N}.<base>
+        // hostnames the admin console registered.
+        ("ATO_RUNNER_PUBLIC_URL_TEMPLATE", format!("https://s{{slot}}.{base_host}")),
     ];
     let mut lines = Vec::new();
     let mut conflicts = Vec::new();
@@ -327,7 +342,7 @@ pub(crate) fn gather(cfg: &OfficialPreviewConfig) -> Vec<Check> {
         Check::ok(
             "env_official",
             "official-preview env",
-            "ATO_RUNNER_PREVIEW / PUBLIC_BASE_URL / MAX_SLOTS configured",
+            "ATO_RUNNER_PREVIEW / PUBLIC_BASE_URL / MAX_SLOTS / PUBLIC_URL_TEMPLATE configured",
         )
     } else {
         Check::missing(
@@ -378,6 +393,10 @@ mod tests {
             "https://runner abc.run",           // whitespace ⇒ env injection
             "https://a.run\nATO_X=1",           // newline ⇒ env injection
             "https://user@host.run",            // userinfo
+            "https://-bad.runner.ato.run",      // leading hyphen label
+            "https://bad-.runner.ato.run",      // trailing hyphen label
+            "https://bad..runner.ato.run",      // empty label
+            "https://.runner.ato.run",          // empty leading label
         ] {
             assert!(validate_public_base_url(bad).is_err(), "must reject {bad:?}");
         }
@@ -400,7 +419,9 @@ mod tests {
 
     #[test]
     fn env_lines_are_append_only_and_conflicts_surface() {
-        // Fresh file: all three keys appended.
+        // Fresh file: all four keys appended — INCLUDING the per-slot URL
+        // template, without which serve refuses multi-slot startup and slot 0
+        // would report the base host (rejected by the slot allowlist).
         let (lines, conflicts) = official_env_lines(&BTreeMap::new(), &cfg());
         assert_eq!(
             lines,
@@ -408,6 +429,7 @@ mod tests {
                 "ATO_RUNNER_PREVIEW=1",
                 "ATO_RUNNER_PUBLIC_BASE_URL=https://runner-abc.runner.ato.run",
                 "ATO_RUNNER_MAX_SLOTS=2",
+                "ATO_RUNNER_PUBLIC_URL_TEMPLATE=https://s{slot}.runner-abc.runner.ato.run",
             ]
         );
         assert!(conflicts.is_empty());
@@ -421,15 +443,66 @@ mod tests {
             "https://runner-abc.runner.ato.run/".into(),
         );
         existing.insert("ATO_RUNNER_MAX_SLOTS".into(), "2".into());
+        existing.insert(
+            "ATO_RUNNER_PUBLIC_URL_TEMPLATE".into(),
+            "https://s{slot}.runner-abc.runner.ato.run".into(),
+        );
         let (lines, conflicts) = official_env_lines(&existing, &cfg());
         assert!(lines.is_empty() && conflicts.is_empty());
 
-        // Disagreeing operator value: NOT rewritten, surfaced as a conflict.
+        // Disagreeing operator values: NOT rewritten, surfaced as conflicts.
         existing.insert("ATO_RUNNER_PUBLIC_BASE_URL".into(), "https://old.example.com".into());
+        existing.insert(
+            "ATO_RUNNER_PUBLIC_URL_TEMPLATE".into(),
+            "https://runner.example.com:{port}/".into(),
+        );
         let (lines, conflicts) = official_env_lines(&existing, &cfg());
         assert!(lines.is_empty());
-        assert_eq!(conflicts.len(), 1);
-        assert!(conflicts[0].contains("ATO_RUNNER_PUBLIC_BASE_URL"));
+        assert_eq!(conflicts.len(), 2);
+        assert!(conflicts.iter().any(|c| c.contains("ATO_RUNNER_PUBLIC_BASE_URL")));
+        assert!(conflicts.iter().any(|c| c.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE")));
+    }
+
+    #[test]
+    fn template_satisfies_serve_startup_validation_at_multi_slot() {
+        // The exact template setup writes must pass BOTH serve-side gates, or
+        // the systemd service crash-loops at max_slots >= 2.
+        let (lines, _) = official_env_lines(&BTreeMap::new(), &cfg());
+        let template = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("ATO_RUNNER_PUBLIC_URL_TEMPLATE="))
+            .expect("template line present");
+        crate::application::runner_agent::validate_public_url_template(Some(template))
+            .expect("template must carry a {slot}/{port} placeholder");
+        crate::application::runner_agent::validate_multi_slot_public_url(2, Some(template))
+            .expect("multi-slot serve must accept the official-preview env");
+    }
+
+    #[test]
+    fn template_renders_slot_hostnames_never_the_base_host() {
+        let (lines, _) = official_env_lines(&BTreeMap::new(), &cfg());
+        let template = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("ATO_RUNNER_PUBLIC_URL_TEMPLATE="))
+            .unwrap();
+        // Slot i serves on LOCAL_BASE_PORT + i; the rendered ready URL must be
+        // the s{N} slot hostname the control-plane allowlist registered.
+        let s0 = crate::application::runner_agent::render_public_url_template(
+            template,
+            LOCAL_BASE_PORT,
+            0,
+        );
+        let s1 = crate::application::runner_agent::render_public_url_template(
+            template,
+            LOCAL_BASE_PORT + 1,
+            1,
+        );
+        assert_eq!(s0, "https://s0.runner-abc.runner.ato.run");
+        assert_eq!(s1, "https://s1.runner-abc.runner.ato.run");
+        // Never the bare base host (the allowlist only carries slot hostnames).
+        for url in [&s0, &s1] {
+            assert!(!url.starts_with("https://runner-abc."), "must not render the base host: {url}");
+        }
     }
 
     #[test]
