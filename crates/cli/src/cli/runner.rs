@@ -171,6 +171,31 @@ pub(crate) enum RunnerCommands {
         /// Control-plane API base URL written into /etc/ato/runner.env.
         #[arg(long, value_name = "URL")]
         api_url: Option<String>,
+
+        /// Additionally prepare this host as an OFFICIAL preview runner behind
+        /// Caddy: installs Caddy, generates the per-slot-hostname Caddyfile
+        /// (base + sN.<base> → loopback slot ports), appends
+        /// ATO_RUNNER_PREVIEW=1 / ATO_RUNNER_PUBLIC_BASE_URL /
+        /// ATO_RUNNER_MAX_SLOTS to /etc/ato/runner.env, and rewrites a runner
+        /// unit that binds the slot proxy publicly. Requires --public-base-url.
+        #[arg(long, default_value_t = false, requires = "public_base_url")]
+        official_preview: bool,
+
+        /// The ato-managed ingress base URL the admin console provisioned for
+        /// this runner — exactly `https://<slug>.runner.ato.run` (no port, no
+        /// path). Only with --official-preview.
+        #[arg(long, value_name = "URL", requires = "official_preview")]
+        public_base_url: Option<String>,
+
+        /// Concurrent run slots (Caddyfile vhosts s0..sN-1 + env
+        /// ATO_RUNNER_MAX_SLOTS). Only with --official-preview. Default: 1.
+        #[arg(long, value_name = "N", requires = "official_preview")]
+        max_slots: Option<usize>,
+
+        /// Where to write the generated Caddyfile. Only with
+        /// --official-preview. Default: /etc/caddy/Caddyfile.
+        #[arg(long, value_name = "PATH", requires = "official_preview")]
+        caddyfile: Option<String>,
     },
 
     /// Minimal local Ready-State smoke, no control plane involved: Docker→ext4
