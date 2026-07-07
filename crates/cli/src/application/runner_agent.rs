@@ -775,6 +775,19 @@ pub async fn run_serve(
     // heartbeat/claim, so stop-requested zombies clear immediately on boot.
     reconcile_open_leases(&client, &api_base, &creds.runner_id, &creds.runner_token).await;
 
+    // Reap Firecracker VMs orphaned by a previous (killed) serve process. The loop
+    // above settled their leases on the control plane, but a SIGKILL leaves the
+    // detached VM + its `<tmp>/ato-restore-overlays/<lease>/` overlay running. Only
+    // the firecracker backend creates these; other backends have nothing to reap.
+    if crate::application::ready_state::flags::selected_backend_id().as_deref()
+        == Some(snapshot::FIRECRACKER_BACKEND_ID)
+    {
+        reap_orphan_restore_overlays(
+            &std::env::temp_dir().join("ato-restore-overlays"),
+            &snapshot::FirecrackerBackend::new(),
+        );
+    }
+
     let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
     // Self-update bookkeeping for the current requested minimum: terminal (no
@@ -1417,6 +1430,89 @@ fn cleanup_orphan_slot_netns(capacity: usize) {
         let _ = std::process::Command::new("ip").args(["link", "del", &veth]).status();
         let _ = std::fs::remove_file(work_root.join(format!("{ns}.lock")));
     }
+}
+
+/// Best-effort startup sweep of Firecracker VMs orphaned by a crashed/killed prior
+/// serve. When `ato runner serve` is SIGKILLed mid-restore, `reconcile_open_leases`
+/// settles the previous process's leases on the control plane, but the detached
+/// Firecracker VM + its writable overlay under `<tmp>/ato-restore-overlays/<lease>/`
+/// survive (observed live: `firecracker --api-sock …/api.sock` alive for hours
+/// after its lease was reconciled to `stopped`). Safe at serve start: this fresh
+/// process owns no restore yet, so every overlay present is from a dead process
+/// (same assumption as `cleanup_orphan_slot_netns`).
+///
+/// Reuses `SnapshotBackend::stop`, which is cross-process — it recovers the pid,
+/// tap/netns, vsock UDS and state-volume locks from the overlay's on-disk
+/// `.fc-session.json` and then removes the overlay dir. The recorded pid is
+/// signalled ONLY when it is dead (the backend's `kill` is then a no-op) or is
+/// confirmed to still be OUR firecracker VM — never a pid that an unrelated
+/// process reused during the (possibly hours-long) gap.
+fn reap_orphan_restore_overlays(overlay_root: &Path, backend: &dyn snapshot::SnapshotBackend) {
+    let entries = match std::fs::read_dir(overlay_root) {
+        Ok(entries) => entries,
+        Err(_) => return, // no overlay root ⇒ nothing to reap
+    };
+    for entry in entries.flatten() {
+        let overlay = entry.path();
+        if !overlay.is_dir() {
+            continue;
+        }
+        let lease_id = entry.file_name().to_string_lossy().into_owned();
+        let recorded_pid = orphan_overlay_recorded_pid(&overlay);
+        let safe_to_signal = match recorded_pid {
+            None => true,                             // no pid ⇒ stop() signals nothing
+            Some(pid) if !vmm_alive(pid) => true,     // dead ⇒ kill is a no-op
+            Some(pid) => proc_is_firecracker_for(pid, &overlay), // alive ⇒ only if still ours
+        };
+        if safe_to_signal {
+            // vmm_pid=None ⇒ stop() reads the pid back from `.fc-session.json` and
+            // signals it (a no-op when dead), then tears down tap/netns/vsock/locks
+            // and removes the overlay dir. All other fields are recovered from meta.
+            let session = snapshot::RestoredSession {
+                session_id: format!("orphan-reap-{lease_id}"),
+                backend_id: snapshot::FIRECRACKER_BACKEND_ID.to_string(),
+                guest_port: None,
+                overlay_root: overlay.clone(),
+                restored_bytes: 0,
+                vmm_pid: None,
+                vsock_uds: None,
+                workload_addr: None,
+            };
+            match backend.stop(session) {
+                Ok(_) => eprintln!("🧹 reaped orphan restore VM + overlay ({lease_id})"),
+                Err(e) => eprintln!("⚠️  could not reap orphan overlay {lease_id}: {e}"),
+            }
+        } else {
+            // The recorded pid is alive but no longer a firecracker VM for this
+            // overlay — it was reused by an unrelated process. NEVER signal it; just
+            // drop the stale overlay so it stops accumulating.
+            eprintln!(
+                "⚠️  orphan overlay {lease_id}: recorded pid reused by another process — removing overlay only"
+            );
+            let _ = std::fs::remove_dir_all(&overlay);
+        }
+    }
+}
+
+/// The Firecracker pid persisted in an overlay's `.fc-session.json`, if any.
+fn orphan_overlay_recorded_pid(overlay: &Path) -> Option<i32> {
+    let meta = std::fs::read_to_string(overlay.join(".fc-session.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    value.get("pid").and_then(|v| v.as_i64()).map(|n| n as i32)
+}
+
+/// True iff `pid` is (still) a firecracker process serving THIS overlay — i.e. its
+/// `/proc/<pid>/cmdline` names firecracker and references this overlay's `api.sock`.
+/// Guards the reaper against pid reuse before it signals anything. On a host with
+/// no `/proc` (non-Linux) the read fails and this returns false — the safe default
+/// (the reaper then skips the kill and only drops the overlay).
+fn proc_is_firecracker_for(pid: i32, overlay: &Path) -> bool {
+    let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => return false,
+    };
+    let api_sock = overlay.join("api.sock");
+    cmdline.contains("firecracker") && cmdline.contains(&*api_sock.to_string_lossy())
 }
 
 /// The public URL the runner will claim for a slot — honestly.
@@ -6981,6 +7077,33 @@ mod tests {
             probe_workload_evidence(&dir.path().join("01LEASE.pid")),
             WorkloadEvidence::ConfirmedGone
         );
+    }
+
+    #[test]
+    fn reap_orphan_restore_overlays_removes_a_stale_overlay_with_a_dead_pid() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let overlay = root.path().join("01LEASEORPHAN");
+        std::fs::create_dir_all(&overlay).expect("mkdir overlay");
+        // A dead pid ⇒ the backend's kill is a no-op; the stale overlay must still
+        // be reaped (dir removed) — that leaked overlay + VM is the bug being fixed.
+        std::fs::write(overlay.join(".fc-session.json"), r#"{"pid": 2147483646}"#)
+            .expect("write session record");
+        assert!(overlay.exists());
+        reap_orphan_restore_overlays(root.path(), &snapshot::FirecrackerBackend::new());
+        assert!(!overlay.exists(), "a stale orphan overlay should be removed");
+    }
+
+    #[test]
+    fn reap_orphan_restore_overlays_is_a_no_op_on_a_missing_or_empty_root() {
+        // Missing root ⇒ nothing to do, no panic.
+        reap_orphan_restore_overlays(
+            std::path::Path::new("/nonexistent/ato-restore-overlays-xyzzy"),
+            &snapshot::FirecrackerBackend::new(),
+        );
+        // Empty root ⇒ preserved, no panic.
+        let root = tempfile::tempdir().expect("tempdir");
+        reap_orphan_restore_overlays(root.path(), &snapshot::FirecrackerBackend::new());
+        assert!(root.path().exists());
     }
 
     #[test]
