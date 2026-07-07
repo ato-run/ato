@@ -101,6 +101,17 @@ pub(crate) fn runner_supervisor_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// ato#1006 (UNIT C): operator opt-in for the Public Preview lane on this runner.
+/// Off by default: the runner then neither advertises `restore_snapshot_preview`
+/// nor accepts a preview lease (byte-identical behavior). Symmetric with
+/// `ATO_RUNNER_SUPERVISOR` — a fixed KVM preview box sets `ATO_RUNNER_PREVIEW=1`.
+pub(crate) fn runner_preview_enabled() -> bool {
+    std::env::var("ATO_RUNNER_PREVIEW")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
 /// v1.2 PR 2 (L8): the binding-lease TTL, `ATO_READY_STATE_BINDING_TTL_MS`
 /// (default 1h). The foreground serving loop renews well inside this window;
 /// an un-renewed lease expiry-scrubs in the guest (lazy) and traffic gates.
@@ -282,6 +293,25 @@ mod tests {
         assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "zero falls back");
         set(Some("not-a-number"));
         assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "junk falls back");
+        set(prev.as_deref());
+    }
+
+    #[test]
+    fn runner_preview_off_by_default_on_when_truthy() {
+        // SAFETY: single-threaded test body; var restored at the end.
+        let prev = std::env::var("ATO_RUNNER_PREVIEW").ok();
+        let set = |v: Option<&str>| unsafe {
+            match v {
+                Some(v) => std::env::set_var("ATO_RUNNER_PREVIEW", v),
+                None => std::env::remove_var("ATO_RUNNER_PREVIEW"),
+            }
+        };
+        set(None);
+        assert!(!runner_preview_enabled(), "off by default");
+        set(Some("1"));
+        assert!(runner_preview_enabled());
+        set(Some("0"));
+        assert!(!runner_preview_enabled());
         set(prev.as_deref());
     }
 
