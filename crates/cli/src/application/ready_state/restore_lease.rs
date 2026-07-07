@@ -36,6 +36,16 @@ pub(crate) const RESTORE_SNAPSHOT_LEASE_KIND: &str = "restore_snapshot";
 /// would not be trusted.
 pub(crate) const RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND: &str = "restore_snapshot_with_bindings";
 
+/// Public Preview Runner v0 (ato#1006, UNIT C): lease kind for a login-free,
+/// time-limited preview restore. Wire-identical to `restore_snapshot` (a NO-BINDING
+/// artifact — see [`classify_restore_artifact`]) PLUS two always-set duration fields
+/// (`max_duration_secs`, `idle_timeout_secs`) that arm the runner's hard TTL. A
+/// separate kind — not an additive field — so the control plane capability-gates
+/// dispatch on `supported_lease_kinds`: only a runner that opted in
+/// (`ATO_RUNNER_PREVIEW=1`) ever advertises it, and only a snapshot the server
+/// re-checked as free-preview eligible is ever minted one.
+pub(crate) const RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND: &str = "restore_snapshot_preview";
+
 /// The reference-only identity a `restore_snapshot` lease carries. No secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RestoreSnapshotCommand {
@@ -59,19 +69,41 @@ pub(crate) struct RestoreSnapshotCommand {
     /// The kind PROMISES a supervisor artifact; `classify_restore_artifact`
     /// fail-closes any kind↔artifact mismatch in either direction.
     pub with_bindings: bool,
+    /// ato#1006 (UNIT C): true iff the lease kind is `restore_snapshot_preview`.
+    /// A preview lease restores exactly a no-binding artifact (`with_bindings` is
+    /// always `false` for it) but arms a hard max-duration TTL in the hold loop.
+    pub is_preview: bool,
+    /// ato#1006 (UNIT C): the preview lane's HARD wall-clock cap, in seconds.
+    /// REQUIRED (non-empty) for a `restore_snapshot_preview` lease and `None` for
+    /// every other kind — an additive/optional wire field (`#[serde(default)]`
+    /// semantics), byte-compatible for non-preview leases which never carry it.
+    pub max_duration_secs: Option<u64>,
+    /// ato#1006 (UNIT C): the preview lane's idle timeout, in seconds. Parsed and
+    /// threaded, but a NO-OP stub in v0 — the restore path exposes no controllable
+    /// idle-activity signal, so `max_duration_secs` is the sole hard cap. Optional
+    /// on the wire; `None` for non-preview leases.
+    pub idle_timeout_secs: Option<u64>,
 }
 
-/// Parse + validate a `restore_snapshot` / `restore_snapshot_with_bindings` lease
-/// command. Every identity field is required and non-empty (a lease missing one is
-/// refused, never restored blind).
+/// Parse + validate a `restore_snapshot` / `restore_snapshot_with_bindings` /
+/// `restore_snapshot_preview` lease command. Every identity field is required and
+/// non-empty (a lease missing one is refused, never restored blind).
+///
+/// ato#1006 (UNIT C): a `restore_snapshot_preview` lease additionally carries
+/// `max_duration_secs` (REQUIRED — fail closed if absent, a preview must never run
+/// unbounded) and `idle_timeout_secs` (optional). Both are ignored for the other
+/// kinds, which never carry them (byte-compatible).
 pub(crate) fn parse_restore_snapshot_command(
     command: &serde_json::Value,
 ) -> std::result::Result<RestoreSnapshotCommand, (String, String)> {
     let err = |m: &str| ("invalid_restore_lease".to_string(), m.to_string());
     let kind = command.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let with_bindings = match kind {
-        RESTORE_SNAPSHOT_LEASE_KIND => false,
-        RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND => true,
+    // A preview lease restores exactly a no-binding artifact — `with_bindings` is
+    // false for it — but is flagged `is_preview` so the hold loop arms its TTL.
+    let (with_bindings, is_preview) = match kind {
+        RESTORE_SNAPSHOT_LEASE_KIND => (false, false),
+        RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND => (true, false),
+        RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND => (false, true),
         _ => return Err(err(&format!("not a restore_snapshot lease (kind {kind:?})"))),
     };
     let req = |k: &str| -> std::result::Result<String, (String, String)> {
@@ -83,6 +115,16 @@ pub(crate) fn parse_restore_snapshot_command(
             .map(str::to_string)
             .ok_or_else(|| err(&format!("restore_snapshot lease is missing required field {k:?}")))
     };
+    // Additive, optional duration fields. `#[serde(default)]`-style: absent → None.
+    let max_duration_secs = command.get("max_duration_secs").and_then(serde_json::Value::as_u64);
+    let idle_timeout_secs = command.get("idle_timeout_secs").and_then(serde_json::Value::as_u64);
+    // Fail closed: a preview lease MUST carry a hard max-duration cap. Without it the
+    // preview would serve unbounded — refuse rather than run without the TTL.
+    if is_preview && max_duration_secs.is_none() {
+        return Err(err(
+            "restore_snapshot_preview lease is missing required field \"max_duration_secs\"",
+        ));
+    }
     Ok(RestoreSnapshotCommand {
         snapshot_id: req("snapshot_id")?,
         capsule_id: req("capsule_id")?,
@@ -105,6 +147,9 @@ pub(crate) fn parse_restore_snapshot_command(
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty()),
         with_bindings,
+        is_preview,
+        max_duration_secs,
+        idle_timeout_secs,
     })
 }
 
@@ -616,6 +661,63 @@ mod tests {
         assert!(c.artifact_fetch_url.is_none());
     }
 
+    // ── ato#1006 (UNIT C): the preview lease kind + duration fields ────────────
+
+    #[test]
+    fn non_preview_leases_carry_no_duration_fields() {
+        // A plain restore_snapshot lease (no duration fields on the wire) parses
+        // with is_preview=false and both durations None — byte-compatible.
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({}))).unwrap();
+        assert!(!c.is_preview);
+        assert!(c.max_duration_secs.is_none());
+        assert!(c.idle_timeout_secs.is_none());
+        // Even if a non-preview lease somehow carried the fields, is_preview stays
+        // false (the kind decides), but the values are still parsed additively.
+        let c = parse_restore_snapshot_command(&cmd_json(
+            serde_json::json!({ "max_duration_secs": 180, "idle_timeout_secs": 45 }),
+        ))
+        .unwrap();
+        assert!(!c.is_preview);
+        assert_eq!(c.max_duration_secs, Some(180));
+        assert_eq!(c.idle_timeout_secs, Some(45));
+    }
+
+    #[test]
+    fn preview_lease_parses_durations_and_is_no_binding() {
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "kind": "restore_snapshot_preview",
+            "max_duration_secs": 180,
+            "idle_timeout_secs": 45,
+        })))
+        .unwrap();
+        assert!(c.is_preview);
+        // A preview lease is a NO-BINDING restore — never a supervisor artifact.
+        assert!(!c.with_bindings);
+        assert_eq!(c.max_duration_secs, Some(180));
+        assert_eq!(c.idle_timeout_secs, Some(45));
+        // idle_timeout_secs is optional: a preview lease with only the hard cap parses.
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "kind": "restore_snapshot_preview",
+            "max_duration_secs": 60,
+        })))
+        .unwrap();
+        assert!(c.is_preview);
+        assert_eq!(c.max_duration_secs, Some(60));
+        assert!(c.idle_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn preview_lease_without_max_duration_fails_closed() {
+        // Fail closed: a preview must never run without a hard max-duration cap.
+        let e = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "kind": "restore_snapshot_preview",
+            "idle_timeout_secs": 45,
+        })))
+        .unwrap_err();
+        assert_eq!(e.0, "invalid_restore_lease");
+        assert!(e.1.contains("max_duration_secs"), "{}", e.1);
+    }
+
     // ── v1.2 PR 3e: the narrow supervisor gate matrix ─────────────────────────
 
     fn manifest_with(supervisor: Option<Vec<&str>>, has_vsock: bool) -> ReadyStateManifest {
@@ -827,6 +929,9 @@ mod tests {
             snapshot_backend: m.snapshot_backend.kind.clone(),
             healthcheck_url_path: Some("/health".into()),
             with_bindings: false,
+            is_preview: false,
+            max_duration_secs: None,
+            idle_timeout_secs: None,
         };
         // Exact match ⇒ ok, classified NoBinding.
         let (_, class) = load_and_verify_manifest(&mpath, &base, false).unwrap();

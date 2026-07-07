@@ -344,6 +344,9 @@ async fn smoke_pipeline(
             snapshot_backend: sealed.manifest.snapshot_backend.kind.clone(),
             healthcheck_url_path: None,
             with_bindings: false,
+            is_preview: false,
+            max_duration_secs: None,
+            idle_timeout_secs: None,
         };
         // locate_artifact must map cas:// to <workdir>/<job>/{manifest.json,cas}.
         let paths = locate_artifact(&cmd.artifact_location, workdir)

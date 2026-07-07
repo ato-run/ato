@@ -1132,6 +1132,7 @@ fn advertised_lease_kinds_for(
     native_inference_ready: bool,
     restore_ready: bool,
     supervisor_restore_ready: bool,
+    preview_restore_ready: bool,
 ) -> Vec<String> {
     let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS
         .iter()
@@ -1153,6 +1154,16 @@ fn advertised_lease_kinds_for(
     if restore_ready && supervisor_restore_ready {
         kinds.push(
             crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+                .to_string(),
+        );
+    }
+    // ato#1006 (UNIT C): restore_snapshot_preview needs restore-readiness AND the
+    // operator preview opt-in (`ATO_RUNNER_PREVIEW=1`). A preview restores a
+    // NO-BINDING artifact, so it needs no supervisor capability — only that this
+    // host can restore+serve and was opted into the public preview lane.
+    if restore_ready && preview_restore_ready {
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
                 .to_string(),
         );
     }
@@ -1184,6 +1195,7 @@ pub(crate) fn advertised_lease_kinds() -> Vec<String> {
         native_inference_ready(),
         ready_state_restore_ready(),
         supervisor_restore_ready(),
+        crate::application::ready_state::flags::runner_preview_enabled(),
     )
 }
 
@@ -2272,6 +2284,7 @@ async fn poll_lease_control(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlOutcome {
     /// No stop requested (or a transient error) — keep watching.
     Continue,
@@ -3595,6 +3608,37 @@ fn vmm_alive(_pid: i32) -> bool {
 /// How often the restore hold-loop polls `/control` for a stop + checks the VMM is alive.
 const RESTORE_HOLD_POLL_SECS: u64 = 2;
 
+/// ato#1006 (UNIT C): decide whether the restore hold loop should break this tick,
+/// and with what reason. Pure so the preview max-duration deadline is unit-testable
+/// without a live VM.
+///
+/// Precedence (first match wins): the workload exiting, then an owner stop / a gone
+/// lease, then — for a preview lease ONLY — the max-duration deadline. `preview_deadline`
+/// is `Some` ONLY for a `restore_snapshot_preview` lease; for every other restore kind
+/// it is `None`, so `preview_expired` can never fire and the non-preview hold loop stays
+/// behavior-identical (`workload_exited` / `user_requested` / `lease_gone`).
+fn restore_hold_break_reason(
+    now: std::time::Instant,
+    preview_deadline: Option<std::time::Instant>,
+    vmm_exited: bool,
+    control: ControlOutcome,
+) -> Option<&'static str> {
+    if vmm_exited {
+        return Some("workload_exited");
+    }
+    match control {
+        ControlOutcome::Stop => return Some("user_requested"),
+        ControlOutcome::Done => return Some("lease_gone"),
+        ControlOutcome::Continue => {}
+    }
+    if let Some(deadline) = preview_deadline
+        && now >= deadline
+    {
+        return Some("preview_expired");
+    }
+    None
+}
+
 /// Track E (#912): restore a sealed Ready-State snapshot for a `restore_snapshot` lease
 /// (Track D dispatch, ato-api#159) and expose it — owning the full
 /// fetch → VERIFY → restore → proxy → ready → hold → teardown lifecycle.
@@ -4148,6 +4192,25 @@ async fn handle_restore_snapshot_lease(
     });
 
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
+    // ato#1006 (UNIT C): a preview lease additionally arms a HARD max-duration cap.
+    // The deadline is computed from serving-start (here, after ready) — the wall-clock
+    // budget a public preview gets. `parse_restore_snapshot_command` guarantees a
+    // preview lease carried `max_duration_secs`, so it is always Some here. The
+    // `idle_timeout_secs` field is parsed + threaded but a NO-OP stub in v0: the
+    // restore path exposes no controllable idle-activity signal, so the max-duration
+    // deadline is the sole hard cap (documented on the struct field).
+    let preview_deadline = if cmd.is_preview {
+        cmd.max_duration_secs
+            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs))
+    } else {
+        None
+    };
+    if cmd.is_preview {
+        println!(
+            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, idle_timeout_secs={:?} [v0 stub])",
+            cmd.max_duration_secs, cmd.idle_timeout_secs
+        );
+    }
     let control_url = format!(
         "{}/v1/runner-leases/{}/control",
         api_base.trim_end_matches('/'),
@@ -4155,15 +4218,17 @@ async fn handle_restore_snapshot_lease(
     );
     let reason = loop {
         tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
-        if let Some(pid) = session.vmm_pid
-            && !vmm_alive(pid)
+        let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
+        // Preserve the original short-circuit: only poll /control while the VM is up.
+        let control = if vmm_exited {
+            ControlOutcome::Continue
+        } else {
+            poll_control_once(client, &control_url, runner_token).await
+        };
+        if let Some(reason) =
+            restore_hold_break_reason(std::time::Instant::now(), preview_deadline, vmm_exited, control)
         {
-            break "workload_exited";
-        }
-        match poll_control_once(client, &control_url, runner_token).await {
-            ControlOutcome::Stop => break "user_requested",
-            ControlOutcome::Done => break "lease_gone",
-            ControlOutcome::Continue => {}
+            break reason;
         }
     };
     println!("🛑 restore lease {lease_id}: {reason}; tearing down");
@@ -4235,10 +4300,13 @@ async fn handle_claimed_lease(
     // (Track D dispatch, ato-api#159). It is NOT a child-process sandbox run, so it owns
     // its own fetch → verify → restore → expose → teardown lifecycle — routed here,
     // before the run_source/run_capsule machinery that would reject the kind.
+    // ato#1006 (UNIT C): restore_snapshot_preview is the same restore lifecycle
+    // (a no-binding artifact) with a hard TTL, so it routes here too.
     if matches!(
         lease.command.get("kind").and_then(|v| v.as_str()),
         Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND)
             | Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND)
+            | Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND)
     ) {
         handle_restore_snapshot_lease(
             client,
@@ -5217,7 +5285,7 @@ mod tests {
         // Not ready: base kinds only, NO native-inference advertised — so the
         // control plane will not dispatch native-inference here (the slice-1 gate
         // requires the capability).
-        let base = advertised_lease_kinds_for(false, false, false);
+        let base = advertised_lease_kinds_for(false, false, false, false);
         assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
         assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
@@ -5225,7 +5293,7 @@ mod tests {
             "must NOT advertise native-inference when the host is not ready"
         );
         // Ready: base kinds preserved + native-inference appended.
-        let ready = advertised_lease_kinds_for(true, false, false);
+        let ready = advertised_lease_kinds_for(true, false, false, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
             ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
@@ -5239,13 +5307,13 @@ mod tests {
         // KVM-free host: restore_snapshot is NOT advertised, so the control plane will
         // not dispatch a restore here (a Fake/KVM-free host cannot serve a real app_url).
         assert!(
-            !advertised_lease_kinds_for(false, false, false)
+            !advertised_lease_kinds_for(false, false, false, false)
                 .iter()
                 .any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND),
             "must NOT advertise restore_snapshot when the host cannot restore+serve"
         );
         // Restore-ready host: base kinds preserved + restore_snapshot appended.
-        let ready = advertised_lease_kinds_for(false, true, false);
+        let ready = advertised_lease_kinds_for(false, true, false, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(ready.iter().any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND));
     }
@@ -5257,19 +5325,96 @@ mod tests {
         };
         let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
         // Neither: no binding kind.
-        assert!(!has(&advertised_lease_kinds_for(false, false, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        assert!(!has(&advertised_lease_kinds_for(false, false, false, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
         // Supervisor-ready but NOT restore-ready (no KVM): still refused — the
         // binding kind requires BOTH.
-        assert!(!has(&advertised_lease_kinds_for(false, false, true), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        assert!(!has(&advertised_lease_kinds_for(false, false, true, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
         // Restore-ready but not supervisor-ready (flag off / no vsock capability):
         // plain restore advertised, binding kind NOT.
-        let plain = advertised_lease_kinds_for(false, true, false);
+        let plain = advertised_lease_kinds_for(false, true, false, false);
         assert!(has(&plain, RESTORE_SNAPSHOT_LEASE_KIND));
         assert!(!has(&plain, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
         // Both: both kinds advertised.
-        let both = advertised_lease_kinds_for(false, true, true);
+        let both = advertised_lease_kinds_for(false, true, true, false);
         assert!(has(&both, RESTORE_SNAPSHOT_LEASE_KIND));
         assert!(has(&both, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_preview_only_when_restore_and_preview_ready() {
+        use crate::application::ready_state::restore_lease::{
+            RESTORE_SNAPSHOT_LEASE_KIND, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND,
+        };
+        let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
+        // Neither restore- nor preview-ready: preview kind NOT advertised.
+        assert!(!has(&advertised_lease_kinds_for(false, false, false, false), RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        // Preview opted-in but NOT restore-ready (no KVM): still refused — the preview
+        // kind requires BOTH the restore capability and the operator opt-in.
+        assert!(!has(&advertised_lease_kinds_for(false, false, false, true), RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        // Restore-ready but NOT preview-opted-in (ATO_RUNNER_PREVIEW unset): plain
+        // restore advertised, preview kind NOT.
+        let plain = advertised_lease_kinds_for(false, true, false, false);
+        assert!(has(&plain, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(!has(&plain, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        // Restore-ready AND preview-opted-in: preview kind advertised. Note it needs
+        // NO supervisor capability (a preview restores a no-binding artifact).
+        let preview = advertised_lease_kinds_for(false, true, false, true);
+        assert!(has(&preview, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(has(&preview, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+    }
+
+    #[test]
+    fn restore_hold_break_reason_precedence_and_preview_deadline() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let future = now + Duration::from_secs(60);
+        let past = now - Duration::from_secs(1);
+
+        // Non-preview lease (deadline None): never breaks "preview_expired".
+        assert_eq!(restore_hold_break_reason(now, None, false, ControlOutcome::Continue), None);
+        assert_eq!(
+            restore_hold_break_reason(now, None, true, ControlOutcome::Continue),
+            Some("workload_exited")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Stop),
+            Some("user_requested")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Done),
+            Some("lease_gone")
+        );
+
+        // Preview lease, deadline not yet reached: keep holding.
+        assert_eq!(
+            restore_hold_break_reason(now, Some(future), false, ControlOutcome::Continue),
+            None
+        );
+        // Preview lease, deadline passed: breaks "preview_expired".
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Continue),
+            Some("preview_expired")
+        );
+        // `now == deadline` counts as expired (>= boundary).
+        assert_eq!(
+            restore_hold_break_reason(now, Some(now), false, ControlOutcome::Continue),
+            Some("preview_expired")
+        );
+
+        // Precedence: workload exit / owner stop / gone lease all win over the
+        // preview deadline even when it has passed.
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), true, ControlOutcome::Continue),
+            Some("workload_exited")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Stop),
+            Some("user_requested")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Done),
+            Some("lease_gone")
+        );
     }
 
     fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {
