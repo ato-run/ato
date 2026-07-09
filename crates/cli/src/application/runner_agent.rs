@@ -6750,7 +6750,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1_000));
             let listener =
                 TcpListener::bind(format!("127.0.0.1:{upstream_port}")).expect("late upstream");
-            for _ in 0..2 {
+            // Budget for more than the 2 conceptual connections (one retry
+            // probe + the test's own final request): the retry loop's actual
+            // number of attempts that reach upstream (as opposed to being
+            // refused before it comes up) depends on scheduling timing, and a
+            // slow/contended CI runner (observed on windows-latest) can let
+            // more than one in-flight proxied connection land here before the
+            // probe settles. Extra accepts beyond what's actually used are
+            // harmless — the loop just exits when the connecting side is done.
+            for _ in 0..8 {
                 let Ok((mut stream, _)) = listener.accept() else {
                     break;
                 };
