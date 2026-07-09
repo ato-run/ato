@@ -1,0 +1,23 @@
+schema_version = "0.3"
+name = "ready-state-gpu-invm"
+version = "0.1.0"
+type = "app"
+description = "Ready-State GPU posture (INELIGIBLE, fail-closed): an in-VM GPU requirement (vram_min) with NO external binding. GPU device state is not snapshottable, so this capsule is Ready-State-INELIGIBLE — it must use a GPU runner class or declare the GPU as an [external.*] capability instead. The manifest is still VALID; only the Ready-State eligibility gate fails. Classified by gpu_mode() == Passthrough and instant_run_eligibility().gpu_blocks_ready_state == true."
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run = "python serve.py"
+port = 8080
+
+[targets.app.readiness_probe]
+type = "http"
+path = "/health"
+
+[snapshot]
+mode = "warm"
+boot_until = "healthcheck"
+
+# In-VM GPU requirement, no external binding -> Ready-State-ineligible (fail-closed).
+[requirements]
+vram_min = "8GB"

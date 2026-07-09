@@ -1,0 +1,12 @@
+# v1 compat: node stdlib app declaring only a port — exercises node + probe synthesis.
+schema_version = "0.3"
+name = "compat-node-port-only"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+driver = "node"
+run = "node server.js"
+port = 8080

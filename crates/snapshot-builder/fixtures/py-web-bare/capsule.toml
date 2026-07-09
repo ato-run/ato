@@ -1,0 +1,15 @@
+# #932 fixture: the REAL Store-capsule shape the v1 builder rejected — a bare-`.py`
+# run command (the CLI-sandbox convention) and NO explicit readiness_probe (the
+# "declared port ⇒ synthesized probe" contract). Seals only with #932's bare-.py
+# normalization (`python3 app.py` in the guest init) + probe synthesis (`http_get "/"`).
+schema_version = "0.3"
+name = "trackc-932-py-web-bare"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "python"
+run = "app.py"
+port = 8080

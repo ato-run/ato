@@ -20,6 +20,7 @@ pub mod launch_template_reuse;
 pub mod materialization;
 pub mod records;
 pub mod requirement_graph;
+pub mod runner_class;
 pub mod store;
 
 pub use finalizer::{FinalizerInput, FinalizerOutput, InstallBuildFacts, InstallRevisionFinalizer};
@@ -74,4 +75,5 @@ pub use requirement_graph::{
     RequirementGraphCompileInput, RequirementGraphCompileOutput, RuntimeRequirementFact,
     SecretRequirementFact, StorageRequirementFact, compile_requirement_graph,
 };
+pub use runner_class::{RunnerClassFacts, RunnerClassId, RunnerClassMismatch};
 pub use store::{AppRecord, InstallInstanceStore, LaunchProfile};
