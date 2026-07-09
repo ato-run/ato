@@ -16,13 +16,17 @@ snapshots must be built on ubuntu-sugamo** — a snapshot built anywhere else
 (e.g. the Hetzner box) is dispatchable by the control plane under
 `legacy_passthrough` but will always fail at restore time on this host.
 
-**Do NOT re-enable the Hetzner `ato-snapshot-builder` unit for staging
-rebuilds.** The Hetzner box (`hetzner-ato-runner`, 65.109.37.38) is the
-production runner; its builder unit is intentionally `inactive` and its
-`/etc/ato/runner-builder-override.env` still points at the staging API — if it
-is started it will claim staging jobs and produce Hetzner-class artifacts that
-Sugamo cannot restore. (Verified live on 2026-07-09: this exact failure mode
-broke every staging preview.)
+**Do NOT point the Hetzner `ato-snapshot-builder` at the staging API.** The
+Hetzner box (`hetzner-ato-runner`, 65.109.37.38) is the production runner and,
+as of 2026-07-10, the **production** snapshot builder: its
+`/etc/ato/runner-builder-override.env` points at `https://api.ato.run` with a
+prod-only `SNAPSHOT_BUILDER_AGENT_TOKEN` (the pre-cutover staging env is kept
+as `runner-builder-override.env.bak-staging`). The same colocation rule holds
+per env: prod snapshots build on the prod preview runner's host (Hetzner),
+staging snapshots on the staging preview runner's host (Sugamo). If the
+Hetzner builder ever claims staging jobs again it produces Hetzner-class
+artifacts that Sugamo cannot restore — verified live on 2026-07-09, when
+exactly this broke every staging preview.
 
 ## Unit layout on ubuntu-sugamo
 
