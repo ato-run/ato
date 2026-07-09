@@ -211,6 +211,11 @@ fn bucket_kernel_abi_class(release: &str) -> String {
 /// Parse the normalized, sorted, deduped CPU feature set from `/proc/cpuinfo`
 /// text. Reads the first `flags` (x86) or `Features` (arm64) line. Sorting +
 /// dedup makes the resulting [`RunnerClassId`] stable across reads.
+///
+/// Not yet wired into `RunnerClassFacts::from_host()` — reserved for the CPU
+/// template detection work in the Hardware Binding Layer Phase 2 (ato-api
+/// RFCs #216-#220).
+#[allow(dead_code)]
 fn parse_cpu_features(cpuinfo: &str) -> Vec<String> {
     for line in cpuinfo.lines() {
         if let Some((key, val)) = line.split_once(':') {

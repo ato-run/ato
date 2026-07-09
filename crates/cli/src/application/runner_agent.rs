@@ -3821,6 +3821,10 @@ fn restore_hold_break_reason(
 /// only in guest tmpfs; renewal runs for the session lifetime and is scrubbed at
 /// teardown.
 #[allow(clippy::too_many_arguments)]
+// The final prof_mark! call's reassignment of prof_last is a dead store
+// (nothing times an interval after it) — inherent to the macro applying
+// uniformly across every call site, not a bug at any specific one.
+#[allow(unused_assignments)]
 async fn handle_restore_snapshot_lease(
     client: &reqwest::Client,
     api_base: &str,
@@ -4506,6 +4510,7 @@ async fn handle_restore_snapshot_lease(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_claimed_lease(
     client: &reqwest::Client,
     api_base: &str,
