@@ -201,43 +201,6 @@ pub fn set_window_topmost(cx: &mut App, handle: AnyWindowHandle) {
     }
 }
 
-/// Make `child` a logical child of `parent` by setting `GWLP_HWNDPARENT`.
-///
-/// Uses `SetWindowLongPtrW(child, GWLP_HWNDPARENT, parent_hwnd)` rather than
-/// `SetParent` to avoid triggering a full WS_CHILD restyle. The child window
-/// will be minimised/restored together with the parent.
-///
-/// Returns `Ok(())` on success; logs and returns `Err(String)` on failure so
-/// the caller can decide whether to surface or ignore it.
-pub fn attach_as_child(
-    cx: &mut App,
-    parent: AnyWindowHandle,
-    child: AnyWindowHandle,
-) -> Result<(), String> {
-    let parent_hwnd = hwnd_for(cx, parent).ok_or_else(|| "parent HWND unavailable".to_string())?;
-    let child_hwnd = hwnd_for(cx, child).ok_or_else(|| "child HWND unavailable".to_string())?;
-
-    unsafe {
-        // Per MSDN: SetWindowLongPtrW returns the previous value on success and
-        // 0 on failure. However it can also return 0 legitimately (previous value
-        // was 0), so we must clear LastError first and test it afterwards.
-        SetLastError(0);
-        let prev = SetWindowLongPtrW(child_hwnd, GWLP_HWNDPARENT, parent_hwnd as isize);
-        if prev == 0 {
-            let err = GetLastError();
-            if err != 0 {
-                return Err(format!(
-                    "SetWindowLongPtrW(GWLP_HWNDPARENT) failed: Win32 error {err}"
-                ));
-            }
-        }
-    }
-    tracing::info!("SetWindowLongPtrW(GWLP_HWNDPARENT) attached child window to parent");
-    Ok(())
-}
-
-/// Dispatch an asynchronous WebView2 screenshot for the window that
-/// backs `handle`. Delegates to [`crate::automation::screenshot::take_screenshot`].
 pub fn request_win_window_snapshot(
     cx: &mut App,
     handle: AnyWindowHandle,

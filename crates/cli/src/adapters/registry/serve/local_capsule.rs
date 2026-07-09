@@ -354,6 +354,11 @@ pub(super) async fn handle_run_local_capsule(
         last_event: Some("spawned".to_string()),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
+                ready_state_vsock_uds: None,
     };
     let process_manager = match ProcessManager::new() {
         Ok(manager) => manager,

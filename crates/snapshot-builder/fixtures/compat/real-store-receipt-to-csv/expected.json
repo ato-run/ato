@@ -1,0 +1,7 @@
+{
+  "class": "positive",
+  "eligibility": "pass",
+  "seal": "sealed",
+  "manifest_source": "external",
+  "notes": "Regression anchor: Koh0920/ato-receipt-to-csv (staging recipe already approved; explicit /api/health probe, synthesized_probe=false expected in receipt)."
+}

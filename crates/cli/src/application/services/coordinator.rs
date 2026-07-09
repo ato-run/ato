@@ -76,6 +76,7 @@ mod tests {
             expose: None,
             env: None,
             state_bindings: Vec::new(),
+            secrets: None,
             readiness_probe: None,
             network: None,
         }

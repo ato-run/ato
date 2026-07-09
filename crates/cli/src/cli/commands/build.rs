@@ -609,10 +609,57 @@ pub fn execute_pack_command_with_injected_manifest(
         }
     };
 
+    // Ready-State seal branch (additive; legacy build is byte-for-byte unchanged
+    // when ATO_READY_STATE_ENABLED is off). Side-channel only — never mutates the
+    // BuildResult, so the legacy JSON output schema is identical.
+    seal_ready_state_if_enabled(&raw_manifest, result.artifact.as_deref(), reporter.as_ref())?;
+
     record_timing(&mut timing_entries, "build.total", total_started.elapsed());
     emit_timings(reporter.clone(), timings, &timing_entries)?;
 
     Ok(result)
+}
+
+/// Seal the just-built capsule into a Ready-State artifact when
+/// `ATO_READY_STATE_ENABLED` is on. No-op (and legacy build unchanged) when off.
+/// Fails the build CLOSED if a Ready-State build cannot seal (GPU guard,
+/// no-secret gate, explicit-but-unavailable backend, missing Firecracker rootfs).
+fn seal_ready_state_if_enabled(
+    raw_manifest: &toml::Value,
+    artifact: Option<&std::path::Path>,
+    reporter: &reporters::CliReporter,
+) -> anyhow::Result<()> {
+    use crate::application::ready_state;
+    if !ready_state::flags::ready_state_enabled() {
+        return Ok(());
+    }
+    let manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(raw_manifest)?)?;
+    if !manifest.is_ready_state_eligible() {
+        futures::executor::block_on(reporter.notify(
+            "READY-STATE: skipped — capsule is not Ready-State-eligible (no warm [snapshot])".to_string(),
+        ))?;
+        return Ok(());
+    }
+    // Sealing a binding-required capsule is allowed (the artifact is pre-bind &
+    // secret-free — no binding VALUES are ever injected/recorded); this guard
+    // documents that contract and rejects any future mode that would.
+    ready_state::bindings::ensure_no_unwired_runtime_bindings(
+        &manifest,
+        ready_state::bindings::BindingGuardMode::BuildSeal,
+    )?;
+    let backend = ready_state::backend::select_backend()?;
+    let hash = ready_state::capsule_manifest_hash(raw_manifest)?;
+    let state_root = ready_state::state_root();
+    let layers = ready_state::assemble_build_layers(backend.id(), artifact)?;
+    let receipt = ready_state::build::seal(&state_root, hash.clone(), &manifest, layers, backend.as_ref())?;
+    futures::executor::block_on(reporter.notify(format!(
+        "READY-STATE: sealed {hash} backend={} no_secret_clean={} sealed_bytes={} -> {}",
+        backend.id(),
+        receipt.no_secret_proof.is_clean(),
+        receipt.sealed_bytes,
+        ready_state::store::artifact_dir(&state_root, &hash).display(),
+    )))?;
+    Ok(())
 }
 
 fn record_timing(entries: &mut Vec<(String, Duration)>, label: &str, elapsed: Duration) {

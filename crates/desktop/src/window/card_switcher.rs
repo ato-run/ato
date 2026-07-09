@@ -164,6 +164,7 @@ struct CardDto {
 ///     and "最近使ったカプセル" rows already use
 fn glyph_for(title: &str, kind: &ContentWindowKind) -> &'static str {
     match kind {
+        ContentWindowKind::Home => "sparkle",
         ContentWindowKind::Store => "store",
         ContentWindowKind::Start => "sparkle",
         ContentWindowKind::Settings => "panel",
@@ -212,6 +213,7 @@ fn request_snapshot(_cx: &mut App, _handle: AnyWindowHandle, tx: mpsc::Sender<Op
 fn kind_tag(kind: &ContentWindowKind) -> &'static str {
     match kind {
         ContentWindowKind::AppWindow { .. } => "AppWindow",
+        ContentWindowKind::Home => "Home",
         ContentWindowKind::Store => "Store",
         ContentWindowKind::Start => "Start",
         ContentWindowKind::Settings => "Settings",

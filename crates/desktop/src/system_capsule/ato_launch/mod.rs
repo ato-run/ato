@@ -127,6 +127,14 @@ pub fn dispatch(
                 .global_mut::<crate::window::launch_window::PendingLaunches>()
                 .0
                 .remove(&preview_id);
+
+            // PR-D1: an `ato://run` request bypasses the AppWindow boot flow
+            // entirely — there is no guest WebView pane to embed. Persist the
+            // secrets/consents the wizard collected exactly as any other
+            // Approve would (below), but once that is done, spawn `ato run`
+            // directly and return without ever calling `open_boot_window`.
+            let run_agent_request = stashed.as_ref().and_then(|s| s.run_agent_request.clone());
+
             let pending_route = stashed.as_ref().map(|s| s.route.clone());
             let requested_client = stashed
                 .as_ref()
@@ -180,8 +188,51 @@ pub fn dispatch(
                 }
             }
 
-            // Close the consent wizard so the boot wizard takes focus.
+            // Close the consent wizard so the boot wizard (or, for an
+            // `ato://run` request, nothing at all) takes focus.
             let _ = host.update(cx, |_, window, _| window.remove_window());
+
+            // PR-D1: an `ato://run` request never opens a boot wizard / guest
+            // WebView pane — approval means "spawn `ato run <source>` on the
+            // Desktop Runner now." Secrets + execution-plan consents were
+            // already persisted above (identical to any other Approve); the
+            // non-secret `config` map is not consumed by this path (the CLI
+            // resolves its own env), so it is intentionally dropped here.
+            if let Some(run_agent) = run_agent_request {
+                let ready_state_enabled = false; // M3: cold-OCI only.
+                match crate::desktop_run_agent::launch(
+                    &run_agent.source,
+                    run_agent.run_id.as_deref(),
+                    ready_state_enabled,
+                ) {
+                    Ok(()) => {
+                        tracing::info!(
+                            source = %run_agent.source,
+                            origin = %run_agent.origin,
+                            run_id = ?run_agent.run_id,
+                            "ato_launch: run agent launch started after consent approval"
+                        );
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            source = %run_agent.source,
+                            origin = %run_agent.origin,
+                            %reason,
+                            "ato_launch: run agent launch failed to start after approval"
+                        );
+                        if let Err(err) =
+                            crate::window::launch_blocked_popup::open_launch_blocked_popup(
+                                cx,
+                                run_agent.source.clone(),
+                                reason,
+                            )
+                        {
+                            tracing::error!(error = %err, "ato_launch: failed to show run-agent launch-failed popup");
+                        }
+                    }
+                }
+                return Ok(());
+            }
 
             // Store non-secret config so AppCapsuleShell passes it to
             // resolve_and_start_guest.
@@ -244,7 +295,28 @@ pub fn dispatch(
             }
         }
         LaunchCommand::Cancel => {
+            // PR-D1: if the cancelled wizard was an `ato://run` consent
+            // request, log a clear declined outcome — mirrors this same
+            // "tracing-only, no popup" treatment every other Cancel already
+            // gets; there is no separate window left open afterward for
+            // either case, so silence here is consistent, not a regression.
+            let declined_run_agent = cx
+                .try_global::<crate::window::launch_window::PendingConsentPreview>()
+                .and_then(|p| p.0.as_ref().map(|preview| preview.preview_id.clone()))
+                .and_then(|preview_id| {
+                    cx.try_global::<crate::window::launch_window::PendingLaunches>()
+                        .and_then(|launches| launches.0.get(&preview_id).cloned())
+                })
+                .and_then(|stashed| stashed.run_agent_request);
+
             tracing::info!("ato_launch: user cancelled");
+            if let Some(run_agent) = declined_run_agent {
+                tracing::info!(
+                    source = %run_agent.source,
+                    origin = %run_agent.origin,
+                    "ato_launch: run consent declined"
+                );
+            }
             cx.set_global(crate::window::launch_window::PendingLaunches::default());
             cx.set_global(crate::window::launch_window::PendingConsentPreview(None));
             let _ = host.update(cx, |_, window, _| window.remove_window());
