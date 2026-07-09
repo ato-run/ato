@@ -30,6 +30,9 @@ tracks the current implementation first.
 | **Sandbox grant** | Explicit host filesystem access granted through flags such as `--read`, `--write`, and `--read-write` |
 | **Execution receipt** | The structured document that records the launch envelope for a run |
 | **Execution ID** | The canonical digest of the launch identity, used to address execution receipts |
+| **Connected Runner** | A machine enrolled under an Ato account (`ato runner enroll`) that heartbeats to the control plane and executes dispatched run leases sandboxed. See [Connected Runner](runner.md) |
+| **Run lease** | A dispatched run claimed by a Connected Runner; the runner reports status, readiness, and stop acknowledgements against the lease |
+| **Ready-State snapshot** | A sealed, content-addressed Firecracker artifact of a capsule already booted and probe-verified; restoring it serves the app without re-running setup. See [Snapshot v1 Compatibility](snapshot-v1-compatibility.md) |
 
 ## Specification
 

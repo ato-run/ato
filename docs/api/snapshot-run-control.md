@@ -5,9 +5,12 @@
 > contract here first, in a PR, before changing an implementation. Tracks
 > [#896](https://github.com/ato-run/ato/issues/896).
 >
-> Status: **draft / PR 1.** No endpoints implemented yet. `nightly` + staging
-> flags only; nothing touches `dev`/`main` runtime release. ato-api code lands
-> behind staging/admin flags, inert until enabled.
+> Status: **implemented (staging-gated).** The endpoints below exist in ato-api
+> (`/v1/capsule-snapshots` builder claim/ack, `/v1/snapshot-jobs` + the snapshot
+> registry read model) and the builder daemon (`crates/snapshot-builder`) runs
+> against them; production remains flag-gated off by design. This document is
+> still the coordination artifact: change the contract here first, in a PR,
+> before changing an implementation.
 
 ## 0. Purpose & boundaries
 
