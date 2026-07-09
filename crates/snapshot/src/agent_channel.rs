@@ -13,7 +13,9 @@
 //! newline-delimited JSON control protocol to/from the guest-agent. All reads/writes
 //! are timeout-bounded; any protocol error fails closed.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+#[cfg(unix)]
+use anyhow::{Context, bail};
 use protocol::binding_control::{AgentToHost, HostToAgent};
 
 /// The guest-agent's AF_VSOCK control port — single source for the port every
@@ -27,11 +29,15 @@ pub trait AgentChannel {
 }
 
 /// PR B (#912): the real host→guest-agent channel over Firecracker's vsock UDS.
+/// Firecracker's vsock UDS is a Unix-only transport (Firecracker itself does not
+/// run on Windows), so this type does not exist there at all.
+#[cfg(unix)]
 pub struct FirecrackerAgentChannel {
     reader: std::io::BufReader<std::os::unix::net::UnixStream>,
     writer: std::os::unix::net::UnixStream,
 }
 
+#[cfg(unix)]
 impl FirecrackerAgentChannel {
     /// Connect through the FC vsock UDS to the guest-agent on `guest_port`.
     pub fn connect(
@@ -86,6 +92,7 @@ impl FirecrackerAgentChannel {
     }
 }
 
+#[cfg(unix)]
 impl AgentChannel for FirecrackerAgentChannel {
     fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost> {
         use std::io::{BufRead, Write};

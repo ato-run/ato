@@ -72,12 +72,12 @@ impl BindingPreviewReceipt {
     }
 }
 
+#[cfg(unix)]
+pub(crate) use snapshot::agent_channel::FirecrackerAgentChannel;
 /// v1.2 PR 3d: the channel trait + vsock transport moved to `snapshot::agent_channel`
 /// so the FirecrackerBackend's build-side supervisor drive shares the exact transport
 /// this run gate uses. Re-exported so every call site here is unchanged.
-pub(crate) use snapshot::agent_channel::{
-    AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT,
-};
+pub(crate) use snapshot::agent_channel::{AgentChannel, GUEST_AGENT_VSOCK_PORT};
 
 /// Deliver every lease, then poll bound-ready up to `max_polls` times. Returns `Ok`
 /// only when the agent reports bound-ready; otherwise **fails closed** with the still
@@ -168,6 +168,21 @@ pub(crate) fn issue_leases(
 /// declares no durable state at all; the caller must still call this
 /// unconditionally rather than branching on "does this capsule have state",
 /// since that decision already lives here.
+// Unix-only below (the guest-agent channel is a Firecracker vsock UDS, which
+// does not exist on Windows); each non-unix stub fails closed.
+#[cfg(not(unix))]
+pub(crate) fn mount_volumes_before_expose(
+    _vsock_uds: &std::path::Path,
+    has_durable_state: bool,
+    _timeout: std::time::Duration,
+) -> Result<()> {
+    if !has_durable_state {
+        return Ok(());
+    }
+    bail!("durable state mount is only supported on Unix hosts")
+}
+
+#[cfg(unix)]
 pub(crate) fn mount_volumes_before_expose(
     vsock_uds: &std::path::Path,
     has_durable_state: bool,
@@ -188,6 +203,16 @@ pub(crate) fn mount_volumes_before_expose(
 /// PR D2: connect the guest-agent over the restored session's vsock UDS, deliver the
 /// leases, and block until bound-ready — **fail closed** on any failure. The caller
 /// must NOT expose traffic unless this returns `Ok`.
+#[cfg(not(unix))]
+pub(crate) fn bind_before_expose(
+    _vsock_uds: &std::path::Path,
+    _leases: &[BindingLease],
+    _timeout: std::time::Duration,
+) -> Result<()> {
+    bail!("bind-before-expose is only supported on Unix hosts")
+}
+
+#[cfg(unix)]
 pub(crate) fn bind_before_expose(
     vsock_uds: &std::path::Path,
     leases: &[BindingLease],
@@ -262,6 +287,20 @@ pub(crate) fn spawn_lease_renewal(
 /// One renewal pass: resolve every grant, re-deliver the resolvable ones,
 /// revoke the ones whose grant disappeared. Returns how many leases were
 /// renewed. Names/reasons only in errors — never a value.
+///
+/// Unix-only (vsock UDS); the non-unix stub fails closed, matching every
+/// other Firecracker-vsock entry point in this file.
+#[cfg(not(unix))]
+fn renewal_tick(
+    _vsock_uds: &std::path::Path,
+    _namespace: &str,
+    _names: &[String],
+    _ttl_ms: u64,
+) -> Result<usize> {
+    bail!("binding lease renewal is only supported on Unix hosts")
+}
+
+#[cfg(unix)]
 fn renewal_tick(
     vsock_uds: &std::path::Path,
     namespace: &str,
@@ -336,6 +375,12 @@ fn renew_over_channel(
 /// PR D3 (#912): connect the guest-agent over vsock and stop-scrub. Used by `ato stop`
 /// to wipe the guest's tmpfs bindings BEFORE VM teardown. Best-effort — a connect
 /// failure is returned to the caller which logs it and proceeds with teardown.
+#[cfg(not(unix))]
+pub(crate) fn stop_scrub_over_vsock(_vsock_uds: &std::path::Path) -> Result<()> {
+    bail!("stop-scrub is only supported on Unix hosts")
+}
+
+#[cfg(unix)]
 pub(crate) fn stop_scrub_over_vsock(vsock_uds: &std::path::Path) -> Result<()> {
     let mut channel = FirecrackerAgentChannel::connect(
         vsock_uds,
@@ -692,11 +737,13 @@ mod tests {
     // returns `vsock_uds: None`, so building one would require first
     // extending that shared fake) — flagged here rather than silently
     // treated as full coverage of the review's exact call site.
+    #[cfg(unix)]
     struct FakeVsockAgent {
         received: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         _handle: std::thread::JoinHandle<()>,
     }
 
+    #[cfg(unix)]
     impl FakeVsockAgent {
         /// `fail_mount`: replies `Error` to `MountVolumes` instead of `VolumesMounted`.
         fn spawn(uds_path: std::path::PathBuf, fail_mount: bool) -> Self {
@@ -769,6 +816,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn mount_volumes_before_expose_succeeds_with_no_binding_at_all() {
         // The exact scenario PR#992's review flagged: a state-only capsule
         // has durable state but NO secret bindings (supervisor_names ==
@@ -798,6 +846,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn mount_failure_prevents_bind_from_ever_being_attempted() {
         // Mirrors the FIXED call-site structure in both `handle_restore_
         // snapshot_lease` and `pipeline/phases/run.rs`: mount first via `?`,
