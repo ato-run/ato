@@ -52,10 +52,16 @@ pub enum HostToAgent {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentToHost {
     /// A lease was accepted (delivered/renewed). No value echoed back.
-    Ack { id: BindingLeaseId, name: BindingName },
+    Ack {
+        id: BindingLeaseId,
+        name: BindingName,
+    },
     /// Bound-ready state: whether all required bindings are present, and which names
     /// are still pending.
-    BoundReady { ready: bool, pending: Vec<BindingName> },
+    BoundReady {
+        ready: bool,
+        pending: Vec<BindingName>,
+    },
     /// A binding was scrubbed (revoke / expiry / stop).
     Scrubbed { id: BindingLeaseId },
     /// v1.2 (supervisor mode): the supervised workload was stopped (or was not
@@ -101,13 +107,20 @@ mod tests {
         let json = serde_json::to_string(&deliver).unwrap();
         assert!(json.contains(secret), "Deliver carries the value for wire");
         // Its Debug still redacts (WireSecret Debug).
-        assert!(!format!("{deliver:?}").contains(secret), "Deliver Debug leaked the secret");
+        assert!(
+            !format!("{deliver:?}").contains(secret),
+            "Deliver Debug leaked the secret"
+        );
 
         // Responses never carry the value.
-        let resp = AgentToHost::BoundReady { ready: false, pending: vec![BindingName::parse("db_url").unwrap()] };
+        let resp = AgentToHost::BoundReady {
+            ready: false,
+            pending: vec![BindingName::parse("db_url").unwrap()],
+        };
         assert!(!serde_json::to_string(&resp).unwrap().contains(secret));
         // Round-trip a response.
-        let back: AgentToHost = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        let back: AgentToHost =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(back, resp);
     }
     #[test]
@@ -126,7 +139,10 @@ mod tests {
     fn mount_volumes_round_trips_and_is_value_free() {
         let msg = HostToAgent::MountVolumes;
         let j = serde_json::to_string(&msg).unwrap();
-        assert_eq!(j, r#"{"kind":"mount_volumes"}"#, "no payload — the guest already knows its own volumes");
+        assert_eq!(
+            j, r#"{"kind":"mount_volumes"}"#,
+            "no payload — the guest already knows its own volumes"
+        );
         let resp = AgentToHost::VolumesMounted;
         let rj = serde_json::to_string(&resp).unwrap();
         assert_eq!(rj, r#"{"kind":"volumes_mounted"}"#);

@@ -81,8 +81,18 @@ impl ArtifactStore {
     /// `Ok(Some)` = fully present, `Err` = PARTIAL — a hard startup error.
     /// A set-but-blank var counts as absent (it cannot possibly work).
     pub fn from_env() -> Result<Option<ArtifactStore>, String> {
-        let get = |key: &str| std::env::var(key).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
-        ArtifactStore::from_parts(get(ENV_ENDPOINT), get(ENV_BUCKET), get(ENV_ACCESS_KEY_ID), get(ENV_SECRET_ACCESS_KEY))
+        let get = |key: &str| {
+            std::env::var(key)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        ArtifactStore::from_parts(
+            get(ENV_ENDPOINT),
+            get(ENV_BUCKET),
+            get(ENV_ACCESS_KEY_ID),
+            get(ENV_SECRET_ACCESS_KEY),
+        )
     }
 
     /// The pure all-or-nothing gate behind [`ArtifactStore::from_env`]
@@ -130,7 +140,10 @@ impl ArtifactStore {
     /// — the same `<job_id>/<artifact_manifest_hash>` identity the registry's
     /// `r2://` location names, plus the fixed archive filename.
     fn object_url(&self, job_id: &str, artifact_manifest_hash: &str) -> String {
-        format!("{}/{}/{job_id}/{artifact_manifest_hash}/{ARTIFACT_ARCHIVE_NAME}", self.endpoint, self.bucket)
+        format!(
+            "{}/{}/{job_id}/{artifact_manifest_hash}/{ARTIFACT_ARCHIVE_NAME}",
+            self.endpoint, self.bucket
+        )
     }
 
     /// Package + upload one sealed job artifact, returning the REMOTE
@@ -144,7 +157,13 @@ impl ArtifactStore {
         job_id: &str,
         artifact_manifest_hash: &str,
     ) -> Result<String, String> {
-        self.pack_and_upload_with_backoff(runner, jobdir, job_id, artifact_manifest_hash, UPLOAD_BACKOFF)
+        self.pack_and_upload_with_backoff(
+            runner,
+            jobdir,
+            job_id,
+            artifact_manifest_hash,
+            UPLOAD_BACKOFF,
+        )
     }
 
     fn pack_and_upload_with_backoff(
@@ -156,7 +175,8 @@ impl ArtifactStore {
         backoff: &[Duration],
     ) -> Result<String, String> {
         let archive = pack_artifact(runner, jobdir)?;
-        let uploaded = self.upload_with_backoff(runner, &archive, job_id, artifact_manifest_hash, backoff);
+        let uploaded =
+            self.upload_with_backoff(runner, &archive, job_id, artifact_manifest_hash, backoff);
         // The tar.gz is transport-only: remove it on success AND failure so the
         // local job layout stays {manifest.json, cas/} and a failed job never
         // leaves a stale archive to be confused for uploaded bytes.
@@ -189,15 +209,28 @@ impl ArtifactStore {
             }
             match runner.run(
                 "curl",
-                &["--fail", "--aws-sigv4", "aws:amz:auto:s3", "--user", &user, "-T", archive_arg.as_ref(), &url],
+                &[
+                    "--fail",
+                    "--aws-sigv4",
+                    "aws:amz:auto:s3",
+                    "--user",
+                    &user,
+                    "-T",
+                    archive_arg.as_ref(),
+                    &url,
+                ],
             ) {
                 Ok(out) if out.status == 0 => return Ok(()),
-                Ok(out) => last = format!("curl exited {}: {}", out.status, stderr_tail(&out.stderr)),
+                Ok(out) => {
+                    last = format!("curl exited {}: {}", out.status, stderr_tail(&out.stderr))
+                }
                 Err(e) => last = format!("spawn curl: {e}"),
             }
             eprintln!("[builder] artifact upload attempt {attempt}/{attempts} failed: {last}");
         }
-        Err(format!("artifact upload to {url} failed after {attempts} attempt(s): {last}"))
+        Err(format!(
+            "artifact upload to {url} failed after {attempts} attempt(s): {last}"
+        ))
     }
 }
 
@@ -211,10 +244,24 @@ pub fn pack_artifact(runner: &dyn ImportCommandRunner, jobdir: &Path) -> Result<
     let jobdir_arg = jobdir.to_string_lossy();
     let archive_arg = archive.to_string_lossy();
     let out = runner
-        .run("tar", &["-C", jobdir_arg.as_ref(), "-czf", archive_arg.as_ref(), "manifest.json", "cas"])
+        .run(
+            "tar",
+            &[
+                "-C",
+                jobdir_arg.as_ref(),
+                "-czf",
+                archive_arg.as_ref(),
+                "manifest.json",
+                "cas",
+            ],
+        )
         .map_err(|e| format!("spawn tar: {e}"))?;
     if out.status != 0 {
-        return Err(format!("pack {ARTIFACT_ARCHIVE_NAME}: tar exited {}: {}", out.status, stderr_tail(&out.stderr)));
+        return Err(format!(
+            "pack {ARTIFACT_ARCHIVE_NAME}: tar exited {}: {}",
+            out.status,
+            stderr_tail(&out.stderr)
+        ));
     }
     Ok(archive)
 }
@@ -244,7 +291,10 @@ mod tests {
 
     impl FakeRunner {
         fn new(script: Vec<Result<ImportCommandOutput, std::io::ErrorKind>>) -> Self {
-            FakeRunner { script: Mutex::new(script.into()), calls: Mutex::new(Vec::new()) }
+            FakeRunner {
+                script: Mutex::new(script.into()),
+                calls: Mutex::new(Vec::new()),
+            }
         }
         fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
@@ -253,7 +303,10 @@ mod tests {
 
     impl ImportCommandRunner for FakeRunner {
         fn run(&self, program: &str, args: &[&str]) -> std::io::Result<ImportCommandOutput> {
-            self.calls.lock().unwrap().push(format!("{program} {}", args.join(" ")));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("{program} {}", args.join(" ")));
             match self.script.lock().unwrap().pop_front() {
                 Some(Ok(out)) => Ok(out),
                 Some(Err(kind)) => Err(kind.into()),
@@ -263,11 +316,19 @@ mod tests {
     }
 
     fn ok() -> Result<ImportCommandOutput, std::io::ErrorKind> {
-        Ok(ImportCommandOutput { status: 0, stdout: String::new(), stderr: String::new() })
+        Ok(ImportCommandOutput {
+            status: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        })
     }
 
     fn exit(status: i32, stderr: &str) -> Result<ImportCommandOutput, std::io::ErrorKind> {
-        Ok(ImportCommandOutput { status, stdout: String::new(), stderr: stderr.to_string() })
+        Ok(ImportCommandOutput {
+            status,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        })
     }
 
     fn store() -> ArtifactStore {
@@ -289,10 +350,17 @@ mod tests {
     fn absent_config_is_none_and_the_v1_cas_location_is_unchanged() {
         // All four vars absent ⇒ no store ⇒ process_job keeps the v1 same-host
         // location. Both halves of that behavior are pinned here.
-        assert!(ArtifactStore::from_parts(None, None, None, None).unwrap().is_none());
+        assert!(
+            ArtifactStore::from_parts(None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
         // The EXACT pre-ato#1002 string (was inline `format!("cas://{}/{}", …)`
         // in process_job) — registry data, must never drift.
-        assert_eq!(cas_location("job_1", "blake3:abc"), "cas://job_1/blake3:abc");
+        assert_eq!(
+            cas_location("job_1", "blake3:abc"),
+            "cas://job_1/blake3:abc"
+        );
     }
 
     #[test]
@@ -355,12 +423,18 @@ mod tests {
         let archive = pack_artifact(&r, Path::new("/work/job_9")).unwrap();
         assert_eq!(archive, PathBuf::from("/work/job_9/artifact.tar.gz"));
         // Exactly manifest.json + cas at the archive root — fixed member list.
-        assert_eq!(r.calls(), vec!["tar -C /work/job_9 -czf /work/job_9/artifact.tar.gz manifest.json cas"]);
+        assert_eq!(
+            r.calls(),
+            vec!["tar -C /work/job_9 -czf /work/job_9/artifact.tar.gz manifest.json cas"]
+        );
     }
 
     #[test]
     fn pack_fails_closed_on_nonzero_tar_exit() {
-        let r = FakeRunner::new(vec![exit(2, "tar: manifest.json: Cannot stat: No such file or directory")]);
+        let r = FakeRunner::new(vec![exit(
+            2,
+            "tar: manifest.json: Cannot stat: No such file or directory",
+        )]);
         let err = pack_artifact(&r, Path::new("/work/job_9")).unwrap_err();
         assert!(err.contains("tar exited 2"), "{err}");
         assert!(err.contains("Cannot stat"), "{err}");
@@ -377,7 +451,13 @@ mod tests {
         let s = store();
         let r = FakeRunner::new(vec![ok(), ok()]); // tar, then curl first-try success
         let loc = s
-            .pack_and_upload_with_backoff(&r, Path::new("/work/job_9"), "job_9", "blake3:abc", ZERO_BACKOFF)
+            .pack_and_upload_with_backoff(
+                &r,
+                Path::new("/work/job_9"),
+                "job_9",
+                "blake3:abc",
+                ZERO_BACKOFF,
+            )
             .unwrap();
         assert_eq!(loc, "r2://ato-artifacts/job_9/blake3:abc");
         assert_eq!(
@@ -392,15 +472,29 @@ mod tests {
         let s = store();
         // tar ok; curl: 2 failures (HTTP error, spawn error) then success ⇒ the
         // job still SEALS with the remote location.
-        let r = FakeRunner::new(vec![ok(), exit(22, "The requested URL returned error: 500"), Err(std::io::ErrorKind::NotFound), ok()]);
+        let r = FakeRunner::new(vec![
+            ok(),
+            exit(22, "The requested URL returned error: 500"),
+            Err(std::io::ErrorKind::NotFound),
+            ok(),
+        ]);
         let loc = s
-            .pack_and_upload_with_backoff(&r, Path::new("/work/job_9"), "job_9", "blake3:abc", ZERO_BACKOFF)
+            .pack_and_upload_with_backoff(
+                &r,
+                Path::new("/work/job_9"),
+                "job_9",
+                "blake3:abc",
+                ZERO_BACKOFF,
+            )
             .unwrap();
         assert_eq!(loc, "r2://ato-artifacts/job_9/blake3:abc");
         let calls = r.calls();
         assert_eq!(calls.len(), 4, "one tar + three curl attempts: {calls:?}");
         assert!(calls[0].starts_with("tar "), "{calls:?}");
-        assert!(calls[1..].iter().all(|c| c.starts_with("curl ")), "{calls:?}");
+        assert!(
+            calls[1..].iter().all(|c| c.starts_with("curl ")),
+            "{calls:?}"
+        );
     }
 
     #[test]
@@ -413,14 +507,25 @@ mod tests {
             exit(7, "Failed to connect"),
         ]);
         let err = s
-            .pack_and_upload_with_backoff(&r, Path::new("/work/job_9"), "job_9", "blake3:abc", ZERO_BACKOFF)
+            .pack_and_upload_with_backoff(
+                &r,
+                Path::new("/work/job_9"),
+                "job_9",
+                "blake3:abc",
+                ZERO_BACKOFF,
+            )
             .unwrap_err();
         // process_job maps this Err to failure_stage="artifact_upload" — a
         // failed ack, so no sealed ack (and no r2:// location) can exist.
         assert!(err.contains("failed after 3 attempt(s)"), "{err}");
         assert!(err.contains("curl exited 7"), "{err}");
         // The reason reaches the failed ack: URL yes, credentials never.
-        assert!(err.contains("https://acct.r2.example.com/ato-artifacts/job_9/blake3:abc/artifact.tar.gz"), "{err}");
+        assert!(
+            err.contains(
+                "https://acct.r2.example.com/ato-artifacts/job_9/blake3:abc/artifact.tar.gz"
+            ),
+            "{err}"
+        );
         assert!(!err.contains("secret-value-7f3a9c"), "{err}");
         assert_eq!(r.calls().len(), 4, "exactly one tar + three curl attempts");
     }
@@ -434,11 +539,24 @@ mod tests {
     #[test]
     fn pack_failure_never_reaches_curl() {
         let s = store();
-        let r = FakeRunner::new(vec![exit(1, "tar: cas: Cannot stat: No such file or directory")]);
+        let r = FakeRunner::new(vec![exit(
+            1,
+            "tar: cas: Cannot stat: No such file or directory",
+        )]);
         let err = s
-            .pack_and_upload_with_backoff(&r, Path::new("/work/job_9"), "job_9", "blake3:abc", ZERO_BACKOFF)
+            .pack_and_upload_with_backoff(
+                &r,
+                Path::new("/work/job_9"),
+                "job_9",
+                "blake3:abc",
+                ZERO_BACKOFF,
+            )
             .unwrap_err();
         assert!(err.contains("tar exited 1"), "{err}");
-        assert_eq!(r.calls().len(), 1, "no upload may be attempted for an unpacked artifact");
+        assert_eq!(
+            r.calls().len(),
+            1,
+            "no upload may be attempted for an unpacked artifact"
+        );
     }
 }

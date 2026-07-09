@@ -189,7 +189,7 @@ fn background_process_info(
         ready_state_overlay_root: None,
         ready_state_session_id: None,
         ready_state_tap_dev: None,
-            ready_state_vsock_uds: None,
+        ready_state_vsock_uds: None,
     }
 }
 

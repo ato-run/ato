@@ -135,8 +135,16 @@ mod tests {
             8,
             ChunkingKind::PageAligned { page_size: 4 },
             vec![
-                Chunk { hash: hash_bytes(b"page0"), offset: 0, length: 4 },
-                Chunk { hash: hash_bytes(b"page1"), offset: 4, length: 4 },
+                Chunk {
+                    hash: hash_bytes(b"page0"),
+                    offset: 0,
+                    length: 4,
+                },
+                Chunk {
+                    hash: hash_bytes(b"page1"),
+                    offset: 4,
+                    length: 4,
+                },
             ],
         )
     }
@@ -162,9 +170,17 @@ mod tests {
             ChunkingKind::ContentDefined,
             vec![
                 // offset+length overflows -> skipped, no panic.
-                Chunk { hash: hash_bytes(b"ovf"), offset: u64::MAX, length: 10 },
+                Chunk {
+                    hash: hash_bytes(b"ovf"),
+                    offset: u64::MAX,
+                    length: 10,
+                },
                 // far away from the queried range -> skipped.
-                Chunk { hash: hash_bytes(b"far"), offset: 1_000_000, length: 4 },
+                Chunk {
+                    hash: hash_bytes(b"far"),
+                    offset: 1_000_000,
+                    length: 4,
+                },
             ],
         );
         let mut r = HotsetRecorder::new();

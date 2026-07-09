@@ -5,10 +5,10 @@
 //! they are the round-trip the Ready-State build (seal) and run (restore) rely
 //! on — content-address a layer on build, read it back lazily on restore.
 
+use crate::Result;
 use crate::cas::CasStore;
 use crate::chunk::{ChunkParams, chunk_content_defined, chunk_page_aligned};
 use crate::manifest::{BlobManifest, ChunkingKind, LayerKind};
-use crate::Result;
 
 /// Chunk `payload` according to `chunking`, store every chunk in `store`, and
 /// return the manifest. Storing is idempotent, so re-sealing identical bytes
@@ -21,9 +21,7 @@ pub fn store_blob(
 ) -> Result<BlobManifest> {
     let chunks = match chunking {
         ChunkingKind::ContentDefined => chunk_content_defined(payload, ChunkParams::default()),
-        ChunkingKind::PageAligned { page_size } => {
-            chunk_page_aligned(payload, page_size as usize)
-        }
+        ChunkingKind::PageAligned { page_size } => chunk_page_aligned(payload, page_size as usize),
     };
     // Persist each chunk's bytes. The chunk descriptors already carry the
     // content hash; re-deriving it inside put_chunk is cheap and keeps the
@@ -53,8 +51,13 @@ mod tests {
         let store = CasStore::open(dir.path()).unwrap();
         let payload: Vec<u8> = (0..500_000u32).map(|i| (i * 31 % 256) as u8).collect();
 
-        let manifest = store_blob(&store, LayerKind::App, &payload, ChunkingKind::ContentDefined)
-            .unwrap();
+        let manifest = store_blob(
+            &store,
+            LayerKind::App,
+            &payload,
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let reader = LazyBlobReader::new(&store, &manifest);
         assert_eq!(reader.read_all().unwrap(), payload);
     }
@@ -65,12 +68,22 @@ mod tests {
         let store = CasStore::open(dir.path()).unwrap();
         let payload = vec![5u8; 300_000];
 
-        let m1 = store_blob(&store, LayerKind::Rootfs, &payload, ChunkingKind::ContentDefined)
-            .unwrap();
+        let m1 = store_blob(
+            &store,
+            LayerKind::Rootfs,
+            &payload,
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let count_after_first = store.list_chunks().unwrap().len();
         // Storing identical bytes as a different layer reuses the same chunks.
-        let m2 = store_blob(&store, LayerKind::Runtime, &payload, ChunkingKind::ContentDefined)
-            .unwrap();
+        let m2 = store_blob(
+            &store,
+            LayerKind::Runtime,
+            &payload,
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let count_after_second = store.list_chunks().unwrap().len();
 
         assert_eq!(m1.chunks, m2.chunks, "same bytes → same chunk refs");

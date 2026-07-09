@@ -106,7 +106,11 @@ mod tests {
             assert_eq!(c.offset, cursor, "chunks must be contiguous");
             cursor += c.length;
         }
-        assert_eq!(cursor, data.len() as u64, "chunks must cover the whole payload");
+        assert_eq!(
+            cursor,
+            data.len() as u64,
+            "chunks must cover the whole payload"
+        );
     }
 
     #[test]
@@ -116,8 +120,8 @@ mod tests {
         let data: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 256) as u8).collect();
         let p = ChunkParams::default();
         let ours = chunk_content_defined(&data, p);
-        for entry in fastcdc::v2020::FastCDC::new(&data, p.min_size, p.avg_size, p.max_size)
-            .zip(ours.iter())
+        for entry in
+            fastcdc::v2020::FastCDC::new(&data, p.min_size, p.avg_size, p.max_size).zip(ours.iter())
         {
             let (fc, chunk) = entry;
             let slice = &data[fc.offset..fc.offset + fc.length];

@@ -29,7 +29,11 @@ impl SecretResolver for EnvSecretResolver {
         let value = std::env::var(&env)
             .ok()
             .filter(|v| !v.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("binding '{binding_name}' has no value; set {env} (preview secret source)"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "binding '{binding_name}' has no value; set {env} (preview secret source)"
+                )
+            })?;
         Ok(SecretValue::new(value))
     }
 
@@ -49,7 +53,10 @@ macro_rules! unimplemented_resolver {
         pub(crate) struct $name;
         impl SecretResolver for $name {
             fn resolve(&self, binding_name: &str) -> Result<SecretValue> {
-                anyhow::bail!("{} resolver for '{binding_name}' is not implemented yet (fail-closed)", $kind)
+                anyhow::bail!(
+                    "{} resolver for '{binding_name}' is not implemented yet (fail-closed)",
+                    $kind
+                )
             }
             fn kind(&self) -> &'static str {
                 $kind
@@ -58,8 +65,16 @@ macro_rules! unimplemented_resolver {
     };
 }
 
-unimplemented_resolver!(VaultSecretResolver, "vault", "Vault-backed resolver (future).");
-unimplemented_resolver!(CloudSecretResolver, "cloud", "Cloud secret-manager resolver (future).");
+unimplemented_resolver!(
+    VaultSecretResolver,
+    "vault",
+    "Vault-backed resolver (future)."
+);
+unimplemented_resolver!(
+    CloudSecretResolver,
+    "cloud",
+    "Cloud secret-manager resolver (future)."
+);
 
 /// v1.2 PR 2: the **SecretStore-backed** resolver — the default secret source
 /// for Ready-State bindings. Reads the value from the HOST-LOCAL age-encrypted
@@ -109,10 +124,13 @@ impl SecretResolver for UserSecretStoreResolver {
 /// value **fails closed** — a typo must never silently change where secrets
 /// come from.
 pub(crate) fn select_resolver(namespace: &str) -> Result<Box<dyn SecretResolver>> {
-    match std::env::var("ATO_READY_STATE_SECRET_SOURCE").ok().as_deref() {
-        None | Some("") | Some("user_store") => {
-            Ok(Box::new(UserSecretStoreResolver::new(namespace.to_string())))
-        }
+    match std::env::var("ATO_READY_STATE_SECRET_SOURCE")
+        .ok()
+        .as_deref()
+    {
+        None | Some("") | Some("user_store") => Ok(Box::new(UserSecretStoreResolver::new(
+            namespace.to_string(),
+        ))),
         Some("env") => Ok(Box::new(EnvSecretResolver)),
         Some(other) => anyhow::bail!(
             "unknown ATO_READY_STATE_SECRET_SOURCE '{other}' (expected 'user_store' or 'env') — \
@@ -128,7 +146,10 @@ mod tests {
     #[test]
     fn env_resolver_reads_value_and_fails_closed_on_missing() {
         let set = |k: &str, v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         };
         let r = EnvSecretResolver;
         assert_eq!(r.kind(), "env");
@@ -136,8 +157,14 @@ mod tests {
         assert_eq!(r.resolve("api_key").unwrap().expose(), "sk-l3-secret");
         set("ATO_BINDING_api_key", None);
         let err = r.resolve("api_key").unwrap_err().to_string();
-        assert!(err.contains("api_key") && err.contains("ATO_BINDING_api_key"), "{err}");
-        assert!(!err.contains("sk-l3-secret"), "error must not carry a value");
+        assert!(
+            err.contains("api_key") && err.contains("ATO_BINDING_api_key"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("sk-l3-secret"),
+            "error must not carry a value"
+        );
     }
 
     #[test]
@@ -153,7 +180,10 @@ mod tests {
         // to ATO_CRED_SECRETS_RS_ABC123__<KEY> — the headless/CI grant form.
         // This exercises the REAL store path without an age identity.
         let set = |k: &str, v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         };
         let r = UserSecretStoreResolver::new("rs-abc123".to_string());
         assert_eq!(r.kind(), "user_store");
@@ -161,26 +191,38 @@ mod tests {
         assert_eq!(r.resolve("API_KEY").unwrap().expose(), "sk-grant");
         set("ATO_CRED_SECRETS_RS_ABC123__API_KEY", None);
         let err = r.resolve("API_KEY").unwrap_err().to_string();
-        assert!(err.contains("API_KEY") && err.contains("rs-abc123"), "{err}");
+        assert!(
+            err.contains("API_KEY") && err.contains("rs-abc123"),
+            "{err}"
+        );
         assert!(!err.contains("sk-grant"), "error must not carry a value");
         // A DIFFERENT capsule's namespace must not see this grant (per-app scope).
         set("ATO_CRED_SECRETS_RS_ABC123__API_KEY", Some("sk-grant"));
         let other = UserSecretStoreResolver::new("rs-ffff00".to_string());
-        assert!(other.resolve("API_KEY").is_err(), "cross-namespace grant leak");
+        assert!(
+            other.resolve("API_KEY").is_err(),
+            "cross-namespace grant leak"
+        );
         set("ATO_CRED_SECRETS_RS_ABC123__API_KEY", None);
     }
 
     #[test]
     fn select_resolver_defaults_to_user_store_and_fails_closed_on_unknown() {
         let set = |k: &str, v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         };
         set("ATO_READY_STATE_SECRET_SOURCE", None);
         assert_eq!(select_resolver("rs-x").unwrap().kind(), "user_store");
         set("ATO_READY_STATE_SECRET_SOURCE", Some("env"));
         assert_eq!(select_resolver("rs-x").unwrap().kind(), "env");
         set("ATO_READY_STATE_SECRET_SOURCE", Some("vault"));
-        assert!(select_resolver("rs-x").is_err(), "typo must fail closed, not fall back");
+        assert!(
+            select_resolver("rs-x").is_err(),
+            "typo must fail closed, not fall back"
+        );
         set("ATO_READY_STATE_SECRET_SOURCE", None);
     }
 }

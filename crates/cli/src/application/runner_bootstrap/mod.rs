@@ -85,7 +85,13 @@ pub(crate) struct Check {
 
 impl Check {
     pub(crate) fn ok(id: &'static str, label: &'static str, detail: impl Into<String>) -> Self {
-        Self { id, label, status: CheckStatus::Ok, detail: detail.into(), fix: None }
+        Self {
+            id,
+            label,
+            status: CheckStatus::Ok,
+            detail: detail.into(),
+            fix: None,
+        }
     }
     pub(crate) fn missing(
         id: &'static str,
@@ -93,7 +99,13 @@ impl Check {
         detail: impl Into<String>,
         fix: impl Into<String>,
     ) -> Self {
-        Self { id, label, status: CheckStatus::Missing, detail: detail.into(), fix: Some(fix.into()) }
+        Self {
+            id,
+            label,
+            status: CheckStatus::Missing,
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
     }
     pub(crate) fn warn(
         id: &'static str,
@@ -101,10 +113,26 @@ impl Check {
         detail: impl Into<String>,
         fix: impl Into<String>,
     ) -> Self {
-        Self { id, label, status: CheckStatus::Warn, detail: detail.into(), fix: Some(fix.into()) }
+        Self {
+            id,
+            label,
+            status: CheckStatus::Warn,
+            detail: detail.into(),
+            fix: Some(fix.into()),
+        }
     }
-    pub(crate) fn blocked(id: &'static str, label: &'static str, detail: impl Into<String>) -> Self {
-        Self { id, label, status: CheckStatus::Blocked, detail: detail.into(), fix: None }
+    pub(crate) fn blocked(
+        id: &'static str,
+        label: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            status: CheckStatus::Blocked,
+            detail: detail.into(),
+            fix: None,
+        }
     }
 }
 
@@ -131,12 +159,18 @@ pub(crate) fn ready_state_summary(checks: &[Check]) -> ReadyStateSummary {
             .any(|c| c.id == id && matches!(c.status, CheckStatus::Missing | CheckStatus::Blocked))
     };
     // The microVM substrate both paths need (arch gates the whole x86_64 stack).
-    let vm_blockers: Vec<String> =
-        ["arch", "cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap"]
-            .iter()
-            .filter(|id| failed(id))
-            .map(|id| id.to_string())
-            .collect();
+    let vm_blockers: Vec<String> = [
+        "arch",
+        "cpu_virt",
+        "kvm_device",
+        "firecracker",
+        "guest_kernel",
+        "tun_tap",
+    ]
+    .iter()
+    .filter(|id| failed(id))
+    .map(|id| id.to_string())
+    .collect();
     // Restoring/serving additionally needs the ato binary the runner unit runs.
     let mut restore_blockers = vm_blockers.clone();
     if failed("ato_cli_binary") {
@@ -151,7 +185,11 @@ pub(crate) fn ready_state_summary(checks: &[Check]) -> ReadyStateSummary {
         build_blockers.push("snapshot_builder_binary".to_string());
     }
     let verdict = |blockers: Vec<String>| {
-        if blockers.is_empty() { ReadinessVerdict::Ok } else { ReadinessVerdict::Blocked(blockers) }
+        if blockers.is_empty() {
+            ReadinessVerdict::Ok
+        } else {
+            ReadinessVerdict::Blocked(blockers)
+        }
     };
     ReadyStateSummary {
         build_ready_state: verdict(build_blockers),
@@ -164,13 +202,26 @@ mod tests {
     use super::*;
 
     fn c(id: &'static str, status: CheckStatus) -> Check {
-        Check { id, label: "x", status, detail: String::new(), fix: None }
+        Check {
+            id,
+            label: "x",
+            status,
+            detail: String::new(),
+            fix: None,
+        }
     }
 
     fn all_green() -> Vec<Check> {
         [
-            "arch", "cpu_virt", "kvm_device", "firecracker", "guest_kernel", "tun_tap", "docker",
-            "ato_cli_binary", "snapshot_builder_binary",
+            "arch",
+            "cpu_virt",
+            "kvm_device",
+            "firecracker",
+            "guest_kernel",
+            "tun_tap",
+            "docker",
+            "ato_cli_binary",
+            "snapshot_builder_binary",
         ]
         .iter()
         .map(|id| c(id, CheckStatus::Ok))
@@ -196,14 +247,18 @@ mod tests {
         let mut b = all_green();
         set(&mut b, "snapshot_builder_binary", CheckStatus::Missing);
         let s = ready_state_summary(&b);
-        assert!(matches!(&s.build_ready_state, ReadinessVerdict::Blocked(x) if x == &["snapshot_builder_binary"]));
+        assert!(
+            matches!(&s.build_ready_state, ReadinessVerdict::Blocked(x) if x == &["snapshot_builder_binary"])
+        );
         assert!(matches!(s.restore_snapshot, ReadinessVerdict::Ok));
 
         // The ato binary blocks RESTORE only (the runner unit runs it).
         let mut b = all_green();
         set(&mut b, "ato_cli_binary", CheckStatus::Missing);
         let s = ready_state_summary(&b);
-        assert!(matches!(&s.restore_snapshot, ReadinessVerdict::Blocked(x) if x == &["ato_cli_binary"]));
+        assert!(
+            matches!(&s.restore_snapshot, ReadinessVerdict::Blocked(x) if x == &["ato_cli_binary"])
+        );
         assert!(matches!(s.build_ready_state, ReadinessVerdict::Ok));
 
         // Arch blocks BOTH (the whole x86_64 stack); a Warn does not block.

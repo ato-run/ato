@@ -37,12 +37,29 @@ fn agent_binary_delivers_to_tmpfs_reports_ready_and_scrubs_on_stop() {
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
 
-    assert!(stdout.contains("\"kind\":\"ack\""), "expected Ack: {stdout}");
-    assert!(stdout.contains("\"ready\":true"), "expected bound-ready: {stdout}");
-    assert!(!root.join("db_url").exists(), "stop must scrub tmpfs; stdout={stdout}");
-    assert!(!stdout.contains(secret), "agent stdout leaked the secret: {stdout}");
+    assert!(
+        stdout.contains("\"kind\":\"ack\""),
+        "expected Ack: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"ready\":true"),
+        "expected bound-ready: {stdout}"
+    );
+    assert!(
+        !root.join("db_url").exists(),
+        "stop must scrub tmpfs; stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains(secret),
+        "agent stdout leaked the secret: {stdout}"
+    );
 }

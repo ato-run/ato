@@ -55,7 +55,10 @@ impl FirecrackerAgentChannel {
         if !line.starts_with("OK") {
             bail!("guest-agent vsock CONNECT rejected on port {guest_port}: {line:?}");
         }
-        Ok(FirecrackerAgentChannel { reader, writer: stream })
+        Ok(FirecrackerAgentChannel {
+            reader,
+            writer: stream,
+        })
     }
 
     /// v1.2 PR 3d: `connect`, retried until `total` elapses. The build drive dials

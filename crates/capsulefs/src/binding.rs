@@ -93,9 +93,18 @@ mod tests {
 
     #[test]
     fn writeback_mode_serde_snake_case() {
-        assert_eq!(serde_json::to_string(&WritebackMode::ReadOnly).unwrap(), "\"read_only\"");
-        assert_eq!(serde_json::to_string(&WritebackMode::CopyOut).unwrap(), "\"copy_out\"");
-        assert_eq!(serde_json::to_string(&WritebackMode::CopyIn).unwrap(), "\"copy_in\"");
+        assert_eq!(
+            serde_json::to_string(&WritebackMode::ReadOnly).unwrap(),
+            "\"read_only\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WritebackMode::CopyOut).unwrap(),
+            "\"copy_out\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WritebackMode::CopyIn).unwrap(),
+            "\"copy_in\""
+        );
         assert_eq!(
             serde_json::to_string(&WritebackMode::ReadWriteWithExplicitGrant).unwrap(),
             "\"read_write_with_explicit_grant\""

@@ -51,24 +51,24 @@ use capsulefs::{
 use serde_json::json;
 
 use crate::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT};
+#[cfg(test)]
+use crate::backend::BuildLayers;
 use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
     SupervisorBindings, TeardownReceipt,
 };
-use crate::manifest::{
-    NoSecretProof, ReadyStateManifest, RestoreContract, SnapshotBackendInfo, SupervisorBuildReceipt,
-    READY_STATE_SCHEMA,
-};
-use protocol::binding_control::{AgentToHost, HostToAgent};
-use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 use crate::bench;
-use crate::scanner;
-#[cfg(test)]
-use crate::backend::BuildLayers;
 #[cfg(test)]
 use crate::manifest::ReadyStateLayers;
+use crate::manifest::{
+    NoSecretProof, READY_STATE_SCHEMA, ReadyStateManifest, RestoreContract, SnapshotBackendInfo,
+    SupervisorBuildReceipt,
+};
+use crate::scanner;
+use protocol::binding_control::{AgentToHost, HostToAgent};
+use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
 pub const FIRECRACKER_BACKEND_ID: &str = "firecracker";
 const KVM_DEVICE: &str = "/dev/kvm";
@@ -77,7 +77,10 @@ const DEVICE_PROFILE: &str = "virtio-blk+virtio-net+vsock";
 const NETWORK_MODEL: &str = "tap";
 
 fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).ok().filter(|v| !v.is_empty()).unwrap_or_else(|| default.to_string())
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Backend configuration (env-overridable).
@@ -124,7 +127,10 @@ impl Default for FirecrackerConfig {
         Self {
             firecracker_bin: env_or("ATO_FC_BIN", "firecracker"),
             kernel_path: PathBuf::from(env_or("ATO_FC_KERNEL", "vmlinux")),
-            base_rootfs_path: std::env::var("ATO_FC_BASE_ROOTFS").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
+            base_rootfs_path: std::env::var("ATO_FC_BASE_ROOTFS")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
             vcpu_count: env_or("ATO_FC_VCPUS", "2").parse().unwrap_or(2),
             mem_size_mib: env_or("ATO_FC_MEM_MIB", "512").parse().unwrap_or(512),
             rootfs_read_only: env_or("ATO_FC_ROOTFS_READONLY", "1") != "0",
@@ -135,8 +141,12 @@ impl Default for FirecrackerConfig {
             healthcheck_port: env_or("ATO_FC_HEALTH_PORT", "8080").parse().unwrap_or(8080),
             healthcheck_path: env_or("ATO_FC_HEALTH_PATH", "/health"),
             work_root: PathBuf::from(env_or("ATO_FC_WORK", "/tmp/ato-fc")),
-            cpu_template: std::env::var("ATO_FC_CPU_TEMPLATE").ok().filter(|v| !v.is_empty()),
-            boot_timeout: Duration::from_secs(env_or("ATO_FC_BOOT_TIMEOUT_S", "30").parse().unwrap_or(30)),
+            cpu_template: std::env::var("ATO_FC_CPU_TEMPLATE")
+                .ok()
+                .filter(|v| !v.is_empty()),
+            boot_timeout: Duration::from_secs(
+                env_or("ATO_FC_BOOT_TIMEOUT_S", "30").parse().unwrap_or(30),
+            ),
             // Legacy single-slot by default; `for_slot` fills these when netns-on.
             netns: None,
             ingress_ip: None,
@@ -158,7 +168,11 @@ impl FirecrackerConfig {
     /// reached from the root namespace at `{prefix}.{index}.2` via a veth `/30`.
     /// The tap name and guest IP stay the frozen snapshot values — only the
     /// namespace and the host-side ingress differ per slot.
-    pub fn for_slot(index: usize, netns_enabled: bool, base: &FirecrackerConfig) -> FirecrackerConfig {
+    pub fn for_slot(
+        index: usize,
+        netns_enabled: bool,
+        base: &FirecrackerConfig,
+    ) -> FirecrackerConfig {
         let mut c = base.clone();
         if !netns_enabled {
             return c;
@@ -205,7 +219,11 @@ impl FirecrackerBackend {
     }
 
     pub fn with_config(config: FirecrackerConfig) -> Self {
-        Self { config, sessions: Arc::default(), page_servers: Arc::default() }
+        Self {
+            config,
+            sessions: Arc::default(),
+            page_servers: Arc::default(),
+        }
     }
 
     pub fn kvm_present() -> bool {
@@ -213,10 +231,15 @@ impl FirecrackerBackend {
     }
 
     fn detect_version(&self) -> Option<String> {
-        let out = Command::new(&self.config.firecracker_bin).arg("--version").output().ok()?;
+        let out = Command::new(&self.config.firecracker_bin)
+            .arg("--version")
+            .output()
+            .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         for tok in text.split_whitespace() {
-            if let Some(v) = tok.strip_prefix('v') && v.split('.').count() >= 2 {
+            if let Some(v) = tok.strip_prefix('v')
+                && v.split('.').count() >= 2
+            {
                 return Some(v.to_string());
             }
         }
@@ -224,18 +247,29 @@ impl FirecrackerBackend {
     }
 
     fn backend_err(&self, reason: impl Into<String>) -> SnapshotError {
-        SnapshotError::Backend { backend: FIRECRACKER_BACKEND_ID.to_string(), reason: reason.into() }
+        SnapshotError::Backend {
+            backend: FIRECRACKER_BACKEND_ID.to_string(),
+            reason: reason.into(),
+        }
     }
     fn unsupported(&self, reason: impl Into<String>) -> SnapshotError {
-        SnapshotError::Unsupported { backend: FIRECRACKER_BACKEND_ID.to_string(), reason: reason.into() }
+        SnapshotError::Unsupported {
+            backend: FIRECRACKER_BACKEND_ID.to_string(),
+            reason: reason.into(),
+        }
     }
 
     fn ensure_available(&self) -> Result<(), SnapshotError> {
         if !Self::kvm_present() {
-            return Err(self.unsupported(format!("{KVM_DEVICE} not present; Firecracker needs KVM")));
+            return Err(
+                self.unsupported(format!("{KVM_DEVICE} not present; Firecracker needs KVM"))
+            );
         }
         if self.detect_version().is_none() {
-            return Err(self.unsupported(format!("firecracker binary '{}' not found or not runnable", self.config.firecracker_bin)));
+            return Err(self.unsupported(format!(
+                "firecracker binary '{}' not found or not runnable",
+                self.config.firecracker_bin
+            )));
         }
         Ok(())
     }
@@ -243,11 +277,19 @@ impl FirecrackerBackend {
     fn runner_facts(&self) -> RunnerClassFacts {
         let mut f = RunnerClassFacts::from_host();
         f.vmm = FIRECRACKER_BACKEND_ID.to_string();
-        f.vmm_version = self.detect_version().unwrap_or_else(|| "unknown".to_string());
+        f.vmm_version = self
+            .detect_version()
+            .unwrap_or_else(|| "unknown".to_string());
         f.snapshot_format = SNAPSHOT_FORMAT.to_string();
         f.cpu_template = self.config.cpu_template.clone();
-        f.guest_kernel_id = blake3_file(&self.config.kernel_path).unwrap_or_else(|| "unset".to_string());
-        f.rootfs_base_id = self.config.base_rootfs_path.as_ref().and_then(|p| blake3_file(p)).unwrap_or_else(|| "unset".to_string());
+        f.guest_kernel_id =
+            blake3_file(&self.config.kernel_path).unwrap_or_else(|| "unset".to_string());
+        f.rootfs_base_id = self
+            .config
+            .base_rootfs_path
+            .as_ref()
+            .and_then(|p| blake3_file(p))
+            .unwrap_or_else(|| "unset".to_string());
         f.device_profile = DEVICE_PROFILE.to_string();
         f.network_model = NETWORK_MODEL.to_string();
         f
@@ -256,7 +298,9 @@ impl FirecrackerBackend {
     fn backend_info(&self) -> SnapshotBackendInfo {
         SnapshotBackendInfo {
             kind: FIRECRACKER_BACKEND_ID.to_string(),
-            version: self.detect_version().unwrap_or_else(|| "unknown".to_string()),
+            version: self
+                .detect_version()
+                .unwrap_or_else(|| "unknown".to_string()),
             snapshot_format_version: SNAPSHOT_FORMAT.to_string(),
             cpu_template: self.config.cpu_template.clone(),
         }
@@ -268,7 +312,11 @@ impl FirecrackerBackend {
     /// snapshot. Restore replays the baked-in cmdline, so this needs setting only
     /// here. No-binding builds keep the exact historical string.
     fn boot_args(&self, page_hygiene: bool) -> String {
-        let hygiene = if page_hygiene { " init_on_free=1 init_on_alloc=1 page_poison=1" } else { "" };
+        let hygiene = if page_hygiene {
+            " init_on_free=1 init_on_alloc=1 page_poison=1"
+        } else {
+            ""
+        };
         format!(
             "console=ttyS0 reboot=k panic=1 pci=off{hygiene} ip={}::{}:{}::eth0:off",
             self.config.guest_ip, self.config.host_ip, self.config.guest_mask
@@ -280,20 +328,32 @@ impl FirecrackerBackend {
     /// legacy path, or the per-slot ingress (`10.201.{i}.2`) in netns mode,
     /// which DNATs into the namespace to the same frozen guest IP.
     fn reachable_host(&self) -> &str {
-        self.config.ingress_ip.as_deref().unwrap_or(&self.config.guest_ip)
+        self.config
+            .ingress_ip
+            .as_deref()
+            .unwrap_or(&self.config.guest_ip)
     }
 
     /// Stable cache path keyed on a layer's content id (no content read needed),
     /// so build and restore agree and large immutable layers are rehydrated from
     /// CapsuleFS at most once, then reused across restores.
     fn cache_path(&self, kind: &str, blob: &BlobManifest, ext: &str) -> PathBuf {
-        self.config.work_root.join(kind).join(format!("{}.{ext}", blob_id_hex(blob)))
+        self.config
+            .work_root
+            .join(kind)
+            .join(format!("{}.{ext}", blob_id_hex(blob)))
     }
     /// Rehydrate a layer to `path`. `always` forces a fresh write (rw rootfs);
     /// otherwise it is a no-op when the file is already cached. Materialization is
     /// ATOMIC (write a temp file, then rename) so Firecracker never sees a partial
     /// memory/rootfs file — required for the parallel prefetch path (Phase 6A).
-    fn rehydrate_atomic(&self, path: &Path, store: &CasStore, blob: &BlobManifest, always: bool) -> Result<(), SnapshotError> {
+    fn rehydrate_atomic(
+        &self,
+        path: &Path,
+        store: &CasStore,
+        blob: &BlobManifest,
+        always: bool,
+    ) -> Result<(), SnapshotError> {
         if !always && path.exists() {
             // Validate the cached file before trusting it (Phase 7.5c). The
             // rehydrate path is already integrity-checked (read_all re-hashes every
@@ -323,7 +383,12 @@ impl FirecrackerBackend {
         self.write_atomic(path, &bytes)
     }
     /// Rehydrate a layer to `path` only if it is not already on disk (atomic).
-    fn ensure_cached(&self, path: &Path, store: &CasStore, blob: &BlobManifest) -> Result<(), SnapshotError> {
+    fn ensure_cached(
+        &self,
+        path: &Path,
+        store: &CasStore,
+        blob: &BlobManifest,
+    ) -> Result<(), SnapshotError> {
         self.rehydrate_atomic(path, store, blob, false)
     }
     /// Atomic file write: write a sibling temp file, then rename over `path`, so a
@@ -340,7 +405,11 @@ impl FirecrackerBackend {
         })?;
         std::fs::rename(&tmp, path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp);
-            self.backend_err(format!("rename {} -> {}: {e}", tmp.display(), path.display()))
+            self.backend_err(format!(
+                "rename {} -> {}: {e}",
+                tmp.display(),
+                path.display()
+            ))
         })
     }
     fn lock_path(&self) -> PathBuf {
@@ -365,13 +434,24 @@ impl Drop for BuildLock {
 
 impl FirecrackerBackend {
     fn acquire_lock(&self, owner: &str) -> Result<(), SnapshotError> {
-        std::fs::create_dir_all(&self.config.work_root).map_err(|e| self.backend_err(e.to_string()))?;
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(self.lock_path()) {
-            Ok(mut f) => { let _ = f.write_all(owner.as_bytes()); Ok(()) }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(self.backend_err(format!(
-                "single-session backend busy: tap '{}' is held by another session (lock {})",
-                self.config.tap_dev, self.lock_path().display()
-            ))),
+        std::fs::create_dir_all(&self.config.work_root)
+            .map_err(|e| self.backend_err(e.to_string()))?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.lock_path())
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(owner.as_bytes());
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(self.backend_err(format!(
+                    "single-session backend busy: tap '{}' is held by another session (lock {})",
+                    self.config.tap_dev,
+                    self.lock_path().display()
+                )))
+            }
             Err(e) => Err(self.backend_err(format!("acquire lock: {e}"))),
         }
     }
@@ -380,17 +460,31 @@ impl FirecrackerBackend {
     }
 
     fn run_ip(&self, args: &[&str]) -> Result<(), SnapshotError> {
-        let status = Command::new("ip").args(args).status()
+        let status = Command::new("ip")
+            .args(args)
+            .status()
             .map_err(|e| self.backend_err(format!("spawn `ip {}`: {e}", args.join(" "))))?;
-        if status.success() { Ok(()) } else { Err(self.backend_err(format!("`ip {}` failed", args.join(" ")))) }
+        if status.success() {
+            Ok(())
+        } else {
+            Err(self.backend_err(format!("`ip {}` failed", args.join(" "))))
+        }
     }
     /// `ip netns exec <ns> <argv…>` — run a host command inside a namespace.
     fn run_in_netns(&self, ns: &str, argv: &[&str]) -> Result<(), SnapshotError> {
         let mut a = vec!["netns", "exec", ns];
         a.extend_from_slice(argv);
-        let status = Command::new("ip").args(&a).status()
-            .map_err(|e| self.backend_err(format!("spawn `ip netns exec {ns} {}`: {e}", argv.join(" "))))?;
-        if status.success() { Ok(()) } else { Err(self.backend_err(format!("`ip netns exec {ns} {}` failed", argv.join(" ")))) }
+        let status = Command::new("ip").args(&a).status().map_err(|e| {
+            self.backend_err(format!(
+                "spawn `ip netns exec {ns} {}`: {e}",
+                argv.join(" ")
+            ))
+        })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(self.backend_err(format!("`ip netns exec {ns} {}` failed", argv.join(" "))))
+        }
     }
 
     fn net_up(&self, guest_port: u16) -> Result<(), SnapshotError> {
@@ -405,7 +499,13 @@ impl FirecrackerBackend {
         let tap = &self.config.tap_dev;
         let _ = Command::new("ip").args(["link", "del", tap]).status();
         self.run_ip(&["tuntap", "add", "dev", tap, "mode", "tap"])?;
-        self.run_ip(&["addr", "add", &format!("{}/24", self.config.host_ip), "dev", tap])?;
+        self.run_ip(&[
+            "addr",
+            "add",
+            &format!("{}/24", self.config.host_ip),
+            "dev",
+            tap,
+        ])?;
         self.run_ip(&["link", "set", tap, "up"])?;
         Ok(())
     }
@@ -419,10 +519,26 @@ impl FirecrackerBackend {
         let tap = &self.config.tap_dev;
         let host_ip = &self.config.host_ip;
         let guest_ip = &self.config.guest_ip;
-        let veth_root = self.config.veth_root.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_root"))?;
-        let veth_ns = self.config.veth_ns.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_ns"))?;
-        let veth_root_ip = self.config.veth_root_ip.as_deref().ok_or_else(|| self.backend_err("netns config missing veth_root_ip"))?;
-        let ingress_ip = self.config.ingress_ip.as_deref().ok_or_else(|| self.backend_err("netns config missing ingress_ip"))?;
+        let veth_root = self
+            .config
+            .veth_root
+            .as_deref()
+            .ok_or_else(|| self.backend_err("netns config missing veth_root"))?;
+        let veth_ns = self
+            .config
+            .veth_ns
+            .as_deref()
+            .ok_or_else(|| self.backend_err("netns config missing veth_ns"))?;
+        let veth_root_ip = self
+            .config
+            .veth_root_ip
+            .as_deref()
+            .ok_or_else(|| self.backend_err("netns config missing veth_root_ip"))?;
+        let ingress_ip = self
+            .config
+            .ingress_ip
+            .as_deref()
+            .ok_or_else(|| self.backend_err("netns config missing ingress_ip"))?;
         let port = guest_port.to_string();
         let dnat = format!("{guest_ip}:{port}");
         let veth_root_cidr = format!("{veth_root_ip}/30");
@@ -438,7 +554,9 @@ impl FirecrackerBackend {
         self.run_in_netns(ns, &["ip", "addr", "add", &host_cidr, "dev", tap])?;
         self.run_in_netns(ns, &["ip", "link", "set", tap, "up"])?;
         // veth pair: root end stays in root ns, the other end moves into `ns`.
-        self.run_ip(&["link", "add", veth_root, "type", "veth", "peer", "name", veth_ns])?;
+        self.run_ip(&[
+            "link", "add", veth_root, "type", "veth", "peer", "name", veth_ns,
+        ])?;
         self.run_ip(&["link", "set", veth_ns, "netns", ns])?;
         self.run_ip(&["addr", "add", &veth_root_cidr, "dev", veth_root])?;
         self.run_ip(&["link", "set", veth_root, "up"])?;
@@ -448,8 +566,40 @@ impl FirecrackerBackend {
         // the guest replies to a same-subnet source. All rules stay inside `ns`
         // (root namespace is left untouched → teardown is just `ip netns del`).
         self.run_in_netns(ns, &["sysctl", "-q", "-w", "net.ipv4.ip_forward=1"])?;
-        self.run_in_netns(ns, &["iptables", "-t", "nat", "-A", "PREROUTING", "-d", ingress_ip, "-p", "tcp", "--dport", &port, "-j", "DNAT", "--to-destination", &dnat])?;
-        self.run_in_netns(ns, &["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", tap, "-j", "MASQUERADE"])?;
+        self.run_in_netns(
+            ns,
+            &[
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "PREROUTING",
+                "-d",
+                ingress_ip,
+                "-p",
+                "tcp",
+                "--dport",
+                &port,
+                "-j",
+                "DNAT",
+                "--to-destination",
+                &dnat,
+            ],
+        )?;
+        self.run_in_netns(
+            ns,
+            &[
+                "iptables",
+                "-t",
+                "nat",
+                "-A",
+                "POSTROUTING",
+                "-o",
+                tap,
+                "-j",
+                "MASQUERADE",
+            ],
+        )?;
         Ok(())
     }
 
@@ -465,7 +615,9 @@ impl FirecrackerBackend {
                 }
             }
             None => {
-                let _ = Command::new("ip").args(["link", "del", &self.config.tap_dev]).status();
+                let _ = Command::new("ip")
+                    .args(["link", "del", &self.config.tap_dev])
+                    .status();
             }
         }
     }
@@ -483,13 +635,22 @@ impl FirecrackerBackend {
     /// directories are created by the caller before spawn (same underlying fs).
     fn fc_command(&self, vsock_isolation: bool) -> Command {
         match &self.config.netns {
-            Some(ns) => match self.config.vsock_slot_dir.as_ref().filter(|_| vsock_isolation) {
+            Some(ns) => match self
+                .config
+                .vsock_slot_dir
+                .as_ref()
+                .filter(|_| vsock_isolation)
+            {
                 Some(slot_dir) => {
                     let mut c = Command::new("ip");
                     c.args([
-                        "netns", "exec", ns,
-                        "unshare", "--mount",
-                        "sh", "-c",
+                        "netns",
+                        "exec",
+                        ns,
+                        "unshare",
+                        "--mount",
+                        "sh",
+                        "-c",
                         // $1 = per-slot dir, $2 = baked vsock parent; the rest is
                         // the VMM argv (start_fc appends --api-sock etc. after
                         // the firecracker binary below).
@@ -515,25 +676,48 @@ impl FirecrackerBackend {
         self.start_fc_with(sock, console_log, false)
     }
 
-    fn start_fc_with(&self, sock: &Path, console_log: &Path, vsock_isolation: bool) -> Result<FcProcess, SnapshotError> {
+    fn start_fc_with(
+        &self,
+        sock: &Path,
+        console_log: &Path,
+        vsock_isolation: bool,
+    ) -> Result<FcProcess, SnapshotError> {
         let _ = std::fs::remove_file(sock);
-        let log = std::fs::File::create(console_log).map_err(|e| self.backend_err(format!("create console log: {e}")))?;
-        let child = self.fc_command(vsock_isolation)
-            .arg("--api-sock").arg(sock)
-            .stdout(Stdio::from(log.try_clone().map_err(|e| self.backend_err(e.to_string()))?))
+        let log = std::fs::File::create(console_log)
+            .map_err(|e| self.backend_err(format!("create console log: {e}")))?;
+        let child = self
+            .fc_command(vsock_isolation)
+            .arg("--api-sock")
+            .arg(sock)
+            .stdout(Stdio::from(
+                log.try_clone()
+                    .map_err(|e| self.backend_err(e.to_string()))?,
+            ))
             .stderr(Stdio::from(log))
             .spawn()
             .map_err(|e| self.backend_err(format!("spawn firecracker: {e}")))?;
-        let mut fc = FcProcess { child: Some(child), sock: sock.to_path_buf() };
+        let mut fc = FcProcess {
+            child: Some(child),
+            sock: sock.to_path_buf(),
+        };
         for _ in 0..100 {
-            if sock.exists() { return Ok(fc); }
+            if sock.exists() {
+                return Ok(fc);
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         fc.kill_now();
         Err(self.backend_err("firecracker api socket never appeared"))
     }
 
-    fn configure_boot(&self, fc: &FcProcess, kernel: &Path, rootfs: &Path, read_only: bool, page_hygiene: bool) -> Result<(), SnapshotError> {
+    fn configure_boot(
+        &self,
+        fc: &FcProcess,
+        kernel: &Path,
+        rootfs: &Path,
+        read_only: bool,
+        page_hygiene: bool,
+    ) -> Result<(), SnapshotError> {
         let mc = if let Some(t) = &self.config.cpu_template {
             json!({"vcpu_count": self.config.vcpu_count, "mem_size_mib": self.config.mem_size_mib, "cpu_template": t})
         } else {
@@ -543,13 +727,29 @@ impl FirecrackerBackend {
         fc.api(self, "PUT", "/boot-source", Some(&json!({
             "kernel_image_path": kernel.to_string_lossy(), "boot_args": self.boot_args(page_hygiene)
         }).to_string()))?;
-        fc.api(self, "PUT", "/drives/rootfs", Some(&json!({
-            "drive_id": "rootfs", "path_on_host": rootfs.to_string_lossy(),
-            "is_root_device": true, "is_read_only": read_only
-        }).to_string()))?;
-        fc.api(self, "PUT", "/network-interfaces/eth0", Some(&json!({
-            "iface_id": "eth0", "host_dev_name": self.config.tap_dev
-        }).to_string()))?;
+        fc.api(
+            self,
+            "PUT",
+            "/drives/rootfs",
+            Some(
+                &json!({
+                    "drive_id": "rootfs", "path_on_host": rootfs.to_string_lossy(),
+                    "is_root_device": true, "is_read_only": read_only
+                })
+                .to_string(),
+            ),
+        )?;
+        fc.api(
+            self,
+            "PUT",
+            "/network-interfaces/eth0",
+            Some(
+                &json!({
+                    "iface_id": "eth0", "host_dev_name": self.config.tap_dev
+                })
+                .to_string(),
+            ),
+        )?;
         Ok(())
     }
 
@@ -558,10 +758,21 @@ impl FirecrackerBackend {
     /// as [`crate::state_volume::state_drive_configs`]. A no-op when `paths` is
     /// empty — `configure_boot` above is untouched, so a no-state-volume build
     /// PUTs the exact same drives as before this slice (byte-identical).
-    fn configure_state_drives(&self, fc: &FcProcess, paths: &[PathBuf]) -> Result<(), SnapshotError> {
+    fn configure_state_drives(
+        &self,
+        fc: &FcProcess,
+        paths: &[PathBuf],
+    ) -> Result<(), SnapshotError> {
         for cfg in crate::state_volume::state_drive_configs(paths) {
-            let drive_id = cfg["drive_id"].as_str().expect("state_drive_configs always sets drive_id");
-            fc.api(self, "PUT", &format!("/drives/{drive_id}"), Some(&cfg.to_string()))?;
+            let drive_id = cfg["drive_id"]
+                .as_str()
+                .expect("state_drive_configs always sets drive_id");
+            fc.api(
+                self,
+                "PUT",
+                &format!("/drives/{drive_id}"),
+                Some(&cfg.to_string()),
+            )?;
         }
         Ok(())
     }
@@ -585,7 +796,8 @@ impl FirecrackerBackend {
         // the per-slot ingress (netns mode) which DNATs into the namespace.
         let reachable = self.reachable_host();
         let addr: std::net::SocketAddr = format!("{reachable}:{port}")
-            .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
+            .parse()
+            .map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
         let start = Instant::now();
         while start.elapsed() < self.config.boot_timeout {
             if let Some(reason) = abort() {
@@ -593,7 +805,10 @@ impl FirecrackerBackend {
             }
             if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
                 let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
-                let req = format!("GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n", self.config.guest_ip);
+                let req = format!(
+                    "GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n",
+                    self.config.guest_ip
+                );
                 let mut buf = [0u8; 32];
                 if s.write_all(req.as_bytes()).is_ok()
                     && let Ok(n) = s.read(&mut buf)
@@ -612,7 +827,11 @@ impl FirecrackerBackend {
     /// (retrying while the guest boots) and deliver every placeholder lease, then
     /// poll bound-ready. The agent starts the workload at bound-ready, so the
     /// caller's `wait_health` right after this is the placeholder health-verify.
-    fn supervisor_deliver_placeholders(&self, uds: &Path, drive: &SupervisorDrive) -> Result<(), SnapshotError> {
+    fn supervisor_deliver_placeholders(
+        &self,
+        uds: &Path,
+        drive: &SupervisorDrive,
+    ) -> Result<(), SnapshotError> {
         let mut ch = FirecrackerAgentChannel::connect_with_retry(
             uds,
             GUEST_AGENT_VSOCK_PORT,
@@ -623,10 +842,14 @@ impl FirecrackerBackend {
             match ch.request(HostToAgent::Deliver(lease.to_delivery())) {
                 Ok(AgentToHost::Ack { .. }) => {}
                 Ok(AgentToHost::Error { message }) => {
-                    return Err(self.backend_err(format!("supervisor build: placeholder delivery refused: {message}")));
+                    return Err(self.backend_err(format!(
+                        "supervisor build: placeholder delivery refused: {message}"
+                    )));
                 }
                 Ok(other) => {
-                    return Err(self.backend_err(format!("supervisor build: unexpected Deliver response: {other:?}")));
+                    return Err(self.backend_err(format!(
+                        "supervisor build: unexpected Deliver response: {other:?}"
+                    )));
                 }
                 Err(e) => return Err(self.backend_err(format!("supervisor build: deliver: {e:#}"))),
             }
@@ -638,12 +861,20 @@ impl FirecrackerBackend {
                     std::thread::sleep(Duration::from_millis(200));
                 }
                 Ok(other) => {
-                    return Err(self.backend_err(format!("supervisor build: unexpected BoundReady response: {other:?}")));
+                    return Err(self.backend_err(format!(
+                        "supervisor build: unexpected BoundReady response: {other:?}"
+                    )));
                 }
-                Err(e) => return Err(self.backend_err(format!("supervisor build: bound-ready poll: {e:#}"))),
+                Err(e) => {
+                    return Err(
+                        self.backend_err(format!("supervisor build: bound-ready poll: {e:#}"))
+                    );
+                }
             }
         }
-        Err(self.backend_err("supervisor build: agent never reached bound-ready after placeholder delivery"))
+        Err(self.backend_err(
+            "supervisor build: agent never reached bound-ready after placeholder delivery",
+        ))
     }
 
     /// v1.2 PR 3d step 2, run AFTER health passed and BEFORE the pause/snapshot:
@@ -651,9 +882,16 @@ impl FirecrackerBackend {
     /// `Revoke` every placeholder lease (tmpfs scrub, ack'd) — so the snapshot is
     /// taken with the workload down and no binding material in guest tmpfs. Order
     /// is contract-fixed: StopWorkload FIRST, then Revoke (binding_control §v1.2).
-    fn supervisor_stop_and_revoke(&self, uds: &Path, drive: &SupervisorDrive) -> Result<(), SnapshotError> {
-        let mut ch = FirecrackerAgentChannel::connect(uds, GUEST_AGENT_VSOCK_PORT, Duration::from_secs(10))
-            .map_err(|e| self.backend_err(format!("supervisor build: reconnect for stop: {e:#}")))?;
+    fn supervisor_stop_and_revoke(
+        &self,
+        uds: &Path,
+        drive: &SupervisorDrive,
+    ) -> Result<(), SnapshotError> {
+        let mut ch =
+            FirecrackerAgentChannel::connect(uds, GUEST_AGENT_VSOCK_PORT, Duration::from_secs(10))
+                .map_err(|e| {
+                    self.backend_err(format!("supervisor build: reconnect for stop: {e:#}"))
+                })?;
         match ch.request(HostToAgent::StopWorkload) {
             Ok(AgentToHost::WorkloadStopped { was_running }) => {
                 if !was_running {
@@ -664,21 +902,33 @@ impl FirecrackerBackend {
                 }
             }
             Ok(AgentToHost::Error { message }) => {
-                return Err(self.backend_err(format!("supervisor build: StopWorkload refused: {message}")));
+                return Err(
+                    self.backend_err(format!("supervisor build: StopWorkload refused: {message}"))
+                );
             }
             Ok(other) => {
-                return Err(self.backend_err(format!("supervisor build: unexpected StopWorkload response: {other:?}")));
+                return Err(self.backend_err(format!(
+                    "supervisor build: unexpected StopWorkload response: {other:?}"
+                )));
             }
-            Err(e) => return Err(self.backend_err(format!("supervisor build: StopWorkload: {e:#}"))),
+            Err(e) => {
+                return Err(self.backend_err(format!("supervisor build: StopWorkload: {e:#}")));
+            }
         }
         for name in &drive.binding_names {
-            match ch.request(HostToAgent::Revoke { id: BindingLeaseId::new(format!("lease-build-{name}")) }) {
+            match ch.request(HostToAgent::Revoke {
+                id: BindingLeaseId::new(format!("lease-build-{name}")),
+            }) {
                 Ok(AgentToHost::Scrubbed { .. }) => {}
                 Ok(AgentToHost::Error { message }) => {
-                    return Err(self.backend_err(format!("supervisor build: revoke refused: {message}")));
+                    return Err(
+                        self.backend_err(format!("supervisor build: revoke refused: {message}"))
+                    );
                 }
                 Ok(other) => {
-                    return Err(self.backend_err(format!("supervisor build: unexpected Revoke response: {other:?}")));
+                    return Err(self.backend_err(format!(
+                        "supervisor build: unexpected Revoke response: {other:?}"
+                    )));
                 }
                 Err(e) => return Err(self.backend_err(format!("supervisor build: revoke: {e:#}"))),
             }
@@ -694,7 +944,8 @@ impl FirecrackerBackend {
     fn wait_workload_down(&self, port: u16, timeout: Duration) -> Result<(), SnapshotError> {
         let reachable = self.reachable_host();
         let addr: std::net::SocketAddr = format!("{reachable}:{port}")
-            .parse().map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
+            .parse()
+            .map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
         let start = Instant::now();
         while start.elapsed() < timeout {
             if TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_err() {
@@ -731,7 +982,9 @@ impl FirecrackerBackend {
             Ok(other) => Err(self.backend_err(format!(
                 "supervisor restore: unexpected BoundReady response: {other:?}"
             ))),
-            Err(e) => Err(self.backend_err(format!("supervisor restore: bound-ready probe: {e:#}"))),
+            Err(e) => {
+                Err(self.backend_err(format!("supervisor restore: bound-ready probe: {e:#}")))
+            }
         }
     }
 
@@ -752,13 +1005,19 @@ impl FirecrackerBackend {
             );
         }
         if keep_build_dir_enabled() {
-            eprintln!("READY-STATE: ATO_FC_KEEP_BUILD_DIR set — preserving {}", build_dir.display());
+            eprintln!(
+                "READY-STATE: ATO_FC_KEEP_BUILD_DIR set — preserving {}",
+                build_dir.display()
+            );
         }
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), SnapshotError> {
-        if let Some(p) = path.parent() { std::fs::create_dir_all(p).map_err(|e| self.backend_err(e.to_string()))?; }
-        std::fs::write(path, bytes).map_err(|e| self.backend_err(format!("write {}: {e}", path.display())))
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p).map_err(|e| self.backend_err(e.to_string()))?;
+        }
+        std::fs::write(path, bytes)
+            .map_err(|e| self.backend_err(format!("write {}: {e}", path.display())))
     }
 }
 
@@ -766,11 +1025,16 @@ fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
     c.ports.first().copied().unwrap_or(fallback)
 }
 fn hc_path(c: &RestoreContract, fallback: &str) -> String {
-    c.healthcheck.clone().unwrap_or_else(|| fallback.to_string())
+    c.healthcheck
+        .clone()
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn blake3_file(path: &Path) -> Option<String> {
-    Some(format!("blake3:{}", blake3::hash(&std::fs::read(path).ok()?).to_hex()))
+    Some(format!(
+        "blake3:{}",
+        blake3::hash(&std::fs::read(path).ok()?).to_hex()
+    ))
 }
 
 fn blob_id_hex(blob: &BlobManifest) -> String {
@@ -825,7 +1089,10 @@ fn host_vhost_vsock_present() -> bool {
 /// Whether to attach a Firecracker vsock device (for the guest-agent binding channel).
 /// Off by default → the restore path is unchanged.
 fn vsock_enabled() -> bool {
-    matches!(std::env::var("ATO_FC_VSOCK").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+    matches!(
+        std::env::var("ATO_FC_VSOCK").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// The parent directory of every baked vsock host UDS (`$TMPDIR/ato-vsock`). Also the
@@ -879,7 +1146,10 @@ fn vsock_uds_path(capsule_manifest_hash: &str) -> PathBuf {
 /// v1.2 PR 3d: keep the transient build dir (incl. `console.log`) on disk instead of
 /// removing it — the failure-forensics escape hatch. Off by default.
 fn keep_build_dir_enabled() -> bool {
-    matches!(std::env::var("ATO_FC_KEEP_BUILD_DIR").ok().as_deref(), Some("1" | "true" | "yes" | "on"))
+    matches!(
+        std::env::var("ATO_FC_KEEP_BUILD_DIR").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 /// v1.2 PR 3d: a unique, never-stored placeholder value for one build-time binding.
@@ -958,7 +1228,9 @@ impl SupervisorDrive {
 /// fail closed on a state that is not a pre-bind-seal violation (nothing was
 /// ever bound), so it takes the ordinary health wait, exactly like a no-binding
 /// artifact.
-fn restore_uses_agent_probe(supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>) -> bool {
+fn restore_uses_agent_probe(
+    supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+) -> bool {
     supervisor_build.is_some_and(|s| !s.binding_names.is_empty())
 }
 
@@ -980,14 +1252,20 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn fc_request(sock: &Path, method: &str, path: &str, body: Option<&str>) -> std::io::Result<(u16, String)> {
+fn fc_request(
+    sock: &Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> std::io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(sock)?;
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let body = body.unwrap_or("");
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-        body.len(), body
+        body.len(),
+        body
     );
     stream.write_all(req.as_bytes())?;
     stream.flush()?;
@@ -1009,10 +1287,19 @@ fn fc_request(sock: &Path, method: &str, path: &str, body: Option<&str>) -> std:
         }
     };
     let headers = String::from_utf8_lossy(&buf[..header_end.min(buf.len())]).into_owned();
-    let status = headers.lines().next().and_then(|l| l.split_whitespace().nth(1)).and_then(|s| s.parse().ok()).unwrap_or(0u16);
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0u16);
     let content_length = headers
         .lines()
-        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().ok()))
+        .find_map(|l| {
+            l.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().parse::<usize>().ok())
+        })
         .flatten()
         .unwrap_or(0);
     // 2) read exactly the declared body, then stop (don't wait for close).
@@ -1035,13 +1322,22 @@ struct FcProcess {
     sock: PathBuf,
 }
 impl FcProcess {
-    fn api(&self, b: &FirecrackerBackend, method: &str, path: &str, body: Option<&str>) -> Result<(), SnapshotError> {
+    fn api(
+        &self,
+        b: &FirecrackerBackend,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<(), SnapshotError> {
         let (status, text) = fc_request(&self.sock, method, path, body)
             .map_err(|e| b.backend_err(format!("api {method} {path}: {e}")))?;
         if (200..300).contains(&status) {
             Ok(())
         } else {
-            Err(b.backend_err(format!("api {method} {path} -> HTTP {status}: {}", text.lines().last().unwrap_or(""))))
+            Err(b.backend_err(format!(
+                "api {method} {path} -> HTTP {status}: {}",
+                text.lines().last().unwrap_or("")
+            )))
         }
     }
     fn kill_now(&mut self) {
@@ -1074,7 +1370,10 @@ impl SnapshotBackend for FirecrackerBackend {
         let reason = if !kvm {
             Some(format!("{KVM_DEVICE} not present; Firecracker needs KVM"))
         } else if version.is_none() {
-            Some(format!("firecracker binary '{}' not found", self.config.firecracker_bin))
+            Some(format!(
+                "firecracker binary '{}' not found",
+                self.config.firecracker_bin
+            ))
         } else {
             None
         };
@@ -1090,7 +1389,8 @@ impl SnapshotBackend for FirecrackerBackend {
         // Firecracker backend, host vsock, a guest-agent, and x86_64 (the guest-agent +
         // vsock plumbing are x86_64). stop-scrub + the no-secret scanner ship with it.
         let supports_vsock = host_vhost_vsock_present();
-        let supports_binding_lease = available && supports_vsock && std::env::consts::ARCH == "x86_64";
+        let supports_binding_lease =
+            available && supports_vsock && std::env::consts::ARCH == "x86_64";
         let binding = crate::backend::BindingCapabilities {
             supports_firecracker: true,
             supports_vsock,
@@ -1155,9 +1455,15 @@ impl SnapshotBackend for FirecrackerBackend {
         };
         self.ensure_available()?;
         self.acquire_lock("build")?;
-        let _lock = BuildLock { path: self.lock_path() };
-        std::fs::create_dir_all(&self.config.work_root).map_err(|e| self.backend_err(e.to_string()))?;
-        let build_dir = self.config.work_root.join(format!("build-{}", std::process::id()));
+        let _lock = BuildLock {
+            path: self.lock_path(),
+        };
+        std::fs::create_dir_all(&self.config.work_root)
+            .map_err(|e| self.backend_err(e.to_string()))?;
+        let build_dir = self
+            .config
+            .work_root
+            .join(format!("build-{}", std::process::id()));
         std::fs::create_dir_all(&build_dir).map_err(|e| self.backend_err(e.to_string()))?;
 
         // Store the rootfs blob first so its content id keys the stable drive
@@ -1238,18 +1544,32 @@ impl SnapshotBackend for FirecrackerBackend {
             let vsock_uds = if vsock_enabled() {
                 let uds = vsock_uds_path(&input.capsule_manifest_hash);
                 if let Some(d) = uds.parent() {
-                    std::fs::create_dir_all(d).map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+                    std::fs::create_dir_all(d)
+                        .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
                 }
                 let _ = std::fs::remove_file(&uds);
-                fc.api(self, "PUT", "/vsock", Some(&json!({
-                    "guest_cid": 3, "uds_path": uds.to_string_lossy()
-                }).to_string()))?;
+                fc.api(
+                    self,
+                    "PUT",
+                    "/vsock",
+                    Some(
+                        &json!({
+                            "guest_cid": 3, "uds_path": uds.to_string_lossy()
+                        })
+                        .to_string(),
+                    ),
+                )?;
                 Some(uds)
             } else {
                 None
             };
             bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
-                fc.api(self, "PUT", "/actions", Some(&json!({"action_type":"InstanceStart"}).to_string()))?;
+                fc.api(
+                    self,
+                    "PUT",
+                    "/actions",
+                    Some(&json!({"action_type":"InstanceStart"}).to_string()),
+                )?;
                 // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
                 // workload only at bound-ready — deliver the placeholder leases
                 // first, THEN health. A ZERO-binding supervisor build (dockerfile
@@ -1258,7 +1578,9 @@ impl SnapshotBackend for FirecrackerBackend {
                 // so the health wait below is reached directly.
                 if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
                     let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                        self.backend_err(
+                            "supervisor build: vsock uds missing (unreachable: gated above)",
+                        )
                     })?;
                     self.supervisor_deliver_placeholders(uds, drive)?;
                 }
@@ -1279,24 +1601,44 @@ impl SnapshotBackend for FirecrackerBackend {
                 // answers — see `restore_uses_agent_probe` for the restore side.
                 if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
                     let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                        self.backend_err(
+                            "supervisor build: vsock uds missing (unreachable: gated above)",
+                        )
                     })?;
                     self.supervisor_stop_and_revoke(uds, drive)?;
                     self.wait_workload_down(port, Duration::from_secs(10))?;
                 }
                 Ok(())
             })?;
-            bench::time("build.snapshot_create", || -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
-                fc.api(self, "PATCH", "/vm", Some(&json!({"state":"Paused"}).to_string()))?;
-                fc.api(self, "PUT", "/snapshot/create", Some(&json!({
-                    "snapshot_type":"Full",
-                    "snapshot_path": vmstate_path.to_string_lossy(),
-                    "mem_file_path": mem_path.to_string_lossy()
-                }).to_string()))?;
-                let vmstate = std::fs::read(&vmstate_path).map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
-                let mem = std::fs::read(&mem_path).map_err(|e| self.backend_err(format!("read mem: {e}")))?;
-                Ok((vmstate, mem))
-            })
+            bench::time(
+                "build.snapshot_create",
+                || -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
+                    fc.api(
+                        self,
+                        "PATCH",
+                        "/vm",
+                        Some(&json!({"state":"Paused"}).to_string()),
+                    )?;
+                    fc.api(
+                        self,
+                        "PUT",
+                        "/snapshot/create",
+                        Some(
+                            &json!({
+                                "snapshot_type":"Full",
+                                "snapshot_path": vmstate_path.to_string_lossy(),
+                                "mem_file_path": mem_path.to_string_lossy()
+                            })
+                            .to_string(),
+                        ),
+                    )?;
+                    let vmstate = std::fs::read(&vmstate_path)
+                        .map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
+                    let mem = std::fs::read(&mem_path)
+                        .map_err(|e| self.backend_err(format!("read mem: {e}")))?;
+                    Ok((vmstate, mem))
+                },
+            )
             // fc drops here → killed+reaped
         })();
         self.net_down();
@@ -1379,8 +1721,12 @@ impl SnapshotBackend for FirecrackerBackend {
         let layers = out.layers;
 
         let mut rec = HotsetRecorder::new();
-        if let Some(m) = &layers.memory { rec.extend_from_manifest(m); }
-        if let Some(r) = &layers.rootfs { rec.extend_from_manifest(r); }
+        if let Some(m) = &layers.memory {
+            rec.extend_from_manifest(m);
+        }
+        if let Some(r) = &layers.rootfs {
+            rec.extend_from_manifest(r);
+        }
         let hotset_profile = rec.finish();
 
         let no_secret_proof = NoSecretProof {
@@ -1391,7 +1737,11 @@ impl SnapshotBackend for FirecrackerBackend {
             verdict: "clean".to_string(),
             coverage,
         };
-        let runner_class_id = Some(input.runner_class.unwrap_or_else(|| self.runner_facts().id()));
+        let runner_class_id = Some(
+            input
+                .runner_class
+                .unwrap_or_else(|| self.runner_facts().id()),
+        );
         let manifest = ReadyStateManifest {
             schema: READY_STATE_SCHEMA.to_string(),
             capsule_manifest_hash: input.capsule_manifest_hash,
@@ -1410,7 +1760,11 @@ impl SnapshotBackend for FirecrackerBackend {
         if !keep_build_dir_enabled() {
             let _ = std::fs::remove_dir_all(&build_dir);
         }
-        Ok(BuildReadyStateReceipt { manifest, sealed_bytes, no_secret_proof })
+        Ok(BuildReadyStateReceipt {
+            manifest,
+            sealed_bytes,
+            no_secret_proof,
+        })
     }
 
     fn inspect(
@@ -1421,7 +1775,9 @@ impl SnapshotBackend for FirecrackerBackend {
         let mut all = true;
         for (_, blob) in manifest.layers.iter() {
             for c in &blob.chunks {
-                if !store.has_chunk(&c.hash) { all = false; }
+                if !store.has_chunk(&c.hash) {
+                    all = false;
+                }
             }
         }
         Ok(SnapshotInspection {
@@ -1433,13 +1789,12 @@ impl SnapshotBackend for FirecrackerBackend {
         })
     }
 
-    fn restore(
-        &self,
-        input: RestoreReadyStateInput<'_>,
-    ) -> Result<RestoreReceipt, SnapshotError> {
+    fn restore(&self, input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError> {
         self.ensure_available()?;
         // ── runner-class gate (fail-closed) ──────────────────────────────────
-        let host_class = input.host_runner_class.unwrap_or_else(|| self.runner_facts().id());
+        let host_class = input
+            .host_runner_class
+            .unwrap_or_else(|| self.runner_facts().id());
         if let Some(expected) = &input.manifest.runner_class_id
             && expected != &host_class
         {
@@ -1452,9 +1807,24 @@ impl SnapshotBackend for FirecrackerBackend {
             ));
         }
 
-        let rootfs = input.manifest.layers.rootfs.as_ref().ok_or_else(|| self.backend_err("manifest has no rootfs layer"))?;
-        let vmstate = input.manifest.layers.vmstate.as_ref().ok_or_else(|| self.backend_err("manifest has no vmstate layer"))?;
-        let memory = input.manifest.layers.memory.as_ref().ok_or_else(|| self.backend_err("manifest has no memory layer"))?;
+        let rootfs = input
+            .manifest
+            .layers
+            .rootfs
+            .as_ref()
+            .ok_or_else(|| self.backend_err("manifest has no rootfs layer"))?;
+        let vmstate = input
+            .manifest
+            .layers
+            .vmstate
+            .as_ref()
+            .ok_or_else(|| self.backend_err("manifest has no vmstate layer"))?;
+        let memory = input
+            .manifest
+            .layers
+            .memory
+            .as_ref()
+            .ok_or_else(|| self.backend_err("manifest has no memory layer"))?;
 
         // N-slot fail-closed guards (#948, Phase -1 audit). Netns isolates the
         // NETWORK, not host filesystem paths, so two concurrent restores of the
@@ -1879,12 +2249,21 @@ impl SnapshotBackend for FirecrackerBackend {
 
         match result {
             Ok((session, child, page_handle)) => {
-                self.sessions.lock().unwrap().insert(session.session_id.clone(), child);
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .insert(session.session_id.clone(), child);
                 if let Some(h) = page_handle {
-                    self.page_servers.lock().unwrap().insert(session.session_id.clone(), h);
+                    self.page_servers
+                        .lock()
+                        .unwrap()
+                        .insert(session.session_id.clone(), h);
                 }
                 // lock + tap intentionally held for the live session (released by stop()).
-                Ok(RestoreReceipt { ready_state_manifest_id: input.manifest.id(), session })
+                Ok(RestoreReceipt {
+                    ready_state_manifest_id: input.manifest.id(),
+                    session,
+                })
             }
             Err(e) => {
                 self.net_down();
@@ -1902,7 +2281,8 @@ impl SnapshotBackend for FirecrackerBackend {
         // backend (empty in-memory registry) and possibly a different ATO_FC_TAP
         // env than the run process, so the authoritative pid + tap come from
         // .fc-session.json (written at restore), not self.config / self.sessions.
-        let meta = std::fs::read_to_string(session.overlay_root.join(".fc-session.json")).unwrap_or_default();
+        let meta = std::fs::read_to_string(session.overlay_root.join(".fc-session.json"))
+            .unwrap_or_default();
         let recorded_tap = json_str(&meta, "tap");
         let tap = recorded_tap.as_deref().unwrap_or(&self.config.tap_dev);
         // #948 N-slot: the recorded namespace (if any) is authoritative for a
@@ -1910,7 +2290,9 @@ impl SnapshotBackend for FirecrackerBackend {
         let recorded_netns = json_str(&meta, "netns").filter(|s| !s.is_empty());
         let netns = recorded_netns.as_deref().or(self.config.netns.as_deref());
         let recorded_veth = json_str(&meta, "veth_root").filter(|s| !s.is_empty());
-        let veth_root = recorded_veth.as_deref().or(self.config.veth_root.as_deref());
+        let veth_root = recorded_veth
+            .as_deref()
+            .or(self.config.veth_root.as_deref());
 
         // FIXED TEARDOWN ORDER (#948): (1) kill+reap the VMM, (2) wait for exit,
         // BEFORE removing the namespace — `ip netns del` while firecracker is
@@ -1919,7 +2301,11 @@ impl SnapshotBackend for FirecrackerBackend {
         if let Some(mut child) = self.sessions.lock().unwrap().remove(&session.session_id) {
             let _ = child.kill();
             let _ = child.wait();
-        } else if let Some(pid) = session.vmm_pid.map(|p| p as u32).or_else(|| json_u32(&meta, "pid")) {
+        } else if let Some(pid) = session
+            .vmm_pid
+            .map(|p| p as u32)
+            .or_else(|| json_u32(&meta, "pid"))
+        {
             let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
         }
         // v1.6 (ato#983) Slice 4 fix: fsync every durable-state backing file
@@ -1936,7 +2322,11 @@ impl SnapshotBackend for FirecrackerBackend {
         // logged, not fatal (stop must never fail because a diagnostic-only
         // durability belt-and-suspenders step couldn't run).
         for p in json_str_array(&meta, "state_volume_paths") {
-            match std::fs::OpenOptions::new().write(true).open(&p).and_then(|f| f.sync_all()) {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .and_then(|f| f.sync_all())
+            {
                 Ok(()) => {}
                 Err(e) => eprintln!("stop(): fsync durable-state backing file {p}: {e}"),
             }
@@ -1944,7 +2334,12 @@ impl SnapshotBackend for FirecrackerBackend {
         // U1 (#854): stop + join the page-server thread (if any) AFTER killing the
         // child, so the guest stops faulting and the uffd read hits EOF. The
         // .page-server.sock is removed by the overlay teardown below.
-        if let Some(h) = self.page_servers.lock().unwrap().remove(&session.session_id) {
+        if let Some(h) = self
+            .page_servers
+            .lock()
+            .unwrap()
+            .remove(&session.session_id)
+        {
             let _ = h.stop_and_join();
         }
         // (3) Tear down the network + (5) the per-slot lockfile. In netns mode
@@ -1982,19 +2377,30 @@ impl SnapshotBackend for FirecrackerBackend {
         for lock in json_str_array(&meta, "state_volume_locks") {
             crate::state_volume::release_volume_lock(Path::new(&lock));
         }
-        let overlay_removed = session.overlay_root.exists() && std::fs::remove_dir_all(&session.overlay_root).is_ok();
-        Ok(TeardownReceipt { session_id: session.session_id, overlay_removed })
+        let overlay_removed =
+            session.overlay_root.exists() && std::fs::remove_dir_all(&session.overlay_root).is_ok();
+        Ok(TeardownReceipt {
+            session_id: session.session_id,
+            overlay_removed,
+        })
     }
 }
 
 fn manifest_short(m: &ReadyStateManifest) -> String {
-    m.id().strip_prefix("blake3:").unwrap_or("000000").chars().take(12).collect()
+    m.id()
+        .strip_prefix("blake3:")
+        .unwrap_or("000000")
+        .chars()
+        .take(12)
+        .collect()
 }
 fn json_u32(s: &str, key: &str) -> Option<u32> {
     let needle = format!("\"{key}\":");
     let i = s.find(&needle)? + needle.len();
     let rest = s[i..].trim_start();
-    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
     rest[..end].parse().ok()
 }
 /// Extract a quoted string value for `key` from a flat JSON object (no deps).
@@ -2012,9 +2418,13 @@ fn json_str(s: &str, key: &str) -> Option<String> {
 /// sealed before this slice has no `state_volume_locks` field at all.
 fn json_str_array(s: &str, key: &str) -> Vec<String> {
     let needle = format!("\"{key}\":[");
-    let Some(i) = s.find(&needle) else { return Vec::new() };
+    let Some(i) = s.find(&needle) else {
+        return Vec::new();
+    };
     let rest = &s[i + needle.len()..];
-    let Some(end) = rest.find(']') else { return Vec::new() };
+    let Some(end) = rest.find(']') else {
+        return Vec::new();
+    };
     rest[..end]
         .split(',')
         .filter_map(|piece| {
@@ -2036,8 +2446,16 @@ mod tests {
         let c = FirecrackerConfig::for_slot(0, false, &base);
         assert!(c.netns.is_none() && c.ingress_ip.is_none() && c.veth_root.is_none());
         // legacy reachable host is the guest IP; lock is tap-keyed.
-        assert_eq!(FirecrackerBackend::with_config(c.clone()).reachable_host(), c.guest_ip);
-        assert!(FirecrackerBackend::with_config(c).lock_path().to_string_lossy().contains("fctap0.lock"));
+        assert_eq!(
+            FirecrackerBackend::with_config(c.clone()).reachable_host(),
+            c.guest_ip
+        );
+        assert!(
+            FirecrackerBackend::with_config(c)
+                .lock_path()
+                .to_string_lossy()
+                .contains("fctap0.lock")
+        );
     }
 
     #[test]
@@ -2061,7 +2479,10 @@ mod tests {
         assert!(s1.ingress_ip.as_deref().unwrap().ends_with(".1.2"));
         // reachable host is the per-slot ingress, not the shared guest IP.
         let s1_ingress = s1.ingress_ip.clone().unwrap();
-        assert_eq!(FirecrackerBackend::with_config(s1).reachable_host(), s1_ingress);
+        assert_eq!(
+            FirecrackerBackend::with_config(s1).reachable_host(),
+            s1_ingress
+        );
     }
 
     // ── v1.4 (ato#970): per-slot vsock UDS isolation ──
@@ -2070,7 +2491,11 @@ mod tests {
     fn for_slot_netns_on_derives_distinct_vsock_slot_dirs() {
         let base = FirecrackerConfig::default();
         // netns off ⇒ no isolation dir (legacy shared baked path).
-        assert!(FirecrackerConfig::for_slot(0, false, &base).vsock_slot_dir.is_none());
+        assert!(
+            FirecrackerConfig::for_slot(0, false, &base)
+                .vsock_slot_dir
+                .is_none()
+        );
         // netns on ⇒ every slot gets its own dir.
         let s0 = FirecrackerConfig::for_slot(0, true, &base);
         let s1 = FirecrackerConfig::for_slot(1, true, &base);
@@ -2098,20 +2523,32 @@ mod tests {
 
         // Legacy: no netns ⇒ plain firecracker, isolation flag irrelevant.
         let plain = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(0, false, &base));
-        assert_eq!(plain.fc_command(true).get_program(), std::ffi::OsStr::new(&base.firecracker_bin));
+        assert_eq!(
+            plain.fc_command(true).get_program(),
+            std::ffi::OsStr::new(&base.firecracker_bin)
+        );
 
         // Netns without isolation: ip netns exec <ns> <fc> (unchanged shape).
         let ns = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(1, true, &base));
         let cmd = ns.fc_command(false);
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("ip"));
-        assert_eq!(args, vec!["netns", "exec", "ato-slot-1", &base.firecracker_bin]);
+        assert_eq!(
+            args,
+            vec!["netns", "exec", "ato-slot-1", &base.firecracker_bin]
+        );
 
         // Netns WITH isolation: the VMM is exec'd inside `unshare --mount` with
         // the per-slot dir bind-mounted over the baked vsock parent, and the
         // firecracker binary last so start_fc's appended args reach "$@".
         let cmd = ns.fc_command(true);
-        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("ip"));
         assert_eq!(&args[..3], ["netns", "exec", "ato-slot-1"]);
         assert_eq!(&args[3..5], ["unshare", "--mount"]);
@@ -2121,7 +2558,11 @@ mod tests {
         assert_eq!(args[9], "/run/ato/vsk/1");
         assert_eq!(args[10], vsock_uds_parent_dir().to_string_lossy());
         assert_eq!(args[11], base.firecracker_bin);
-        assert_eq!(args.len(), 12, "firecracker binary must be LAST so --api-sock appends into \"$@\"");
+        assert_eq!(
+            args.len(),
+            12,
+            "firecracker binary must be LAST so --api-sock appends into \"$@\""
+        );
     }
 
     #[test]
@@ -2129,8 +2570,10 @@ mod tests {
         // The bug this guards: two slots share tap `fctap0`, so a tap-keyed lock
         // would re-serialize them. Namespaced slots get namespace-keyed locks.
         let base = FirecrackerConfig::default();
-        let l0 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(0, true, &base)).lock_path();
-        let l1 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(1, true, &base)).lock_path();
+        let l0 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(0, true, &base))
+            .lock_path();
+        let l1 = FirecrackerBackend::with_config(FirecrackerConfig::for_slot(1, true, &base))
+            .lock_path();
         assert_ne!(l0, l1);
         assert!(l0.to_string_lossy().contains("ato-slot-0.lock"));
         assert!(l1.to_string_lossy().contains("ato-slot-1.lock"));
@@ -2161,28 +2604,45 @@ mod tests {
         assert_eq!(p.filesystem_model, FilesystemModel::Block);
         assert_eq!(p.gpu_mode, GpuMode::None);
         assert!(p.supports_seal_before_bind);
-        let expect = FirecrackerBackend::kvm_present() && FirecrackerBackend::new().detect_version().is_some();
+        let expect = FirecrackerBackend::kvm_present()
+            && FirecrackerBackend::new().detect_version().is_some();
         assert_eq!(p.available, expect);
-        if !p.available { assert!(p.reason.is_some()); }
+        if !p.available {
+            assert!(p.reason.is_some());
+        }
         // U0 UFFD facet invariant: false ⇒ a concrete reason; true ⇒ no reason.
         // (On this test host — non-x86_64 or no /dev/kvm — it is false with a reason.)
         if p.supports_uffd_mem_backend {
             assert!(p.uffd_reason.is_none());
         } else {
-            assert!(p.uffd_reason.is_some(), "unsupported UFFD must carry a reason");
+            assert!(
+                p.uffd_reason.is_some(),
+                "unsupported UFFD must carry a reason"
+            );
         }
     }
 
     #[test]
     fn restore_is_unsupported_without_kvm() {
-        if FirecrackerBackend::kvm_present() { return; }
+        if FirecrackerBackend::kvm_present() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path()).unwrap();
         let m = err_manifest();
         assert!(FirecrackerBackend::new().inspect(&store, &m).is_ok()); // inspect needs no KVM
         let backend = FirecrackerBackend::new();
-        let input = RestoreReadyStateInput { store: &store, manifest: m, overlay_root: dir.path().join("ov"), host_runner_class: None, uffd_preview: false };
-        assert!(matches!(backend.restore(input), Err(SnapshotError::Unsupported { .. })));
+        let input = RestoreReadyStateInput {
+            store: &store,
+            manifest: m,
+            overlay_root: dir.path().join("ov"),
+            host_runner_class: None,
+            uffd_preview: false,
+        };
+        assert!(matches!(
+            backend.restore(input),
+            Err(SnapshotError::Unsupported { .. })
+        ));
     }
 
     #[test]
@@ -2205,15 +2665,27 @@ mod tests {
                 vmstate: Vec::new(),
                 memory: Vec::new(),
             },
-            restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
+            restore_contract: RestoreContract {
+                ports: vec![8080],
+                healthcheck: Some("/health".to_string()),
+                expected_ready_ms: Some(3000),
+            },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
             execution_id: None,
             supervisor: None,
         };
-        let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "preflight must reject before KVM/store: {err:?}");
-        assert!(store.list_chunks().unwrap().is_empty(), "rejected build must persist no rootfs in CAS");
+        let err = FirecrackerBackend::new()
+            .build_ready_state(input)
+            .unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::SecretFoundInSnapshot(_)),
+            "preflight must reject before KVM/store: {err:?}"
+        );
+        assert!(
+            store.list_chunks().unwrap().is_empty(),
+            "rejected build must persist no rootfs in CAS"
+        );
     }
 
     // ── v1.2 PR 3d: supervisor build drive ────────────────────────────────────
@@ -2223,12 +2695,24 @@ mod tests {
         let b = FirecrackerBackend::new();
         let plain = b.boot_args(false);
         // The no-binding cmdline is byte-identical to the historical string.
-        assert!(plain.starts_with("console=ttyS0 reboot=k panic=1 pci=off ip="), "{plain}");
-        assert!(!plain.contains("init_on_free"), "no hygiene args on the no-binding path: {plain}");
+        assert!(
+            plain.starts_with("console=ttyS0 reboot=k panic=1 pci=off ip="),
+            "{plain}"
+        );
+        assert!(
+            !plain.contains("init_on_free"),
+            "no hygiene args on the no-binding path: {plain}"
+        );
         let hardened = b.boot_args(true);
-        assert!(hardened.contains("init_on_free=1 init_on_alloc=1 page_poison=1"), "{hardened}");
+        assert!(
+            hardened.contains("init_on_free=1 init_on_alloc=1 page_poison=1"),
+            "{hardened}"
+        );
         // Hygiene args are inserted, nothing else changes.
-        assert_eq!(hardened.replace(" init_on_free=1 init_on_alloc=1 page_poison=1", ""), plain);
+        assert_eq!(
+            hardened.replace(" init_on_free=1 init_on_alloc=1 page_poison=1", ""),
+            plain
+        );
     }
 
     #[test]
@@ -2264,8 +2748,11 @@ mod tests {
         // ato#1002 D4: an EMPTY set is an accepted supervisor build (zero-binding
         // dockerfile import) — zero leases, and the drive reports no placeholders
         // so the build skips the delivery/stop protocol entirely.
-        let empty = SupervisorDrive::prepare(&SupervisorBindings { binding_names: vec![], ..Default::default() })
-            .expect("empty supervisor set must be accepted (ato#1002 D4)");
+        let empty = SupervisorDrive::prepare(&SupervisorBindings {
+            binding_names: vec![],
+            ..Default::default()
+        })
+        .expect("empty supervisor set must be accepted (ato#1002 D4)");
         assert!(empty.leases.is_empty());
         assert!(empty.placeholder_values.is_empty());
         assert!(!empty.has_placeholders());
@@ -2320,16 +2807,31 @@ mod tests {
                 vmstate: Vec::new(),
                 memory: Vec::new(),
             },
-            restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".to_string()), expected_ready_ms: Some(3000) },
+            restore_contract: RestoreContract {
+                ports: vec![8080],
+                healthcheck: Some("/health".to_string()),
+                expected_ready_ms: Some(3000),
+            },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: None,
-            supervisor: Some(SupervisorBindings { binding_names: vec!["openai_api_key".into()], ..Default::default() }),
+            supervisor: Some(SupervisorBindings {
+                binding_names: vec!["openai_api_key".into()],
+                ..Default::default()
+            }),
         };
-        let err = FirecrackerBackend::new().build_ready_state(input).unwrap_err();
+        let err = FirecrackerBackend::new()
+            .build_ready_state(input)
+            .unwrap_err();
         let msg = format!("{err}");
-        assert!(msg.contains("ATO_FC_VSOCK"), "must name the missing flag: {msg}");
-        assert!(store.list_chunks().unwrap().is_empty(), "no bytes stored on the fail-closed path");
+        assert!(
+            msg.contains("ATO_FC_VSOCK"),
+            "must name the missing flag: {msg}"
+        );
+        assert!(
+            store.list_chunks().unwrap().is_empty(),
+            "no bytes stored on the fail-closed path"
+        );
     }
 
     #[test]
@@ -2340,7 +2842,9 @@ mod tests {
         // rootfs_read_only defaults to true, but honors ATO_FC_ROOTFS_READONLY
         // (the KVM integration run sets =0), so assert it matches the env rather
         // than a fixed value.
-        let expect_ro = std::env::var("ATO_FC_ROOTFS_READONLY").map(|v| v != "0").unwrap_or(true);
+        let expect_ro = std::env::var("ATO_FC_ROOTFS_READONLY")
+            .map(|v| v != "0")
+            .unwrap_or(true);
         assert_eq!(c.rootfs_read_only, expect_ro);
     }
 
@@ -2350,7 +2854,10 @@ mod tests {
         let p1 = std::env::var("ATO_READY_STATE_HOTSET").ok();
         let p2 = std::env::var("ATO_READY_STATE_PREFETCH").ok();
         let set = |k: &str, v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k) }
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
         };
         set("ATO_READY_STATE_HOTSET", None);
         set("ATO_READY_STATE_PREFETCH", None);
@@ -2361,7 +2868,10 @@ mod tests {
         set("ATO_READY_STATE_PREFETCH", Some("memory"));
         assert!(hotset_enabled(), "PREFETCH=memory enables");
         set("ATO_READY_STATE_PREFETCH", Some("rootfs"));
-        assert!(!hotset_enabled(), "PREFETCH=rootfs does not enable memory-first");
+        assert!(
+            !hotset_enabled(),
+            "PREFETCH=rootfs does not enable memory-first"
+        );
         set("ATO_READY_STATE_HOTSET", p1.as_deref());
         set("ATO_READY_STATE_PREFETCH", p2.as_deref());
     }
@@ -2375,7 +2885,10 @@ mod tests {
         // SAFETY: serial within this fn; var restored at the end.
         let prev = std::env::var("ATO_FC_UFFD").ok();
         let set = |v: Option<&str>| unsafe {
-            match v { Some(v) => std::env::set_var("ATO_FC_UFFD", v), None => std::env::remove_var("ATO_FC_UFFD") }
+            match v {
+                Some(v) => std::env::set_var("ATO_FC_UFFD", v),
+                None => std::env::remove_var("ATO_FC_UFFD"),
+            }
         };
         set(None);
         assert_eq!(uffd_mode(), None, "unset ⇒ File backend (default path)");
@@ -2392,7 +2905,11 @@ mod tests {
         set(Some("1"));
         assert_eq!(uffd_mode(), Some(UffdMode::Cas));
         set(Some("garbage"));
-        assert_eq!(uffd_mode(), None, "unknown token ⇒ File (fail safe to default)");
+        assert_eq!(
+            uffd_mode(),
+            None,
+            "unknown token ⇒ File (fail safe to default)"
+        );
         set(prev.as_deref());
     }
 
@@ -2400,7 +2917,13 @@ mod tests {
     fn rehydrate_atomic_materializes_caches_and_leaves_no_temp() {
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("cas")).unwrap();
-        let blob = store_blob(&store, LayerKind::Memory, b"mem-bytes-xyz", ChunkingKind::ContentDefined).unwrap();
+        let blob = store_blob(
+            &store,
+            LayerKind::Memory,
+            b"mem-bytes-xyz",
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let b = FirecrackerBackend::new();
         let path = dir.path().join("layers").join("mem.bin");
 
@@ -2411,7 +2934,11 @@ mod tests {
         // cache hit: second non-forced call does not rewrite.
         let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
         b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m1, "cached layer must not be rewritten");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            m1,
+            "cached layer must not be rewritten"
+        );
 
         // always=true forces a fresh write (rw rootfs semantics).
         b.rehydrate_atomic(&path, &store, &blob, true).unwrap();
@@ -2430,7 +2957,13 @@ mod tests {
     fn rehydrate_atomic_discards_wrong_size_cache_and_rehydrates() {
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("cas")).unwrap();
-        let blob = store_blob(&store, LayerKind::Memory, b"good-memory-bytes", ChunkingKind::ContentDefined).unwrap();
+        let blob = store_blob(
+            &store,
+            LayerKind::Memory,
+            b"good-memory-bytes",
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let b = FirecrackerBackend::new();
         let path = dir.path().join("layers").join("mem.bin");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -2439,17 +2972,28 @@ mod tests {
         // re-rehydrated from CAS — never trusted into LoadSnapshot.
         std::fs::write(&path, b"truncated").unwrap();
         b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), b"good-memory-bytes", "corrupt cache repaired from CAS");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"good-memory-bytes",
+            "corrupt cache repaired from CAS"
+        );
 
         // A correct cache (size matches) is a no-op hit (not rewritten).
         let m1 = std::fs::metadata(&path).unwrap().modified().unwrap();
         b.rehydrate_atomic(&path, &store, &blob, false).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), m1, "valid cache must not be rewritten");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            m1,
+            "valid cache must not be rewritten"
+        );
     }
 
     #[test]
     fn json_u32_parses() {
-        assert_eq!(json_u32("{\"pid\":12345,\"tap\":\"x\"}", "pid"), Some(12345));
+        assert_eq!(
+            json_u32("{\"pid\":12345,\"tap\":\"x\"}", "pid"),
+            Some(12345)
+        );
         assert_eq!(json_u32("{\"pid\": 7 }", "pid"), Some(7));
         assert_eq!(json_u32("{\"tap\":\"x\"}", "pid"), None);
     }
@@ -2464,7 +3008,12 @@ mod tests {
             execution_id: None,
             layers: ReadyStateLayers::default(),
             hotset_profile: Default::default(),
-            snapshot_backend: SnapshotBackendInfo { kind: FIRECRACKER_BACKEND_ID.to_string(), version: "0".to_string(), snapshot_format_version: SNAPSHOT_FORMAT.to_string(), cpu_template: None },
+            snapshot_backend: SnapshotBackendInfo {
+                kind: FIRECRACKER_BACKEND_ID.to_string(),
+                version: "0".to_string(),
+                snapshot_format_version: SNAPSHOT_FORMAT.to_string(),
+                cpu_template: None,
+            },
             restore_contract: RestoreContract::default(),
             sanitizer_contract: SanitizerContract::default(),
             no_secret_proof: None,
@@ -2509,7 +3058,10 @@ mod tests {
         .unwrap();
 
         let backend = FirecrackerBackend {
-            config: FirecrackerConfig { work_root, ..Default::default() },
+            config: FirecrackerConfig {
+                work_root,
+                ..Default::default()
+            },
             sessions: Arc::new(Mutex::new(HashMap::new())),
             page_servers: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2525,10 +3077,20 @@ mod tests {
         };
         let receipt = backend.stop(session).unwrap();
 
-        assert!(receipt.overlay_removed, "overlay must still be removed as before this slice");
+        assert!(
+            receipt.overlay_removed,
+            "overlay must still be removed as before this slice"
+        );
         assert!(!overlay_root.exists());
-        assert!(vpath.exists(), "the durable state backing file must survive stop()");
-        assert_eq!(std::fs::read(&vpath).unwrap(), b"durable-bytes", "content untouched by the fsync");
+        assert!(
+            vpath.exists(),
+            "the durable state backing file must survive stop()"
+        );
+        assert_eq!(
+            std::fs::read(&vpath).unwrap(),
+            b"durable-bytes",
+            "content untouched by the fsync"
+        );
         assert!(!lpath.exists(), "the volume lock must be released");
     }
 
@@ -2560,7 +3122,10 @@ mod tests {
         .unwrap();
 
         let backend = FirecrackerBackend {
-            config: FirecrackerConfig { work_root, ..Default::default() },
+            config: FirecrackerConfig {
+                work_root,
+                ..Default::default()
+            },
             sessions: Arc::new(Mutex::new(HashMap::new())),
             page_servers: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -2574,7 +3139,9 @@ mod tests {
             vsock_uds: None,
             workload_addr: None,
         };
-        let receipt = backend.stop(session).expect("stop must not fail on a missing fsync target");
+        let receipt = backend
+            .stop(session)
+            .expect("stop must not fail on a missing fsync target");
         assert!(receipt.overlay_removed);
     }
 }
