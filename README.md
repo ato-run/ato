@@ -110,9 +110,9 @@ curl -fsSL https://ato.run/install.sh | sh -s -- --cli-only
 To install a specific version:
 
 ```bash
-curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5
-curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --with-cli
-curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.5.5 --cli-only
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.7.1
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.7.1 --with-cli
+curl -fsSL https://ato.run/install.sh | sh -s -- --version 0.7.1 --cli-only
 ```
 
 ### Windows PowerShell
@@ -372,6 +372,25 @@ ato stop --all                  # stop running sessions
 ato logs                        # show logs
 ```
 
+## Ready-State and Connected Runners
+
+Beyond rehearsing a project from source, Ato can capture a **Ready-State** capsule:
+a warm snapshot of an already-built, already-started app so a later run restores
+the running state instead of resolving and booting from scratch. The snapshot
+subsystem (`crates/snapshot`) builds and restores this warm state behind a
+backend-agnostic contract, with a real Firecracker (KVM) microVM backend on
+Linux and a content-addressed local layer store (`crates/capsulefs`).
+
+A **Connected Runner** lets you run capsules on a machine other than the one in
+front of you — a home server, a Linux box, or a cloud host — while driving it
+from the CLI or the desktop app:
+
+```bash
+ato runner enroll        # register this machine as a Connected Runner
+ato runner serve         # run the agent that accepts and executes runs
+ato doctor runner        # diagnose runner readiness
+```
+
 ## Repository layout
 
 This repository contains the CLI, runtime libraries, desktop app, and supporting tools.
@@ -379,20 +398,25 @@ This repository contains the CLI, runtime libraries, desktop app, and supporting
 ```text
 ato/
 ├── crates/
-│   ├── protocol/     # IPC/wire surface — pure message types, DAG root
+│   ├── protocol/         # IPC/wire surface — pure message types, DAG root
 │   ├── capsule/          # project detection, locking, packing, runtime logic + local session state
 │   ├── cli/              # command-line interface (orchestrator; ships the `ato` binary)
+│   │   └── lock-draft-engine/  # LEIP lock-draft hashing engine
 │   ├── desktop/          # desktop app (shell; ships the `ato-desktop` binary)
 │   ├── netd/             # networking daemon (pairing, reachability, transport; ships the `ato-netd` binary)
-│   └── nacelle/          # source runtime sandbox
+│   ├── nacelle/          # source runtime sandbox
+│   ├── capsulefs/        # content-addressed, chunked local store for Ready-State capsule layers
+│   ├── snapshot/         # backend-agnostic build/restore of Ready-State warm state (Firecracker KVM backend; QEMU/Kata stubs)
+│   ├── snapshot-builder/ # Track C snapshot builder daemon (dev/ops tool, not shipped)
+│   └── guest-agent/      # Ready-State guest agent — vsock binding-lease control plane
 ├── sidecars/
-│   └── ato-tsnetd/       # optional network sidecar
+│   └── ato-tsnetd/       # Go Tailscale tsnet gRPC sidecar (optional network sidecar)
 ├── docs/
 │   └── rfcs/             # design notes and proposals
 └── .github/workflows/    # CI
 ```
 
-Most users should use the installer. Contributors usually work in `crates/cli`, `crates/desktop`, `crates/capsule`, and the runtime sidecars.
+Most users should use the installer. Contributors usually work in `crates/cli`, `crates/desktop`, `crates/capsule`, and the runtime sidecars. `crates/desktop` and `sidecars/ato-tsnetd` are kept out of the cargo workspace (see `Cargo.toml`).
 
 > Crate names dropped the `ato-` prefix (`cli`/`desktop`/`netd`); the produced
 > binaries keep their stable names (`ato`, `ato-desktop`, `ato-netd`).

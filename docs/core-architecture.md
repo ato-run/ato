@@ -2,15 +2,35 @@
 
 ## Overview
 
-The current Ato implementation is split across four public layers:
+The core of the Ato implementation is split across four layers:
 
-- `crates/cli`: the human-facing CLI surface
+- `crates/cli`: the human-facing CLI surface (also hosts the Connected Runner agent)
 - `crates/capsule`: manifest, lock, routing, engine bridge, and execution identity
 - `crates/nacelle`: the machine-oriented execution engine
 - `crates/desktop`: the GPUI/Wry desktop shell that consumes session metadata
 
+Around that core, the workspace carries the **Ready-State snapshot subsystem**
+and shared plumbing:
+
+- `crates/snapshot`: backend-agnostic build/restore of Ready-State warm state
+  (real Firecracker/KVM backend; QEMU and Kata stubs; seal + no-secret scan)
+- `crates/capsulefs`: content-addressed, chunked local store for Ready-State
+  capsule layers (rootfs / runtime / deps / app / vmstate / memory)
+- `crates/snapshot-builder`: the builder daemon that claims capsule-snapshot
+  jobs from the control plane, builds and seals artifacts, and acks (dev/ops
+  tool, not shipped to end users)
+- `crates/guest-agent`: the in-guest agent — vsock binding-lease control plane
+  and v1.2 supervisor mode
+- `crates/protocol`: capsule wire types shared by `cli` (producer) and
+  `desktop` (consumer)
+- `crates/netd`: the session-scoped network broker daemon
+- `crates/cli/lock-draft-engine`: the LEIP lock-draft hashing engine
+- `sidecars/ato-tsnetd`: Go tailnet sidecar (kept outside the cargo workspace,
+  like `crates/desktop`)
+
 If you want to understand how Ato behaves today, start from `cli`, then
-follow the handoff into `capsule`, and only then drop into `nacelle`.
+follow the handoff into `capsule`, and only then drop into `nacelle`. Visit the
+snapshot crates only when working on the Ready-State path.
 
 ## How it works
 
@@ -40,10 +60,12 @@ The current `ato run` path is:
 
 | Layer | Responsibility |
 |---|---|
-| `cli` | user CLI, input normalization, reporter UX, orchestration |
+| `cli` | user CLI, input normalization, reporter UX, orchestration, Connected Runner agent (`ato runner`) |
 | `capsule` | manifest model, lock model, runtime routing, host isolation context, execution receipts |
 | `nacelle` | internal engine protocol, sandbox enforcement, process execution |
 | `desktop` | local desktop shell, webview orchestration, session / receipt display |
+| `snapshot` + `capsulefs` + `snapshot-builder` + `guest-agent` | Ready-State snapshot build, storage, restore, and in-guest control plane |
+| `protocol` / `netd` | cli ⇄ desktop wire types / session network broker |
 
 ### Current run model
 
