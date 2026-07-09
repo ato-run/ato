@@ -65,8 +65,12 @@ pub(crate) fn select_backend_for_slot(
         return Ok(Box::new(FakeSnapshotBackend::new()));
     };
     if id == "firecracker" {
-        let cfg = FirecrackerConfig::for_slot(slot_index, netns_enabled, &FirecrackerConfig::default());
-        return require_available(Box::new(FirecrackerBackend::with_config(cfg)), "firecracker");
+        let cfg =
+            FirecrackerConfig::for_slot(slot_index, netns_enabled, &FirecrackerConfig::default());
+        return require_available(
+            Box::new(FirecrackerBackend::with_config(cfg)),
+            "firecracker",
+        );
     }
     // Other backends have no per-slot network isolation; defer to the base path.
     select_backend()
@@ -101,8 +105,12 @@ mod tests {
         if !snapshot::FirecrackerBackend::kvm_present() {
             set(Some("firecracker"));
             // `.err().unwrap()` avoids requiring `Debug` on `Box<dyn SnapshotBackend>`.
-            let err = select_backend().err().expect("must fail closed without kvm");
-            assert!(err.to_string().contains("firecracker") && err.to_string().contains("unavailable"));
+            let err = select_backend()
+                .err()
+                .expect("must fail closed without kvm");
+            assert!(
+                err.to_string().contains("firecracker") && err.to_string().contains("unavailable")
+            );
         }
 
         // qemu/kata skeletons are unavailable → error (never silently used).

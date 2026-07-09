@@ -73,10 +73,11 @@ impl ContentHash {
         if hex.len() != BLAKE3_HEX_LEN {
             return Err(invalid("digest must be exactly 64 hex characters"));
         }
-        if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
-            return Err(invalid(
-                "digest must contain only lowercase hex [0-9a-f]",
-            ));
+        if !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(invalid("digest must contain only lowercase hex [0-9a-f]"));
         }
         Ok(Self(s.to_string()))
     }
@@ -167,14 +168,14 @@ mod tests {
     fn parse_rejects_path_traversal_and_malformed_hashes() {
         // Every one of these must fail closed — none may become a ContentHash.
         let bad = [
-            "blake3:../../x",                     // path traversal
-            "blake3:/tmp/x",                      // absolute path escape
-            "blake3:..",                          // parent dir
+            "blake3:../../x", // path traversal
+            "blake3:/tmp/x",  // absolute path escape
+            "blake3:..",      // parent dir
             "sha256:0000000000000000000000000000000000000000000000000000000000000000", // wrong family
-            "blake3:not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-xx",        // non-hex
+            "blake3:not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-not-hex-xx",       // non-hex
             "blake3:ABCDEF0000000000000000000000000000000000000000000000000000000000", // uppercase
-            "deadbeef",                           // no prefix
-            "",                                   // empty
+            "deadbeef",                                                                // no prefix
+            "",                                                                        // empty
         ];
         for s in bad {
             assert!(

@@ -69,7 +69,9 @@ pub fn derive_imported_service_plan(
     cmd.extend(config.entrypoint.iter().cloned());
     cmd.extend(config.cmd.iter().cloned());
     if cmd.is_empty() {
-        return Err("image declares neither ENTRYPOINT nor CMD — nothing to start (fail-closed)".into());
+        return Err(
+            "image declares neither ENTRYPOINT nor CMD — nothing to start (fail-closed)".into(),
+        );
     }
 
     if !config.volumes.is_empty() {
@@ -96,12 +98,18 @@ pub fn derive_imported_service_plan(
                 "image EXPOSEs {} tcp ports ({}) — v0 imports a single public web service; \
                  supply the public port explicitly",
                 many.len(),
-                many.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
+                many.iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
     };
 
-    let EnvPartition { mut base_env, bindings_env } = partition_dockerfile_env(&config.env, policy)?;
+    let EnvPartition {
+        mut base_env,
+        bindings_env,
+    } = partition_dockerfile_env(&config.env, policy)?;
     // Same invariant as the legacy multi-service derive: the public service
     // listens on the proxied port; PORT is injected idempotently (an image
     // that already sets PORT keeps its own value only if it matches).
@@ -113,7 +121,9 @@ pub fn derive_imported_service_plan(
              service must listen on the single proxied port (fail-closed)"
         ));
     }
-    base_env.entry("PORT".to_string()).or_insert_with(|| port.to_string());
+    base_env
+        .entry("PORT".to_string())
+        .or_insert_with(|| port.to_string());
 
     let mut warnings = Vec::new();
     if let Some(user) = config.user.as_deref() {
@@ -134,7 +144,10 @@ pub fn derive_imported_service_plan(
     let service = ServiceBuildSpec {
         name: IMPORTED_SERVICE_NAME.to_string(),
         cmd,
-        cwd: config.working_dir.clone().unwrap_or_else(|| "/".to_string()),
+        cwd: config
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| "/".to_string()),
         base_env,
         env_map: bindings_env.clone(),
         public: true,
@@ -150,7 +163,12 @@ pub fn derive_imported_service_plan(
         services: Some(vec![service]),
         public_service: Some(IMPORTED_SERVICE_NAME.to_string()),
     };
-    Ok(ImportedServicePlan { supervisor, port, readiness_http_path, warnings })
+    Ok(ImportedServicePlan {
+        supervisor,
+        port,
+        readiness_http_path,
+        warnings,
+    })
 }
 
 /// The pack script for an ALREADY-BUILT imported image: same shared pipeline as
@@ -165,9 +183,15 @@ pub(crate) fn imported_pack_script(
     plan: &ImportedServicePlan,
     size_mib: u64,
 ) -> String {
-    let (agent_prep, launch) =
-        supervisor_prep_and_launch(Some(&plan.supervisor), plan.port, /* start_cmd unused in services shape */ "");
-    let healthcheck = plan.readiness_http_path.clone().unwrap_or_else(|| "/".to_string());
+    let (agent_prep, launch) = supervisor_prep_and_launch(
+        Some(&plan.supervisor),
+        plan.port,
+        /* start_cmd unused in services shape */ "",
+    );
+    let healthcheck = plan
+        .readiness_http_path
+        .clone()
+        .unwrap_or_else(|| "/".to_string());
     rootfs_pack_script(&PackScriptInputs {
         tool,
         tag_init: format!("TAG={}", shell_single_quote(image_tag)),
@@ -214,7 +238,9 @@ pub fn pack_imported_rootfs(
             .join("\n");
         return Err(format!("imported rootfs pack failed: {tail}"));
     }
-    std::fs::metadata(out_ext4).map(|m| m.len()).map_err(|e| e.to_string())
+    std::fs::metadata(out_ext4)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -240,7 +266,8 @@ mod tests {
 
     #[test]
     fn plan_maps_entrypoint_cmd_workdir_env_expose() {
-        let plan = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let plan =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
         assert_eq!(plan.port, 3000);
         let svcs = plan.supervisor.services.as_ref().unwrap();
         assert_eq!(svcs.len(), 1);
@@ -252,7 +279,10 @@ mod tests {
         assert_eq!(s.base_env["PORT"], "3000"); // injected idempotently
         assert!(s.public);
         assert_eq!(s.port, Some(3000));
-        assert_eq!(plan.supervisor.public_service.as_deref(), Some(IMPORTED_SERVICE_NAME));
+        assert_eq!(
+            plan.supervisor.public_service.as_deref(),
+            Some(IMPORTED_SERVICE_NAME)
+        );
         assert!(plan.warnings.is_empty());
         assert!(plan.supervisor.binding_names.is_empty());
     }
@@ -262,31 +292,40 @@ mod tests {
         let mut c = config();
         c.entrypoint.clear();
         c.cmd.clear();
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
         assert!(err.contains("neither ENTRYPOINT nor CMD"), "{err}");
 
         let mut c = config();
         c.volumes = vec!["/data".into()];
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
-        assert!(err.contains("VOLUME /data") && err.contains("[state]"), "{err}");
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
+        assert!(
+            err.contains("VOLUME /data") && err.contains("[state]"),
+            "{err}"
+        );
     }
 
     #[test]
     fn port_resolution_matrix() {
         // Explicit override wins over EXPOSE.
-        let plan = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, Some(8080), None).unwrap();
+        let plan =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, Some(8080), None)
+                .unwrap();
         assert_eq!(plan.port, 8080);
 
         // Zero EXPOSE + no override: fail closed.
         let mut c = config();
         c.exposed_tcp_ports.clear();
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
         assert!(err.contains("EXPOSEs no tcp port"), "{err}");
 
         // Multiple EXPOSE + no override: fail closed, ports listed.
         let mut c = config();
         c.exposed_tcp_ports = vec![3000, 9090];
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
         assert!(err.contains("3000, 9090"), "{err}");
     }
 
@@ -296,7 +335,8 @@ mod tests {
         c.env.insert("PORT".into(), "3000".into());
         assert!(derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).is_ok());
         c.env.insert("PORT".into(), "9999".into());
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap_err();
         assert!(err.contains("PORT = \"9999\""), "{err}");
     }
 
@@ -308,25 +348,40 @@ mod tests {
         let plan = derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap();
         assert_eq!(
             plan.warnings,
-            vec![DockerImportWarning::DockerUserIgnored, DockerImportWarning::DockerHealthcheckIgnored]
+            vec![
+                DockerImportWarning::DockerUserIgnored,
+                DockerImportWarning::DockerHealthcheckIgnored
+            ]
         );
         // root-equivalent USER forms are not "ignored" — no warning.
         let mut c = config();
         c.user = Some("root".into());
-        assert!(derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None).unwrap().warnings.is_empty());
+        assert!(
+            derive_imported_service_plan(&c, SecretEnvPolicy::Reject, None, None)
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
     }
 
     #[test]
     fn secret_env_flows_through_the_slice2_gate() {
         let mut c = config();
-        c.env.insert("OPENAI_API_KEY".into(), "sk-abcdefghijklmnopqrstuvwx".into());
-        let err = derive_imported_service_plan(&c, SecretEnvPolicy::ConvertPlaceholders, None, None).unwrap_err();
+        c.env.insert(
+            "OPENAI_API_KEY".into(),
+            "sk-abcdefghijklmnopqrstuvwx".into(),
+        );
+        let err =
+            derive_imported_service_plan(&c, SecretEnvPolicy::ConvertPlaceholders, None, None)
+                .unwrap_err();
         assert!(err.contains("OPENAI_API_KEY"), "{err}");
         assert!(!err.contains("sk-abcdefghijklmnopqrstuvwx"), "{err}");
 
         let mut c = config();
         c.env.insert("OPENAI_API_KEY".into(), "".into());
-        let plan = derive_imported_service_plan(&c, SecretEnvPolicy::ConvertPlaceholders, None, None).unwrap();
+        let plan =
+            derive_imported_service_plan(&c, SecretEnvPolicy::ConvertPlaceholders, None, None)
+                .unwrap();
         assert_eq!(plan.supervisor.binding_names, vec!["openai_api_key"]);
         let s = &plan.supervisor.services.as_ref().unwrap()[0];
         assert_eq!(s.env_map["OPENAI_API_KEY"], "openai_api_key");
@@ -335,7 +390,8 @@ mod tests {
 
     #[test]
     fn imported_pack_script_shares_the_pipeline_but_not_the_build() {
-        let plan = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let plan =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
         let script = imported_pack_script("podman", "ato-import-abc123", &plan, 1024);
         // Imported tag, single-quoted; chosen tool drives create/export/cleanup.
         assert!(script.contains("TAG='ato-import-abc123'"), "{script}");
@@ -347,7 +403,10 @@ mod tests {
         // Supervisor staging + services-shaped supervisor.json + agent launch.
         assert!(script.contains("ATO_GUEST_AGENT_BIN"), "{script}");
         assert!(script.contains("\"services\""), "{script}");
-        assert!(script.contains("/usr/local/bin/ato-guest-agent"), "{script}");
+        assert!(
+            script.contains("/usr/local/bin/ato-guest-agent"),
+            "{script}"
+        );
         // Init cwd is `/`, not the legacy `/app`.
         assert!(script.contains("\ncd /\n"), "{script}");
         assert!(!script.contains("cd /app"), "{script}");
@@ -377,11 +436,26 @@ readiness_probe = { http_get = "/health" }
 "#,
         )
         .unwrap();
-        let spec = derive_build_spec(&m, &SourceProbe { has_requirements_txt: true, ..Default::default() }).unwrap();
+        let spec = derive_build_spec(
+            &m,
+            &SourceProbe {
+                has_requirements_txt: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let script = crate::rootfs_builder::build_rootfs_script(&spec, 512);
         assert!(script.contains("TAG=\"ato-rootfs-$$\""), "{script}");
-        assert!(script.contains("cp -a \"$ATO_SRC/.\" \"$BUILD/\""), "{script}");
-        assert!(script.contains("docker build -q -t \"$TAG\" \"$BUILD\" >/dev/null\nCID=$(docker create \"$TAG\")"), "{script}");
+        assert!(
+            script.contains("cp -a \"$ATO_SRC/.\" \"$BUILD/\""),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "docker build -q -t \"$TAG\" \"$BUILD\" >/dev/null\nCID=$(docker create \"$TAG\")"
+            ),
+            "{script}"
+        );
         assert!(script.contains("\ncd /app\n"), "{script}");
     }
 }

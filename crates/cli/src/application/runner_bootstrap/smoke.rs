@@ -104,11 +104,13 @@ fn resource_snapshot() -> ResourceSnapshot {
             .map(str::to_string)
             .filter(|s| !s.is_empty())
             .collect(),
-        ato_containers: shell("docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^ato' || true")
-            .lines()
-            .map(str::to_string)
-            .filter(|s| !s.is_empty())
-            .collect(),
+        ato_containers: shell(
+            "docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^ato' || true",
+        )
+        .lines()
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        .collect(),
     }
 }
 
@@ -123,7 +125,11 @@ fn leftovers(before: &ResourceSnapshot, after: &ResourceSnapshot) -> Vec<String>
     for (name, b, a) in [
         ("tap device", &before.tap_devices, &after.tap_devices),
         ("loop device", &before.loop_devices, &after.loop_devices),
-        ("ato docker container", &before.ato_containers, &after.ato_containers),
+        (
+            "ato docker container",
+            &before.ato_containers,
+            &after.ato_containers,
+        ),
     ] {
         for item in a.difference(b) {
             out.push(format!("{name}: {item}"));
@@ -140,11 +146,23 @@ pub(crate) struct SmokeOptions {
 
 pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
     let mut stages: Vec<StageResult> = Vec::new();
-    let mut push = |stages: &mut Vec<StageResult>, stage: &'static str, ok: bool, detail: String, t: Instant| {
-        stages.push(StageResult { stage, ok, detail, ms: t.elapsed().as_millis() });
+    let mut push = |stages: &mut Vec<StageResult>,
+                    stage: &'static str,
+                    ok: bool,
+                    detail: String,
+                    t: Instant| {
+        stages.push(StageResult {
+            stage,
+            ok,
+            detail,
+            ms: t.elapsed().as_millis(),
+        });
         ok
     };
-    let proxy_listen = opts.proxy_listen.clone().unwrap_or_else(|| "127.0.0.1:8431".to_string());
+    let proxy_listen = opts
+        .proxy_listen
+        .clone()
+        .unwrap_or_else(|| "127.0.0.1:8431".to_string());
 
     // ── Stage 0: preflight (fail fast; nothing is created yet) ──
     let t = Instant::now();
@@ -155,7 +173,10 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
         // v0 is x86_64-only (pinned Firecracker + kernel) — fail clearly elsewhere.
         let arch = super::checks::parse_arch(&shell("uname -m"));
         if arch != super::SUPPORTED_ARCH {
-            bail!("Runner Bootstrap v0 is {}-only; this host is {arch}", super::SUPPORTED_ARCH);
+            bail!(
+                "Runner Bootstrap v0 is {}-only; this host is {arch}",
+                super::SUPPORTED_ARCH
+            );
         }
         if !FirecrackerBackend::kvm_present() {
             bail!("/dev/kvm is not usable — run `ato doctor runner`");
@@ -168,7 +189,14 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            })
             .unwrap_or_default();
         if ver.is_empty() {
             bail!("{fc} did not answer --version");
@@ -181,7 +209,13 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
     })();
     let (fc_bin, kernel) = match preflight {
         Ok(pair) => {
-            push(&mut stages, "preflight", true, format!("root+kvm+docker ok; fc={} kernel={}", pair.0, pair.1), t);
+            push(
+                &mut stages,
+                "preflight",
+                true,
+                format!("root+kvm+docker ok; fc={} kernel={}", pair.0, pair.1),
+                t,
+            );
             pair
         }
         Err(e) => {
@@ -195,12 +229,25 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
     std::fs::create_dir_all(&workdir)?;
     let before = resource_snapshot();
 
-    let result = smoke_pipeline(&mut stages, &mut push, &workdir, &fc_bin, &kernel, &proxy_listen).await;
+    let result = smoke_pipeline(
+        &mut stages,
+        &mut push,
+        &workdir,
+        &fc_bin,
+        &kernel,
+        &proxy_listen,
+    )
+    .await;
     if let Err(e) = result {
         // The failing stage already recorded its detail; this catches setup errors
         // between stages so they are never silently dropped.
         if stages.last().map(|s| s.ok) != Some(false) {
-            stages.push(StageResult { stage: "internal", ok: false, detail: format!("{e:#}"), ms: 0 });
+            stages.push(StageResult {
+                stage: "internal",
+                ok: false,
+                detail: format!("{e:#}"),
+                ms: 0,
+            });
         }
     }
 
@@ -213,7 +260,11 @@ pub(crate) async fn run(opts: SmokeOptions) -> Result<()> {
         &mut stages,
         "orphans",
         ok,
-        if ok { "no leftover firecracker/tap/loop/docker resources".to_string() } else { left.join("; ") },
+        if ok {
+            "no leftover firecracker/tap/loop/docker resources".to_string()
+        } else {
+            left.join("; ")
+        },
         t,
     );
 
@@ -248,7 +299,13 @@ async fn smoke_pipeline(
     let receipt = build_rootfs(&src, &spec, &ext4, 1024);
     match &receipt {
         Ok(r) => {
-            push(stages, "rootfs_build", true, format!("{} ({} bytes)", ext4.display(), r.rootfs_bytes), t);
+            push(
+                stages,
+                "rootfs_build",
+                true,
+                format!("{} ({} bytes)", ext4.display(), r.rootfs_bytes),
+                t,
+            );
         }
         Err(e) => {
             push(stages, "rootfs_build", false, e.clone(), t);
@@ -264,7 +321,8 @@ async fn smoke_pipeline(
         work_root: workdir.join("fc-work"),
         ..Default::default()
     });
-    let store = CasStore::open(workdir.join("cas")).map_err(|e| anyhow::anyhow!("CAS open: {e}"))?;
+    let store =
+        CasStore::open(workdir.join("cas")).map_err(|e| anyhow::anyhow!("CAS open: {e}"))?;
     let rootfs_bytes = std::fs::read(&ext4)?;
     let built = backend.build_ready_state(BuildReadyStateInput {
         store: &store,
@@ -297,7 +355,13 @@ async fn smoke_pipeline(
     });
     let sealed = match built {
         Ok(r) => {
-            push(stages, "build_ready_state", true, format!("sealed manifest {}", r.manifest.id()), t);
+            push(
+                stages,
+                "build_ready_state",
+                true,
+                format!("sealed manifest {}", r.manifest.id()),
+                t,
+            );
             r
         }
         Err(e) => {
@@ -352,7 +416,11 @@ async fn smoke_pipeline(
         let paths = locate_artifact(&cmd.artifact_location, workdir)
             .map_err(|(c, m)| anyhow::anyhow!("{c}: {m}"))?;
         if paths.manifest_json != manifest_json {
-            bail!("locate_artifact mapped to {} not {}", paths.manifest_json.display(), manifest_json.display());
+            bail!(
+                "locate_artifact mapped to {} not {}",
+                paths.manifest_json.display(),
+                manifest_json.display()
+            );
         }
         // Positive: the exact artifact must verify.
         load_and_verify_manifest(&paths.manifest_json, &cmd, false)
@@ -367,7 +435,13 @@ async fn smoke_pipeline(
     })();
     match verify {
         Ok(h) => {
-            push(stages, "restore_lease_verify", true, format!("manifest.id()=={h} verified; tamper refused"), t);
+            push(
+                stages,
+                "restore_lease_verify",
+                true,
+                format!("manifest.id()=={h} verified; tamper refused"),
+                t,
+            );
         }
         Err(e) => {
             push(stages, "restore_lease_verify", false, format!("{e:#}"), t);
@@ -410,29 +484,41 @@ async fn smoke_pipeline(
     let mut proxy_handle = None;
     let probe = match session.workload_addr.clone() {
         Some(addr) => {
-            match crate::application::runner_agent::start_root_proxy_to(proxy_listen, addr.clone()).await {
+            match crate::application::runner_agent::start_root_proxy_to(proxy_listen, addr.clone())
+                .await
+            {
                 Ok(handle) => {
                     proxy_handle = Some(handle);
-                    probe_health(proxy_listen, &spec.healthcheck).await.map(|code| (addr, code))
+                    probe_health(proxy_listen, &spec.healthcheck)
+                        .await
+                        .map(|code| (addr, code))
                 }
                 Err(e) => Err(anyhow::anyhow!("proxy did not start: {e:#}")),
             }
         }
-        None => Err(anyhow::anyhow!("restored session reported no workload address")),
+        None => Err(anyhow::anyhow!(
+            "restored session reported no workload address"
+        )),
     };
     let proxy_ok = match probe {
         Ok((addr, code)) if code == 200 => push(
             stages,
             "proxy_health",
             true,
-            format!("GET {proxy_listen}{} -> 200 (upstream {addr})", spec.healthcheck),
+            format!(
+                "GET {proxy_listen}{} -> 200 (upstream {addr})",
+                spec.healthcheck
+            ),
             t,
         ),
         Ok((addr, code)) => push(
             stages,
             "proxy_health",
             false,
-            format!("GET {proxy_listen}{} -> {code} (upstream {addr})", spec.healthcheck),
+            format!(
+                "GET {proxy_listen}{} -> {code} (upstream {addr})",
+                spec.healthcheck
+            ),
             t,
         ),
         Err(e) => push(stages, "proxy_health", false, format!("{e:#}"), t),
@@ -451,7 +537,10 @@ async fn smoke_pipeline(
                 stages,
                 "teardown",
                 td.overlay_removed && overlay_gone,
-                format!("overlay_removed={} (dir gone={overlay_gone})", td.overlay_removed),
+                format!(
+                    "overlay_removed={} (dir gone={overlay_gone})",
+                    td.overlay_removed
+                ),
                 t,
             );
         }
@@ -472,8 +561,10 @@ async fn probe_health(addr: &str, path: &str) -> Result<u16> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let fut = async {
         let mut s = tokio::net::TcpStream::connect(addr).await?;
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes())
-            .await?;
+        s.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .await?;
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).await?;
         let head = String::from_utf8_lossy(&buf);
@@ -497,17 +588,30 @@ pub(crate) fn parse_http_status(response: &str) -> Option<u16> {
 fn finish(stages: Vec<StageResult>, json: bool) -> Result<()> {
     let passed = stages.iter().all(|s| s.ok);
     if json {
-        println!("{}", serde_json::to_string_pretty(&SmokeReport { stages, passed })?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&SmokeReport { stages, passed })?
+        );
     } else {
         println!();
         println!("Ato Runner Smoke");
         for s in &stages {
-            println!("  {} {} ({} ms): {}", if s.ok { "✓" } else { "✗" }, s.stage, s.ms, s.detail);
+            println!(
+                "  {} {} ({} ms): {}",
+                if s.ok { "✓" } else { "✗" },
+                s.stage,
+                s.ms,
+                s.detail
+            );
         }
         println!();
         println!(
             "{}",
-            if passed { "SMOKE PASSED — this host can build and serve capsule snapshots." } else { "SMOKE FAILED — see the failing stage above." }
+            if passed {
+                "SMOKE PASSED — this host can build and serve capsule snapshots."
+            } else {
+                "SMOKE FAILED — see the failing stage above."
+            }
         );
     }
     if passed {
@@ -527,7 +631,10 @@ mod tests {
     #[test]
     fn http_status_parse_is_strict() {
         assert_eq!(parse_http_status("HTTP/1.1 200 OK\r\n"), Some(200));
-        assert_eq!(parse_http_status("HTTP/1.0 404 Not Found\r\nX: y\r\n"), Some(404));
+        assert_eq!(
+            parse_http_status("HTTP/1.0 404 Not Found\r\nX: y\r\n"),
+            Some(404)
+        );
         assert_eq!(parse_http_status("garbage 200"), None);
         assert_eq!(parse_http_status(""), None);
     }

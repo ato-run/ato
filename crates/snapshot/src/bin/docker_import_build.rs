@@ -52,19 +52,29 @@ fn has_flag(flag: &str) -> bool {
 }
 
 fn fail(stage: &str, reason: String) -> ! {
-    eprintln!("{}", serde_json::json!({ "ok": false, "failure_stage": stage, "failure_reason": reason }));
+    eprintln!(
+        "{}",
+        serde_json::json!({ "ok": false, "failure_stage": stage, "failure_reason": reason })
+    );
     std::process::exit(1);
 }
 
 fn main() {
     let source = PathBuf::from(
-        arg(&["--source", "-s"]).unwrap_or_else(|| fail("args", "--source <checkout dir> required".into())),
+        arg(&["--source", "-s"])
+            .unwrap_or_else(|| fail("args", "--source <checkout dir> required".into())),
     );
-    let out = PathBuf::from(arg(&["--out", "-o"]).unwrap_or_else(|| fail("args", "--out <ext4> required".into())));
+    let out = PathBuf::from(
+        arg(&["--out", "-o"]).unwrap_or_else(|| fail("args", "--out <ext4> required".into())),
+    );
     let dockerfile = arg(&["--dockerfile"]).unwrap_or_else(|| "Dockerfile".to_string());
-    let size_mib: u64 = arg(&["--size-mib"]).and_then(|s| s.parse().ok()).unwrap_or(2048);
-    let port_override: Option<u16> = arg(&["--port"])
-        .map(|p| p.parse().unwrap_or_else(|_| fail("args", format!("--port {p:?} is not a u16"))));
+    let size_mib: u64 = arg(&["--size-mib"])
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2048);
+    let port_override: Option<u16> = arg(&["--port"]).map(|p| {
+        p.parse()
+            .unwrap_or_else(|_| fail("args", format!("--port {p:?} is not a u16")))
+    });
     let readiness_http_path = arg(&["--readiness-path"]);
     let policy = if has_flag("--convert-placeholder-secrets") {
         SecretEnvPolicy::ConvertPlaceholders
@@ -93,8 +103,8 @@ fn main() {
         size_mib,
     };
 
-    let outcome =
-        run_dockerfile_import(&SystemImportCommandRunner, &req).unwrap_or_else(|e| fail("import", e));
+    let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req)
+        .unwrap_or_else(|e| fail("import", e));
 
     println!(
         "{}",

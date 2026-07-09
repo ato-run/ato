@@ -792,7 +792,7 @@ pub(super) fn start_guest_session(
         ready_state_overlay_root: None,
         ready_state_session_id: None,
         ready_state_tap_dev: None,
-                ready_state_vsock_uds: None,
+        ready_state_vsock_uds: None,
     };
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
@@ -1156,7 +1156,7 @@ pub(super) fn start_runtime_session(
         ready_state_overlay_root: None,
         ready_state_session_id: None,
         ready_state_tap_dev: None,
-                ready_state_vsock_uds: None,
+        ready_state_vsock_uds: None,
     };
     let timer = PhaseStageTimer::start(HourglassPhase::Execute, "write_pid");
     process_manager.write_pid(&process_info)?;
@@ -1550,7 +1550,7 @@ pub(super) fn start_orchestration_session_in_process(
         ready_state_overlay_root: None,
         ready_state_session_id: None,
         ready_state_tap_dev: None,
-                ready_state_vsock_uds: None,
+        ready_state_vsock_uds: None,
     };
     process_manager.write_pid(&process_info)?;
 
@@ -1819,7 +1819,7 @@ pub(super) fn start_orchestration_session_supervisor(
         ready_state_overlay_root: None,
         ready_state_session_id: None,
         ready_state_tap_dev: None,
-                ready_state_vsock_uds: None,
+        ready_state_vsock_uds: None,
     };
     process_manager.write_pid(&process_info)?;
 

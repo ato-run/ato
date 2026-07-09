@@ -63,9 +63,7 @@ impl SnapshotBackend for QemuBackend {
         BackendCapabilities {
             backend_id: QEMU_BACKEND_ID.to_string(),
             available: false,
-            reason: Some(
-                "QemuBackend skeleton: build/restore not implemented yet".to_string(),
-            ),
+            reason: Some("QemuBackend skeleton: build/restore not implemented yet".to_string()),
             arch: std::env::consts::ARCH.to_string(),
             kvm_present: Self::kvm_present(),
             vmm_version: None,
@@ -100,10 +98,7 @@ impl SnapshotBackend for QemuBackend {
         Err(self.unsupported())
     }
 
-    fn restore(
-        &self,
-        _input: RestoreReadyStateInput<'_>,
-    ) -> Result<RestoreReceipt, SnapshotError> {
+    fn restore(&self, _input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError> {
         Err(self.unsupported())
     }
 
