@@ -1,0 +1,28 @@
+schema_version = "0.3"
+name = "ready-state-gpu-external"
+version = "0.1.0"
+type = "app"
+description = "Ready-State GPU posture (ELIGIBLE): the GPU is declared as a post-restore [external.*] capability, never sealed into the snapshot. 'GPU execution yes, GPU snapshot no.' The CPU app boots to a secret-free healthcheck and is sealed; the GPU is provisioned after restore. Classified by CapsuleManifest::gpu_mode() == External and instant_run_eligibility().eligible == true."
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run = "python serve.py"
+port = 8080
+
+[targets.app.readiness_probe]
+type = "http"
+path = "/health"
+
+[snapshot]
+mode = "warm"
+boot_until = "healthcheck"
+
+# GPU as an external capability — provisioned post-restore, not in the snapshot.
+[external.gpu]
+type = "gpu"
+required = false
+providers = ["managed_gpu_runner", "user_byok"]
+provision = "parallel"
+locality = "cloud"
+degraded = "demo"

@@ -1,0 +1,4 @@
+[
+  { "capsule_id": "example-static-http", "rootfs": "/home/ubuntu/bench/tiny-http.ext4", "healthcheck": "/health", "port": 8080, "target_label": "web" },
+  { "capsule_id": "example-python-web",  "rootfs": "/home/ubuntu/bench/light-python.ext4", "healthcheck": "/health", "port": 8080, "target_label": "web" }
+]
