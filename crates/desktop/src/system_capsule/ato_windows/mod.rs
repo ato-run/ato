@@ -117,8 +117,8 @@ pub fn dispatch(
                 cx.set_global(CardSwitcherWindowSlot(None));
                 cx.set_global(crate::window::card_switcher::CardSwitcherEntitySlot(None));
                 let _ = host.update(cx, |_, window, _| window.remove_window());
-                if let Err(err) = crate::window::start_window::open_start_window(cx) {
-                    tracing::error!(error = %err, "ato_windows: open_start_window failed");
+                if let Err(err) = crate::window::home::show_ato_home(cx) {
+                    tracing::error!(error = %err, "ato_windows: show_ato_home failed");
                 }
             });
         }

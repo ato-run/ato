@@ -378,6 +378,14 @@ pub struct ServiceSpec {
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
 
+    /// v1.5 per-service secret scoping (ato#982): the `[secrets.<name>]` this
+    /// service needs. A secret is delivered ONLY to the service(s) that name it
+    /// here (least privilege). `None`/empty ⇒ this service receives no secret. In a
+    /// multi-service capsule every REQUIRED secret must be named by at least one
+    /// service (fail-closed) — an unscoped required secret is a config error.
+    #[serde(default)]
+    pub secrets: Option<Vec<String>>,
+
     /// State requirements bound into this service at runtime.
     #[serde(default)]
     pub state_bindings: Vec<ServiceStateBinding>,
@@ -768,6 +776,35 @@ pub struct CapsuleManifest {
     /// requests by path prefix to upstream container services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress: Option<IngressConfig>,
+
+    /// Ready-State Capsule sealing/restore policy (`[snapshot]`).
+    ///
+    /// Parse-only in the current milestone. Absent or `mode = "none"` means the
+    /// legacy cold path. See [`super::ready_state`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<super::ready_state::SnapshotConfig>,
+
+    /// Required secrets declared as refs (`[secrets.<name>]`), never values.
+    ///
+    /// Resolved post-restore via the existing secret-injection path. Parse-only
+    /// in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub secrets: BTreeMap<String, super::ready_state::SecretSpec>,
+
+    /// Post-restore, user/billing/env-specific injections (`[bindings.<name>]`).
+    /// Parse-only in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub bindings: BTreeMap<String, super::ready_state::BindingSpec>,
+
+    /// Heavy external capabilities (`[external.<name>]`), max 3 for Public
+    /// Instant Run. Parse-only in the current milestone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub external: BTreeMap<String, super::ready_state::ExternalCapabilitySpec>,
+
+    /// User Context Store binding (`[context]`). Parse-only in the current
+    /// milestone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<super::ready_state::ContextConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1175,6 +1212,106 @@ pub struct StateRequirement {
     pub schema_id: Option<String>,
     #[serde(default)]
     pub sharing: StateSharing,
+    /// v1.6 (ato#983): the size of the durable backing volume a snapshot
+    /// service's `state_bindings` mounts for this state. `None` ⇒
+    /// [`DEFAULT_STATE_VOLUME_SIZE_MB`]. Not used on the OCI/container path
+    /// (a host-path bind mount has no fixed size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_mb: Option<u32>,
+}
+
+/// v1.6 (ato#983): default size (MiB) of a snapshot durable-state backing
+/// volume when `[state.<name>].size_mb` is omitted.
+pub const DEFAULT_STATE_VOLUME_SIZE_MB: u32 = 2048;
+/// v1.6 (ato#983): smallest accepted `size_mb` — guards against a
+/// practically-useless (or accidentally zero) backing volume.
+pub const MIN_STATE_VOLUME_SIZE_MB: u32 = 64;
+/// v1.6 (ato#983): largest accepted `size_mb` (64 GiB) — a fail-closed
+/// ceiling so a typo'd or attacker-controlled manifest can't make the
+/// snapshot builder (a later slice) allocate an unbounded sparse file on the
+/// host. Documented as tunable later if a real workload needs more.
+pub const MAX_STATE_VOLUME_SIZE_MB: u32 = 65_536;
+
+/// v1.6 (ato#983): validate a snapshot durable-volume `state_bindings.target`
+/// and return its LEXICALLY NORMALIZED form. Both the manifest validator
+/// (`manifest_validation.rs`, a private submodule of this one) and the
+/// snapshot builder (`crates/snapshot`, via this `pub` function) call this
+/// exact logic, so a target is judged identically at both layers and every
+/// downstream duplicate/overlap comparison and the build receipt itself use
+/// the same normalized string — never the raw manifest value.
+///
+/// Rules (no filesystem access — the path need not exist yet):
+/// - must be absolute POSIX (`Path::is_absolute`);
+/// - every component must be `RootDir` or `Normal` — a `CurDir` (`.`),
+///   `ParentDir` (`..`), or `Prefix` (Windows-style) component is rejected;
+/// - the normalized form is `/` + normal components joined by `/` (no
+///   trailing slash, no repeated slashes — so `/ato/state/db/` and
+///   `/ato/state//db` both normalize to `/ato/state/db`);
+/// - must be strictly under `/ato/state/` (component-wise via
+///   `Path::starts_with`, not a string prefix — `/ato/state-evil` is
+///   rejected) and must not be exactly `/ato/state` itself (a real subpath is
+///   required).
+///
+/// v1.6 MVP deliberately restricts every durable mount to under
+/// `/ato/state/` rather than allowing an arbitrary in-guest path: a single
+/// microVM shares one filesystem across every service, so an unrestricted
+/// mount target could shadow `/app`, `/etc`, `/tmp`, or another service's
+/// files. An app that needs a specific env var (e.g. Postgres `PGDATA`) can
+/// point it at a path under `/ato/state/` instead.
+pub fn validate_and_normalize_state_mount_target(raw: &str) -> Result<String, String> {
+    // A mount target names a path INSIDE the Linux guest microVM — always
+    // POSIX-style, regardless of the platform this validator itself runs on
+    // (a builder host). Parsed manually as a plain string rather than via
+    // `std::path::Path`: on Windows, `Path::new("/ato/state/x").is_absolute()`
+    // is FALSE (Windows absolute paths need a drive letter/UNC prefix), which
+    // would wrongly reject every legitimate guest path when this validator
+    // (or its tests) run on a non-Linux host.
+    if !raw.starts_with('/') {
+        return Err(format!("mount target '{raw}' must be an absolute path"));
+    }
+    let mut normal_parts: Vec<&str> = Vec::new();
+    for component in raw.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                return Err(format!(
+                    "mount target '{raw}' must be a plain absolute path (no '.', '..', or drive prefix)"
+                ));
+            }
+            part => normal_parts.push(part),
+        }
+    }
+    let normalized = format!("/{}", normal_parts.join("/"));
+    const STATE_ROOT: &str = "/ato/state";
+    if normalized == STATE_ROOT {
+        return Err(format!(
+            "mount target '{raw}' must be a subpath under '{STATE_ROOT}/', not '{STATE_ROOT}' itself"
+        ));
+    }
+    if !Path::new(&normalized).starts_with(STATE_ROOT) {
+        return Err(format!(
+            "mount target '{raw}' must be under '{STATE_ROOT}/' (single-VM snapshots restrict durable \
+             mounts to this prefix to avoid shadowing app/system paths)"
+        ));
+    }
+    Ok(normalized)
+}
+
+/// v1.6 (ato#983): validate a `[state.<name>].size_mb` against the shared
+/// bounds. `None` ⇒ [`DEFAULT_STATE_VOLUME_SIZE_MB`]. Shared by the manifest
+/// validator and the snapshot builder so both enforce the identical range.
+pub fn validate_state_volume_size_mb(
+    state_name: &str,
+    size_mb: Option<u32>,
+) -> Result<u32, String> {
+    let size = size_mb.unwrap_or(DEFAULT_STATE_VOLUME_SIZE_MB);
+    if !(MIN_STATE_VOLUME_SIZE_MB..=MAX_STATE_VOLUME_SIZE_MB).contains(&size) {
+        return Err(format!(
+            "state '{state_name}': size_mb {size} is out of range \
+             ({MIN_STATE_VOLUME_SIZE_MB}..={MAX_STATE_VOLUME_SIZE_MB})"
+        ));
+    }
+    Ok(size)
 }
 
 /// Human-readable metadata

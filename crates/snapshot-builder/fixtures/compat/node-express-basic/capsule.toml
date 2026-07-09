@@ -1,0 +1,12 @@
+# v1 compat: node with a package.json dependency — exercises the npm install path.
+schema_version = "0.3"
+name = "compat-node-express-basic"
+version = "0.1.0"
+type = "app"
+default_target = "web"
+
+[targets.web]
+runtime = "source"
+run = "node server.js"
+port = 8080
+readiness_probe = { http_get = "/health" }

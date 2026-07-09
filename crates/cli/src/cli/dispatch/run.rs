@@ -142,6 +142,18 @@ pub(crate) fn execute_run_like_command(args: RunLikeCommandArgs) -> Result<()> {
             .map(|_| ());
     }
 
+    // Explicit Desktop Runner selection (developer-preview, macOS Apple
+    // Containerization). The default `ato run` path is unchanged — this early
+    // return fires ONLY when ATO_DESKTOP_RUNNER_EXECUTE / ATO_RUN_PROVIDER=desktop
+    // is set. Fail-closed: binding-required and non-OCI capsules are rejected
+    // before any container starts (MacBook M3).
+    if crate::application::desktop_runner::execute::is_explicitly_selected() {
+        return crate::application::desktop_runner::execute::run_selected(
+            &args.path,
+            args.target.as_deref(),
+        );
+    }
+
     let sandbox_requested =
         args.sandbox_mode || args.unsafe_mode_legacy || args.unsafe_bypass_sandbox_legacy;
     let effective_enforcement = enforce_sandbox_mode_flags(
