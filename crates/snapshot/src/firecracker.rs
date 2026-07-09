@@ -38,6 +38,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -50,6 +51,7 @@ use capsulefs::{
 };
 use serde_json::json;
 
+#[cfg(unix)]
 use crate::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT};
 #[cfg(test)]
 use crate::backend::BuildLayers;
@@ -67,6 +69,7 @@ use crate::manifest::{
     SupervisorBuildReceipt,
 };
 use crate::scanner;
+#[cfg(unix)]
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
@@ -827,6 +830,19 @@ impl FirecrackerBackend {
     /// (retrying while the guest boots) and deliver every placeholder lease, then
     /// poll bound-ready. The agent starts the workload at bound-ready, so the
     /// caller's `wait_health` right after this is the placeholder health-verify.
+    ///
+    /// Unix-only (the guest-agent channel is a Firecracker vsock UDS, which does
+    /// not exist on Windows); the non-unix stub fails closed like `fc_request`.
+    #[cfg(not(unix))]
+    fn supervisor_deliver_placeholders(
+        &self,
+        _uds: &Path,
+        _drive: &SupervisorDrive,
+    ) -> Result<(), SnapshotError> {
+        Err(self.backend_err("Firecracker supervisor drive is only supported on Unix hosts"))
+    }
+
+    #[cfg(unix)]
     fn supervisor_deliver_placeholders(
         &self,
         uds: &Path,
@@ -882,6 +898,18 @@ impl FirecrackerBackend {
     /// `Revoke` every placeholder lease (tmpfs scrub, ack'd) — so the snapshot is
     /// taken with the workload down and no binding material in guest tmpfs. Order
     /// is contract-fixed: StopWorkload FIRST, then Revoke (binding_control §v1.2).
+    ///
+    /// Unix-only (vsock UDS); non-unix stub fails closed as above.
+    #[cfg(not(unix))]
+    fn supervisor_stop_and_revoke(
+        &self,
+        _uds: &Path,
+        _drive: &SupervisorDrive,
+    ) -> Result<(), SnapshotError> {
+        Err(self.backend_err("Firecracker supervisor drive is only supported on Unix hosts"))
+    }
+
+    #[cfg(unix)]
     fn supervisor_stop_and_revoke(
         &self,
         uds: &Path,
@@ -966,6 +994,14 @@ impl FirecrackerBackend {
     /// guest-agent reachable" — and, fail-closed, the agent must report NOT
     /// bound-ready: a bound-ready session straight out of restore means binding
     /// state survived the seal (a pre-bind-seal violation), never expose it.
+    ///
+    /// Unix-only (vsock UDS); non-unix stub fails closed as above.
+    #[cfg(not(unix))]
+    fn probe_restored_agent_unbound(&self, _uds: &Path) -> Result<(), SnapshotError> {
+        Err(self.backend_err("Firecracker supervisor restore is only supported on Unix hosts"))
+    }
+
+    #[cfg(unix)]
     fn probe_restored_agent_unbound(&self, uds: &Path) -> Result<(), SnapshotError> {
         let mut ch = FirecrackerAgentChannel::connect_with_retry(
             uds,
@@ -1252,6 +1288,22 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+// Firecracker's own API is a Unix socket (it does not run on Windows at all);
+// the non-unix stub exists only so the crate compiles cross-platform, matching
+// `ensure_private_dir`'s established fail-closed-at-runtime pattern above.
+#[cfg(not(unix))]
+fn fc_request(
+    _sock: &Path,
+    _method: &str,
+    _path: &str,
+    _body: Option<&str>,
+) -> std::io::Result<(u16, String)> {
+    Err(std::io::Error::other(
+        "Firecracker is only supported on Unix hosts",
+    ))
+}
+
+#[cfg(unix)]
 fn fc_request(
     sock: &Path,
     method: &str,
@@ -3146,5 +3198,6 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// KVM/Firecracker is a Unix-only concept (does not exist on Windows at all).
+#[cfg(all(test, unix))]
 mod kvm_tests;
