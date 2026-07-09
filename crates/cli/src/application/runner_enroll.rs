@@ -55,22 +55,30 @@ pub(crate) async fn run_enroll(opts: EnrollOptions) -> Result<()> {
     write_runner_env(&creds, opts.public_base_url.as_deref());
 
     // 4. Verify the runner can reach the control plane AND is active.
-    let view = fetch_self(&creds)
-        .await
-        .context("control-plane reachability check failed (is GET /v1/runners/:id/self deployed?)")?;
+    let view = fetch_self(&creds).await.context(
+        "control-plane reachability check failed (is GET /v1/runners/:id/self deployed?)",
+    )?;
     println!(
         "✅ Control plane reachable — runner {} status={} online={}",
         view.id, view.status, view.online
     );
     if view.status != "active" {
-        bail!("runner registered but status is {:?} (expected active)", view.status);
+        bail!(
+            "runner registered but status is {:?} (expected active)",
+            view.status
+        );
     }
     // Whether restore_snapshot will be advertised is a LOCAL host-capability question
     // (KVM + Firecracker), decided by the serve loop's first heartbeat — not by /self,
     // which is read here BEFORE that heartbeat and so still shows the registration
     // default. Check the local advertisement instead of a stale control-plane view.
-    if advertised_lease_kinds().iter().any(|k| k == "restore_snapshot") {
-        println!("• this host advertises restore_snapshot (snapshot runs can dispatch here once serving)");
+    if advertised_lease_kinds()
+        .iter()
+        .any(|k| k == "restore_snapshot")
+    {
+        println!(
+            "• this host advertises restore_snapshot (snapshot runs can dispatch here once serving)"
+        );
     } else {
         eprintln!(
             "⚠️  this host will NOT advertise restore_snapshot (KVM/Firecracker not ready). Run `ato doctor runner`; snapshot runs will not dispatch here until it does."
@@ -81,7 +89,9 @@ pub(crate) async fn run_enroll(opts: EnrollOptions) -> Result<()> {
     if opts.start {
         start_runner_service()?;
     } else {
-        println!("Next: sudo systemctl enable --now {RUNNER_UNIT}   (or re-run enroll with --start)");
+        println!(
+            "Next: sudo systemctl enable --now {RUNNER_UNIT}   (or re-run enroll with --start)"
+        );
         println!("Then: ato runner status");
     }
     Ok(())
@@ -146,14 +156,19 @@ fn write_runner_env(creds: &RunnerCredentials, public_base_url: Option<&str>) {
         (runner_agent::ENV_RUNNER_API_URL, creds.api_base.clone()),
         (runner_agent::ENV_RUNNER_ID, creds.runner_id.clone()),
         (runner_agent::ENV_RUNNER_TOKEN, creds.runner_token.clone()),
-        (runner_agent::ENV_RUNNER_DISPLAY_NAME, creds.display_name.clone()),
+        (
+            runner_agent::ENV_RUNNER_DISPLAY_NAME,
+            creds.display_name.clone(),
+        ),
     ];
     if let Some(url) = public_base_url {
         set.push(("ATO_RUNNER_PUBLIC_BASE_URL", url.to_string()));
     }
     // Tuning keys — never clobber an operator/bootstrap value.
-    let append: Vec<(&str, String)> =
-        vec![("ATO_SNAPSHOT_ARTIFACT_ROOT", checks::resolve_artifact_root())];
+    let append: Vec<(&str, String)> = vec![(
+        "ATO_SNAPSHOT_ARTIFACT_ROOT",
+        checks::resolve_artifact_root(),
+    )];
 
     let new_text = upsert_env_text(&existing_text, &set, &append);
     if new_text == existing_text {
@@ -233,7 +248,11 @@ fn write_env_secure(path: &Path, content: &str) -> Result<Option<std::path::Path
         backup = Some(bak);
     }
     // Write to a 0600 temp beside the target, then atomically rename into place.
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let file_name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let tmp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
     {
         use std::io::Write as _;
@@ -374,11 +393,30 @@ pub(crate) async fn run_status(json: bool) -> Result<()> {
             println!("Control plane:");
             println!("  status:            {}", v.status);
             println!("  online:            {}", v.online);
-            println!("  last seen:         {}", v.last_seen_at.as_deref().unwrap_or("never"));
-            println!("  public base url:   {}", v.public_base_url.as_deref().unwrap_or("(none — apps reachable on this host only)"));
-            println!("  supported kinds:   {}", v.supported_lease_kinds.join(", "));
-            println!("  max slots:         {}", v.max_slots.map(|n| n.to_string()).unwrap_or_else(|| "1".into()));
-            let restore = v.supported_lease_kinds.iter().any(|k| k == "restore_snapshot");
+            println!(
+                "  last seen:         {}",
+                v.last_seen_at.as_deref().unwrap_or("never")
+            );
+            println!(
+                "  public base url:   {}",
+                v.public_base_url
+                    .as_deref()
+                    .unwrap_or("(none — apps reachable on this host only)")
+            );
+            println!(
+                "  supported kinds:   {}",
+                v.supported_lease_kinds.join(", ")
+            );
+            println!(
+                "  max slots:         {}",
+                v.max_slots
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "1".into())
+            );
+            let restore = v
+                .supported_lease_kinds
+                .iter()
+                .any(|k| k == "restore_snapshot");
             println!();
             println!(
                 "  {} snapshot runs {} dispatch here",
@@ -387,7 +425,9 @@ pub(crate) async fn run_status(json: bool) -> Result<()> {
             );
         }
         None if creds.is_some() => {
-            println!("Control plane: UNREACHABLE (check ATO_API_URL / network / that GET /v1/runners/:id/self is deployed)");
+            println!(
+                "Control plane: UNREACHABLE (check ATO_API_URL / network / that GET /v1/runners/:id/self is deployed)"
+            );
         }
         None => {}
     }
@@ -400,20 +440,42 @@ mod tests {
     use std::collections::BTreeMap;
 
     /// Mirror write_runner_env's key split for the tests.
-    fn upsert(existing: &str, api: &str, id: &str, token: &str, name: &str, pub_url: Option<&str>, root: &str) -> String {
+    fn upsert(
+        existing: &str,
+        api: &str,
+        id: &str,
+        token: &str,
+        name: &str,
+        pub_url: Option<&str>,
+        root: &str,
+    ) -> String {
         let mut set: Vec<(&str, String)> = vec![
             (runner_agent::ENV_RUNNER_API_URL, api.into()),
             (runner_agent::ENV_RUNNER_ID, id.into()),
             (runner_agent::ENV_RUNNER_TOKEN, token.into()),
             (runner_agent::ENV_RUNNER_DISPLAY_NAME, name.into()),
         ];
-        if let Some(u) = pub_url { set.push(("ATO_RUNNER_PUBLIC_BASE_URL", u.into())); }
-        upsert_env_text(existing, &set, &[("ATO_SNAPSHOT_ARTIFACT_ROOT", root.into())])
+        if let Some(u) = pub_url {
+            set.push(("ATO_RUNNER_PUBLIC_BASE_URL", u.into()));
+        }
+        upsert_env_text(
+            existing,
+            &set,
+            &[("ATO_SNAPSHOT_ARTIFACT_ROOT", root.into())],
+        )
     }
 
     #[test]
     fn env_upsert_writes_identity_keys_on_a_fresh_file() {
-        let out = upsert("", "https://api.ato.run", "runner_1", "ato_rnr_secret", "my-host", Some("https://runner.example.com"), "/var/lib/ato/snapshots");
+        let out = upsert(
+            "",
+            "https://api.ato.run",
+            "runner_1",
+            "ato_rnr_secret",
+            "my-host",
+            Some("https://runner.example.com"),
+            "/var/lib/ato/snapshots",
+        );
         for want in [
             "ATO_API_URL=https://api.ato.run",
             "ATO_RUNNER_ID=runner_1",
@@ -431,20 +493,53 @@ mod tests {
         // setup seeded ATO_API_URL with the prod default + an operator artifact root +
         // a builder token; enroll must OVERRIDE the endpoint it owns but leave the rest.
         let existing = "# header\nATO_API_URL=https://api.ato.run\nSNAPSHOT_BUILDER_AGENT_TOKEN=builder-secret\nATO_SNAPSHOT_ARTIFACT_ROOT=/srv/snap\n";
-        let out = upsert(existing, "http://127.0.0.1:8787", "runner_1", "ato_rnr_secret", "my-host", None, "/var/lib/ato/snapshots");
+        let out = upsert(
+            existing,
+            "http://127.0.0.1:8787",
+            "runner_1",
+            "ato_rnr_secret",
+            "my-host",
+            None,
+            "/var/lib/ato/snapshots",
+        );
         // Endpoint replaced IN PLACE (exactly once) with enroll's --api-url.
-        assert_eq!(out.lines().filter(|l| l.starts_with("ATO_API_URL=")).count(), 1);
-        assert!(out.lines().any(|l| l == "ATO_API_URL=http://127.0.0.1:8787"));
+        assert_eq!(
+            out.lines()
+                .filter(|l| l.starts_with("ATO_API_URL="))
+                .count(),
+            1
+        );
+        assert!(
+            out.lines()
+                .any(|l| l == "ATO_API_URL=http://127.0.0.1:8787")
+        );
         assert!(!out.contains("ATO_API_URL=https://api.ato.run"));
         // Operator tuning keys untouched.
-        assert!(out.lines().any(|l| l == "SNAPSHOT_BUILDER_AGENT_TOKEN=builder-secret"));
-        assert!(out.lines().any(|l| l == "ATO_SNAPSHOT_ARTIFACT_ROOT=/srv/snap"));
+        assert!(
+            out.lines()
+                .any(|l| l == "SNAPSHOT_BUILDER_AGENT_TOKEN=builder-secret")
+        );
+        assert!(
+            out.lines()
+                .any(|l| l == "ATO_SNAPSHOT_ARTIFACT_ROOT=/srv/snap")
+        );
         assert!(!out.contains("/var/lib/ato/snapshots")); // append-only key not re-added
         // Comment preserved; token appended.
         assert!(out.starts_with("# header\n"));
         assert!(out.lines().any(|l| l == "ATO_RUNNER_TOKEN=ato_rnr_secret"));
         // A re-run with the same values is idempotent (no further change).
-        assert_eq!(upsert(&out, "http://127.0.0.1:8787", "runner_1", "ato_rnr_secret", "my-host", None, "/var/lib/ato/snapshots"), out);
+        assert_eq!(
+            upsert(
+                &out,
+                "http://127.0.0.1:8787",
+                "runner_1",
+                "ato_rnr_secret",
+                "my-host",
+                None,
+                "/var/lib/ato/snapshots"
+            ),
+            out
+        );
     }
 
     #[test]
@@ -458,19 +553,27 @@ mod tests {
         assert!(write_env_secure(&path, "A=1\n").unwrap().is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\n");
         #[cfg(unix)]
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         // Simulate a pre-existing file left WORLD-READABLE by setup (0644) holding a
         // token: enroll must back it up AND leave the backup 0600 (no token leak), and
         // the replaced file is 0600.
         #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let bak = write_env_secure(&path, "A=1\nB=2\n").unwrap().expect("backup expected");
+        let bak = write_env_secure(&path, "A=1\nB=2\n")
+            .unwrap()
+            .expect("backup expected");
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), "A=1\n"); // original preserved
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\nB=2\n");
         #[cfg(unix)]
         {
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
             assert_eq!(
                 std::fs::metadata(&bak).unwrap().permissions().mode() & 0o077,
                 0,
@@ -492,7 +595,13 @@ mod tests {
         let parsed: SelfResponse = serde_json::from_str(body).unwrap();
         assert_eq!(parsed.runner.id, "r1");
         assert!(parsed.runner.online);
-        assert!(parsed.runner.supported_lease_kinds.iter().any(|k| k == "restore_snapshot"));
+        assert!(
+            parsed
+                .runner
+                .supported_lease_kinds
+                .iter()
+                .any(|k| k == "restore_snapshot")
+        );
         assert_eq!(parsed.runner.max_slots, Some(3));
     }
 }

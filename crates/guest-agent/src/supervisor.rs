@@ -154,7 +154,10 @@ impl ServiceSpec {
     /// Fail-closed per-service validation (see [`SupervisorConfig::validate`]).
     fn validate(&self) -> Result<(), String> {
         if self.cmd.is_empty() {
-            return Err(format!("supervisor.json: service {:?} has empty `cmd`", self.name));
+            return Err(format!(
+                "supervisor.json: service {:?} has empty `cmd`",
+                self.name
+            ));
         }
         if self.name.trim().is_empty() {
             return Err("supervisor.json: a service has an empty `name`".into());
@@ -175,7 +178,10 @@ impl ServiceSpec {
                 ));
             }
             BindingName::parse(binding.as_str()).map_err(|e| {
-                format!("supervisor.json: service {:?} invalid binding name {binding:?}: {e}", self.name)
+                format!(
+                    "supervisor.json: service {:?} invalid binding name {binding:?}: {e}",
+                    self.name
+                )
             })?;
         }
         Ok(())
@@ -236,7 +242,10 @@ impl SupervisorConfig {
         for svc in &services {
             svc.validate()?;
             if !seen.insert(svc.name.clone()) {
-                return Err(format!("supervisor.json: duplicate service name {:?}", svc.name));
+                return Err(format!(
+                    "supervisor.json: duplicate service name {:?}",
+                    svc.name
+                ));
             }
         }
         // v1.5 readiness graph: `depends_on` must reference declared services, must
@@ -259,18 +268,30 @@ impl SupervisorConfig {
                 return Err("supervisor.json: a volume has an empty state_name".into());
             }
             if vol.fs_label.trim().is_empty() {
-                return Err(format!("supervisor.json: volume {:?} has an empty fs_label", vol.state_name));
+                return Err(format!(
+                    "supervisor.json: volume {:?} has an empty fs_label",
+                    vol.state_name
+                ));
             }
             if !seen_states.insert(vol.state_name.clone()) {
-                return Err(format!("supervisor.json: duplicate volume state_name {:?}", vol.state_name));
+                return Err(format!(
+                    "supervisor.json: duplicate volume state_name {:?}",
+                    vol.state_name
+                ));
             }
             if !seen_labels.insert(vol.fs_label.clone()) {
-                return Err(format!("supervisor.json: duplicate volume fs_label {:?}", vol.fs_label));
+                return Err(format!(
+                    "supervisor.json: duplicate volume fs_label {:?}",
+                    vol.fs_label
+                ));
             }
             let target = crate::volume_mount::validate_mount_target(&vol.target)
                 .map_err(|e| format!("supervisor.json: volume {:?}: {e}", vol.state_name))?;
             for prev in &targets {
-                if *prev == target || prev.starts_with(&target) || target.starts_with(prev.as_path()) {
+                if *prev == target
+                    || prev.starts_with(&target)
+                    || target.starts_with(prev.as_path())
+                {
                     return Err(format!(
                         "supervisor.json: volume {:?} target {} conflicts with another volume's \
                          target {} — targets must not be identical or nested under one another",
@@ -298,7 +319,10 @@ impl SupervisorConfig {
         for svc in &services {
             for d in &svc.depends_on {
                 if d == &svc.name {
-                    return Err(format!("supervisor.json: service {:?} depends on itself", svc.name));
+                    return Err(format!(
+                        "supervisor.json: service {:?} depends on itself",
+                        svc.name
+                    ));
                 }
                 if !names.contains(d) {
                     return Err(format!(
@@ -320,7 +344,11 @@ impl SupervisorConfig {
         ) -> Result<(), String> {
             match state.get(n).copied().unwrap_or(0) {
                 2 => return Ok(()),
-                1 => return Err(format!("supervisor.json: dependency cycle involving service {n:?}")),
+                1 => {
+                    return Err(format!(
+                        "supervisor.json: dependency cycle involving service {n:?}"
+                    ));
+                }
                 _ => {}
             }
             state.insert(n.to_string(), 1);
@@ -399,7 +427,10 @@ pub fn plan_spawn(config: &SupervisorConfig, bindings_root: &Path) -> std::io::R
 
 /// Plan the spawn for ONE service (v1.5). Verifies each binding file EXISTS
 /// (fail-closed — never start half-bound) without reading its contents.
-pub fn plan_spawn_service(service: &ServiceSpec, bindings_root: &Path) -> std::io::Result<SpawnPlan> {
+pub fn plan_spawn_service(
+    service: &ServiceSpec,
+    bindings_root: &Path,
+) -> std::io::Result<SpawnPlan> {
     service
         .validate()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
@@ -442,7 +473,10 @@ pub fn service_log_dir() -> PathBuf {
 /// also PATH-safe (no `/`, `.`, or `..` component), so it cannot escape the dir.
 pub fn service_log_paths(name: &str) -> (PathBuf, PathBuf) {
     let dir = service_log_dir();
-    (dir.join(format!("{name}.stdout.log")), dir.join(format!("{name}.stderr.log")))
+    (
+        dir.join(format!("{name}.stdout.log")),
+        dir.join(format!("{name}.stderr.log")),
+    )
 }
 
 /// POSIX single-quote a string for safe embedding in an `sh -c` script.
@@ -614,7 +648,9 @@ impl ReadinessProbe for TcpReadinessProbe {
     fn is_ready(&self, spec: &ReadinessSpec) -> bool {
         use std::io::{Read, Write};
         let addr = format!("127.0.0.1:{}", spec.port);
-        let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>() else { return false };
+        let Ok(sockaddr) = addr.parse::<std::net::SocketAddr>() else {
+            return false;
+        };
         let Ok(mut stream) =
             std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_millis(500))
         else {
@@ -623,7 +659,11 @@ impl ReadinessProbe for TcpReadinessProbe {
         let Some(path) = &spec.http_path else {
             return true; // TCP accept is enough.
         };
-        let p = if path.starts_with('/') { path.clone() } else { format!("/{path}") };
+        let p = if path.starts_with('/') {
+            path.clone()
+        } else {
+            format!("/{path}")
+        };
         let req = format!("GET {p} HTTP/1.0\r\nHost: ato-readiness\r\n\r\n");
         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
         let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
@@ -855,7 +895,10 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.cmd, vec!["python3", "app.py"]);
         assert_eq!(cfg.cwd, "/app"); // default
-        assert_eq!(cfg.bindings_env.get("OPENAI_API_KEY").map(String::as_str), Some("openai"));
+        assert_eq!(
+            cfg.bindings_env.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai")
+        );
         assert!(SupervisorConfig::from_json(r#"{"cmd":[]}"#).is_err());
         assert!(SupervisorConfig::from_json("not json").is_err());
     }
@@ -896,7 +939,9 @@ mod tests {
         // services + top-level cmd (existing).
         bad(r#"{"cmd":["a"],"services":[{"cmd":["b"]}]}"#);
         // services + top-level bindings_env → MUST reject (dropped secret).
-        bad(r#"{"services":[{"name":"api","cmd":["python3","api.py"]}],"bindings_env":{"OPENAI_API_KEY":"openai_api_key"}}"#);
+        bad(
+            r#"{"services":[{"name":"api","cmd":["python3","api.py"]}],"bindings_env":{"OPENAI_API_KEY":"openai_api_key"}}"#,
+        );
         // services + top-level base_env → MUST reject.
         bad(r#"{"services":[{"name":"api","cmd":["a"]}],"base_env":{"NODE_ENV":"production"}}"#);
         // services-only → accepted.
@@ -927,15 +972,22 @@ mod tests {
         let err = plan_spawn(&multi, dir.path()).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         // A single-service `services` list is still plannable via the legacy entry.
-        let one = SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["true"]}]}"#).unwrap();
+        let one =
+            SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["true"]}]}"#).unwrap();
         assert!(plan_spawn(&one, dir.path()).is_ok());
     }
 
     #[test]
     fn config_rejects_neither_shape_and_duplicate_names() {
         // Neither → rejected.
-        assert!(SupervisorConfig::from_json(r#"{}"#).is_err(), "empty config rejected");
-        assert!(SupervisorConfig::from_json(r#"{"services":[]}"#).is_err(), "empty services rejected");
+        assert!(
+            SupervisorConfig::from_json(r#"{}"#).is_err(),
+            "empty config rejected"
+        );
+        assert!(
+            SupervisorConfig::from_json(r#"{"services":[]}"#).is_err(),
+            "empty services rejected"
+        );
         // A service with empty cmd → rejected.
         assert!(
             SupervisorConfig::from_json(r#"{"services":[{"cmd":[]}]}"#).is_err(),
@@ -1094,7 +1146,10 @@ mod tests {
         let st = fake.0.clone();
         let mut sup = Supervisor::new(cfg, dir.path(), move || fake.clone());
 
-        assert!(sup.on_bound_ready(true).is_err(), "missing binding fails the group");
+        assert!(
+            sup.on_bound_ready(true).is_err(),
+            "missing binding fails the group"
+        );
         assert!(!sup.is_running(), "the started service was rolled back");
         assert!(!sup.started(), "group is not marked started");
         assert_eq!(*st.live.borrow(), 0, "no service left running");
@@ -1124,7 +1179,10 @@ mod tests {
             let (out, _) = service_log_paths(name);
             assert_eq!(out.parent().unwrap(), dir);
             let file = out.file_name().unwrap().to_string_lossy();
-            assert!(!file.contains('/') && file != ".." && file != ".", "path-safe: {file}");
+            assert!(
+                !file.contains('/') && file != ".." && file != ".",
+                "path-safe: {file}"
+            );
         }
     }
 
@@ -1142,11 +1200,22 @@ mod tests {
             readiness: None,
         };
         let plan = plan_spawn_service(&api, dir.path()).unwrap();
-        assert!(plan.stdout_log.to_string_lossy().ends_with("api.stdout.log"));
-        assert!(plan.stderr_log.to_string_lossy().ends_with("api.stderr.log"));
+        assert!(
+            plan.stdout_log
+                .to_string_lossy()
+                .ends_with("api.stdout.log")
+        );
+        assert!(
+            plan.stderr_log
+                .to_string_lossy()
+                .ends_with("api.stderr.log")
+        );
         // The plan (which is what feeds the spawn) never carries the secret VALUE —
         // only the tmpfs path. A reported diagnostic built from the plan is clean.
-        assert!(!format!("{plan:?}").contains("sk-SECRET-VALUE"), "plan carries no value");
+        assert!(
+            !format!("{plan:?}").contains("sk-SECRET-VALUE"),
+            "plan carries no value"
+        );
     }
 
     #[test]
@@ -1174,9 +1243,18 @@ mod tests {
         }
         let out = std::fs::read_to_string(&plan.stdout_log).unwrap_or_default();
         let err = std::fs::read_to_string(&plan.stderr_log).unwrap_or_default();
-        assert!(out.contains("OUT"), "stdout in the service's stdout log: {out:?}");
-        assert!(err.contains("ERR"), "stderr in the service's stderr log: {err:?}");
-        assert!(!out.contains("ERR"), "stderr must NOT leak into the stdout log");
+        assert!(
+            out.contains("OUT"),
+            "stdout in the service's stdout log: {out:?}"
+        );
+        assert!(
+            err.contains("ERR"),
+            "stderr in the service's stderr log: {err:?}"
+        );
+        assert!(
+            !out.contains("ERR"),
+            "stderr must NOT leak into the stdout log"
+        );
         let _ = w.stop();
         let _ = std::fs::remove_file(&plan.stdout_log);
         let _ = std::fs::remove_file(&plan.stderr_log);
@@ -1199,12 +1277,16 @@ mod tests {
                 false
             }
         }
-        let cfg =
-            SupervisorConfig::from_json(r#"{"services":[{"name":"redis","cmd":["redis-server"]}]}"#)
-                .unwrap();
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[{"name":"redis","cmd":["redis-server"]}]}"#,
+        )
+        .unwrap();
         let mut sup = Supervisor::new(cfg, dir.path(), FailWorkload::default);
         let err = sup.on_bound_ready(true).unwrap_err();
-        assert!(err.to_string().contains("service 'redis'"), "names the failed service: {err}");
+        assert!(
+            err.to_string().contains("service 'redis'"),
+            "names the failed service: {err}"
+        );
     }
 
     // ── v1.5 (ato#973): readiness graph — dependency-ordered start + wait ──
@@ -1222,23 +1304,29 @@ mod tests {
         assert_eq!(cfg.start_order().unwrap(), vec!["redis", "api"]);
 
         // Unknown dependency → rejected at parse (validate calls start_order).
-        assert!(SupervisorConfig::from_json(
-            r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["ghost"]}]}"#
-        )
-        .is_err());
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["ghost"]}]}"#
+            )
+            .is_err()
+        );
         // Self dependency → rejected.
-        assert!(SupervisorConfig::from_json(
-            r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["api"]}]}"#
-        )
-        .is_err());
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"api","cmd":["true"],"depends_on":["api"]}]}"#
+            )
+            .is_err()
+        );
         // Cycle → rejected.
-        assert!(SupervisorConfig::from_json(
-            r#"{"services":[
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[
                 {"name":"a","cmd":["true"],"depends_on":["b"]},
                 {"name":"b","cmd":["true"],"depends_on":["a"]}
             ]}"#
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1257,14 +1345,21 @@ mod tests {
         let st = fake.0.clone();
         let probe = FakeProbe::ready_after(6379, 3);
         let pst = probe.0.clone();
-        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+        let mut sup = fast_readiness(
+            Supervisor::new(cfg, dir.path(), move || fake.clone()),
+            probe,
+        );
 
         assert!(sup.on_bound_ready(true).unwrap());
         // Both started, redis before api (topological).
         let starts = st.starts.borrow();
         assert_eq!(starts.len(), 2);
         assert_eq!(starts[0].cmd, vec!["redis"], "redis starts first");
-        assert_eq!(starts[1].cmd, vec!["api"], "api starts after redis is ready");
+        assert_eq!(
+            starts[1].cmd,
+            vec!["api"],
+            "api starts after redis is ready"
+        );
         // The probe was polled until redis answered (≥ the countdown of 3 + the
         // final success = 4).
         assert!(pst.borrow().calls.iter().filter(|p| **p == 6379).count() >= 4);
@@ -1284,7 +1379,10 @@ mod tests {
         let st = fake.0.clone();
         // Never ready → the readiness wait times out and the group rolls back.
         let probe = FakeProbe::ready_after(6379, i32::MAX);
-        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+        let mut sup = fast_readiness(
+            Supervisor::new(cfg, dir.path(), move || fake.clone()),
+            probe,
+        );
 
         let err = sup.on_bound_ready(true).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
@@ -1292,7 +1390,12 @@ mod tests {
         assert!(!sup.started());
         assert_eq!(*st.live.borrow(), 0);
         // api NEVER started (its dependency never became ready).
-        assert!(st.starts.borrow().iter().all(|p| p.cmd != vec!["api".to_string()]));
+        assert!(
+            st.starts
+                .borrow()
+                .iter()
+                .all(|p| p.cmd != vec!["api".to_string()])
+        );
     }
 
     #[test]
@@ -1311,10 +1414,16 @@ mod tests {
         // Probe should never be consulted for a probeless dependency.
         let probe = FakeProbe::default();
         let pst = probe.0.clone();
-        let mut sup = fast_readiness(Supervisor::new(cfg, dir.path(), move || fake.clone()), probe);
+        let mut sup = fast_readiness(
+            Supervisor::new(cfg, dir.path(), move || fake.clone()),
+            probe,
+        );
         assert!(sup.on_bound_ready(true).unwrap());
         assert_eq!(st.starts.borrow().len(), 2);
-        assert!(pst.borrow().calls.is_empty(), "no probe for a probeless dependency");
+        assert!(
+            pst.borrow().calls.is_empty(),
+            "no probe for a probeless dependency"
+        );
     }
 
     #[test]
@@ -1322,15 +1431,30 @@ mod tests {
         // A supervisor config is fail-closed: bad env var / binding names are
         // rejected at load, never sanitized or interpolated into the spawn script.
         let bad_var = r#"{"cmd":["true"],"bindings_env":{"BAD NAME":"openai"}}"#;
-        assert!(SupervisorConfig::from_json(bad_var).is_err(), "space in env var name");
+        assert!(
+            SupervisorConfig::from_json(bad_var).is_err(),
+            "space in env var name"
+        );
         let inject = r#"{"cmd":["true"],"bindings_env":{"X; rm -rf /":"openai"}}"#;
-        assert!(SupervisorConfig::from_json(inject).is_err(), "shell metachars in env var name");
+        assert!(
+            SupervisorConfig::from_json(inject).is_err(),
+            "shell metachars in env var name"
+        );
         let lead_digit = r#"{"cmd":["true"],"bindings_env":{"1KEY":"openai"}}"#;
-        assert!(SupervisorConfig::from_json(lead_digit).is_err(), "env var starting with a digit");
+        assert!(
+            SupervisorConfig::from_json(lead_digit).is_err(),
+            "env var starting with a digit"
+        );
         let bad_binding = r#"{"cmd":["true"],"bindings_env":{"KEY":"../escape"}}"#;
-        assert!(SupervisorConfig::from_json(bad_binding).is_err(), "path-traversal binding name");
+        assert!(
+            SupervisorConfig::from_json(bad_binding).is_err(),
+            "path-traversal binding name"
+        );
         let bad_base = r#"{"cmd":["true"],"base_env":{"BAD-VAR":"1"}}"#;
-        assert!(SupervisorConfig::from_json(bad_base).is_err(), "invalid base_env var name");
+        assert!(
+            SupervisorConfig::from_json(bad_base).is_err(),
+            "invalid base_env var name"
+        );
         // The valid shape still loads.
         assert!(SupervisorConfig::from_json(
             r#"{"cmd":["python3","app.py"],"base_env":{"PORT":"8080"},"bindings_env":{"OPENAI_API_KEY":"openai"}}"#
@@ -1356,13 +1480,22 @@ mod tests {
         assert_eq!(plan.secret_env[0].0, "OPENAI_API_KEY");
         assert_eq!(plan.secret_env[0].1, dir.path().join("openai"));
         // The value is NOT anywhere in the plan (never read into the agent).
-        assert!(!format!("{plan:?}").contains("sk-REAL-VALUE"), "plan must not carry the value");
+        assert!(
+            !format!("{plan:?}").contains("sk-REAL-VALUE"),
+            "plan must not carry the value"
+        );
 
         // The spawn script reads the value from the file at exec, in the child.
         let script = spawn_script(&plan);
-        assert!(script.contains("export OPENAI_API_KEY=\"$(cat "), "{script}");
+        assert!(
+            script.contains("export OPENAI_API_KEY=\"$(cat "),
+            "{script}"
+        );
         assert!(script.contains("exec 'python3' 'app.py'"), "{script}");
-        assert!(!script.contains("sk-REAL-VALUE"), "script must not carry the value");
+        assert!(
+            !script.contains("sk-REAL-VALUE"),
+            "script must not carry the value"
+        );
 
         // A missing binding must fail closed, never start half-bound.
         let cfg2 = SupervisorConfig {
@@ -1493,7 +1626,10 @@ mod tests {
             volumes: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default);
-        assert!(!sup.stop_workload().unwrap(), "nothing to stop ⇒ was_running=false");
+        assert!(
+            !sup.stop_workload().unwrap(),
+            "nothing to stop ⇒ was_running=false"
+        );
     }
 
     #[test]
@@ -1508,7 +1644,10 @@ mod tests {
             cmd: vec![
                 "sh".into(),
                 "-c".into(),
-                format!("printf %s \"$OPENAI_API_KEY\" > {}; sleep 30", out.display()),
+                format!(
+                    "printf %s \"$OPENAI_API_KEY\" > {}; sleep 30",
+                    out.display()
+                ),
             ],
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
@@ -1526,8 +1665,14 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert_eq!(std::fs::read_to_string(&out).unwrap(), "sk-CHILD-ONLY-VALUE");
-        assert!(sup.stop_workload().unwrap(), "a live child reports was_running=true");
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "sk-CHILD-ONLY-VALUE"
+        );
+        assert!(
+            sup.stop_workload().unwrap(),
+            "a live child reports was_running=true"
+        );
         assert!(!sup.is_running());
     }
 
@@ -1537,7 +1682,11 @@ mod tests {
         // return within ~grace + reap via SIGKILL. `trap '' TERM` ignores SIGTERM.
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
-            cmd: vec!["sh".into(), "-c".into(), "trap '' TERM; while true; do sleep 1; done".into()],
+            cmd: vec![
+                "sh".into(),
+                "-c".into(),
+                "trap '' TERM; while true; do sleep 1; done".into(),
+            ],
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
             bindings_env: BTreeMap::new(),
@@ -1548,11 +1697,17 @@ mod tests {
         assert!(sup.on_bound_ready(true).unwrap());
         assert!(sup.is_running());
         let started = std::time::Instant::now();
-        assert!(sup.stop_workload().unwrap(), "bounded stop still reports was_running");
+        assert!(
+            sup.stop_workload().unwrap(),
+            "bounded stop still reports was_running"
+        );
         let elapsed = started.elapsed();
         assert!(!sup.is_running());
         // Bounded: grace (2s) + SIGKILL reap, comfortably under 10s.
-        assert!(elapsed < std::time::Duration::from_secs(10), "stop took {elapsed:?} — not bounded");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "stop took {elapsed:?} — not bounded"
+        );
     }
 
     #[test]
@@ -1571,7 +1726,10 @@ mod tests {
         assert!(sup.on_bound_ready(true).unwrap());
         let started = std::time::Instant::now();
         assert!(sup.stop_workload().unwrap());
-        assert!(started.elapsed() < std::time::Duration::from_millis(500), "normal stop should be fast");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "normal stop should be fast"
+        );
     }
 
     #[cfg(unix)]
@@ -1601,7 +1759,11 @@ mod tests {
             Some(ch) => ch.id() as i32,
             None => panic!("child running"),
         };
-        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "workload must lead its own process group");
+        assert_eq!(
+            unsafe { libc::getpgid(pid) },
+            pid,
+            "workload must lead its own process group"
+        );
         assert!(sup.stop_workload().unwrap());
         // The WHOLE group must be gone — poll killpg(sig 0) until ESRCH (the
         // grandchild sleeper included; reparented orphans are reaped by init).

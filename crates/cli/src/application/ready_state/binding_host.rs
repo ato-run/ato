@@ -75,7 +75,9 @@ impl BindingPreviewReceipt {
 /// v1.2 PR 3d: the channel trait + vsock transport moved to `snapshot::agent_channel`
 /// so the FirecrackerBackend's build-side supervisor drive shares the exact transport
 /// this run gate uses. Re-exported so every call site here is unchanged.
-pub(crate) use snapshot::agent_channel::{AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT};
+pub(crate) use snapshot::agent_channel::{
+    AgentChannel, FirecrackerAgentChannel, GUEST_AGENT_VSOCK_PORT,
+};
 
 /// Deliver every lease, then poll bound-ready up to `max_polls` times. Returns `Ok`
 /// only when the agent reports bound-ready; otherwise **fails closed** with the still
@@ -97,7 +99,10 @@ pub(crate) fn establish_bindings(
     for _ in 0..max_polls.max(1) {
         match channel.request(HostToAgent::QueryBoundReady)? {
             AgentToHost::BoundReady { ready: true, .. } => return Ok(()),
-            AgentToHost::BoundReady { ready: false, pending } => {
+            AgentToHost::BoundReady {
+                ready: false,
+                pending,
+            } => {
                 last_pending = pending.iter().map(|n| n.as_str().to_string()).collect();
             }
             other => bail!("unexpected agent response to QueryBoundReady: {other:?}"),
@@ -276,8 +281,12 @@ fn renewal_tick(
             Err(_) => revoked.push(name.clone()),
         }
     }
-    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, std::time::Duration::from_secs(5))
-        .context("connect guest-agent for lease renewal")?;
+    let mut channel = FirecrackerAgentChannel::connect(
+        vsock_uds,
+        GUEST_AGENT_VSOCK_PORT,
+        std::time::Duration::from_secs(5),
+    )
+    .context("connect guest-agent for lease renewal")?;
     for name in &revoked {
         let id = protocol::binding_lease::BindingLeaseId::new(format!("lease-{name}"));
         match revoke_binding(&mut channel, id) {
@@ -328,8 +337,12 @@ fn renew_over_channel(
 /// to wipe the guest's tmpfs bindings BEFORE VM teardown. Best-effort — a connect
 /// failure is returned to the caller which logs it and proceeds with teardown.
 pub(crate) fn stop_scrub_over_vsock(vsock_uds: &std::path::Path) -> Result<()> {
-    let mut channel = FirecrackerAgentChannel::connect(vsock_uds, GUEST_AGENT_VSOCK_PORT, std::time::Duration::from_secs(5))
-        .context("connect guest-agent for stop-scrub")?;
+    let mut channel = FirecrackerAgentChannel::connect(
+        vsock_uds,
+        GUEST_AGENT_VSOCK_PORT,
+        std::time::Duration::from_secs(5),
+    )
+    .context("connect guest-agent for stop-scrub")?;
     stop_scrub(&mut channel)
 }
 
@@ -379,7 +392,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
             session: BindingSession::new(
-                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                vec![
+                    BindingName::parse("db_url").unwrap(),
+                    BindingName::parse("api_key").unwrap(),
+                ],
                 TmpfsBindingSink::new(dir.path()),
             ),
             now_ms: 1_000,
@@ -387,7 +403,10 @@ mod tests {
         let leases = vec![lease("db_url", "l1"), lease("api_key", "l2")];
         establish_bindings(&mut ch, &leases, 3).expect("gate should open");
         // both secrets are on tmpfs.
-        assert_eq!(std::fs::read_to_string(dir.path().join("db_url")).unwrap(), "secret-for-db_url");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("db_url")).unwrap(),
+            "secret-for-db_url"
+        );
         assert!(dir.path().join("api_key").exists());
     }
 
@@ -396,15 +415,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
             session: BindingSession::new(
-                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                vec![
+                    BindingName::parse("db_url").unwrap(),
+                    BindingName::parse("api_key").unwrap(),
+                ],
                 TmpfsBindingSink::new(dir.path()),
             ),
             now_ms: 1_000,
         };
         // only deliver one of the two required.
         let leases = vec![lease("db_url", "l1")];
-        let err = establish_bindings(&mut ch, &leases, 3).unwrap_err().to_string();
-        assert!(err.contains("api_key"), "should report the missing binding: {err}");
+        let err = establish_bindings(&mut ch, &leases, 3)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("api_key"),
+            "should report the missing binding: {err}"
+        );
         assert!(err.contains("pending"), "should fail closed: {err}");
     }
 
@@ -412,13 +439,19 @@ mod tests {
     fn revoke_scrubs_the_binding_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
-            session: BindingSession::new(vec![BindingName::parse("db_url").unwrap()], TmpfsBindingSink::new(dir.path())),
+            session: BindingSession::new(
+                vec![BindingName::parse("db_url").unwrap()],
+                TmpfsBindingSink::new(dir.path()),
+            ),
             now_ms: 1_000,
         };
         establish_bindings(&mut ch, &[lease("db_url", "l1")], 2).unwrap();
         assert!(dir.path().join("db_url").exists());
         revoke_binding(&mut ch, BindingLeaseId::new("l1")).unwrap();
-        assert!(!dir.path().join("db_url").exists(), "revoke scrubbed the tmpfs file");
+        assert!(
+            !dir.path().join("db_url").exists(),
+            "revoke scrubbed the tmpfs file"
+        );
     }
 
     #[test]
@@ -426,7 +459,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
             session: BindingSession::new(
-                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                vec![
+                    BindingName::parse("db_url").unwrap(),
+                    BindingName::parse("api_key").unwrap(),
+                ],
                 TmpfsBindingSink::new(dir.path()),
             ),
             now_ms: 1_000,
@@ -434,8 +470,14 @@ mod tests {
         establish_bindings(&mut ch, &[lease("db_url", "l1"), lease("api_key", "l2")], 2).unwrap();
         assert!(dir.path().join("db_url").exists() && dir.path().join("api_key").exists());
         stop_scrub(&mut ch).unwrap();
-        assert!(!dir.path().join("db_url").exists(), "stop-scrub wiped db_url");
-        assert!(!dir.path().join("api_key").exists(), "stop-scrub wiped api_key");
+        assert!(
+            !dir.path().join("db_url").exists(),
+            "stop-scrub wiped db_url"
+        );
+        assert!(
+            !dir.path().join("api_key").exists(),
+            "stop-scrub wiped api_key"
+        );
     }
 
     /// PR 7: the **no-secret** end-to-end invariant proof (in-process). A full bound
@@ -455,19 +497,31 @@ mod tests {
             60_000,
         );
         let mut ch = MockChannel {
-            session: BindingSession::new(vec![BindingName::parse("db_url").unwrap()], TmpfsBindingSink::new(dir.path())),
+            session: BindingSession::new(
+                vec![BindingName::parse("db_url").unwrap()],
+                TmpfsBindingSink::new(dir.path()),
+            ),
             now_ms: 1_000,
         };
 
         // 1. Bind → secret lands ONLY on the guest tmpfs.
         establish_bindings(&mut ch, std::slice::from_ref(&l), 2).unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("db_url")).unwrap(), secret);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("db_url")).unwrap(),
+            secret
+        );
 
         // 2. No host-side artifact carries the secret: the loggable receipt is
         //    value-free, the lease Debug redacts, and the lease is not even Serialize.
         let receipt = l.receipt(1_000);
-        assert!(!serde_json::to_string(&receipt).unwrap().contains(secret), "host receipt leaked the secret");
-        assert!(!format!("{l:?}").contains(secret), "lease Debug leaked the secret");
+        assert!(
+            !serde_json::to_string(&receipt).unwrap().contains(secret),
+            "host receipt leaked the secret"
+        );
+        assert!(
+            !format!("{l:?}").contains(secret),
+            "lease Debug leaked the secret"
+        );
         assert!(!format!("{receipt:?}").contains(secret));
 
         // 3. A bound session may never be re-sealed.
@@ -475,7 +529,10 @@ mod tests {
 
         // 4. stop-scrub wipes tmpfs.
         stop_scrub(&mut ch).unwrap();
-        assert!(!dir.path().join("db_url").exists(), "tmpfs scrubbed after stop");
+        assert!(
+            !dir.path().join("db_url").exists(),
+            "tmpfs scrubbed after stop"
+        );
     }
 
     #[test]
@@ -496,22 +553,38 @@ mod tests {
         .unwrap();
         assert_eq!(ok.len(), 1);
         assert_eq!(ok[0].to_delivery().value.expose(), "sk-secret-xyz");
-        assert!(!format!("{:?}", ok[0]).contains("sk-secret-xyz"), "lease Debug must redact");
+        assert!(
+            !format!("{:?}", ok[0]).contains("sk-secret-xyz"),
+            "lease Debug must redact"
+        );
         // An invalid binding name fails closed at issuance.
-        assert!(issue_leases(vec![("bad name!".to_string(), SecretValue::new("v"))], 1000, 60_000).is_err());
+        assert!(
+            issue_leases(
+                vec![("bad name!".to_string(), SecretValue::new("v"))],
+                1000,
+                60_000
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn binding_preview_receipt_records_names_only_never_values() {
         let r = BindingPreviewReceipt::decide(true, vec!["api_key".into(), "db_url".into()]);
         assert!(r.binding_preview_enabled && r.bindings_required);
-        assert_eq!(r.binding_names, vec!["api_key".to_string(), "db_url".to_string()]);
+        assert_eq!(
+            r.binding_names,
+            vec!["api_key".to_string(), "db_url".to_string()]
+        );
         assert!(!r.binding_delivery_attempted && !r.bound_ready);
         // no value fields exist on the receipt at all — serialize + confirm it is
         // names/flags only.
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("binding_names") && json.contains("api_key"));
-        assert!(!json.contains("value"), "receipt must never carry a value: {json}");
+        assert!(
+            !json.contains("value"),
+            "receipt must never carry a value: {json}"
+        );
         // no-binding capsule ⇒ not required.
         let none = BindingPreviewReceipt::decide(true, vec![]);
         assert!(!none.bindings_required);
@@ -555,7 +628,9 @@ mod tests {
         // Past the ORIGINAL expiry (1_000+60_000) but inside the renewed one:
         ch.now_ms = 100_000;
         match ch.request(HostToAgent::QueryBoundReady).unwrap() {
-            AgentToHost::BoundReady { ready, .. } => assert!(ready, "renewed lease must outlive the original TTL"),
+            AgentToHost::BoundReady { ready, .. } => {
+                assert!(ready, "renewed lease must outlive the original TTL")
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -565,15 +640,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
             session: BindingSession::new(
-                vec![BindingName::parse("db_url").unwrap(), BindingName::parse("api_key").unwrap()],
+                vec![
+                    BindingName::parse("db_url").unwrap(),
+                    BindingName::parse("api_key").unwrap(),
+                ],
                 TmpfsBindingSink::new(dir.path()),
             ),
             now_ms: 1_000,
         };
-        establish_bindings(&mut ch, &[lease("db_url", "l1"), lease("api_key", "l2")], 3).expect("bind");
+        establish_bindings(&mut ch, &[lease("db_url", "l1"), lease("api_key", "l2")], 3)
+            .expect("bind");
         // Grant for db_url disappears -> the renewal loop revokes that lease…
         revoke_binding(&mut ch, BindingLeaseId::new("l1")).expect("revoke");
-        assert!(!dir.path().join("db_url").exists(), "revoked value must be scrubbed");
+        assert!(
+            !dir.path().join("db_url").exists(),
+            "revoked value must be scrubbed"
+        );
         // …and the still-granted lease renews Ack-only (bound-ready is false by design).
         renew_over_channel(&mut ch, &[lease("api_key", "l2")], false).expect("ack-only renew");
         assert!(dir.path().join("api_key").exists());
@@ -625,7 +707,9 @@ mod tests {
             let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
             let received_thread = received.clone();
             let handle = std::thread::spawn(move || {
-                let Ok((stream, _)) = listener.accept() else { return };
+                let Ok((stream, _)) = listener.accept() else {
+                    return;
+                };
                 let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
                 let mut writer = stream;
                 // Firecracker guest→host CONNECT handshake ack.
@@ -651,13 +735,21 @@ mod tests {
                     };
                     received_thread.lock().unwrap().push(kind.to_string());
                     let resp = match &msg {
-                        HostToAgent::MountVolumes if fail_mount => {
-                            AgentToHost::Error { message: "fake: injected mount failure".to_string() }
-                        }
+                        HostToAgent::MountVolumes if fail_mount => AgentToHost::Error {
+                            message: "fake: injected mount failure".to_string(),
+                        },
                         HostToAgent::MountVolumes => AgentToHost::VolumesMounted,
-                        HostToAgent::Deliver(d) => AgentToHost::Ack { id: d.id.clone(), name: d.name.clone() },
-                        HostToAgent::QueryBoundReady => AgentToHost::BoundReady { ready: true, pending: vec![] },
-                        other => panic!("fake vsock agent: unhandled request in this test: {other:?}"),
+                        HostToAgent::Deliver(d) => AgentToHost::Ack {
+                            id: d.id.clone(),
+                            name: d.name.clone(),
+                        },
+                        HostToAgent::QueryBoundReady => AgentToHost::BoundReady {
+                            ready: true,
+                            pending: vec![],
+                        },
+                        other => {
+                            panic!("fake vsock agent: unhandled request in this test: {other:?}")
+                        }
                     };
                     let json = serde_json::to_string(&resp).unwrap();
                     if writeln!(writer, "{json}").is_err() || writer.flush().is_err() {
@@ -665,7 +757,10 @@ mod tests {
                     }
                 }
             });
-            FakeVsockAgent { received, _handle: handle }
+            FakeVsockAgent {
+                received,
+                _handle: handle,
+            }
         }
 
         fn received(&self) -> Vec<String> {
@@ -682,8 +777,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let uds = dir.path().join("vsock.sock");
         let agent = FakeVsockAgent::spawn(uds.clone(), false);
-        mount_volumes_before_expose(&uds, true, std::time::Duration::from_secs(2)).expect("mount must succeed");
-        assert_eq!(agent.received(), vec!["mount_volumes"], "only MountVolumes, no Deliver — no bindings exist");
+        mount_volumes_before_expose(&uds, true, std::time::Duration::from_secs(2))
+            .expect("mount must succeed");
+        assert_eq!(
+            agent.received(),
+            vec!["mount_volumes"],
+            "only MountVolumes, no Deliver — no bindings exist"
+        );
     }
 
     #[test]
@@ -706,15 +806,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let uds = dir.path().join("vsock.sock");
         let agent = FakeVsockAgent::spawn(uds.clone(), true);
-        let leases =
-            vec![lease("openai_api_key", "l1")];
+        let leases = vec![lease("openai_api_key", "l1")];
         let result: Result<()> = (|| {
             mount_volumes_before_expose(&uds, true, std::time::Duration::from_secs(2))?;
             bind_before_expose(&uds, &leases, std::time::Duration::from_secs(2))
         })();
         assert!(result.is_err(), "mount failure must propagate as an error");
         assert!(
-            result.unwrap_err().to_string().contains("injected mount failure"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected mount failure"),
             "the mount failure itself must be the reported error"
         );
         assert_eq!(

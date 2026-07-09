@@ -113,7 +113,10 @@ impl DockerImportSpec {
     /// Validate + construct. Fail-closed on a path that could escape the checkout and
     /// on secret-looking build args (the receipt records args verbatim; a secret arg
     /// must not exist rather than be redacted).
-    pub fn new(dockerfile_path: &str, build_args: BTreeMap<String, String>) -> Result<Self, String> {
+    pub fn new(
+        dockerfile_path: &str,
+        build_args: BTreeMap<String, String>,
+    ) -> Result<Self, String> {
         validate_dockerfile_path(dockerfile_path)?;
         for (k, v) in &build_args {
             if !valid_env_var_name(k) {
@@ -401,7 +404,10 @@ pub fn partition_dockerfile_env(
         }
     }
     let bindings_env = normalize_env_binding_names(binding_keys)?;
-    Ok(EnvPartition { base_env, bindings_env })
+    Ok(EnvPartition {
+        base_env,
+        bindings_env,
+    })
 }
 
 /// The REBUILD-INPUTS identity digest: `sha256:<hex>` over the JCS
@@ -426,7 +432,10 @@ pub fn partition_dockerfile_env(
 /// ([`import_descriptor_blake3`] shares its envelope). The execution identity
 /// an import build stamps into the sealed manifest is [`import_execution_id`].
 pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
-    format!("sha256:{}", build::sha256_hex(import_descriptor_canonical_json(receipt).as_bytes()))
+    format!(
+        "sha256:{}",
+        build::sha256_hex(import_descriptor_canonical_json(receipt).as_bytes())
+    )
 }
 
 /// The import EXECUTION identity: `sha256:<hex>` over the JCS canonicalization
@@ -447,7 +456,10 @@ pub fn import_identity_digest(receipt: &DockerImportReceipt) -> String {
 /// identity: rebuilding the same declared inputs keeps the rebuild identity by
 /// construction, while the execution identity commits to what the sealed
 /// artifact actually executes.
-pub fn import_execution_id(plan: &rootfs::ImportedServicePlan, receipt: &DockerImportReceipt) -> String {
+pub fn import_execution_id(
+    plan: &rootfs::ImportedServicePlan,
+    receipt: &DockerImportReceipt,
+) -> String {
     // v0 emits exactly ONE service ([`rootfs::IMPORTED_SERVICE_NAME`]); the
     // envelope is folded over the plan's first service so a future
     // multi-service import must extend it DELIBERATELY (new envelope version),
@@ -484,7 +496,10 @@ pub fn import_execution_id(plan: &rootfs::ImportedServicePlan, receipt: &DockerI
 /// ([`import_descriptor_canonical_json`]) so the two digests hash identical bytes
 /// by construction and cannot drift.
 pub fn import_descriptor_blake3(receipt: &DockerImportReceipt) -> String {
-    format!("blake3:{}", blake3::hash(import_descriptor_canonical_json(receipt).as_bytes()).to_hex())
+    format!(
+        "blake3:{}",
+        blake3::hash(import_descriptor_canonical_json(receipt).as_bytes()).to_hex()
+    )
 }
 
 /// The JCS-canonicalized input-only import descriptor both digests hash — factored
@@ -576,15 +591,21 @@ pub fn run_dockerfile_import(
     req: &DockerfileImportRequest<'_>,
 ) -> Result<DockerfileImportOutcome, String> {
     let probe = build::probe_build_tool(runner)?;
-    let built = build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
+    let built =
+        build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
     let plan = rootfs::derive_imported_service_plan(
         &built.image_config,
         req.policy,
         req.port_override,
         req.readiness_http_path.clone(),
     )?;
-    let rootfs_bytes =
-        rootfs::pack_imported_rootfs(probe.tool, &req.image_tag, &plan, req.out_ext4, req.size_mib)?;
+    let rootfs_bytes = rootfs::pack_imported_rootfs(
+        probe.tool,
+        &req.image_tag,
+        &plan,
+        req.out_ext4,
+        req.size_mib,
+    )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
         secret_env_policy: req.policy,
@@ -592,7 +613,14 @@ pub fn run_dockerfile_import(
         readiness_http_path: req.readiness_http_path.clone(),
         size_mib: req.size_mib,
     };
-    let receipt = assemble_receipt(&probe, &req.spec, &built, &plan, import_options, exported_rootfs_digest);
+    let receipt = assemble_receipt(
+        &probe,
+        &req.spec,
+        &built,
+        &plan,
+        import_options,
+        exported_rootfs_digest,
+    );
     Ok(DockerfileImportOutcome {
         receipt,
         plan,
@@ -612,7 +640,10 @@ mod tests {
         assert_eq!(normalize_binding_name("API_KEY").unwrap(), "api_key");
         assert_eq!(normalize_binding_name("api-key").unwrap(), "api-key");
         assert_eq!(normalize_binding_name("API KEY").unwrap(), "api_key");
-        assert_eq!(normalize_binding_name("OPENAI_API_KEY").unwrap(), "openai_api_key");
+        assert_eq!(
+            normalize_binding_name("OPENAI_API_KEY").unwrap(),
+            "openai_api_key"
+        );
         assert_eq!(normalize_binding_name("db.url").unwrap(), "db.url");
     }
 
@@ -634,11 +665,23 @@ mod tests {
     #[test]
     fn normalization_defers_reserved_and_overlong_to_binding_name_parse() {
         // "." / ".." survive the char map but are not usable path components.
-        assert!(normalize_binding_name(".").unwrap_err().contains("invalid binding name"));
-        assert!(normalize_binding_name("..").unwrap_err().contains("invalid binding name"));
+        assert!(
+            normalize_binding_name(".")
+                .unwrap_err()
+                .contains("invalid binding name")
+        );
+        assert!(
+            normalize_binding_name("..")
+                .unwrap_err()
+                .contains("invalid binding name")
+        );
         // Over-length is BindingName's own bound (128), not re-implemented here.
         let long = "a".repeat(200);
-        assert!(normalize_binding_name(&long).unwrap_err().contains("invalid binding name"));
+        assert!(
+            normalize_binding_name(&long)
+                .unwrap_err()
+                .contains("invalid binding name")
+        );
     }
 
     #[test]
@@ -677,13 +720,23 @@ mod tests {
             ("GITHUB_TOKEN", "ghp_0123456789abcdefghij"),
             ("MY_SECRET", "x"), // short but literal — still fail-closed
         ] {
-            assert_eq!(classify_dockerfile_env(k, v), EnvSecretClass::SecretLiteral, "{k}");
+            assert_eq!(
+                classify_dockerfile_env(k, v),
+                EnvSecretClass::SecretLiteral,
+                "{k}"
+            );
         }
     }
 
     #[test]
     fn sensitive_key_with_placeholder_is_placeholder() {
-        for v in ["", "  ", "${OPENAI_API_KEY}", "$OPENAI_API_KEY", "<your-key-here>"] {
+        for v in [
+            "",
+            "  ",
+            "${OPENAI_API_KEY}",
+            "$OPENAI_API_KEY",
+            "<your-key-here>",
+        ] {
             assert_eq!(
                 classify_dockerfile_env("OPENAI_API_KEY", v),
                 EnvSecretClass::SecretPlaceholder,
@@ -708,12 +761,19 @@ mod tests {
             EnvSecretClass::SecretLiteral
         );
         // Short suffix after a known prefix is NOT credential-shaped (e.g. sk-latest).
-        assert_eq!(classify_dockerfile_env("MODE", "sk-latest"), EnvSecretClass::Plain);
+        assert_eq!(
+            classify_dockerfile_env("MODE", "sk-latest"),
+            EnvSecretClass::Plain
+        );
     }
 
     #[test]
     fn plain_env_is_plain() {
-        for (k, v) in [("PORT", "8080"), ("NODE_ENV", "production"), ("WORKERS", "4")] {
+        for (k, v) in [
+            ("PORT", "8080"),
+            ("NODE_ENV", "production"),
+            ("WORKERS", "4"),
+        ] {
             assert_eq!(classify_dockerfile_env(k, v), EnvSecretClass::Plain, "{k}");
         }
     }
@@ -721,12 +781,19 @@ mod tests {
     // --- partition_dockerfile_env ---------------------------------------------------
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
     fn partition_plain_env_passes_through() {
-        let p = partition_dockerfile_env(&env(&[("PORT", "8080"), ("NODE_ENV", "production")]), SecretEnvPolicy::Reject).unwrap();
+        let p = partition_dockerfile_env(
+            &env(&[("PORT", "8080"), ("NODE_ENV", "production")]),
+            SecretEnvPolicy::Reject,
+        )
+        .unwrap();
         assert_eq!(p.base_env.len(), 2);
         assert!(p.bindings_env.is_empty());
     }
@@ -739,7 +806,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("OPENAI_API_KEY"), "{err}");
-        assert!(!err.contains("sk-abcdefghijklmnopqrstuvwx"), "value must never be echoed: {err}");
+        assert!(
+            !err.contains("sk-abcdefghijklmnopqrstuvwx"),
+            "value must never be echoed: {err}"
+        );
     }
 
     #[test]
@@ -755,7 +825,8 @@ mod tests {
 
     #[test]
     fn partition_rejects_non_posix_env_keys() {
-        let err = partition_dockerfile_env(&env(&[("1BAD", "x")]), SecretEnvPolicy::Reject).unwrap_err();
+        let err =
+            partition_dockerfile_env(&env(&[("1BAD", "x")]), SecretEnvPolicy::Reject).unwrap_err();
         assert!(err.contains("POSIX identifier"), "{err}");
     }
 
@@ -777,8 +848,17 @@ mod tests {
     fn spec_validates_dockerfile_path_containment() {
         assert!(DockerImportSpec::new("Dockerfile", BTreeMap::new()).is_ok());
         assert!(DockerImportSpec::new("docker/prod.Dockerfile", BTreeMap::new()).is_ok());
-        for bad in ["", "  ", "/abs/Dockerfile", "../Dockerfile", "a/../../Dockerfile"] {
-            assert!(DockerImportSpec::new(bad, BTreeMap::new()).is_err(), "{bad:?}");
+        for bad in [
+            "",
+            "  ",
+            "/abs/Dockerfile",
+            "../Dockerfile",
+            "a/../../Dockerfile",
+        ] {
+            assert!(
+                DockerImportSpec::new(bad, BTreeMap::new()).is_err(),
+                "{bad:?}"
+            );
         }
     }
 
@@ -817,8 +897,14 @@ mod tests {
             dockerfile_sha256: "ab".repeat(32),
             build_context_digest: "cd".repeat(32),
             resolved_base_images: vec![
-                ResolvedBaseImage { original_ref: "node:20".into(), resolved_digest: format!("docker.io/library/node@sha256:{}", "ef".repeat(32)) },
-                ResolvedBaseImage { original_ref: "alpine:3.19".into(), resolved_digest: format!("docker.io/library/alpine@sha256:{}", "12".repeat(32)) },
+                ResolvedBaseImage {
+                    original_ref: "node:20".into(),
+                    resolved_digest: format!("docker.io/library/node@sha256:{}", "ef".repeat(32)),
+                },
+                ResolvedBaseImage {
+                    original_ref: "alpine:3.19".into(),
+                    resolved_digest: format!("docker.io/library/alpine@sha256:{}", "12".repeat(32)),
+                },
             ],
             final_image_digest: format!("sha256:{}", "01".repeat(32)),
             exported_rootfs_digest: format!("sha256:{}", "23".repeat(32)),
@@ -856,7 +942,8 @@ mod tests {
         input_differs.dockerfile_sha256 = "00".repeat(32);
         assert_ne!(import_identity_digest(&input_differs), a);
         let mut base_differs = r.clone();
-        base_differs.resolved_base_images[0].resolved_digest = format!("docker.io/library/node@sha256:{}", "aa".repeat(32));
+        base_differs.resolved_base_images[0].resolved_digest =
+            format!("docker.io/library/node@sha256:{}", "aa".repeat(32));
         assert_ne!(import_identity_digest(&base_differs), a);
         // effective_dockerfile_sha256 is DERIVED (dockerfile sha + base digests)
         // — by itself it must not shift the identity.
@@ -874,19 +961,35 @@ mod tests {
 
         let mut port = base.clone();
         port.import_options.port_override = Some(8080);
-        assert_ne!(import_identity_digest(&port), a, "port_override must be identity input");
+        assert_ne!(
+            import_identity_digest(&port),
+            a,
+            "port_override must be identity input"
+        );
 
         let mut readiness = base.clone();
         readiness.import_options.readiness_http_path = Some("/healthz".into());
-        assert_ne!(import_identity_digest(&readiness), a, "readiness_http_path must be identity input");
+        assert_ne!(
+            import_identity_digest(&readiness),
+            a,
+            "readiness_http_path must be identity input"
+        );
 
         let mut policy = base.clone();
         policy.import_options.secret_env_policy = SecretEnvPolicy::ConvertPlaceholders;
-        assert_ne!(import_identity_digest(&policy), a, "secret_env_policy must be identity input");
+        assert_ne!(
+            import_identity_digest(&policy),
+            a,
+            "secret_env_policy must be identity input"
+        );
 
         let mut size = base.clone();
         size.import_options.size_mib = 4096;
-        assert_ne!(import_identity_digest(&size), a, "size_mib must be identity input");
+        assert_ne!(
+            import_identity_digest(&size),
+            a,
+            "size_mib must be identity input"
+        );
 
         // And distinct option sets are pairwise distinct from one another.
         let ids = [
@@ -918,8 +1021,13 @@ mod tests {
     }
 
     fn sample_plan() -> rootfs::ImportedServicePlan {
-        rootfs::derive_imported_service_plan(&sample_image_config(), SecretEnvPolicy::Reject, None, None)
-            .expect("sample plan derives")
+        rootfs::derive_imported_service_plan(
+            &sample_image_config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+        )
+        .expect("sample plan derives")
     }
 
     #[test]
@@ -930,25 +1038,49 @@ mod tests {
         let receipt = sample_receipt();
         let a = import_execution_id(&sample_plan(), &receipt);
         assert!(a.starts_with("sha256:") && a.len() == 7 + 64, "{a}");
-        assert_eq!(import_execution_id(&sample_plan(), &receipt), a, "stable across runs");
+        assert_eq!(
+            import_execution_id(&sample_plan(), &receipt),
+            a,
+            "stable across runs"
+        );
 
         // cmd changes the id (a different argv is a different execution).
         let mut cfg = sample_image_config();
         cfg.cmd = vec!["node".into(), "other.js".into()];
-        let cmd_differs = rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None).unwrap();
-        assert_ne!(import_execution_id(&cmd_differs, &receipt), a, "cmd must shift the execution id");
+        let cmd_differs =
+            rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None)
+                .unwrap();
+        assert_ne!(
+            import_execution_id(&cmd_differs, &receipt),
+            a,
+            "cmd must shift the execution id"
+        );
 
         // env changes the id.
         let mut cfg = sample_image_config();
         cfg.env.insert("WORKERS".into(), "4".into());
-        let env_differs = rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None).unwrap();
-        assert_ne!(import_execution_id(&env_differs, &receipt), a, "env must shift the execution id");
+        let env_differs =
+            rootfs::derive_imported_service_plan(&cfg, SecretEnvPolicy::Reject, None, None)
+                .unwrap();
+        assert_ne!(
+            import_execution_id(&env_differs, &receipt),
+            a,
+            "env must shift the execution id"
+        );
 
         // port changes the id.
-        let port_differs =
-            rootfs::derive_imported_service_plan(&sample_image_config(), SecretEnvPolicy::Reject, Some(8080), None)
-                .unwrap();
-        assert_ne!(import_execution_id(&port_differs, &receipt), a, "port must shift the execution id");
+        let port_differs = rootfs::derive_imported_service_plan(
+            &sample_image_config(),
+            SecretEnvPolicy::Reject,
+            Some(8080),
+            None,
+        )
+        .unwrap();
+        assert_ne!(
+            import_execution_id(&port_differs, &receipt),
+            a,
+            "port must shift the execution id"
+        );
 
         // readiness path changes the id.
         let readiness_differs = rootfs::derive_imported_service_plan(
@@ -958,12 +1090,20 @@ mod tests {
             Some("/healthz".into()),
         )
         .unwrap();
-        assert_ne!(import_execution_id(&readiness_differs, &receipt), a, "readiness must shift the execution id");
+        assert_ne!(
+            import_execution_id(&readiness_differs, &receipt),
+            a,
+            "readiness must shift the execution id"
+        );
 
         // final_image_digest changes the id (the exact image that executes).
         let mut image_differs = receipt.clone();
         image_differs.final_image_digest = format!("sha256:{}", "ff".repeat(32));
-        assert_ne!(import_execution_id(&sample_plan(), &image_differs), a, "image digest must shift the execution id");
+        assert_ne!(
+            import_execution_id(&sample_plan(), &image_differs),
+            a,
+            "image digest must shift the execution id"
+        );
     }
 
     #[test]
@@ -975,17 +1115,32 @@ mod tests {
         // execution fact).
         let receipt = sample_receipt();
         let plan = sample_plan();
-        assert_ne!(import_execution_id(&plan, &receipt), import_identity_digest(&receipt));
+        assert_ne!(
+            import_execution_id(&plan, &receipt),
+            import_identity_digest(&receipt)
+        );
 
         let mut image_differs = receipt.clone();
         image_differs.final_image_digest = format!("sha256:{}", "ff".repeat(32));
-        assert_ne!(import_execution_id(&plan, &image_differs), import_execution_id(&plan, &receipt));
-        assert_eq!(import_identity_digest(&image_differs), import_identity_digest(&receipt));
+        assert_ne!(
+            import_execution_id(&plan, &image_differs),
+            import_execution_id(&plan, &receipt)
+        );
+        assert_eq!(
+            import_identity_digest(&image_differs),
+            import_identity_digest(&receipt)
+        );
 
         let mut dockerfile_differs = receipt.clone();
         dockerfile_differs.dockerfile_sha256 = "00".repeat(32);
-        assert_eq!(import_execution_id(&plan, &dockerfile_differs), import_execution_id(&plan, &receipt));
-        assert_ne!(import_identity_digest(&dockerfile_differs), import_identity_digest(&receipt));
+        assert_eq!(
+            import_execution_id(&plan, &dockerfile_differs),
+            import_execution_id(&plan, &receipt)
+        );
+        assert_ne!(
+            import_identity_digest(&dockerfile_differs),
+            import_identity_digest(&receipt)
+        );
     }
 
     #[test]
@@ -995,7 +1150,11 @@ mod tests {
         let r = sample_receipt();
         let d = import_descriptor_blake3(&r);
         assert!(d.starts_with("blake3:") && d.len() == 7 + 64, "{d}");
-        assert_eq!(import_descriptor_blake3(&r.clone()), d, "must be deterministic");
+        assert_eq!(
+            import_descriptor_blake3(&r.clone()),
+            d,
+            "must be deterministic"
+        );
         // Base image ORDER must not matter (canonicalized by original_ref).
         let mut swapped = r.clone();
         swapped.resolved_base_images.reverse();
@@ -1047,13 +1206,17 @@ mod tests {
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&receipt).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&receipt).unwrap()).unwrap();
         assert_eq!(v["importer_version"], DOCKER_IMPORTER_VERSION);
         assert_eq!(v["build_tool"], "buildah");
         assert_eq!(v["resolved_base_images"][0]["original_ref"], "node:20");
         assert_eq!(v["warnings"][0], "docker_user_ignored");
         // Import options are identity inputs and must serialize stably.
-        assert_eq!(v["import_options"]["secret_env_policy"], "convert_placeholders");
+        assert_eq!(
+            v["import_options"]["secret_env_policy"],
+            "convert_placeholders"
+        );
         assert_eq!(v["import_options"]["port_override"], 8080);
         assert_eq!(v["import_options"]["readiness_http_path"], "/health");
         assert_eq!(v["import_options"]["size_mib"], 2048);

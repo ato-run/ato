@@ -627,7 +627,9 @@ impl ProcessManager {
     /// (idempotent, safe on double-stop / after crash). A dirty overlay (removal
     /// failed) is quarantined so it is never reused.
     fn teardown_ready_state_session(&self, info: &ProcessInfo) {
-        let Some(backend_id) = info.ready_state_backend_id.as_deref() else { return };
+        let Some(backend_id) = info.ready_state_backend_id.as_deref() else {
+            return;
+        };
         // Phase 8a-RunGate PR D3 (#912): stop-scrub. If this is a bound binding session,
         // ask the guest-agent to revoke + scrub its tmpfs bindings over vsock BEFORE the
         // VM is torn down. Best-effort defense-in-depth (the teardown destroys the guest
@@ -635,13 +637,23 @@ impl ProcessManager {
         // NEVER re-seals.
         if let Some(uds) = info.ready_state_vsock_uds.as_deref() {
             match crate::application::ready_state::binding_host::stop_scrub_over_vsock(uds) {
-                Ok(()) => tracing::info!(target: "ato::ready_state", "stop-scrub: guest bindings scrubbed before teardown"),
-                Err(e) => tracing::warn!(target: "ato::ready_state", "stop-scrub failed (teardown proceeds): {e}"),
+                Ok(()) => {
+                    tracing::info!(target: "ato::ready_state", "stop-scrub: guest bindings scrubbed before teardown")
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ato::ready_state", "stop-scrub failed (teardown proceeds): {e}")
+                }
             }
         }
         let overlay = info.ready_state_overlay_root.clone().unwrap_or_default();
         let session_id = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
-        let _ = self.teardown_ready_state(backend_id, session_id, &overlay, Some(info.pid), info.requested_port);
+        let _ = self.teardown_ready_state(
+            backend_id,
+            session_id,
+            &overlay,
+            Some(info.pid),
+            info.requested_port,
+        );
     }
 
     /// Shared Ready-State teardown core (used by `ato stop`, stale-pid cleanup,
@@ -707,7 +719,13 @@ impl ProcessManager {
             .unwrap_or(0);
         let safe: String = session_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         fs::rename(overlay, qdir.join(format!("{safe}-{ts}")))?;
         Ok(())
@@ -1011,7 +1029,12 @@ impl ProcessManager {
     /// record). Without a record (crashed before writing it) the tap name is
     /// unknown → quarantine only. A `socket_grace`-fresh dir (mid-restore, pre-pid)
     /// is skipped.
-    fn sweep_ready_state_overlays(&self, report: &mut RunDirSweepReport, now: SystemTime, grace: Duration) {
+    fn sweep_ready_state_overlays(
+        &self,
+        report: &mut RunDirSweepReport,
+        now: SystemTime,
+        grace: Duration,
+    ) {
         // Overlays still owned by a live (pid-alive) Ready-State session.
         let live: std::collections::HashSet<PathBuf> = self
             .list_processes()
@@ -1021,10 +1044,14 @@ impl ProcessManager {
             .filter_map(|p| p.ready_state_overlay_root)
             .collect();
 
-        let Ok(entries) = fs::read_dir(&self.run_dir) else { return };
+        let Ok(entries) = fs::read_dir(&self.run_dir) else {
+            return;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if !name.starts_with("ready-state-") || !path.is_dir() || live.contains(&path) {
                 continue;
             }
@@ -2727,7 +2754,10 @@ mod tests {
         let de: ProcessInfo = toml::from_str(&toml::to_string(&info).unwrap()).unwrap();
         assert_eq!(de.runtime, "microvm");
         assert_eq!(de.ready_state_backend_id.as_deref(), Some("fake"));
-        assert_eq!(de.ready_state_overlay_root, Some(PathBuf::from("/tmp/ov-7")));
+        assert_eq!(
+            de.ready_state_overlay_root,
+            Some(PathBuf::from("/tmp/ov-7"))
+        );
         assert_eq!(de.ready_state_session_id.as_deref(), Some("sess-1"));
         // Legacy .pid TOML (written before Phase 7) must still parse (serde default).
         let legacy = r#"
@@ -2748,13 +2778,17 @@ start_time = [0, 0]
         let overlay = run_dir.path().join("ready-state-ov");
         std::fs::create_dir_all(&overlay).unwrap();
         let pm = ProcessManager::with_run_dir_for_test(run_dir.path().to_path_buf());
-        pm.write_pid(&microvm_info("capsule-7", overlay.clone())).unwrap();
+        pm.write_pid(&microvm_info("capsule-7", overlay.clone()))
+            .unwrap();
         assert!(pm.pid_file_path("capsule-7").exists());
 
         let stopped = pm.stop_process("capsule-7", false).unwrap();
         assert!(stopped, "microVM session stopped");
         assert!(!pm.pid_file_path("capsule-7").exists(), "pid file deleted");
-        assert!(!overlay.exists(), "Fake backend teardown removed the disposable overlay");
+        assert!(
+            !overlay.exists(),
+            "Fake backend teardown removed the disposable overlay"
+        );
 
         // Double-stop is safe (no pid file -> Ok(false), no panic).
         assert!(!pm.stop_process("capsule-7", false).unwrap());
@@ -2774,7 +2808,12 @@ start_time = [0, 0]
         assert_eq!(report.orphan_overlays_reaped, 0);
         assert!(!ov.exists(), "orphan overlay moved out of the live path");
         assert!(
-            run.path().join("quarantine").read_dir().unwrap().next().is_some(),
+            run.path()
+                .join("quarantine")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_some(),
             "overlay preserved in quarantine"
         );
     }
@@ -2818,7 +2857,11 @@ start_time = [0, 0]
         // tap) → quarantined.
         let json = format!(r#"{{"pid":{},"session_id":"fc-notap"}}"#, dead_pid());
         let (reaped, quarantined, exists) = sweep_one_record(&json);
-        assert_eq!((reaped, quarantined), (0, 1), "tap-less record must be quarantined");
+        assert_eq!(
+            (reaped, quarantined),
+            (0, 1),
+            "tap-less record must be quarantined"
+        );
         assert!(!exists);
     }
 
@@ -2827,7 +2870,11 @@ start_time = [0, 0]
         // tap present but no pid field → vmm_pid would be unknown → quarantined.
         let (reaped, quarantined, exists) =
             sweep_one_record(r#"{"tap":"tap-test","session_id":"fc-nopid"}"#);
-        assert_eq!((reaped, quarantined), (0, 1), "missing pid must be quarantined");
+        assert_eq!(
+            (reaped, quarantined),
+            (0, 1),
+            "missing pid must be quarantined"
+        );
         assert!(!exists);
     }
 
@@ -2844,9 +2891,16 @@ start_time = [0, 0]
     fn sweep_reaps_dead_record_with_pid_and_tap() {
         // Positive dead pid + non-empty tap → a usable record → reaped via the
         // backend (kill is a no-op ESRCH on the already-dead pid).
-        let json = format!(r#"{{"pid":{},"tap":"tap-test","session_id":"fc-ok"}}"#, dead_pid());
+        let json = format!(
+            r#"{{"pid":{},"tap":"tap-test","session_id":"fc-ok"}}"#,
+            dead_pid()
+        );
         let (reaped, quarantined, exists) = sweep_one_record(&json);
-        assert_eq!((reaped, quarantined), (1, 0), "pid+tap dead record must be reaped");
+        assert_eq!(
+            (reaped, quarantined),
+            (1, 0),
+            "pid+tap dead record must be reaped"
+        );
         assert!(!exists);
     }
 

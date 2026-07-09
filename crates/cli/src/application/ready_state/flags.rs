@@ -286,13 +286,25 @@ mod tests {
             }
         };
         set(None);
-        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "default 8 GiB");
+        assert_eq!(
+            artifact_fetch_max_bytes(),
+            8 * 1024 * 1024 * 1024,
+            "default 8 GiB"
+        );
         set(Some("1048576"));
         assert_eq!(artifact_fetch_max_bytes(), 1_048_576);
         set(Some("0"));
-        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "zero falls back");
+        assert_eq!(
+            artifact_fetch_max_bytes(),
+            8 * 1024 * 1024 * 1024,
+            "zero falls back"
+        );
         set(Some("not-a-number"));
-        assert_eq!(artifact_fetch_max_bytes(), 8 * 1024 * 1024 * 1024, "junk falls back");
+        assert_eq!(
+            artifact_fetch_max_bytes(),
+            8 * 1024 * 1024 * 1024,
+            "junk falls back"
+        );
         set(prev.as_deref());
     }
 

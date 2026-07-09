@@ -62,8 +62,8 @@ use snapshot::docker_import::{
 };
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, FirecrackerBackend,
-    FirecrackerConfig, RestoreContract, RestoreReadyStateInput, RestoredSession,
-    SanitizerContract, SnapshotBackend, SupervisorBindings,
+    FirecrackerConfig, RestoreContract, RestoreReadyStateInput, RestoredSession, SanitizerContract,
+    SnapshotBackend, SupervisorBindings,
 };
 
 use super::binding_host::stop_scrub_over_vsock;
@@ -141,11 +141,20 @@ fn clone_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> anyhow::R
     std::fs::create_dir_all(dest)?;
     let run = |args: &[&str]| -> anyhow::Result<()> {
         let out = Command::new("git").args(args).current_dir(dest).output()?;
-        anyhow::ensure!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        anyhow::ensure!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         Ok(())
     };
     run(&["init", "-q"])?;
-    run(&["remote", "add", "origin", &format!("https://github.com/{owner}/{repo}.git")])?;
+    run(&[
+        "remote",
+        "add",
+        "origin",
+        &format!("https://github.com/{owner}/{repo}.git"),
+    ])?;
     run(&["fetch", "-q", "--depth", "1", "origin", commit])?;
     run(&["checkout", "-q", "FETCH_HEAD"])?;
     Ok(())
@@ -155,7 +164,9 @@ fn http_get(addr: &str, path: &str, timeout: Duration) -> anyhow::Result<(u16, S
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(timeout))?;
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes())?;
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf)?;
     let text = String::from_utf8_lossy(&buf).into_owned();
@@ -190,7 +201,12 @@ fn firecracker_proc_count() -> usize {
         .args(["-c", "-x", "firecracker"])
         .output()
         .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<usize>().ok())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
         .unwrap_or(0)
 }
 
@@ -227,7 +243,11 @@ fn import_and_seal(
 
     // ── Provenance assertions: every base digest-pinned; identity computable;
     // the expected per-app warnings (and no unexpected rejections). ──
-    anyhow::ensure!(!outcome.receipt.resolved_base_images.is_empty(), "({}) no base images pinned", app.slug);
+    anyhow::ensure!(
+        !outcome.receipt.resolved_base_images.is_empty(),
+        "({}) no base images pinned",
+        app.slug
+    );
     for b in &outcome.receipt.resolved_base_images {
         anyhow::ensure!(
             b.resolved_digest.contains("@sha256:"),
@@ -238,7 +258,11 @@ fn import_and_seal(
         );
     }
     let identity = import_identity_digest(&outcome.receipt);
-    anyhow::ensure!(identity.starts_with("sha256:"), "({}) bad identity {identity:?}", app.slug);
+    anyhow::ensure!(
+        identity.starts_with("sha256:"),
+        "({}) bad identity {identity:?}",
+        app.slug
+    );
     let warns = &outcome.receipt.warnings;
     anyhow::ensure!(
         warns.contains(&DockerImportWarning::DockerUserIgnored) == app.expect_user_warning,
@@ -246,7 +270,8 @@ fn import_and_seal(
         app.slug
     );
     anyhow::ensure!(
-        warns.contains(&DockerImportWarning::DockerHealthcheckIgnored) == app.expect_healthcheck_warning,
+        warns.contains(&DockerImportWarning::DockerHealthcheckIgnored)
+            == app.expect_healthcheck_warning,
         "({}) docker_healthcheck_ignored expectation mismatch: {warns:?}",
         app.slug
     );
@@ -254,7 +279,12 @@ fn import_and_seal(
         "  [{slug}] imported ({clone_ms} ms clone, {import_ms} ms import): port={port} identity={identity} bases={bases:?} warnings={warns:?}",
         slug = app.slug,
         port = outcome.plan.port,
-        bases = outcome.receipt.resolved_base_images.iter().map(|b| b.resolved_digest.as_str()).collect::<Vec<_>>(),
+        bases = outcome
+            .receipt
+            .resolved_base_images
+            .iter()
+            .map(|b| b.resolved_digest.as_str())
+            .collect::<Vec<_>>(),
     );
 
     let t_seal = std::time::Instant::now();
@@ -298,7 +328,11 @@ fn import_and_seal(
             }),
         })
         .map_err(|e| anyhow::anyhow!("build_ready_state({}): {e}", app.slug))?;
-    eprintln!("  [{}] sealed ({} ms seal)", app.slug, t_seal.elapsed().as_millis());
+    eprintln!(
+        "  [{}] sealed ({} ms seal)",
+        app.slug,
+        t_seal.elapsed().as_millis()
+    );
     Ok((sealed, outcome.plan.port, readiness))
 }
 
@@ -323,7 +357,10 @@ fn restore_and_verify(
     // A v0 import has ZERO bindings and ZERO volumes — the supervisor gate is
     // vacuously bound-ready, so no vsock delivery is required before the
     // workload starts. Readiness alone is the verification.
-    let addr = session.workload_addr.clone().ok_or_else(|| anyhow::anyhow!("({slug}) no workload_addr"))?;
+    let addr = session
+        .workload_addr
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("({slug}) no workload_addr"))?;
     wait_ready(&addr, readiness, 40).map_err(|e| anyhow::anyhow!("({slug}) {e}"))?;
     Ok(session)
 }
@@ -335,8 +372,13 @@ fn stop_session(backend: &FirecrackerBackend, session: RestoredSession) -> anyho
         }
     }
     let overlay = session.overlay_root.clone();
-    let td = backend.stop(session).map_err(|e| anyhow::anyhow!("stop: {e}"))?;
-    anyhow::ensure!(td.overlay_removed && !overlay.exists(), "overlay not removed after stop");
+    let td = backend
+        .stop(session)
+        .map_err(|e| anyhow::anyhow!("stop: {e}"))?;
+    anyhow::ensure!(
+        td.overlay_removed && !overlay.exists(),
+        "overlay not removed after stop"
+    );
     Ok(())
 }
 
@@ -393,17 +435,26 @@ fn docker_import_live_smoke() {
     let mut passed: Vec<&str> = Vec::new();
     for app in APPS {
         eprintln!("── {} ({}@{}) ──", app.slug, app.repo, &app.commit[..12]);
-        let (sealed, port, readiness) = import_and_seal(&backend, &store, workdir, app).expect(app.slug);
+        let (sealed, port, readiness) =
+            import_and_seal(&backend, &store, workdir, app).expect(app.slug);
         let t_restore = std::time::Instant::now();
-        let session = restore_and_verify(&backend, &store, workdir, app.slug, &sealed, &readiness).expect(app.slug);
-        eprintln!("  [{}] restored + ready on port {port} ({} ms restore->ready)", app.slug, t_restore.elapsed().as_millis());
+        let session = restore_and_verify(&backend, &store, workdir, app.slug, &sealed, &readiness)
+            .expect(app.slug);
+        eprintln!(
+            "  [{}] restored + ready on port {port} ({} ms restore->ready)",
+            app.slug,
+            t_restore.elapsed().as_millis()
+        );
         stop_session(&backend, session).expect(app.slug);
         eprintln!("  [{}] stopped, overlay removed", app.slug);
         passed.push(app.slug);
     }
 
     let fc_after = firecracker_proc_count();
-    assert_eq!(fc_after, fc_baseline, "orphan firecracker processes left behind ({fc_baseline} -> {fc_after})");
+    assert_eq!(
+        fc_after, fc_baseline,
+        "orphan firecracker processes left behind ({fc_baseline} -> {fc_after})"
+    );
     eprintln!("docker_import_live_smoke: ALL STAGES PASSED for {passed:?} (orphans: 0)");
     // tempdir drops here — clones, ext4s, CAS, overlays all removed.
 }

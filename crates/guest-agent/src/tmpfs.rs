@@ -41,7 +41,10 @@ impl TmpfsBindingSink {
 impl BindingSink for TmpfsBindingSink {
     fn deliver(&self, name: &BindingName, value: &str) -> io::Result<()> {
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.root)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.root)?;
         let final_path = self.path(name);
         let tmp = self.root.join(format!(".{}.tmp", name.as_str()));
         {
@@ -123,6 +126,9 @@ mod tests {
         let n = name("token");
         sink.deliver(&n, "v1").unwrap();
         sink.deliver(&n, "v2-renewed").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.path().join("token")).unwrap(), "v2-renewed");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("token")).unwrap(),
+            "v2-renewed"
+        );
     }
 }

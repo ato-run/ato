@@ -197,7 +197,11 @@ impl HotsetProfile {
     pub(crate) fn from_trace(trace: &HotsetTrace) -> HotsetProfile {
         let mut seen = std::collections::HashSet::new();
         let mut offsets = Vec::new();
-        let mut pre: Vec<&TraceEntry> = trace.entries.iter().filter(|e| e.phase == "pre_health").collect();
+        let mut pre: Vec<&TraceEntry> = trace
+            .entries
+            .iter()
+            .filter(|e| e.phase == "pre_health")
+            .collect();
         pre.sort_by_key(|e| e.first_fault_at_us);
         for e in pre {
             if seen.insert(e.file_offset) {
@@ -267,7 +271,10 @@ impl HotsetProfileStore {
         std::fs::create_dir_all(&self.root)?;
         let final_path = self.path(key);
         let tmp = final_path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(profile).map_err(std::io::Error::other)?)?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(profile).map_err(std::io::Error::other)?,
+        )?;
         std::fs::rename(tmp, final_path)
     }
 
@@ -292,7 +299,10 @@ pub(crate) use linux_impl::{PageServer, PageServerHandle, PageSource};
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use super::{file_offset_for, host_page_for_offset, page_align_down, region_for, HotsetProfile, HotsetTrace, Region, TraceEntry, UffdRestoreReceipt};
+    use super::{
+        HotsetProfile, HotsetTrace, Region, TraceEntry, UffdRestoreReceipt, file_offset_for,
+        host_page_for_offset, page_align_down, region_for,
+    };
     use capsulefs::{BlobManifest, CasStore, LazyBlobReader, MEMORY_PAGE_CHUNK_SIZE};
     use std::collections::HashMap;
     use std::io;
@@ -438,7 +448,9 @@ mod linux_impl {
         /// U6: ensure the CAS chunks overlapping `[start, start+len)` are present in
         /// the local store, fetching any missing ones from the remote read-through.
         fn ensure_local(&self, start: u64, len: u64) -> io::Result<()> {
-            let Some(remote) = &self.remote else { return Ok(()) };
+            let Some(remote) = &self.remote else {
+                return Ok(());
+            };
             let end = start + len;
             for c in &self.mem_blob.chunks {
                 let c_end = c.offset.wrapping_add(c.length);
@@ -446,9 +458,9 @@ mod linux_impl {
                     continue;
                 }
                 if !self.store.has_chunk(&c.hash) {
-                    let bytes = remote
-                        .get_chunk(&c.hash)
-                        .map_err(|e| io::Error::other(format!("remote read-through {}: {e}", c.hash.hex())))?;
+                    let bytes = remote.get_chunk(&c.hash).map_err(|e| {
+                        io::Error::other(format!("remote read-through {}: {e}", c.hash.hex()))
+                    })?;
                     self.store
                         .put_chunk(&bytes)
                         .map_err(|e| io::Error::other(format!("cache read-through chunk: {e}")))?;
@@ -512,7 +524,10 @@ mod linux_impl {
             let rc = match self {
                 PageSource::Zero => {
                     let mut z = UffdioZeropage {
-                        range: UffdioRange { start: fault_page, len: page_size as u64 },
+                        range: UffdioRange {
+                            start: fault_page,
+                            len: page_size as u64,
+                        },
                         mode: 0,
                         zeropage: 0,
                     };
@@ -600,7 +615,11 @@ mod linux_impl {
         pub(crate) fn bind(sock_path: &Path, source: PageSource) -> io::Result<PageServer> {
             let _ = std::fs::remove_file(sock_path);
             let listener = UnixListener::bind(sock_path)?;
-            Ok(PageServer { listener, source, page_size: page_size() })
+            Ok(PageServer {
+                listener,
+                source,
+                page_size: page_size(),
+            })
         }
 
         /// Spawn the serving thread (accept the FC connection → `SCM_RIGHTS`
@@ -609,13 +628,23 @@ mod linux_impl {
         pub(crate) fn serve(self, hotset: Option<HotsetProfile>) -> PageServerHandle {
             let shared = Arc::new(Shared::default());
             let t_shared = Arc::clone(&shared);
-            let PageServer { listener, source, page_size } = self;
+            let PageServer {
+                listener,
+                source,
+                page_size,
+            } = self;
             let join = std::thread::spawn(move || {
-                if let Err(e) = serve_loop(&listener, &source, page_size, &t_shared, hotset.as_ref()) {
+                if let Err(e) =
+                    serve_loop(&listener, &source, page_size, &t_shared, hotset.as_ref())
+                {
                     eprintln!("UFFD page-server: serve loop ended: {e}");
                 }
             });
-            PageServerHandle { shared, join: Some(join), pid: std::process::id() as i32 }
+            PageServerHandle {
+                shared,
+                join: Some(join),
+                pid: std::process::id() as i32,
+            }
         }
     }
 
@@ -654,10 +683,13 @@ mod linux_impl {
             return Err(io::Error::other("no control message (no fd)"));
         }
         // SAFETY: cmsg is non-null and points into cbuf.
-        let (level, ctype, clen) = unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
+        let (level, ctype, clen) =
+            unsafe { ((*cmsg).cmsg_level, (*cmsg).cmsg_type, (*cmsg).cmsg_len) };
         let want = unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) } as usize;
         if level != libc::SOL_SOCKET || ctype != libc::SCM_RIGHTS || clen != want {
-            return Err(io::Error::other("unexpected control message (not a single SCM_RIGHTS fd)"));
+            return Err(io::Error::other(
+                "unexpected control message (not a single SCM_RIGHTS fd)",
+            ));
         }
         let mut raw: libc::c_int = -1;
         // SAFETY: CMSG_DATA points to clen-prefixed payload >= size_of::<c_int>().
@@ -688,7 +720,9 @@ mod linux_impl {
         let (conn, _) = listener.accept()?;
         let (uffd, regions) = recv_handshake(conn.as_raw_fd())?;
         shared.fd_received.store(true, Ordering::SeqCst);
-        shared.region_count.store(regions.len() as u32, Ordering::SeqCst);
+        shared
+            .region_count
+            .store(regions.len() as u32, Ordering::SeqCst);
         let uffd_fd = uffd.as_raw_fd();
         let loop_start = Instant::now();
 
@@ -704,7 +738,9 @@ mod linux_impl {
                 }
                 let aligned = page_align_down(file_offset, page_size as u64);
                 // Map the stable file offset to THIS run's host page address.
-                let Some(fault_page) = host_page_for_offset(&regions, aligned) else { continue };
+                let Some(fault_page) = host_page_for_offset(&regions, aligned) else {
+                    continue;
+                };
                 let t0 = Instant::now();
                 if let Ok(bytes) = source.serve_fault(uffd_fd, fault_page, aligned, page_size) {
                     shared.prefetch_count.fetch_add(1, Ordering::SeqCst);
@@ -727,7 +763,11 @@ mod linux_impl {
             if shared.stop.load(Ordering::SeqCst) {
                 break;
             }
-            let mut pfd = libc::pollfd { fd: uffd_fd, events: libc::POLLIN, revents: 0 };
+            let mut pfd = libc::pollfd {
+                fd: uffd_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
             // SAFETY: single valid pollfd.
             let r = unsafe { libc::poll(&mut pfd, 1, 200) };
             if r == 0 {
@@ -858,20 +898,36 @@ mod linux_impl {
 
         /// U3: snapshot the per-restore fault trace (for the `.hotset-trace.json`).
         pub(crate) fn trace(&self) -> HotsetTrace {
-            let entries = self.shared.trace.lock().map(|t| t.clone()).unwrap_or_default();
+            let entries = self
+                .shared
+                .trace
+                .lock()
+                .map(|t| t.clone())
+                .unwrap_or_default();
             HotsetTrace { entries }
         }
 
         /// Snapshot the counters into a receipt WITHOUT stopping the thread.
-        pub(crate) fn receipt(&self, vm_reaches_health: bool, time_to_health_ms: Option<u128>) -> UffdRestoreReceipt {
+        pub(crate) fn receipt(
+            &self,
+            vm_reaches_health: bool,
+            time_to_health_ms: Option<u128>,
+        ) -> UffdRestoreReceipt {
             let faults = self.shared.page_fault_count.load(Ordering::SeqCst);
-            let mut svc = self.shared.service_us.lock().map(|v| v.clone()).unwrap_or_default();
+            let mut svc = self
+                .shared
+                .service_us
+                .lock()
+                .map(|v| v.clone())
+                .unwrap_or_default();
             svc.sort_unstable();
             let pct = |p: f64| -> Option<u128> {
                 if svc.is_empty() {
                     return None;
                 }
-                let idx = (((svc.len() as f64) * p).ceil() as usize).saturating_sub(1).min(svc.len() - 1);
+                let idx = (((svc.len() as f64) * p).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(svc.len() - 1);
                 Some(svc[idx] as u128)
             };
             let first = self.shared.first_fault_us.load(Ordering::SeqCst);
@@ -881,7 +937,11 @@ mod linux_impl {
                 region_count: self.shared.region_count.load(Ordering::SeqCst),
                 page_fault_count: faults,
                 bytes_copied: self.shared.bytes_copied.load(Ordering::SeqCst),
-                first_fault_us: if first == 0 { None } else { Some(first as u128) },
+                first_fault_us: if first == 0 {
+                    None
+                } else {
+                    Some(first as u128)
+                },
                 p50_fault_service_us: pct(0.50),
                 p95_fault_service_us: pct(0.95),
                 vm_reaches_health,
@@ -985,8 +1045,16 @@ mod tests {
     #[test]
     fn region_lookup_and_offset() {
         let regions = vec![
-            Region { base_host_virt_addr: 0x1_0000, size: 0x2000, offset: 0 },
-            Region { base_host_virt_addr: 0x10_0000, size: 0x1000, offset: 0x2000 },
+            Region {
+                base_host_virt_addr: 0x1_0000,
+                size: 0x2000,
+                offset: 0,
+            },
+            Region {
+                base_host_virt_addr: 0x10_0000,
+                size: 0x1000,
+                offset: 0x2000,
+            },
         ];
         // a page in the first region
         let r = region_for(&regions, 0x1_1000).expect("region");
@@ -1029,7 +1097,8 @@ mod tests {
             restore_total_ms: Some(489),
             ..Default::default()
         };
-        let back: UffdRestoreReceipt = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        let back: UffdRestoreReceipt =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back.schema_version, UFFD_RECEIPT_SCHEMA_VERSION);
         assert_eq!(back.source, "remote_cas");
         assert_eq!(back.page_fault_count, 42);
@@ -1043,7 +1112,10 @@ mod tests {
         let old: UffdRestoreReceipt = serde_json::from_str(legacy).unwrap();
         assert_eq!(old.schema_version, 0, "legacy receipt ⇒ schema_version 0");
         assert_eq!(old.page_fault_count, 5);
-        assert!(old.backend.is_empty() && old.source.is_empty(), "legacy has no context");
+        assert!(
+            old.backend.is_empty() && old.source.is_empty(),
+            "legacy has no context"
+        );
     }
 
     /// U12 (#879): a persisted hotset profile round-trips for an EXACT identity, and a
@@ -1061,7 +1133,9 @@ mod tests {
             page_size: 4096,
             memory_size: 536870912,
         };
-        let profile = HotsetProfile { offsets: vec![0, 2 << 20, 4 << 20] };
+        let profile = HotsetProfile {
+            offsets: vec![0, 2 << 20, 4 << 20],
+        };
         store.save(&key, &profile).unwrap();
 
         // exact identity ⇒ hit.
@@ -1070,7 +1144,10 @@ mod tests {
         // different memory image ⇒ MISS (never the wrong-image profile).
         let mut other = key.clone();
         other.memory_image_hash = "blake3:mem-B".into();
-        assert!(store.load(&other).is_none(), "different image must not load the profile");
+        assert!(
+            store.load(&other).is_none(),
+            "different image must not load the profile"
+        );
 
         // different runner / backend / page-size / mem-size ⇒ all misses.
         for mutate in [
@@ -1101,7 +1178,14 @@ mod tests {
             memory_size: 1 << 20,
         };
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join(format!("{}.json", key.id())), b"}{ not json at all").unwrap();
-        assert!(store.load(&key).is_none(), "corrupt profile file ⇒ None (never a bad profile)");
+        std::fs::write(
+            root.join(format!("{}.json", key.id())),
+            b"}{ not json at all",
+        )
+        .unwrap();
+        assert!(
+            store.load(&key).is_none(),
+            "corrupt profile file ⇒ None (never a bad profile)"
+        );
     }
 }

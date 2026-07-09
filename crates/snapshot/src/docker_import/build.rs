@@ -82,10 +82,16 @@ fn version_of(runner: &dyn ImportCommandRunner, program: &str) -> Option<String>
 /// (present but not driven in v0) or when nothing is found.
 pub fn probe_build_tool(runner: &dyn ImportCommandRunner) -> Result<BuildToolProbe, String> {
     if let Some(version) = version_of(runner, "podman") {
-        return Ok(BuildToolProbe { tool: BuildTool::Podman, version });
+        return Ok(BuildToolProbe {
+            tool: BuildTool::Podman,
+            version,
+        });
     }
     if let Some(version) = version_of(runner, "docker") {
-        return Ok(BuildToolProbe { tool: BuildTool::Docker, version });
+        return Ok(BuildToolProbe {
+            tool: BuildTool::Docker,
+            version,
+        });
     }
     if version_of(runner, "buildah").is_some() {
         return Err(
@@ -196,7 +202,9 @@ pub fn parse_dockerfile_base_refs(
             continue;
         }
         let mut tokens = line.split_whitespace();
-        let Some(instruction) = tokens.next() else { continue };
+        let Some(instruction) = tokens.next() else {
+            continue;
+        };
         if instruction.eq_ignore_ascii_case("ARG") && !seen_from {
             // Pre-FROM ARG: `ARG NAME[=default]` — defaults feed FROM substitution;
             // a supplied build arg overrides the default.
@@ -294,7 +302,8 @@ pub fn render_effective_dockerfile(
                 let raw_ref = rest.get(idx).ok_or("FROM with no image reference")?;
                 let resolved = substitute_from_ref(raw_ref, &args)?;
                 let is_prior_stage = is_stage_ref(&resolved, &stages);
-                let as_clause = if rest.len() >= idx + 3 && rest[idx + 1].eq_ignore_ascii_case("AS") {
+                let as_clause = if rest.len() >= idx + 3 && rest[idx + 1].eq_ignore_ascii_case("AS")
+                {
                     stages.push(rest[idx + 2].to_string());
                     Some((rest[idx + 1], rest[idx + 2]))
                 } else {
@@ -376,7 +385,11 @@ fn run_tool(
         .run(tool.as_str(), args)
         .map_err(|e| format!("{what}: spawn {} failed: {e}", tool.as_str()))?;
     if !out.success() {
-        return Err(format!("{what} failed (exit {}): {}", out.status, out.stderr_tail()));
+        return Err(format!(
+            "{what} failed (exit {}): {}",
+            out.status,
+            out.stderr_tail()
+        ));
     }
     Ok(out)
 }
@@ -401,7 +414,13 @@ fn resolve_base_digests(
         let out = run_tool(
             runner,
             tool,
-            &["image", "inspect", "--format", "{{index .RepoDigests 0}}", r],
+            &[
+                "image",
+                "inspect",
+                "--format",
+                "{{index .RepoDigests 0}}",
+                r,
+            ],
             &format!("inspect base image {r:?}"),
         )?;
         let digest_ref = out.stdout.trim().to_string();
@@ -411,14 +430,17 @@ fn resolve_base_digests(
                  a tag is not a reproducible identity; refusing to continue (fail-closed)"
             ));
         }
-        resolved.push(ResolvedBaseImage { original_ref: r.clone(), resolved_digest: digest_ref });
+        resolved.push(ResolvedBaseImage {
+            original_ref: r.clone(),
+            resolved_digest: digest_ref,
+        });
     }
     Ok(resolved)
 }
 
 fn parse_image_config(inspect_json: &str) -> Result<DockerImageConfig, String> {
-    let v: serde_json::Value =
-        serde_json::from_str(inspect_json).map_err(|e| format!("image inspect JSON parse error: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(inspect_json)
+        .map_err(|e| format!("image inspect JSON parse error: {e}"))?;
     // docker/podman `image inspect` emit an array; podman can also emit a bare object.
     let obj = v.get(0).unwrap_or(&v);
     let config = obj
@@ -428,7 +450,11 @@ fn parse_image_config(inspect_json: &str) -> Result<DockerImageConfig, String> {
         config
             .get(key)
             .and_then(|x| x.as_array())
-            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
     let mut env = BTreeMap::new();
@@ -490,7 +516,9 @@ pub(crate) fn sha256_file_hex(path: &Path) -> Result<String, String> {
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
-        let n = f.read(&mut buf).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -524,11 +552,14 @@ pub fn build_context_digest(context_dir: &Path) -> Result<String, String> {
             if rel == ".git" || rel.starts_with(".git/") {
                 continue;
             }
-            let ft = entry.file_type().map_err(|e| format!("file_type {rel}: {e}"))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| format!("file_type {rel}: {e}"))?;
             if ft.is_dir() {
                 stack.push(path);
             } else if ft.is_symlink() {
-                let target = std::fs::read_link(&path).map_err(|e| format!("read_link {rel}: {e}"))?;
+                let target =
+                    std::fs::read_link(&path).map_err(|e| format!("read_link {rel}: {e}"))?;
                 entries.push((rel, sha256_hex(target.to_string_lossy().as_bytes())));
             } else {
                 let bytes = std::fs::read(&path).map_err(|e| format!("read {rel}: {e}"))?;
@@ -595,7 +626,8 @@ pub fn run_dockerfile_build(
         .iter()
         .map(|r| (r.original_ref.clone(), r.resolved_digest.clone()))
         .collect();
-    let effective = render_effective_dockerfile(&dockerfile_text, &spec.build_args, &digest_by_ref)?;
+    let effective =
+        render_effective_dockerfile(&dockerfile_text, &spec.build_args, &digest_by_ref)?;
     let effective_dockerfile_sha256 = sha256_hex(effective.as_bytes());
     // Unique per invocation (pid + sequence): concurrent imports — including
     // parallel tests sharing a tag — must never share/steal a staging dir.
@@ -606,9 +638,11 @@ pub fn run_dockerfile_build(
         std::process::id(),
         EFF_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&eff_dir).map_err(|e| format!("create effective-Dockerfile dir: {e}"))?;
+    std::fs::create_dir_all(&eff_dir)
+        .map_err(|e| format!("create effective-Dockerfile dir: {e}"))?;
     let eff_path = eff_dir.join("Dockerfile.effective");
-    std::fs::write(&eff_path, &effective).map_err(|e| format!("write effective Dockerfile: {e}"))?;
+    std::fs::write(&eff_path, &effective)
+        .map_err(|e| format!("write effective Dockerfile: {e}"))?;
 
     let dockerfile_arg = eff_path.to_string_lossy().to_string();
     let context_arg = context_canon.to_string_lossy().to_string();
@@ -617,8 +651,15 @@ pub fn run_dockerfile_build(
         build_args_flat.push("--build-arg".into());
         build_args_flat.push(format!("{k}={v}"));
     }
-    let mut args: Vec<&str> =
-        vec!["build", "--platform", DOCKER_IMPORT_PLATFORM, "-f", &dockerfile_arg, "-t", image_tag];
+    let mut args: Vec<&str> = vec![
+        "build",
+        "--platform",
+        DOCKER_IMPORT_PLATFORM,
+        "-f",
+        &dockerfile_arg,
+        "-t",
+        image_tag,
+    ];
     args.extend(build_args_flat.iter().map(|s| s.as_str()));
     args.push(&context_arg);
     let build_result = run_tool(runner, probe.tool, &args, "dockerfile build");
@@ -705,7 +746,10 @@ mod tests {
                 }
             }
             // Unscripted command = "not installed" (io error), like a missing binary.
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, format!("unscripted: {full}")))
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("unscripted: {full}"),
+            ))
         }
     }
 
@@ -728,7 +772,12 @@ mod tests {
 
     #[test]
     fn probe_buildah_only_is_a_specific_error() {
-        let r = FakeRunner::new(vec![("buildah --version", 0, "buildah version 1.35.0\n", "")]);
+        let r = FakeRunner::new(vec![(
+            "buildah --version",
+            0,
+            "buildah version 1.35.0\n",
+            "",
+        )]);
         let err = probe_build_tool(&r).unwrap_err();
         assert!(err.contains("buildah is present"), "{err}");
         assert!(err.contains("podman"), "{err}");
@@ -780,25 +829,40 @@ CMD ["/app/serve"]
     #[test]
     fn arg_defaults_and_build_args_substitute_from_refs() {
         let df = "ARG BASE=node:20\nFROM ${BASE}\n";
-        assert_eq!(parse_dockerfile_base_refs(df, &no_args()).unwrap(), vec!["node:20"]);
+        assert_eq!(
+            parse_dockerfile_base_refs(df, &no_args()).unwrap(),
+            vec!["node:20"]
+        );
 
         let mut args = no_args();
         args.insert("BASE".into(), "node:22".into());
-        assert_eq!(parse_dockerfile_base_refs(df, &args).unwrap(), vec!["node:22"]);
+        assert_eq!(
+            parse_dockerfile_base_refs(df, &args).unwrap(),
+            vec!["node:22"]
+        );
 
         // ${VAR:-default} form.
         let df = "FROM ${BASE:-python:3.12-slim}\n";
-        assert_eq!(parse_dockerfile_base_refs(df, &no_args()).unwrap(), vec!["python:3.12-slim"]);
+        assert_eq!(
+            parse_dockerfile_base_refs(df, &no_args()).unwrap(),
+            vec!["python:3.12-slim"]
+        );
 
         // $VAR form with a declared default.
         let df = "ARG REG=docker.io\nFROM $REG/library/redis:7\n";
-        assert_eq!(parse_dockerfile_base_refs(df, &no_args()).unwrap(), vec!["docker.io/library/redis:7"]);
+        assert_eq!(
+            parse_dockerfile_base_refs(df, &no_args()).unwrap(),
+            vec!["docker.io/library/redis:7"]
+        );
     }
 
     #[test]
     fn unresolved_arg_fails_closed() {
         let err = parse_dockerfile_base_refs("FROM ${MYSTERY}\n", &no_args()).unwrap_err();
-        assert!(err.contains("MYSTERY") && err.contains("fail-closed"), "{err}");
+        assert!(
+            err.contains("MYSTERY") && err.contains("fail-closed"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -810,13 +874,19 @@ CMD ["/app/serve"]
     #[test]
     fn duplicate_refs_dedupe() {
         let df = "FROM alpine:3.19 AS a\nFROM alpine:3.19 AS b\n";
-        assert_eq!(parse_dockerfile_base_refs(df, &no_args()).unwrap(), vec!["alpine:3.19"]);
+        assert_eq!(
+            parse_dockerfile_base_refs(df, &no_args()).unwrap(),
+            vec!["alpine:3.19"]
+        );
     }
 
     // --- render_effective_dockerfile ------------------------------------------------
 
     fn digests(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -827,7 +897,10 @@ CMD ["/app/serve"]
             &digests(&[("node:20", "docker.io/library/node@sha256:aaaa")]),
         )
         .unwrap();
-        assert!(out.contains("FROM docker.io/library/node@sha256:aaaa AS builder"), "{out}");
+        assert!(
+            out.contains("FROM docker.io/library/node@sha256:aaaa AS builder"),
+            "{out}"
+        );
         assert!(!out.contains("FROM node:20 "), "{out}");
         assert!(out.contains("RUN make"), "{out}");
     }
@@ -841,7 +914,10 @@ CMD ["/app/serve"]
             &digests(&[("golang:1.22", "docker.io/library/golang@sha256:bbbb")]),
         )
         .unwrap();
-        assert!(out.contains("FROM docker.io/library/golang@sha256:bbbb AS builder"), "{out}");
+        assert!(
+            out.contains("FROM docker.io/library/golang@sha256:bbbb AS builder"),
+            "{out}"
+        );
         assert!(out.contains("FROM builder AS runtime"), "{out}"); // verbatim
     }
 
@@ -857,8 +933,14 @@ CMD ["/app/serve"]
             ]),
         )
         .unwrap();
-        assert!(out.contains("FROM --platform=linux/amd64 docker.io/library/golang@sha256:bbbb AS b"), "{out}");
-        assert!(out.contains("FROM docker.io/library/alpine@sha256:cccc"), "{out}");
+        assert!(
+            out.contains("FROM --platform=linux/amd64 docker.io/library/golang@sha256:bbbb AS b"),
+            "{out}"
+        );
+        assert!(
+            out.contains("FROM docker.io/library/alpine@sha256:cccc"),
+            "{out}"
+        );
         // scratch/comments/other lines byte-preserved; ARG line kept.
         assert!(out.contains("ARG BASE=alpine:3.19"), "{out}");
         assert!(out.contains("COPY --from=b /out /app"), "{out}");
@@ -866,8 +948,12 @@ CMD ["/app/serve"]
 
     #[test]
     fn effective_fails_closed_on_a_missing_digest() {
-        let err = render_effective_dockerfile("FROM node:20\n", &no_args(), &digests(&[])).unwrap_err();
-        assert!(err.contains("no resolved digest") && err.contains("fail-closed"), "{err}");
+        let err =
+            render_effective_dockerfile("FROM node:20\n", &no_args(), &digests(&[])).unwrap_err();
+        assert!(
+            err.contains("no resolved digest") && err.contains("fail-closed"),
+            "{err}"
+        );
     }
 
     // --- parse_image_config --------------------------------------------------------
@@ -943,7 +1029,10 @@ CMD ["/app/serve"]
         let dir = std::env::temp_dir().join(format!(
             "docker-import-test-{}-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("t").replace("::", "-"),
+            std::thread::current()
+                .name()
+                .unwrap_or("t")
+                .replace("::", "-"),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -972,28 +1061,53 @@ CMD ["/app/serve"]
     #[test]
     fn build_flow_runs_pull_pin_build_inspect_in_order() {
         let dir = tempdir();
-        std::fs::write(dir.join("Dockerfile"), "FROM node:20-slim\nCMD [\"node\"]\n").unwrap();
+        std::fs::write(
+            dir.join("Dockerfile"),
+            "FROM node:20-slim\nCMD [\"node\"]\n",
+        )
+        .unwrap();
         let runner = FakeRunner::new(full_build_script());
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "podman 4.9".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "podman 4.9".into(),
+        };
         let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
 
         let out = run_dockerfile_build(&runner, &probe, &dir, &spec, "ato-import-test").unwrap();
         assert_eq!(out.final_image_digest, "sha256:0123abcd"); // bare hex normalized
         assert_eq!(out.resolved_base_images.len(), 1);
         assert_eq!(out.resolved_base_images[0].original_ref, "node:20-slim");
-        assert!(out.resolved_base_images[0].resolved_digest.contains("@sha256:aaaa"));
+        assert!(
+            out.resolved_base_images[0]
+                .resolved_digest
+                .contains("@sha256:aaaa")
+        );
         assert_eq!(out.image_config.cmd, vec!["node", "server.js"]);
         assert_eq!(out.dockerfile_sha256.len(), 64);
         assert_eq!(out.build_context_digest.len(), 64);
 
         let calls = runner.calls();
-        let idx = |prefix: &str| calls.iter().position(|c| c.starts_with(prefix)).unwrap_or_else(|| panic!("missing call {prefix}: {calls:?}"));
+        let idx = |prefix: &str| {
+            calls
+                .iter()
+                .position(|c| c.starts_with(prefix))
+                .unwrap_or_else(|| panic!("missing call {prefix}: {calls:?}"))
+        };
         assert!(idx("podman pull --platform linux/amd64 node:20-slim") < idx("podman build"));
-        assert!(idx("podman build --platform linux/amd64 -f") < idx("podman image inspect --format {{.Id}}"));
+        assert!(
+            idx("podman build --platform linux/amd64 -f")
+                < idx("podman image inspect --format {{.Id}}")
+        );
         // The build consumes the EFFECTIVE Dockerfile, never the original.
-        let build_call = calls.iter().find(|c| c.starts_with("podman build")).unwrap();
+        let build_call = calls
+            .iter()
+            .find(|c| c.starts_with("podman build"))
+            .unwrap();
         assert!(build_call.contains("Dockerfile.effective"), "{build_call}");
-        assert!(!build_call.contains(&dir.join("Dockerfile").to_string_lossy().to_string()), "{build_call}");
+        assert!(
+            !build_call.contains(&dir.join("Dockerfile").to_string_lossy().to_string()),
+            "{build_call}"
+        );
         assert_eq!(out.effective_dockerfile_sha256.len(), 64);
         assert_ne!(out.effective_dockerfile_sha256, out.dockerfile_sha256); // digest-pinned rewrite differs
         cleanup(dir);
@@ -1021,17 +1135,32 @@ CMD ["/app/serve"]
     #[test]
     fn build_input_is_the_digest_pinned_effective_dockerfile() {
         let dir = tempdir();
-        std::fs::write(dir.join("Dockerfile"), "FROM node:20-slim\nCMD [\"node\"]\n").unwrap();
+        std::fs::write(
+            dir.join("Dockerfile"),
+            "FROM node:20-slim\nCMD [\"node\"]\n",
+        )
+        .unwrap();
         let runner = EffectiveCapturingRunner {
             inner: FakeRunner::new(full_build_script()),
             captured: Mutex::new(None),
         };
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "p".into(),
+        };
         let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
         run_dockerfile_build(&runner, &probe, &dir, &spec, "t").unwrap();
 
-        let effective = runner.captured.lock().unwrap().clone().expect("build ran with -f");
-        assert!(effective.contains("FROM docker.io/library/node@sha256:aaaa"), "{effective}");
+        let effective = runner
+            .captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("build ran with -f");
+        assert!(
+            effective.contains("FROM docker.io/library/node@sha256:aaaa"),
+            "{effective}"
+        );
         assert!(!effective.contains("node:20-slim"), "{effective}");
         // The author's Dockerfile on disk is untouched.
         let original = std::fs::read_to_string(dir.join("Dockerfile")).unwrap();
@@ -1042,11 +1171,18 @@ CMD ["/app/serve"]
     #[test]
     fn build_args_are_passed_and_context_is_last() {
         let dir = tempdir();
-        std::fs::write(dir.join("Dockerfile"), "ARG NODE_VERSION=20\nFROM node:${NODE_VERSION}-slim\n").unwrap();
+        std::fs::write(
+            dir.join("Dockerfile"),
+            "ARG NODE_VERSION=20\nFROM node:${NODE_VERSION}-slim\n",
+        )
+        .unwrap();
         let mut script = full_build_script();
         script[1].2 = "docker.io/library/node@sha256:bbbb\n";
         let runner = FakeRunner::new(script);
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "p".into(),
+        };
         let mut args = BTreeMap::new();
         args.insert("NODE_VERSION".to_string(), "22".to_string());
         let spec = DockerImportSpec::new("Dockerfile", args).unwrap();
@@ -1055,9 +1191,21 @@ CMD ["/app/serve"]
         // The supplied build arg overrode the ARG default in FROM resolution…
         assert_eq!(out.resolved_base_images[0].original_ref, "node:22-slim");
         // …and was passed to the build, with the context dir as the final arg.
-        let build_call = runner.calls().into_iter().find(|c| c.starts_with("podman build")).unwrap();
-        assert!(build_call.contains("--build-arg NODE_VERSION=22"), "{build_call}");
-        assert!(build_call.trim_end().ends_with(&dir.canonicalize().unwrap().to_string_lossy().to_string()), "{build_call}");
+        let build_call = runner
+            .calls()
+            .into_iter()
+            .find(|c| c.starts_with("podman build"))
+            .unwrap();
+        assert!(
+            build_call.contains("--build-arg NODE_VERSION=22"),
+            "{build_call}"
+        );
+        assert!(
+            build_call
+                .trim_end()
+                .ends_with(&dir.canonicalize().unwrap().to_string_lossy().to_string()),
+            "{build_call}"
+        );
         cleanup(dir);
     }
 
@@ -1066,15 +1214,30 @@ CMD ["/app/serve"]
         let dir = tempdir();
         std::fs::write(dir.join("Dockerfile"), "FROM node:20-slim\n").unwrap();
         let mut script = full_build_script();
-        script[1] = ("podman image inspect --format {{index .RepoDigests 0}}", 0, "\n", "");
+        script[1] = (
+            "podman image inspect --format {{index .RepoDigests 0}}",
+            0,
+            "\n",
+            "",
+        );
         let runner = FakeRunner::new(script);
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "p".into(),
+        };
         let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
 
         let err = run_dockerfile_build(&runner, &probe, &dir, &spec, "t").unwrap_err();
-        assert!(err.contains("did not resolve to a registry digest"), "{err}");
+        assert!(
+            err.contains("did not resolve to a registry digest"),
+            "{err}"
+        );
         // The build must never have run.
-        assert!(!runner.calls().iter().any(|c| c.starts_with("podman build")), "{:?}", runner.calls());
+        assert!(
+            !runner.calls().iter().any(|c| c.starts_with("podman build")),
+            "{:?}",
+            runner.calls()
+        );
         cleanup(dir);
     }
 
@@ -1083,9 +1246,17 @@ CMD ["/app/serve"]
         let dir = tempdir();
         std::fs::write(dir.join("Dockerfile"), "FROM node:20-slim\n").unwrap();
         let mut script = full_build_script();
-        script[2] = ("podman build", 1, "", "step 3/9: npm ci\nnpm ERR! missing lockfile\n");
+        script[2] = (
+            "podman build",
+            1,
+            "",
+            "step 3/9: npm ci\nnpm ERR! missing lockfile\n",
+        );
         let runner = FakeRunner::new(script);
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "p".into(),
+        };
         let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
 
         let err = run_dockerfile_build(&runner, &probe, &dir, &spec, "t").unwrap_err();
@@ -1098,7 +1269,10 @@ CMD ["/app/serve"]
     fn missing_dockerfile_and_escape_fail_closed() {
         let dir = tempdir();
         let runner = FakeRunner::new(vec![]);
-        let probe = BuildToolProbe { tool: BuildTool::Podman, version: "p".into() };
+        let probe = BuildToolProbe {
+            tool: BuildTool::Podman,
+            version: "p".into(),
+        };
         let spec = DockerImportSpec::new("Dockerfile", BTreeMap::new()).unwrap();
         let err = run_dockerfile_build(&runner, &probe, &dir, &spec, "t").unwrap_err();
         assert!(err.contains("not found"), "{err}");

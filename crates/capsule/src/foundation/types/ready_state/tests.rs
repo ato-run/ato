@@ -156,7 +156,10 @@ future_field = "ignored"
 fn empty_ready_state_tables_are_not_serialized() {
     let m = parse("");
     let json = m.to_json().expect("to_json");
-    assert!(!json.contains("\"snapshot\""), "snapshot should be skipped: {json}");
+    assert!(
+        !json.contains("\"snapshot\""),
+        "snapshot should be skipped: {json}"
+    );
     assert!(!json.contains("\"secrets\""), "secrets should be skipped");
     assert!(!json.contains("\"bindings\""), "bindings should be skipped");
     assert!(!json.contains("\"external\""), "external should be skipped");
@@ -192,8 +195,8 @@ type = "service"
 fn shipped_sample_recipe_parses_and_is_eligible() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../samples/ready-state-demo/capsule.toml");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let m = CapsuleManifest::from_toml(&text).expect("sample should parse");
 
     assert!(m.is_ready_state_eligible());
@@ -204,7 +207,11 @@ fn shipped_sample_recipe_parses_and_is_eligible() {
     assert!(m.context.is_some());
 
     let e = m.instant_run_eligibility();
-    assert!(e.eligible, "sample must stay eligible: {:?}", e.blocking_reasons);
+    assert!(
+        e.eligible,
+        "sample must stay eligible: {:?}",
+        e.blocking_reasons
+    );
 }
 
 // ── eligibility validator ─────────────────────────────────────────────────
@@ -395,7 +402,11 @@ path = "/health"
         "a probe on a non-serving target must not satisfy the healthcheck gate"
     );
     assert!(!e.eligible);
-    assert!(e.blocking_reasons.iter().any(|r| r.contains("serving target 'app'")));
+    assert!(
+        e.blocking_reasons
+            .iter()
+            .any(|r| r.contains("serving target 'app'"))
+    );
 }
 
 #[test]
@@ -611,8 +622,8 @@ type = "accelerator"
 
 fn read_sample(rel: &str) -> CapsuleManifest {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     CapsuleManifest::from_toml(&text).expect("sample should parse")
 }
 

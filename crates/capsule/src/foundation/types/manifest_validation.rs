@@ -1503,7 +1503,10 @@ impl CapsuleManifest {
                         let (service_b, state_b, target_b) = &snapshot_state_targets[j];
                         let path_a = std::path::Path::new(target_a);
                         let path_b = std::path::Path::new(target_b);
-                        if path_a == path_b || path_a.starts_with(path_b) || path_b.starts_with(path_a) {
+                        if path_a == path_b
+                            || path_a.starts_with(path_b)
+                            || path_b.starts_with(path_a)
+                        {
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_a.clone(),
                                 format!(
@@ -2339,7 +2342,10 @@ mod tests {
     /// `[services.<name>]` has NO `target` field (every v1.5 supervisor/snapshot
     /// fixture is shaped this way — it has no `[targets.<label>]` to route an OCI
     /// mount into).
-    fn validate_snapshot_state_binding(state_block: &str, binding_line: &str) -> Result<(), Vec<super::ValidationError>> {
+    fn validate_snapshot_state_binding(
+        state_block: &str,
+        binding_line: &str,
+    ) -> Result<(), Vec<super::ValidationError>> {
         let toml = format!(
             "schema_version = \"0.3\"\nname = \"snap-state\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
              default_target = \"app\"\n\
@@ -2367,7 +2373,10 @@ mod tests {
             &persistent_state_decl("dbdata", ""),
             "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
         );
-        assert!(r.is_ok(), "valid snapshot-mode state binding should validate: {r:?}");
+        assert!(
+            r.is_ok(),
+            "valid snapshot-mode state binding should validate: {r:?}"
+        );
     }
 
     #[test]
@@ -2437,11 +2446,13 @@ mod tests {
             ),
             "out of range"
         ));
-        assert!(validate_snapshot_state_binding(
-            &persistent_state_decl("dbdata", "size_mb = 4096\n"),
-            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
-        )
-        .is_ok());
+        assert!(
+            validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", "size_mb = 4096\n"),
+                "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2493,7 +2504,11 @@ mod tests {
         let manifest: crate::foundation::types::manifest::CapsuleManifest =
             toml::from_str(&toml).expect("parse manifest");
         let r = manifest.validate();
-        assert!(has_err(&r, "dbdata") && (has_err(&r, "shared mutable state") || has_err(&r, "same-capsule")), "{r:?}");
+        assert!(
+            has_err(&r, "dbdata")
+                && (has_err(&r, "shared mutable state") || has_err(&r, "same-capsule")),
+            "{r:?}"
+        );
     }
 
     #[test]

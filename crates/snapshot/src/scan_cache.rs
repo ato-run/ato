@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::scanner::{FindingKind, SecretFinding, POLICY_VERSION, SCANNER_VERSION};
+use crate::scanner::{FindingKind, POLICY_VERSION, SCANNER_VERSION, SecretFinding};
 
 /// A finding without its layer — the layer is implied by the lookup key, so it is
 /// re-attached on read. (Avoids serializing the `&'static str` layer field.)
@@ -53,7 +53,9 @@ pub struct ScanCache {
 impl ScanCache {
     /// Open (lazily) the scan cache under a CAS root: `<cas_root>/scans/`.
     pub fn open(cas_root: &Path) -> Self {
-        ScanCache { dir: cas_root.join("scans") }
+        ScanCache {
+            dir: cas_root.join("scans"),
+        }
     }
 
     fn path(&self, blob_hex: &str) -> PathBuf {
@@ -79,9 +81,18 @@ impl ScanCache {
         let findings = rec
             .findings
             .into_iter()
-            .map(|f| SecretFinding { layer, offset: f.offset, len: f.len, kind: f.kind, detail: f.detail })
+            .map(|f| SecretFinding {
+                layer,
+                offset: f.offset,
+                len: f.len,
+                kind: f.kind,
+                detail: f.detail,
+            })
             .collect();
-        Some(CachedScan { findings, capped: rec.capped })
+        Some(CachedScan {
+            findings,
+            capped: rec.capped,
+        })
     }
 
     /// Store the heuristic findings for a layer blob (best-effort; atomic write).
@@ -93,14 +104,21 @@ impl ScanCache {
             capped,
             findings: findings
                 .iter()
-                .map(|f| CachedFinding { offset: f.offset, len: f.len, kind: f.kind, detail: f.detail.clone() })
+                .map(|f| CachedFinding {
+                    offset: f.offset,
+                    len: f.len,
+                    kind: f.kind,
+                    detail: f.detail.clone(),
+                })
                 .collect(),
         };
         let path = self.path(blob_hex);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let Ok(json) = serde_json::to_vec(&rec) else { return };
+        let Ok(json) = serde_json::to_vec(&rec) else {
+            return;
+        };
         let tmp = path.with_extension(capsulefs::unique_tmp_suffix());
         if std::fs::write(&tmp, &json).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
@@ -110,7 +128,13 @@ impl ScanCache {
 
 fn sanitize(v: &str) -> String {
     v.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -119,7 +143,13 @@ mod tests {
     use super::*;
 
     fn finding(layer: &'static str) -> SecretFinding {
-        SecretFinding { layer, offset: 10, len: 5, kind: FindingKind::HighEntropyToken, detail: "e=4.2".into() }
+        SecretFinding {
+            layer,
+            offset: 10,
+            len: 5,
+            kind: FindingKind::HighEntropyToken,
+            detail: "e=4.2".into(),
+        }
     }
 
     #[test]
@@ -148,7 +178,10 @@ mod tests {
         let p = cache.path("deadbeef");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, b"{not valid json").unwrap();
-        assert!(cache.get("deadbeef", "rootfs").is_none(), "corrupt entry must be a miss");
+        assert!(
+            cache.get("deadbeef", "rootfs").is_none(),
+            "corrupt entry must be a miss"
+        );
     }
 
     #[test]
@@ -166,7 +199,10 @@ mod tests {
         let p = cache.path("abc");
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, serde_json::to_vec(&rec).unwrap()).unwrap();
-        assert!(cache.get("abc", "rootfs").is_none(), "blob_id mismatch must be a miss");
+        assert!(
+            cache.get("abc", "rootfs").is_none(),
+            "blob_id mismatch must be a miss"
+        );
     }
 
     #[test]

@@ -79,9 +79,7 @@ impl<'a> LazyBlobReader<'a> {
         let mut declared_sum: u64 = 0;
         for chunk in &self.manifest.chunks {
             declared_sum = declared_sum.checked_add(chunk.length).ok_or_else(|| {
-                CapsuleFsError::MalformedManifest(
-                    "sum of chunk lengths overflows u64".to_string(),
-                )
+                CapsuleFsError::MalformedManifest("sum of chunk lengths overflows u64".to_string())
             })?;
         }
         if declared_sum != self.manifest.total_len {
@@ -236,8 +234,7 @@ mod tests {
             .map(|i| (((i / page) * 97 + i) % 256) as u8)
             .collect();
         let (_dir, store, manifest) = store_with_blob(&payload);
-        let distinct: std::collections::HashSet<_> =
-            manifest.referenced_chunks().collect();
+        let distinct: std::collections::HashSet<_> = manifest.referenced_chunks().collect();
         assert_eq!(distinct.len(), 3, "pages must be distinct for this test");
 
         // Build a hotset from this blob's chunks plus one foreign chunk.

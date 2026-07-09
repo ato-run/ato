@@ -3730,8 +3730,8 @@ where
     // enabled Ready-State as a validation mode. An explicit-but-unavailable
     // backend also fails closed (`select_backend`).
     if crate::application::ready_state::flags::ready_state_enabled() {
-        use capsule::Measurable;
         use crate::application::ready_state;
+        use capsule::Measurable;
         // Only reached when the flag is on, so the legacy path does ZERO of this
         // (no manifest re-parse / hash). decide_ready_state_run fails CLOSED when
         // the capsule is eligible but no sealed artifact exists (validation mode
@@ -3762,21 +3762,31 @@ where
             // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
             // the #837 pre-restore guard fail-closes exactly as today.
             let binding_req = ready_state::bindings::requires_runtime_bindings(&rs_manifest);
-            let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
+            let binding_names: Vec<String> = binding_req
+                .secrets
+                .iter()
+                .chain(binding_req.bindings.iter())
+                .chain(binding_req.external.iter())
+                .cloned()
+                .collect();
             let binding_preview = ready_state::flags::bindings_preview_enabled();
             let binding_gate_active = binding_preview && !binding_names.is_empty();
             // v1.6 (ato#983) Slice 3 revision: captured now — `plan.manifest`
             // is moved into `restore_and_expose` below — so MountVolumes can
             // be sent before any binding delivery.
-            let has_durable_state =
-                plan.manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
+            let has_durable_state = plan
+                .manifest
+                .supervisor_build
+                .as_ref()
+                .is_some_and(|s| !s.state_volumes.is_empty());
             // v1.2 PR 2: the grant-scoped resolver (default: host-local SecretStore,
             // namespace rs-<hash16>) + LAUNCH PREFLIGHT. Every declared binding must
             // resolve BEFORE anything is restored — a missing grant blocks the launch
             // with the aggregated, actionable report (name + description + the exact
             // `ato secrets set … --namespace …` command). Values stay in memory only
             // until lease delivery; never logged or recorded.
-            let mut preflight_resolved: Vec<(String, protocol::binding_lease::SecretValue)> = Vec::new();
+            let mut preflight_resolved: Vec<(String, protocol::binding_lease::SecretValue)> =
+                Vec::new();
             let mut resolver_kind: Option<String> = None;
             let mut grant_namespace: Option<String> = None;
             if binding_gate_active {
@@ -3794,7 +3804,10 @@ where
                 grant_namespace = Some(ns);
             }
             {
-                let mut receipt = ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone());
+                let mut receipt = ready_state::binding_host::BindingPreviewReceipt::decide(
+                    binding_preview,
+                    binding_names.clone(),
+                );
                 receipt.resolver_kind = resolver_kind.clone();
                 receipt.grant_namespace = grant_namespace.clone();
                 receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
@@ -3814,16 +3827,22 @@ where
             if binding_gate_active {
                 let caps = backend.probe();
                 if !caps.binding.supports_binding_lease {
-                    let reason = caps.binding.unavailable_reason().unwrap_or_else(|| "binding-lease unsupported".into());
+                    let reason = caps
+                        .binding
+                        .unavailable_reason()
+                        .unwrap_or_else(|| "binding-lease unsupported".into());
                     tracing::warn!(target: "ato::ready_state", %reason, "binding preview fail-closed (placement)");
-                    anyhow::bail!("Ready-State binding preview requested but this host cannot deliver bindings: {reason}");
+                    anyhow::bail!(
+                        "Ready-State binding preview requested but this host cannot deliver bindings: {reason}"
+                    );
                 }
             }
             // Orphan Ready-State overlays from crashed prior serving runs are
             // reaped/quarantined by the canonical startup sweep
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
             // separate sweep is wired here.
-            let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            let store =
+                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
             // U10 (#877): opt-in mem_backend selection diagnostics — record what a
             // selector WOULD choose, then restore via File EXACTLY as before. Pure
             // observation; no behavior change.
@@ -3956,7 +3975,9 @@ where
                 });
                 if let Err(e) = mount {
                     let _ = backend.stop(session.clone());
-                    anyhow::bail!("Ready-State durable-state mount failed closed (no traffic exposed): {e}");
+                    anyhow::bail!(
+                        "Ready-State durable-state mount failed closed (no traffic exposed): {e}"
+                    );
                 }
             }
             // Phase 8a-RunGate PR D2 (#912): BIND BEFORE EXPOSE. For a binding-required
@@ -3986,12 +4007,18 @@ where
                         now_ms,
                         ready_state::flags::binding_ttl_ms(),
                     )?;
-                    ready_state::binding_host::bind_before_expose(uds, &leases, std::time::Duration::from_secs(10))
+                    ready_state::binding_host::bind_before_expose(
+                        uds,
+                        &leases,
+                        std::time::Duration::from_secs(10),
+                    )
                 })();
                 if let Err(e) = bind {
                     // Fail closed: no unbound session is ever exposed.
                     let _ = backend.stop(session.clone());
-                    anyhow::bail!("Ready-State binding preview failed closed (no traffic exposed): {e}");
+                    anyhow::bail!(
+                        "Ready-State binding preview failed closed (no traffic exposed): {e}"
+                    );
                 }
                 tracing::info!(
                     target: "ato::ready_state",
@@ -4000,8 +4027,7 @@ where
                 );
             }
             // Surface RuntimeMetadata::MicroVm through the restored-session handle.
-            let handle =
-                ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
+            let handle = ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
             let metrics = handle.capture_metrics().await.map_err(anyhow::Error::new)?;
             // Long-lived serving (Phase 7) requires a REAL serving VMM process.
             // Only a backend that spawns one (Firecracker) sets `vmm_pid = Some`;
@@ -4062,7 +4088,11 @@ where
                 ready_state_tap_dev: None,
                 // D3: record the vsock UDS for a bound session so `ato stop` can
                 // scrub the guest bindings before teardown.
-                ready_state_vsock_uds: if binding_gate_active { session.vsock_uds.clone() } else { None },
+                ready_state_vsock_uds: if binding_gate_active {
+                    session.vsock_uds.clone()
+                } else {
+                    None
+                },
             };
             crate::runtime::process::ProcessManager::new()?.write_pid(&info)?;
             tracing::info!(
@@ -4074,7 +4104,10 @@ where
                 port = ?session.guest_port,
                 "READY-STATE: serving (long-lived)"
             );
-            let port_str = session.guest_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+            let port_str = session
+                .guest_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "?".to_string());
 
             if ready_state::flags::foreground_serve_enabled() {
                 // Foreground serve (Phase 7.5b, opt-in): BLOCK until the guest exits
@@ -4093,14 +4126,15 @@ where
                     .await?;
                 let sigint_session = session.clone();
                 let sigint_id = id.clone();
-                let token = crate::application::pipeline::cleanup::register_dep_contract_sigint_teardown(
-                    move || {
-                        let _ = snapshot::FirecrackerBackend::new().stop(sigint_session);
-                        if let Ok(pm) = crate::runtime::process::ProcessManager::new() {
-                            let _ = pm.delete_pid(&sigint_id);
-                        }
-                    },
-                );
+                let token =
+                    crate::application::pipeline::cleanup::register_dep_contract_sigint_teardown(
+                        move || {
+                            let _ = snapshot::FirecrackerBackend::new().stop(sigint_session);
+                            if let Ok(pm) = crate::runtime::process::ProcessManager::new() {
+                                let _ = pm.delete_pid(&sigint_id);
+                            }
+                        },
+                    );
                 // v1.2 PR 2 (L8): while a BOUND session serves in the foreground, renew
                 // its leases inside the TTL and revoke any lease whose grant disappears
                 // (`ato secrets delete …` mid-session ⇒ guest value scrubbed, traffic
@@ -4109,7 +4143,9 @@ where
                 let renewal = (binding_gate_active && session.vsock_uds.is_some()).then(|| {
                     ready_state::binding_host::spawn_lease_renewal(
                         session.vsock_uds.clone().expect("checked above"),
-                        grant_namespace.clone().expect("set when the binding gate is active"),
+                        grant_namespace
+                            .clone()
+                            .expect("set when the binding gate is active"),
                         binding_names.clone(),
                         ready_state::flags::binding_ttl_ms(),
                     )
@@ -4120,7 +4156,9 @@ where
                 }
                 // Normal exit (guest shut down on its own): drop the now-stale SIGINT
                 // hook so it can't double-fire, then reap tap/overlay/lock + pid record.
-                crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(token);
+                crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(
+                    token,
+                );
                 let _ = ready_state::restore::teardown(backend.as_ref(), session);
                 let _ = crate::runtime::process::ProcessManager::new().map(|pm| pm.delete_pid(&id));
                 let code = exit.unwrap_or(0);
@@ -4717,7 +4755,7 @@ where
                     ready_state_overlay_root: None,
                     ready_state_session_id: None,
                     ready_state_tap_dev: None,
-                ready_state_vsock_uds: None,
+                    ready_state_vsock_uds: None,
                 };
 
                 let process_manager = crate::runtime::process::ProcessManager::new()?;

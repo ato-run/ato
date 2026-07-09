@@ -35,7 +35,11 @@ struct Args {
 }
 
 fn parse_args() -> Args {
-    let mut a = Args { capsules: PathBuf::new(), iterations: 5, out: PathBuf::from("store-bench-out") };
+    let mut a = Args {
+        capsules: PathBuf::new(),
+        iterations: 5,
+        out: PathBuf::from("store-bench-out"),
+    };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let mut v = || it.next().expect("missing value");
@@ -55,7 +59,11 @@ fn stats(v: &[f64]) -> Value {
     }
     let mut s = v.to_vec();
     s.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let pct = |p: f64| s[((s.len() as f64 * p).ceil() as usize).saturating_sub(1).min(s.len() - 1)];
+    let pct = |p: f64| {
+        s[((s.len() as f64 * p).ceil() as usize)
+            .saturating_sub(1)
+            .min(s.len() - 1)]
+    };
     json!({ "n": s.len(), "min": s[0], "p50": pct(0.50), "p95": pct(0.95), "max": s[s.len()-1] })
 }
 
@@ -66,20 +74,41 @@ fn clear_mem_cache() {
 
 /// Run the full pipeline for one capsule; a failure at any stage is captured in the
 /// receipt (`failure_stage` + `failure_reason`), never a panic.
-fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, dir: &std::path::Path) -> Value {
-    let id = spec.get("capsule_id").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-    let hc = spec.get("healthcheck").and_then(|v| v.as_str()).unwrap_or("/health").to_string();
+fn run_capsule(
+    backend: &FirecrackerBackend,
+    spec: &Value,
+    iterations: usize,
+    dir: &std::path::Path,
+) -> Value {
+    let id = spec
+        .get("capsule_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?")
+        .to_string();
+    let hc = spec
+        .get("healthcheck")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/health")
+        .to_string();
     let port = spec.get("port").and_then(|v| v.as_u64()).unwrap_or(8080) as u16;
     let mut r = json!({ "capsule_id": id, "eligible": false, "success": false, "failure_stage": Value::Null, "failure_reason": Value::Null });
 
     // ── eligibility ──────────────────────────────────────────────────────────────
     let rootfs_path = match spec.get("rootfs").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
-        None => { r["failure_stage"] = json!("eligibility"); r["failure_reason"] = json!("no rootfs in spec"); return r; }
+        None => {
+            r["failure_stage"] = json!("eligibility");
+            r["failure_reason"] = json!("no rootfs in spec");
+            return r;
+        }
     };
     let rootfs = match std::fs::read(&rootfs_path) {
         Ok(b) => b,
-        Err(e) => { r["failure_stage"] = json!("eligibility"); r["failure_reason"] = json!(format!("read rootfs: {e}")); return r; }
+        Err(e) => {
+            r["failure_stage"] = json!("eligibility");
+            r["failure_reason"] = json!(format!("read rootfs: {e}"));
+            return r;
+        }
     };
     r["eligible"] = json!(true);
 
@@ -93,15 +122,30 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
         store: &store,
         capsule_manifest_hash: format!("blake3:{id}"),
         runner_class: None,
-        layers: BuildLayers { rootfs, runtime: None, dependency: None, app: None, vmstate: Vec::new(), memory: Vec::new() },
-        restore_contract: RestoreContract { ports: vec![port], healthcheck: Some(hc.clone()), expected_ready_ms: Some(8000) },
+        layers: BuildLayers {
+            rootfs,
+            runtime: None,
+            dependency: None,
+            app: None,
+            vmstate: Vec::new(),
+            memory: Vec::new(),
+        },
+        restore_contract: RestoreContract {
+            ports: vec![port],
+            healthcheck: Some(hc.clone()),
+            expected_ready_ms: Some(8000),
+        },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
         supervisor: None,
     }) {
         Ok(rc) => rc,
-        Err(e) => { r["failure_stage"] = json!("build"); r["failure_reason"] = json!(e.to_string()); return r; }
+        Err(e) => {
+            r["failure_stage"] = json!("build");
+            r["failure_reason"] = json!(e.to_string());
+            return r;
+        }
     };
     let build_to_seal_ms = t_build.elapsed().as_millis();
     let manifest = receipt.manifest;
@@ -109,11 +153,15 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
     // ── no-secret scan (build gate + the reusable L4 scanner over the CAS) ──────────
     let no_secret_clean = receipt.no_secret_proof.is_clean()
         && no_secret_scan::scan(
-            &no_secret_scan::ScanTargets { cas: Some(capdir.join("cas")), ..Default::default() },
+            &no_secret_scan::ScanTargets {
+                cas: Some(capdir.join("cas")),
+                ..Default::default()
+            },
             // no-binding capsules inject no secret; a couple of canary markers keep the
             // gate honest (they must never appear in a sealed artifact).
             &[b"BEGIN PRIVATE KEY", b"AKIA"],
-        ).clean;
+        )
+        .clean;
 
     let sizes = json!({
         "rootfs_bytes": manifest.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
@@ -132,21 +180,50 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
         clear_mem_cache();
         let ov = capdir.join(format!("ov-cold-{i}"));
         let t = Instant::now();
-        match backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
-            Ok(rs) => { cold.push(t.elapsed().as_secs_f64() * 1000.0); let _ = backend.stop(rs.session); }
-            Err(e) => { r["failure_stage"] = json!("restore"); r["failure_reason"] = json!(e.to_string()); restore_ok = false; break; }
+        match backend.restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: manifest.clone(),
+            overlay_root: ov,
+            host_runner_class: None,
+            uffd_preview: false,
+        }) {
+            Ok(rs) => {
+                cold.push(t.elapsed().as_secs_f64() * 1000.0);
+                let _ = backend.stop(rs.session);
+            }
+            Err(e) => {
+                r["failure_stage"] = json!("restore");
+                r["failure_reason"] = json!(e.to_string());
+                restore_ok = false;
+                break;
+            }
         }
     }
     if restore_ok {
         // prime warm cache, then warm runs.
-        if let Ok(rs) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: capdir.join("ov-warm-prime"), host_runner_class: None, uffd_preview: false }) {
+        if let Ok(rs) = backend.restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: manifest.clone(),
+            overlay_root: capdir.join("ov-warm-prime"),
+            host_runner_class: None,
+            uffd_preview: false,
+        }) {
             let _ = backend.stop(rs.session);
         }
         for i in 0..iterations.max(1) {
             let ov = capdir.join(format!("ov-warm-{i}"));
             let t = Instant::now();
-            match backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
-                Ok(rs) => { warm.push(t.elapsed().as_secs_f64() * 1000.0); let _ = backend.stop(rs.session); }
+            match backend.restore(RestoreReadyStateInput {
+                store: &store,
+                manifest: manifest.clone(),
+                overlay_root: ov,
+                host_runner_class: None,
+                uffd_preview: false,
+            }) {
+                Ok(rs) => {
+                    warm.push(t.elapsed().as_secs_f64() * 1000.0);
+                    let _ = backend.stop(rs.session);
+                }
                 Err(_) => break,
             }
         }
@@ -157,7 +234,11 @@ fn run_capsule(backend: &FirecrackerBackend, spec: &Value, iterations: usize, di
     r["build_to_seal_ms"] = json!(build_to_seal_ms);
     r["artifact"] = sizes;
     r["benchmark"] = json!({ "file_cold_ms": stats(&cold), "file_warm_ms": stats(&warm) });
-    eprintln!("[store-bench] {id}: success={} cold_p50={:?}", r["success"], stats(&cold).get("p50"));
+    eprintln!(
+        "[store-bench] {id}: success={} cold_p50={:?}",
+        r["success"],
+        stats(&cold).get("p50")
+    );
     r
 }
 
@@ -171,45 +252,102 @@ fn main() {
         eprintln!("SKIP: /dev/kvm absent");
         std::process::exit(0);
     }
-    let specs: Vec<Value> = serde_json::from_slice(&std::fs::read(&args.capsules).expect("read --capsules")).expect("parse capsule list");
+    let specs: Vec<Value> =
+        serde_json::from_slice(&std::fs::read(&args.capsules).expect("read --capsules"))
+            .expect("parse capsule list");
     let backend = FirecrackerBackend::new();
     let dir = std::env::temp_dir().join("store-bench");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
 
-    let results: Vec<Value> = specs.iter().map(|s| run_capsule(&backend, s, args.iterations, &dir)).collect();
-    let ok = results.iter().filter(|r| r["success"].as_bool().unwrap_or(false)).count();
+    let results: Vec<Value> = specs
+        .iter()
+        .map(|s| run_capsule(&backend, s, args.iterations, &dir))
+        .collect();
+    let ok = results
+        .iter()
+        .filter(|r| r["success"].as_bool().unwrap_or(false))
+        .count();
 
     std::fs::create_dir_all(&args.out).unwrap();
-    std::fs::write(args.out.join("results.json"), serde_json::to_string_pretty(&json!({ "capsules": results.len(), "succeeded": ok, "results": results })).unwrap()).unwrap();
+    std::fs::write(
+        args.out.join("results.json"),
+        serde_json::to_string_pretty(
+            &json!({ "capsules": results.len(), "succeeded": ok, "results": results }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     std::fs::write(args.out.join("summary.md"), markdown(&results, ok)).unwrap();
     println!("{}", markdown(&results, ok));
-    eprintln!("[store-bench] {ok}/{} capsules snapshot+restore succeeded", results.len());
+    eprintln!(
+        "[store-bench] {ok}/{} capsules snapshot+restore succeeded",
+        results.len()
+    );
 }
 
 fn markdown(results: &[Value], ok: usize) -> String {
     let g = |r: &Value, path: &[&str]| -> String {
         let mut v = r;
-        for p in path { v = v.get(p).unwrap_or(&Value::Null); }
-        match v { Value::Number(n) => format!("{n}"), Value::Bool(b) => b.to_string(), Value::String(s) => s.clone(), _ => "-".into() }
+        for p in path {
+            v = v.get(p).unwrap_or(&Value::Null);
+        }
+        match v {
+            Value::Number(n) => format!("{n}"),
+            Value::Bool(b) => b.to_string(),
+            Value::String(s) => s.clone(),
+            _ => "-".into(),
+        }
     };
-    let mut s = format!("# Store Capsule Snapshot Benchmark\n\n{ok}/{} capsules snapshot + restore succeeded.\n\n", results.len());
+    let mut s = format!(
+        "# Store Capsule Snapshot Benchmark\n\n{ok}/{} capsules snapshot + restore succeeded.\n\n",
+        results.len()
+    );
     s.push_str("| capsule | eligible | success | no-secret | build→seal ms | cold p50 | cold p95 | warm p50 | rootfs MB | mem MB | failure |\n");
     s.push_str("|---|---|---|---|---:|---:|---:|---:|---:|---:|---|\n");
     for r in results {
-        let rb = r.get("artifact").and_then(|a| a.get("rootfs_bytes")).and_then(|v| v.as_u64()).unwrap_or(0) / 1024 / 1024;
-        let mb = r.get("artifact").and_then(|a| a.get("mem_bytes")).and_then(|v| v.as_u64()).unwrap_or(0) / 1024 / 1024;
+        let rb = r
+            .get("artifact")
+            .and_then(|a| a.get("rootfs_bytes"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            / 1024
+            / 1024;
+        let mb = r
+            .get("artifact")
+            .and_then(|a| a.get("mem_bytes"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            / 1024
+            / 1024;
         s.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {rb} | {mb} | {} |\n",
-            g(r, &["capsule_id"]), g(r, &["eligible"]), g(r, &["success"]), g(r, &["no_secret_scan_clean"]),
-            g(r, &["build_to_seal_ms"]), g(r, &["benchmark", "file_cold_ms", "p50"]), g(r, &["benchmark", "file_cold_ms", "p95"]),
+            g(r, &["capsule_id"]),
+            g(r, &["eligible"]),
+            g(r, &["success"]),
+            g(r, &["no_secret_scan_clean"]),
+            g(r, &["build_to_seal_ms"]),
+            g(r, &["benchmark", "file_cold_ms", "p50"]),
+            g(r, &["benchmark", "file_cold_ms", "p95"]),
             g(r, &["benchmark", "file_warm_ms", "p50"]),
-            r.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("-"),
+            r.get("failure_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-"),
         ));
     }
     s.push_str("\n## Failure taxonomy\n\n");
-    for r in results.iter().filter(|r| !r["success"].as_bool().unwrap_or(false)) {
-        s.push_str(&format!("- **{}**: {} — {}\n", g(r, &["capsule_id"]), g(r, &["failure_stage"]), r.get("failure_reason").and_then(|v| v.as_str()).unwrap_or("-")));
+    for r in results
+        .iter()
+        .filter(|r| !r["success"].as_bool().unwrap_or(false))
+    {
+        s.push_str(&format!(
+            "- **{}**: {} — {}\n",
+            g(r, &["capsule_id"]),
+            g(r, &["failure_stage"]),
+            r.get("failure_reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("-")
+        ));
     }
     s
 }

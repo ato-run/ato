@@ -98,8 +98,8 @@ impl ReadyStateManifest {
     /// Content-addressed id of this manifest: `blake3:<hex>` over the JCS
     /// canonical form (structural-id family).
     pub fn id(&self) -> String {
-        let canonical = serde_jcs::to_vec(self)
-            .expect("ReadyStateManifest is always JCS-canonicalizable");
+        let canonical =
+            serde_jcs::to_vec(self).expect("ReadyStateManifest is always JCS-canonicalizable");
         format!("blake3:{}", blake3::hash(&canonical).to_hex())
     }
 
@@ -275,12 +275,20 @@ mod tests {
     fn manifest_with_layers() -> (tempfile::TempDir, ReadyStateManifest) {
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path()).unwrap();
-        let rootfs = store_blob(&store, LayerKind::Rootfs, b"rootfs-bytes", ChunkingKind::ContentDefined).unwrap();
+        let rootfs = store_blob(
+            &store,
+            LayerKind::Rootfs,
+            b"rootfs-bytes",
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         let memory = store_blob(
             &store,
             LayerKind::Memory,
             &vec![3u8; 100_000],
-            ChunkingKind::PageAligned { page_size: 64 * 1024 },
+            ChunkingKind::PageAligned {
+                page_size: 64 * 1024,
+            },
         )
         .unwrap();
         let m = ReadyStateManifest {

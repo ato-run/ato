@@ -474,7 +474,9 @@ impl CapsuleManifest {
         let persistent_states: Vec<&str> = self
             .state
             .iter()
-            .filter(|(_, req)| matches!(req.durability, super::manifest::StateDurability::Persistent))
+            .filter(|(_, req)| {
+                matches!(req.durability, super::manifest::StateDurability::Persistent)
+            })
             .map(|(name, _)| name.as_str())
             .collect();
         let ephemeral_only = persistent_states.is_empty();
@@ -500,8 +502,7 @@ impl CapsuleManifest {
             .collect();
         let no_secrets_required = !caps_secrets_required && required_secret_names.is_empty();
         if caps_secrets_required {
-            blocking_reasons
-                .push("requirements.capabilities.secrets_required is true".to_string());
+            blocking_reasons.push("requirements.capabilities.secrets_required is true".to_string());
         }
         if !required_secret_names.is_empty() {
             blocking_reasons.push(format!(
@@ -541,8 +542,7 @@ impl CapsuleManifest {
                 })
             }
         };
-        let serving_target = serving_label
-            .and_then(|label| named.and_then(|nt| nt.get(label)));
+        let serving_target = serving_label.and_then(|label| named.and_then(|nt| nt.get(label)));
 
         let target_has_probe = serving_target
             .map(|nt| nt.readiness_probe.is_some())

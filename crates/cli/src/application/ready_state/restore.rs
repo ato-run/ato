@@ -47,7 +47,9 @@ pub(crate) fn teardown(
     backend: &dyn SnapshotBackend,
     session: RestoredSession,
 ) -> Result<TeardownReceipt> {
-    backend.stop(session).context("snapshot backend stop failed")
+    backend
+        .stop(session)
+        .context("snapshot backend stop failed")
 }
 
 #[cfg(test)]
@@ -75,7 +77,10 @@ mod tests {
                     vmstate: vec![1u8; 256],
                     memory: (0..100_000u32).map(|i| (i % 256) as u8).collect(),
                 },
-                restore_contract: RestoreContract { ports: vec![8080], ..Default::default() },
+                restore_contract: RestoreContract {
+                    ports: vec![8080],
+                    ..Default::default()
+                },
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: None,
@@ -85,7 +90,8 @@ mod tests {
             .manifest;
 
         let overlay = dir.path().join("ov");
-        let receipt = restore_and_expose(&backend, &store, manifest, overlay.clone(), None, false).unwrap();
+        let receipt =
+            restore_and_expose(&backend, &store, manifest, overlay.clone(), None, false).unwrap();
         assert_eq!(receipt.session.guest_port, Some(8080));
         assert!(overlay.exists());
 
