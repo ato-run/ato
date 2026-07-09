@@ -1,0 +1,11 @@
+{
+  "class": "negative",
+  "eligibility": "pass",
+  "runtime": "python",
+  "probe_synthesized": true,
+  "start_cmd": "python3 app.py",
+  "seal": "failed",
+  "seal_failure_stage": "build_ready_state",
+  "manifest_source": "repo",
+  "notes": "A synthesized \"/\" probe that 404s fails boot-verify; receipt records synthesized_probe=true."
+}

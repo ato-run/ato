@@ -1,0 +1,316 @@
+{
+  "raw": [
+    {
+      "mode": "file-cold",
+      "restore_ms": 905.739784,
+      "run": 0
+    },
+    {
+      "mode": "file-cold",
+      "restore_ms": 897.240722,
+      "run": 1
+    },
+    {
+      "mode": "file-cold",
+      "restore_ms": 893.9990260000001,
+      "run": 2
+    },
+    {
+      "mode": "file-cold",
+      "restore_ms": 904.474411,
+      "run": 3
+    },
+    {
+      "mode": "file-cold",
+      "restore_ms": 902.962591,
+      "run": 4
+    },
+    {
+      "mode": "file-warm",
+      "restore_ms": 219.523836,
+      "run": 0
+    },
+    {
+      "mode": "file-warm",
+      "restore_ms": 217.02165200000002,
+      "run": 1
+    },
+    {
+      "mode": "file-warm",
+      "restore_ms": 217.907638,
+      "run": 2
+    },
+    {
+      "mode": "file-warm",
+      "restore_ms": 214.480621,
+      "run": 3
+    },
+    {
+      "mode": "file-warm",
+      "restore_ms": 218.154031,
+      "run": 4
+    },
+    {
+      "mode": "uffd-local",
+      "restore_ms": 403.87224399999997,
+      "run": 0
+    },
+    {
+      "mode": "uffd-local",
+      "restore_ms": 445.92418200000003,
+      "run": 1
+    },
+    {
+      "mode": "uffd-local",
+      "restore_ms": 447.283052,
+      "run": 2
+    },
+    {
+      "mode": "uffd-local",
+      "restore_ms": 415.572862,
+      "run": 3
+    },
+    {
+      "mode": "uffd-local",
+      "restore_ms": 433.228384,
+      "run": 4
+    },
+    {
+      "mode": "uffd-hotset",
+      "restore_ms": 255.428371,
+      "run": 0
+    },
+    {
+      "mode": "uffd-hotset",
+      "restore_ms": 260.350074,
+      "run": 1
+    },
+    {
+      "mode": "uffd-hotset",
+      "restore_ms": 256.581169,
+      "run": 2
+    },
+    {
+      "mode": "uffd-hotset",
+      "restore_ms": 260.727126,
+      "run": 3
+    },
+    {
+      "mode": "uffd-hotset",
+      "restore_ms": 262.93617800000004,
+      "run": 4
+    },
+    {
+      "mode": "uffd-remote",
+      "restore_ms": 511.059552,
+      "run": 0
+    },
+    {
+      "mode": "uffd-remote",
+      "restore_ms": 431.393292,
+      "run": 1
+    },
+    {
+      "mode": "uffd-remote",
+      "restore_ms": 428.05250500000005,
+      "run": 2
+    },
+    {
+      "mode": "uffd-remote",
+      "restore_ms": 424.228965,
+      "run": 3
+    },
+    {
+      "mode": "uffd-remote",
+      "restore_ms": 416.300873,
+      "run": 4
+    }
+  ],
+  "report": {
+    "app": "light-python",
+    "iterations": 5,
+    "mem_bytes_total": 536870912,
+    "modes": {
+      "file-cold": {
+        "bytes_copied": {
+          "n": 0
+        },
+        "page_faults": {
+          "n": 0
+        },
+        "prefetched_pages": {
+          "n": 0
+        },
+        "remote_chunks_fetched": {
+          "n": 0
+        },
+        "restore_ms": {
+          "max": 905.739784,
+          "median": 902.962591,
+          "min": 893.9990260000001,
+          "n": 5,
+          "p95": 905.739784
+        },
+        "time_to_health_ms": {
+          "n": 0
+        }
+      },
+      "file-warm": {
+        "bytes_copied": {
+          "n": 0
+        },
+        "page_faults": {
+          "n": 0
+        },
+        "prefetched_pages": {
+          "n": 0
+        },
+        "remote_chunks_fetched": {
+          "n": 0
+        },
+        "restore_ms": {
+          "max": 219.523836,
+          "median": 217.907638,
+          "min": 214.480621,
+          "n": 5,
+          "p95": 219.523836
+        },
+        "time_to_health_ms": {
+          "n": 0
+        }
+      },
+      "uffd-hotset": {
+        "bytes_copied": {
+          "max": 12386304.0,
+          "median": 12292096.0,
+          "min": 12279808.0,
+          "n": 5,
+          "p95": 12386304.0
+        },
+        "page_faults": {
+          "max": 27.0,
+          "median": 4.0,
+          "min": 1.0,
+          "n": 5,
+          "p95": 27.0
+        },
+        "prefetched_pages": {
+          "max": 2997.0,
+          "median": 2997.0,
+          "min": 2997.0,
+          "n": 5,
+          "p95": 2997.0
+        },
+        "remote_chunks_fetched": {
+          "max": 0.0,
+          "median": 0.0,
+          "min": 0.0,
+          "n": 5,
+          "p95": 0.0
+        },
+        "restore_ms": {
+          "max": 262.93617800000004,
+          "median": 260.350074,
+          "min": 255.428371,
+          "n": 5,
+          "p95": 262.93617800000004
+        },
+        "time_to_health_ms": {
+          "max": 137.0,
+          "median": 132.0,
+          "min": 129.0,
+          "n": 5,
+          "p95": 137.0
+        }
+      },
+      "uffd-local": {
+        "bytes_copied": {
+          "max": 12337152.0,
+          "median": 12283904.0,
+          "min": 12279808.0,
+          "n": 5,
+          "p95": 12337152.0
+        },
+        "page_faults": {
+          "max": 3011.0,
+          "median": 2999.0,
+          "min": 2998.0,
+          "n": 5,
+          "p95": 3011.0
+        },
+        "prefetched_pages": {
+          "max": 0.0,
+          "median": 0.0,
+          "min": 0.0,
+          "n": 5,
+          "p95": 0.0
+        },
+        "remote_chunks_fetched": {
+          "max": 0.0,
+          "median": 0.0,
+          "min": 0.0,
+          "n": 5,
+          "p95": 0.0
+        },
+        "restore_ms": {
+          "max": 447.283052,
+          "median": 433.228384,
+          "min": 403.87224399999997,
+          "n": 5,
+          "p95": 447.283052
+        },
+        "time_to_health_ms": {
+          "max": 336.0,
+          "median": 317.0,
+          "min": 305.0,
+          "n": 5,
+          "p95": 336.0
+        }
+      },
+      "uffd-remote": {
+        "bytes_copied": {
+          "max": 12345344.0,
+          "median": 12288000.0,
+          "min": 12267520.0,
+          "n": 5,
+          "p95": 12345344.0
+        },
+        "page_faults": {
+          "max": 3013.0,
+          "median": 3000.0,
+          "min": 2995.0,
+          "n": 5,
+          "p95": 3013.0
+        },
+        "prefetched_pages": {
+          "max": 0.0,
+          "median": 0.0,
+          "min": 0.0,
+          "n": 5,
+          "p95": 0.0
+        },
+        "remote_chunks_fetched": {
+          "max": 50.0,
+          "median": 0.0,
+          "min": 0.0,
+          "n": 5,
+          "p95": 50.0
+        },
+        "restore_ms": {
+          "max": 511.059552,
+          "median": 428.05250500000005,
+          "min": 416.300873,
+          "n": 5,
+          "p95": 511.059552
+        },
+        "time_to_health_ms": {
+          "max": 382.0,
+          "median": 302.0,
+          "min": 291.0,
+          "n": 5,
+          "p95": 382.0
+        }
+      }
+    }
+  }
+}

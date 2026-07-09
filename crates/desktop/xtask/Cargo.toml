@@ -4,7 +4,7 @@
 name = "ato-desktop-xtask"
 # Must track ato-desktop's version because xtask reads
 # env!("CARGO_PKG_VERSION") to embed into MSI/DMG/AppImage filenames.
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 # Internal build helper — never published. Excluded from the workspace
 # (see root Cargo.toml) so release-plz's `cargo package` step skips it.

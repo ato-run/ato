@@ -111,11 +111,46 @@ pub fn load_credentials(path: &std::path::Path) -> Result<RunnerCredentials> {
     })
 }
 
+/// Env var names the systemd EnvironmentFile (`/etc/ato/runner.env`, written by
+/// `ato runner enroll`) can supply. Used only as a fallback when there is no
+/// `credentials.json` — e.g. the operator ran `ato runner enroll` as themselves but
+/// `ato-runner-agent.service` runs as root, so the two do not share a home.
+pub const ENV_RUNNER_API_URL: &str = "ATO_API_URL";
+pub const ENV_RUNNER_TOKEN: &str = "ATO_RUNNER_TOKEN";
+pub const ENV_RUNNER_ID: &str = "ATO_RUNNER_ID";
+pub const ENV_RUNNER_DISPLAY_NAME: &str = "ATO_RUNNER_DISPLAY_NAME";
+
+/// Resolve runner credentials from `credentials.json` (authoritative), else
+/// reconstruct them from the environment (systemd EnvironmentFile). Fail-closed with
+/// the same guidance when neither is available.
+pub fn load_runner_credentials() -> Result<RunnerCredentials> {
+    let path = credentials_path();
+    if path.exists() {
+        return load_credentials(&path);
+    }
+    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
+    if let (Some(api_base), Some(token), Some(id)) = (
+        env(ENV_RUNNER_API_URL),
+        env(ENV_RUNNER_TOKEN),
+        env(ENV_RUNNER_ID),
+    ) {
+        return Ok(RunnerCredentials {
+            api_base: api_base.trim_end_matches('/').to_string(),
+            runner_id: id,
+            runner_token: token,
+            display_name: env(ENV_RUNNER_DISPLAY_NAME).unwrap_or_else(default_display_name),
+            heartbeat_interval_seconds: default_heartbeat_interval(),
+        });
+    }
+    // Neither source available — surface the credentials.json guidance.
+    load_credentials(&path)
+}
+
 // ─────────────────────────────────────────────
 // Capabilities
 // ─────────────────────────────────────────────
 
-fn binary_on_path(name: &str) -> bool {
+pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
@@ -228,6 +263,11 @@ pub fn build_heartbeat_body(
         // plane gates dispatch on this so a runner is never sent a kind it would
         // reject on-device (e.g. `run_capsule` before that execution path ships).
         "supported_lease_kinds": advertised_lease_kinds(),
+        // ato-api Hardware Binding Layer: snapshot codecs this runner can decode
+        // (empty when this host cannot restore snapshots at all). No legacy
+        // passthrough exists for codec on the control-plane side, so omitting
+        // this field is never safe once that gate is live — always send it.
+        "supported_snapshot_codecs": advertised_snapshot_codecs(),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -697,13 +737,21 @@ pub async fn run_serve(
         .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_URL_TEMPLATE").ok())
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // The systemd unit runs `ato runner serve` with no flags, reading config from
+    // EnvironmentFile=/etc/ato/runner.env — so honor ATO_RUNNER_PUBLIC_BASE_URL (written
+    // by `ato runner enroll`) as the public base URL when the flag is absent. Without
+    // this the service would advertise no URL and never be dispatchable.
+    let public_base_url = public_base_url
+        .or_else(|| std::env::var("ATO_RUNNER_PUBLIC_BASE_URL").ok())
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty());
     // Fail fast at startup on configurations that would violate the
     // no-port-collision / no-fabricated-URL invariants, rather than discovering
     // them per-slot at ready time.
     validate_slot_port_range(proxy_base_port, capacity)?;
     validate_public_url_template(public_url_template.as_deref())?;
-    let path = credentials_path();
-    let creds = load_credentials(&path)?;
+    validate_multi_slot_public_url(capacity, public_url_template.as_deref())?;
+    let creds = load_runner_credentials()?;
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or(creds.api_base.clone());
@@ -734,6 +782,19 @@ pub async fn run_serve(
     // heartbeat/claim, so stop-requested zombies clear immediately on boot.
     reconcile_open_leases(&client, &api_base, &creds.runner_id, &creds.runner_token).await;
 
+    // Reap Firecracker VMs orphaned by a previous (killed) serve process. The loop
+    // above settled their leases on the control plane, but a SIGKILL leaves the
+    // detached VM + its `<tmp>/ato-restore-overlays/<lease>/` overlay running. Only
+    // the firecracker backend creates these; other backends have nothing to reap.
+    if crate::application::ready_state::flags::selected_backend_id().as_deref()
+        == Some(snapshot::FIRECRACKER_BACKEND_ID)
+    {
+        reap_orphan_restore_overlays(
+            &std::env::temp_dir().join("ato-restore-overlays"),
+            &snapshot::FirecrackerBackend::new(),
+        );
+    }
+
     let mut interval = clamp_heartbeat_interval(creds.heartbeat_interval_seconds);
     let mut consecutive_failures: u32 = 0;
     // Self-update bookkeeping for the current requested minimum: terminal (no
@@ -750,8 +811,22 @@ pub async fn run_serve(
         pool.capacity(),
         proxy_listen
     );
+    if capacity == DEFAULT_MAX_SLOTS {
+        println!(
+            "           (default; override with --max-slots or ATO_RUNNER_MAX_SLOTS, max {MAX_SLOTS_CEILING})"
+        );
+    }
     if let Some(template) = public_url_template.as_deref() {
         println!("   Public URL template: {template}");
+    }
+    // #948 N-slot: with more than one slot (or an explicit ATO_FC_NETNS=1) each
+    // restore runs in its own network namespace so identical `fctap0`/172.16.0.2
+    // VMs coexist. Single-slot stays on the legacy root-namespace path.
+    let netns_enabled =
+        pool.capacity() > 1 || std::env::var("ATO_FC_NETNS").ok().as_deref() == Some("1");
+    if netns_enabled {
+        println!("   Network: per-slot namespaces (ato-slot-N) enabled");
+        cleanup_orphan_slot_netns(pool.capacity());
     }
 
     loop {
@@ -836,35 +911,80 @@ pub async fn run_serve(
             }
         }
 
-        // Between heartbeats: poll for leases in short slices while idle.
+        // Between heartbeats: poll for leases in short slices while idle. With
+        // long-poll on, the API holds the request itself, so we skip the
+        // pre-sleep and let the (heartbeat-bounded) hold BE the wait; every
+        // iteration decrements `remaining` by its true elapsed time so the
+        // heartbeat cadence never drifts regardless of hold length.
+        let long_poll = lease_long_poll_enabled();
         let mut remaining = interval;
         while remaining > 0 {
-            let slice = remaining.min(LEASE_POLL_SECONDS);
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
-                _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+            let iter_start = std::time::Instant::now();
+            let can_poll = pool.has_free();
+
+            // Pre-sleep only when we are NOT about to long-poll a free slot:
+            // the short idle cadence (non-long-poll), or backpressure when at
+            // capacity (can't accept work — never hold a connection then).
+            if !long_poll || !can_poll {
+                let slice = remaining.min(lease_poll_seconds());
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => { println!("stopped"); return Ok(()); }
+                    _ = tokio::time::sleep(Duration::from_secs(slice)) => {}
+                }
             }
-            remaining = remaining.saturating_sub(slice);
 
             // Don't poll (and therefore don't CLAIM) when every slot is taken.
-            if !pool.has_free() {
+            if !can_poll {
+                remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
                 continue;
             }
-            match fetch_next_lease(&client, &api_base, &creds.runner_id, &creds.runner_token).await
-            {
+
+            // Hold budget: cap at LEASE_LONG_POLL_WAIT_MS AND at the time left
+            // before the next heartbeat — a hold must never outlast the
+            // heartbeat window. 0 keeps the historical one-shot poll.
+            let wait_ms = if long_poll {
+                LEASE_LONG_POLL_WAIT_MS.min(remaining.saturating_mul(1000))
+            } else {
+                0
+            };
+            let poll = fetch_next_lease(
+                &client,
+                &api_base,
+                &creds.runner_id,
+                &creds.runner_token,
+                wait_ms,
+            )
+            .await;
+            remaining = remaining.saturating_sub(iter_start.elapsed().as_secs().max(1));
+            match poll {
                 LeasePoll::None => {}
                 LeasePoll::Claimed(lease) => match pool.acquire() {
                     Some(slot) => {
-                        handle_claimed_lease(
-                            &client,
-                            &api_base,
-                            &creds.runner_token,
-                            lease,
-                            slot,
-                            public_base_url.clone(),
-                            public_url_template.clone(),
-                        )
-                        .await;
+                        // #948 N-slot: SPAWN (don't await inline). A restore
+                        // lease holds its VM for the whole session; awaiting it
+                        // here would block the poll loop and starve the other
+                        // slots (the pool would never fill). Detach the task —
+                        // it owns the SlotLease and releases it after teardown,
+                        // matching the run-lifecycle spawn below. Panic-safety:
+                        // SlotLease's Drop frees the slot even if the task dies.
+                        let client = client.clone();
+                        let api_base = api_base.clone();
+                        let runner_token = creds.runner_token.clone();
+                        let public_base_url = public_base_url.clone();
+                        let public_url_template = public_url_template.clone();
+                        tokio::spawn(async move {
+                            handle_claimed_lease(
+                                &client,
+                                &api_base,
+                                &runner_token,
+                                lease,
+                                slot,
+                                public_base_url,
+                                public_url_template,
+                                netns_enabled,
+                            )
+                            .await;
+                        });
                     }
                     None => {
                         // Defensive: `has_free()` was true immediately before the
@@ -927,8 +1047,37 @@ pub async fn run_serve(
 // a workload with no readiness signal is reported running, never ready.
 // ─────────────────────────────────────────────
 
-/** Interval between lease polls while idle (seconds). */
+/** Default interval between lease polls while idle (seconds). Conservative for
+ *  production; latency-sensitive deployments (e.g. the staging demo runner)
+ *  override via `ATO_LEASE_POLL_SECONDS` — the 0–5s claim jitter was the
+ *  largest single share of the measured Run→Open latency (ato#940). */
 const LEASE_POLL_SECONDS: u64 = 5;
+
+/// Effective idle lease-poll interval: `ATO_LEASE_POLL_SECONDS` (clamped to
+/// 1..=60 — sub-second polling would hammer the control plane, and anything
+/// over a minute starves lease pickup) or the conservative default.
+fn lease_poll_seconds() -> u64 {
+    lease_poll_seconds_from(std::env::var("ATO_LEASE_POLL_SECONDS").ok().as_deref())
+}
+
+fn lease_poll_seconds_from(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.clamp(1, 60))
+        .unwrap_or(LEASE_POLL_SECONDS)
+}
+
+/// L2 long-poll (ato#948): when `ATO_LEASE_LONG_POLL=1`, the idle claim poll
+/// asks the API to HOLD the request for up to this budget until a lease is
+/// claimable — cutting claim latency from the idle-poll floor to sub-second.
+/// The API caps its own hold at 25s; we ask for 20s, comfortably inside a
+/// reqwest/Workers request. Off by default (opt-in per deployment).
+const LEASE_LONG_POLL_WAIT_MS: u64 = 20_000;
+
+fn lease_long_poll_enabled() -> bool {
+    std::env::var("ATO_LEASE_LONG_POLL")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
 const DEFAULT_READY_TIMEOUT_SECS: u64 = 600;
 /// After a port-LESS readiness signal (the human "[✓] ready" echo), hold this
 /// long for the canonical "LIFECYCLE: ready port=N" line — they race on separate
@@ -999,7 +1148,12 @@ fn native_inference_ready() -> bool {
 /// Pure: the lease kinds/runtimes to advertise given the host's native-inference
 /// readiness. Split from the cached host probe so the conditional `native-inference`
 /// append is unit-testable.
-fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
+fn advertised_lease_kinds_for(
+    native_inference_ready: bool,
+    restore_ready: bool,
+    supervisor_restore_ready: bool,
+    preview_restore_ready: bool,
+) -> Vec<String> {
     let mut kinds: Vec<String> = SUPPORTED_LEASE_KINDS
         .iter()
         .map(|s| s.to_string())
@@ -1007,11 +1161,100 @@ fn advertised_lease_kinds_for(native_inference_ready: bool) -> Vec<String> {
     if native_inference_ready {
         kinds.push(NATIVE_INFERENCE_RUNTIME.to_string());
     }
+    // Track E (#912): only advertise restore_snapshot where this host can actually
+    // restore + SERVE a sealed microVM (KVM + a firecracker binary). The control plane
+    // capability-gates dispatch on this, so a KVM-free host is never handed a restore.
+    if restore_ready {
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND.to_string(),
+        );
+    }
+    // v1.2 PR 3e: restore_snapshot_with_bindings needs restore-readiness AND the
+    // supervisor prerequisites (operator flag + backend binding-lease capability) —
+    // BOTH, so a flag-only host without vsock support is never handed a binding
+    // artifact, and a capable-but-not-opted-in host isn't either.
+    if restore_ready && supervisor_restore_ready {
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+                .to_string(),
+        );
+    }
+    // ato#1006 (UNIT C): restore_snapshot_preview needs restore-readiness AND the
+    // operator preview opt-in (`ATO_RUNNER_PREVIEW=1`). A preview restores a
+    // NO-BINDING artifact, so it needs no supervisor capability — only that this
+    // host can restore+serve and was opted into the public preview lane.
+    if restore_ready && preview_restore_ready {
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
+                .to_string(),
+        );
+    }
     kinds
 }
 
-fn advertised_lease_kinds() -> Vec<String> {
-    advertised_lease_kinds_for(native_inference_ready())
+/// This host can restore + serve a sealed Ready-State snapshot iff a real VMM backend
+/// probes available (KVM present + the backend binary). Mirrors `select_backend`'s
+/// fail-closed probe without materializing a backend.
+fn ready_state_restore_ready() -> bool {
+    snapshot::FirecrackerBackend::kvm_present()
+}
+
+/// v1.2 PR 3e: this host may serve SUPERVISOR (binding-required) restores iff the
+/// operator opted in (`ATO_RUNNER_SUPERVISOR=1`, read live) AND the backend's
+/// binding-lease capability probes true (cached — host vsock/KVM facts don't change
+/// mid-serve, and the heartbeat calls this frequently).
+fn supervisor_restore_ready() -> bool {
+    static CAPABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    crate::application::ready_state::flags::runner_supervisor_enabled()
+        && *CAPABLE.get_or_init(|| {
+            use snapshot::SnapshotBackend as _;
+            snapshot::FirecrackerBackend::new()
+                .probe()
+                .binding
+                .supports_binding_lease
+        })
+}
+
+pub(crate) fn advertised_lease_kinds() -> Vec<String> {
+    advertised_lease_kinds_for(
+        native_inference_ready(),
+        ready_state_restore_ready(),
+        supervisor_restore_ready(),
+        crate::application::ready_state::flags::runner_preview_enabled(),
+    )
+}
+
+/// Snapshot artifact codecs this runner can DECODE at restore time (ato-api
+/// Hardware Binding Layer; RFC `docs/rfcs/draft/snapshot-codec-registry.md`,
+/// `asc.*` namespace). This is a small, independent slice that must reach
+/// every runner BEFORE ato-api's control-plane codec gating is deployed to
+/// production: unlike a hardware contract (which has a legacy exact-host
+/// `runner_class_id` passthrough on the control-plane side), codec
+/// compatibility has NO passthrough there — a snapshot naming a codec no
+/// online runner has advertised fails closed with `codec_not_supported`, with
+/// no fallback. Only `asc.raw-v1.v1` exists today (Phase 1 of that rollout);
+/// this constant grows only via an RFC update in ato-api, matching the same
+/// curated-registry discipline as `SUPPORTED_LEASE_KINDS`.
+const SUPPORTED_SNAPSHOT_CODECS: &[&str] = &["asc.raw-v1.v1"];
+
+/// Pure: which codecs to advertise given this host's restore-readiness. A host
+/// that cannot restore a Ready-State snapshot at all (no KVM / no firecracker
+/// backend) has nothing to decode, so it advertises none — same honesty
+/// principle as `restore_snapshot` itself only being advertised when
+/// `restore_ready` (see `advertised_lease_kinds_for`).
+fn advertised_snapshot_codecs_for(restore_ready: bool) -> Vec<String> {
+    if restore_ready {
+        SUPPORTED_SNAPSHOT_CODECS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn advertised_snapshot_codecs() -> Vec<String> {
+    advertised_snapshot_codecs_for(ready_state_restore_ready())
 }
 
 /// Fail-closed dispatch guard. The control plane already gates native-inference
@@ -1094,6 +1337,23 @@ pub fn validate_public_url_template(template: Option<&str>) -> Result<()> {
     {
         bail!(
             "public URL template must include {{port}} or {{slot}} so each slot renders a distinct URL"
+        );
+    }
+    Ok(())
+}
+
+/// v1.3 (ato#968): a multi-slot runner WITHOUT a public URL template can only
+/// ever hand a URL to slot 0 — every other slot reports an honest but
+/// unopenable ready (and under netns its guest is unreachable except through
+/// the proxy the URL would front). Readiness must mean "openable", so the
+/// configuration is refused at startup instead of failing one run at a time.
+pub fn validate_multi_slot_public_url(capacity: usize, template: Option<&str>) -> Result<()> {
+    if capacity > 1 && template.is_none() {
+        bail!(
+            "--max-slots {capacity} requires a public URL template: without one only slot 0 \
+             gets a ready_url and every other slot's run is unopenable. Pass \
+             --public-url-template (e.g. \"http://HOST:{{port}}\") or set \
+             ATO_RUNNER_PUBLIC_URL_TEMPLATE."
         );
     }
     Ok(())
@@ -1187,6 +1447,123 @@ impl SlotLease {
     }
 }
 
+/// Panic-safety net (#948 N-slot): a claimed lease is now handled in a detached
+/// task, so a PANIC inside it must not wedge the slot forever. Release happens
+/// on drop ONLY while unwinding a panic — a normal drop deliberately does NOT
+/// release, preserving the fail-closed invariant that a slot whose VM teardown
+/// could not be confirmed stays held (explicit `release()` after a confirmed
+/// teardown owns the normal path). `release()` is idempotent regardless.
+impl Drop for SlotLease {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.release();
+        }
+    }
+}
+
+/// Best-effort startup sweep of per-slot network state left by a crashed prior
+/// serve (#948 N-slot). Safe because at serve start no slot is live yet:
+/// deleting each `ato-slot-{i}` namespace atomically removes its in-ns tap,
+/// veth end, and iptables rules; the root veth end `vsl{i}h` and the stale
+/// per-slot lockfile are removed too. Silent (these usually don't exist).
+fn cleanup_orphan_slot_netns(capacity: usize) {
+    let work_root = snapshot::FirecrackerConfig::default().work_root;
+    for i in 0..capacity {
+        let ns = format!("ato-slot-{i}");
+        let veth = format!("vsl{i}h");
+        let _ = std::process::Command::new("ip")
+            .args(["netns", "del", &ns])
+            .status();
+        let _ = std::process::Command::new("ip")
+            .args(["link", "del", &veth])
+            .status();
+        let _ = std::fs::remove_file(work_root.join(format!("{ns}.lock")));
+    }
+}
+
+/// Best-effort startup sweep of Firecracker VMs orphaned by a crashed/killed prior
+/// serve. When `ato runner serve` is SIGKILLed mid-restore, `reconcile_open_leases`
+/// settles the previous process's leases on the control plane, but the detached
+/// Firecracker VM + its writable overlay under `<tmp>/ato-restore-overlays/<lease>/`
+/// survive (observed live: `firecracker --api-sock …/api.sock` alive for hours
+/// after its lease was reconciled to `stopped`). Safe at serve start: this fresh
+/// process owns no restore yet, so every overlay present is from a dead process
+/// (same assumption as `cleanup_orphan_slot_netns`).
+///
+/// Reuses `SnapshotBackend::stop`, which is cross-process — it recovers the pid,
+/// tap/netns, vsock UDS and state-volume locks from the overlay's on-disk
+/// `.fc-session.json` and then removes the overlay dir. The recorded pid is
+/// signalled ONLY when it is dead (the backend's `kill` is then a no-op) or is
+/// confirmed to still be OUR firecracker VM — never a pid that an unrelated
+/// process reused during the (possibly hours-long) gap.
+fn reap_orphan_restore_overlays(overlay_root: &Path, backend: &dyn snapshot::SnapshotBackend) {
+    let entries = match std::fs::read_dir(overlay_root) {
+        Ok(entries) => entries,
+        Err(_) => return, // no overlay root ⇒ nothing to reap
+    };
+    for entry in entries.flatten() {
+        let overlay = entry.path();
+        if !overlay.is_dir() {
+            continue;
+        }
+        let lease_id = entry.file_name().to_string_lossy().into_owned();
+        let recorded_pid = orphan_overlay_recorded_pid(&overlay);
+        let safe_to_signal = match recorded_pid {
+            None => true,                                        // no pid ⇒ stop() signals nothing
+            Some(pid) if !vmm_alive(pid) => true,                // dead ⇒ kill is a no-op
+            Some(pid) => proc_is_firecracker_for(pid, &overlay), // alive ⇒ only if still ours
+        };
+        if safe_to_signal {
+            // vmm_pid=None ⇒ stop() reads the pid back from `.fc-session.json` and
+            // signals it (a no-op when dead), then tears down tap/netns/vsock/locks
+            // and removes the overlay dir. All other fields are recovered from meta.
+            let session = snapshot::RestoredSession {
+                session_id: format!("orphan-reap-{lease_id}"),
+                backend_id: snapshot::FIRECRACKER_BACKEND_ID.to_string(),
+                guest_port: None,
+                overlay_root: overlay.clone(),
+                restored_bytes: 0,
+                vmm_pid: None,
+                vsock_uds: None,
+                workload_addr: None,
+            };
+            match backend.stop(session) {
+                Ok(_) => eprintln!("🧹 reaped orphan restore VM + overlay ({lease_id})"),
+                Err(e) => eprintln!("⚠️  could not reap orphan overlay {lease_id}: {e}"),
+            }
+        } else {
+            // The recorded pid is alive but no longer a firecracker VM for this
+            // overlay — it was reused by an unrelated process. NEVER signal it; just
+            // drop the stale overlay so it stops accumulating.
+            eprintln!(
+                "⚠️  orphan overlay {lease_id}: recorded pid reused by another process — removing overlay only"
+            );
+            let _ = std::fs::remove_dir_all(&overlay);
+        }
+    }
+}
+
+/// The Firecracker pid persisted in an overlay's `.fc-session.json`, if any.
+fn orphan_overlay_recorded_pid(overlay: &Path) -> Option<i32> {
+    let meta = std::fs::read_to_string(overlay.join(".fc-session.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    value.get("pid").and_then(|v| v.as_i64()).map(|n| n as i32)
+}
+
+/// True iff `pid` is (still) a firecracker process serving THIS overlay — i.e. its
+/// `/proc/<pid>/cmdline` names firecracker and references this overlay's `api.sock`.
+/// Guards the reaper against pid reuse before it signals anything. On a host with
+/// no `/proc` (non-Linux) the read fails and this returns false — the safe default
+/// (the reaper then skips the kill and only drops the overlay).
+fn proc_is_firecracker_for(pid: i32, overlay: &Path) -> bool {
+    let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => return false,
+    };
+    let api_sock = overlay.join("api.sock");
+    cmdline.contains("firecracker") && cmdline.contains(&*api_sock.to_string_lossy())
+}
+
 /// The public URL the runner will claim for a slot — honestly.
 ///
 /// * With a template (`{port}` / `{slot}` placeholders) the operator asserts
@@ -1201,16 +1578,29 @@ fn public_ready_url(
     slot: &SlotLease,
 ) -> Option<String> {
     if let Some(template) = public_url_template {
-        return Some(
-            template
-                .replace("{port}", &slot.proxy_port.to_string())
-                .replace("{slot}", &slot.index.to_string()),
-        );
+        return Some(render_public_url_template(
+            template,
+            slot.proxy_port,
+            slot.index,
+        ));
     }
     match public_base_url {
         Some(base) if slot.index == 0 => Some(format!("{}/", base.trim_end_matches('/'))),
         _ => None,
     }
+}
+
+/// Fill a public URL template's `{port}` / `{slot}` placeholders for one slot.
+/// Pure — split out so the official-preview setup tests can assert the exact
+/// per-slot URLs the template it writes will render to.
+pub(crate) fn render_public_url_template(
+    template: &str,
+    proxy_port: u16,
+    slot_index: usize,
+) -> String {
+    template
+        .replace("{port}", &proxy_port.to_string())
+        .replace("{slot}", &slot_index.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1240,9 +1630,20 @@ async fn fetch_next_lease(
     api_base: &str,
     runner_id: &str,
     runner_token: &str,
+    wait_ms: u64,
 ) -> LeasePoll {
+    // Transport only: `wait_ms>0` asks the API to hold the request until a
+    // lease is claimable (L2). The claim CONTRACT is unchanged — same capacity
+    // gate, ownership, idempotency and terminal handling; a full runner / no
+    // lease still returns `{lease:null}`, just after an honest hold instead of
+    // now. 0 ⇒ the historical one-shot poll.
+    let wait = if wait_ms > 0 {
+        format!("?wait_ms={wait_ms}")
+    } else {
+        String::new()
+    };
     let url = format!(
-        "{}/v1/runners/{}/leases/next",
+        "{}/v1/runners/{}/leases/next{wait}",
         api_base.trim_end_matches('/'),
         runner_id
     );
@@ -1796,11 +2197,23 @@ pub async fn start_root_proxy(
     listen: &str,
     workload_port: u16,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    start_root_proxy_to(listen, format!("127.0.0.1:{workload_port}")).await
+}
+
+/// Core of [`start_root_proxy`] with an explicit upstream address. The child-run
+/// path pipes to host loopback; a restored microVM serves on its TAP guest IP
+/// (e.g. `172.16.0.2:8080`), which the snapshot backend reports as the session's
+/// `workload_addr` — the upstream is always a fixed, session-derived address,
+/// never caller/request-controlled, so this still cannot be an open proxy.
+pub async fn start_root_proxy_to(
+    listen: &str,
+    upstream_addr: String,
+) -> Result<tokio::task::JoinHandle<()>> {
     // Refuse to come up if the upstream is not actually accepting — a proxy
     // in front of nothing would make ready_url a lie.
-    tokio::net::TcpStream::connect(("127.0.0.1", workload_port))
+    tokio::net::TcpStream::connect(&upstream_addr)
         .await
-        .with_context(|| format!("workload 127.0.0.1:{workload_port} is not accepting"))?;
+        .with_context(|| format!("workload {upstream_addr} is not accepting"))?;
 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
@@ -1810,10 +2223,9 @@ pub async fn start_root_proxy(
             let Ok((mut inbound, _)) = listener.accept().await else {
                 break;
             };
+            let upstream_addr = upstream_addr.clone();
             tokio::spawn(async move {
-                let Ok(mut upstream) =
-                    tokio::net::TcpStream::connect(("127.0.0.1", workload_port)).await
-                else {
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
                     return;
                 };
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
@@ -1821,6 +2233,146 @@ pub async fn start_root_proxy(
         }
     });
     Ok(handle)
+}
+
+// ── Proxy readiness probe (v1.2 PR 3e-4) ──
+//
+// The restore path's supervisor guest restarts its workload with the real env
+// AFTER bind_before_expose, so the first accept can lag proxy bring-up by
+// 1-2s. `start_root_proxy_to`'s single connect check is a guaranteed race
+// there (observed on staging: bound-ready followed by ready_url=none). The
+// restore path instead brings the listener up first and proves readiness
+// END-TO-END through it — the same path a user's browser takes — retrying on
+// a short backoff until `ATO_PROXY_READY_TIMEOUT_MS` is spent.
+
+/// Backoff schedule (ms) for the readiness probe: fast first attempts for the
+/// common 1-2s restart lag, settling to 1s ticks until the budget is spent.
+const PROXY_READY_BACKOFF_MS: [u64; 6] = [50, 100, 200, 400, 800, 1_000];
+/// Per-attempt IO budget: connect + request + first response byte.
+const PROXY_READY_ATTEMPT_IO_MS: u64 = 1_000;
+
+/// Outcome of the through-proxy readiness probe — feeds the `PROXY_READY_PROF`
+/// line and the `RESTORE_PROF` extras. Counters only; never URLs or secrets.
+pub struct ProxyReadyProbe {
+    pub attempts: u32,
+    pub wait_ms: u64,
+    pub ok: bool,
+}
+
+impl ProxyReadyProbe {
+    pub fn result_label(&self) -> &'static str {
+        if self.ok { "ok" } else { "timeout" }
+    }
+}
+
+/// One probe attempt through the proxy listener: connect, send a minimal
+/// HTTP/1.0 GET, and count ANY response byte as ready (the workload accepted
+/// and answered — status is its business). An upstream that refuses makes the
+/// proxy drop the inbound connection → EOF → not ready yet.
+async fn probe_once_via(listen: &str, request: &[u8], io_timeout: Duration) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let attempt = async {
+        let mut stream = tokio::net::TcpStream::connect(listen).await.ok()?;
+        stream.write_all(request).await.ok()?;
+        let mut buf = [0u8; 1];
+        match stream.read(&mut buf).await {
+            Ok(n) if n > 0 => Some(()),
+            _ => None,
+        }
+    };
+    tokio::time::timeout(io_timeout, attempt)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
+/// Bring the slot's root proxy up and prove readiness THROUGH it before the
+/// caller claims a URL. Returns the accept-loop handle only when a probe
+/// request got response bytes back through the proxy; on timeout the listener
+/// is aborted and the caller must treat the lease as failed — a ready_url in
+/// front of a dead workload is a lie, and (for a web run) a ready without a
+/// URL is the same lie in the other direction. The probe outcome is returned
+/// in BOTH cases so the caller can always emit `PROXY_READY_PROF`.
+pub async fn start_root_proxy_ready(
+    listen: &str,
+    upstream_addr: String,
+    probe_path: &str,
+    timeout: Duration,
+) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
+    let started = std::time::Instant::now();
+    let mut probe = ProxyReadyProbe {
+        attempts: 0,
+        wait_ms: 0,
+        ok: false,
+    };
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            probe.wait_ms = started.elapsed().as_millis() as u64;
+            return (
+                Err(anyhow::Error::new(e)
+                    .context(format!("failed to bind proxy listener on {listen}"))),
+                probe,
+            );
+        }
+    };
+    let accept_upstream = upstream_addr.clone();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut inbound, _)) = listener.accept().await else {
+                break;
+            };
+            let upstream_addr = accept_upstream.clone();
+            tokio::spawn(async move {
+                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+            });
+        }
+    });
+
+    let path = if probe_path.starts_with('/') {
+        probe_path.to_string()
+    } else {
+        format!("/{probe_path}")
+    };
+    let request =
+        format!("GET {path} HTTP/1.0\r\nHost: ato-proxy-ready-probe\r\n\r\n").into_bytes();
+    let mut backoff = PROXY_READY_BACKOFF_MS.iter().copied();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        probe.attempts += 1;
+        let io_budget = remaining.min(Duration::from_millis(PROXY_READY_ATTEMPT_IO_MS));
+        if probe_once_via(listen, &request, io_budget).await {
+            probe.ok = true;
+            break;
+        }
+        let delay = Duration::from_millis(backoff.next().unwrap_or(1_000));
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(delay.min(remaining)).await;
+    }
+    probe.wait_ms = started.elapsed().as_millis() as u64;
+    if probe.ok {
+        (Ok(handle), probe)
+    } else {
+        handle.abort();
+        (
+            Err(anyhow::anyhow!(
+                "workload behind proxy {listen} did not answer the readiness probe within {}ms ({} attempt(s))",
+                timeout.as_millis(),
+                probe.attempts
+            )),
+            probe,
+        )
+    }
 }
 
 // ── Owner-initiated stop (P3-C) ──
@@ -1895,6 +2447,7 @@ async fn poll_lease_control(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlOutcome {
     /// No stop requested (or a transient error) — keep watching.
     Continue,
@@ -3203,6 +3756,761 @@ async fn run_lease_child(
     }
 }
 
+/// True while the restored VMM process is still alive (`kill(pid, 0)` probes without
+/// delivering a signal). Unlike the child-run path this is a single process pid, not a
+/// process group.
+#[cfg(unix)]
+fn vmm_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+#[cfg(not(unix))]
+fn vmm_alive(_pid: i32) -> bool {
+    true
+}
+
+/// How often the restore hold-loop polls `/control` for a stop + checks the VMM is alive.
+const RESTORE_HOLD_POLL_SECS: u64 = 2;
+
+/// ato#1006 (UNIT C): decide whether the restore hold loop should break this tick,
+/// and with what reason. Pure so the preview max-duration deadline is unit-testable
+/// without a live VM.
+///
+/// Precedence (first match wins): the workload exiting, then an owner stop / a gone
+/// lease, then — for a preview lease ONLY — the max-duration deadline. `preview_deadline`
+/// is `Some` ONLY for a `restore_snapshot_preview` lease; for every other restore kind
+/// it is `None`, so `preview_expired` can never fire and the non-preview hold loop stays
+/// behavior-identical (`workload_exited` / `user_requested` / `lease_gone`).
+fn restore_hold_break_reason(
+    now: std::time::Instant,
+    preview_deadline: Option<std::time::Instant>,
+    vmm_exited: bool,
+    control: ControlOutcome,
+) -> Option<&'static str> {
+    if vmm_exited {
+        return Some("workload_exited");
+    }
+    match control {
+        ControlOutcome::Stop => return Some("user_requested"),
+        ControlOutcome::Done => return Some("lease_gone"),
+        ControlOutcome::Continue => {}
+    }
+    if let Some(deadline) = preview_deadline
+        && now >= deadline
+    {
+        return Some("preview_expired");
+    }
+    None
+}
+
+/// Track E (#912): restore a sealed Ready-State snapshot for a `restore_snapshot` lease
+/// (Track D dispatch, ato-api#159) and expose it — owning the full
+/// fetch → VERIFY → restore → proxy → ready → hold → teardown lifecycle.
+///
+/// The lease is REFERENCE-ONLY: `artifact_location` is a hint, and the identity fields
+/// are verified against the fetched manifest by `load_and_verify_manifest` (incl. the
+/// `manifest.id() == artifact_manifest_hash` gate that `backend.restore` does not
+/// provide) BEFORE anything is restored. Every failure reports a typed `Failed` and
+/// releases the slot.
+///
+/// v1.2 PR 3e: a `restore_snapshot_with_bindings` lease restores a SUPERVISOR
+/// artifact. The binding names come ONLY from the sealed manifest
+/// (`supervisor_build.binding_names` — never a lease field); every name is REQUIRED
+/// and resolved from the RUNNER host's own secret store BEFORE the restore (fail
+/// fast, no VM booted on a missing grant), then delivered over vsock and gated
+/// bound-ready BEFORE any traffic is exposed (`bind_before_expose`). Values live
+/// only in guest tmpfs; renewal runs for the session lifetime and is scrubbed at
+/// teardown.
+#[allow(clippy::too_many_arguments)]
+// The final prof_mark! call's reassignment of prof_last is a dead store
+// (nothing times an interval after it) — inherent to the macro applying
+// uniformly across every call site, not a bug at any specific one.
+#[allow(unused_assignments)]
+async fn handle_restore_snapshot_lease(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease: LeaseDto,
+    slot: SlotLease,
+    public_base_url: Option<String>,
+    public_url_template: Option<String>,
+    netns_enabled: bool,
+) {
+    use crate::application::ready_state::backend::select_backend_for_slot;
+    use crate::application::ready_state::binding_grants::{
+        binding_namespace, preflight_resolve_names,
+    };
+    use crate::application::ready_state::binding_host::{
+        bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal,
+        stop_scrub_over_vsock,
+    };
+    use crate::application::ready_state::flags::{
+        artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
+    };
+    use crate::application::ready_state::restore::{restore_and_expose, teardown};
+    use crate::application::ready_state::restore_lease::{
+        RestoreArtifactClass, ensure_artifact_local, load_and_verify_manifest,
+        parse_restore_snapshot_command,
+    };
+    use crate::application::ready_state::secret_resolver::select_resolver;
+    use capsulefs::CasStore;
+
+    let lease_id = lease.id.clone();
+
+    // ── Track R1 (ato#948): restore-prep phase profiling ────────────────────
+    // The measured claimed→firecracker gap (~1.7s) hid inside this handler.
+    // Every phase is timed and emitted as ONE stable key=value line
+    // (`RESTORE_PROF …`) on the success path — ids only, never secrets/URLs.
+    // `spans=` carries the snapshot backend's internal bench spans
+    // (rehydrate/cache/spawn/health…), populated when ATO_READY_STATE_BENCH=1.
+    let prof_total = std::time::Instant::now();
+    let mut prof_last = std::time::Instant::now();
+    let mut prof_parts: Vec<String> = Vec::new();
+    macro_rules! prof_mark {
+        ($name:literal) => {{
+            prof_parts.push(format!(
+                concat!($name, "={}"),
+                prof_last.elapsed().as_millis()
+            ));
+            prof_last = std::time::Instant::now();
+        }};
+    }
+
+    // Report a typed failure and release the slot (fail-closed on every reject path).
+    async fn fail(
+        client: &reqwest::Client,
+        api_base: &str,
+        runner_token: &str,
+        lease_id: &str,
+        slot: SlotLease,
+        code: &str,
+        message: String,
+    ) {
+        eprintln!(
+            "⚠️  restore lease {lease_id} rejected: {}",
+            scrub_secrets(&message)
+        );
+        let report = LeaseReport::Failed {
+            code: code.to_string(),
+            message,
+        };
+        if let Err(err) =
+            report_lease_status(client, api_base, runner_token, lease_id, &report).await
+        {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: failure report failed: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+        }
+        slot.release();
+    }
+
+    // 1. Parse the reference-only command (every identity field required + non-empty).
+    let cmd = match parse_restore_snapshot_command(&lease.command) {
+        Ok(c) => c,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    println!(
+        "📦 restore lease {lease_id}: snapshot {} (capsule {}, {}/{})",
+        cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
+    );
+    prof_mark!("parse_ms");
+    // Track R3 (ato#948): the Preparing report is a PROGRESS HINT, not a
+    // terminal contract — R1 measured it at p50 ~1.1s of pure control-plane
+    // round-trip sitting on the restore critical path. Fire it in the
+    // background (ONE task per restore, no retry loop) and start the restore
+    // immediately. Ready/Failed reporting stays awaited — the terminal
+    // contract is unchanged.
+    {
+        let client = client.clone();
+        let api_base = api_base.to_string();
+        let runner_token = runner_token.to_string();
+        let lease_id = lease_id.clone();
+        tokio::spawn(async move {
+            if let Err(err) = report_lease_status(
+                &client,
+                &api_base,
+                &runner_token,
+                &lease_id,
+                &LeaseReport::Preparing,
+            )
+            .await
+            {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: preparing report failed (non-fatal): {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+            }
+        });
+    }
+    prof_mark!("report_preparing_spawn_ms");
+
+    // 2. Locate the artifact on this host (v1 same-host cas://, ato#928 layout) —
+    // or, for an r2:// location (ato#1002), fetch it via the lease's presigned
+    // artifact_fetch_url into the same layout first (idempotent: a local copy wins).
+    let artifact_root = match std::env::var("ATO_SNAPSHOT_ARTIFACT_ROOT") {
+        Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
+        _ => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "artifact_unavailable",
+                "ATO_SNAPSHOT_ARTIFACT_ROOT is not configured on this runner".to_string(),
+            )
+            .await;
+            return;
+        }
+    };
+    let paths = match ensure_artifact_local(
+        client,
+        &cmd.artifact_location,
+        &artifact_root,
+        cmd.artifact_fetch_url.as_deref(),
+        artifact_fetch_max_bytes(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    // Key kept stable (Track R1); for an r2:// fetch this span includes the download.
+    prof_mark!("locate_artifact_ms");
+
+    // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate)
+    // and classify it (fail-closed narrow supervisor exception, PR 3e).
+    let (manifest, artifact_class) =
+        match load_and_verify_manifest(&paths.manifest_json, &cmd, runner_supervisor_enabled()) {
+            Ok(m) => m,
+            Err((code, message)) => {
+                fail(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    slot,
+                    &code,
+                    message,
+                )
+                .await;
+                return;
+            }
+        };
+    // Binding names from the SEALED MANIFEST only (the single source of truth) —
+    // captured now because `manifest` is moved into the restore below.
+    let supervisor_names: Option<Vec<String>> = match &artifact_class {
+        RestoreArtifactClass::Supervisor { binding_names } => Some(binding_names.clone()),
+        RestoreArtifactClass::NoBinding => None,
+    };
+    // v1.6 (ato#983) Slice 3 revision: whether this sealed artifact declares
+    // any durable state volumes — captured now (same "manifest is the single
+    // source of truth, moved into restore below" reasoning as above) so
+    // MountVolumes can be sent before any binding delivery.
+    let has_durable_state = manifest
+        .supervisor_build
+        .as_ref()
+        .is_some_and(|s| !s.state_volumes.is_empty());
+    prof_mark!("verify_manifest_ms");
+
+    // 4. Open the artifact's CAS + select the host backend (both fail-closed).
+    let store = match CasStore::open(&paths.cas_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "artifact_unavailable",
+                format!("open CAS: {e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+    // #948 N-slot: build the backend for THIS slot. Under netns mode the
+    // Firecracker config is namespaced (ato-slot-{index}) so concurrent restores
+    // don't collide on tap/IP/lock; legacy single-slot keeps the root-ns config.
+    let backend = match select_backend_for_slot(slot.index, netns_enabled) {
+        Ok(b) => b,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "backend_unavailable",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+    prof_mark!("cas_open_backend_select_ms");
+
+    // v1.2 PR 3e (supervisor only): re-check the BACKEND's binding capability —
+    // the control plane gates dispatch on the advertised kind, but a runner that
+    // advertises it while its backend cannot do binding leases must still refuse
+    // (defence in depth), and BEFORE any restore.
+    if supervisor_names.is_some() && !backend.probe().binding.supports_binding_lease {
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "binding_unsupported",
+            "supervisor artifact refused: this runner's snapshot backend does not support \
+             binding leases (vsock/KVM capability missing)"
+                .to_string(),
+        )
+        .await;
+        return;
+    }
+    // v1.2 PR 3e (supervisor only): resolve EVERY binding from the RUNNER host's
+    // own secret store BEFORE the restore — all names are required (3e MVP has no
+    // optional-secret semantics), and a missing grant must not boot a VM at all.
+    // Values are held in-memory only, for lease issuance below; never logged.
+    let resolved_bindings: Option<Vec<(String, protocol::binding_lease::SecretValue)>> =
+        match &supervisor_names {
+            Some(names) => {
+                let step = || -> Result<Vec<(String, protocol::binding_lease::SecretValue)>> {
+                    let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+                    let resolver = select_resolver(&namespace)?;
+                    preflight_resolve_names(resolver.as_ref(), names, &namespace)
+                };
+                match step() {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        fail(
+                            client,
+                            api_base,
+                            runner_token,
+                            &lease_id,
+                            slot,
+                            "bind_failed",
+                            format!("{e:#}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+    prof_mark!("binding_preflight_ms");
+
+    // 5. Restore + expose. The disposable overlay is destroyed on teardown. host_runner
+    // class stays None so `backend.restore` re-gates the manifest's runner class against
+    // THIS host (fail-closed, defence in depth over the pre-restore verify).
+    let overlay_root = std::env::temp_dir()
+        .join("ato-restore-overlays")
+        .join(&lease_id);
+    // Drain any stale spans so `spans=` below carries THIS restore only.
+    let _ = snapshot::bench::drain();
+    let receipt = match restore_and_expose(
+        backend.as_ref(),
+        &store,
+        manifest,
+        overlay_root,
+        None,
+        false,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "restore_failed",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
+    prof_mark!("backend_restore_ms");
+    let prof_spans: Vec<String> = snapshot::bench::drain()
+        .into_iter()
+        .map(|s| format!("{}={}ms", s.name, s.micros / 1000))
+        .collect();
+    let session = receipt.session;
+
+    let Some(guest_port) = session.guest_port else {
+        // Nothing to expose (e.g. a Fake/KVM-free backend) — a public run needs a served
+        // port. Tear the session down and fail rather than report a portless ready.
+        let _ = teardown(backend.as_ref(), session);
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "restore_no_port",
+            "restored session exposed no guest port; this runner cannot serve it".to_string(),
+        )
+        .await;
+        return;
+    };
+    // Where the restored workload ACTUALLY accepts connections — backend-authoritative
+    // (Firecracker serves on the TAP guest IP, e.g. 172.16.0.2:8080, not host loopback).
+    // Missing addr ⇒ nothing to honestly proxy; ready is reported without a URL below.
+    let workload_addr = session.workload_addr.clone();
+
+    // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND/EXPOSE —
+    // durable state is a restore-time binding, independent of whether this
+    // capsule has any secret bindings at all (a state-only capsule can have
+    // durable state with `supervisor_names == None`). Deliberately its OWN
+    // block, not nested inside the `supervisor_names` branch below — review
+    // finding (PR#992): nesting it there meant a state-only capsule that
+    // never went through the binding-required classification would skip
+    // MountVolumes entirely and fall through to proxy/expose unmounted.
+    // ANY failure = teardown + typed fail, exactly like the binding gate.
+    if has_durable_state {
+        let mount_result: anyhow::Result<()> = async {
+            let uds = session.vsock_uds.clone().ok_or_else(|| {
+                anyhow::anyhow!("restored session declares durable state but exposes no vsock uds")
+            })?;
+            tokio::task::spawn_blocking(move || {
+                mount_volumes_before_expose(&uds, true, Duration::from_secs(10))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("mount task join: {e}"))?
+        }
+        .await;
+        if let Err(e) = mount_result {
+            let _ = teardown(backend.as_ref(), session);
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "mount_failed",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    }
+
+    // v1.2 PR 3e (supervisor only): BIND BEFORE EXPOSE. Issue leases from the
+    // pre-resolved values and deliver them over the restored session's vsock; the
+    // gate returns Ok only at bound-ready (the guest-agent then restarts the
+    // workload with the real env). ANY failure = teardown + typed fail — an
+    // unbound supervisor session must never reach the proxy/ready steps below.
+    let supervisor_bind: Option<(std::path::PathBuf, String)> =
+        if let Some(names) = &supervisor_names {
+            let step = async {
+                let uds = session.vsock_uds.clone().ok_or_else(|| {
+                    anyhow::anyhow!("restored supervisor session exposes no vsock uds")
+                })?;
+                let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let leases = issue_leases(
+                    resolved_bindings.clone().unwrap_or_default(),
+                    now_ms,
+                    binding_ttl_ms(),
+                )?;
+                let bind_uds = uds.clone();
+                // Blocking vsock connect + delivery — keep it off the async reactor.
+                tokio::task::spawn_blocking(move || {
+                    bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
+                Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+            };
+            match step.await {
+                Ok(ctx) => {
+                    println!(
+                        "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
+                        names.len()
+                    );
+                    Some(ctx)
+                }
+                Err(e) => {
+                    let _ = teardown(backend.as_ref(), session);
+                    fail(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "bind_failed",
+                        format!("{e:#}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+    prof_mark!("bind_before_expose_ms");
+
+    // 6. Bring the per-slot root proxy up and prove readiness THROUGH it BEFORE
+    // claiming a URL (v1.2 PR 3e-4). The supervisor guest restarts its workload
+    // with the real env after bind — the first accept can lag by 1-2s, so the
+    // probe retries on a backoff up to ATO_PROXY_READY_TIMEOUT_MS. For a web
+    // run the candidate URL IS the product: a probe timeout is a typed failure
+    // (teardown + fail), never a silent ready without ready_url.
+    let candidate = public_ready_url(
+        public_base_url.as_deref(),
+        public_url_template.as_deref(),
+        &slot,
+    );
+    let (proxy_handle, proxy_started) = match (candidate.as_deref(), workload_addr.as_deref()) {
+        (Some(_), Some(addr)) => {
+            let probe_path = cmd.healthcheck_url_path.as_deref().unwrap_or("/");
+            let timeout = Duration::from_millis(proxy_ready_timeout_ms());
+            let (proxy, probe) =
+                start_root_proxy_ready(&slot.proxy_listen, addr.to_string(), probe_path, timeout)
+                    .await;
+            // One stable line per probe, both outcomes (grep: PROXY_READY_PROF).
+            println!(
+                "PROXY_READY_PROF lease={lease_id} slot={} attempts={} wait_ms={} result={}",
+                slot.index,
+                probe.attempts,
+                probe.wait_ms,
+                probe.result_label(),
+            );
+            prof_parts.push(format!("proxy_ready_wait_ms={}", probe.wait_ms));
+            prof_parts.push(format!("proxy_ready_attempts={}", probe.attempts));
+            match proxy {
+                Ok(handle) => {
+                    println!(
+                        "🔀 restore lease {lease_id}: slot {} proxy {} -> {} (ready after {} attempt(s))",
+                        slot.index, slot.proxy_listen, addr, probe.attempts
+                    );
+                    (Some(handle), Some(true))
+                }
+                Err(err) => {
+                    // Scrub + teardown mirror the stop path: the leases were
+                    // already delivered to the guest, so wipe them before the
+                    // VM (teardown destroys the tmpfs regardless; best-effort).
+                    eprintln!(
+                        "⚠️  restore lease {lease_id}: proxy readiness probe failed; failing the lease: {}",
+                        scrub_secrets(&format!("{err:#}"))
+                    );
+                    if let Some((uds, _)) = supervisor_bind {
+                        let scrub =
+                            tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+                        match scrub {
+                            Ok(Ok(())) => {
+                                println!("🧹 restore lease {lease_id}: guest bindings scrubbed")
+                            }
+                            Ok(Err(e)) => eprintln!(
+                                "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                                scrub_secrets(&format!("{e:#}"))
+                            ),
+                            Err(e) => eprintln!(
+                                "⚠️  restore lease {lease_id}: binding scrub task join error: {e}"
+                            ),
+                        }
+                    }
+                    let _ = teardown(backend.as_ref(), session);
+                    fail(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "proxy_ready_timeout",
+                        format!("{err:#}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        (Some(_), None) => {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
+            );
+            (None, Some(false))
+        }
+        _ => (None, None),
+    };
+    let payload = decide_ready_payload(
+        cmd.execution_id.clone(),
+        candidate.as_deref(),
+        Some(guest_port),
+        proxy_started,
+    );
+    prof_mark!("proxy_setup_ms");
+    println!(
+        "📨 restore lease {lease_id}: ready ({}, ready_url={})",
+        payload.execution_id,
+        payload.ready_url.as_deref().unwrap_or("none")
+    );
+    if let Err(err) = report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await
+    {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: ready report failed: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+    prof_mark!("ready_ack_ms");
+    // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
+    println!(
+        "RESTORE_PROF lease={lease_id} snapshot={} {} total_ms={} spans=\"{}\"",
+        cmd.snapshot_id,
+        prof_parts.join(" "),
+        prof_total.elapsed().as_millis(),
+        prof_spans.join(";"),
+    );
+
+    // v1.2 PR 3e (supervisor only): keep the leases fresh for the session lifetime.
+    // The renewal loop re-resolves from the runner's store every tick (a deleted
+    // grant revokes the lease → the guest scrubs it and bound-ready drops).
+    // Held in-handler (the runner records no ProcessInfo for restored sessions) and
+    // aborted at teardown below.
+    let renewal_handle = supervisor_bind.as_ref().map(|(uds, namespace)| {
+        spawn_lease_renewal(
+            uds.clone(),
+            namespace.clone(),
+            supervisor_names.clone().unwrap_or_default(),
+            binding_ttl_ms(),
+        )
+    });
+
+    // 7. Hold until the owner stops the run (/control) or the VMM exits.
+    // ato#1006 (UNIT C): a preview lease additionally arms a HARD max-duration cap.
+    // The deadline is computed from serving-start (here, after ready) — the wall-clock
+    // budget a public preview gets. `parse_restore_snapshot_command` guarantees a
+    // preview lease carried `max_duration_secs`, so it is always Some here. The
+    // `idle_timeout_secs` field is parsed + threaded but a NO-OP stub in v0: the
+    // restore path exposes no controllable idle-activity signal, so the max-duration
+    // deadline is the sole hard cap (documented on the struct field).
+    let preview_deadline = if cmd.is_preview {
+        cmd.max_duration_secs
+            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs))
+    } else {
+        None
+    };
+    if cmd.is_preview {
+        println!(
+            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, idle_timeout_secs={:?} [v0 stub])",
+            cmd.max_duration_secs, cmd.idle_timeout_secs
+        );
+    }
+    let control_url = format!(
+        "{}/v1/runner-leases/{}/control",
+        api_base.trim_end_matches('/'),
+        &lease_id
+    );
+    let reason = loop {
+        tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
+        let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
+        // Preserve the original short-circuit: only poll /control while the VM is up.
+        let control = if vmm_exited {
+            ControlOutcome::Continue
+        } else {
+            poll_control_once(client, &control_url, runner_token).await
+        };
+        if let Some(reason) = restore_hold_break_reason(
+            std::time::Instant::now(),
+            preview_deadline,
+            vmm_exited,
+            control,
+        ) {
+            break reason;
+        }
+    };
+    println!("🛑 restore lease {lease_id}: {reason}; tearing down");
+
+    // 8. Teardown: stop the VM + destroy the overlay, stop the proxy, ack /stopped, and
+    // free the slot ONLY on a fully confirmed teardown (fail closed — a slot held is
+    // safer than one offered while a VM may still be up).
+    // v1.2 PR 3e (supervisor only): first stop renewing, then best-effort scrub the
+    // guest's tmpfs bindings over vsock BEFORE the VM (and its tmpfs) is destroyed —
+    // teardown wipes them regardless, so a scrub failure is logged, never fatal.
+    if let Some(handle) = renewal_handle {
+        handle.abort();
+    }
+    if let Some((uds, _)) = supervisor_bind {
+        let scrub = tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+        match scrub {
+            Ok(Ok(())) => println!("🧹 restore lease {lease_id}: guest bindings scrubbed"),
+            Ok(Err(e)) => eprintln!(
+                "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                scrub_secrets(&format!("{e:#}"))
+            ),
+            Err(e) => eprintln!("⚠️  restore lease {lease_id}: binding scrub task join error: {e}"),
+        }
+    }
+    let vm_stopped = match teardown(backend.as_ref(), session) {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: backend stop failed: {}",
+                scrub_secrets(&format!("{e:#}"))
+            );
+            false
+        }
+    };
+    let proxy_stopped = stop_proxy(proxy_handle).await;
+    let cleanup = StopCleanup::from_teardown(vm_stopped, proxy_stopped);
+    if let Err(err) = report_lease_stopped_with_reason(
+        client,
+        api_base,
+        runner_token,
+        &lease_id,
+        &cleanup,
+        reason,
+    )
+    .await
+    {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: stopped ack failed: {}",
+            scrub_secrets(&format!("{err:#}"))
+        );
+    }
+    if cleanup.slot_released {
+        slot.release();
+        println!("🔓 restore lease {lease_id}: VM stopped, proxy down, slot released");
+    } else {
+        eprintln!(
+            "⚠️  restore lease {lease_id}: teardown incomplete (vm_stopped={}, proxy_stopped={}); slot held",
+            cleanup.process_terminated, cleanup.proxy_stopped
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_claimed_lease(
     client: &reqwest::Client,
     api_base: &str,
@@ -3211,8 +4519,34 @@ async fn handle_claimed_lease(
     slot: SlotLease,
     public_base_url: Option<String>,
     public_url_template: Option<String>,
+    netns_enabled: bool,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
+    // Track E (#912): a restore_snapshot lease restores a sealed Ready-State snapshot
+    // (Track D dispatch, ato-api#159). It is NOT a child-process sandbox run, so it owns
+    // its own fetch → verify → restore → expose → teardown lifecycle — routed here,
+    // before the run_source/run_capsule machinery that would reject the kind.
+    // ato#1006 (UNIT C): restore_snapshot_preview is the same restore lifecycle
+    // (a no-binding artifact) with a hard TTL, so it routes here too.
+    if matches!(
+        lease.command.get("kind").and_then(|v| v.as_str()),
+        Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND)
+            | Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND)
+            | Some(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND)
+    ) {
+        handle_restore_snapshot_lease(
+            client,
+            api_base,
+            runner_token,
+            lease,
+            slot,
+            public_base_url,
+            public_url_template,
+            netns_enabled,
+        )
+        .await;
+        return;
+    }
     // Fail closed FIRST — before resolving/materializing the lease or reporting
     // Preparing: a native-inference lease must only run where this host can
     // actually run native-inference. The control plane already capability-gates
@@ -3679,6 +5013,21 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn lease_poll_interval_is_env_tunable_clamped_and_defaults_conservative() {
+        // Default (no env / garbage): the conservative 5s stays.
+        assert_eq!(lease_poll_seconds_from(None), 5);
+        assert_eq!(lease_poll_seconds_from(Some("")), 5);
+        assert_eq!(lease_poll_seconds_from(Some("fast")), 5);
+        assert_eq!(lease_poll_seconds_from(Some("-1")), 5);
+        // Staging latency override (ato#940 Track L): 1s.
+        assert_eq!(lease_poll_seconds_from(Some("1")), 1);
+        assert_eq!(lease_poll_seconds_from(Some(" 2 ")), 2);
+        // Clamped: never sub-second hammering, never minute-scale starvation.
+        assert_eq!(lease_poll_seconds_from(Some("0")), 1);
+        assert_eq!(lease_poll_seconds_from(Some("999")), 60);
+    }
 
     #[test]
     fn build_enroll_body_carries_token_and_honest_host_facts() {
@@ -4158,11 +5507,36 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_advertises_supported_snapshot_codecs_field() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        assert!(
+            body["supported_snapshot_codecs"].is_array(),
+            "supported_snapshot_codecs must always be present (no legacy passthrough for codec)"
+        );
+    }
+
+    #[test]
+    fn advertised_snapshot_codecs_for_is_empty_when_not_restore_ready() {
+        // A host that cannot restore a Ready-State snapshot at all has nothing
+        // to decode — it must explicitly advertise zero codecs (never omit the
+        // field, which the control plane would otherwise treat identically to a
+        // legacy-unreported runner for hardware, but codec has no such
+        // passthrough anyway; explicit `[]` is simply the honest answer).
+        assert_eq!(advertised_snapshot_codecs_for(false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn advertised_snapshot_codecs_for_advertises_raw_v1_when_restore_ready() {
+        let codecs = advertised_snapshot_codecs_for(true);
+        assert_eq!(codecs, vec!["asc.raw-v1.v1".to_string()]);
+    }
+
+    #[test]
     fn advertised_lease_kinds_appends_native_inference_only_when_ready() {
         // Not ready: base kinds only, NO native-inference advertised — so the
         // control plane will not dispatch native-inference here (the slice-1 gate
         // requires the capability).
-        let base = advertised_lease_kinds_for(false);
+        let base = advertised_lease_kinds_for(false, false, false, false);
         assert!(base.iter().any(|k| k == LEASE_COMMAND_KIND));
         assert!(base.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
@@ -4170,11 +5544,142 @@ mod tests {
             "must NOT advertise native-inference when the host is not ready"
         );
         // Ready: base kinds preserved + native-inference appended.
-        let ready = advertised_lease_kinds_for(true);
+        let ready = advertised_lease_kinds_for(true, false, false, false);
         assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
         assert!(
             ready.iter().any(|k| k == NATIVE_INFERENCE_RUNTIME),
             "must advertise native-inference when the host is ready"
+        );
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_restore_snapshot_only_when_ready() {
+        use crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND;
+        // KVM-free host: restore_snapshot is NOT advertised, so the control plane will
+        // not dispatch a restore here (a Fake/KVM-free host cannot serve a real app_url).
+        assert!(
+            !advertised_lease_kinds_for(false, false, false, false)
+                .iter()
+                .any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND),
+            "must NOT advertise restore_snapshot when the host cannot restore+serve"
+        );
+        // Restore-ready host: base kinds preserved + restore_snapshot appended.
+        let ready = advertised_lease_kinds_for(false, true, false, false);
+        assert!(ready.iter().any(|k| k == RUN_CAPSULE_LEASE_KIND));
+        assert!(ready.iter().any(|k| k == RESTORE_SNAPSHOT_LEASE_KIND));
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_with_bindings_only_when_restore_and_supervisor_ready() {
+        use crate::application::ready_state::restore_lease::{
+            RESTORE_SNAPSHOT_LEASE_KIND, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND,
+        };
+        let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
+        // Neither: no binding kind.
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, false),
+            RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+        ));
+        // Supervisor-ready but NOT restore-ready (no KVM): still refused — the
+        // binding kind requires BOTH.
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, true, false),
+            RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+        ));
+        // Restore-ready but not supervisor-ready (flag off / no vsock capability):
+        // plain restore advertised, binding kind NOT.
+        let plain = advertised_lease_kinds_for(false, true, false, false);
+        assert!(has(&plain, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(!has(&plain, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        // Both: both kinds advertised.
+        let both = advertised_lease_kinds_for(false, true, true, false);
+        assert!(has(&both, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(has(&both, RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+    }
+
+    #[test]
+    fn advertised_lease_kinds_appends_preview_only_when_restore_and_preview_ready() {
+        use crate::application::ready_state::restore_lease::{
+            RESTORE_SNAPSHOT_LEASE_KIND, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND,
+        };
+        let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
+        // Neither restore- nor preview-ready: preview kind NOT advertised.
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, false),
+            RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
+        ));
+        // Preview opted-in but NOT restore-ready (no KVM): still refused — the preview
+        // kind requires BOTH the restore capability and the operator opt-in.
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, true),
+            RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
+        ));
+        // Restore-ready but NOT preview-opted-in (ATO_RUNNER_PREVIEW unset): plain
+        // restore advertised, preview kind NOT.
+        let plain = advertised_lease_kinds_for(false, true, false, false);
+        assert!(has(&plain, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(!has(&plain, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        // Restore-ready AND preview-opted-in: preview kind advertised. Note it needs
+        // NO supervisor capability (a preview restores a no-binding artifact).
+        let preview = advertised_lease_kinds_for(false, true, false, true);
+        assert!(has(&preview, RESTORE_SNAPSHOT_LEASE_KIND));
+        assert!(has(&preview, RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+    }
+
+    #[test]
+    fn restore_hold_break_reason_precedence_and_preview_deadline() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        let future = now + Duration::from_secs(60);
+        let past = now - Duration::from_secs(1);
+
+        // Non-preview lease (deadline None): never breaks "preview_expired".
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Continue),
+            None
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, None, true, ControlOutcome::Continue),
+            Some("workload_exited")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Stop),
+            Some("user_requested")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Done),
+            Some("lease_gone")
+        );
+
+        // Preview lease, deadline not yet reached: keep holding.
+        assert_eq!(
+            restore_hold_break_reason(now, Some(future), false, ControlOutcome::Continue),
+            None
+        );
+        // Preview lease, deadline passed: breaks "preview_expired".
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Continue),
+            Some("preview_expired")
+        );
+        // `now == deadline` counts as expired (>= boundary).
+        assert_eq!(
+            restore_hold_break_reason(now, Some(now), false, ControlOutcome::Continue),
+            Some("preview_expired")
+        );
+
+        // Precedence: workload exit / owner stop / gone lease all win over the
+        // preview deadline even when it has passed.
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), true, ControlOutcome::Continue),
+            Some("workload_exited")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Stop),
+            Some("user_requested")
+        );
+        assert_eq!(
+            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Done),
+            Some("lease_gone")
         );
     }
 
@@ -5011,6 +6516,347 @@ mod tests {
         );
     }
 
+    /// Pick a free loopback port + return a `listen` string for the proxy (the
+    /// proxy's listen arg is a string; bind-then-drop reserves a free port).
+    fn free_listen() -> String {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+        let a = l.local_addr().expect("addr").to_string();
+        drop(l);
+        a
+    }
+
+    /// v1.5 (ato#973): the runner proxy is a raw L4 `copy_bidirectional` pipe, so a
+    /// WebSocket upgrade + full-duplex frames tunnel through it unchanged. This locks
+    /// that in — a future proxy change that buffers or closes early would break it.
+    #[tokio::test]
+    async fn proxy_tunnels_a_websocket_upgrade_and_bidirectional_frames() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = std::thread::spawn(move || {
+            // #1: the proxy's bring-up probe — accept and drop.
+            let _ = upstream_listener.accept();
+            // #2: the real connection.
+            let (mut s, _) = upstream_listener.accept().expect("real conn");
+            let mut buf = [0u8; 1024];
+            let n = s.read(&mut buf).expect("upgrade request");
+            assert!(
+                String::from_utf8_lossy(&buf[..n])
+                    .to_lowercase()
+                    .contains("upgrade: websocket"),
+                "proxy forwarded the upgrade request"
+            );
+            s.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            )
+            .unwrap();
+            // Echo frames both directions on the SAME persistent connection until
+            // the client closes.
+            loop {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if s.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        let listen = free_listen();
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy up");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut c = tokio::net::TcpStream::connect(&listen)
+            .await
+            .expect("connect proxy");
+        c.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut buf = vec![0u8; 1024];
+        let n = c.read(&mut buf).await.unwrap();
+        assert!(
+            String::from_utf8_lossy(&buf[..n]).contains("101 Switching Protocols"),
+            "proxy tunnelled the 101 upgrade response"
+        );
+        // Full-duplex frames after the upgrade, same connection.
+        c.write_all(b"frame-one").await.unwrap();
+        let n = c.read(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"frame-one",
+            "first WS frame echoed through the proxy"
+        );
+        c.write_all(b"frame-two").await.unwrap();
+        let n = c.read(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf[..n],
+            b"frame-two",
+            "second WS frame — the pipe stays open bidirectionally"
+        );
+
+        // Close the client FIRST so the proxy propagates EOF to the upstream (whose
+        // echo loop then breaks); the upstream thread is detached (not joined — it
+        // would block if the abort raced the close), reaped at process teardown.
+        drop(c);
+        handle.abort();
+        drop(upstream);
+    }
+
+    /// v1.5 (ato#973): Server-Sent Events must STREAM through the proxy — chunks
+    /// pushed over time arrive incrementally, not buffered until EOF. Proven
+    /// DETERMINISTICALLY (no timing race): the upstream sends event 1, then BLOCKS
+    /// on a channel until the test — which only signals AFTER it has received event
+    /// 1 through the proxy — releases the rest. A buffer-to-EOF proxy delivers
+    /// nothing until close, so the test would never see event 1, never signal,
+    /// and phase 1 would time out (fail) instead of racing on sleeps.
+    #[tokio::test]
+    async fn proxy_streams_sse_chunks_incrementally_not_buffered() {
+        // test → upstream: "you may send event 2 and 3 now".
+        let (cont_tx, cont_rx) = std::sync::mpsc::channel::<()>();
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        let upstream_port = upstream_listener.local_addr().unwrap().port();
+        let upstream = std::thread::spawn(move || {
+            let _ = upstream_listener.accept(); // bring-up probe
+            let (mut s, _) = upstream_listener.accept().expect("real conn");
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf); // the GET request
+            // Headers + event 1, flushed — available to a STREAMING proxy immediately.
+            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+                .unwrap();
+            s.write_all(b"data: 1\n\n").unwrap();
+            s.flush().unwrap();
+            // Hold events 2 & 3 until the test confirms it saw event 1 (recv_timeout
+            // so a failed test can't block this detached thread forever).
+            let released = cont_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
+            if released {
+                let _ = s.write_all(b"data: 2\n\ndata: 3\n\n");
+                let _ = s.flush();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+
+        let listen = free_listen();
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy up");
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut c = tokio::net::TcpStream::connect(&listen)
+            .await
+            .expect("connect proxy");
+        c.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut acc = String::new();
+        let mut buf = vec![0u8; 4096];
+
+        // Phase 1: event 1 must arrive through the proxy BEFORE the test releases
+        // events 2 & 3. A buffering proxy delivers nothing here → this loop times out.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !acc.contains("data: 1") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "event 1 never streamed through: {acc:?}"
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => panic!("read timed out before event 1 (proxy buffered to EOF?): {acc:?}"),
+            }
+        }
+        // The stream came through the proxy with its SSE content type + event 1, and
+        // event 2 does NOT exist yet (the upstream is blocked on the channel).
+        assert!(
+            acc.contains("content-type: text/event-stream"),
+            "SSE content-type seen through proxy: {acc:?}"
+        );
+        assert!(acc.contains("data: 1"), "event 1 received: {acc:?}");
+        assert!(
+            !acc.contains("data: 2"),
+            "event 2 must NOT have arrived before release: {acc:?}"
+        );
+
+        // Phase 2: release events 2 & 3, then read them in order.
+        cont_tx.send(()).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !acc.contains("data: 3") {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "events 2/3 never arrived: {acc:?}"
+            );
+            match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
+                _ => break,
+            }
+        }
+        let (p1, p2, p3) = (
+            acc.find("data: 1").unwrap(),
+            acc.find("data: 2").expect("event 2"),
+            acc.find("data: 3").expect("event 3"),
+        );
+        assert!(p1 < p2 && p2 < p3, "events in order: {acc:?}");
+
+        drop(c);
+        handle.abort();
+        drop(upstream); // detached.
+    }
+
+    /// v1.3 (ato#968): multi-slot without a URL template = slot≥1 unopenable;
+    /// the config must be refused at serve startup, not one run at a time.
+    #[test]
+    fn multi_slot_without_template_is_refused_at_startup() {
+        assert!(validate_multi_slot_public_url(1, None).is_ok());
+        assert!(validate_multi_slot_public_url(1, Some("http://h:{port}")).is_ok());
+        assert!(validate_multi_slot_public_url(2, Some("http://h:{port}")).is_ok());
+        assert!(validate_multi_slot_public_url(3, Some("http://h/{slot}/")).is_ok());
+        let err = validate_multi_slot_public_url(2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("public URL template"),
+            "actionable message, got: {err}"
+        );
+        assert!(err.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE"));
+    }
+
+    // ── Proxy readiness probe (3e-4) ──
+
+    /// The 3e-4 race, fixed: the workload starts accepting AFTER proxy
+    /// bring-up (restart-with-env lag). First probe hits Connection refused,
+    /// a later one succeeds → the proxy comes up and the ready payload claims
+    /// the URL (the pre-3e-4 single check reported ready_url=none here).
+    #[tokio::test]
+    async fn proxy_ready_retries_until_late_upstream_accepts_then_claims_url() {
+        // Reserve an upstream port, but only start listening ~1s later — the
+        // restart-with-env window in miniature. Deliberately generous (not
+        // 300ms): under a loaded/contended CI runner (observed on
+        // windows-latest), scheduling this test's own async task can itself
+        // be delayed enough that a too-tight window makes the first probe
+        // race the upstream coming up instead of reliably preceding it.
+        let upstream_port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("upstream port");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let upstream = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(1_000));
+            let listener =
+                TcpListener::bind(format!("127.0.0.1:{upstream_port}")).expect("late upstream");
+            // Budget for more than the 2 conceptual connections (one retry
+            // probe + the test's own final request): the retry loop's actual
+            // number of attempts that reach upstream (as opposed to being
+            // refused before it comes up) depends on scheduling timing, and a
+            // slow/contended CI runner (observed on windows-latest) can let
+            // more than one in-flight proxied connection land here before the
+            // probe settles. Extra accepts beyond what's actually used are
+            // harmless — the loop just exits when the connecting side is done.
+            for _ in 0..8 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 2\r\n\r\nok");
+            }
+        });
+        let listen = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+            let addr = l.local_addr().unwrap().to_string();
+            drop(l);
+            addr
+        };
+
+        let (result, probe) = start_root_proxy_ready(
+            &listen,
+            format!("127.0.0.1:{upstream_port}"),
+            "/health",
+            Duration::from_secs(5),
+        )
+        .await;
+        let handle = result.expect("proxy must come up once the workload starts accepting");
+        assert!(probe.ok, "probe must settle ok");
+        assert!(
+            probe.attempts >= 2,
+            "first attempt must have been refused (attempts={})",
+            probe.attempts
+        );
+        assert_eq!(probe.result_label(), "ok");
+
+        // The contract downstream: a started proxy claims the candidate URL.
+        let payload = decide_ready_payload(
+            "sha256:test".into(),
+            Some("https://runner.example:8420"),
+            Some(8080),
+            Some(true),
+        );
+        assert_eq!(
+            payload.ready_url.as_deref(),
+            Some("https://runner.example:8420")
+        );
+
+        // And the proxy actually serves end-to-end after the probe.
+        let response = reqwest::Client::new()
+            .get(format!("http://{listen}/health"))
+            .send()
+            .await
+            .expect("request through proxy");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        drop(upstream);
+        handle.abort();
+    }
+
+    /// A workload that never accepts must exhaust the budget into a typed
+    /// error (the caller fails the lease) — never a silent ready_url=none.
+    #[tokio::test]
+    async fn proxy_ready_timeout_is_an_error_with_probe_counters() {
+        let dead_port = {
+            let l = TcpListener::bind("127.0.0.1:0").expect("dead");
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            p
+        };
+        let listen = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
+            let addr = l.local_addr().unwrap().to_string();
+            drop(l);
+            addr
+        };
+        let started = std::time::Instant::now();
+        // 2s (not 500ms): under a loaded/contended CI runner (observed on
+        // windows-latest) a too-tight budget can be consumed almost entirely
+        // by scheduling delay before this task's first poll, leaving room for
+        // only one attempt instead of the several this test wants to prove.
+        let budget = Duration::from_secs(2);
+        let (result, probe) =
+            start_root_proxy_ready(&listen, format!("127.0.0.1:{dead_port}"), "/health", budget)
+                .await;
+        assert!(result.is_err(), "dead upstream must be a typed error");
+        assert!(!probe.ok);
+        assert_eq!(probe.result_label(), "timeout");
+        assert!(
+            probe.attempts >= 2,
+            "the budget must buy more than one attempt (attempts={})",
+            probe.attempts
+        );
+        assert!(
+            probe.wait_ms >= budget.as_millis() as u64,
+            "budget must be spent (wait_ms={})",
+            probe.wait_ms
+        );
+        assert!(
+            started.elapsed() < budget + Duration::from_secs(3),
+            "timeout must not overshoot the budget by seconds"
+        );
+    }
+
     // ── Lease poll wire handling ──
 
     #[tokio::test]
@@ -5020,7 +6866,7 @@ mod tests {
             "{\"lease\":{\"id\":\"01LEASE\",\"run_id\":\"01RUN\",\"command\":{\"kind\":\"run_source_sandbox\",\"source_url\":\"https://github.com/x/y\"}},\"next_poll_seconds\":5}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let request = server.join().expect("server");
         assert!(request.contains("GET /v1/runners/01R/leases/next"));
         match outcome {
@@ -5035,13 +6881,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_poll_wait_ms_appended_only_when_long_poll_requested() {
+        // wait_ms=0 ⇒ the historical one-shot URL (no query).
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let client = reqwest::Client::new();
+        let _ = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
+        let request = server.join().expect("server");
+        assert!(request.contains("GET /v1/runners/01R/leases/next "));
+        assert!(!request.contains("wait_ms"));
+
+        // wait_ms>0 ⇒ the long-poll query is appended verbatim.
+        let (base2, server2) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"lease\":null,\"next_poll_seconds\":5}",
+        );
+        let _ = fetch_next_lease(&client, &base2, "01R", "ato_rnr_t", 20_000).await;
+        let request2 = server2.join().expect("server");
+        assert!(request2.contains("GET /v1/runners/01R/leases/next?wait_ms=20000"));
+    }
+
+    #[tokio::test]
     async fn lease_poll_revoked_is_terminal() {
         let (base, server) = one_shot_http(
             "HTTP/1.1 401 Unauthorized",
             "{\"error\":\"runner_revoked\",\"message\":\"revoked\"}",
         );
         let client = reqwest::Client::new();
-        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t").await;
+        let outcome = fetch_next_lease(&client, &base, "01R", "ato_rnr_t", 0).await;
         let _ = server.join();
         assert!(matches!(outcome, LeasePoll::Revoked));
     }
@@ -5438,6 +7307,36 @@ mod tests {
             probe_workload_evidence(&dir.path().join("01LEASE.pid")),
             WorkloadEvidence::ConfirmedGone
         );
+    }
+
+    #[test]
+    fn reap_orphan_restore_overlays_removes_a_stale_overlay_with_a_dead_pid() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let overlay = root.path().join("01LEASEORPHAN");
+        std::fs::create_dir_all(&overlay).expect("mkdir overlay");
+        // A dead pid ⇒ the backend's kill is a no-op; the stale overlay must still
+        // be reaped (dir removed) — that leaked overlay + VM is the bug being fixed.
+        std::fs::write(overlay.join(".fc-session.json"), r#"{"pid": 2147483646}"#)
+            .expect("write session record");
+        assert!(overlay.exists());
+        reap_orphan_restore_overlays(root.path(), &snapshot::FirecrackerBackend::new());
+        assert!(
+            !overlay.exists(),
+            "a stale orphan overlay should be removed"
+        );
+    }
+
+    #[test]
+    fn reap_orphan_restore_overlays_is_a_no_op_on_a_missing_or_empty_root() {
+        // Missing root ⇒ nothing to do, no panic.
+        reap_orphan_restore_overlays(
+            std::path::Path::new("/nonexistent/ato-restore-overlays-xyzzy"),
+            &snapshot::FirecrackerBackend::new(),
+        );
+        // Empty root ⇒ preserved, no panic.
+        let root = tempfile::tempdir().expect("tempdir");
+        reap_orphan_restore_overlays(root.path(), &snapshot::FirecrackerBackend::new());
+        assert!(root.path().exists());
     }
 
     #[test]

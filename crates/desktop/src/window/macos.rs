@@ -15,10 +15,69 @@
 use gpui::{AnyWindowHandle, App, Window};
 use objc2::rc::Retained;
 use objc2::runtime::AnyClass;
-use objc2_app_kit::{NSColor, NSFloatingWindowLevel, NSView, NSWindow, NSWindowOrderingMode};
+use objc2_app_kit::{NSColor, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tracing::warn;
+
+/// NSWindow backing `window`, extracted WITHOUT going through
+/// `handle.update` — usable inside that window's own event handlers,
+/// where a same-window `update` would fail.
+pub fn ns_window_of(window: &Window) -> Option<Retained<NSWindow>> {
+    let rwh = match HasWindowHandle::window_handle(window) {
+        Ok(h) => h,
+        Err(e) => {
+            warn!(error = %e, "ns_window_of: window_handle failed");
+            return None;
+        }
+    };
+    match rwh.as_raw() {
+        RawWindowHandle::AppKit(h) => {
+            let view: &NSView = unsafe { &*(h.ns_view.as_ptr() as *const NSView) };
+            view.window()
+        }
+        other => {
+            warn!(handle = ?other, "ns_window_of: not AppKit");
+            None
+        }
+    }
+}
+
+/// Resize `nswindow` keeping its top edge and horizontal centre — but
+/// OUTSIDE any GPUI update. `setFrame` synchronously re-enters GPUI's
+/// window delegates (windowDidResize); doing that while an `App` borrow
+/// is held logs "RefCell already borrowed", the resize event is dropped,
+/// and GPUI's internal size goes stale — which breaks hit-testing (a
+/// click on one icon lands on another). Scheduling the frame change on
+/// the foreground executor lets AppKit deliver the resize while GPUI is
+/// idle, so its layout and hit-test geometry stay correct.
+pub fn resize_window_outside_update(
+    nswindow: Retained<NSWindow>,
+    executor: gpui::ForegroundExecutor,
+    new_w: f32,
+    new_h: f32,
+) {
+    executor
+        .spawn(async move {
+            let current = nswindow.frame();
+            let top_y = current.origin.y + current.size.height;
+            let center_x = current.origin.x + current.size.width / 2.0;
+            let new_frame = NSRect::new(
+                NSPoint::new(center_x - new_w as f64 / 2.0, top_y - new_h as f64),
+                NSSize::new(new_w as f64, new_h as f64),
+            );
+            nswindow.setFrame_display_animate(new_frame, true, false);
+            if let Some(content_view) = nswindow.contentView() {
+                content_view.setWantsLayer(true);
+                if let Some(layer) = content_view.layer() {
+                    layer.setCornerRadius(new_h as f64 / 2.0);
+                    layer.setMasksToBounds(true);
+                }
+            }
+            nswindow.invalidateShadow();
+        })
+        .detach();
+}
 
 /// Walk from a `gpui::WindowHandle` to its underlying `NSWindow`.
 /// Returns `None` if the handle is unknown, the platform window
@@ -224,36 +283,6 @@ pub fn hide_window_in_handler(window: &mut Window) {
             warn!(handle = ?other, "hide_window_in_handler: not AppKit");
         }
     }
-}
-
-/// Make `child` a real AppKit child of `parent` via
-/// `[parent addChildWindow:child ordered:NSWindowAbove]`. Also bumps
-/// the child window's level to `NSFloatingWindowLevel` so it paints
-/// above all normal-level windows — including the parent's title bar
-/// — without leaving the parent's space group.
-///
-/// Returns `Ok(())` on success. Errors are logged at warn-level and
-/// returned as `Err(String)` so the caller can decide whether to
-/// surface the failure or treat it as best-effort.
-pub fn attach_as_child(
-    cx: &mut App,
-    parent: AnyWindowHandle,
-    child: AnyWindowHandle,
-) -> Result<(), String> {
-    let parent_win = ns_window_for(cx, parent)
-        .ok_or_else(|| "parent NSWindow unavailable (window not realised yet?)".to_string())?;
-    let child_win = ns_window_for(cx, child)
-        .ok_or_else(|| "child NSWindow unavailable (window not realised yet?)".to_string())?;
-    // SAFETY: both windows are retained for the duration of this call.
-    // `addChildWindow:ordered:` is the documented AppKit API for
-    // parent-child window relationships; objc2-app-kit marks it
-    // unsafe because misuse (e.g. cyclic parenting) can crash AppKit.
-    unsafe {
-        child_win.setLevel(NSFloatingWindowLevel);
-        parent_win.addChildWindow_ordered(&child_win, NSWindowOrderingMode::Above);
-    }
-    tracing::info!("addChildWindow attached Control Bar to AppWindow");
-    Ok(())
 }
 
 // ── WKWebView screenshot helpers ──────────────────────────────────
