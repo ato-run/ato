@@ -635,9 +635,12 @@ fn seal_ready_state_if_enabled(
     }
     let manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(raw_manifest)?)?;
     if !manifest.is_ready_state_eligible() {
-        futures::executor::block_on(reporter.notify(
-            "READY-STATE: skipped — capsule is not Ready-State-eligible (no warm [snapshot])".to_string(),
-        ))?;
+        futures::executor::block_on(
+            reporter.notify(
+                "READY-STATE: skipped — capsule is not Ready-State-eligible (no warm [snapshot])"
+                    .to_string(),
+            ),
+        )?;
         return Ok(());
     }
     // Sealing a binding-required capsule is allowed (the artifact is pre-bind &
@@ -651,7 +654,13 @@ fn seal_ready_state_if_enabled(
     let hash = ready_state::capsule_manifest_hash(raw_manifest)?;
     let state_root = ready_state::state_root();
     let layers = ready_state::assemble_build_layers(backend.id(), artifact)?;
-    let receipt = ready_state::build::seal(&state_root, hash.clone(), &manifest, layers, backend.as_ref())?;
+    let receipt = ready_state::build::seal(
+        &state_root,
+        hash.clone(),
+        &manifest,
+        layers,
+        backend.as_ref(),
+    )?;
     futures::executor::block_on(reporter.notify(format!(
         "READY-STATE: sealed {hash} backend={} no_secret_clean={} sealed_bytes={} -> {}",
         backend.id(),

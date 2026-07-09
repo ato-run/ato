@@ -18,9 +18,7 @@ use crate::backend::{
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
 };
-use crate::manifest::{
-    NoSecretProof, ReadyStateManifest, SnapshotBackendInfo, READY_STATE_SCHEMA,
-};
+use crate::manifest::{NoSecretProof, READY_STATE_SCHEMA, ReadyStateManifest, SnapshotBackendInfo};
 use crate::scanner;
 
 /// Backend id reported by [`FakeSnapshotBackend`].
@@ -148,15 +146,17 @@ impl SnapshotBackend for FakeSnapshotBackend {
             // v1.2 PR 3d: the Fake backend boots nothing, so it models the
             // supervisor input as pure plumbing — names recorded, no hygiene
             // cmdline, placeholder scan not evaluated (`None`, honestly).
-            supervisor_build: input.supervisor.as_ref().map(|s| crate::manifest::SupervisorBuildReceipt {
-                binding_names: s.binding_names.clone(),
-                page_hygiene_boot_args: false,
-                placeholder_absent_from_seal: None,
-                // v1.6 (ato#983) Slice 2: recorded honestly (round-trip fidelity for
-                // tests asserting receipt content) — the Fake backend attaches no
-                // real device, same as it boots no real kernel.
-                state_volumes: s.state_volumes.clone(),
-                state_owner_scope: s.state_owner_scope.clone(),
+            supervisor_build: input.supervisor.as_ref().map(|s| {
+                crate::manifest::SupervisorBuildReceipt {
+                    binding_names: s.binding_names.clone(),
+                    page_hygiene_boot_args: false,
+                    placeholder_absent_from_seal: None,
+                    // v1.6 (ato#983) Slice 2: recorded honestly (round-trip fidelity for
+                    // tests asserting receipt content) — the Fake backend attaches no
+                    // real device, same as it boots no real kernel.
+                    state_volumes: s.state_volumes.clone(),
+                    state_owner_scope: s.state_owner_scope.clone(),
+                }
             }),
         };
 
@@ -189,10 +189,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
         })
     }
 
-    fn restore(
-        &self,
-        input: RestoreReadyStateInput<'_>,
-    ) -> Result<RestoreReceipt, SnapshotError> {
+    fn restore(&self, input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError> {
         // ── runner-class gate (fail-closed) ─────────────────────────────────
         // A snapshot pinned to a runner class is only restorable on a host
         // *proven* to match it. Unknown host class is NOT compatible — it is
@@ -238,7 +235,9 @@ impl SnapshotBackend for FakeSnapshotBackend {
             .unwrap_or("overlay");
         let session_id = format!(
             "fake-{}-{}",
-            manifest_id.strip_prefix("blake3:").unwrap_or(&manifest_id)
+            manifest_id
+                .strip_prefix("blake3:")
+                .unwrap_or(&manifest_id)
                 .get(..12)
                 .unwrap_or("000000000000"),
             overlay_name
@@ -253,7 +252,6 @@ impl SnapshotBackend for FakeSnapshotBackend {
             vmm_pid: None, // Fake has no serving process.
             vsock_uds: None,
             workload_addr: None, // Fake has no live listener — nothing to honestly expose.
-
         };
 
         Ok(RestoreReceipt {
@@ -262,7 +260,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
         })
     }
 
-    fn stop(&self, session: RestoredSession) -> Result<crate::backend::TeardownReceipt, SnapshotError> {
+    fn stop(
+        &self,
+        session: RestoredSession,
+    ) -> Result<crate::backend::TeardownReceipt, SnapshotError> {
         let overlay_removed = if session.overlay_root.exists() {
             std::fs::remove_dir_all(&session.overlay_root)?;
             true
@@ -282,7 +283,10 @@ mod tests {
     use crate::backend::BuildLayers;
     use crate::manifest::{RestoreContract, SanitizerContract};
 
-    fn build_input<'a>(store: &'a CasStore, secret_markers: Vec<String>) -> BuildReadyStateInput<'a> {
+    fn build_input<'a>(
+        store: &'a CasStore,
+        secret_markers: Vec<String>,
+    ) -> BuildReadyStateInput<'a> {
         BuildReadyStateInput {
             store,
             capsule_manifest_hash: "blake3:capsule".to_string(),
@@ -324,12 +328,16 @@ mod tests {
         let mut input = build_input(&store, vec![]);
         let id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         input.execution_id = Some(id.to_string());
-        let receipt = FakeSnapshotBackend::new().build_ready_state(input).expect("build");
+        let receipt = FakeSnapshotBackend::new()
+            .build_ready_state(input)
+            .expect("build");
         assert_eq!(receipt.manifest.execution_id.as_deref(), Some(id));
 
         // None ⇒ the sealed manifest carries no execution id (nothing is invented).
         let store2 = CasStore::open(dir.path().join("cas2")).unwrap();
-        let receipt2 = FakeSnapshotBackend::new().build_ready_state(build_input(&store2, vec![])).expect("build");
+        let receipt2 = FakeSnapshotBackend::new()
+            .build_ready_state(build_input(&store2, vec![]))
+            .expect("build");
         assert_eq!(receipt2.manifest.execution_id, None);
     }
 
@@ -418,7 +426,9 @@ mod tests {
         for hash in store.list_chunks().unwrap() {
             let bytes = store.get_chunk(&hash).unwrap();
             assert!(
-                !bytes.windows(runtime_secret.len()).any(|w| w == runtime_secret),
+                !bytes
+                    .windows(runtime_secret.len())
+                    .any(|w| w == runtime_secret),
                 "a post-restore secret must never appear in a sealed chunk"
             );
         }
@@ -440,7 +450,11 @@ mod tests {
             state_owner_scope: None,
         });
         let receipt = FakeSnapshotBackend::new().build_ready_state(input).unwrap();
-        let sup = receipt.manifest.supervisor_build.as_ref().expect("supervisor receipt");
+        let sup = receipt
+            .manifest
+            .supervisor_build
+            .as_ref()
+            .expect("supervisor receipt");
         assert_eq!(sup.binding_names, vec!["openai_api_key"]);
         assert!(!sup.page_hygiene_boot_args);
         assert_eq!(sup.placeholder_absent_from_seal, None);
@@ -453,7 +467,11 @@ mod tests {
             .build_ready_state(build_input(&store, vec![]))
             .unwrap();
         assert!(plain.manifest.supervisor_build.is_none());
-        assert!(!serde_json::to_string(&plain.manifest).unwrap().contains("supervisor_build"));
+        assert!(
+            !serde_json::to_string(&plain.manifest)
+                .unwrap()
+                .contains("supervisor_build")
+        );
         // ato#1002 D4: an EMPTY binding set is an accepted supervisor build (a
         // zero-binding dockerfile import still runs guest-agent + supervisor) —
         // the manifest records supervisor_build honestly with the empty name set,
@@ -464,8 +482,14 @@ mod tests {
             state_volumes: vec![],
             state_owner_scope: None,
         });
-        let empty = FakeSnapshotBackend::new().build_ready_state(empty_input).unwrap();
-        let sup = empty.manifest.supervisor_build.as_ref().expect("empty supervisor receipt recorded");
+        let empty = FakeSnapshotBackend::new()
+            .build_ready_state(empty_input)
+            .unwrap();
+        let sup = empty
+            .manifest
+            .supervisor_build
+            .as_ref()
+            .expect("empty supervisor receipt recorded");
         assert!(sup.binding_names.is_empty());
         let json = serde_json::to_string(&empty.manifest).unwrap();
         assert!(json.contains(r#""supervisor_build""#), "{json}");
@@ -541,7 +565,7 @@ mod tests {
             manifest,
             overlay_root: dir.path().join("ov"),
             host_runner_class: Some(class),
-                uffd_preview: false,
+            uffd_preview: false,
         });
         assert!(ok.is_ok());
     }
@@ -590,10 +614,16 @@ mod tests {
         mem.extend_from_slice(b"sk-proj-ABCDEFGHIJ1234567890abcdef");
         mem.extend_from_slice(&[b' '; 64]);
         input.layers.memory = mem;
-        let receipt = backend.build_ready_state(input).expect("memory heuristic must not block");
+        let receipt = backend
+            .build_ready_state(input)
+            .expect("memory heuristic must not block");
         assert!(receipt.no_secret_proof.is_clean());
         assert!(
-            receipt.no_secret_proof.advisories.iter().any(|a| a.contains("memory") && a.contains("provider-key")),
+            receipt
+                .no_secret_proof
+                .advisories
+                .iter()
+                .any(|a| a.contains("memory") && a.contains("provider-key")),
             "advisories: {:?}",
             receipt.no_secret_proof.advisories
         );
@@ -608,7 +638,10 @@ mod tests {
         let mut input = build_input(&store, vec![]);
         input.layers.app = Some(b"token sk-proj-ABCDEFGHIJ1234567890abcdef end".to_vec());
         let err = backend.build_ready_state(input).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+        assert!(
+            matches!(err, SnapshotError::SecretScanFindings(_)),
+            "{err:?}"
+        );
         assert!(store.list_chunks().unwrap().is_empty(), "nothing sealed");
     }
 
@@ -620,7 +653,10 @@ mod tests {
         let mut input = build_input(&store, vec![]);
         input.layers.app = Some(b"API_KEY=sk-live-deadbeefcafef00d12345".to_vec());
         let err = backend.build_ready_state(input).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+        assert!(
+            matches!(err, SnapshotError::SecretScanFindings(_)),
+            "{err:?}"
+        );
         assert!(store.list_chunks().unwrap().is_empty());
     }
 
@@ -629,14 +665,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path()).unwrap();
         let backend = FakeSnapshotBackend::new();
-        let receipt = backend.build_ready_state(build_input(&store, vec![])).unwrap();
+        let receipt = backend
+            .build_ready_state(build_input(&store, vec![]))
+            .unwrap();
         assert!(receipt.no_secret_proof.is_clean());
-        assert_eq!(receipt.no_secret_proof.scanner_version, scanner::SCANNER_VERSION);
+        assert_eq!(
+            receipt.no_secret_proof.scanner_version,
+            scanner::SCANNER_VERSION
+        );
         assert!(receipt.no_secret_proof.findings.is_empty());
-        assert!(receipt
-            .no_secret_proof
-            .scanned_layers
-            .contains(&"memory".to_string()));
+        assert!(
+            receipt
+                .no_secret_proof
+                .scanned_layers
+                .contains(&"memory".to_string())
+        );
     }
 
     #[test]
@@ -686,33 +729,64 @@ mod tests {
         let store = CasStore::open(dir.path().join("cas")).unwrap();
         let backend = FakeSnapshotBackend::new();
         // Build #1 (cold cache) scans + caches the base layers.
-        let r1 = backend.build_ready_state(build_input(&store, vec![])).unwrap();
-        let rootfs1 = r1.no_secret_proof.coverage.iter().find(|c| c.layer == "rootfs").unwrap();
+        let r1 = backend
+            .build_ready_state(build_input(&store, vec![]))
+            .unwrap();
+        let rootfs1 = r1
+            .no_secret_proof
+            .coverage
+            .iter()
+            .find(|c| c.layer == "rootfs")
+            .unwrap();
         assert_eq!(rootfs1.source, "scanned");
         // Build #2 (same store, identical layers) reuses the cache — no rescan.
-        let r2 = backend.build_ready_state(build_input(&store, vec![])).unwrap();
-        let rootfs2 = r2.no_secret_proof.coverage.iter().find(|c| c.layer == "rootfs").unwrap();
-        assert_eq!(rootfs2.source, "cache_hit", "identical rootfs must hit the scan cache");
+        let r2 = backend
+            .build_ready_state(build_input(&store, vec![]))
+            .unwrap();
+        let rootfs2 = r2
+            .no_secret_proof
+            .coverage
+            .iter()
+            .find(|c| c.layer == "rootfs")
+            .unwrap();
+        assert_eq!(
+            rootfs2.source, "cache_hit",
+            "identical rootfs must hit the scan cache"
+        );
         // app stays "scanned" — build-authored layers are never cache-consulted.
-        let app2 = r2.no_secret_proof.coverage.iter().find(|c| c.layer == "app").unwrap();
+        let app2 = r2
+            .no_secret_proof
+            .coverage
+            .iter()
+            .find(|c| c.layer == "app")
+            .unwrap();
         assert_eq!(app2.source, "scanned");
     }
 
     #[test]
     fn poisoned_cache_cannot_suppress_app_blocking() {
-        use capsulefs::{store_blob, ChunkingKind, LayerKind};
+        use capsulefs::{ChunkingKind, LayerKind, store_blob};
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("cas")).unwrap();
         let backend = FakeSnapshotBackend::new();
         let app_bytes = b"token sk-proj-ABCDEFGHIJ1234567890abcdef end".to_vec();
         // Pre-write a "clean" cache entry at the app blob's id. app is NEVER
         // cache-consulted, so this poison must not suppress the fail-closed gate.
-        let app_blob = store_blob(&store, LayerKind::App, &app_bytes, ChunkingKind::ContentDefined).unwrap();
+        let app_blob = store_blob(
+            &store,
+            LayerKind::App,
+            &app_bytes,
+            ChunkingKind::ContentDefined,
+        )
+        .unwrap();
         crate::scan_cache::ScanCache::open(store.root()).put(app_blob.id().hex(), false, &[]);
         let mut input = build_input(&store, vec![]);
         input.layers.app = Some(app_bytes);
         let err = backend.build_ready_state(input).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "app must fail closed despite poisoned cache: {err:?}");
+        assert!(
+            matches!(err, SnapshotError::SecretScanFindings(_)),
+            "app must fail closed despite poisoned cache: {err:?}"
+        );
     }
 
     #[test]
@@ -724,10 +798,20 @@ mod tests {
         let store = CasStore::open(dir.path().join("cas")).unwrap();
         let backend = FakeSnapshotBackend::new();
         // build_input's memory layer is 300_000 bytes > 1024 budget → capped.
-        let r = backend.build_ready_state(build_input(&store, vec![])).unwrap();
-        let mem = r.no_secret_proof.coverage.iter().find(|c| c.layer == "memory").unwrap();
+        let r = backend
+            .build_ready_state(build_input(&store, vec![]))
+            .unwrap();
+        let mem = r
+            .no_secret_proof
+            .coverage
+            .iter()
+            .find(|c| c.layer == "memory")
+            .unwrap();
         assert_eq!(mem.coverage, "budget_capped");
-        assert!(r.no_secret_proof.is_clean(), "budget cap is advisory — build stays clean");
+        assert!(
+            r.no_secret_proof.is_clean(),
+            "budget cap is advisory — build stays clean"
+        );
         unsafe {
             match prev {
                 Some(v) => std::env::set_var("ATO_SCAN_ADVISORY_BUDGET_BYTES", v),

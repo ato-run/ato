@@ -53,7 +53,10 @@ fn identity_key(owner_scope: &str, state_name: &str) -> String {
 /// The stable backing-file path for a durable state volume.
 pub fn volume_path(work_root: &Path, owner_scope: &str, state_name: &str) -> PathBuf {
     let owner_hash = blake3::hash(owner_scope.as_bytes()).to_hex();
-    work_root.join("state").join(&owner_hash.to_string()[..16]).join(format!("{state_name}.img"))
+    work_root
+        .join("state")
+        .join(&owner_hash.to_string()[..16])
+        .join(format!("{state_name}.img"))
 }
 
 /// The lock-file path guarding concurrent writable attach of the same volume
@@ -62,7 +65,9 @@ pub fn volume_path(work_root: &Path, owner_scope: &str, state_name: &str) -> Pat
 /// corruption, not a race to tolerate).
 pub fn lock_path(work_root: &Path, owner_scope: &str, state_name: &str) -> PathBuf {
     let key = blake3::hash(identity_key(owner_scope, state_name).as_bytes()).to_hex();
-    work_root.join("state").join(format!("{}.lock", &key.to_string()[..16]))
+    work_root
+        .join("state")
+        .join(format!("{}.lock", &key.to_string()[..16]))
 }
 
 /// Formats a freshly `set_len`'d file as ext4 with the given label. Real
@@ -130,8 +135,10 @@ pub fn ensure_state_volume(
     }
     let tmp = tmp_path(path);
     let result = (|| -> Result<(), String> {
-        let f = std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
-        f.set_len(size_bytes).map_err(|e| format!("set_len {}: {e}", tmp.display()))?;
+        let f =
+            std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
+        f.set_len(size_bytes)
+            .map_err(|e| format!("set_len {}: {e}", tmp.display()))?;
         drop(f);
         formatter.format_ext4(&tmp, label)
     })();
@@ -154,7 +161,11 @@ pub fn ensure_state_volume(
 fn commit_or_cleanup(tmp: &Path, path: &Path) -> Result<(), String> {
     if let Err(e) = std::fs::rename(tmp, path) {
         let _ = std::fs::remove_file(tmp);
-        return Err(format!("rename {} -> {}: {e}", tmp.display(), path.display()));
+        return Err(format!(
+            "rename {} -> {}: {e}",
+            tmp.display(),
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -172,7 +183,11 @@ pub fn acquire_volume_lock(lock_path: &Path) -> Result<(), String> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(lock_path) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(lock_path)
+    {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(format!(
             "state volume busy: another session already holds the lock at {} — a durable volume \
@@ -293,7 +308,10 @@ mod tests {
             if self.fail {
                 return Err("fake formatter: injected failure".to_string());
             }
-            self.calls.lock().unwrap().push((path.to_path_buf(), label.to_string()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), label.to_string()));
             Ok(())
         }
     }
@@ -307,13 +325,19 @@ mod tests {
         let root = Path::new("/work");
         let a1 = volume_path(root, "owner-a", "dbdata");
         let a2 = volume_path(root, "owner-a", "dbdata");
-        assert_eq!(a1, a2, "same owner+state must resolve to the same path every time");
+        assert_eq!(
+            a1, a2,
+            "same owner+state must resolve to the same path every time"
+        );
 
         let b = volume_path(root, "owner-b", "dbdata");
         assert_ne!(a1, b, "different owner must resolve to a different path");
 
         let other_state = volume_path(root, "owner-a", "cache");
-        assert_ne!(a1, other_state, "different state_name must resolve to a different path");
+        assert_ne!(
+            a1, other_state,
+            "different state_name must resolve to a different path"
+        );
     }
 
     #[test]
@@ -332,7 +356,11 @@ mod tests {
         let l1 = volume_label("owner-a", "dbdata");
         let l2 = volume_label("owner-a", "dbdata");
         assert_eq!(l1, l2);
-        assert_eq!(l1.len(), 16, "ext4 label must fit the 16-byte on-disk limit");
+        assert_eq!(
+            l1.len(),
+            16,
+            "ext4 label must fit the 16-byte on-disk limit"
+        );
         assert!(l1.starts_with("AS"));
         assert_ne!(l1, volume_label("owner-b", "dbdata"));
     }
@@ -353,7 +381,10 @@ mod tests {
         assert!(path.exists());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 64 * 1024 * 1024);
         assert_eq!(fmt.calls.lock().unwrap().len(), 1);
-        assert!(!path.with_file_name("dbdata.img.tmp").exists(), "tmp file must not remain");
+        assert!(
+            !path.with_file_name("dbdata.img.tmp").exists(),
+            "tmp file must not remain"
+        );
     }
 
     #[test]
@@ -373,10 +404,22 @@ mod tests {
         }
         // Second ensure with the SAME size must not reformat (data survives).
         ensure_state_volume(&fmt, &path, 64, "ASlabel").unwrap();
-        assert_eq!(fmt.calls.lock().unwrap().len(), 1, "reuse must not call format again");
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 64 * 1024 * 1024, "size preserved");
+        assert_eq!(
+            fmt.calls.lock().unwrap().len(),
+            1,
+            "reuse must not call format again"
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            64 * 1024 * 1024,
+            "size preserved"
+        );
         let bytes = std::fs::read(&path).unwrap();
-        assert_eq!(&bytes[..14], b"durable-marker", "reuse must not truncate/reformat existing data");
+        assert_eq!(
+            &bytes[..14],
+            b"durable-marker",
+            "reuse must not truncate/reformat existing data"
+        );
     }
 
     #[test]
@@ -396,11 +439,20 @@ mod tests {
     fn create_failure_cleans_the_tmp_file_and_leaves_no_partial_artifact() {
         let dir = tmpdir();
         let path = dir.path().join("dbdata.img");
-        let fmt = FakeFormatter { fail: true, ..Default::default() };
+        let fmt = FakeFormatter {
+            fail: true,
+            ..Default::default()
+        };
         let err = ensure_state_volume(&fmt, &path, 64, "ASlabel").unwrap_err();
         assert!(err.contains("injected failure"));
-        assert!(!path.exists(), "no partial .img must be promoted on format failure");
-        assert!(!path.with_file_name("dbdata.img.tmp").exists(), "tmp must be cleaned up");
+        assert!(
+            !path.exists(),
+            "no partial .img must be promoted on format failure"
+        );
+        assert!(
+            !path.with_file_name("dbdata.img.tmp").exists(),
+            "tmp must be cleaned up"
+        );
     }
 
     #[test]
@@ -419,7 +471,10 @@ mod tests {
         let err = commit_or_cleanup(&tmp, &path).unwrap_err();
         assert!(err.contains("rename"), "{err}");
         assert!(!tmp.exists(), "tmp must not remain after a rename failure");
-        assert!(path.is_dir(), "the pre-existing destination directory is untouched");
+        assert!(
+            path.is_dir(),
+            "the pre-existing destination directory is untouched"
+        );
     }
 
     #[test]
@@ -469,8 +524,14 @@ mod tests {
         let work_root = dir.path().to_path_buf();
         let fmt = FakeFormatter::default();
         let volumes = vec![
-            DurableVolumeSpec { state_name: "aaa".to_string(), size_mb: 64 },
-            DurableVolumeSpec { state_name: "bbb".to_string(), size_mb: 64 },
+            DurableVolumeSpec {
+                state_name: "aaa".to_string(),
+                size_mb: 64,
+            },
+            DurableVolumeSpec {
+                state_name: "bbb".to_string(),
+                size_mb: 64,
+            },
         ];
         // Pre-acquire "bbb"'s lock (sorted after "aaa") so its acquire fails.
         let bbb_lock = lock_path(&work_root, "owner-x", "bbb");
@@ -481,7 +542,10 @@ mod tests {
 
         let err = prepare_volumes(&fmt, &work_root, "owner-x", &volumes).unwrap_err();
         assert!(err.contains("busy"), "{err}");
-        assert!(!aaa_lock.exists(), "aaa's lock (acquired before bbb failed) must be released, not leaked");
+        assert!(
+            !aaa_lock.exists(),
+            "aaa's lock (acquired before bbb failed) must be released, not leaked"
+        );
 
         release_volume_lock(&bbb_lock);
     }
@@ -492,17 +556,29 @@ mod tests {
         let work_root = dir.path().to_path_buf();
         let fmt = FakeFormatter::default();
         let volumes = vec![
-            DurableVolumeSpec { state_name: "aaa".to_string(), size_mb: 64 },
-            DurableVolumeSpec { state_name: "bbb".to_string(), size_mb: 64 },
+            DurableVolumeSpec {
+                state_name: "aaa".to_string(),
+                size_mb: 64,
+            },
+            DurableVolumeSpec {
+                state_name: "bbb".to_string(),
+                size_mb: 64,
+            },
         ];
         let aaa_lock = lock_path(&work_root, "owner-x", "aaa");
         let bbb_lock = lock_path(&work_root, "owner-x", "bbb");
 
         let (paths, guard) = prepare_volumes(&fmt, &work_root, "owner-x", &volumes).unwrap();
         assert_eq!(paths.len(), 2);
-        assert!(aaa_lock.exists() && bbb_lock.exists(), "both locks held while the guard is alive");
+        assert!(
+            aaa_lock.exists() && bbb_lock.exists(),
+            "both locks held while the guard is alive"
+        );
         drop(guard);
-        assert!(!aaa_lock.exists() && !bbb_lock.exists(), "both locks released once the guard drops");
+        assert!(
+            !aaa_lock.exists() && !bbb_lock.exists(),
+            "both locks released once the guard drops"
+        );
     }
 
     #[test]
@@ -512,7 +588,10 @@ mod tests {
 
     #[test]
     fn state_drive_configs_are_never_root_and_never_read_only() {
-        let paths = vec![PathBuf::from("/work/state/a/dbdata.img"), PathBuf::from("/work/state/a/cache.img")];
+        let paths = vec![
+            PathBuf::from("/work/state/a/dbdata.img"),
+            PathBuf::from("/work/state/a/cache.img"),
+        ];
         let cfgs = state_drive_configs(&paths);
         assert_eq!(cfgs.len(), 2);
         assert_eq!(cfgs[0]["drive_id"], "state0");

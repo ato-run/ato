@@ -12,10 +12,10 @@
 
 use std::collections::HashSet;
 
+use crate::Result;
 use crate::cas::CasStore;
 use crate::hash::ContentHash;
 use crate::manifest::BlobManifest;
-use crate::Result;
 
 /// One evicted chunk: its content address and the bytes reclaimed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +139,10 @@ mod tests {
         let before = store.list_chunks().unwrap().len();
         let report = collect_garbage(&store, std::slice::from_ref(&live), &HashSet::new()).unwrap();
 
-        assert!(report.deleted_count() > 0, "dead blob's chunks should be reclaimed");
+        assert!(
+            report.deleted_count() > 0,
+            "dead blob's chunks should be reclaimed"
+        );
         assert_eq!(report.kept, live.chunks.len());
         assert_eq!(
             store.list_chunks().unwrap().len(),
@@ -161,16 +164,21 @@ mod tests {
             &store,
             LayerKind::Memory,
             &vec![7u8; 200_000],
-            ChunkingKind::PageAligned { page_size: 64 * 1024 },
+            ChunkingKind::PageAligned {
+                page_size: 64 * 1024,
+            },
         )
         .unwrap();
 
         // Pin every chunk; pass no live manifests.
-        let pinned: HashSet<ContentHash> =
-            blob.referenced_chunks().cloned().collect();
+        let pinned: HashSet<ContentHash> = blob.referenced_chunks().cloned().collect();
         let report = collect_garbage(&store, &[], &pinned).unwrap();
 
-        assert_eq!(report.deleted_count(), 0, "pinned chunks must not be deleted");
+        assert_eq!(
+            report.deleted_count(),
+            0,
+            "pinned chunks must not be deleted"
+        );
         assert_eq!(report.kept, pinned.len());
     }
 
@@ -278,7 +286,10 @@ mod tests {
 
         let report = collect_garbage(&store, std::slice::from_ref(&live), &HashSet::new()).unwrap();
         assert!(store.has_chunk(&shared), "shared chunk must survive");
-        assert!(!store.has_chunk(&dead_only), "dead-only chunk must be reclaimed");
+        assert!(
+            !store.has_chunk(&dead_only),
+            "dead-only chunk must be reclaimed"
+        );
         assert!(report.deleted.contains(&dead_only));
         assert!(!report.deleted.contains(&shared));
         assert_eq!(report.kept, 1);

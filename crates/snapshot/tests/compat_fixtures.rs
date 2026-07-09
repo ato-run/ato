@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use capsule::foundation::types::manifest::CapsuleManifest;
 use serde::Deserialize;
-use snapshot::rootfs_builder::{derive_build_spec, SourceProbe};
+use snapshot::rootfs_builder::{SourceProbe, derive_build_spec};
 
 /// The contract's fixture matrix (docs/snapshot-v1-compatibility.md §4),
 /// verbatim. Completeness is asserted both ways: a fixture dir without a
@@ -130,7 +130,10 @@ fn every_fixture_matches_its_eligibility_expectation() {
             .unwrap_or_else(|e| panic!("{name}: manifest parse failed: {e}"));
         let probe = SourceProbe::scan(&dir);
 
-        match (expected.eligibility.as_str(), derive_build_spec(&manifest, &probe)) {
+        match (
+            expected.eligibility.as_str(),
+            derive_build_spec(&manifest, &probe),
+        ) {
             ("pass", Ok(spec)) => {
                 if let Some(runtime) = &expected.runtime {
                     let got = serde_json::to_value(spec.runtime).unwrap();
@@ -150,7 +153,10 @@ fn every_fixture_matches_its_eligibility_expectation() {
                 // must name the later stage the API E2E asserts on.
                 if expected.seal == "failed" {
                     assert!(
-                        expected.seal_failure_stage.as_deref().is_some_and(|s| s != "eligibility"),
+                        expected
+                            .seal_failure_stage
+                            .as_deref()
+                            .is_some_and(|s| s != "eligibility"),
                         "{name}: eligible fixture with seal=failed must pin a post-eligibility stage"
                     );
                 }
@@ -159,7 +165,9 @@ fn every_fixture_matches_its_eligibility_expectation() {
                 let needle = expected
                     .eligibility_reason_contains
                     .as_deref()
-                    .unwrap_or_else(|| panic!("{name}: eligibility=fail needs eligibility_reason_contains"));
+                    .unwrap_or_else(|| {
+                        panic!("{name}: eligibility=fail needs eligibility_reason_contains")
+                    });
                 assert!(
                     reason.contains(needle),
                     "{name}: rejection {reason:?} does not contain {needle:?} — \

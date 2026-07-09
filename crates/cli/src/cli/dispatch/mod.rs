@@ -821,15 +821,17 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                         },
                     )
                 }
-                crate::cli::RunnerCommands::Smoke { proxy_listen, keep, json } => {
-                    rt.block_on(crate::application::runner_bootstrap::smoke::run(
-                        crate::application::runner_bootstrap::smoke::SmokeOptions {
-                            proxy_listen,
-                            keep,
-                            json,
-                        },
-                    ))
-                }
+                crate::cli::RunnerCommands::Smoke {
+                    proxy_listen,
+                    keep,
+                    json,
+                } => rt.block_on(crate::application::runner_bootstrap::smoke::run(
+                    crate::application::runner_bootstrap::smoke::SmokeOptions {
+                        proxy_listen,
+                        keep,
+                        json,
+                    },
+                )),
                 crate::cli::RunnerCommands::Enroll {
                     api_url,
                     site_base,

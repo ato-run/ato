@@ -110,12 +110,21 @@ pub fn scan(targets: &ScanTargets, secrets: &[&[u8]]) -> NoSecretScanResult {
             if let Ok(bytes) = std::fs::read(&f)
                 && secrets.iter().any(|s| contains(&bytes, s))
             {
-                hits.push(SecretHit { target: label.to_string(), path: f.display().to_string() });
+                hits.push(SecretHit {
+                    target: label.to_string(),
+                    path: f.display().to_string(),
+                });
             }
         }
     }
 
-    NoSecretScanResult { clean: hits.is_empty(), scanned, skipped, files_scanned, hits }
+    NoSecretScanResult {
+        clean: hits.is_empty(),
+        scanned,
+        skipped,
+        files_scanned,
+        hits,
+    }
 }
 
 /// Convenience for a single in-memory blob (e.g. a serialized manifest JSON) — returns
@@ -136,7 +145,10 @@ mod tests {
         std::fs::write(cas.join("blob1"), b"harmless content").unwrap();
         std::fs::write(cas.join("blob2"), b"prefix SECRET-XYZ suffix").unwrap();
 
-        let targets = ScanTargets { cas: Some(cas.clone()), ..Default::default() };
+        let targets = ScanTargets {
+            cas: Some(cas.clone()),
+            ..Default::default()
+        };
         let r = scan(&targets, &[b"SECRET-XYZ"]);
         assert!(!r.clean, "a secret present ⇒ not clean");
         assert_eq!(r.hits.len(), 1);
@@ -168,7 +180,10 @@ mod tests {
     fn multiple_secrets_and_blob_helper() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("f"), b"has TOKEN-A only").unwrap();
-        let targets = ScanTargets { extra: vec![dir.path().to_path_buf()], ..Default::default() };
+        let targets = ScanTargets {
+            extra: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
         let r = scan(&targets, &[b"TOKEN-A", b"TOKEN-B"]);
         assert!(!r.clean, "any of the secrets present ⇒ not clean");
         assert!(blob_is_clean(b"clean blob", &[b"TOKEN-A", b"TOKEN-B"]));

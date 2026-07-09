@@ -55,7 +55,11 @@ fn fc_engine_smoke_build_restore_stop() {
     let rootfs_path = std::env::var("ATO_FC_ROOTFS")
         .ok()
         .filter(|p| !p.is_empty())
-        .or_else(|| std::env::var("ATO_FC_TEST_ROOTFS").ok().filter(|p| !p.is_empty()));
+        .or_else(|| {
+            std::env::var("ATO_FC_TEST_ROOTFS")
+                .ok()
+                .filter(|p| !p.is_empty())
+        });
     let rootfs = match rootfs_path {
         Some(p) => std::fs::read(&p).expect("read ATO_FC_ROOTFS / ATO_FC_TEST_ROOTFS"),
         None => {
@@ -68,7 +72,11 @@ fn fc_engine_smoke_build_restore_stop() {
     // SAFETY: single-threaded (`--test-threads=1` for the KVM suite).
     unsafe { std::env::set_var("ATO_SNAPSHOT_BACKEND", "firecracker") };
     let be = backend::select_backend().expect("firecracker must select on a KVM host");
-    assert_eq!(be.id(), "firecracker", "engine must use the real backend, not a fallback");
+    assert_eq!(
+        be.id(),
+        "firecracker",
+        "engine must use the real backend, not a fallback"
+    );
 
     let dir = tempfile::tempdir().unwrap();
     let state_root = dir.path();
@@ -86,17 +94,33 @@ fn fc_engine_smoke_build_restore_stop() {
     // BUILD (Boot/Snapshot/Seal) through the engine.
     let receipt = build::seal(state_root, hash.clone(), &manifest, layers, be.as_ref())
         .expect("engine seal failed");
-    assert!(receipt.no_secret_proof.is_clean(), "no-secret gate must pass on a clean rootfs");
-    assert!(receipt.manifest.layers.memory.is_some(), "memory layer sealed");
-    assert!(receipt.manifest.runner_class_id.is_some(), "runner class pinned");
+    assert!(
+        receipt.no_secret_proof.is_clean(),
+        "no-secret gate must pass on a clean rootfs"
+    );
+    assert!(
+        receipt.manifest.layers.memory.is_some(),
+        "memory layer sealed"
+    );
+    assert!(
+        receipt.manifest.runner_class_id.is_some(),
+        "runner class pinned"
+    );
 
     // RESTORE (Restore/Bind/Expose) through the engine, from the persisted seal.
     let cas = store::open_store(state_root, &hash).unwrap();
-    let sealed = store::load_manifest(state_root, &hash).unwrap().expect("sealed manifest present");
+    let sealed = store::load_manifest(state_root, &hash)
+        .unwrap()
+        .expect("sealed manifest present");
     let overlay = dir.path().join("ov");
-    let restored = restore::restore_and_expose(be.as_ref(), &cas, sealed, overlay.clone(), None, false)
-        .expect("engine restore failed");
-    assert_eq!(restored.session.guest_port, Some(8080), "restored session exposes the app port");
+    let restored =
+        restore::restore_and_expose(be.as_ref(), &cas, sealed, overlay.clone(), None, false)
+            .expect("engine restore failed");
+    assert_eq!(
+        restored.session.guest_port,
+        Some(8080),
+        "restored session exposes the app port"
+    );
     assert!(restored.session.restored_bytes > 0);
 
     // STOP (Teardown) through the engine: VM gone, disposable overlay destroyed.

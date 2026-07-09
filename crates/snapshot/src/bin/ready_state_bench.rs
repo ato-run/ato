@@ -19,10 +19,10 @@ use std::process::Command;
 use std::time::Instant;
 
 use capsulefs::CasStore;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use snapshot::{
-    bench, BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract,
-    RestoreReadyStateInput, SanitizerContract, SnapshotBackend,
+    BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
+    SanitizerContract, SnapshotBackend, bench,
 };
 
 struct Args {
@@ -57,7 +57,11 @@ fn parse_args() -> Args {
 }
 
 fn work_root() -> PathBuf {
-    std::env::var("ATO_FC_WORK").ok().filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp/ato-fc"))
+    std::env::var("ATO_FC_WORK")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/ato-fc"))
 }
 
 /// Clear the content-addressed layer caches so the next restore is a cold-cache run.
@@ -78,8 +82,21 @@ fn sh(cmd: &str, args: &[&str]) -> String {
 }
 
 fn host_facts() -> Value {
-    let cpu = sh("sh", &["-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"]);
-    let gcp = |k: &str| sh("sh", &["-c", &format!("curl -s -m1 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/{k} 2>/dev/null")]);
+    let cpu = sh(
+        "sh",
+        &["-c", "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2"],
+    );
+    let gcp = |k: &str| {
+        sh(
+            "sh",
+            &[
+                "-c",
+                &format!(
+                    "curl -s -m1 -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/{k} 2>/dev/null"
+                ),
+            ],
+        )
+    };
     let machine = gcp("machine-type");
     let cgroup_v2 = Path::new("/sys/fs/cgroup/cgroup.controllers").exists();
     json!({
@@ -127,7 +144,11 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
             vmstate: Vec::new(),
             memory: Vec::new(),
         },
-        restore_contract: RestoreContract { ports: vec![8080], healthcheck: Some("/health".into()), expected_ready_ms: Some(3000) },
+        restore_contract: RestoreContract {
+            ports: vec![8080],
+            healthcheck: Some("/health".into()),
+            expected_ready_ms: Some(3000),
+        },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
@@ -136,14 +157,25 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
 }
 
 /// Record one (phase, mode, run) row: total ms + per-span ms.
-fn row(phase: &str, mode: &str, idx: usize, total_ms: f64, spans: &[bench::Span], extra: Value) -> Value {
+fn row(
+    phase: &str,
+    mode: &str,
+    idx: usize,
+    total_ms: f64,
+    spans: &[bench::Span],
+    extra: Value,
+) -> Value {
     let mut span_obj = serde_json::Map::new();
     for s in spans {
-        *span_obj.entry(s.name).or_insert(json!(0.0)) = json!(span_obj.get(s.name).and_then(|v| v.as_f64()).unwrap_or(0.0) + s.micros as f64 / 1000.0);
+        *span_obj.entry(s.name).or_insert(json!(0.0)) = json!(
+            span_obj.get(s.name).and_then(|v| v.as_f64()).unwrap_or(0.0) + s.micros as f64 / 1000.0
+        );
     }
     let mut o = json!({ "phase": phase, "mode": mode, "run": idx, "total_ms": total_ms, "spans": Value::Object(span_obj) });
     if let (Value::Object(m), Value::Object(e)) = (&mut o, &extra) {
-        for (k, v) in e { m.insert(k.clone(), v.clone()); }
+        for (k, v) in e {
+            m.insert(k.clone(), v.clone());
+        }
     }
     o
 }
@@ -170,7 +202,13 @@ fn main() {
     std::fs::create_dir_all(&out_dir).expect("create out dir");
     let mut raw: Vec<Value> = Vec::new();
 
-    eprintln!("[bench] target={} rootfs={} build_runs={} restore_runs={}", args.target, rootfs.len(), args.build_runs, args.restore_runs);
+    eprintln!(
+        "[bench] target={} rootfs={} build_runs={} restore_runs={}",
+        args.target,
+        rootfs.len(),
+        args.build_runs,
+        args.restore_runs
+    );
 
     // ── BUILD phase: N seals, keep the last store+manifest for restore. ──────
     let scratch = std::env::temp_dir().join(format!("ato-rs-bench-{}", std::process::id()));
@@ -206,12 +244,20 @@ fn main() {
         };
         let spans = bench::drain();
         let m = &receipt.manifest;
-        let bytes = |b: &Option<capsulefs::BlobManifest>| b.as_ref().map(|x| x.total_len).unwrap_or(0);
+        let bytes =
+            |b: &Option<capsulefs::BlobManifest>| b.as_ref().map(|x| x.total_len).unwrap_or(0);
         sealed_bytes = json!({
             "rootfs": bytes(&m.layers.rootfs), "memory": bytes(&m.layers.memory),
             "vmstate": bytes(&m.layers.vmstate), "total": m.layers.iter().map(|(_, x)| x.total_len).sum::<u64>(),
         });
-        raw.push(row("build", "-", i, total, &spans, json!({"sealed_bytes": sealed_bytes.clone()})));
+        raw.push(row(
+            "build",
+            "-",
+            i,
+            total,
+            &spans,
+            json!({"sealed_bytes": sealed_bytes.clone()}),
+        ));
         build_totals.push(total);
         eprintln!("[build {i}] {total:.0}ms");
         last = Some((dir, store, receipt.manifest));
@@ -223,8 +269,19 @@ fn main() {
             "config": {"build_runs": args.build_runs, "restore_runs": args.restore_runs, "rootfs_input_bytes": rootfs.len()},
             "error": "all builds failed",
         });
-        std::fs::write(out_dir.join("receipt.json"), serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
-        std::fs::write(out_dir.join("raw.jsonl"), raw.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::write(
+            out_dir.join("receipt.json"),
+            serde_json::to_string_pretty(&receipt).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            out_dir.join("raw.jsonl"),
+            raw.iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
         let _ = std::fs::remove_dir_all(&scratch);
         std::process::exit(1);
     };
@@ -237,7 +294,13 @@ fn main() {
             // prime the cache once (not counted)
             clear_layer_cache();
             let ov = keep_dir.join("prime");
-            if let Ok(r) = backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
+            if let Ok(r) = backend.restore(RestoreReadyStateInput {
+                store: &store,
+                manifest: manifest.clone(),
+                overlay_root: ov,
+                host_runner_class: None,
+                uffd_preview: false,
+            }) {
                 let _ = backend.stop(r.session);
             }
             let _ = bench::drain();
@@ -249,9 +312,18 @@ fn main() {
             let ov = keep_dir.join(format!("ov-{mode}-{i}"));
             let _ = bench::drain();
             let t = Instant::now();
-            let r = match backend.restore(RestoreReadyStateInput { store: &store, manifest: manifest.clone(), overlay_root: ov, host_runner_class: None, uffd_preview: false }) {
+            let r = match backend.restore(RestoreReadyStateInput {
+                store: &store,
+                manifest: manifest.clone(),
+                overlay_root: ov,
+                host_runner_class: None,
+                uffd_preview: false,
+            }) {
                 Ok(r) => r,
-                Err(e) => { raw.push(json!({"phase":"restore","mode":mode,"run":i,"error": e.to_string()})); continue; }
+                Err(e) => {
+                    raw.push(json!({"phase":"restore","mode":mode,"run":i,"error": e.to_string()}));
+                    continue;
+                }
             };
             let total = t.elapsed().as_secs_f64() * 1000.0;
             let spans = bench::drain();
@@ -259,15 +331,28 @@ fn main() {
             let st = Instant::now();
             let _ = backend.stop(r.session);
             let stop_ms = st.elapsed().as_secs_f64() * 1000.0;
-            raw.push(row("restore", mode, i, total, &spans, json!({"restored_bytes": restored, "stop_ms": stop_ms})));
+            raw.push(row(
+                "restore",
+                mode,
+                i,
+                total,
+                &spans,
+                json!({"restored_bytes": restored, "stop_ms": stop_ms}),
+            ));
             totals.push(total);
-            if i % 5 == 0 { eprintln!("[restore {mode} {i}] {total:.0}ms"); }
+            if i % 5 == 0 {
+                eprintln!("[restore {mode} {i}] {total:.0}ms");
+            }
         }
         restore_summ.insert(mode.to_string(), stats(&totals));
     }
 
     // ── Persist raw JSONL + receipt + markdown. ──────────────────────────────
-    let jsonl: String = raw.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n");
+    let jsonl: String = raw
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
     std::fs::write(out_dir.join("raw.jsonl"), jsonl).unwrap();
 
     let receipt = json!({
@@ -278,12 +363,19 @@ fn main() {
         "build_total_ms": stats(&build_totals),
         "restore_total_ms": Value::Object(restore_summ.clone()),
     });
-    std::fs::write(out_dir.join("receipt.json"), serde_json::to_string_pretty(&receipt).unwrap()).unwrap();
+    std::fs::write(
+        out_dir.join("receipt.json"),
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
 
     let md = render_markdown(&args.target, &receipt);
     std::fs::write(out_dir.join("summary.md"), &md).unwrap();
     println!("{md}");
-    eprintln!("[bench] wrote {}/{{raw.jsonl,receipt.json,summary.md}}", out_dir.display());
+    eprintln!(
+        "[bench] wrote {}/{{raw.jsonl,receipt.json,summary.md}}",
+        out_dir.display()
+    );
     let _ = std::fs::remove_dir_all(&scratch);
 }
 
@@ -321,7 +413,12 @@ fn stat_row(label: &str, receipt: &Value, base: &[&str]) -> String {
     };
     format!(
         "| {} | {} | {} | {} | {} | {} |\n",
-        label, cell("min"), cell("median"), cell("p90"), cell("p95"), cell("max")
+        label,
+        cell("min"),
+        cell("median"),
+        cell("p90"),
+        cell("p95"),
+        cell("max")
     )
 }
 
@@ -347,8 +444,16 @@ fn render_markdown(target: &str, receipt: &Value) -> String {
     ));
     s.push_str("| metric (ms) | min | median | p90 | p95 | max |\n|---|---|---|---|---|---|\n");
     s.push_str(&stat_row("build total", receipt, &["build_total_ms"]));
-    s.push_str(&stat_row("restore cold-cache", receipt, &["restore_total_ms", "cold-cache"]));
-    s.push_str(&stat_row("restore warm-cache", receipt, &["restore_total_ms", "warm-cache"]));
+    s.push_str(&stat_row(
+        "restore cold-cache",
+        receipt,
+        &["restore_total_ms", "cold-cache"],
+    ));
+    s.push_str(&stat_row(
+        "restore warm-cache",
+        receipt,
+        &["restore_total_ms", "warm-cache"],
+    ));
     s.push_str("\nSee `raw.jsonl` for per-run span decomposition (Firecracker vs Ato overhead).\n");
     s
 }

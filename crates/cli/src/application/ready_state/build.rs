@@ -61,12 +61,30 @@ pub(crate) fn sanitizer_contract_from_manifest(m: &CapsuleManifest) -> Sanitizer
         return SanitizerContract::default();
     }
     let steps = vec![
-        SanitizerStep { step: "regenerate_ids".into(), layer: SanitizerLayer::GuestAgent },
-        SanitizerStep { step: "reseed_entropy".into(), layer: SanitizerLayer::GuestAgent },
-        SanitizerStep { step: "refresh_clock".into(), layer: SanitizerLayer::GuestAgent },
-        SanitizerStep { step: "reset_sockets".into(), layer: SanitizerLayer::GuestAgent },
-        SanitizerStep { step: "reconnect_net".into(), layer: SanitizerLayer::HostAndGuest },
-        SanitizerStep { step: "port_remap".into(), layer: SanitizerLayer::Host },
+        SanitizerStep {
+            step: "regenerate_ids".into(),
+            layer: SanitizerLayer::GuestAgent,
+        },
+        SanitizerStep {
+            step: "reseed_entropy".into(),
+            layer: SanitizerLayer::GuestAgent,
+        },
+        SanitizerStep {
+            step: "refresh_clock".into(),
+            layer: SanitizerLayer::GuestAgent,
+        },
+        SanitizerStep {
+            step: "reset_sockets".into(),
+            layer: SanitizerLayer::GuestAgent,
+        },
+        SanitizerStep {
+            step: "reconnect_net".into(),
+            layer: SanitizerLayer::HostAndGuest,
+        },
+        SanitizerStep {
+            step: "port_remap".into(),
+            layer: SanitizerLayer::Host,
+        },
     ];
     SanitizerContract { steps }
 }
@@ -154,14 +172,20 @@ path = "/health"
 
     #[test]
     fn restore_contract_maps_ports() {
-        let c = restore_contract_from_manifest(&parse("[snapshot]\nmode=\"warm\"\nmax_restore_seconds=8\n"));
+        let c = restore_contract_from_manifest(&parse(
+            "[snapshot]\nmode=\"warm\"\nmax_restore_seconds=8\n",
+        ));
         assert!(c.ports.contains(&8080));
         assert_eq!(c.expected_ready_ms, Some(8000));
     }
 
     #[test]
     fn sanitizer_contract_present_by_default_and_empty_when_disabled() {
-        assert!(!sanitizer_contract_from_manifest(&parse("[snapshot]\nmode=\"warm\"\n")).steps.is_empty());
+        assert!(
+            !sanitizer_contract_from_manifest(&parse("[snapshot]\nmode=\"warm\"\n"))
+                .steps
+                .is_empty()
+        );
         let off = parse("[snapshot]\nmode=\"warm\"\nsanitize_after_restore=false\n");
         assert!(sanitizer_contract_from_manifest(&off).steps.is_empty());
     }
@@ -187,10 +211,19 @@ path = "/health"
             vmstate: vec![0xAB; 256],
             memory: (0..100_000u32).map(|i| (i % 256) as u8).collect(),
         };
-        let receipt = seal(dir.path(), "blake3:capsule".to_string(), &m, layers, &backend).unwrap();
+        let receipt = seal(
+            dir.path(),
+            "blake3:capsule".to_string(),
+            &m,
+            layers,
+            &backend,
+        )
+        .unwrap();
         assert!(receipt.no_secret_proof.is_clean());
         // The sealed manifest is loadable from disk.
-        let loaded = store::load_manifest(dir.path(), "blake3:capsule").unwrap().unwrap();
+        let loaded = store::load_manifest(dir.path(), "blake3:capsule")
+            .unwrap()
+            .unwrap();
         assert_eq!(loaded.id(), receipt.manifest.id());
     }
 

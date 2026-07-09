@@ -57,7 +57,12 @@ pub struct BlobManifest {
 
 impl BlobManifest {
     /// Build a manifest from an ordered chunk list and the layer's total length.
-    pub fn new(layer: LayerKind, total_len: u64, chunking: ChunkingKind, chunks: Vec<Chunk>) -> Self {
+    pub fn new(
+        layer: LayerKind,
+        total_len: u64,
+        chunking: ChunkingKind,
+        chunks: Vec<Chunk>,
+    ) -> Self {
         Self {
             layer,
             total_len,
@@ -99,7 +104,12 @@ mod tests {
                 length: 2,
             },
         ];
-        BlobManifest::new(LayerKind::Memory, 3, ChunkingKind::PageAligned { page_size: 2 }, chunks)
+        BlobManifest::new(
+            LayerKind::Memory,
+            3,
+            ChunkingKind::PageAligned { page_size: 2 },
+            chunks,
+        )
     }
 
     #[test]

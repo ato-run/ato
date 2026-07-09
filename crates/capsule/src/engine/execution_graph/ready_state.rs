@@ -77,7 +77,9 @@ impl ReadyStateDeclaredEnvelope {
     /// string, stable for the same envelope on any host.
     pub fn declared_execution_id(&self) -> String {
         let graph = ExecutionGraphBuilder::build(ExecutionGraphBuildInput {
-            source: Some(GraphSourceInput { identifier: self.source_identifier.clone() }),
+            source: Some(GraphSourceInput {
+                identifier: self.source_identifier.clone(),
+            }),
             targets: vec![GraphTargetInput {
                 identifier: format!("target://{}", self.target_label),
                 runtime: self.runtime.clone(),
@@ -93,14 +95,21 @@ impl ReadyStateDeclaredEnvelope {
                 ..GraphPolicyInput::default()
             }),
         });
-        graph.canonical_form(CanonicalGraphDomain::Declared).digest_hex()
+        graph
+            .canonical_form(CanonicalGraphDomain::Declared)
+            .digest_hex()
     }
 }
 
 /// The pinned store source identity: `github://owner/repo@<commit>` plus `#subdir` when
 /// the capsule lives in a subdirectory. Host-independent by construction — callers must
 /// pass the SERVER-RESOLVED identity (approved store record), never a local path.
-pub fn store_source_identifier(owner: &str, repo: &str, commit: &str, subdir: Option<&str>) -> String {
+pub fn store_source_identifier(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+) -> String {
     match subdir.filter(|s| !s.is_empty()) {
         Some(s) => format!("github://{owner}/{repo}@{commit}#{s}"),
         None => format!("github://{owner}/{repo}@{commit}"),
@@ -112,8 +121,11 @@ pub fn store_source_identifier(owner: &str, repo: &str, commit: &str, subdir: Op
 /// the same `provider://<alias>` / `output://<alias>` identifier convention as the
 /// launch-path adapter (`cli::application::execution_graph_adapter`), so the facets that
 /// enter the id match the launch path byte-for-byte.
-pub fn declared_dependencies_from_manifest_toml(toml_text: &str) -> Result<Vec<GraphDependencyInput>, String> {
-    let value: toml::Value = toml::from_str(toml_text).map_err(|e| format!("parse capsule.toml: {e}"))?;
+pub fn declared_dependencies_from_manifest_toml(
+    toml_text: &str,
+) -> Result<Vec<GraphDependencyInput>, String> {
+    let value: toml::Value =
+        toml::from_str(toml_text).map_err(|e| format!("parse capsule.toml: {e}"))?;
     let deps = lockfile::manifest_external_capsule_dependencies(&value)
         .map_err(|e| format!("derive [dependencies.*]: {e}"))?;
     Ok(deps
@@ -157,7 +169,12 @@ readiness_probe = {{ http_get = "/health" }}
 
     fn base_envelope() -> ReadyStateDeclaredEnvelope {
         ReadyStateDeclaredEnvelope {
-            source_identifier: store_source_identifier("acme", "app", &"a".repeat(40), Some("pkg/web")),
+            source_identifier: store_source_identifier(
+                "acme",
+                "app",
+                &"a".repeat(40),
+                Some("pkg/web"),
+            ),
             target_label: "app".into(),
             runtime: "source".into(),
             working_directory: None,
@@ -182,35 +199,64 @@ readiness_probe = {{ http_get = "/health" }}
         let base = base_envelope().declared_execution_id();
         // Pinned source commit (transitively commits to capsule.toml → run/port/readiness).
         let mut e = base_envelope();
-        e.source_identifier = store_source_identifier("acme", "app", &"b".repeat(40), Some("pkg/web"));
-        assert_ne!(e.declared_execution_id(), base, "commit change must change the id");
+        e.source_identifier =
+            store_source_identifier("acme", "app", &"b".repeat(40), Some("pkg/web"));
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "commit change must change the id"
+        );
         // Subdir.
         let mut e = base_envelope();
         e.source_identifier = store_source_identifier("acme", "app", &"a".repeat(40), None);
-        assert_ne!(e.declared_execution_id(), base, "subdir change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "subdir change must change the id"
+        );
         // Target label.
         let mut e = base_envelope();
         e.target_label = "web".into();
-        assert_ne!(e.declared_execution_id(), base, "target change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "target change must change the id"
+        );
         // Runtime.
         let mut e = base_envelope();
         e.runtime = "oci".into();
-        assert_ne!(e.declared_execution_id(), base, "runtime change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "runtime change must change the id"
+        );
         // Working directory.
         let mut e = base_envelope();
         e.working_directory = Some("server".into());
-        assert_ne!(e.declared_execution_id(), base, "working_dir change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "working_dir change must change the id"
+        );
         // A declared dependency.
         let mut e = base_envelope();
         e.dependencies = declared_dependencies_from_manifest_toml(
             &manifest_toml("[dependencies.db]\ncapsule = \"capsule://ato/acme-postgres@16\"\ncontract = \"service@1\"\n"),
         )
         .unwrap();
-        assert_ne!(e.declared_execution_id(), base, "dependency change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "dependency change must change the id"
+        );
         // Declared policy hash.
         let mut e = base_envelope();
         e.network_policy_hash = Some("sha256:aaaa".into());
-        assert_ne!(e.declared_execution_id(), base, "policy change must change the id");
+        assert_ne!(
+            e.declared_execution_id(),
+            base,
+            "policy change must change the id"
+        );
     }
 
     #[test]
@@ -222,9 +268,16 @@ readiness_probe = {{ http_get = "/health" }}
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].provider, "provider://db");
         assert_eq!(deps[0].output, "output://db");
-        assert_eq!(deps[0].source.as_deref(), Some("capsule://ato/acme-postgres@16"));
+        assert_eq!(
+            deps[0].source.as_deref(),
+            Some("capsule://ato/acme-postgres@16")
+        );
         // No [dependencies.*] ⇒ empty (the common no-binding store capsule).
-        assert!(declared_dependencies_from_manifest_toml(&manifest_toml("")).unwrap().is_empty());
+        assert!(
+            declared_dependencies_from_manifest_toml(&manifest_toml(""))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -233,7 +286,13 @@ readiness_probe = {{ http_get = "/health" }}
             store_source_identifier("o", "r", "c", Some("sub/dir")),
             "github://o/r@c#sub/dir"
         );
-        assert_eq!(store_source_identifier("o", "r", "c", None), "github://o/r@c");
-        assert_eq!(store_source_identifier("o", "r", "c", Some("")), "github://o/r@c");
+        assert_eq!(
+            store_source_identifier("o", "r", "c", None),
+            "github://o/r@c"
+        );
+        assert_eq!(
+            store_source_identifier("o", "r", "c", Some("")),
+            "github://o/r@c"
+        );
     }
 }

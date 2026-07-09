@@ -27,8 +27,12 @@ pub(crate) fn run(json: bool) -> Result<()> {
         .all(|c| !matches!(c.status, CheckStatus::Missing | CheckStatus::Blocked));
 
     if json {
-        let report =
-            DoctorReport { profile: "capsule-runner", checks: &checks, ready_state: &summary, ready };
+        let report = DoctorReport {
+            profile: "capsule-runner",
+            checks: &checks,
+            ready_state: &summary,
+            ready,
+        };
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
@@ -53,9 +57,10 @@ pub(crate) fn run(json: bool) -> Result<()> {
 
     println!();
     println!("Ready-State:");
-    for (name, verdict) in
-        [("build_ready_state", &summary.build_ready_state), ("restore_snapshot", &summary.restore_snapshot)]
-    {
+    for (name, verdict) in [
+        ("build_ready_state", &summary.build_ready_state),
+        ("restore_snapshot", &summary.restore_snapshot),
+    ] {
         match verdict {
             ReadinessVerdict::Ok => println!("  ✓ {name}: OK"),
             ReadinessVerdict::Blocked(on) => println!("  ✗ {name}: BLOCKED on {}", on.join(", ")),
@@ -63,9 +68,14 @@ pub(crate) fn run(json: bool) -> Result<()> {
     }
 
     println!();
-    let blocked: Vec<&Check> =
-        checks.iter().filter(|c| c.status == CheckStatus::Blocked).collect();
-    let missing = checks.iter().filter(|c| c.status == CheckStatus::Missing).count();
+    let blocked: Vec<&Check> = checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Blocked)
+        .collect();
+    let missing = checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Missing)
+        .count();
     if !blocked.is_empty() {
         println!("Manual steps required (not fixable from software):");
         for c in &blocked {

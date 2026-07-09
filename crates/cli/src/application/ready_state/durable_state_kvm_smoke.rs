@@ -42,12 +42,14 @@ use protocol::binding_lease::SecretValue;
 use snapshot::rootfs_builder::{SourceProbe, build_rootfs, derive_supervisor_build_spec};
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
-    BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, FirecrackerBackend, FirecrackerConfig,
-    RestoreContract, RestoreReadyStateInput, RestoredSession, SanitizerContract, SnapshotBackend,
-    SupervisorBindings,
+    BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, FirecrackerBackend,
+    FirecrackerConfig, RestoreContract, RestoreReadyStateInput, RestoredSession, SanitizerContract,
+    SnapshotBackend, SupervisorBindings,
 };
 
-use super::binding_host::{bind_before_expose, issue_leases, mount_volumes_before_expose, stop_scrub_over_vsock};
+use super::binding_host::{
+    bind_before_expose, issue_leases, mount_volumes_before_expose, stop_scrub_over_vsock,
+};
 
 /// `{name}` and `{schema_hex}` are substituted per capsule instance — only the
 /// capsule `name` differs between the two builds this smoke creates, which is
@@ -157,11 +159,16 @@ http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
 "#;
 
 fn capsule_toml(name: &str) -> String {
-    CAPSULE_TOML_TEMPLATE.replace("{name}", name).replace("{schema_hex}", &"0".repeat(64))
+    CAPSULE_TOML_TEMPLATE
+        .replace("{name}", name)
+        .replace("{schema_hex}", &"0".repeat(64))
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// One blocking HTTP/1.1 GET; returns (status, body). No proxy layer — this
@@ -172,7 +179,9 @@ fn http_get(addr: &str, path: &str, timeout: Duration) -> anyhow::Result<(u16, S
     let mut s = TcpStream::connect(addr)?;
     s.set_read_timeout(Some(timeout))?;
     s.set_write_timeout(Some(timeout))?;
-    s.write_all(format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes())?;
+    s.write_all(
+        format!("GET {path} HTTP/1.1\r\nHost: smoke\r\nConnection: close\r\n\r\n").as_bytes(),
+    )?;
     let mut buf = Vec::new();
     s.read_to_end(&mut buf)?;
     let text = String::from_utf8_lossy(&buf).into_owned();
@@ -204,7 +213,12 @@ fn wait_for_health(addr: &str, tries: u32) -> anyhow::Result<()> {
 /// level failure (not a non-200 status, which is a real application-level
 /// answer and returned immediately) a few times before giving up, so a
 /// transient reconnect blip doesn't fail the whole smoke.
-fn http_get_retrying(addr: &str, path: &str, timeout: Duration, tries: u32) -> anyhow::Result<(u16, String)> {
+fn http_get_retrying(
+    addr: &str,
+    path: &str,
+    timeout: Duration,
+    tries: u32,
+) -> anyhow::Result<(u16, String)> {
     let mut last_err = None;
     for attempt in 0..tries {
         match http_get(addr, path, timeout) {
@@ -236,26 +250,36 @@ fn build_capsule(
     std::fs::create_dir_all(&src)?;
     std::fs::write(src.join("capsule.toml"), &toml)?;
     std::fs::write(src.join("app.py"), APP_PY)?;
-    let manifest =
-        CapsuleManifest::from_toml(&toml).map_err(|e| anyhow::anyhow!("fixture manifest ({name}): {e}"))?;
+    let manifest = CapsuleManifest::from_toml(&toml)
+        .map_err(|e| anyhow::anyhow!("fixture manifest ({name}): {e}"))?;
     let spec = derive_supervisor_build_spec(&manifest, &SourceProbe::scan(&src))
         .map_err(|e| anyhow::anyhow!("derive_supervisor_build_spec({name}): {e}"))?;
     let ext4 = workdir.join(format!("{name}.ext4"));
-    build_rootfs(&src, &spec, &ext4, 1024).map_err(|e| anyhow::anyhow!("build_rootfs({name}): {e}"))?;
+    build_rootfs(&src, &spec, &ext4, 1024)
+        .map_err(|e| anyhow::anyhow!("build_rootfs({name}): {e}"))?;
     let rootfs_bytes = std::fs::read(&ext4)?;
 
     let owner_scope = manifest
         .persistent_state_owner_scope()
         .ok_or_else(|| anyhow::anyhow!("fixture manifest ({name}) has no owner scope"))?;
-    let sup = spec.supervisor.as_ref().ok_or_else(|| anyhow::anyhow!("({name}) is not a supervisor build"))?;
+    let sup = spec
+        .supervisor
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("({name}) is not a supervisor build"))?;
     let state_volumes: Vec<DurableVolumeSpec> = sup
         .services
         .iter()
         .flatten()
         .flat_map(|s| &s.volumes)
-        .map(|v| DurableVolumeSpec { state_name: v.state_name.clone(), size_mb: v.size_mb })
+        .map(|v| DurableVolumeSpec {
+            state_name: v.state_name.clone(),
+            size_mb: v.size_mb,
+        })
         .collect();
-    anyhow::ensure!(!state_volumes.is_empty(), "fixture ({name}) derived zero durable volumes");
+    anyhow::ensure!(
+        !state_volumes.is_empty(),
+        "fixture ({name}) derived zero durable volumes"
+    );
 
     let sealed = backend
         .build_ready_state(BuildReadyStateInput {
@@ -286,7 +310,10 @@ fn build_capsule(
         })
         .map_err(|e| anyhow::anyhow!("build_ready_state({name}): {e}"))?;
 
-    Ok(BuiltCapsule { sealed, owner_scope })
+    Ok(BuiltCapsule {
+        sealed,
+        owner_scope,
+    })
 }
 
 /// Restore + deliver the REAL secret over vsock via the SAME production gate
@@ -309,20 +336,36 @@ fn restore_and_bind(
         })
         .map_err(|e| anyhow::anyhow!("restore({label}): {e}"))?;
     let session = restored.session;
-    let vsock = session.vsock_uds.clone().ok_or_else(|| anyhow::anyhow!("({label}) no vsock_uds"))?;
+    let vsock = session
+        .vsock_uds
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("({label}) no vsock_uds"))?;
     // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND, every
     // restore, fresh — the whole point of this fixture after the live-KVM
     // finding. Mounting is never baked into the build-time snapshot.
     mount_volumes_before_expose(&vsock, true, Duration::from_secs(10))
         .map_err(|e| anyhow::anyhow!("mount_volumes_before_expose({label}): {e}"))?;
-    let leases = issue_leases(vec![("openai_api_key".to_string(), SecretValue::new("sk-smoke-dummy"))], now_ms(), 60_000)
-        .map_err(|e| anyhow::anyhow!("issue_leases({label}): {e}"))?;
+    let leases = issue_leases(
+        vec![(
+            "openai_api_key".to_string(),
+            SecretValue::new("sk-smoke-dummy"),
+        )],
+        now_ms(),
+        60_000,
+    )
+    .map_err(|e| anyhow::anyhow!("issue_leases({label}): {e}"))?;
     bind_before_expose(&vsock, &leases, Duration::from_secs(10))
         .map_err(|e| anyhow::anyhow!("bind_before_expose({label}): {e}"))?;
-    let addr = session.workload_addr.clone().ok_or_else(|| anyhow::anyhow!("({label}) no workload_addr"))?;
+    let addr = session
+        .workload_addr
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("({label}) no workload_addr"))?;
     wait_for_health(&addr, 20).map_err(|e| anyhow::anyhow!("({label}) {e}"))?;
     let (code, body) = http_get_retrying(&addr, "/secret-check", Duration::from_secs(2), 5)?;
-    anyhow::ensure!(code == 200 && body == "yes", "({label}) real secret did not reach the service (got {body:?})");
+    anyhow::ensure!(
+        code == 200 && body == "yes",
+        "({label}) real secret did not reach the service (got {body:?})"
+    );
     Ok(session)
 }
 
@@ -339,8 +382,13 @@ fn stop_session(backend: &FirecrackerBackend, session: RestoredSession) -> anyho
         }
     }
     let overlay = session.overlay_root.clone();
-    let td = backend.stop(session).map_err(|e| anyhow::anyhow!("stop: {e}"))?;
-    anyhow::ensure!(td.overlay_removed && !overlay.exists(), "overlay not removed after stop");
+    let td = backend
+        .stop(session)
+        .map_err(|e| anyhow::anyhow!("stop: {e}"))?;
+    anyhow::ensure!(
+        td.overlay_removed && !overlay.exists(),
+        "overlay not removed after stop"
+    );
     Ok(())
 }
 
@@ -396,23 +444,40 @@ fn durable_state_live_smoke() {
     // identity) — this is the isolation check's fixture setup. ──
     let a = build_capsule(&backend, &store, workdir, "durable-smoke-a").expect("build capsule a");
     let b = build_capsule(&backend, &store, workdir, "durable-smoke-b").expect("build capsule b");
-    assert_ne!(a.owner_scope, b.owner_scope, "the two fixtures must have different owner scopes");
+    assert_ne!(
+        a.owner_scope, b.owner_scope,
+        "the two fixtures must have different owner scopes"
+    );
 
     // ── Run 1: restore a, write a unique marker through the durable mount ──
     let marker = format!("durable-state-smoke-marker-{}", now_ms());
-    let session = restore_and_bind(&backend, &store, workdir, "a-run1", &a.sealed).expect("restore a run1");
+    let session =
+        restore_and_bind(&backend, &store, workdir, "a-run1", &a.sealed).expect("restore a run1");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, _) = http_get_retrying(&addr, &format!("/write?value={marker}"), Duration::from_secs(5), 5).expect("write");
+    let (code, _) = http_get_retrying(
+        &addr,
+        &format!("/write?value={marker}"),
+        Duration::from_secs(5),
+        5,
+    )
+    .expect("write");
     assert_eq!(code, 200, "write must succeed");
-    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read back");
-    assert_eq!((code, body.as_str()), (200, marker.as_str()), "read-after-write within the same run");
+    let (code, body) =
+        http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read back");
+    assert_eq!(
+        (code, body.as_str()),
+        (200, marker.as_str()),
+        "read-after-write within the same run"
+    );
     stop_session(&backend, session).expect("stop a run1");
 
     // ── Run 2: restore the SAME sealed artifact AGAIN — proves the marker
     // survived stop/restore (the whole point of durable state). ──
-    let session = restore_and_bind(&backend, &store, workdir, "a-run2", &a.sealed).expect("restore a run2");
+    let session =
+        restore_and_bind(&backend, &store, workdir, "a-run2", &a.sealed).expect("restore a run2");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read after restore");
+    let (code, body) =
+        http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read after restore");
     assert_eq!(
         (code, body.as_str()),
         (200, marker.as_str()),
@@ -423,13 +488,22 @@ fn durable_state_live_smoke() {
     // ── Isolation: restore capsule "b" (different owner_scope) — must NOT
     // see "a"'s marker. Proves durable state is identity-scoped, never baked
     // into the (shared, content-addressed) rootfs and never globally shared. ──
-    let session = restore_and_bind(&backend, &store, workdir, "b-run1", &b.sealed).expect("restore b run1");
+    let session =
+        restore_and_bind(&backend, &store, workdir, "b-run1", &b.sealed).expect("restore b run1");
     let addr = session.workload_addr.clone().unwrap();
-    let (code, body) = http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read from b");
-    assert_eq!((code, body.as_str()), (200, ""), "a differently-scoped capsule must never see another's durable state");
+    let (code, body) =
+        http_get_retrying(&addr, "/read", Duration::from_secs(5), 5).expect("read from b");
+    assert_eq!(
+        (code, body.as_str()),
+        (200, ""),
+        "a differently-scoped capsule must never see another's durable state"
+    );
     stop_session(&backend, session).expect("stop b run1");
 
-    eprintln!("durable_state_live_smoke: ALL STAGES PASSED (marker={marker:?}, owner_scope a={:?} b={:?})", a.owner_scope, b.owner_scope);
+    eprintln!(
+        "durable_state_live_smoke: ALL STAGES PASSED (marker={marker:?}, owner_scope a={:?} b={:?})",
+        a.owner_scope, b.owner_scope
+    );
     // `dir` drops here — tempdir (rootfs cache + durable state backing files
     // + locks) removed; no separate cleanup step needed.
 }

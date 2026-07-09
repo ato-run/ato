@@ -71,11 +71,16 @@ pub(crate) fn validate_public_base_url(url: &str) -> Result<()> {
         bail!("--public-base-url must be https:// (got {url:?}) — Caddy terminates TLS on 443");
     };
     let host = rest.trim_end_matches('/');
-    if host.is_empty() || rest.matches('/').count() > 1 || (rest.contains('/') && !rest.ends_with('/')) {
+    if host.is_empty()
+        || rest.matches('/').count() > 1
+        || (rest.contains('/') && !rest.ends_with('/'))
+    {
         bail!("--public-base-url must be exactly https://<hostname> with no path (got {url:?})");
     }
     if host.contains(':') || host.contains('@') || host.contains('?') || host.contains('#') {
-        bail!("--public-base-url must not contain a port, userinfo, query, or fragment (got {url:?})");
+        bail!(
+            "--public-base-url must not contain a port, userinfo, query, or fragment (got {url:?})"
+        );
     }
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         bail!("--public-base-url must not contain whitespace or control characters");
@@ -86,14 +91,18 @@ pub(crate) fn validate_public_base_url(url: &str) -> Result<()> {
     }
     let is_ipv4 = h.split('.').count() == 4 && h.split('.').all(|o| o.parse::<u8>().is_ok());
     if is_ipv4 {
-        bail!("--public-base-url must be a DNS hostname, not an IP literal (a Cloudflare Worker cannot fetch a raw-IP upstream — error 1003)");
+        bail!(
+            "--public-base-url must be a DNS hostname, not an IP literal (a Cloudflare Worker cannot fetch a raw-IP upstream — error 1003)"
+        );
     }
     if !h.contains('.')
         || !h
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
     {
-        bail!("--public-base-url hostname may only contain [a-z0-9.-] and must be a dotted DNS name (got {url:?})");
+        bail!(
+            "--public-base-url hostname may only contain [a-z0-9.-] and must be a dotted DNS name (got {url:?})"
+        );
     }
     // DNS label boundaries: no empty label (leading/trailing/double dot), no
     // leading/trailing hyphen per label, ≤63 chars per label.
@@ -111,7 +120,10 @@ pub(crate) fn validate_config(cfg: &OfficialPreviewConfig) -> Result<()> {
         bail!("--max-slots must be in [1, 64] (got {})", cfg.max_slots);
     }
     if !cfg.caddyfile_path.starts_with('/') || cfg.caddyfile_path.contains("..") {
-        bail!("--caddyfile must be a plain absolute path (got {:?})", cfg.caddyfile_path);
+        bail!(
+            "--caddyfile must be a plain absolute path (got {:?})",
+            cfg.caddyfile_path
+        );
     }
     Ok(())
 }
@@ -162,7 +174,10 @@ pub(crate) fn official_env_lines(
     let base_host = base_hostname(&cfg.public_base_url);
     let wanted: Vec<(&str, String)> = vec![
         ("ATO_RUNNER_PREVIEW", "1".to_string()),
-        ("ATO_RUNNER_PUBLIC_BASE_URL", cfg.public_base_url.trim_end_matches('/').to_string()),
+        (
+            "ATO_RUNNER_PUBLIC_BASE_URL",
+            cfg.public_base_url.trim_end_matches('/').to_string(),
+        ),
         ("ATO_RUNNER_MAX_SLOTS", cfg.max_slots.to_string()),
         // Per-slot READY URLs. Without this, serve (a) refuses to start at
         // max_slots >= 2 (validate_multi_slot_public_url requires a template)
@@ -170,7 +185,10 @@ pub(crate) fn official_env_lines(
         // which the control plane's slot-hostname allowlist (s0.<base>…)
         // rejects at /ready. The template renders exactly the s{N}.<base>
         // hostnames the admin console registered.
-        ("ATO_RUNNER_PUBLIC_URL_TEMPLATE", format!("https://s{{slot}}.{base_host}")),
+        (
+            "ATO_RUNNER_PUBLIC_URL_TEMPLATE",
+            format!("https://s{{slot}}.{base_host}"),
+        ),
     ];
     let mut lines = Vec::new();
     let mut conflicts = Vec::new();
@@ -195,7 +213,9 @@ pub(crate) fn official_env_lines(
 /// control plane's slot-hostname allowlist. Pure.
 pub(crate) fn unit_has_public_proxy_listen(unit_text: &str) -> bool {
     for line in unit_text.lines() {
-        let Some(idx) = line.find("--proxy-listen") else { continue };
+        let Some(idx) = line.find("--proxy-listen") else {
+            continue;
+        };
         let rest = line[idx + "--proxy-listen".len()..].trim_start_matches(['=', ' ']);
         let value = rest.split_whitespace().next().unwrap_or("");
         let host = value.rsplit_once(':').map(|(h, _)| h).unwrap_or(value);
@@ -246,14 +266,21 @@ pub(crate) fn gather(cfg: &OfficialPreviewConfig) -> Vec<Check> {
     let base_host = base_hostname(&cfg.public_base_url);
 
     // Caddy binary.
-    out.push(match std::process::Command::new("caddy").arg("version").output() {
-        Ok(o) if o.status.success() => Check::ok(
-            "caddy",
-            "Caddy",
-            String::from_utf8_lossy(&o.stdout).trim().to_string(),
-        ),
-        _ => Check::missing("caddy", "Caddy", "not installed", "apt-get install -y caddy"),
-    });
+    out.push(
+        match std::process::Command::new("caddy").arg("version").output() {
+            Ok(o) if o.status.success() => Check::ok(
+                "caddy",
+                "Caddy",
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            ),
+            _ => Check::missing(
+                "caddy",
+                "Caddy",
+                "not installed",
+                "apt-get install -y caddy",
+            ),
+        },
+    );
 
     // Caddyfile content: ours iff it names the base hostname (regenerating is
     // idempotent; a foreign file is backed up before being replaced).
@@ -266,7 +293,10 @@ pub(crate) fn gather(cfg: &OfficialPreviewConfig) -> Vec<Check> {
         Ok(_) => Check::missing(
             "caddyfile",
             "Caddyfile",
-            format!("{} exists but does not serve {base_host}", cfg.caddyfile_path),
+            format!(
+                "{} exists but does not serve {base_host}",
+                cfg.caddyfile_path
+            ),
             "setup --fix regenerates it (existing file backed up)",
         ),
         Err(_) => Check::missing(
@@ -283,7 +313,10 @@ pub(crate) fn gather(cfg: &OfficialPreviewConfig) -> Vec<Check> {
         Some(state) => Check::missing(
             "caddy_service",
             "Caddy service",
-            format!("installed, {}", if state.is_empty() { "inactive" } else { state }),
+            format!(
+                "installed, {}",
+                if state.is_empty() { "inactive" } else { state }
+            ),
             "systemctl enable --now caddy",
         ),
         None => Check::missing(
@@ -301,17 +334,27 @@ pub(crate) fn gather(cfg: &OfficialPreviewConfig) -> Vec<Check> {
         let id: &'static str = if port == 80 { "port_80" } else { "port_443" };
         out.push(if host_listens_on(port) {
             if caddy_active {
-                Check::ok(id, "ingress port", format!("{port} in LISTEN (caddy active)"))
+                Check::ok(
+                    id,
+                    "ingress port",
+                    format!("{port} in LISTEN (caddy active)"),
+                )
             } else {
                 Check::warn(
                     id,
                     "ingress port",
-                    format!("{port} is in LISTEN but caddy is not active — another server owns it?"),
+                    format!(
+                        "{port} is in LISTEN but caddy is not active — another server owns it?"
+                    ),
                     "stop the conflicting service; Caddy must bind 80+443",
                 )
             }
         } else {
-            Check::ok(id, "ingress port", format!("{port} free (Caddy will bind it)"))
+            Check::ok(
+                id,
+                "ingress port",
+                format!("{port} free (Caddy will bind it)"),
+            )
         });
     }
 
@@ -383,22 +426,25 @@ mod tests {
         assert!(validate_public_base_url("https://runner-abc.runner.ato.run").is_ok());
         assert!(validate_public_base_url("https://runner-abc.runner.ato.run/").is_ok());
         for bad in [
-            "http://runner-abc.runner.ato.run", // https only
+            "http://runner-abc.runner.ato.run",       // https only
             "https://runner-abc.runner.ato.run:8421", // no port — Caddy owns 443
-            "https://runner-abc.runner.ato.run/app", // no path
-            "https://65.109.37.38",             // raw IP
-            "https://127.0.0.1",                // loopback
-            "https://localhost",                // loopback
-            "https://runner",                   // not a dotted DNS name
-            "https://runner abc.run",           // whitespace ⇒ env injection
-            "https://a.run\nATO_X=1",           // newline ⇒ env injection
-            "https://user@host.run",            // userinfo
-            "https://-bad.runner.ato.run",      // leading hyphen label
-            "https://bad-.runner.ato.run",      // trailing hyphen label
-            "https://bad..runner.ato.run",      // empty label
-            "https://.runner.ato.run",          // empty leading label
+            "https://runner-abc.runner.ato.run/app",  // no path
+            "https://65.109.37.38",                   // raw IP
+            "https://127.0.0.1",                      // loopback
+            "https://localhost",                      // loopback
+            "https://runner",                         // not a dotted DNS name
+            "https://runner abc.run",                 // whitespace ⇒ env injection
+            "https://a.run\nATO_X=1",                 // newline ⇒ env injection
+            "https://user@host.run",                  // userinfo
+            "https://-bad.runner.ato.run",            // leading hyphen label
+            "https://bad-.runner.ato.run",            // trailing hyphen label
+            "https://bad..runner.ato.run",            // empty label
+            "https://.runner.ato.run",                // empty leading label
         ] {
-            assert!(validate_public_base_url(bad).is_err(), "must reject {bad:?}");
+            assert!(
+                validate_public_base_url(bad).is_err(),
+                "must reject {bad:?}"
+            );
         }
     }
 
@@ -451,7 +497,10 @@ mod tests {
         assert!(lines.is_empty() && conflicts.is_empty());
 
         // Disagreeing operator values: NOT rewritten, surfaced as conflicts.
-        existing.insert("ATO_RUNNER_PUBLIC_BASE_URL".into(), "https://old.example.com".into());
+        existing.insert(
+            "ATO_RUNNER_PUBLIC_BASE_URL".into(),
+            "https://old.example.com".into(),
+        );
         existing.insert(
             "ATO_RUNNER_PUBLIC_URL_TEMPLATE".into(),
             "https://runner.example.com:{port}/".into(),
@@ -459,8 +508,16 @@ mod tests {
         let (lines, conflicts) = official_env_lines(&existing, &cfg());
         assert!(lines.is_empty());
         assert_eq!(conflicts.len(), 2);
-        assert!(conflicts.iter().any(|c| c.contains("ATO_RUNNER_PUBLIC_BASE_URL")));
-        assert!(conflicts.iter().any(|c| c.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE")));
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.contains("ATO_RUNNER_PUBLIC_BASE_URL"))
+        );
+        assert!(
+            conflicts
+                .iter()
+                .any(|c| c.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE"))
+        );
     }
 
     #[test]
@@ -501,16 +558,19 @@ mod tests {
         assert_eq!(s1, "https://s1.runner-abc.runner.ato.run");
         // Never the bare base host (the allowlist only carries slot hostnames).
         for url in [&s0, &s1] {
-            assert!(!url.starts_with("https://runner-abc."), "must not render the base host: {url}");
+            assert!(
+                !url.starts_with("https://runner-abc."),
+                "must not render the base host: {url}"
+            );
         }
     }
 
     #[test]
     fn public_proxy_listen_detection() {
         // The unit setup writes (no flags) is loopback-safe.
-        assert!(!unit_has_public_proxy_listen(&super::super::setup::render_unit(
-            super::super::RUNNER_UNIT
-        )));
+        assert!(!unit_has_public_proxy_listen(
+            &super::super::setup::render_unit(super::super::RUNNER_UNIT)
+        ));
         for public in [
             "ExecStart=/usr/local/bin/ato runner serve --proxy-listen 0.0.0.0:8420",
             "ExecStart=/usr/local/bin/ato runner serve --proxy-listen=10.0.0.5:8420",
@@ -523,7 +583,10 @@ mod tests {
             "ExecStart=ato runner serve --proxy-listen 127.0.0.1:8420",
             "ExecStart=ato runner serve --proxy-listen=localhost:9000",
         ] {
-            assert!(!unit_has_public_proxy_listen(loopback), "must pass {loopback:?}");
+            assert!(
+                !unit_has_public_proxy_listen(loopback),
+                "must pass {loopback:?}"
+            );
         }
     }
 
@@ -536,7 +599,10 @@ mod tests {
                    2: 00000000:01BB 00000000:0000 01\n";
         assert!(proc_net_tcp_listens_on(tcp, 80));
         assert!(proc_net_tcp_listens_on(tcp, 8420)); // 0x20E4
-        assert!(!proc_net_tcp_listens_on(tcp, 443), "st 01 (ESTABLISHED) is not LISTEN");
+        assert!(
+            !proc_net_tcp_listens_on(tcp, 443),
+            "st 01 (ESTABLISHED) is not LISTEN"
+        );
         assert!(!proc_net_tcp_listens_on(tcp, 9999));
     }
 

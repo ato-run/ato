@@ -76,7 +76,8 @@ impl VolumeMounter for RealVolumeMounter {
     }
 
     fn mount(&self, device: &Path, target: &Path) -> Result<(), String> {
-        std::fs::create_dir_all(target).map_err(|e| format!("mkdir -p {}: {e}", target.display()))?;
+        std::fs::create_dir_all(target)
+            .map_err(|e| format!("mkdir -p {}: {e}", target.display()))?;
         let out = std::process::Command::new("mount")
             .args(["-o", MOUNT_OPTIONS])
             .arg(device)
@@ -137,7 +138,9 @@ pub fn validate_mount_target(target: &str) -> Result<PathBuf, String> {
     }
     for component in path.components() {
         if matches!(component, Component::CurDir | Component::ParentDir) {
-            return Err(format!("volume target {target:?} must not contain '.' or '..'"));
+            return Err(format!(
+                "volume target {target:?} must not contain '.' or '..'"
+            ));
         }
     }
     match path.strip_prefix(STATE_ROOT) {
@@ -148,7 +151,9 @@ pub fn validate_mount_target(target: &str) -> Result<PathBuf, String> {
         }
         Ok(_) => {}
         Err(_) => {
-            return Err(format!("volume target {target:?} must be under '{STATE_ROOT}/'"));
+            return Err(format!(
+                "volume target {target:?} must be under '{STATE_ROOT}/'"
+            ));
         }
     }
     reject_if_any_ancestor_is_not_a_plain_directory(path)?;
@@ -200,7 +205,10 @@ fn reject_if_any_ancestor_is_not_a_plain_directory(path: &Path) -> Result<(), St
 /// Mount every declared volume, sorted by `state_name` for a deterministic
 /// order, BEFORE any service starts. Fail-closed: the first failure aborts —
 /// the workload never starts half-mounted.
-pub fn mount_all_volumes(mounter: &dyn VolumeMounter, volumes: &[VolumeSpec]) -> Result<(), String> {
+pub fn mount_all_volumes(
+    mounter: &dyn VolumeMounter,
+    volumes: &[VolumeSpec],
+) -> Result<(), String> {
     let mut sorted: Vec<&VolumeSpec> = volumes.iter().collect();
     sorted.sort_by(|a, b| a.state_name.cmp(&b.state_name));
     // Review fix (ato#991): track every volume ALREADY mounted so a LATER
@@ -262,7 +270,10 @@ fn rollback_mounted(mounter: &dyn VolumeMounter, mounted: &[&VolumeSpec]) {
 pub fn unmount_all_volumes(mounter: &dyn VolumeMounter, volumes: &[VolumeSpec]) {
     for vol in volumes {
         if let Err(e) = mounter.sync_and_umount(Path::new(&vol.target)) {
-            eprintln!("ato-guest-agent: umount state '{}' at {}: {e}", vol.state_name, vol.target);
+            eprintln!(
+                "ato-guest-agent: umount state '{}' at {}: {e}",
+                vol.state_name, vol.target
+            );
         }
     }
 }
@@ -295,7 +306,10 @@ mod tests {
             if self.fail_mount_for.as_deref() == Some(target) {
                 return Err("fake: injected mount failure".to_string());
             }
-            self.mount_calls.lock().unwrap().push((device.to_path_buf(), target.to_path_buf()));
+            self.mount_calls
+                .lock()
+                .unwrap()
+                .push((device.to_path_buf(), target.to_path_buf()));
             Ok(())
         }
         fn sync_and_umount(&self, target: &Path) -> Result<(), String> {
@@ -335,9 +349,18 @@ mod tests {
         // would wrongly accept "/ato/stateevil/..." / "/ato/state2/..." —
         // these must be rejected on a COMPONENT boundary, not a string match.
         assert!(validate_mount_target("/ato/state/dbdata").is_ok());
-        assert!(validate_mount_target("/ato/state").is_err(), "exact /ato/state must be rejected");
-        assert!(validate_mount_target("/ato/stateevil/db").is_err(), "component lookalike must be rejected");
-        assert!(validate_mount_target("/ato/state2/db").is_err(), "component lookalike must be rejected");
+        assert!(
+            validate_mount_target("/ato/state").is_err(),
+            "exact /ato/state must be rejected"
+        );
+        assert!(
+            validate_mount_target("/ato/stateevil/db").is_err(),
+            "component lookalike must be rejected"
+        );
+        assert!(
+            validate_mount_target("/ato/state2/db").is_err(),
+            "component lookalike must be rejected"
+        );
     }
 
     /// `tempfile::tempdir()`'s path can itself sit under an OS-level symlink
@@ -385,7 +408,10 @@ mod tests {
         let leaf = symlinked_ancestor.join("dbdata");
         let err = reject_if_any_ancestor_is_not_a_plain_directory(&leaf).unwrap_err();
         assert!(err.contains("symlink"), "{err}");
-        assert!(err.contains("state-link"), "the error must name the offending ancestor: {err}");
+        assert!(
+            err.contains("state-link"),
+            "the error must name the offending ancestor: {err}"
+        );
     }
 
     #[test]
@@ -394,25 +420,44 @@ mod tests {
         let existing_dir = root.join("real");
         std::fs::create_dir_all(&existing_dir).unwrap();
         assert!(reject_if_any_ancestor_is_not_a_plain_directory(&existing_dir).is_ok());
-        assert!(reject_if_any_ancestor_is_not_a_plain_directory(&root.join("does-not-exist-yet")).is_ok());
+        assert!(
+            reject_if_any_ancestor_is_not_a_plain_directory(&root.join("does-not-exist-yet"))
+                .is_ok()
+        );
     }
 
     #[test]
     fn mount_all_volumes_mounts_in_state_name_sorted_order() {
         let mut m = FakeMounter::default();
-        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
-        m.devices.insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
-        let volumes = vec![vol("bbb", "/ato/state/bbb", "LBL_BBB"), vol("aaa", "/ato/state/aaa", "LBL_AAA")];
+        m.devices
+            .insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        m.devices
+            .insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
+        let volumes = vec![
+            vol("bbb", "/ato/state/bbb", "LBL_BBB"),
+            vol("aaa", "/ato/state/aaa", "LBL_AAA"),
+        ];
         mount_all_volumes(&m, &volumes).unwrap();
         let calls = m.mount_calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0], (PathBuf::from("/dev/vdb"), PathBuf::from("/ato/state/aaa")), "aaa mounted first");
-        assert_eq!(calls[1], (PathBuf::from("/dev/vdc"), PathBuf::from("/ato/state/bbb")), "bbb mounted second");
+        assert_eq!(
+            calls[0],
+            (PathBuf::from("/dev/vdb"), PathBuf::from("/ato/state/aaa")),
+            "aaa mounted first"
+        );
+        assert_eq!(
+            calls[1],
+            (PathBuf::from("/dev/vdc"), PathBuf::from("/ato/state/bbb")),
+            "bbb mounted second"
+        );
     }
 
     #[test]
     fn mount_all_volumes_fails_closed_when_a_device_cannot_be_resolved() {
-        let m = FakeMounter { fail_resolve_for: Some("LBL_MISSING".to_string()), ..Default::default() };
+        let m = FakeMounter {
+            fail_resolve_for: Some("LBL_MISSING".to_string()),
+            ..Default::default()
+        };
         let volumes = vec![vol("dbdata", "/ato/state/dbdata", "LBL_MISSING")];
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
         assert!(err.contains("dbdata"), "{err}");
@@ -421,7 +466,8 @@ mod tests {
     #[test]
     fn mount_all_volumes_fails_closed_on_invalid_target_and_rolls_back_the_earlier_success() {
         let mut m = FakeMounter::default();
-        m.devices.insert("LBL_GOOD".to_string(), "/dev/vdb".to_string());
+        m.devices
+            .insert("LBL_GOOD".to_string(), "/dev/vdb".to_string());
         // "agood" < "zbad" lexicographically, so "agood" sorts (and mounts)
         // first, THEN "zbad"'s invalid target fails.
         let volumes = vec![
@@ -431,7 +477,11 @@ mod tests {
         // Review fix (ato#991): "agood" must be rolled back, not left mounted.
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
         assert!(err.contains("zbad"), "{err}");
-        assert_eq!(m.mount_calls.lock().unwrap().len(), 1, "agood WAS mounted before zbad failed");
+        assert_eq!(
+            m.mount_calls.lock().unwrap().len(),
+            1,
+            "agood WAS mounted before zbad failed"
+        );
         assert_eq!(
             m.umount_calls.lock().unwrap().as_slice(),
             [PathBuf::from("/ato/state/good")],
@@ -441,26 +491,51 @@ mod tests {
 
     #[test]
     fn mount_all_volumes_stops_at_the_first_mount_failure_with_nothing_to_roll_back() {
-        let mut m = FakeMounter { fail_mount_for: Some(PathBuf::from("/ato/state/aaa")), ..Default::default() };
-        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
-        m.devices.insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
-        let volumes = vec![vol("aaa", "/ato/state/aaa", "LBL_AAA"), vol("bbb", "/ato/state/bbb", "LBL_BBB")];
+        let mut m = FakeMounter {
+            fail_mount_for: Some(PathBuf::from("/ato/state/aaa")),
+            ..Default::default()
+        };
+        m.devices
+            .insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        m.devices
+            .insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
+        let volumes = vec![
+            vol("aaa", "/ato/state/aaa", "LBL_AAA"),
+            vol("bbb", "/ato/state/bbb", "LBL_BBB"),
+        ];
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
         assert!(err.contains("aaa"), "{err}");
-        assert!(m.mount_calls.lock().unwrap().is_empty(), "aaa failed before any successful mount call recorded");
-        assert!(m.umount_calls.lock().unwrap().is_empty(), "nothing succeeded yet, so nothing to roll back");
+        assert!(
+            m.mount_calls.lock().unwrap().is_empty(),
+            "aaa failed before any successful mount call recorded"
+        );
+        assert!(
+            m.umount_calls.lock().unwrap().is_empty(),
+            "nothing succeeded yet, so nothing to roll back"
+        );
     }
 
     #[test]
     fn mount_all_volumes_rolls_back_an_earlier_success_when_a_later_devices_resolve_fails() {
         // The exact scenario from review: aaa mounts successfully, bbb's
         // device resolution (blkid) then fails — aaa must be rolled back.
-        let mut m = FakeMounter { fail_resolve_for: Some("LBL_BBB".to_string()), ..Default::default() };
-        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
-        let volumes = vec![vol("aaa", "/ato/state/aaa", "LBL_AAA"), vol("bbb", "/ato/state/bbb", "LBL_BBB")];
+        let mut m = FakeMounter {
+            fail_resolve_for: Some("LBL_BBB".to_string()),
+            ..Default::default()
+        };
+        m.devices
+            .insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        let volumes = vec![
+            vol("aaa", "/ato/state/aaa", "LBL_AAA"),
+            vol("bbb", "/ato/state/bbb", "LBL_BBB"),
+        ];
         let err = mount_all_volumes(&m, &volumes).unwrap_err();
         assert!(err.contains("bbb"), "{err}");
-        assert_eq!(m.mount_calls.lock().unwrap().len(), 1, "aaa mounted before bbb's resolve failed");
+        assert_eq!(
+            m.mount_calls.lock().unwrap().len(),
+            1,
+            "aaa mounted before bbb's resolve failed"
+        );
         assert_eq!(
             m.umount_calls.lock().unwrap().as_slice(),
             [PathBuf::from("/ato/state/aaa")],
@@ -470,9 +545,14 @@ mod tests {
 
     #[test]
     fn mount_all_volumes_rolls_back_in_reverse_order_for_multiple_earlier_successes() {
-        let mut m = FakeMounter { fail_resolve_for: Some("LBL_CCC".to_string()), ..Default::default() };
-        m.devices.insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
-        m.devices.insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
+        let mut m = FakeMounter {
+            fail_resolve_for: Some("LBL_CCC".to_string()),
+            ..Default::default()
+        };
+        m.devices
+            .insert("LBL_AAA".to_string(), "/dev/vdb".to_string());
+        m.devices
+            .insert("LBL_BBB".to_string(), "/dev/vdc".to_string());
         let volumes = vec![
             vol("aaa", "/ato/state/aaa", "LBL_AAA"),
             vol("bbb", "/ato/state/bbb", "LBL_BBB"),
@@ -482,7 +562,10 @@ mod tests {
         assert!(err.contains("ccc"), "{err}");
         assert_eq!(
             m.umount_calls.lock().unwrap().as_slice(),
-            [PathBuf::from("/ato/state/bbb"), PathBuf::from("/ato/state/aaa")],
+            [
+                PathBuf::from("/ato/state/bbb"),
+                PathBuf::from("/ato/state/aaa")
+            ],
             "rollback unwinds most-recently-mounted first"
         );
     }
@@ -490,7 +573,10 @@ mod tests {
     #[test]
     fn unmount_all_volumes_attempts_every_volume_even_if_logged() {
         let m = FakeMounter::default();
-        let volumes = vec![vol("aaa", "/ato/state/aaa", "LBL_AAA"), vol("bbb", "/ato/state/bbb", "LBL_BBB")];
+        let volumes = vec![
+            vol("aaa", "/ato/state/aaa", "LBL_AAA"),
+            vol("bbb", "/ato/state/bbb", "LBL_BBB"),
+        ];
         unmount_all_volumes(&m, &volumes);
         let calls = m.umount_calls.lock().unwrap();
         assert_eq!(calls.len(), 2);

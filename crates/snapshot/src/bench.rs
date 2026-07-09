@@ -68,7 +68,12 @@ pub fn drain_counts() -> Vec<(&'static str, u64)> {
 /// Record a pre-measured span (no-op when instrumentation is off).
 pub fn record(name: &'static str, dur: Duration) {
     if enabled() {
-        SPANS.with(|s| s.borrow_mut().push(Span { name, micros: dur.as_micros() }));
+        SPANS.with(|s| {
+            s.borrow_mut().push(Span {
+                name,
+                micros: dur.as_micros(),
+            })
+        });
     }
 }
 

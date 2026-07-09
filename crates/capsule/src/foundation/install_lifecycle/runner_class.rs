@@ -278,8 +278,7 @@ fn detect_vmm() -> (String, String) {
     {
         Ok(out) => {
             let text = String::from_utf8_lossy(&out.stdout);
-            let version =
-                parse_firecracker_version(&text).unwrap_or_else(|| VMM_NONE.to_string());
+            let version = parse_firecracker_version(&text).unwrap_or_else(|| VMM_NONE.to_string());
             (FIRECRACKER_VMM.to_string(), version)
         }
         Err(_) => (VMM_NONE.to_string(), VMM_NONE.to_string()),

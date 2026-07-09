@@ -154,7 +154,10 @@ pub(crate) enum RunnerCommands {
     /// /etc/ato/runner.env file (append-only) and the two systemd units (existing
     /// files are backed up, never clobbered). BIOS virtualization and a non-Ubuntu
     /// OS cannot be fixed from software — those are printed as manual steps.
-    #[command(name = "setup", about = "Prepare this Ubuntu host as a snapshot builder + capsule runner")]
+    #[command(
+        name = "setup",
+        about = "Prepare this Ubuntu host as a snapshot builder + capsule runner"
+    )]
     Setup {
         /// Apply the fixes (host mutation, root only). Without it: dry-run plan.
         #[arg(long, default_value_t = false)]
@@ -204,7 +207,10 @@ pub(crate) enum RunnerCommands {
     /// (firecracker pids, tap devices, loop devices, ato docker containers).
     /// Requires root + KVM + Docker. A green smoke means this host can actually
     /// build AND serve capsule snapshots.
-    #[command(name = "smoke", about = "Local build→restore→proxy→teardown smoke for this runner host")]
+    #[command(
+        name = "smoke",
+        about = "Local build→restore→proxy→teardown smoke for this runner host"
+    )]
     Smoke {
         /// Local address the probe proxy listens on (default: 127.0.0.1:8431).
         #[arg(long, value_name = "ADDR:PORT")]
@@ -225,7 +231,10 @@ pub(crate) enum RunnerCommands {
     /// systemd env file (`/etc/ato/runner.env`, append-only — operator keys are
     /// never overwritten) and verifies the control plane is reachable and the runner
     /// is active. Run with `sudo` to write the env file / start the service.
-    #[command(name = "enroll", about = "Register this host as a Connected Capsule Runner")]
+    #[command(
+        name = "enroll",
+        about = "Register this host as a Connected Capsule Runner"
+    )]
     Enroll {
         /// Control-plane API base URL (else ATO_API_URL / ATO_STORE_API_URL).
         #[arg(long, value_name = "URL")]
@@ -261,7 +270,10 @@ pub(crate) enum RunnerCommands {
     /// and — using its runner token — the control-plane device view (active/online,
     /// last seen, public URL, supported lease kinds incl. restore_snapshot, and slot
     /// capacity) via the read-only `GET /v1/runners/:id/self`.
-    #[command(name = "status", about = "Show local + control-plane status for this runner")]
+    #[command(
+        name = "status",
+        about = "Show local + control-plane status for this runner"
+    )]
     Status {
         /// Emit machine-readable JSON on stdout instead of the human summary.
         #[arg(long, default_value_t = false)]

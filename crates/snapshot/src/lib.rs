@@ -34,24 +34,25 @@ pub mod docker_import;
 mod fake;
 mod firecracker;
 mod kata;
-mod scan_cache;
-mod seal;
 mod manifest;
 pub mod mem_backend_selector;
 pub mod no_secret_scan;
 mod placement;
 mod qemu;
 pub mod rootfs_builder;
+mod scan_cache;
 mod scanner;
+mod seal;
 pub mod state_volume;
 mod uffd;
 mod uffd_page_server;
 
 pub use backend::{
-    BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
-    FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
-    RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
-    SupervisorBindings, TeardownReceipt, ensure_gpu_not_in_snapshot,
+    BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
+    BuildReadyStateReceipt, DeviceProfile, FilesystemModel, GpuMode, IsolationBoundary,
+    RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
+    SnapshotInspection, SnapshotKind, SupervisorBindings, TeardownReceipt,
+    ensure_gpu_not_in_snapshot,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};

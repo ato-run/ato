@@ -55,7 +55,10 @@ impl SourceProbe {
     pub fn scan(dir: &Path) -> Self {
         let has = |f: &str| dir.join(f).exists();
         let has_py_files = std::fs::read_dir(dir)
-            .map(|rd| rd.flatten().any(|e| e.path().extension().is_some_and(|x| x == "py")))
+            .map(|rd| {
+                rd.flatten()
+                    .any(|e| e.path().extension().is_some_and(|x| x == "py"))
+            })
             .unwrap_or(false);
         SourceProbe {
             has_package_json: has("package.json"),
@@ -202,15 +205,25 @@ pub struct RootfsReceipt {
 /// Rejects (Phase 8 firewall + v1 scope): any required secret / binding, any external
 /// capability, GPU, a runtime outside {static web, node source, python source}, and a
 /// missing port or healthcheck. The start command (`execution.entrypoint`) is required.
-pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
+pub fn derive_build_spec(
+    m: &CapsuleManifest,
+    probe: &SourceProbe,
+) -> Result<RootfsBuildSpec, String> {
     if m.secrets.values().any(|s| s.required) {
         return Err("capsule requires secrets (secrets.*.required)".into());
     }
     // Any binding disqualifies a v1 no-binding snapshot — this is also how user-files
     // and oauth are declared (BindingKind::UserFiles / ::Oauth), so it rejects those too.
     if !m.bindings.is_empty() {
-        let kinds: Vec<String> = m.bindings.values().map(|b| format!("{:?}", b.kind).to_ascii_lowercase()).collect();
-        return Err(format!("capsule declares bindings ({}) — v1 is no-binding only", kinds.join(", ")));
+        let kinds: Vec<String> = m
+            .bindings
+            .values()
+            .map(|b| format!("{:?}", b.kind).to_ascii_lowercase())
+            .collect();
+        return Err(format!(
+            "capsule declares bindings ({}) — v1 is no-binding only",
+            kinds.join(", ")
+        ));
     }
     if !m.external.is_empty() {
         return Err("capsule requires external services (external.*)".into());
@@ -221,7 +234,9 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
 
     // 0.3 runtime/port/healthcheck live on the default [targets.<label>], not [execution].
     let target = m.resolve_default_target().map_err(|e| e.to_string())?;
-    let port = target.port.ok_or("capsule default target has no port (declare `port = <n>` on the default target)")?;
+    let port = target
+        .port
+        .ok_or("capsule default target has no port (declare `port = <n>` on the default target)")?;
     // #932: an explicit `readiness_probe.http_get` wins; otherwise SYNTHESIZE one from
     // the declared port. The capsule contract the CLI/runner path honors is "a declared
     // port ⇒ Ato synthesizes an honest readiness probe"; the snapshot boot-verify
@@ -256,7 +271,10 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
             declared_start_cmd.clone()
         }
     };
-    let build_cmd = target.build_command.clone().filter(|c| !c.trim().is_empty());
+    let build_cmd = target
+        .build_command
+        .clone()
+        .filter(|c| !c.trim().is_empty());
     // Manifest commands must be single-line + NUL-free: they are embedded (single-quoted)
     // into a generated Dockerfile/init, and a newline could break out of the quoting or the
     // heredoc delimiter. A NUL can't survive the shell either. Fail closed.
@@ -269,13 +287,26 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
     // the source probe. Only static web + node source + python source are supported (v1).
     let rt = RuntimeType::from_target_runtime(&target.runtime).unwrap_or(RuntimeType::Source);
     let driver = target.driver.as_deref().unwrap_or("").to_ascii_lowercase();
-    let lang = target.language.as_deref().unwrap_or("").to_ascii_lowercase();
+    let lang = target
+        .language
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let runtime = match rt.normalize() {
         RuntimeType::Web => RuntimeKind::StaticWeb,
         RuntimeType::Source => {
-            if driver == "node" || lang == "javascript" || lang == "typescript" || probe.has_package_json {
+            if driver == "node"
+                || lang == "javascript"
+                || lang == "typescript"
+                || probe.has_package_json
+            {
                 RuntimeKind::Node
-            } else if driver == "python" || lang == "python" || probe.has_requirements_txt || probe.has_pyproject || probe.has_py_files {
+            } else if driver == "python"
+                || lang == "python"
+                || probe.has_requirements_txt
+                || probe.has_pyproject
+                || probe.has_py_files
+            {
                 RuntimeKind::Python
             } else if driver == "static" || probe.has_index_html {
                 RuntimeKind::StaticWeb
@@ -284,7 +315,9 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
             }
         }
         other => {
-            return Err(format!("unsupported runtime {other:?} (v1 supports: static web, node source, python source)"));
+            return Err(format!(
+                "unsupported runtime {other:?} (v1 supports: static web, node source, python source)"
+            ));
         }
     };
 
@@ -292,7 +325,11 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
         RuntimeKind::Node => (
             "node:20-slim".to_string(),
-            Some(if probe.has_package_json { "npm ci --omit=dev || npm install --omit=dev".to_string() } else { "true".to_string() }),
+            Some(if probe.has_package_json {
+                "npm ci --omit=dev || npm install --omit=dev".to_string()
+            } else {
+                "true".to_string()
+            }),
         ),
         RuntimeKind::Python => (
             "python:3.11-slim".to_string(),
@@ -307,7 +344,18 @@ pub fn derive_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<Roo
         ),
     };
 
-    Ok(RootfsBuildSpec { runtime, base_image, install_cmd, build_cmd, start_cmd, declared_start_cmd, port, healthcheck, probe_synthesized, supervisor: None })
+    Ok(RootfsBuildSpec {
+        runtime,
+        base_image,
+        install_cmd,
+        build_cmd,
+        start_cmd,
+        declared_start_cmd,
+        port,
+        healthcheck,
+        probe_synthesized,
+        supervisor: None,
+    })
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -333,9 +381,14 @@ pub(crate) fn valid_env_var_name(name: &str) -> bool {
 /// and GPU stay rejected. All runtime/port/command detection is the exact same tested
 /// logic as the no-binding path — this reuses [`derive_build_spec`] on a secret-stripped
 /// manifest, so it cannot drift, then attaches the supervisor config.
-pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
+pub fn derive_supervisor_build_spec(
+    m: &CapsuleManifest,
+    probe: &SourceProbe,
+) -> Result<RootfsBuildSpec, String> {
     if m.secrets.is_empty() {
-        return Err("supervisor build requires at least one [secrets.*] (delivery = \"env\")".into());
+        return Err(
+            "supervisor build requires at least one [secrets.*] (delivery = \"env\")".into(),
+        );
     }
     for (name, s) in &m.secrets {
         // Only `env` delivery is supervisor env injection. `file` is a request-time
@@ -379,7 +432,11 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
                  [secrets.openai_api_key] env = \"OPENAI_API_KEY\""
             ));
         }
-        let var = s.env.clone().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| name.clone());
+        let var = s
+            .env
+            .clone()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| name.clone());
         if !valid_env_var_name(&var) {
             return Err(format!(
                 "secret '{name}': env var name {var:?} is not a POSIX identifier \
@@ -408,8 +465,11 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // used, so the guest never blocks on a secret no service consumes. The legacy
     // single-service build is untouched (its sole workload gets every secret).
     if let Some(svcs) = services.as_ref() {
-        let scoped: std::collections::BTreeSet<&str> =
-            svcs.iter().flat_map(|s| s.env_map.values()).map(|s| s.as_str()).collect();
+        let scoped: std::collections::BTreeSet<&str> = svcs
+            .iter()
+            .flat_map(|s| s.env_map.values())
+            .map(|s| s.as_str())
+            .collect();
         for (name, s) in &m.secrets {
             if s.required && !scoped.contains(name.as_str()) {
                 return Err(format!(
@@ -426,7 +486,12 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     let public_service = services
         .as_ref()
         .and_then(|svcs| svcs.iter().find(|s| s.public).map(|s| s.name.clone()));
-    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services, public_service });
+    spec.supervisor = Some(SupervisorBuildSpec {
+        binding_names,
+        env_map,
+        services,
+        public_service,
+    });
     Ok(spec)
 }
 
@@ -479,7 +544,8 @@ fn build_supervisor_json(
             // `SupervisorConfig.volumes` shape, not nested under a service.
             // Flattened across every service and ordered by drive_id (already
             // assigned in one global, deterministic pass above).
-            let mut volumes: Vec<&DurableVolumeBuildSpec> = services.iter().flat_map(|s| &s.volumes).collect();
+            let mut volumes: Vec<&DurableVolumeBuildSpec> =
+                services.iter().flat_map(|s| &s.volumes).collect();
             volumes.sort_by(|a, b| a.drive_id.cmp(&b.drive_id));
             if !volumes.is_empty() {
                 obj["volumes"] = serde_json::json!(
@@ -510,7 +576,9 @@ fn build_supervisor_json(
 /// (it keys per-service logs and may become an in-guest DNS label).
 fn valid_service_name(name: &str) -> bool {
     let ok_len = (1..=63).contains(&name.len());
-    let ok_chars = name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let ok_chars = name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     let ends = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
     ok_len && ok_chars && ends(name.bytes().next()) && ends(name.bytes().next_back())
 }
@@ -599,7 +667,9 @@ fn derive_supervisor_services(
         for binding in &svc.state_bindings {
             let state_name = binding.state.trim();
             if !bound_states_this_service.insert(state_name.to_string()) {
-                return Err(format!("service '{name}': state '{state_name}' is bound more than once"));
+                return Err(format!(
+                    "service '{name}': state '{state_name}' is bound more than once"
+                ));
             }
             if binding.service_target.is_some() {
                 return Err(format!(
@@ -657,7 +727,9 @@ fn derive_supervisor_services(
         let depends_on = svc.depends_on.clone().unwrap_or_default();
         for dep in &depends_on {
             if !names.contains(dep.as_str()) {
-                return Err(format!("service '{name}': depends_on '{dep}' is not a declared service"));
+                return Err(format!(
+                    "service '{name}': depends_on '{dep}' is not a declared service"
+                ));
             }
             if dep == *name {
                 return Err(format!("service '{name}': depends_on itself"));
@@ -671,7 +743,9 @@ fn derive_supervisor_services(
         let mut base_env: BTreeMap<String, String> = BTreeMap::new();
         for (k, v) in svc.env.clone().unwrap_or_default() {
             if !valid_env_var_name(&k) {
-                return Err(format!("service '{name}': env var {k:?} is not a POSIX identifier"));
+                return Err(format!(
+                    "service '{name}': env var {k:?} is not a POSIX identifier"
+                ));
             }
             base_env.insert(k, v);
         }
@@ -693,7 +767,11 @@ fn derive_supervisor_services(
             }
         }
         // DNS-safe aliases (they may become in-guest DNS labels in the aliasing slice).
-        let aliases = svc.network.as_ref().map(|n| n.aliases.clone()).unwrap_or_default();
+        let aliases = svc
+            .network
+            .as_ref()
+            .map(|n| n.aliases.clone())
+            .unwrap_or_default();
         for alias in &aliases {
             if !valid_service_name(alias) {
                 return Err(format!(
@@ -811,10 +889,17 @@ fn derive_supervisor_services(
              a stable identity from"
                 .to_string()
         })?;
-        let mut state_names: Vec<String> = collected.iter().flat_map(|r| &r.volumes).map(|v| v.state_name.clone()).collect();
+        let mut state_names: Vec<String> = collected
+            .iter()
+            .flat_map(|r| &r.volumes)
+            .map(|v| v.state_name.clone())
+            .collect();
         state_names.sort();
-        let index_of: BTreeMap<String, usize> =
-            state_names.into_iter().enumerate().map(|(i, name)| (name, i)).collect();
+        let index_of: BTreeMap<String, usize> = state_names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| (name, i))
+            .collect();
         for r in &mut collected {
             for v in &mut r.volumes {
                 let i = index_of[&v.state_name];
@@ -848,7 +933,10 @@ fn derive_supervisor_services(
         let mut seen = std::collections::BTreeSet::new();
         for ph in &r.expose {
             if !seen.insert(ph.as_str()) {
-                return Err(format!("service '{}': duplicate expose placeholder {ph:?}", r.name));
+                return Err(format!(
+                    "service '{}': duplicate expose placeholder {ph:?}",
+                    r.name
+                ));
             }
         }
     }
@@ -928,7 +1016,9 @@ fn derive_supervisor_services(
     let mut alloc = || -> Result<u16, String> {
         loop {
             let p = next;
-            next = next.checked_add(1).ok_or("ran out of ports allocating service expose placeholders")?;
+            next = next
+                .checked_add(1)
+                .ok_or("ran out of ports allocating service expose placeholders")?;
             if !reserved.contains(&p) {
                 reserved.insert(p);
                 return Ok(p);
@@ -940,7 +1030,11 @@ fn derive_supervisor_services(
     let mut primary: BTreeMap<String, u16> = BTreeMap::new();
     for r in &collected {
         for (i, ph) in r.expose.iter().enumerate() {
-            let port = if r.public && i == 0 { target_port } else { alloc()? };
+            let port = if r.public && i == 0 {
+                target_port
+            } else {
+                alloc()?
+            };
             resolved_ports.insert((r.name.clone(), ph.clone()), port);
             if i == 0 {
                 primary.entry(r.name.clone()).or_insert(port);
@@ -985,7 +1079,9 @@ fn derive_supervisor_services(
         // set it idempotently BEFORE the checked injections (an expose placeholder
         // literally named "PORT" would then correctly collide).
         if r.public {
-            base_env.entry("PORT".to_string()).or_insert_with(|| target_port.to_string());
+            base_env
+                .entry("PORT".to_string())
+                .or_insert_with(|| target_port.to_string());
         }
         // Own placeholders, unprefixed, so THIS service binds there.
         for ph in &r.expose {
@@ -1052,8 +1148,12 @@ fn derive_supervisor_services(
 /// Hostnames `build_etc_hosts` bakes unconditionally for the loopback entries — a
 /// service name or alias may not shadow one (ambiguous DNS). `localhost.localdomain`
 /// is reserved defensively even though it is not emitted.
-const RESERVED_HOSTNAMES: &[&str] =
-    &["localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"];
+const RESERVED_HOSTNAMES: &[&str] = &[
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+];
 
 /// v1.5 (ato#973): the `/etc/hosts` a multi-service guest is built with, so a
 /// service reaches another by NAME on loopback. Every service name and alias maps
@@ -1070,9 +1170,7 @@ fn build_etc_hosts(services: &[ServiceBuildSpec]) -> String {
     }
     names.sort_unstable();
     let joined = names.join(" ");
-    format!(
-        "127.0.0.1 localhost {joined}\n::1 localhost ip6-localhost ip6-loopback\n"
-    )
+    format!("127.0.0.1 localhost {joined}\n::1 localhost ip6-localhost ip6-loopback\n")
 }
 
 /// Uppercase a service name into an env-var prefix: `-` → `_`, then uppercase
@@ -1086,7 +1184,9 @@ fn env_prefix(service: &str) -> String {
 /// not starting/ending with a hyphen. Anything else (empty, `/`, `..`, path-like) fails.
 pub fn valid_github_owner(owner: &str) -> bool {
     let ok_len = (1..=39).contains(&owner.len());
-    let ok_chars = owner.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let ok_chars = owner
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-');
     let ends = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_alphanumeric());
     ok_len && ok_chars && ends(owner.bytes().next()) && ends(owner.bytes().next_back())
 }
@@ -1095,7 +1195,9 @@ pub fn valid_github_owner(owner: &str) -> bool {
 /// pathological `.` / `..`.
 pub fn valid_github_repo(repo: &str) -> bool {
     let ok_len = (1..=100).contains(&repo.len());
-    let ok_chars = repo.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    let ok_chars = repo
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
     ok_len && ok_chars && repo != "." && repo != ".."
 }
 
@@ -1112,7 +1214,9 @@ pub(crate) fn validate_subdir(subdir: &str) -> Result<(), String> {
         match c {
             Component::Normal(_) | Component::CurDir => {}
             Component::ParentDir => return Err(format!("subdir {subdir:?} may not contain '..'")),
-            Component::RootDir | Component::Prefix(_) => return Err(format!("subdir {subdir:?} has an illegal prefix")),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("subdir {subdir:?} has an illegal prefix"));
+            }
         }
     }
     Ok(())
@@ -1131,7 +1235,14 @@ pub(crate) fn validate_subdir(subdir: &str) -> Result<(), String> {
 /// (the Store-apply publish model stores the manifest server-side precisely because
 /// upstream repos carry none). When `None` (raw-GitHub capsule jobs), the repo's own
 /// `capsule.toml` is required, fail-closed exactly as before.
-pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<&str>, manifest_override: Option<&str>, dest: &Path) -> Result<PathBuf, String> {
+pub fn materialize_source(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+    manifest_override: Option<&str>,
+    dest: &Path,
+) -> Result<PathBuf, String> {
     if !valid_github_owner(owner) {
         return Err(format!("invalid github owner {owner:?}"));
     }
@@ -1139,7 +1250,9 @@ pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<
         return Err(format!("invalid github repo {repo:?}"));
     }
     if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(format!("refusing non-pinned commit {commit:?} (need a full 40-char sha)"));
+        return Err(format!(
+            "refusing non-pinned commit {commit:?} (need a full 40-char sha)"
+        ));
     }
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
@@ -1153,14 +1266,20 @@ pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<
         }
         let out = c.output().map_err(|e| format!("git {args:?}: {e}"))?;
         if !out.status.success() {
-            return Err(format!("git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
         Ok(())
     };
     std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     run(&["init", "-q"], Some(dest))?;
     run(&["remote", "add", "origin", &url], Some(dest))?;
-    run(&["fetch", "-q", "--depth", "1", "origin", commit], Some(dest))?;
+    run(
+        &["fetch", "-q", "--depth", "1", "origin", commit],
+        Some(dest),
+    )?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
 
     let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
@@ -1181,7 +1300,11 @@ pub fn materialize_source(owner: &str, repo: &str, commit: &str, subdir: Option<
 /// root (the raw-GitHub path); recipe-manifest jobs pass `false` and write the approved
 /// recipe there instead (#932). Split out so the containment logic is unit-testable
 /// without a network clone.
-pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>, require_manifest: bool) -> Result<PathBuf, String> {
+pub(crate) fn contained_source_root(
+    dest: &Path,
+    subdir: Option<&str>,
+    require_manifest: bool,
+) -> Result<PathBuf, String> {
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
@@ -1189,10 +1312,18 @@ pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>, require_m
         Some(s) => dest.join(s),
         None => dest.to_path_buf(),
     };
-    let dest_canon = dest.canonicalize().map_err(|e| format!("canonicalize checkout: {e}"))?;
-    let root_canon = root.canonicalize().map_err(|e| format!("resolved source root {} not found: {e}", root.display()))?;
+    let dest_canon = dest
+        .canonicalize()
+        .map_err(|e| format!("canonicalize checkout: {e}"))?;
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("resolved source root {} not found: {e}", root.display()))?;
     if !root_canon.starts_with(&dest_canon) {
-        return Err(format!("subdir escapes the checkout: {} is outside {}", root_canon.display(), dest_canon.display()));
+        return Err(format!(
+            "subdir escapes the checkout: {} is outside {}",
+            root_canon.display(),
+            dest_canon.display()
+        ));
     }
     if require_manifest && !root_canon.join("capsule.toml").exists() {
         return Err(format!(
@@ -1207,7 +1338,12 @@ pub(crate) fn contained_source_root(dest: &Path, subdir: Option<&str>, require_m
 /// writing it to `out_ext4`. Shells out to `docker` (assemble the app filesystem) and
 /// `mkfs.ext4`/`mount` (pack it) — the same mechanism as `build_rootfs_ro.sh`, driven by
 /// the capsule instead of a synthetic image. Requires root (mount) + docker on the host.
-pub fn build_rootfs(source_dir: &Path, spec: &RootfsBuildSpec, out_ext4: &Path, size_mib: u64) -> Result<RootfsReceipt, String> {
+pub fn build_rootfs(
+    source_dir: &Path,
+    spec: &RootfsBuildSpec,
+    out_ext4: &Path,
+    size_mib: u64,
+) -> Result<RootfsReceipt, String> {
     let script = build_rootfs_script(spec, size_mib);
     let out = Command::new("bash")
         .arg("-c")
@@ -1217,11 +1353,25 @@ pub fn build_rootfs(source_dir: &Path, spec: &RootfsBuildSpec, out_ext4: &Path, 
         .output()
         .map_err(|e| format!("spawn rootfs build: {e}"))?;
     if !out.status.success() {
-        let tail: String = String::from_utf8_lossy(&out.stderr).lines().rev().take(12).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+        let tail: String = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(format!("rootfs build failed: {tail}"));
     }
-    let rootfs_bytes = std::fs::metadata(out_ext4).map_err(|e| e.to_string())?.len();
-    Ok(RootfsReceipt { spec: spec.clone(), rootfs_path: out_ext4.display().to_string(), rootfs_bytes })
+    let rootfs_bytes = std::fs::metadata(out_ext4)
+        .map_err(|e| e.to_string())?
+        .len();
+    Ok(RootfsReceipt {
+        spec: spec.clone(),
+        rootfs_path: out_ext4.display().to_string(),
+        rootfs_bytes,
+    })
 }
 
 /// Reject NUL bytes and line breaks in a value interpolated into a builder-generated
@@ -1234,7 +1384,9 @@ pub fn reject_control_chars(label: &str, value: &str) -> Result<(), String> {
         return Err(format!("{label} contains a NUL byte"));
     }
     if value.contains('\n') || value.contains('\r') {
-        return Err(format!("{label} contains a newline (single-line value required)"));
+        return Err(format!(
+            "{label} contains a newline (single-line value required)"
+        ));
     }
     Ok(())
 }
@@ -1261,7 +1413,8 @@ pub(crate) fn build_rootfs_script(spec: &RootfsBuildSpec, size_mib: u64) -> Stri
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     let build_q = shell_single_quote(spec.build_cmd.as_deref().unwrap_or("true"));
 
-    let (agent_prep, launch) = supervisor_prep_and_launch(spec.supervisor.as_ref(), spec.port, &spec.start_cmd);
+    let (agent_prep, launch) =
+        supervisor_prep_and_launch(spec.supervisor.as_ref(), spec.port, &spec.start_cmd);
     // The legacy acquire step: copy the materialized source into the build dir and
     // assemble the app image from a GENERATED Dockerfile. The Docker-import path
     // (ato#994) replaces exactly this step with an already-built imported image —
@@ -1311,7 +1464,10 @@ pub(crate) fn supervisor_prep_and_launch(
 ) -> (String, String) {
     let start_q = shell_single_quote(start_cmd);
     match supervisor {
-        None => (String::new(), format!("/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &")),
+        None => (
+            String::new(),
+            format!("/bin/sh -lc {start_q} >/tmp/app.log 2>&1 &"),
+        ),
         Some(sup) => {
             // supervisor.json (no secret value — env var → binding name only).
             let cfg = build_supervisor_json(sup, port, start_cmd);
@@ -1367,7 +1523,9 @@ pub(crate) fn supervisor_prep_and_launch(
                 } else {
                     let args: Vec<String> = targets
                         .iter()
-                        .map(|t| format!("\"$BUILD\"{}", shell_single_quote(&format!("/rootfs{t}"))))
+                        .map(|t| {
+                            format!("\"$BUILD\"{}", shell_single_quote(&format!("/rootfs{t}")))
+                        })
                         .collect();
                     format!("\nmkdir -p {}", args.join(" "))
                 }
@@ -1514,7 +1672,10 @@ readiness_probe = { http_get = "/health" }
     }
 
     fn probe_python() -> SourceProbe {
-        SourceProbe { has_requirements_txt: true, ..Default::default() }
+        SourceProbe {
+            has_requirements_txt: true,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -1541,7 +1702,8 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(spec.start_cmd, "python3 app.py");
         assert_eq!(spec.declared_start_cmd, "app.py");
         // A path-y bare script normalizes too.
-        let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"scripts/serve.py\""));
+        let m =
+            parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"scripts/serve.py\""));
         let spec = derive_build_spec(&m, &probe_python()).unwrap();
         assert_eq!(spec.start_cmd, "python3 scripts/serve.py");
         // Multi-token commands are explicit shell commands — verbatim, even when they
@@ -1551,7 +1713,14 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(spec.start_cmd, "python app.py");
         // Non-python commands are untouched.
         let m = parse(&base_toml().replace("run = \"python3 app.py\"", "run = \"node server.js\""));
-        let spec = derive_build_spec(&m, &SourceProbe { has_package_json: true, ..Default::default() }).unwrap();
+        let spec = derive_build_spec(
+            &m,
+            &SourceProbe {
+                has_package_json: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(spec.start_cmd, "node server.js");
         assert_eq!(spec.declared_start_cmd, "node server.js");
     }
@@ -1559,7 +1728,14 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn node_detected_from_package_json() {
         let m = parse(&base_toml().replace("python3 app.py", "node server.js"));
-        let spec = derive_build_spec(&m, &SourceProbe { has_package_json: true, ..Default::default() }).unwrap();
+        let spec = derive_build_spec(
+            &m,
+            &SourceProbe {
+                has_package_json: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(spec.runtime, RuntimeKind::Node);
         assert_eq!(spec.base_image, "node:20-slim");
     }
@@ -1575,26 +1751,58 @@ readiness_probe = { http_get = "/health" }
     fn stdlib_python_detected_from_py_files_with_no_install() {
         // A python app that ships only *.py (no requirements/pyproject, no driver).
         let m = parse(&base_toml());
-        let spec = derive_build_spec(&m, &SourceProbe { has_py_files: true, ..Default::default() }).unwrap();
+        let spec = derive_build_spec(
+            &m,
+            &SourceProbe {
+                has_py_files: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(spec.runtime, RuntimeKind::Python);
         assert_eq!(spec.install_cmd.as_deref(), Some("true")); // nothing to install
     }
 
     #[test]
     fn required_secret_binding_external_gpu_all_fail_closed() {
-        let secret = format!("{}\n[secrets.api_key]\nrequired = true\nenv = \"API_KEY\"\ndelivery = \"proxy\"\n", base_toml());
-        assert!(derive_build_spec(&parse(&secret), &probe_python()).unwrap_err().contains("secrets"));
-        let binding = format!("{}\n[bindings.user_files]\nkind = \"user_files\"\nrequired = true\nscope = \"user\"\n", base_toml());
-        assert!(derive_build_spec(&parse(&binding), &probe_python()).unwrap_err().contains("bindings"));
-        let external = format!("{}\n[external.gpu]\ntype = \"gpu\"\nrequired = false\n", base_toml());
-        assert!(derive_build_spec(&parse(&external), &probe_python()).unwrap_err().contains("external"));
+        let secret = format!(
+            "{}\n[secrets.api_key]\nrequired = true\nenv = \"API_KEY\"\ndelivery = \"proxy\"\n",
+            base_toml()
+        );
+        assert!(
+            derive_build_spec(&parse(&secret), &probe_python())
+                .unwrap_err()
+                .contains("secrets")
+        );
+        let binding = format!(
+            "{}\n[bindings.user_files]\nkind = \"user_files\"\nrequired = true\nscope = \"user\"\n",
+            base_toml()
+        );
+        assert!(
+            derive_build_spec(&parse(&binding), &probe_python())
+                .unwrap_err()
+                .contains("bindings")
+        );
+        let external = format!(
+            "{}\n[external.gpu]\ntype = \"gpu\"\nrequired = false\n",
+            base_toml()
+        );
+        assert!(
+            derive_build_spec(&parse(&external), &probe_python())
+                .unwrap_err()
+                .contains("external")
+        );
     }
 
     #[test]
     fn missing_port_fails_closed_but_missing_probe_synthesizes() {
         // No port: still fail-closed — nothing to probe, nothing to proxy.
         let no_port = base_toml().replace("port = 8080\n", "");
-        assert!(derive_build_spec(&parse(&no_port), &probe_python()).unwrap_err().contains("port"));
+        assert!(
+            derive_build_spec(&parse(&no_port), &probe_python())
+                .unwrap_err()
+                .contains("port")
+        );
         // #932: no explicit readiness_probe but a declared port ⇒ synthesize `http_get "/"`
         // (the port⇒probe contract the CLI/runner path honors), recorded as synthesized.
         let no_hc = base_toml().replace("readiness_probe = { http_get = \"/health\" }\n", "");
@@ -1608,21 +1816,59 @@ readiness_probe = { http_get = "/health" }
     fn materialize_rejects_a_non_pinned_commit() {
         let dir = tempfile::tempdir().unwrap();
         let sha = "a".repeat(40);
-        assert!(materialize_source("acme", "app", "main", None, None, dir.path()).unwrap_err().contains("non-pinned"));
+        assert!(
+            materialize_source("acme", "app", "main", None, None, dir.path())
+                .unwrap_err()
+                .contains("non-pinned")
+        );
         // path-like / invalid owner + repo are rejected before any network use.
-        assert!(materialize_source("../evil", "app", &sha, None, None, dir.path()).unwrap_err().contains("owner"));
-        assert!(materialize_source("acme/x", "app", &sha, None, None, dir.path()).unwrap_err().contains("owner"));
-        assert!(materialize_source("acme", "a/b", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
-        assert!(materialize_source("acme", "..", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
-        assert!(materialize_source("acme", "", &sha, None, None, dir.path()).unwrap_err().contains("repo"));
+        assert!(
+            materialize_source("../evil", "app", &sha, None, None, dir.path())
+                .unwrap_err()
+                .contains("owner")
+        );
+        assert!(
+            materialize_source("acme/x", "app", &sha, None, None, dir.path())
+                .unwrap_err()
+                .contains("owner")
+        );
+        assert!(
+            materialize_source("acme", "a/b", &sha, None, None, dir.path())
+                .unwrap_err()
+                .contains("repo")
+        );
+        assert!(
+            materialize_source("acme", "..", &sha, None, None, dir.path())
+                .unwrap_err()
+                .contains("repo")
+        );
+        assert!(
+            materialize_source("acme", "", &sha, None, None, dir.path())
+                .unwrap_err()
+                .contains("repo")
+        );
     }
 
     #[test]
     fn github_identity_validation() {
-        assert!(valid_github_owner("acme") && valid_github_owner("a-b-1") && valid_github_owner("A9"));
-        assert!(!valid_github_owner("") && !valid_github_owner("-a") && !valid_github_owner("a-") && !valid_github_owner("a/b") && !valid_github_owner(".."));
+        assert!(
+            valid_github_owner("acme") && valid_github_owner("a-b-1") && valid_github_owner("A9")
+        );
+        assert!(
+            !valid_github_owner("")
+                && !valid_github_owner("-a")
+                && !valid_github_owner("a-")
+                && !valid_github_owner("a/b")
+                && !valid_github_owner("..")
+        );
         assert!(valid_github_repo("my.app_1-x") && valid_github_repo("a"));
-        assert!(!valid_github_repo("") && !valid_github_repo(".") && !valid_github_repo("..") && !valid_github_repo("a/b") && !valid_github_repo("a b"));
+        assert!(
+            !valid_github_repo("")
+                && !valid_github_repo(".")
+                && !valid_github_repo("..")
+                && !valid_github_repo("a/b")
+                && !valid_github_repo("a b")
+        );
     }
 
     #[test]
@@ -1658,7 +1904,10 @@ readiness_probe = { http_get = "/health" }
         std::fs::create_dir_all(checkout.path().join("src")).unwrap();
         let err = contained_source_root(checkout.path(), None, true).unwrap_err();
         assert!(err.contains("no capsule.toml"), "{err}");
-        assert!(err.contains("recipe manifest"), "the error must say what was missing: {err}");
+        assert!(
+            err.contains("recipe manifest"),
+            "the error must say what was missing: {err}"
+        );
         assert!(contained_source_root(checkout.path(), None, false).is_ok());
         // Containment is still enforced on the recipe path (subdir escape still rejected).
         #[cfg(unix)]
@@ -1673,10 +1922,24 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn non_required_binding_is_also_rejected() {
         // user-files / oauth are BindingKinds; any binding (even required=false) is out.
-        let uf = format!("{}\n[bindings.user_files]\nkind = \"user_files\"\nrequired = false\nscope = \"user\"\n", base_toml());
-        assert!(derive_build_spec(&parse(&uf), &probe_python()).unwrap_err().contains("binding"));
-        let oauth = format!("{}\n[bindings.login]\nkind = \"oauth\"\nrequired = false\nscope = \"user\"\n", base_toml());
-        assert!(derive_build_spec(&parse(&oauth), &probe_python()).unwrap_err().contains("binding"));
+        let uf = format!(
+            "{}\n[bindings.user_files]\nkind = \"user_files\"\nrequired = false\nscope = \"user\"\n",
+            base_toml()
+        );
+        assert!(
+            derive_build_spec(&parse(&uf), &probe_python())
+                .unwrap_err()
+                .contains("binding")
+        );
+        let oauth = format!(
+            "{}\n[bindings.login]\nkind = \"oauth\"\nrequired = false\nscope = \"user\"\n",
+            base_toml()
+        );
+        assert!(
+            derive_build_spec(&parse(&oauth), &probe_python())
+                .unwrap_err()
+                .contains("binding")
+        );
     }
 
     #[test]
@@ -1694,8 +1957,16 @@ readiness_probe = { http_get = "/health" }
             supervisor: None,
         };
         let script = build_rootfs_script(&spec, 512);
-        assert!(script.contains("trap cleanup EXIT"), "script must install an EXIT cleanup trap");
-        assert!(script.contains("docker rm -f") && script.contains("docker rmi -f") && script.contains("umount"), "cleanup must reap container/image/mount");
+        assert!(
+            script.contains("trap cleanup EXIT"),
+            "script must install an EXIT cleanup trap"
+        );
+        assert!(
+            script.contains("docker rm -f")
+                && script.contains("docker rmi -f")
+                && script.contains("umount"),
+            "cleanup must reap container/image/mount"
+        );
     }
 
     #[test]
@@ -1716,13 +1987,25 @@ readiness_probe = { http_get = "/health" }
         };
         let script = build_rootfs_script(&spec, 512);
         // Heredocs are QUOTED ⇒ the builder host performs no expansion of their bodies.
-        assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs must be quoted");
+        assert!(
+            script.contains("<<'DOCKER'") && script.contains("<<'INIT'"),
+            "heredocs must be quoted"
+        );
         // The command appears as a single-quoted argument to sh -lc (Docker RUN + guest init),
         // never as a bare host-shell token.
-        assert!(script.contains("RUN /bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)'"), "build cmd must be a single-quoted Docker RUN arg");
-        assert!(script.contains("/bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)' >/tmp/app.log"), "start cmd must be a single-quoted guest-init arg");
+        assert!(
+            script.contains("RUN /bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)'"),
+            "build cmd must be a single-quoted Docker RUN arg"
+        );
+        assert!(
+            script.contains("/bin/sh -lc 'echo $(touch /tmp/ato-host-pwned)' >/tmp/app.log"),
+            "start cmd must be a single-quoted guest-init arg"
+        );
         // And there is no UNquoted occurrence that the host would expand.
-        assert!(!script.contains("( echo $(touch"), "must not embed the command raw");
+        assert!(
+            !script.contains("( echo $(touch"),
+            "must not embed the command raw"
+        );
     }
 
     #[test]
@@ -1735,8 +2018,15 @@ readiness_probe = { http_get = "/health" }
 
     #[test]
     fn newline_or_nul_in_a_command_fails_closed() {
-        let nl = base_toml().replace("run = \"python3 app.py\"", "run = \"python3 app.py\\nrm -rf /\"");
-        assert!(derive_build_spec(&parse(&nl), &probe_python()).unwrap_err().contains("newline"));
+        let nl = base_toml().replace(
+            "run = \"python3 app.py\"",
+            "run = \"python3 app.py\\nrm -rf /\"",
+        );
+        assert!(
+            derive_build_spec(&parse(&nl), &probe_python())
+                .unwrap_err()
+                .contains("newline")
+        );
     }
 
     // ── v1.2 supervisor emission ──────────────────────────────────────────────
@@ -1755,7 +2045,9 @@ readiness_probe = { http_get = "/health" }
         let m = parse(&supervisor_toml());
         // The v1.0 no-binding path still rejects any secret (unchanged contract).
         assert!(
-            derive_build_spec(&m, &probe_python()).unwrap_err().contains("secrets"),
+            derive_build_spec(&m, &probe_python())
+                .unwrap_err()
+                .contains("secrets"),
             "no-binding derive must still reject a secret capsule"
         );
         // The v1.2 supervisor path accepts it and produces the supervisor config.
@@ -1763,7 +2055,10 @@ readiness_probe = { http_get = "/health" }
         let sup = spec.supervisor.as_ref().expect("supervisor present");
         // Binding name = the (lowercase) secret key; env_map is ENV_VAR → binding name.
         assert_eq!(sup.binding_names, vec!["openai_api_key"]);
-        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert_eq!(
+            sup.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
         // Runtime/port/command detection is identical to the no-binding path.
         assert_eq!(spec.start_cmd, "python3 app.py");
         assert_eq!(spec.port, 8080);
@@ -1783,7 +2078,10 @@ readiness_probe = { http_get = "/health" }
         );
         let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
         assert!(err.contains("binding name"), "{err}");
-        assert!(err.contains("[secrets.openai_api_key]"), "message must suggest the lowercase form: {err}");
+        assert!(
+            err.contains("[secrets.openai_api_key]"),
+            "message must suggest the lowercase form: {err}"
+        );
         // The canonical lowercase-key + explicit-uppercase-env form is accepted.
         assert!(derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).is_ok());
     }
@@ -1794,7 +2092,8 @@ readiness_probe = { http_get = "/health" }
         // all rejected here (file is a later request-time read path; proxy/fd never
         // inject an env var).
         for d in ["file", "proxy", "fd"] {
-            let toml = supervisor_toml().replace("env = \"OPENAI_API_KEY\"", &format!("delivery = \"{d}\""));
+            let toml = supervisor_toml()
+                .replace("env = \"OPENAI_API_KEY\"", &format!("delivery = \"{d}\""));
             let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
             assert!(err.contains("delivery"), "{d}: {err}");
         }
@@ -1807,13 +2106,17 @@ readiness_probe = { http_get = "/health" }
             "{}\n[bindings.data]\nkind = \"state\"\nmount = \"/data\"\n",
             supervisor_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&with_binding), &probe_python())
-            .unwrap_err()
-            .contains("no-binding"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&with_binding), &probe_python())
+                .unwrap_err()
+                .contains("no-binding")
+        );
         // No secrets at all → not a supervisor build.
-        assert!(derive_supervisor_build_spec(&parse(&base_toml()), &probe_python())
-            .unwrap_err()
-            .contains("requires at least one"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&base_toml()), &probe_python())
+                .unwrap_err()
+                .contains("requires at least one")
+        );
     }
 
     #[test]
@@ -1824,27 +2127,30 @@ readiness_probe = { http_get = "/health" }
             "{}\n[secrets.key]\nrequired = true\nenv = \"BAD-VAR\"\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&bad), &probe_python())
-            .unwrap_err()
-            .contains("POSIX identifier"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&bad), &probe_python())
+                .unwrap_err()
+                .contains("POSIX identifier")
+        );
         // Two secrets resolving to the SAME env var is ambiguous → fail-closed.
         let dup = format!(
             "{}\n[secrets.key_a]\nrequired = true\nenv = \"SHARED\"\n\
              [secrets.key_b]\nrequired = true\nenv = \"SHARED\"\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
-            .unwrap_err()
-            .contains("duplicate env injection"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&dup), &probe_python())
+                .unwrap_err()
+                .contains("duplicate env injection")
+        );
         // A secret with no `env` uses its NAME; a name that isn't a POSIX identifier
         // (dot allowed in a binding name but not an env var) is rejected too.
-        let name_as_var = format!(
-            "{}\n[secrets.\"api.key\"]\nrequired = true\n",
-            base_toml()
+        let name_as_var = format!("{}\n[secrets.\"api.key\"]\nrequired = true\n", base_toml());
+        assert!(
+            derive_supervisor_build_spec(&parse(&name_as_var), &probe_python())
+                .unwrap_err()
+                .contains("POSIX identifier")
         );
-        assert!(derive_supervisor_build_spec(&parse(&name_as_var), &probe_python())
-            .unwrap_err()
-            .contains("POSIX identifier"));
     }
 
     // ── v1.5 per-service secret scoping (ato#982) ──
@@ -1867,10 +2173,22 @@ readiness_probe = { http_get = "/health" }
         let api = services.iter().find(|s| s.name == "api").unwrap();
         let redis = services.iter().find(|s| s.name == "redis").unwrap();
         // api gets ONLY the openai key; redis gets ONLY the redis password.
-        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
-        assert!(!api.env_map.contains_key("REDIS_PASSWORD"), "api must NOT get redis's secret");
-        assert_eq!(redis.env_map.get("REDIS_PASSWORD").map(String::as_str), Some("redis_password"));
-        assert!(!redis.env_map.contains_key("OPENAI_API_KEY"), "redis must NOT get api's secret");
+        assert_eq!(
+            api.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
+        assert!(
+            !api.env_map.contains_key("REDIS_PASSWORD"),
+            "api must NOT get redis's secret"
+        );
+        assert_eq!(
+            redis.env_map.get("REDIS_PASSWORD").map(String::as_str),
+            Some("redis_password")
+        );
+        assert!(
+            !redis.env_map.contains_key("OPENAI_API_KEY"),
+            "redis must NOT get api's secret"
+        );
         // Both required secrets are scoped, so both are still waited-for by the gate.
         assert_eq!(sup.binding_names, vec!["openai_api_key", "redis_password"]);
     }
@@ -1890,9 +2208,22 @@ readiness_probe = { http_get = "/health" }
         let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
         // The optional unused secret is not waited-for; redis carries no secret.
-        assert_eq!(sup.binding_names, vec!["openai_api_key"], "unused optional secret dropped from lease set");
-        let redis = sup.services.as_ref().unwrap().iter().find(|s| s.name == "redis").unwrap();
-        assert!(redis.env_map.is_empty(), "redis scopes no secret → empty injection map");
+        assert_eq!(
+            sup.binding_names,
+            vec!["openai_api_key"],
+            "unused optional secret dropped from lease set"
+        );
+        let redis = sup
+            .services
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == "redis")
+            .unwrap();
+        assert!(
+            redis.env_map.is_empty(),
+            "redis scopes no secret → empty injection map"
+        );
     }
 
     // ── v1.5 multi-service COMPOSITION fixture (ato#984) ──
@@ -1932,14 +2263,24 @@ readiness_probe = { http_get = "/health" }
         // app_url selection: web is the sole public service + the target-port owner.
         assert_eq!(sup.public_service.as_deref(), Some("web"));
         assert_eq!(web.port, Some(spec.port));
-        assert_eq!(services.iter().filter(|s| s.port == Some(spec.port)).count(), 1);
+        assert_eq!(
+            services
+                .iter()
+                .filter(|s| s.port == Some(spec.port))
+                .count(),
+            1
+        );
 
         // expose resolution + cross-injection: redis's port is allocated (≠ target),
         // web can reach it by REDIS_REDIS_PORT, and it matches redis's own REDIS_PORT.
         let rport = redis.base_env.get("REDIS_PORT").expect("redis own port");
         assert_ne!(rport, "8080");
         assert_eq!(web.base_env.get("REDIS_REDIS_PORT"), Some(rport));
-        assert_eq!(worker.base_env.get("REDIS_REDIS_PORT"), Some(rport), "worker reaches redis too");
+        assert_eq!(
+            worker.base_env.get("REDIS_REDIS_PORT"),
+            Some(rport),
+            "worker reaches redis too"
+        );
 
         // service aliasing: /etc/hosts maps every name + alias to loopback.
         let hosts = build_etc_hosts(services);
@@ -1948,9 +2289,18 @@ readiness_probe = { http_get = "/health" }
         }
 
         // per-service secret scoping: least privilege, no cross-delivery.
-        assert_eq!(web.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
-        assert!(!web.env_map.contains_key("REDIS_PASSWORD"), "web must not get redis's secret");
-        assert_eq!(redis.env_map.get("REDIS_PASSWORD").map(String::as_str), Some("redis_password"));
+        assert_eq!(
+            web.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
+        assert!(
+            !web.env_map.contains_key("REDIS_PASSWORD"),
+            "web must not get redis's secret"
+        );
+        assert_eq!(
+            redis.env_map.get("REDIS_PASSWORD").map(String::as_str),
+            Some("redis_password")
+        );
         assert!(!redis.env_map.contains_key("OPENAI_API_KEY"));
         assert!(worker.env_map.is_empty(), "worker scopes no secret");
         // Both required secrets are scoped → both waited-for by the gate.
@@ -1974,9 +2324,15 @@ readiness_probe = { http_get = "/health" }
         // web/worker were cross-injected with. This is what makes the wait reach it.
         let redis_port: u16 = redis.base_env.get("REDIS_PORT").unwrap().parse().unwrap();
         assert_eq!(redisj["readiness"]["port"], redis_port);
-        assert!(redisj["readiness"].get("http_path").is_none(), "redis readiness is TCP-accept");
+        assert!(
+            redisj["readiness"].get("http_path").is_none(),
+            "redis readiness is TCP-accept"
+        );
         // No secret VALUE anywhere in the emitted config (names only).
-        assert!(!json.to_string().contains("sk-") && !json.to_string().to_lowercase().contains("password="));
+        assert!(
+            !json.to_string().contains("sk-")
+                && !json.to_string().to_lowercase().contains("password=")
+        );
 
         // The whole build script assembles (multi-service supervisor.json + /etc/hosts).
         let script = build_rootfs_script(&spec, 1024);
@@ -1993,7 +2349,11 @@ readiness_probe = { http_get = "/health" }
             base_toml()
         );
         let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
-        assert!(err.contains("required secret 'openai_api_key'") && err.contains("not used by any service"), "{err}");
+        assert!(
+            err.contains("required secret 'openai_api_key'")
+                && err.contains("not used by any service"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2005,36 +2365,69 @@ readiness_probe = { http_get = "/health" }
             base_toml()
         );
         let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
-        assert!(err.contains("'ghost_key'") && err.contains("not a declared"), "{err}");
+        assert!(
+            err.contains("'ghost_key'") && err.contains("not a declared"),
+            "{err}"
+        );
     }
 
     #[test]
     fn legacy_single_service_still_receives_every_secret() {
         // The legacy single-service build (no [services]) is unchanged: the sole
         // workload gets every declared secret, and binding_names is the full set.
-        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
         assert!(sup.services.is_none(), "legacy single-service build");
-        assert_eq!(sup.binding_names, vec!["openai_api_key"], "legacy keeps every declared secret");
-        assert_eq!(sup.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert_eq!(
+            sup.binding_names,
+            vec!["openai_api_key"],
+            "legacy keeps every declared secret"
+        );
+        assert_eq!(
+            sup.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
     }
 
     #[test]
     fn supervisor_build_script_runs_agent_as_init_and_emits_config_without_secrets() {
-        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
         // init runs the guest-agent (vsock supervisor) with the (lowercase) binding name
         // as argv, NOT the app directly — and NOT the uppercase env var name.
-        assert!(script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"), "{script}");
-        assert!(!script.contains("ato-guest-agent 'OPENAI_API_KEY'"), "env var must not be the binding argv");
-        assert!(script.contains("ATO_GUEST_AGENT_MODE=vsock"), "agent runs in vsock mode");
-        assert!(!script.contains("python3 app.py' >/tmp/app.log"), "app is not launched directly");
+        assert!(
+            script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"),
+            "{script}"
+        );
+        assert!(
+            !script.contains("ato-guest-agent 'OPENAI_API_KEY'"),
+            "env var must not be the binding argv"
+        );
+        assert!(
+            script.contains("ATO_GUEST_AGENT_MODE=vsock"),
+            "agent runs in vsock mode"
+        );
+        assert!(
+            !script.contains("python3 app.py' >/tmp/app.log"),
+            "app is not launched directly"
+        );
         // supervisor.json is staged, requires the agent binary, and carries NO value —
         // only the env var → binding name map.
-        assert!(script.contains("ATO_GUEST_AGENT_BIN"), "supervisor build needs the agent binary");
+        assert!(
+            script.contains("ATO_GUEST_AGENT_BIN"),
+            "supervisor build needs the agent binary"
+        );
         assert!(script.contains("supervisor.json"), "config is staged");
-        assert!(script.contains("\"OPENAI_API_KEY\": \"openai_api_key\""), "env→binding map present");
-        assert!(script.contains("<<'DOCKER'") && script.contains("<<'INIT'"), "heredocs still quoted");
+        assert!(
+            script.contains("\"OPENAI_API_KEY\": \"openai_api_key\""),
+            "env→binding map present"
+        );
+        assert!(
+            script.contains("<<'DOCKER'") && script.contains("<<'INIT'"),
+            "heredocs still quoted"
+        );
     }
 
     /// v1.6 (ato#983) Slice 3 regression, found live on real KVM hardware: the
@@ -2073,7 +2466,10 @@ readiness_probe = { http_get = "/health" }
         );
         let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
-        assert!(!script.contains("/ato/state"), "no durable state declared, no /ato/state mkdir expected: {script}");
+        assert!(
+            !script.contains("/ato/state"),
+            "no durable state declared, no /ato/state mkdir expected: {script}"
+        );
     }
 
     #[test]
@@ -2081,8 +2477,14 @@ readiness_probe = { http_get = "/health" }
         // A no-binding spec still runs the app directly and stages no agent.
         let spec = derive_build_spec(&parse(&base_toml()), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
-        assert!(script.contains("/bin/sh -lc 'python3 app.py' >/tmp/app.log"), "direct app launch");
-        assert!(!script.contains("ato-guest-agent"), "no agent in a no-binding rootfs");
+        assert!(
+            script.contains("/bin/sh -lc 'python3 app.py' >/tmp/app.log"),
+            "direct app launch"
+        );
+        assert!(
+            !script.contains("ato-guest-agent"),
+            "no agent in a no-binding rootfs"
+        );
         assert!(!script.contains("supervisor.json"), "no supervisor config");
     }
 
@@ -2117,7 +2519,10 @@ readiness_probe = { http_get = "/health" }
         assert!(api.public, "api declared network.publish = true");
         assert_eq!(api.cmd, vec!["/bin/sh", "-lc", "python3 api.py"]);
         assert_eq!(api.depends_on, vec!["redis"]);
-        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert_eq!(
+            api.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
         assert_eq!(redis.name, "redis");
         assert!(!redis.public, "redis is internal (no publish)");
 
@@ -2128,9 +2533,15 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["name"], "api");
         assert_eq!(arr[0]["base_env"]["PORT"], spec.port.to_string());
-        assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
+        assert!(
+            arr[1]["base_env"].get("PORT").is_none(),
+            "internal service has no PORT injected"
+        );
         assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
-        assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+        assert!(
+            !json.to_string().contains("sk-"),
+            "no secret value in the emitted config"
+        );
     }
 
     // ── v1.5 (ato#973): app_url selection ──
@@ -2139,20 +2550,33 @@ readiness_probe = { http_get = "/health" }
     fn app_url_selection_records_the_public_service_and_targets_its_port() {
         // api(public) + redis(internal) → the app_url target is api, on the proxied
         // target port; redis is never the URL target and its port is not exposed.
-        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
         // The receipt records WHICH service the public URL points at.
-        assert_eq!(sup.public_service.as_deref(), Some("api"), "public service recorded for app_url");
+        assert_eq!(
+            sup.public_service.as_deref(),
+            Some("api"),
+            "public service recorded for app_url"
+        );
         // That service owns the proxied target port (= the ready_url/app_url port).
         let services = sup.services.as_ref().unwrap();
         let api = services.iter().find(|s| s.name == "api").unwrap();
         assert!(api.public);
-        assert_eq!(api.port, Some(spec.port), "public service listens on the proxied port");
+        assert_eq!(
+            api.port,
+            Some(spec.port),
+            "public service listens on the proxied port"
+        );
         // The internal service is never selected, and it does not own the target port.
         let redis = services.iter().find(|s| s.name == "redis").unwrap();
         assert!(!redis.public);
         assert_ne!(sup.public_service.as_deref(), Some("redis"));
-        assert_ne!(redis.port, Some(spec.port), "internal service is not on the public port");
+        assert_ne!(
+            redis.port,
+            Some(spec.port),
+            "internal service is not on the public port"
+        );
         // The recorded name is exactly the one public service.
         assert_eq!(services.iter().filter(|s| s.public).count(), 1);
     }
@@ -2171,12 +2595,29 @@ readiness_probe = { http_get = "/health" }
         let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
         assert_eq!(sup.public_service.as_deref(), Some("api"));
-        let redis = sup.services.as_ref().unwrap().iter().find(|s| s.name == "redis").unwrap();
+        let redis = sup
+            .services
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == "redis")
+            .unwrap();
         // redis's exposed port is a real allocated loopback port, but it is NOT the
         // public/proxied port, and redis is not the URL target.
-        let rport = redis.base_env.get("REDIS_PORT").unwrap().parse::<u16>().unwrap();
-        assert_ne!(rport, spec.port, "internal expose port is not the public port");
-        assert!(!redis.aliases.is_empty(), "redis has an alias (cache) — internal, not a URL target");
+        let rport = redis
+            .base_env
+            .get("REDIS_PORT")
+            .unwrap()
+            .parse::<u16>()
+            .unwrap();
+        assert_ne!(
+            rport, spec.port,
+            "internal expose port is not the public port"
+        );
+        assert!(
+            !redis.aliases.is_empty(),
+            "redis has an alias (cache) — internal, not a URL target"
+        );
         assert!(!redis.public);
     }
 
@@ -2190,8 +2631,12 @@ readiness_probe = { http_get = "/health" }
              [services.redis]\nentrypoint = \"r\"\n[services.redis.env]\nPORT = \"8080\"\n",
             base_toml() // target port 8080
         );
-        let err = derive_supervisor_build_spec(&parse(&internal_on_target), &probe_python()).unwrap_err();
-        assert!(err.contains("proxied public port") && err.contains("redis"), "{err}");
+        let err =
+            derive_supervisor_build_spec(&parse(&internal_on_target), &probe_python()).unwrap_err();
+        assert!(
+            err.contains("proxied public port") && err.contains("redis"),
+            "{err}"
+        );
 
         // (2) Two internal services declaring the SAME concrete literal port → rejected.
         let dup_literal = format!(
@@ -2202,7 +2647,10 @@ readiness_probe = { http_get = "/health" }
             base_toml()
         );
         let err = derive_supervisor_build_spec(&parse(&dup_literal), &probe_python()).unwrap_err();
-        assert!(err.contains("single owner") && err.contains("9001"), "{err}");
+        assert!(
+            err.contains("single owner") && err.contains("9001"),
+            "{err}"
+        );
 
         // (3) The public service remains the ONLY service whose primary port == target;
         //     an internal service on a DIFFERENT literal port is fine.
@@ -2214,19 +2662,33 @@ readiness_probe = { http_get = "/health" }
         );
         let spec = derive_supervisor_build_spec(&parse(&ok), &probe_python()).unwrap();
         let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
-        assert_eq!(services.iter().filter(|s| s.port == Some(spec.port)).count(), 1, "one target-port owner");
+        assert_eq!(
+            services
+                .iter()
+                .filter(|s| s.port == Some(spec.port))
+                .count(),
+            1,
+            "one target-port owner"
+        );
         let owner = services.iter().find(|s| s.port == Some(spec.port)).unwrap();
-        assert!(owner.public && owner.name == "api", "the target-port owner is the public service");
+        assert!(
+            owner.public && owner.name == "api",
+            "the target-port owner is the public service"
+        );
     }
 
     #[test]
     fn legacy_single_service_has_no_recorded_public_service() {
         // A legacy single-service build: no [services] → services None, and
         // public_service is None (the sole workload is implicitly the URL target).
-        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
         assert!(sup.services.is_none(), "legacy single-service build");
-        assert!(sup.public_service.is_none(), "no explicit public service selection for legacy");
+        assert!(
+            sup.public_service.is_none(),
+            "no explicit public service selection for legacy"
+        );
     }
 
     #[test]
@@ -2250,8 +2712,14 @@ readiness_probe = { http_get = "/health" }
         }
         // The rootfs script bakes /etc/hosts for the multi-service build.
         let script = build_rootfs_script(&spec, 512);
-        assert!(script.contains("rootfs/etc/hosts"), "multi-service bakes /etc/hosts");
-        assert!(script.contains("cache"), "alias present in the baked hosts file");
+        assert!(
+            script.contains("rootfs/etc/hosts"),
+            "multi-service bakes /etc/hosts"
+        );
+        assert!(
+            script.contains("cache"),
+            "alias present in the baked hosts file"
+        );
 
         // A duplicate hostname (alias equals another service's name) is fail-closed.
         let dup = format!(
@@ -2260,9 +2728,11 @@ readiness_probe = { http_get = "/health" }
              [services.redis]\nentrypoint = \"r\"\n[services.redis.network]\naliases = [\"api\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
-            .unwrap_err()
-            .contains("claimed by both"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&dup), &probe_python())
+                .unwrap_err()
+                .contains("claimed by both")
+        );
     }
 
     #[test]
@@ -2317,19 +2787,36 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn single_service_supervisor_build_does_not_bake_etc_hosts() {
         // A legacy single-service supervisor build stays byte-identical: no /etc/hosts.
-        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
-        assert!(!script.contains("rootfs/etc/hosts"), "single-service must not bake /etc/hosts");
+        assert!(
+            !script.contains("rootfs/etc/hosts"),
+            "single-service must not bake /etc/hosts"
+        );
     }
 
     #[test]
     fn multi_service_build_script_emits_services_and_no_legacy_top_level_cmd() {
-        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
         let script = build_rootfs_script(&spec, 512);
-        assert!(script.contains("\"services\""), "emits a services[] supervisor.json");
-        assert!(script.contains("\"name\": \"api\"") && script.contains("\"name\": \"redis\""), "{script}");
-        assert!(script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"), "agent argv = binding");
-        assert!(!script.contains("sk-"), "no secret value in the rootfs script");
+        assert!(
+            script.contains("\"services\""),
+            "emits a services[] supervisor.json"
+        );
+        assert!(
+            script.contains("\"name\": \"api\"") && script.contains("\"name\": \"redis\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("/usr/local/bin/ato-guest-agent 'openai_api_key'"),
+            "agent argv = binding"
+        );
+        assert!(
+            !script.contains("sk-"),
+            "no secret value in the rootfs script"
+        );
     }
 
     #[test]
@@ -2345,7 +2832,11 @@ readiness_probe = { http_get = "/health" }
             base_toml()
         );
         let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
-        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        let json = build_supervisor_json(
+            spec.supervisor.as_ref().unwrap(),
+            spec.port,
+            &spec.start_cmd,
+        );
         let arr = json["services"].as_array().unwrap();
         let api = arr.iter().find(|s| s["name"] == "api").unwrap();
         let redis = arr.iter().find(|s| s["name"] == "redis").unwrap();
@@ -2378,7 +2869,10 @@ readiness_probe = { http_get = "/health" }
         let redis = services.iter().find(|s| s.name == "redis").unwrap();
 
         // redis's placeholder resolved to a concrete allocated port (not the target).
-        let rport = redis.base_env.get("REDIS_PORT").expect("own placeholder injected");
+        let rport = redis
+            .base_env
+            .get("REDIS_PORT")
+            .expect("own placeholder injected");
         assert_ne!(rport, "8080");
         let rport: u16 = rport.parse().unwrap();
         assert!(rport >= 8091, "allocated from the service port base");
@@ -2386,7 +2880,10 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(redis.port, Some(rport));
 
         // api can reach redis on loopback via the cross-referenced env var.
-        assert_eq!(api.base_env.get("REDIS_REDIS_PORT").map(String::as_str), Some(rport.to_string().as_str()));
+        assert_eq!(
+            api.base_env.get("REDIS_REDIS_PORT").map(String::as_str),
+            Some(rport.to_string().as_str())
+        );
         // The public service still listens on the proxied target port.
         assert_eq!(api.base_env.get("PORT").map(String::as_str), Some("8080"));
         assert_eq!(api.port, Some(8080));
@@ -2404,8 +2901,16 @@ readiness_probe = { http_get = "/health" }
         );
         let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
         let web = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap()[0].clone();
-        assert_eq!(web.base_env.get("HTTP_PORT").map(String::as_str), Some("8080"), "first expose = target port");
-        assert_eq!(web.base_env.get("PORT").map(String::as_str), Some("8080"), "public always gets PORT=target");
+        assert_eq!(
+            web.base_env.get("HTTP_PORT").map(String::as_str),
+            Some("8080"),
+            "first expose = target port"
+        );
+        assert_eq!(
+            web.base_env.get("PORT").map(String::as_str),
+            Some("8080"),
+            "public always gets PORT=target"
+        );
         let metrics: u16 = web.base_env.get("METRICS_PORT").unwrap().parse().unwrap();
         assert_ne!(metrics, 8080, "second expose is a distinct allocated port");
         assert_eq!(web.port, Some(8080));
@@ -2418,9 +2923,11 @@ readiness_probe = { http_get = "/health" }
              [services.api]\nentrypoint = \"a\"\nexpose = [\"bad-name\"]\n[services.api.network]\npublish = true\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&toml), &probe_python())
-            .unwrap_err()
-            .contains("POSIX identifier"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&toml), &probe_python())
+                .unwrap_err()
+                .contains("POSIX identifier")
+        );
     }
 
     /// Helper: a two-service capsule (public api + one internal service) with the
@@ -2439,9 +2946,11 @@ readiness_probe = { http_get = "/health" }
         let dup = expose_collision_toml(
             "[services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\", \"REDIS_PORT\"]\n",
         );
-        assert!(derive_supervisor_build_spec(&parse(&dup), &probe_python())
-            .unwrap_err()
-            .contains("duplicate expose placeholder"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&dup), &probe_python())
+                .unwrap_err()
+                .contains("duplicate expose placeholder")
+        );
 
         // (2) Two (service, placeholder) pairs generate the SAME cross-ref var:
         //     `a-b`+`C` and `a`+`B_C` both → `A_B_C`. Rejected.
@@ -2452,18 +2961,22 @@ readiness_probe = { http_get = "/health" }
              [services.a]\nentrypoint = \"y\"\nexpose = [\"B_C\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&alias), &probe_python())
-            .unwrap_err()
-            .contains("cross-reference env var"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&alias), &probe_python())
+                .unwrap_err()
+                .contains("cross-reference env var")
+        );
 
         // (3a) Own placeholder env var already declared by the author → rejected.
         let own = expose_collision_toml(
             "[services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n\
              [services.redis.env]\nREDIS_PORT = \"1234\"\n",
         );
-        assert!(derive_supervisor_build_spec(&parse(&own), &probe_python())
-            .unwrap_err()
-            .contains("collides with an existing"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&own), &probe_python())
+                .unwrap_err()
+                .contains("collides with an existing")
+        );
 
         // (3b) Generated cross-reference var already declared by the author → rejected.
         let xref = format!(
@@ -2473,9 +2986,11 @@ readiness_probe = { http_get = "/health" }
              [services.redis]\nentrypoint = \"r\"\nexpose = [\"REDIS_PORT\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&xref), &probe_python())
-            .unwrap_err()
-            .contains("collides with an existing"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&xref), &probe_python())
+                .unwrap_err()
+                .contains("collides with an existing")
+        );
     }
 
     #[test]
@@ -2489,7 +3004,11 @@ readiness_probe = { http_get = "/health" }
         let port_of = || {
             let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
             let svc = spec.supervisor.unwrap().services.unwrap();
-            svc.iter().find(|s| s.name == "redis").unwrap().port.unwrap()
+            svc.iter()
+                .find(|s| s.name == "redis")
+                .unwrap()
+                .port
+                .unwrap()
         };
         let a = port_of();
         // SAFETY: single-threaded test; the value is ignored by the allocator now.
@@ -2503,12 +3022,18 @@ readiness_probe = { http_get = "/health" }
     #[test]
     fn multi_service_fail_closed_rules() {
         let bad = |extra: &str, needle: &str| {
-            let toml = format!("{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{extra}", base_toml());
+            let toml = format!(
+                "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n{extra}",
+                base_toml()
+            );
             let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
             assert!(err.contains(needle), "expected {needle:?} in: {err}");
         };
         // No public service.
-        bad("[services.api]\nentrypoint = \"python3 api.py\"\n", "no public service");
+        bad(
+            "[services.api]\nentrypoint = \"python3 api.py\"\n",
+            "no public service",
+        );
         // Two public services.
         bad(
             "[services.a]\nentrypoint = \"a\"\n[services.a.network]\npublish = true\n\
@@ -2516,7 +3041,10 @@ readiness_probe = { http_get = "/health" }
             "exactly one may be public",
         );
         // Empty entrypoint.
-        bad("[services.api]\nentrypoint = \"\"\n[services.api.network]\npublish = true\n", "`entrypoint` is empty");
+        bad(
+            "[services.api]\nentrypoint = \"\"\n[services.api.network]\npublish = true\n",
+            "`entrypoint` is empty",
+        );
         // depends_on to an unknown service.
         bad(
             "[services.api]\nentrypoint = \"a\"\ndepends_on = [\"ghost\"]\n[services.api.network]\npublish = true\n",
@@ -2588,21 +3116,38 @@ readiness_probe = { http_get = "/health" }
             // v1.6 Slice 3: drive_id/fs_label are assigned globally, from the
             // manifest's name (no explicit state_owner_scope declared here).
             assert_eq!(api.volumes[0].drive_id, "state0");
-            assert_eq!(api.volumes[0].fs_label.len(), 16, "ext4 label must be 16 bytes");
+            assert_eq!(
+                api.volumes[0].fs_label.len(),
+                16,
+                "ext4 label must be 16 bytes"
+            );
             assert!(api.volumes[0].fs_label.starts_with("AS"));
         }
         // And it DOES appear in the receipt when non-empty.
         let receipt = serde_json::to_value(&spec).unwrap();
-        assert_eq!(receipt["supervisor"]["services"][0]["volumes"][0]["state_name"], "dbdata");
+        assert_eq!(
+            receipt["supervisor"]["services"][0]["volumes"][0]["state_name"],
+            "dbdata"
+        );
         // v1.6 Slice 3: NOW emitted into the guest-facing supervisor.json too —
         // as a VM-WIDE top-level array (mounts happen once at boot, before any
         // service; not nested under the owning service).
-        let sup_json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
-        assert!(sup_json["services"][0].get("volumes").is_none(), "volumes are top-level, not per-service");
+        let sup_json = build_supervisor_json(
+            spec.supervisor.as_ref().unwrap(),
+            spec.port,
+            &spec.start_cmd,
+        );
+        assert!(
+            sup_json["services"][0].get("volumes").is_none(),
+            "volumes are top-level, not per-service"
+        );
         assert_eq!(sup_json["volumes"][0]["state_name"], "dbdata");
         assert_eq!(sup_json["volumes"][0]["target"], "/ato/state/dbdata");
         assert_eq!(sup_json["volumes"][0]["drive_id"], "state0");
-        assert_eq!(sup_json["volumes"][0]["size_mb"], DEFAULT_STATE_VOLUME_SIZE_MB);
+        assert_eq!(
+            sup_json["volumes"][0]["size_mb"],
+            DEFAULT_STATE_VOLUME_SIZE_MB
+        );
 
         // Accepted: custom in-bounds size_mb, and lexical normalization (trailing
         // slash + repeated slash) both collapse to the same target string.
@@ -2794,10 +3339,19 @@ readiness_probe = { http_get = "/health" }
             );
             let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap();
             let services = spec.supervisor.as_ref().unwrap().services.as_ref().unwrap();
-            assert!(services.iter().find(|s| s.name == "api").unwrap().volumes.is_empty());
+            assert!(
+                services
+                    .iter()
+                    .find(|s| s.name == "api")
+                    .unwrap()
+                    .volumes
+                    .is_empty()
+            );
             let receipt = serde_json::to_value(&spec).unwrap();
             assert!(
-                receipt["supervisor"]["services"][0].get("volumes").is_none(),
+                receipt["supervisor"]["services"][0]
+                    .get("volumes")
+                    .is_none(),
                 "volumes must be omitted from the receipt when empty: {receipt}"
             );
         }
@@ -2814,7 +3368,10 @@ readiness_probe = { http_get = "/health" }
             base_toml() // target port = 8080
         );
         let err = derive_supervisor_build_spec(&parse(&mismatch), &probe_python()).unwrap_err();
-        assert!(err.contains("proxied port") && err.contains("3000"), "{err}");
+        assert!(
+            err.contains("proxied port") && err.contains("3000"),
+            "{err}"
+        );
 
         // Declaring the SAME port is fine (redundant but honest).
         let same = format!(
@@ -2824,12 +3381,21 @@ readiness_probe = { http_get = "/health" }
             base_toml()
         );
         let spec = derive_supervisor_build_spec(&parse(&same), &probe_python()).unwrap();
-        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        let json = build_supervisor_json(
+            spec.supervisor.as_ref().unwrap(),
+            spec.port,
+            &spec.start_cmd,
+        );
         assert_eq!(json["services"][0]["base_env"]["PORT"], "8080");
 
         // Absent PORT → the builder injects the target port.
-        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
-        let json = build_supervisor_json(spec.supervisor.as_ref().unwrap(), spec.port, &spec.start_cmd);
+        let spec =
+            derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let json = build_supervisor_json(
+            spec.supervisor.as_ref().unwrap(),
+            spec.port,
+            &spec.start_cmd,
+        );
         assert_eq!(json["services"][0]["base_env"]["PORT"], "8080");
 
         // An INTERNAL service may listen wherever it likes — its PORT is untouched.
@@ -2852,9 +3418,11 @@ readiness_probe = { http_get = "/health" }
              [services.api]\nentrypoint = \"a\"\nsecrets = [\"openai_api_key\"]\n[services.api.network]\npublish = true\naliases = [\"Bad_Alias\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&bad_alias), &probe_python())
-            .unwrap_err()
-            .contains("DNS-safe"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&bad_alias), &probe_python())
+                .unwrap_err()
+                .contains("DNS-safe")
+        );
 
         // A declared HTTP readiness path is recorded on the service spec.
         let with_probe = format!(
@@ -2872,24 +3440,38 @@ readiness_probe = { http_get = "/health" }
     fn multi_service_coexists_with_the_build_target_which_supplies_the_public_port() {
         // The [targets.app] anchor supplies runtime/port; [services] supply the
         // runtime processes. The PUBLIC service inherits that derived port.
-        let spec = derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&multi_service_toml()), &probe_python()).unwrap();
         assert_eq!(spec.port, 8080, "port comes from the build target");
         let sup = spec.supervisor.as_ref().unwrap();
         let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
         let api = &json["services"].as_array().unwrap()[0];
         assert_eq!(api["name"], "api");
-        assert_eq!(api["base_env"]["PORT"], "8080", "public service listens on the proxied port");
+        assert_eq!(
+            api["base_env"]["PORT"], "8080",
+            "public service listens on the proxied port"
+        );
     }
 
     #[test]
     fn single_service_supervisor_json_stays_byte_identical() {
         // A legacy (no [services]) supervisor build must emit the OLD top-level shape.
-        let spec = derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
+        let spec =
+            derive_supervisor_build_spec(&parse(&supervisor_toml()), &probe_python()).unwrap();
         let sup = spec.supervisor.as_ref().unwrap();
-        assert!(sup.services.is_none(), "no [services] ⇒ legacy single-service build");
+        assert!(
+            sup.services.is_none(),
+            "no [services] ⇒ legacy single-service build"
+        );
         let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
-        assert!(json.get("services").is_none(), "legacy build emits top-level cmd, not services[]");
-        assert_eq!(json["cmd"], serde_json::json!(["/bin/sh", "-lc", "python3 app.py"]));
+        assert!(
+            json.get("services").is_none(),
+            "legacy build emits top-level cmd, not services[]"
+        );
+        assert_eq!(
+            json["cmd"],
+            serde_json::json!(["/bin/sh", "-lc", "python3 app.py"])
+        );
         assert_eq!(json["base_env"]["PORT"], spec.port.to_string());
         assert_eq!(json["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
     }

@@ -20,14 +20,16 @@
 //! clone hundreds of MB of rootfs/memory.
 
 use capsulefs::{
-    store_blob, BlobManifest, CasStore, ChunkingKind, LayerKind, MEMORY_PAGE_CHUNK_SIZE,
+    BlobManifest, CasStore, ChunkingKind, LayerKind, MEMORY_PAGE_CHUNK_SIZE, store_blob,
 };
 
 use crate::backend::SnapshotError;
 use crate::bench;
 use crate::manifest::{LayerScanCoverage, ReadyStateLayers};
 use crate::scan_cache::ScanCache;
-use crate::scanner::{self, FindingKind, ScanReport, SecretFinding, POLICY_VERSION, SCANNER_VERSION};
+use crate::scanner::{
+    self, FindingKind, POLICY_VERSION, SCANNER_VERSION, ScanReport, SecretFinding,
+};
 
 /// Default advisory byte budget (8 MiB): small layers (incl. all test fixtures)
 /// scan fully; large opaque layers are capped so the build does not block.
@@ -67,20 +69,34 @@ struct Acc {
     sealed_bytes: u64,
 }
 
-fn coverage_row(layer: &'static str, hex: String, blocking: bool, capped: bool, source: &str) -> LayerScanCoverage {
+fn coverage_row(
+    layer: &'static str,
+    hex: String,
+    blocking: bool,
+    capped: bool,
+    source: &str,
+) -> LayerScanCoverage {
     LayerScanCoverage {
         layer: layer.to_string(),
         content_hash: hex,
         scanner_version: SCANNER_VERSION.to_string(),
         policy_version: POLICY_VERSION.to_string(),
         declared_checked: true,
-        blocking_checks: if blocking { vec!["provider".into(), "env".into()] } else { Vec::new() },
+        blocking_checks: if blocking {
+            vec!["provider".into(), "env".into()]
+        } else {
+            Vec::new()
+        },
         advisory_checks: if blocking {
             vec!["entropy".into()]
         } else {
             vec!["provider".into(), "env".into(), "entropy".into()]
         },
-        coverage: if capped { "budget_capped".into() } else { "full".into() },
+        coverage: if capped {
+            "budget_capped".into()
+        } else {
+            "full".into()
+        },
         source: source.to_string(),
     }
 }
@@ -98,7 +114,8 @@ fn store_blocking(
     acc.sealed_bytes += blob.total_len;
     let hex = blob.id().hex().to_string();
     acc.heuristic.extend(findings);
-    acc.coverage.push(coverage_row(layer, hex, true, false, "scanned"));
+    acc.coverage
+        .push(coverage_row(layer, hex, true, false, "scanned"));
     Ok(blob)
 }
 
@@ -130,14 +147,19 @@ fn store_opaque(
         None => {
             bench::count("scan.cache.miss", 1);
             let (f, c) = scanner::scan_layer_budgeted(layer, bytes, budget);
-            let scanned = if budget == 0 { bytes.len() } else { bytes.len().min(budget) };
+            let scanned = if budget == 0 {
+                bytes.len()
+            } else {
+                bytes.len().min(budget)
+            };
             bench::count("scan.bytes_scanned", scanned as u64);
             cache.put(&hex, c, &f);
             (f, c, "scanned")
         }
     };
     acc.heuristic.extend(findings);
-    acc.coverage.push(coverage_row(layer, hex, false, capped, source));
+    acc.coverage
+        .push(coverage_row(layer, hex, false, capped, source));
     Ok(blob)
 }
 
@@ -167,7 +189,12 @@ pub fn gate_layers(
     let blocking: Vec<SecretFinding> = scanner::scan_layer("app", app)
         .into_iter()
         .chain(scanner::scan_layer("dependency", dependency))
-        .filter(|f| matches!(f.kind, FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment))
+        .filter(|f| {
+            matches!(
+                f.kind,
+                FindingKind::ProviderKeyPrefix | FindingKind::EnvAssignment
+            )
+        })
         .collect();
     if !blocking.is_empty() {
         return Err(SnapshotError::SecretScanFindings(blocking));
@@ -190,7 +217,12 @@ pub fn preflight_gate(
     markers: &[String],
 ) -> Result<(), SnapshotError> {
     gate_layers(
-        &[rootfs, runtime.unwrap_or(&[]), dependency.unwrap_or(&[]), app.unwrap_or(&[])],
+        &[
+            rootfs,
+            runtime.unwrap_or(&[]),
+            dependency.unwrap_or(&[]),
+            app.unwrap_or(&[]),
+        ],
         app.unwrap_or(&[]),
         dependency.unwrap_or(&[]),
         markers,
@@ -233,24 +265,84 @@ pub fn seal_and_scan(
 
     // ── Phase 2: STORE + advisory scan ──────────────────────────────────────
     let cd = ChunkingKind::ContentDefined;
-    let page = ChunkingKind::PageAligned { page_size: MEMORY_PAGE_CHUNK_SIZE as u64 };
-    let mut acc = Acc { heuristic: Vec::new(), coverage: Vec::new(), sealed_bytes: 0 };
+    let page = ChunkingKind::PageAligned {
+        page_size: MEMORY_PAGE_CHUNK_SIZE as u64,
+    };
+    let mut acc = Acc {
+        heuristic: Vec::new(),
+        coverage: Vec::new(),
+        sealed_bytes: 0,
+    };
 
-    let rootfs = store_opaque(store, cache, advisory_budget, "rootfs", layers.rootfs, LayerKind::Rootfs, cd, rootfs_prestored, &mut acc)?;
+    let rootfs = store_opaque(
+        store,
+        cache,
+        advisory_budget,
+        "rootfs",
+        layers.rootfs,
+        LayerKind::Rootfs,
+        cd,
+        rootfs_prestored,
+        &mut acc,
+    )?;
     let runtime = match layers.runtime {
-        Some(b) => Some(store_opaque(store, cache, advisory_budget, "runtime", b, LayerKind::Runtime, cd, None, &mut acc)?),
+        Some(b) => Some(store_opaque(
+            store,
+            cache,
+            advisory_budget,
+            "runtime",
+            b,
+            LayerKind::Runtime,
+            cd,
+            None,
+            &mut acc,
+        )?),
         None => None,
     };
     let dependency = match layers.dependency {
-        Some(b) => Some(store_blocking(store, "dependency", b, LayerKind::Dependency, dep_findings, &mut acc)?),
+        Some(b) => Some(store_blocking(
+            store,
+            "dependency",
+            b,
+            LayerKind::Dependency,
+            dep_findings,
+            &mut acc,
+        )?),
         None => None,
     };
     let app = match layers.app {
-        Some(b) => Some(store_blocking(store, "app", b, LayerKind::App, app_findings, &mut acc)?),
+        Some(b) => Some(store_blocking(
+            store,
+            "app",
+            b,
+            LayerKind::App,
+            app_findings,
+            &mut acc,
+        )?),
         None => None,
     };
-    let vmstate = store_opaque(store, cache, advisory_budget, "vmstate", layers.vmstate, LayerKind::VmState, cd, None, &mut acc)?;
-    let memory = store_opaque(store, cache, advisory_budget, "memory", layers.memory, LayerKind::Memory, page, None, &mut acc)?;
+    let vmstate = store_opaque(
+        store,
+        cache,
+        advisory_budget,
+        "vmstate",
+        layers.vmstate,
+        LayerKind::VmState,
+        cd,
+        None,
+        &mut acc,
+    )?;
+    let memory = store_opaque(
+        store,
+        cache,
+        advisory_budget,
+        "memory",
+        layers.memory,
+        LayerKind::Memory,
+        page,
+        None,
+        &mut acc,
+    )?;
 
     Ok(SealOutput {
         layers: ReadyStateLayers {
@@ -263,7 +355,10 @@ pub fn seal_and_scan(
         },
         // Gate already passed → declared_hits empty; heuristic holds the advisory
         // findings (+ any app/dep entropy) for the proof's advisory list.
-        report: ScanReport { declared_hits: Vec::new(), heuristic: acc.heuristic },
+        report: ScanReport {
+            declared_hits: Vec::new(),
+            heuristic: acc.heuristic,
+        },
         coverage: acc.coverage,
         sealed_bytes: acc.sealed_bytes,
     })
@@ -277,20 +372,42 @@ mod tests {
 
     #[test]
     fn preflight_passes_on_clean_layers() {
-        assert!(preflight_gate(b"clean rootfs", Some(b"runtime"), None, Some(b"app code"), &[]).is_ok());
+        assert!(
+            preflight_gate(
+                b"clean rootfs",
+                Some(b"runtime"),
+                None,
+                Some(b"app code"),
+                &[]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn preflight_rejects_declared_marker_in_rootfs() {
         let markers = vec!["TOPSECRET-VALUE".to_string()];
-        let err = preflight_gate(b"...embedded TOPSECRET-VALUE here...", None, None, None, &markers).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretFoundInSnapshot(_)), "{err:?}");
+        let err = preflight_gate(
+            b"...embedded TOPSECRET-VALUE here...",
+            None,
+            None,
+            None,
+            &markers,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::SecretFoundInSnapshot(_)),
+            "{err:?}"
+        );
     }
 
     #[test]
     fn preflight_rejects_provider_key_in_app() {
         let err = preflight_gate(b"clean", None, None, Some(PROVIDER_IN_APP), &[]).unwrap_err();
-        assert!(matches!(err, SnapshotError::SecretScanFindings(_)), "{err:?}");
+        assert!(
+            matches!(err, SnapshotError::SecretScanFindings(_)),
+            "{err:?}"
+        );
     }
 
     #[test]

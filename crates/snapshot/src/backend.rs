@@ -22,9 +22,7 @@ pub use capsule::foundation::types::ready_state::GpuMode;
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{
-    NoSecretProof, ReadyStateManifest, RestoreContract, SanitizerContract,
-};
+use crate::manifest::{NoSecretProof, ReadyStateManifest, RestoreContract, SanitizerContract};
 
 /// What kind of state a backend captures (plan §4 / requirements §0.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -188,7 +186,10 @@ impl BindingCapabilities {
         if !self.supports_guest_agent {
             missing.push("guest-agent");
         }
-        Some(format!("binding-lease unsupported on this host: missing {}", missing.join(", ")))
+        Some(format!(
+            "binding-lease unsupported on this host: missing {}",
+            missing.join(", ")
+        ))
     }
 }
 
@@ -480,10 +481,7 @@ pub trait SnapshotBackend: Send + Sync {
     /// Rehydrate a session from a sealed artifact: verify the runner class
     /// (fail-closed on mismatch), read the layers back, create a disposable
     /// overlay, and return a [`RestoredSession`].
-    fn restore(
-        &self,
-        input: RestoreReadyStateInput<'_>,
-    ) -> Result<RestoreReceipt, SnapshotError>;
+    fn restore(&self, input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError>;
 
     /// Tear down a restored session: kill the VM and destroy its overlay.
     fn stop(&self, session: RestoredSession) -> Result<TeardownReceipt, SnapshotError>;
@@ -509,7 +507,10 @@ mod tests {
             other => panic!("expected GpuStateNotSnapshottable, got {other:?}"),
         }
         let msg = err.to_string();
-        assert!(msg.contains("not snapshottable") && msg.contains("passthrough"), "{msg}");
+        assert!(
+            msg.contains("not snapshottable") && msg.contains("passthrough"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -531,17 +532,15 @@ type = "http"
 path = "/health"
 "#;
         // In-VM GPU (vram requirement, no external binding) -> Passthrough -> rejected.
-        let in_vm = CapsuleManifest::from_toml(&format!(
-            "{BASE}\n[requirements]\nvram_min = \"8GB\"\n"
-        ))
-        .expect("parse");
+        let in_vm =
+            CapsuleManifest::from_toml(&format!("{BASE}\n[requirements]\nvram_min = \"8GB\"\n"))
+                .expect("parse");
         assert!(ensure_gpu_not_in_snapshot(in_vm.gpu_mode()).is_err());
 
         // External GPU capability -> External -> allowed.
-        let external = CapsuleManifest::from_toml(&format!(
-            "{BASE}\n[external.gpu]\ntype = \"gpu\"\n"
-        ))
-        .expect("parse");
+        let external =
+            CapsuleManifest::from_toml(&format!("{BASE}\n[external.gpu]\ntype = \"gpu\"\n"))
+                .expect("parse");
         assert!(ensure_gpu_not_in_snapshot(external.gpu_mode()).is_ok());
     }
 
@@ -550,7 +549,10 @@ path = "/health"
         // default (all false) ⇒ unsupported, reason lists the missing pieces.
         let none = BindingCapabilities::default();
         let r = none.unavailable_reason().unwrap();
-        assert!(r.contains("firecracker") && r.contains("vsock") && r.contains("guest-agent"), "{r}");
+        assert!(
+            r.contains("firecracker") && r.contains("vsock") && r.contains("guest-agent"),
+            "{r}"
+        );
 
         // supported ⇒ no reason.
         let ok = BindingCapabilities {
@@ -564,8 +566,15 @@ path = "/health"
         assert!(ok.unavailable_reason().is_none());
 
         // firecracker + guest-agent but NO host vsock ⇒ unsupported, names vsock only.
-        let no_vsock = BindingCapabilities { supports_firecracker: true, supports_guest_agent: true, ..Default::default() };
+        let no_vsock = BindingCapabilities {
+            supports_firecracker: true,
+            supports_guest_agent: true,
+            ..Default::default()
+        };
         let r = no_vsock.unavailable_reason().unwrap();
-        assert!(r.contains("vsock") && !r.contains("firecracker backend"), "{r}");
+        assert!(
+            r.contains("vsock") && !r.contains("firecracker backend"),
+            "{r}"
+        );
     }
 }
