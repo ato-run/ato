@@ -5,7 +5,7 @@
 Ato Desktop is the focused graphical shell for managed recipe executions.
 
 It is not a separate execution engine and it is not a replacement for the CLI.
-Desktop uses the same launch model as `ato run` and `ato session start`: Ato
+Desktop uses the same launch model as `ato run` and `ato run -b`: Ato
 constructs a launch graph from a recipe and its source inputs, materializes it
 as a managed session, records session state, and presents the running execution
 through a desktop-native surface.
@@ -83,7 +83,7 @@ The Desktop process is the user-facing root. It starts the `ato` binary as a chi
 Desktop click / capsule open
   │
   ▼
-spawn ato session start
+spawn ato (internal session launch)
   │
   ▼
 construct declared execution graph
@@ -110,7 +110,7 @@ A Desktop app is backed by a managed Ato session. A session is not just a proces
 - **Dependency providers and state directories**
 - **Logs, teardown order, and owner / watcher relationship**
 
-Desktop can show, reuse, and stop sessions because the CLI records them as session records. This is also why Desktop and CLI session behavior should stay unified — `ato run -b`, `ato session start`, and Desktop launches should all use the same session core.
+Desktop can show, reuse, and stop sessions because the CLI records them as session records (inspect them with `ato ps`, `ato logs`, `ato stop`). This is also why Desktop and CLI session behavior should stay unified — `ato run -b` and Desktop launches should all use the same session core.
 
 ### WebView and bridge
 
@@ -145,7 +145,7 @@ Bridge access is capability-gated. A process allowed to call a host bridge and a
 |---|---|---|
 | `ato run` | trying a project now | foreground session |
 | `ato run -b` | keeping a project running | background managed session |
-| `ato session start` | lifecycle-native automation | managed session API |
+| `ato ps` / `ato logs` / `ato stop` | inspecting and managing sessions | managed session records |
 | **Ato Desktop** | graphical interaction and app-like UX | managed session with desktop presentation |
 
 The interface changes. The execution model does not.

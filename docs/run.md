@@ -56,7 +56,7 @@ workspace before preparation starts, and the prepare phase can route either from
 
 The detailed CLI surface and routing rules live in
 [`ATO_CLI_SPEC.md`](rfcs/accepted/ATO_CLI_SPEC.md) and
-[Core Architecture (JA)](core-architecture.md).
+[Core Architecture](core-architecture.md).
 
 ## Specification
 
