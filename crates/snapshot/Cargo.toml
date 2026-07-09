@@ -5,7 +5,7 @@ edition = "2024"
 license = "MPL-2.0"
 homepage = "https://ato.run"
 repository = "https://github.com/ato-run/ato"
-description = "Backend-agnostic build/restore of Ready-State Capsule warm state. Defines SnapshotBackend + Ready-State artifact types; ships a KVM-free FakeSnapshotBackend and a Firecracker skeleton (Unsupported without /dev/kvm)."
+description = "Backend-agnostic build/restore of Ready-State Capsule warm state. Defines SnapshotBackend + Ready-State artifact types; ships a real Firecracker (KVM, x86_64) backend, a KVM-free FakeSnapshotBackend for tests, and QEMU/Kata stubs."
 
 [package.metadata.dist]
 dist = false

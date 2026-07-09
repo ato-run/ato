@@ -2,14 +2,16 @@
 //! state.
 //!
 //! This crate defines the [`SnapshotBackend`] seam and the Ready-State artifact
-//! types ([`ReadyStateManifest`] and friends), and ships two backends:
+//! types ([`ReadyStateManifest`] and friends), and ships these backends:
 //!
+//! * [`FirecrackerBackend`] — the real x86_64 KVM implementation (M0 GO,
+//!   2026-06-29): drives Firecracker over its REST API to build and restore
+//!   Ready-State microVM snapshots. See `firecracker.rs` for scope.
 //! * [`FakeSnapshotBackend`] — KVM-free; drives the full
 //!   build→seal→restore→teardown pipeline through CapsuleFS so the Ready-State
 //!   flow is end-to-end testable on a host without `/dev/kvm` (e.g. OCI A1).
-//! * [`FirecrackerBackend`] — a skeleton that reports `Unsupported` until it
-//!   runs on a KVM-capable host; the real VMM implementation slots in behind
-//!   the same trait without changing callers.
+//! * [`KataBackend`] / QEMU — deliberate stubs reserving the OCI-alignment and
+//!   virtio-fs/GPU paths.
 //!
 //! ## Design (plan §4)
 //!
