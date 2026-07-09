@@ -16,8 +16,8 @@ use gpui::{AnyWindowHandle, App};
 
 use crate::app::{
     FocusControlBarInput, HideControlBar, NavigateToUrl, OpenAppWindowExperiment, OpenCardSwitcher,
-    OpenDockWindow, OpenGithubRunWindow, OpenStartWindow, OpenStoreWindow, ShowControlBar,
-    ShowSettings, ToggleControlBar,
+    OpenDockWindow, OpenGithubRunWindow, OpenStartWindow, OpenStoreWindow, ShowAtoHome,
+    ShowControlBar, ShowSettings, ToggleControlBar,
 };
 use crate::automation::AutomationHost;
 use crate::automation::command::AutomationCommand;
@@ -438,6 +438,13 @@ pub fn start(cx: &mut App, app_handle: AnyWindowHandle) {
                                             "ShowSettings" => {
                                                 window.dispatch_action(
                                                     Box::new(ShowSettings),
+                                                    cx,
+                                                );
+                                                Ok(())
+                                            }
+                                            "ShowAtoHome" => {
+                                                window.dispatch_action(
+                                                    Box::new(ShowAtoHome),
                                                     cx,
                                                 );
                                                 Ok(())

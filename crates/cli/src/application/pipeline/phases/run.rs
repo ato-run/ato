@@ -3723,6 +3723,424 @@ where
         .map_err(|e| anyhow::Error::new(*e))?;
     }
 
+    // ── Ready-State restore sub-mode (additive; developer-preview) ───────────
+    // Legacy fall-through (None) happens ONLY for: flag off, or flag on + capsule
+    // NOT Ready-State-eligible. With the flag ON + an eligible capsule, a MISSING
+    // sealed artifact FAILS CLOSED (not a silent cold run) — the user explicitly
+    // enabled Ready-State as a validation mode. An explicit-but-unavailable
+    // backend also fails closed (`select_backend`).
+    if crate::application::ready_state::flags::ready_state_enabled() {
+        use capsule::Measurable;
+        use crate::application::ready_state;
+        // Only reached when the flag is on, so the legacy path does ZERO of this
+        // (no manifest re-parse / hash). decide_ready_state_run fails CLOSED when
+        // the capsule is eligible but no sealed artifact exists (validation mode
+        // must not silently degrade to a cold run); returns None only for a
+        // non-eligible capsule (→ legacy dispatch below).
+        //
+        // Eligibility + the artifact key MUST be derived from the SAME manifest the
+        // `ato build` seal used — the RAW `capsule.toml` in the source dir.
+        // `decision.plan.manifest` is the derived/normalized ExecutionPlan manifest:
+        // it drops the top-level `[snapshot]` section (→ never Ready-State-eligible)
+        // and canonicalizes differently (→ a different `capsule_manifest_hash` than
+        // the seal). And `decision.plan.manifest_path` is the resolved `ato.lock.json`,
+        // not the capsule manifest. Either made `ato run` silently cold-path past
+        // every sealed artifact. Read the raw `capsule.toml` from the source dir
+        // (`manifest_dir`) — the same bytes the build sealed; fall back to the plan
+        // manifest only if the file can't be read/parsed.
+        let rs_capsule_toml = decision.plan.manifest_dir.join("capsule.toml");
+        let rs_raw: toml::Value = std::fs::read_to_string(&rs_capsule_toml)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_else(|| decision.plan.manifest.clone());
+        let rs_manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(&rs_raw)?)?;
+        let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
+        let rs_root = ready_state::state_root();
+        if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+            // Phase 8a-RunGate (#912): the binding-preview decision (names only, never
+            // values). D2 routes a binding-required capsule through the post-restore
+            // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
+            // the #837 pre-restore guard fail-closes exactly as today.
+            let binding_req = ready_state::bindings::requires_runtime_bindings(&rs_manifest);
+            let binding_names: Vec<String> = binding_req.secrets.iter().chain(binding_req.bindings.iter()).chain(binding_req.external.iter()).cloned().collect();
+            let binding_preview = ready_state::flags::bindings_preview_enabled();
+            let binding_gate_active = binding_preview && !binding_names.is_empty();
+            // v1.6 (ato#983) Slice 3 revision: captured now — `plan.manifest`
+            // is moved into `restore_and_expose` below — so MountVolumes can
+            // be sent before any binding delivery.
+            let has_durable_state =
+                plan.manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
+            // v1.2 PR 2: the grant-scoped resolver (default: host-local SecretStore,
+            // namespace rs-<hash16>) + LAUNCH PREFLIGHT. Every declared binding must
+            // resolve BEFORE anything is restored — a missing grant blocks the launch
+            // with the aggregated, actionable report (name + description + the exact
+            // `ato secrets set … --namespace …` command). Values stay in memory only
+            // until lease delivery; never logged or recorded.
+            let mut preflight_resolved: Vec<(String, protocol::binding_lease::SecretValue)> = Vec::new();
+            let mut resolver_kind: Option<String> = None;
+            let mut grant_namespace: Option<String> = None;
+            if binding_gate_active {
+                // The namespace derivation is itself fail-closed: a malformed
+                // manifest hash must never degrade into a weaker grant scope.
+                let ns = ready_state::binding_grants::binding_namespace(&rs_hash)?;
+                let resolver = ready_state::secret_resolver::select_resolver(&ns)?;
+                resolver_kind = Some(resolver.kind().to_string());
+                preflight_resolved = ready_state::binding_grants::preflight_resolve(
+                    resolver.as_ref(),
+                    &binding_names,
+                    &rs_manifest,
+                    &ns,
+                )?;
+                grant_namespace = Some(ns);
+            }
+            {
+                let mut receipt = ready_state::binding_host::BindingPreviewReceipt::decide(binding_preview, binding_names.clone());
+                receipt.resolver_kind = resolver_kind.clone();
+                receipt.grant_namespace = grant_namespace.clone();
+                receipt.record(&capsule::common::paths::ato_path_or_workspace_tmp("run"));
+            }
+            if !binding_gate_active {
+                // flag off, OR no bindings required → unchanged: the #837 guard
+                // fail-closes any binding-required capsule before restore.
+                ready_state::bindings::ensure_no_unwired_runtime_bindings(
+                    &rs_manifest,
+                    ready_state::bindings::BindingGuardMode::VerifyOnly,
+                )?;
+            }
+            let backend = ready_state::backend::select_backend()?;
+            // L2 (#912): placement capability gate. A binding-required preview must
+            // fail closed BEFORE restore if this backend/host cannot deliver bindings
+            // (no vsock / not firecracker / not x86_64) — never silently fall back.
+            if binding_gate_active {
+                let caps = backend.probe();
+                if !caps.binding.supports_binding_lease {
+                    let reason = caps.binding.unavailable_reason().unwrap_or_else(|| "binding-lease unsupported".into());
+                    tracing::warn!(target: "ato::ready_state", %reason, "binding preview fail-closed (placement)");
+                    anyhow::bail!("Ready-State binding preview requested but this host cannot deliver bindings: {reason}");
+                }
+            }
+            // Orphan Ready-State overlays from crashed prior serving runs are
+            // reaped/quarantined by the canonical startup sweep
+            // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
+            // separate sweep is wired here.
+            let store = ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            // U10 (#877): opt-in mem_backend selection diagnostics — record what a
+            // selector WOULD choose, then restore via File EXACTLY as before. Pure
+            // observation; no behavior change.
+            if ready_state::flags::uffd_diagnostics_enabled() {
+                let caps = backend.probe();
+                let no_bindings = !ready_state::bindings::requires_runtime_bindings(&rs_manifest)
+                    .requires_bindings();
+                let run_dir = capsule::common::paths::ato_path_or_workspace_tmp("run");
+                let msg = ready_state::diagnostics::record(
+                    backend.id(),
+                    &caps,
+                    &plan.manifest,
+                    &store,
+                    no_bindings,
+                    &plan.capsule_manifest_hash,
+                    ready_state::flags::ready_state_enabled(),
+                    &run_dir,
+                );
+                let _ = request.reporter.notify(msg).await;
+            }
+            let overlay = capsule::common::paths::ato_path_or_workspace_tmp("run")
+                .join(format!("ready-state-{}", std::process::id()));
+            // U15 (#882): opt-in AUTO-selection preview — the pure selector chooses
+            // File vs UFFD from the real facts (no-binding only, local CAS, remote
+            // off), gracefully falling back to File on an unsupported host. Takes
+            // precedence over the U11 forced preview.
+            let uffd_preview = if ready_state::flags::uffd_auto_preview_enabled() {
+                let caps = backend.probe();
+                let no_bindings = !ready_state::bindings::requires_runtime_bindings(&rs_manifest)
+                    .requires_bindings();
+                let has_mem = plan
+                    .manifest
+                    .layers
+                    .memory
+                    .as_ref()
+                    .and_then(|m| m.chunks.first())
+                    .map(|c| store.has_chunk(&c.hash))
+                    .unwrap_or(false);
+                let inputs = snapshot::mem_backend_selector::MemBackendInputs {
+                    host_supports_uffd: caps.supports_uffd_mem_backend,
+                    runner_class_compatible: true,
+                    capsule_no_bindings: no_bindings,
+                    local_cas_has_memory: has_mem,
+                    // The engine auto-loads a persisted hotset profile (U12) when
+                    // present; the selector only decides File vs UFFD here.
+                    hotset_profile_available: false,
+                    remote_preview_enabled: false,
+                    remote_available: false,
+                    validation_mode: ready_state::flags::ready_state_enabled(),
+                    fallback_allowed: true,
+                };
+                let decision = snapshot::mem_backend_selector::decide_mem_backend(&inputs);
+                use snapshot::mem_backend_selector::MemBackendChoice::*;
+                let engage = matches!(decision.choice, UffdLocal | UffdHotset | UffdRemote);
+                tracing::info!(
+                    target: "ato::ready_state",
+                    choice = ?decision.choice,
+                    engage,
+                    reasons = ?decision.reasons,
+                    "READY-STATE auto-select mem_backend (preview)"
+                );
+                let _ = request
+                    .reporter
+                    .notify(format!(
+                        "Ready-State auto-select: {:?} — {}",
+                        decision.choice,
+                        decision.reasons.last().map(String::as_str).unwrap_or("")
+                    ))
+                    .await;
+                engage
+            } else if ready_state::flags::uffd_preview_enabled() {
+                let caps = backend.probe();
+                if !caps.supports_uffd_mem_backend {
+                    anyhow::bail!(
+                        "UFFD preview (ATO_READY_STATE_UFFD_PREVIEW) requested but this host does \
+                         not support the UFFD mem_backend: {}. Unset it to use the File path.",
+                        caps.uffd_reason.as_deref().unwrap_or("unsupported")
+                    );
+                }
+                let has_mem = plan
+                    .manifest
+                    .layers
+                    .memory
+                    .as_ref()
+                    .and_then(|m| m.chunks.first())
+                    .map(|c| store.has_chunk(&c.hash))
+                    .unwrap_or(false);
+                if !has_mem {
+                    anyhow::bail!(
+                        "UFFD preview requires the memory image in the local CAS; it is not present."
+                    );
+                }
+                tracing::info!(
+                    target: "ato::ready_state",
+                    "READY-STATE: UFFD local preview engaged (no-binding capsule, local CAS demand)"
+                );
+                true
+            } else {
+                false
+            };
+            let receipt = ready_state::restore::restore_and_expose(
+                backend.as_ref(),
+                &store,
+                plan.manifest,
+                overlay,
+                plan.host_runner_class,
+                uffd_preview,
+            )?;
+            let session = receipt.session;
+            // v1.6 (ato#983) Slice 3 revision: MOUNT VOLUMES BEFORE BIND —
+            // durable state is a restore-time binding too (never baked into
+            // the build-time snapshot — see `mount_volumes_before_expose`'s
+            // doc comment), independent of the secret binding-preview flag
+            // below (a state-only capsule may have no secrets to preview at
+            // all). Same fail-closed shape: any failure tears the restored
+            // VM down and never exposes traffic.
+            if has_durable_state {
+                let uds = session.vsock_uds.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "durable state declared but the restored session has no vsock channel \
+                         (the artifact was not built with vsock) — cannot mount"
+                    )
+                });
+                let mount = uds.and_then(|uds| {
+                    ready_state::binding_host::mount_volumes_before_expose(
+                        &uds,
+                        true,
+                        std::time::Duration::from_secs(10),
+                    )
+                });
+                if let Err(e) = mount {
+                    let _ = backend.stop(session.clone());
+                    anyhow::bail!("Ready-State durable-state mount failed closed (no traffic exposed): {e}");
+                }
+            }
+            // Phase 8a-RunGate PR D2 (#912): BIND BEFORE EXPOSE. For a binding-required
+            // capsule under the preview flag, connect the guest-agent over vsock,
+            // deliver the leases, and block until bound-ready — BEFORE any traffic is
+            // exposed. Any failure (no vsock channel / missing secret / connect timeout /
+            // agent Error / not bound-ready) FAILS CLOSED: tear the restored VM down and
+            // never expose. The secret is delivered only over vsock, never recorded.
+            if binding_gate_active {
+                let bind = (|| -> anyhow::Result<()> {
+                    let uds = session.vsock_uds.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "binding preview: the restored session has no vsock channel \
+                             (the artifact was not built with vsock) — cannot deliver bindings"
+                        )
+                    })?;
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    // Values were preflight-resolved BEFORE restore; the lease clock
+                    // (issued/expires) starts here at delivery. TTL is policy-driven
+                    // (ATO_READY_STATE_BINDING_TTL_MS, default 1h) — the foreground
+                    // renewal loop renews inside it.
+                    let leases = ready_state::binding_host::issue_leases(
+                        std::mem::take(&mut preflight_resolved),
+                        now_ms,
+                        ready_state::flags::binding_ttl_ms(),
+                    )?;
+                    ready_state::binding_host::bind_before_expose(uds, &leases, std::time::Duration::from_secs(10))
+                })();
+                if let Err(e) = bind {
+                    // Fail closed: no unbound session is ever exposed.
+                    let _ = backend.stop(session.clone());
+                    anyhow::bail!("Ready-State binding preview failed closed (no traffic exposed): {e}");
+                }
+                tracing::info!(
+                    target: "ato::ready_state",
+                    bindings = ?binding_names,
+                    "READY-STATE binding preview: bound-ready — exposing traffic"
+                );
+            }
+            // Surface RuntimeMetadata::MicroVm through the restored-session handle.
+            let handle =
+                ready_state::runtime_adapter::RestoredRuntimeHandle::new(session.clone());
+            let metrics = handle.capture_metrics().await.map_err(anyhow::Error::new)?;
+            // Long-lived serving (Phase 7) requires a REAL serving VMM process.
+            // Only a backend that spawns one (Firecracker) sets `vmm_pid = Some`;
+            // a backend with no serving process (Fake / KVM-free) returns `None`.
+            // We must NOT register a `runtime="microvm"` ProcessInfo against the
+            // CLI's own pid or report "serving" when no serving process exists —
+            // that would claim a long-lived session that isn't real. Such backends
+            // stay on the verify-only path (restore → teardown → Ok), preserving
+            // the KVM-free developer-preview smoke without faking a serving VM.
+            let Some(serving_pid) = session.vmm_pid else {
+                tracing::info!(
+                    target: "ato::ready_state",
+                    backend = backend.id(),
+                    metadata = ?metrics.metadata,
+                    "READY-STATE: verified restore (backend '{}' has no serving process — not long-lived)",
+                    backend.id()
+                );
+                let _ = ready_state::restore::teardown(backend.as_ref(), session);
+                return Ok(());
+            };
+            // The restored Firecracker child is already detached (reparents to
+            // init), so it KEEPS SERVING after this returns. Register it like a
+            // background process so `ato ps` lists it and a LATER fresh-process
+            // `ato stop` reaps it from the on-disk record (pid/tap/overlay), NOT
+            // the in-memory backend registry. NO teardown here. (Binding-required
+            // capsules already failed closed above; this session is no-binding.)
+            let id = format!("capsule-{serving_pid}");
+            let now = SystemTime::now();
+            let info = crate::runtime::process::ProcessInfo {
+                id: id.clone(),
+                name: decision
+                    .plan
+                    .manifest_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "capsule".to_string()),
+                pid: serving_pid,
+                workload_pid: None,
+                status: crate::runtime::process::ProcessStatus::Ready,
+                runtime: "microvm".to_string(),
+                start_time: now,
+                os_start_time_unix_ms: capsule::state::session::process::process_start_time_unix_ms(
+                    serving_pid as u32,
+                ),
+                workload_os_start_time_unix_ms: None,
+                manifest_path: Some(decision.plan.manifest_path.clone()),
+                scoped_id: None,
+                target_label: Some(decision.plan.selected_target_label().to_string()),
+                requested_port: session.guest_port,
+                log_path: Some(session.overlay_root.join("console.log")),
+                ready_at: Some(now),
+                last_event: Some("restored".to_string()),
+                last_error: None,
+                exit_code: None,
+                ready_state_backend_id: Some(backend.id().to_string()),
+                ready_state_overlay_root: Some(session.overlay_root.clone()),
+                ready_state_session_id: Some(session.session_id.clone()),
+                ready_state_tap_dev: None,
+                // D3: record the vsock UDS for a bound session so `ato stop` can
+                // scrub the guest bindings before teardown.
+                ready_state_vsock_uds: if binding_gate_active { session.vsock_uds.clone() } else { None },
+            };
+            crate::runtime::process::ProcessManager::new()?.write_pid(&info)?;
+            tracing::info!(
+                target: "ato::ready_state",
+                backend = backend.id(),
+                metadata = ?metrics.metadata,
+                session = %session.session_id,
+                pid = serving_pid,
+                port = ?session.guest_port,
+                "READY-STATE: serving (long-lived)"
+            );
+            let port_str = session.guest_port.map(|p| p.to_string()).unwrap_or_else(|| "?".to_string());
+
+            if ready_state::flags::foreground_serve_enabled() {
+                // Foreground serve (Phase 7.5b, opt-in): BLOCK until the guest exits
+                // or Ctrl-C, tearing the microVM down either way. The SIGINT hook
+                // reuses the dep-contract teardown registry; it captures only Send
+                // data (cloned session + id) and reconstructs a fresh Firecracker
+                // backend + ProcessManager inside (cross-process via .fc-session.json),
+                // so it owns no non-Send state. teardown + delete_pid are idempotent,
+                // so double-SIGINT and a SIGINT racing the normal-exit path are safe.
+                use snapshot::SnapshotBackend as _;
+                request
+                    .reporter
+                    .notify(format!(
+                        "🚀 Ready-State microVM serving (ID: {id}) on port {port_str} — Ctrl-C to stop"
+                    ))
+                    .await?;
+                let sigint_session = session.clone();
+                let sigint_id = id.clone();
+                let token = crate::application::pipeline::cleanup::register_dep_contract_sigint_teardown(
+                    move || {
+                        let _ = snapshot::FirecrackerBackend::new().stop(sigint_session);
+                        if let Ok(pm) = crate::runtime::process::ProcessManager::new() {
+                            let _ = pm.delete_pid(&sigint_id);
+                        }
+                    },
+                );
+                // v1.2 PR 2 (L8): while a BOUND session serves in the foreground, renew
+                // its leases inside the TTL and revoke any lease whose grant disappears
+                // (`ato secrets delete …` mid-session ⇒ guest value scrubbed, traffic
+                // gates). Background serving has no host process to renew from — there
+                // the single TTL stands and expiry-scrubs lazily (documented).
+                let renewal = (binding_gate_active && session.vsock_uds.is_some()).then(|| {
+                    ready_state::binding_host::spawn_lease_renewal(
+                        session.vsock_uds.clone().expect("checked above"),
+                        grant_namespace.clone().expect("set when the binding gate is active"),
+                        binding_names.clone(),
+                        ready_state::flags::binding_ttl_ms(),
+                    )
+                });
+                let exit = crate::executors::source::wait_for_pid_exit(serving_pid as u32).await;
+                if let Some(task) = renewal {
+                    task.abort();
+                }
+                // Normal exit (guest shut down on its own): drop the now-stale SIGINT
+                // hook so it can't double-fire, then reap tap/overlay/lock + pid record.
+                crate::application::pipeline::cleanup::unregister_dep_contract_sigint_teardown(token);
+                let _ = ready_state::restore::teardown(backend.as_ref(), session);
+                let _ = crate::runtime::process::ProcessManager::new().map(|pm| pm.delete_pid(&id));
+                let code = exit.unwrap_or(0);
+                tracing::info!(target: "ato::ready_state", id = %id, code, "READY-STATE: foreground serve ended");
+                progress.ok(HourglassPhase::Execute, "ready-state microVM exited");
+                return Ok(());
+            }
+
+            // Default (#845): background register-and-return; `ato stop` reaps later.
+            request
+                .reporter
+                .notify(format!(
+                    "🚀 Ready-State microVM serving (ID: {id}) on port {port_str} — stop with `ato stop {id}`"
+                ))
+                .await?;
+            progress.ok(HourglassPhase::Execute, "ready-state microVM serving");
+            return Ok(());
+        }
+    }
+
     let run_command_uses_specialized_executor = decision
         .plan
         .execution_driver()
@@ -3776,6 +4194,11 @@ where
                 last_event: Some("spawned".to_string()),
                 last_error: None,
                 exit_code: None,
+                ready_state_backend_id: None,
+                ready_state_overlay_root: None,
+                ready_state_session_id: None,
+                ready_state_tap_dev: None,
+                ready_state_vsock_uds: None,
             };
 
             let process_manager = crate::runtime::process::ProcessManager::new()?;
@@ -4290,6 +4713,11 @@ where
                     last_event: Some("spawned".to_string()),
                     last_error: None,
                     exit_code: None,
+                    ready_state_backend_id: None,
+                    ready_state_overlay_root: None,
+                    ready_state_session_id: None,
+                    ready_state_tap_dev: None,
+                ready_state_vsock_uds: None,
                 };
 
                 let process_manager = crate::runtime::process::ProcessManager::new()?;

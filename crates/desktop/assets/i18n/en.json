@@ -11,7 +11,6 @@
   "common.empty": "(empty)",
   "common.unknown": "(unknown)",
   "common.coming_soon": "Coming Soon",
-
   "control_bar.settings": "Settings",
   "control_bar.store": "Store",
   "control_bar.dev_console": "Console",
@@ -30,7 +29,6 @@
   "control_bar.info.restart": "Restart",
   "control_bar.info.stop": "Stop",
   "control_bar.info.unmanaged_desc": "This page is not managed by a capsule.",
-
   "start.title": "New Window",
   "start.subtitle": "Open a capsule, local app, or GitHub repo",
   "start.quit": "Quit",
@@ -67,7 +65,6 @@
   "start.featured.tag.local_run": "Local run",
   "start.featured.tag.offline": "Offline",
   "start.featured.tag.privacy": "Privacy-focused",
-
   "settings.title": "Settings",
   "settings.nav.general": "General",
   "settings.nav.desktop": "Desktop",
@@ -147,7 +144,6 @@
   "settings.secrets.delete.body": "will be deleted. All capsule grants for this secret will also be removed. This cannot be undone.",
   "settings.secrets.delete.confirm": "Delete",
   "settings.secrets.delete.button": "Delete",
-
   "store.title": "Store — Capsule Registry",
   "store.view_on_ato": "View on ato.run ↗",
   "store.filter.type": "Type",
@@ -165,12 +161,10 @@
   "store.view.list": "List view",
   "store.search.results": "Results for \"{query}\"",
   "store.search.all": "All Capsules",
-
   "dev_console.title": "Developer Console",
   "dev_console.subtitle": "Manage your published and draft capsules",
   "dock.title": "Dock",
   "dock.subtitle": "Your developer hub on ato",
-
   "windows.title": "Open Windows",
   "windows.subtitle": "Switch between sessions",
   "windows.subtitle_empty": "No windows yet — start with a new window.",
@@ -183,7 +177,6 @@
   "windows.new_window": "New Window",
   "windows.open_start": "Open Start Page",
   "windows.close_window": "Close",
-
   "launch.title": "Review Before Launch",
   "launch.subtitle": "Verify the capsule name and permissions, then launch.",
   "launch.subtitle_named": "Review the details before launching {name}.",
@@ -201,7 +194,6 @@
   "launch.field.env_config_named": "Env config (",
   "launch.field.configured": "Configured",
   "launch.field.policy_consent": "Execution policy consent",
-
   "identity.title": "Account",
   "identity.loading": "Checking…",
   "identity.menu.store": "Store",
@@ -213,5 +205,8 @@
   "identity.phase2_tooltip": "Available in Phase 2",
   "identity.id_error": "ID fetch failed",
   "identity.not_signed_in": "Not signed in",
-  "identity.sign_in_hint": "Run ato login to authenticate"
+  "identity.sign_in_hint": "Run ato login to authenticate",
+  "quit_prompt.title": "Quit Ato?",
+  "quit_prompt.quit": "Quit",
+  "quit_prompt.reopen": "Reopen Home"
 }

@@ -1,0 +1,52 @@
+{
+  "build_total_ms": {
+    "max": 12538.809364,
+    "median": 8396.390163,
+    "min": 7960.207498,
+    "n": 5,
+    "p90": 12538.809364,
+    "p95": 12538.809364
+  },
+  "config": {
+    "build_runs": 5,
+    "restore_runs": 30,
+    "rootfs_input_bytes": 1073741824
+  },
+  "host": {
+    "arch": "x86_64",
+    "cgroup_version": 2,
+    "cpu_model": "Intel(R) Xeon(R) CPU @ 2.80GHz",
+    "cpu_platform": "Intel Cascade Lake",
+    "dev_kvm": true,
+    "disk_root_rota": "0",
+    "firecracker_version": "Firecracker v1.16.0",
+    "kernel": "6.17.0-1020-gcp",
+    "machine_type": "n2-standard-4",
+    "rootfs_read_only": true
+  },
+  "restore_total_ms": {
+    "cold-cache": {
+      "max": 1620.4255380000002,
+      "median": 1561.437433,
+      "min": 1506.024861,
+      "n": 30,
+      "p90": 1576.1407629999999,
+      "p95": 1597.409411
+    },
+    "warm-cache": {
+      "max": 222.623884,
+      "median": 218.032428,
+      "min": 212.038397,
+      "n": 30,
+      "p90": 220.965818,
+      "p95": 221.770303
+    }
+  },
+  "sealed_bytes": {
+    "memory": 536870912,
+    "rootfs": 1073741824,
+    "total": 1610636712,
+    "vmstate": 23976
+  },
+  "target": "light-python-hs1"
+}

@@ -52,6 +52,27 @@ pub struct ProcessInfo {
     pub last_error: Option<String>,
     #[serde(default)]
     pub exit_code: Option<i32>,
+    // ── Ready-State (microVM) session fields (additive; `serde(default)` so
+    // legacy .pid TOML still parses). Present only for `runtime == "microvm"`;
+    // they let a fresh-process `ato stop` reconstruct the session and tear it
+    // down from the on-disk record (not the in-memory backend registry).
+    /// Snapshot backend that restored this session (e.g. `firecracker` / `fake`).
+    #[serde(default)]
+    pub ready_state_backend_id: Option<String>,
+    /// Disposable overlay root (holds `.fc-session.json`); removed on teardown.
+    #[serde(default)]
+    pub ready_state_overlay_root: Option<PathBuf>,
+    /// `RestoredSession.session_id` — the backend's session key.
+    #[serde(default)]
+    pub ready_state_session_id: Option<String>,
+    /// TAP device (informational; the authoritative tap is in `.fc-session.json`).
+    #[serde(default)]
+    pub ready_state_tap_dev: Option<String>,
+    /// Phase 8a-RunGate PR D3 (#912): the guest-agent vsock UDS for a bound binding
+    /// session. `ato stop` sends `Stop` (revoke + scrub) here BEFORE teardown.
+    /// `None` for no-binding sessions.
+    #[serde(default)]
+    pub ready_state_vsock_uds: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +582,18 @@ impl ProcessManager {
             }
         };
 
+        // Ready-State (microVM) session: tear down via the snapshot backend from
+        // the persisted record (this is a fresh process — the backend's in-memory
+        // registry is empty), then delete the pid file. Idempotent + best-effort:
+        // killing an already-dead VMM is a no-op, and a double-stop just finds no
+        // pid file. Handled before the is_active/is_alive checks so a stale/exited
+        // microVM still gets its tap/lock/overlay reaped.
+        if info.runtime == "microvm" && info.ready_state_backend_id.is_some() {
+            self.teardown_ready_state_session(&info);
+            self.delete_pid(id)?;
+            return Ok(true);
+        }
+
         if !info.status.is_active() {
             let stopped_deps = self.stop_dependency_session(id, force)?;
             if stopped_deps {
@@ -585,6 +618,99 @@ impl ProcessManager {
             self.delete_pid(id)?;
             Ok(stopped_deps)
         }
+    }
+
+    /// Tear down a Ready-State (microVM) session via the snapshot backend, from
+    /// the persisted [`ProcessInfo`] record (the calling process has a fresh
+    /// backend whose in-memory session registry is empty). Best-effort: errors
+    /// are logged, never propagated, so the pid file can always be deleted
+    /// (idempotent, safe on double-stop / after crash). A dirty overlay (removal
+    /// failed) is quarantined so it is never reused.
+    fn teardown_ready_state_session(&self, info: &ProcessInfo) {
+        let Some(backend_id) = info.ready_state_backend_id.as_deref() else { return };
+        // Phase 8a-RunGate PR D3 (#912): stop-scrub. If this is a bound binding session,
+        // ask the guest-agent to revoke + scrub its tmpfs bindings over vsock BEFORE the
+        // VM is torn down. Best-effort defense-in-depth (the teardown destroys the guest
+        // RAM + tmpfs regardless); a scrub failure is logged, never blocks teardown, and
+        // NEVER re-seals.
+        if let Some(uds) = info.ready_state_vsock_uds.as_deref() {
+            match crate::application::ready_state::binding_host::stop_scrub_over_vsock(uds) {
+                Ok(()) => tracing::info!(target: "ato::ready_state", "stop-scrub: guest bindings scrubbed before teardown"),
+                Err(e) => tracing::warn!(target: "ato::ready_state", "stop-scrub failed (teardown proceeds): {e}"),
+            }
+        }
+        let overlay = info.ready_state_overlay_root.clone().unwrap_or_default();
+        let session_id = info.ready_state_session_id.as_deref().unwrap_or(&info.id);
+        let _ = self.teardown_ready_state(backend_id, session_id, &overlay, Some(info.pid), info.requested_port);
+    }
+
+    /// Shared Ready-State teardown core (used by `ato stop`, stale-pid cleanup,
+    /// and the orphan-overlay sweep): reconstruct a `RestoredSession`, instantiate
+    /// the backend by id, `backend.stop()`. The Firecracker `stop()` reaps the
+    /// recorded pid + tap + lock from `overlay/.fc-session.json`, so this works
+    /// cross-process (empty in-memory registry). Returns `true` if the overlay was
+    /// removed; on a failed removal the dirty overlay is **quarantined** (never
+    /// reused) and `false` is returned. Best-effort — errors are logged, not
+    /// propagated.
+    fn teardown_ready_state(
+        &self,
+        backend_id: &str,
+        session_id: &str,
+        overlay: &Path,
+        vmm_pid: Option<i32>,
+        guest_port: Option<u16>,
+    ) -> bool {
+        use snapshot::SnapshotBackend;
+        let session = snapshot::RestoredSession {
+            session_id: session_id.to_string(),
+            backend_id: backend_id.to_string(),
+            guest_port,
+            overlay_root: overlay.to_path_buf(),
+            restored_bytes: 0,
+            vmm_pid,
+            vsock_uds: None, // stop path reconstructs from the pid record; no live vsock needed
+            workload_addr: None, // stop path never dials the workload
+        };
+        let backend: Box<dyn SnapshotBackend> = match backend_id {
+            "firecracker" => Box::new(snapshot::FirecrackerBackend::new()),
+            "fake" => Box::new(snapshot::FakeSnapshotBackend::new()),
+            other => {
+                tracing::warn!(target: "ato::ready_state", "stop: unknown ready-state backend '{other}'");
+                return false;
+            }
+        };
+        match backend.stop(session) {
+            Ok(receipt) if receipt.overlay_removed => true,
+            Ok(_) => {
+                if overlay.exists()
+                    && let Err(e) = self.quarantine_overlay(session_id, overlay)
+                {
+                    tracing::warn!(target: "ato::ready_state", "stop: quarantine overlay failed: {e}");
+                }
+                false
+            }
+            Err(e) => {
+                tracing::warn!(target: "ato::ready_state", "stop: ready-state teardown error: {e}");
+                false
+            }
+        }
+    }
+
+    /// Move a dirty overlay (whose removal failed) into `<run_dir>/quarantine/` so
+    /// it is preserved for forensics and never reused as a live session path.
+    fn quarantine_overlay(&self, session_id: &str, overlay: &Path) -> Result<()> {
+        let qdir = self.run_dir.join("quarantine");
+        fs::create_dir_all(&qdir)?;
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let safe: String = session_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+            .collect();
+        fs::rename(overlay, qdir.join(format!("{safe}-{ts}")))?;
+        Ok(())
     }
 
     pub fn stop_import_preview_session(
@@ -868,7 +994,106 @@ impl ProcessManager {
             }
         }
 
+        // Class 4: orphaned Ready-State overlay dirs (`ready-state-*`) with no live
+        // backing session — reap or quarantine so a crashed/abandoned session never
+        // leaks its tap/lock/overlay. Flag-gated so flag-off startup is unchanged.
+        if crate::application::ready_state::flags::ready_state_enabled() {
+            self.sweep_ready_state_overlays(&mut report, now, socket_grace);
+        }
+
         Ok(report)
+    }
+
+    /// Class 4 helper: scan `run_dir` for `ready-state-*` overlay dirs not backed by
+    /// a live pid record. A dir with a still-alive recorded pid is left alone (a
+    /// live session whose pid file we simply didn't find). With `.fc-session.json`
+    /// and a dead pid → reconstruct + backend stop (reaps tap/lock/overlay from the
+    /// record). Without a record (crashed before writing it) the tap name is
+    /// unknown → quarantine only. A `socket_grace`-fresh dir (mid-restore, pre-pid)
+    /// is skipped.
+    fn sweep_ready_state_overlays(&self, report: &mut RunDirSweepReport, now: SystemTime, grace: Duration) {
+        // Overlays still owned by a live (pid-alive) Ready-State session.
+        let live: std::collections::HashSet<PathBuf> = self
+            .list_processes()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(process_info_is_alive)
+            .filter_map(|p| p.ready_state_overlay_root)
+            .collect();
+
+        let Ok(entries) = fs::read_dir(&self.run_dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with("ready-state-") || !path.is_dir() || live.contains(&path) {
+                continue;
+            }
+            // Grace: a dir younger than `grace` may be a session mid-restore that
+            // has not yet written its pid file — never reap it.
+            if entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| now.duration_since(t).ok())
+                .is_some_and(|age| age < grace)
+            {
+                continue;
+            }
+
+            let record = path.join(".fc-session.json");
+            if record.exists() {
+                let json = fs::read_to_string(&record).unwrap_or_default();
+                let val: Option<serde_json::Value> = serde_json::from_str(&json).ok();
+                // A *positive* recorded pid only; 0/negative/missing → None. A
+                // `vmm_pid` of 0 must never reach teardown (it would `kill -9 0`,
+                // signalling the whole process group), so it is not reapable.
+                let pid = val
+                    .as_ref()
+                    .and_then(|v| v.get("pid"))
+                    .and_then(|p| p.as_i64())
+                    .filter(|p| *p > 0)
+                    .map(|p| p as i32);
+                let session_id = val
+                    .as_ref()
+                    .and_then(|v| v.get("session_id"))
+                    .and_then(|s| s.as_str())
+                    .unwrap_or(name)
+                    .to_string();
+                // A live recorded pid → a running VMM we lack a pid file for. Never
+                // kill it; leave the overlay for `ato stop` / its real owner.
+                if pid.is_some_and(is_process_alive) {
+                    continue;
+                }
+                // A record is reapable only if it carries BOTH a positive pid AND a
+                // non-empty recorded tap. Record-driven teardown kills the recorded
+                // pid and deletes the recorded tap, so a missing/zero pid or a
+                // missing/empty tap (or a malformed/partially-written record) must
+                // NOT be reaped — quarantine it like a no-record dir instead.
+                let has_tap = val
+                    .as_ref()
+                    .and_then(|v| v.get("tap"))
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.trim().is_empty());
+                if pid.is_none() || !has_tap {
+                    if self.quarantine_overlay(&session_id, &path).is_ok() {
+                        report.orphan_overlays_quarantined += 1;
+                    }
+                    continue;
+                }
+                // Long-lived serving is Firecracker-only; the record omits backend id.
+                if self.teardown_ready_state("firecracker", &session_id, &path, pid, None) {
+                    report.orphan_overlays_reaped += 1;
+                } else {
+                    report.orphan_overlays_quarantined += 1;
+                }
+            } else {
+                // No record: the tap name is unknown, so we cannot reap the tap —
+                // quarantine the dir (never reuse) and accept the rare tap leak.
+                if self.quarantine_overlay(name, &path).is_ok() {
+                    report.orphan_overlays_quarantined += 1;
+                }
+            }
+        }
     }
 
     pub fn cleanup_dead_processes_with_details(&self) -> Result<Vec<ProcessInfo>> {
@@ -889,6 +1114,13 @@ impl ProcessManager {
                     || (info.status.is_active() && !process_info_is_alive(&info)))
                 && self.stop_dependency_session(id, false).is_ok()
             {
+                // A stale Ready-State session: reap its tap/lockfile/overlay via
+                // the backend (idempotent — the VMM is already dead) before
+                // dropping the pid file, so a crashed session never leaks the tap
+                // (which would block the next single-session run) or its overlay.
+                if info.runtime == "microvm" && info.ready_state_backend_id.is_some() {
+                    self.teardown_ready_state_session(&info);
+                }
                 let _ = self.delete_pid(id);
                 cleaned.push(info);
             }
@@ -910,6 +1142,12 @@ pub struct RunDirSweepReport {
     pub pid_files_removed: usize,
     pub sockets_removed: usize,
     pub import_preview: ImportPreviewSweepReport,
+    /// Ready-State overlay dirs with no live backing pid that were reaped
+    /// (VM/tap/overlay/lock removed) via the recorded `.fc-session.json`.
+    pub orphan_overlays_reaped: usize,
+    /// Ready-State overlay dirs quarantined (no record, or removal failed) —
+    /// preserved for forensics, never reused as a live overlay.
+    pub orphan_overlays_quarantined: usize,
 }
 
 /// Parse the embedded `<pid>` from a `*.sock` / `*.sock.txt` filename.
@@ -2455,6 +2693,184 @@ mod tests {
         assert_eq!(format_duration(zero_sec), "0s");
     }
 
+    fn microvm_info(id: &str, overlay: PathBuf) -> ProcessInfo {
+        ProcessInfo {
+            id: id.to_string(),
+            name: "demo".to_string(),
+            pid: std::process::id() as i32,
+            workload_pid: None,
+            status: ProcessStatus::Ready,
+            runtime: "microvm".to_string(),
+            start_time: SystemTime::UNIX_EPOCH,
+            os_start_time_unix_ms: None,
+            workload_os_start_time_unix_ms: None,
+            manifest_path: None,
+            scoped_id: None,
+            target_label: None,
+            requested_port: Some(8080),
+            log_path: None,
+            ready_at: None,
+            last_event: Some("restored".to_string()),
+            last_error: None,
+            exit_code: None,
+            ready_state_backend_id: Some("fake".to_string()),
+            ready_state_overlay_root: Some(overlay),
+            ready_state_session_id: Some("sess-1".to_string()),
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
+        }
+    }
+
+    #[test]
+    fn ready_state_fields_round_trip_and_legacy_pid_still_parses() {
+        let info = microvm_info("capsule-7", PathBuf::from("/tmp/ov-7"));
+        let de: ProcessInfo = toml::from_str(&toml::to_string(&info).unwrap()).unwrap();
+        assert_eq!(de.runtime, "microvm");
+        assert_eq!(de.ready_state_backend_id.as_deref(), Some("fake"));
+        assert_eq!(de.ready_state_overlay_root, Some(PathBuf::from("/tmp/ov-7")));
+        assert_eq!(de.ready_state_session_id.as_deref(), Some("sess-1"));
+        // Legacy .pid TOML (written before Phase 7) must still parse (serde default).
+        let legacy = r#"
+id = "capsule-old"
+name = "old"
+pid = 42
+status = "Running"
+runtime = "shell"
+start_time = [0, 0]
+"#;
+        let old: ProcessInfo = toml::from_str(legacy).expect("legacy pid parses");
+        assert!(old.ready_state_backend_id.is_none());
+    }
+
+    #[test]
+    fn stop_process_reaps_ready_state_session_and_is_idempotent() {
+        let run_dir = tempfile::tempdir().unwrap();
+        let overlay = run_dir.path().join("ready-state-ov");
+        std::fs::create_dir_all(&overlay).unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run_dir.path().to_path_buf());
+        pm.write_pid(&microvm_info("capsule-7", overlay.clone())).unwrap();
+        assert!(pm.pid_file_path("capsule-7").exists());
+
+        let stopped = pm.stop_process("capsule-7", false).unwrap();
+        assert!(stopped, "microVM session stopped");
+        assert!(!pm.pid_file_path("capsule-7").exists(), "pid file deleted");
+        assert!(!overlay.exists(), "Fake backend teardown removed the disposable overlay");
+
+        // Double-stop is safe (no pid file -> Ok(false), no panic).
+        assert!(!pm.stop_process("capsule-7", false).unwrap());
+    }
+
+    #[test]
+    fn sweep_ready_state_overlays_quarantines_orphan_without_record() {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-888");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(ov.join("data"), "x").unwrap(); // crashed before writing .fc-session.json
+        let mut report = RunDirSweepReport::default();
+        // grace=0 so the just-created dir isn't grace-skipped.
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        assert_eq!(report.orphan_overlays_quarantined, 1);
+        assert_eq!(report.orphan_overlays_reaped, 0);
+        assert!(!ov.exists(), "orphan overlay moved out of the live path");
+        assert!(
+            run.path().join("quarantine").read_dir().unwrap().next().is_some(),
+            "overlay preserved in quarantine"
+        );
+    }
+
+    /// A pid guaranteed dead: a child we spawned and reaped. Safe to pass to
+    /// `kill` — the OS returns ESRCH, not a signal to a live process.
+    fn dead_pid() -> i32 {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .or_else(|_| {
+                std::process::Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .spawn()
+            })
+            .expect("spawn a short-lived child");
+        let pid = child.id() as i32;
+        let _ = child.wait();
+        pid
+    }
+
+    /// Write a `.fc-session.json` overlay and run the sweep with grace=0. Returns
+    /// `(reaped, quarantined, overlay_still_exists)`.
+    fn sweep_one_record(record_json: &str) -> (usize, usize, bool) {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-rec");
+        std::fs::create_dir_all(&ov).unwrap();
+        std::fs::write(ov.join(".fc-session.json"), record_json).unwrap();
+        let mut report = RunDirSweepReport::default();
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        (
+            report.orphan_overlays_reaped,
+            report.orphan_overlays_quarantined,
+            ov.exists(),
+        )
+    }
+
+    #[test]
+    fn sweep_quarantines_dead_record_without_tap() {
+        // Dead pid > 0 but no tap → not reapable (teardown deletes the recorded
+        // tap) → quarantined.
+        let json = format!(r#"{{"pid":{},"session_id":"fc-notap"}}"#, dead_pid());
+        let (reaped, quarantined, exists) = sweep_one_record(&json);
+        assert_eq!((reaped, quarantined), (0, 1), "tap-less record must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_quarantines_record_with_tap_but_missing_pid() {
+        // tap present but no pid field → vmm_pid would be unknown → quarantined.
+        let (reaped, quarantined, exists) =
+            sweep_one_record(r#"{"tap":"tap-test","session_id":"fc-nopid"}"#);
+        assert_eq!((reaped, quarantined), (0, 1), "missing pid must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_quarantines_record_with_tap_and_pid_zero() {
+        // pid=0 must never reach teardown (it would `kill -9 0`) → quarantined.
+        let (reaped, quarantined, exists) =
+            sweep_one_record(r#"{"pid":0,"tap":"tap-test","session_id":"fc-pid0"}"#);
+        assert_eq!((reaped, quarantined), (0, 1), "pid=0 must be quarantined");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_reaps_dead_record_with_pid_and_tap() {
+        // Positive dead pid + non-empty tap → a usable record → reaped via the
+        // backend (kill is a no-op ESRCH on the already-dead pid).
+        let json = format!(r#"{{"pid":{},"tap":"tap-test","session_id":"fc-ok"}}"#, dead_pid());
+        let (reaped, quarantined, exists) = sweep_one_record(&json);
+        assert_eq!((reaped, quarantined), (1, 0), "pid+tap dead record must be reaped");
+        assert!(!exists);
+    }
+
+    #[test]
+    fn sweep_ready_state_overlays_skips_live_backed_session() {
+        let run = tempfile::tempdir().unwrap();
+        let pm = ProcessManager::with_run_dir_for_test(run.path().to_path_buf());
+        let ov = run.path().join("ready-state-self");
+        std::fs::create_dir_all(&ov).unwrap();
+        let mut info = microvm_info("capsule-self", ov.clone());
+        info.pid = std::process::id() as i32; // this test process — alive
+        info.os_start_time_unix_ms =
+            capsule::state::session::process::process_start_time_unix_ms(std::process::id());
+        pm.write_pid(&info).unwrap();
+        let mut report = RunDirSweepReport::default();
+        pm.sweep_ready_state_overlays(&mut report, SystemTime::now(), Duration::from_secs(0));
+        assert_eq!(
+            report.orphan_overlays_reaped + report.orphan_overlays_quarantined,
+            0,
+            "an overlay backed by a live session must never be swept"
+        );
+        assert!(ov.exists(), "live-backed overlay left intact");
+    }
+
     #[test]
     fn test_process_info_serialization() {
         let info = ProcessInfo {
@@ -2476,6 +2892,11 @@ mod tests {
             last_event: Some("spawned".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2519,6 +2940,11 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("Failed to serialize");
@@ -2560,6 +2986,11 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2640,6 +3071,11 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2756,6 +3192,11 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         pm.write_pid(&info).expect("write pid");
 
@@ -2864,6 +3305,11 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         let serialized = toml::to_string(&info).expect("serialize host fallback process info");
@@ -2901,6 +3347,11 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         let other = ProcessInfo {
             id: "other-1".to_string(),
@@ -2921,6 +3372,11 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         pm.write_pid(&matching).expect("write matching");
@@ -3005,6 +3461,11 @@ mod tests {
             last_event: Some("ready".to_string()),
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
 
         pm.write_pid(&info).expect("write pid file");
