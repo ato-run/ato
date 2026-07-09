@@ -15,10 +15,10 @@ BUILD (once, on a KVM builder host)              RUN (per request, on a runner)
 source / server-approved recipe                  sealed artifact
   │  Docker → ext4 rootfs                          │  restore under Firecracker
   ▼                                                ▼
-boot under Firecracker                           deliver real bindings (vsock)
-  │  readiness probe must pass                     │
+boot under Firecracker                           deliver real bindings via vsock
+  │  readiness probe must pass                     │  (only if the capsule has any)
   ▼                                                ▼
-snapshot → seal → no-secret scan → register      bound-ready → proxy traffic
+snapshot → seal → no-secret scan → register      ready → proxy traffic
 ```
 
 The **supported application surface is a contract, not a best effort** — see
@@ -36,10 +36,20 @@ derives a rootfs (Docker → ext4), boots the app under Firecracker, verifies it
 against its readiness probe, snapshots it, seals the result, scans every layer
 for secrets, and registers the artifact.
 
-Secrets and per-user state are **never baked in**. During build the guest runs
-with placeholder bindings; the workload is stopped and scrubbed before the
-snapshot is taken, and a no-secret gate runs over every sealed layer
-(fail-closed on any finding).
+Secrets and per-user state are **never baked in**, and the seal moment depends
+on whether the capsule declares required restore-time bindings:
+
+- **No-binding capsules** (the Snapshot v1 contract surface) seal with the
+  workload **running** — the snapshot captures the probe-verified serving
+  state directly, which is what makes restore instant.
+- **Capsules with required bindings** (supervisor builds) boot with
+  *placeholder* bindings delivered over vsock, verify health, then the host
+  sends `StopWorkload` and revokes every placeholder so the snapshot is taken
+  **workload-idle** with the tmpfs binding files scrubbed. Placeholder values
+  are generated inside the backend and never stored.
+
+In both cases a no-secret gate runs over every sealed layer (fail-closed on
+any finding).
 
 ### Artifact: content-addressed layers
 
@@ -51,11 +61,13 @@ leak between sessions.
 
 ### Restore: bind at restore time
 
-On a runner, restore rehydrates the microVM from `vmstate` + `memory`, then
-delivers the *real* bindings — secrets, durable state, per-session
-configuration — to the in-guest agent (`crates/guest-agent`) over a vsock
-control channel before the workload restarts. Anything session- or
-user-specific is a **restore-time binding, never build-time state**.
+On a runner, restore rehydrates the microVM from `vmstate` + `memory`. A
+no-binding capsule resumes serving directly. A capsule with required bindings
+first receives the *real* bindings — secrets, durable state, per-session
+configuration — via the in-guest agent (`crates/guest-agent`) over a vsock
+control channel, and only then restarts the workload (bound-ready). Anything
+session- or user-specific is a **restore-time binding, never build-time
+state**.
 
 The runner side is the same Connected Runner agent described in
 [Connected Runner](runner.md): hosts prepared with `ato runner setup --fix`
@@ -84,6 +96,9 @@ it is enrolled.
 - GPU state MUST NOT be captured into a snapshot (fail-closed guard)
 - durable state and secrets MUST be delivered as restore-time bindings over
   the vsock channel, never baked into layers
+- builds with required bindings MUST snapshot workload-idle after
+  `StopWorkload` + placeholder revocation; no-binding builds seal with the
+  workload running (v1.0 no-binding contract)
 - eligibility is decided at build time, fail-closed, with an actionable
   rejection reason — the full rule table (R1–R8) lives in the
   [compatibility contract](snapshot-v1-compatibility.md)

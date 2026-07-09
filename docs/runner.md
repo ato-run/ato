@@ -30,35 +30,50 @@ Web Console (app.ato.run)          control plane (api.ato.run)
 
 ### Host preparation and enrollment
 
-The operator flow on an Ubuntu host is:
+There are two preparation tracks, each with its own diagnostic command —
+don't mix them up:
 
-1. **`ato runner doctor`** — read-only readiness check. Profiles:
+**GPU / native-inference hosts** (serving local-LLM runs):
+
+1. **`ato runner doctor`** — read-only GPU-host readiness check. Profiles:
    `nvidia-ubuntu` (default; Vulkan native-inference path for llama.cpp) and
    `nvidia-cuda` (SGLang CUDA path). Never mutates host state.
-2. **`ato runner provision`** (GPU hosts, root) — Dockerless NVIDIA/Vulkan
+2. **`ato runner provision`** (root) — Dockerless NVIDIA/Vulkan
    native-inference provisioning: NVIDIA driver + Vulkan runtime + a
    `vulkaninfo` GPU smoke. Idempotent; `--resume` continues after a reboot,
    `--dry-run` prints the plan.
-3. **`ato runner setup`** (snapshot-capable hosts, root) — prepares the host as
-   an all-in-one snapshot builder + capsule runner. Without `--fix` it only
+
+**Snapshot-serving hosts** (building and restoring Ready-State snapshots):
+
+1. **`ato doctor runner`** (note: the *top-level* doctor, not
+   `ato runner doctor`) — diagnostics-only readiness check for the all-in-one
+   snapshot builder + capsule runner role: KVM, Firecracker, guest kernel,
+   Docker, groups, tun/tap, artifact root, env file, runner token, the systemd
+   services, and the derived Ready-State verdict (can this host
+   `build_ready_state` / `restore_snapshot` today?). It installs and
+   reconfigures nothing; the fixable set is applied by the next step.
+2. **`ato runner setup`** (root) — prepares the host. Without `--fix` it only
    prints the derived plan; with `--fix` it installs Docker, the pinned
    (sha256-verified) Firecracker release and guest kernel, group grants, the
    artifact root, `/etc/ato/runner.env` (append-only), and two systemd units.
    `--official-preview` additionally configures Caddy per-slot ingress for an
    ato-managed `https://<slug>.runner.ato.run` hostname.
-4. **`ato runner smoke`** (root + KVM + Docker) — a local, control-plane-free
+3. **`ato runner smoke`** (root + KVM + Docker) — a local, control-plane-free
    Ready-State smoke: Docker→ext4 rootfs → build (boot + healthcheck + seal) →
    restore → proxy HTTP probe → teardown → orphan diff. A green smoke means the
    host can actually build **and** serve capsule snapshots.
-5. **`ato runner enroll`** — registers the host against the control plane via a
-   browser device-flow sign-in (or a headless single-use `--enrollment-token`,
-   used by Managed Cloud VMs), writes the systemd env file, verifies the
-   control plane sees the runner as active, and with `--start` enables the
-   runner service. Only the runner token is persisted — the operator session
-   used for registration is discarded.
-6. **`ato runner status`** — shows the local systemd unit states plus the
-   control plane's device view (active/online, last seen, public URL,
-   supported lease kinds, slot capacity).
+
+**Both tracks** then converge on:
+
+- **`ato runner enroll`** — registers the host against the control plane via a
+  browser device-flow sign-in (or a headless single-use `--enrollment-token`,
+  used by Managed Cloud VMs), writes the systemd env file, verifies the
+  control plane sees the runner as active, and with `--start` enables the
+  runner service. Only the runner token is persisted — the operator session
+  used for registration is discarded.
+- **`ato runner status`** — shows the local systemd unit states plus the
+  control plane's device view (active/online, last seen, public URL,
+  supported lease kinds, slot capacity).
 
 ### The agent loop
 
@@ -86,8 +101,10 @@ a public URL when the host's ingress supports it.
   tokens are single-use and never stored
 - `/etc/ato/runner.env` is append-only for the tooling: operator-set keys are
   never overwritten, and existing files are backed up rather than clobbered
-- `ato runner doctor` MUST stay read-only; host mutation is confined to
-  `provision` and `setup --fix` (root, with confirmation)
+- the diagnostic commands (`ato runner doctor` for GPU readiness,
+  `ato doctor runner` for snapshot-host readiness) MUST stay read-only; host
+  mutation is confined to `provision` and `setup --fix` (root, with
+  confirmation)
 - slot ports are deterministic (`base_port + slot_index`) so the operator's
   tunnel or load balancer can be configured statically
 
