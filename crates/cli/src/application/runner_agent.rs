@@ -6734,8 +6734,12 @@ mod tests {
     /// the URL (the pre-3e-4 single check reported ready_url=none here).
     #[tokio::test]
     async fn proxy_ready_retries_until_late_upstream_accepts_then_claims_url() {
-        // Reserve an upstream port, but only start listening ~300ms later —
-        // the restart-with-env window in miniature.
+        // Reserve an upstream port, but only start listening ~1s later — the
+        // restart-with-env window in miniature. Deliberately generous (not
+        // 300ms): under a loaded/contended CI runner (observed on
+        // windows-latest), scheduling this test's own async task can itself
+        // be delayed enough that a too-tight window makes the first probe
+        // race the upstream coming up instead of reliably preceding it.
         let upstream_port = {
             let l = TcpListener::bind("127.0.0.1:0").expect("upstream port");
             let p = l.local_addr().unwrap().port();
@@ -6743,7 +6747,7 @@ mod tests {
             p
         };
         let upstream = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(std::time::Duration::from_millis(1_000));
             let listener =
                 TcpListener::bind(format!("127.0.0.1:{upstream_port}")).expect("late upstream");
             for _ in 0..2 {
@@ -6818,13 +6822,14 @@ mod tests {
             addr
         };
         let started = std::time::Instant::now();
-        let (result, probe) = start_root_proxy_ready(
-            &listen,
-            format!("127.0.0.1:{dead_port}"),
-            "/health",
-            Duration::from_millis(500),
-        )
-        .await;
+        // 2s (not 500ms): under a loaded/contended CI runner (observed on
+        // windows-latest) a too-tight budget can be consumed almost entirely
+        // by scheduling delay before this task's first poll, leaving room for
+        // only one attempt instead of the several this test wants to prove.
+        let budget = Duration::from_secs(2);
+        let (result, probe) =
+            start_root_proxy_ready(&listen, format!("127.0.0.1:{dead_port}"), "/health", budget)
+                .await;
         assert!(result.is_err(), "dead upstream must be a typed error");
         assert!(!probe.ok);
         assert_eq!(probe.result_label(), "timeout");
@@ -6834,12 +6839,12 @@ mod tests {
             probe.attempts
         );
         assert!(
-            probe.wait_ms >= 500,
+            probe.wait_ms >= budget.as_millis() as u64,
             "budget must be spent (wait_ms={})",
             probe.wait_ms
         );
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() < budget + Duration::from_secs(3),
             "timeout must not overshoot the budget by seconds"
         );
     }
