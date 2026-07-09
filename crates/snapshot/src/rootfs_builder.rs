@@ -1205,19 +1205,24 @@ pub fn valid_github_repo(repo: &str) -> bool {
 /// Validate a relative `subdir` **before** it is joined to the checkout: reject absolute
 /// paths, any `..` component, and non-normal components (root/prefix). The canonical
 /// containment check after checkout closes symlink traversal.
+///
+/// `subdir` names a path inside a cloned git repository — always POSIX-style,
+/// regardless of the platform this builder itself runs on. Parsed manually as
+/// a plain string rather than via `std::path::Path`/`Component`: on Windows,
+/// `Path::new("/etc").is_absolute()` is FALSE (Windows absolute paths need a
+/// drive letter/UNC prefix) while `.components()` still yields a rooted
+/// component — the two host-platform-dependent checks disagree with each
+/// other and with POSIX semantics, wrongly admitting `/etc` past the
+/// "must be relative" gate on a non-Linux build host.
 pub(crate) fn validate_subdir(subdir: &str) -> Result<(), String> {
-    use std::path::Component;
-    let p = Path::new(subdir);
-    if p.is_absolute() {
+    if subdir.starts_with('/') {
         return Err(format!("subdir {subdir:?} must be relative"));
     }
-    for c in p.components() {
-        match c {
-            Component::Normal(_) | Component::CurDir => {}
-            Component::ParentDir => return Err(format!("subdir {subdir:?} may not contain '..'")),
-            Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("subdir {subdir:?} has an illegal prefix"));
-            }
+    for component in subdir.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => return Err(format!("subdir {subdir:?} may not contain '..'")),
+            _ => {}
         }
     }
     Ok(())
