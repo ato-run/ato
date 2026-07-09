@@ -38,12 +38,13 @@ broke every staging preview.)
   `/sbin/init: /usr/local/bin/ato-guest-agent: not found` and the job fails as
   `guest never became healthy within timeout`.
 - Env files (unit reads both, in order):
-  - `/etc/ato/runner.env` — shared runner host env (written by `ato runner setup`).
+  - `/etc/ato/runner.env` — shared runner host env (written by `ato runner
+    setup`); also carries `ATO_FC_WORK=/var/lib/ato/fc-work` because BOTH the
+    builder and the runner agent need it (see below).
   - `/etc/ato/runner-builder-override.env` — root-owned `0600`; holds
     `SNAPSHOT_BUILDER_AGENT_TOKEN`, `ATO_API_URL=https://staging.api.ato.run`,
-    `ATO_BUILDER_SUPERVISOR=1`, `ATO_FC_VSOCK=1`,
-    `ATO_GUEST_AGENT_BIN=/usr/local/lib/ato/guest-agent-musl`, and
-    `ATO_FC_WORK=/var/lib/ato/fc-work` lives in the shared `/etc/ato/runner.env` (both units need it — see below).
+    `ATO_BUILDER_SUPERVISOR=1`, `ATO_FC_VSOCK=1`, and
+    `ATO_GUEST_AGENT_BIN=/usr/local/lib/ato/guest-agent-musl`.
 
 ## /tmp capacity: why ATO_FC_WORK is set
 
