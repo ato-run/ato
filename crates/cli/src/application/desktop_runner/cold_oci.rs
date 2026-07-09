@@ -370,6 +370,8 @@ pub(crate) enum ContainerGuardSubstrate {
 }
 
 impl ContainerGuard {
+    // Only referenced from #[cfg(test)] smoke helpers; unused in the non-test build.
+    #[allow(dead_code)]
     pub(crate) fn new(name: String) -> Self {
         Self::for_substrate(name, ContainerGuardSubstrate::AppleContainerization)
     }

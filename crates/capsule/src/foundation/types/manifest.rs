@@ -1305,7 +1305,7 @@ pub fn validate_state_volume_size_mb(
     size_mb: Option<u32>,
 ) -> Result<u32, String> {
     let size = size_mb.unwrap_or(DEFAULT_STATE_VOLUME_SIZE_MB);
-    if size < MIN_STATE_VOLUME_SIZE_MB || size > MAX_STATE_VOLUME_SIZE_MB {
+    if !(MIN_STATE_VOLUME_SIZE_MB..=MAX_STATE_VOLUME_SIZE_MB).contains(&size) {
         return Err(format!(
             "state '{state_name}': size_mb {size} is out of range \
              ({MIN_STATE_VOLUME_SIZE_MB}..={MAX_STATE_VOLUME_SIZE_MB})"

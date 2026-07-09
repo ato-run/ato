@@ -269,7 +269,7 @@ pub(crate) fn gather() -> Vec<Check> {
     // never install the x86_64 stack here). This gates the whole VM substrate.
     checks.push(match cmd_stdout("uname", &["-m"]).map(|m| parse_arch(&m)) {
         Some(arch) if arch == super::SUPPORTED_ARCH => {
-            Check::ok("arch", "CPU architecture", format!("{arch}"))
+            Check::ok("arch", "CPU architecture", arch.to_string())
         }
         Some(arch) => Check::blocked(
             "arch",
