@@ -366,10 +366,10 @@ fn restore_and_verify(
 }
 
 fn stop_session(backend: &FirecrackerBackend, session: RestoredSession) -> anyhow::Result<()> {
-    if let Some(vsock) = &session.vsock_uds {
-        if let Err(e) = stop_scrub_over_vsock(vsock) {
-            eprintln!("(non-fatal) stop-scrub over vsock: {e:#}");
-        }
+    if let Some(vsock) = &session.vsock_uds
+        && let Err(e) = stop_scrub_over_vsock(vsock)
+    {
+        eprintln!("(non-fatal) stop-scrub over vsock: {e:#}");
     }
     let overlay = session.overlay_root.clone();
     let td = backend

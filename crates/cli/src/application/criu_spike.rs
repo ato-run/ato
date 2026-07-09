@@ -228,7 +228,7 @@ pub(crate) fn probe() -> CriuSpikeReport {
     }
 
     let criu_version = detect_criu_version();
-    let runtime = ContainerRuntime::detect(|n| crate::application::runner_agent::binary_on_path(n));
+    let runtime = ContainerRuntime::detect(crate::application::runner_agent::binary_on_path);
     let mut diagnostics = Vec::new();
     if criu_version.is_none() {
         diagnostics
@@ -594,10 +594,11 @@ mod smoke {
         cleanup(&name);
 
         let receipt = CriuSpikeReceipt {
-            host_os: report
-                .applicable
-                .then(|| "linux".to_string())
-                .unwrap_or_default(),
+            host_os: if report.applicable {
+                "linux".to_string()
+            } else {
+                String::new()
+            },
             runtime: runtime.as_str().to_string(),
             criu_version: report.criu_version.clone(),
             kernel_release: report.kernel_release.clone(),

@@ -123,25 +123,25 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
         if !self.volumes_mounted || !self.session.bound_ready(now_ms()) {
             return;
         }
-        if let Some(sup) = self.supervisor.as_mut() {
-            if !sup.started() {
-                match sup.on_bound_ready(true) {
-                    Ok(started) => {
-                        if started {
-                            self.running_digests = Some(
-                                self.required
-                                    .iter()
-                                    .filter_map(|n| self.digests.get(n).map(|d| (n.clone(), *d)))
-                                    .collect(),
-                            );
-                            eprintln!(
-                                "ato-guest-agent: vacuously bound-ready — workload started at boot"
-                            );
-                        }
+        if let Some(sup) = self.supervisor.as_mut()
+            && !sup.started()
+        {
+            match sup.on_bound_ready(true) {
+                Ok(started) => {
+                    if started {
+                        self.running_digests = Some(
+                            self.required
+                                .iter()
+                                .filter_map(|n| self.digests.get(n).map(|d| (n.clone(), *d)))
+                                .collect(),
+                        );
+                        eprintln!(
+                            "ato-guest-agent: vacuously bound-ready — workload started at boot"
+                        );
                     }
-                    Err(e) => {
-                        eprintln!("ato-guest-agent: initial workload start failed: {e}");
-                    }
+                }
+                Err(e) => {
+                    eprintln!("ato-guest-agent: initial workload start failed: {e}");
                 }
             }
         }

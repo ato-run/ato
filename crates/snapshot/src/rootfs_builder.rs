@@ -19,10 +19,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use capsule::foundation::types::manifest::{
-    CapsuleManifest, DEFAULT_STATE_VOLUME_SIZE_MB, RuntimeType, ServiceSpec as ManifestServiceSpec,
-    StateDurability, StateSharing, validate_and_normalize_state_mount_target,
-    validate_state_volume_size_mb,
+    CapsuleManifest, RuntimeType, ServiceSpec as ManifestServiceSpec, StateDurability,
+    StateSharing, validate_and_normalize_state_mount_target, validate_state_volume_size_mb,
 };
+// Only referenced from #[cfg(test)] assertions below; unused in the non-test build.
+#[allow(unused_imports)]
+use capsule::foundation::types::manifest::DEFAULT_STATE_VOLUME_SIZE_MB;
 use capsule::foundation::types::ready_state::SecretDelivery;
 use protocol::binding_lease::BindingName;
 use serde::Serialize;
@@ -755,16 +757,15 @@ fn derive_supervisor_services(
         // proxy would front a port nothing is on → false/never ready). Fail closed
         // rather than silently honour the target port and ignore the author's `PORT`.
         // (Injected below in build_supervisor_json when absent.)
-        if public {
-            if let Some(declared) = base_env.get("PORT") {
-                if declared != &target_port.to_string() {
-                    return Err(format!(
-                        "public service '{name}': env PORT = {declared:?} but the build target \
-                         port is {target_port} — the public service must listen on the single \
-                         proxied port. Drop the explicit PORT (it is injected) or set it to {target_port}"
-                    ));
-                }
-            }
+        if public
+            && let Some(declared) = base_env.get("PORT")
+            && declared != &target_port.to_string()
+        {
+            return Err(format!(
+                "public service '{name}': env PORT = {declared:?} but the build target \
+                 port is {target_port} — the public service must listen on the single \
+                 proxied port. Drop the explicit PORT (it is injected) or set it to {target_port}"
+            ));
         }
         // DNS-safe aliases (they may become in-guest DNS labels in the aliasing slice).
         let aliases = svc
@@ -1044,10 +1045,10 @@ fn derive_supervisor_services(
         // internal service with no expose but a literal env.PORT uses that.
         if r.public {
             primary.insert(r.name.clone(), target_port);
-        } else if !primary.contains_key(&r.name) {
-            if let Some(p) = r.literal_port {
-                primary.insert(r.name.clone(), p);
-            }
+        } else if !primary.contains_key(&r.name)
+            && let Some(p) = r.literal_port
+        {
+            primary.insert(r.name.clone(), p);
         }
     }
 

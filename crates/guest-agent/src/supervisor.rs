@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn supervisor_starts_and_stops_the_WHOLE_group_as_a_unit() {
+    fn supervisor_starts_and_stops_the_whole_group_as_a_unit() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "openai", "sk-KEY");
         let cfg = SupervisorConfig::from_json(

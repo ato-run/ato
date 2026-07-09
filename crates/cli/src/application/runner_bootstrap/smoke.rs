@@ -501,7 +501,7 @@ async fn smoke_pipeline(
         )),
     };
     let proxy_ok = match probe {
-        Ok((addr, code)) if code == 200 => push(
+        Ok((addr, 200)) => push(
             stages,
             "proxy_health",
             true,
