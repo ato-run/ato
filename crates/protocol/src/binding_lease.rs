@@ -45,9 +45,16 @@ impl std::fmt::Display for BindingNameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BindingNameError::Empty => write!(f, "binding name is empty"),
-            BindingNameError::TooLong(n) => write!(f, "binding name too long ({n} > {MAX_BINDING_NAME_LEN})"),
-            BindingNameError::InvalidChar(c) => write!(f, "binding name has invalid character {c:?} (allowed: a-z 0-9 _ - .)"),
-            BindingNameError::ReservedDotName => write!(f, "binding name '.'/'..' is not a valid path component"),
+            BindingNameError::TooLong(n) => {
+                write!(f, "binding name too long ({n} > {MAX_BINDING_NAME_LEN})")
+            }
+            BindingNameError::InvalidChar(c) => write!(
+                f,
+                "binding name has invalid character {c:?} (allowed: a-z 0-9 _ - .)"
+            ),
+            BindingNameError::ReservedDotName => {
+                write!(f, "binding name '.'/'..' is not a valid path component")
+            }
         }
     }
 }
@@ -291,20 +298,41 @@ mod tests {
         assert!(BindingName::parse("database_url").is_ok());
         assert!(BindingName::parse("api-key.v2").is_ok());
         assert_eq!(BindingName::parse(""), Err(BindingNameError::Empty));
-        assert_eq!(BindingName::parse("."), Err(BindingNameError::ReservedDotName));
-        assert_eq!(BindingName::parse(".."), Err(BindingNameError::ReservedDotName));
-        assert_eq!(BindingName::parse("bad name"), Err(BindingNameError::InvalidChar(' ')));
-        assert_eq!(BindingName::parse("UPPER"), Err(BindingNameError::InvalidChar('U')));
-        assert!(matches!(BindingName::parse("x".repeat(200)), Err(BindingNameError::TooLong(_))));
+        assert_eq!(
+            BindingName::parse("."),
+            Err(BindingNameError::ReservedDotName)
+        );
+        assert_eq!(
+            BindingName::parse(".."),
+            Err(BindingNameError::ReservedDotName)
+        );
+        assert_eq!(
+            BindingName::parse("bad name"),
+            Err(BindingNameError::InvalidChar(' '))
+        );
+        assert_eq!(
+            BindingName::parse("UPPER"),
+            Err(BindingNameError::InvalidChar('U'))
+        );
+        assert!(matches!(
+            BindingName::parse("x".repeat(200)),
+            Err(BindingNameError::TooLong(_))
+        ));
     }
 
     #[test]
     fn secret_value_never_appears_in_debug() {
         let v = SecretValue::new(SECRET);
-        assert!(!format!("{v:?}").contains(SECRET), "SecretValue Debug leaked the secret");
+        assert!(
+            !format!("{v:?}").contains(SECRET),
+            "SecretValue Debug leaked the secret"
+        );
         // And a whole lease Debug'd must not leak it either.
         let l = lease(1000, 5000);
-        assert!(!format!("{l:?}").contains(SECRET), "BindingLease Debug leaked the secret");
+        assert!(
+            !format!("{l:?}").contains(SECRET),
+            "BindingLease Debug leaked the secret"
+        );
         assert_eq!(v.expose(), SECRET, "expose() still returns the raw value");
     }
 
@@ -329,7 +357,10 @@ mod tests {
         let r = l.receipt(2000);
         let json = serde_json::to_string(&r).unwrap();
         assert!(!json.contains(SECRET), "receipt JSON leaked the secret");
-        assert!(!format!("{r:?}").contains(SECRET), "receipt Debug leaked the secret");
+        assert!(
+            !format!("{r:?}").contains(SECRET),
+            "receipt Debug leaked the secret"
+        );
         assert_eq!(r.status, BindingLeaseStatus::Active);
         assert_eq!(r.schema_version, BINDING_LEASE_SCHEMA_VERSION);
         // round-trip.
@@ -346,9 +377,15 @@ mod tests {
         let l = lease(1000, 5000);
         let delivery = l.to_delivery();
         let json = serde_json::to_string(&delivery).unwrap();
-        assert!(json.contains(SECRET), "delivery payload must carry the value for wire");
+        assert!(
+            json.contains(SECRET),
+            "delivery payload must carry the value for wire"
+        );
         // Even the delivery payload's Debug redacts the secret.
-        assert!(!format!("{delivery:?}").contains(SECRET), "delivery Debug leaked the secret");
+        assert!(
+            !format!("{delivery:?}").contains(SECRET),
+            "delivery Debug leaked the secret"
+        );
         // round-trip the wire payload.
         let back: BindingLeaseDelivery = serde_json::from_str(&json).unwrap();
         assert_eq!(back.value.expose(), SECRET);

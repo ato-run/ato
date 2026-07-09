@@ -90,10 +90,7 @@ impl SnapshotBackend for KataBackend {
         Err(self.unsupported())
     }
 
-    fn restore(
-        &self,
-        _input: RestoreReadyStateInput<'_>,
-    ) -> Result<RestoreReceipt, SnapshotError> {
+    fn restore(&self, _input: RestoreReadyStateInput<'_>) -> Result<RestoreReceipt, SnapshotError> {
         Err(self.unsupported())
     }
 

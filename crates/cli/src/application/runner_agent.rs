@@ -129,9 +129,11 @@ pub fn load_runner_credentials() -> Result<RunnerCredentials> {
         return load_credentials(&path);
     }
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    if let (Some(api_base), Some(token), Some(id)) =
-        (env(ENV_RUNNER_API_URL), env(ENV_RUNNER_TOKEN), env(ENV_RUNNER_ID))
-    {
+    if let (Some(api_base), Some(token), Some(id)) = (
+        env(ENV_RUNNER_API_URL),
+        env(ENV_RUNNER_TOKEN),
+        env(ENV_RUNNER_ID),
+    ) {
         return Ok(RunnerCredentials {
             api_base: api_base.trim_end_matches('/').to_string(),
             runner_id: id,
@@ -820,8 +822,8 @@ pub async fn run_serve(
     // #948 N-slot: with more than one slot (or an explicit ATO_FC_NETNS=1) each
     // restore runs in its own network namespace so identical `fctap0`/172.16.0.2
     // VMs coexist. Single-slot stays on the legacy root-namespace path.
-    let netns_enabled = pool.capacity() > 1
-        || std::env::var("ATO_FC_NETNS").ok().as_deref() == Some("1");
+    let netns_enabled =
+        pool.capacity() > 1 || std::env::var("ATO_FC_NETNS").ok().as_deref() == Some("1");
     if netns_enabled {
         println!("   Network: per-slot namespaces (ato-slot-N) enabled");
         cleanup_orphan_slot_netns(pool.capacity());
@@ -1163,7 +1165,9 @@ fn advertised_lease_kinds_for(
     // restore + SERVE a sealed microVM (KVM + a firecracker binary). The control plane
     // capability-gates dispatch on this, so a KVM-free host is never handed a restore.
     if restore_ready {
-        kinds.push(crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND.to_string());
+        kinds.push(
+            crate::application::ready_state::restore_lease::RESTORE_SNAPSHOT_LEASE_KIND.to_string(),
+        );
     }
     // v1.2 PR 3e: restore_snapshot_with_bindings needs restore-readiness AND the
     // supervisor prerequisites (operator flag + backend binding-lease capability) —
@@ -1204,7 +1208,10 @@ fn supervisor_restore_ready() -> bool {
     crate::application::ready_state::flags::runner_supervisor_enabled()
         && *CAPABLE.get_or_init(|| {
             use snapshot::SnapshotBackend as _;
-            snapshot::FirecrackerBackend::new().probe().binding.supports_binding_lease
+            snapshot::FirecrackerBackend::new()
+                .probe()
+                .binding
+                .supports_binding_lease
         })
 }
 
@@ -1464,8 +1471,12 @@ fn cleanup_orphan_slot_netns(capacity: usize) {
     for i in 0..capacity {
         let ns = format!("ato-slot-{i}");
         let veth = format!("vsl{i}h");
-        let _ = std::process::Command::new("ip").args(["netns", "del", &ns]).status();
-        let _ = std::process::Command::new("ip").args(["link", "del", &veth]).status();
+        let _ = std::process::Command::new("ip")
+            .args(["netns", "del", &ns])
+            .status();
+        let _ = std::process::Command::new("ip")
+            .args(["link", "del", &veth])
+            .status();
         let _ = std::fs::remove_file(work_root.join(format!("{ns}.lock")));
     }
 }
@@ -1498,8 +1509,8 @@ fn reap_orphan_restore_overlays(overlay_root: &Path, backend: &dyn snapshot::Sna
         let lease_id = entry.file_name().to_string_lossy().into_owned();
         let recorded_pid = orphan_overlay_recorded_pid(&overlay);
         let safe_to_signal = match recorded_pid {
-            None => true,                             // no pid ⇒ stop() signals nothing
-            Some(pid) if !vmm_alive(pid) => true,     // dead ⇒ kill is a no-op
+            None => true,                                        // no pid ⇒ stop() signals nothing
+            Some(pid) if !vmm_alive(pid) => true,                // dead ⇒ kill is a no-op
             Some(pid) => proc_is_firecracker_for(pid, &overlay), // alive ⇒ only if still ours
         };
         if safe_to_signal {
@@ -1567,7 +1578,11 @@ fn public_ready_url(
     slot: &SlotLease,
 ) -> Option<String> {
     if let Some(template) = public_url_template {
-        return Some(render_public_url_template(template, slot.proxy_port, slot.index));
+        return Some(render_public_url_template(
+            template,
+            slot.proxy_port,
+            slot.index,
+        ));
     }
     match public_base_url {
         Some(base) if slot.index == 0 => Some(format!("{}/", base.trim_end_matches('/'))),
@@ -2286,7 +2301,11 @@ pub async fn start_root_proxy_ready(
     timeout: Duration,
 ) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
     let started = std::time::Instant::now();
-    let mut probe = ProxyReadyProbe { attempts: 0, wait_ms: 0, ok: false };
+    let mut probe = ProxyReadyProbe {
+        attempts: 0,
+        wait_ms: 0,
+        ok: false,
+    };
     let listener = match tokio::net::TcpListener::bind(listen).await {
         Ok(l) => l,
         Err(e) => {
@@ -2319,7 +2338,8 @@ pub async fn start_root_proxy_ready(
     } else {
         format!("/{probe_path}")
     };
-    let request = format!("GET {path} HTTP/1.0\r\nHost: ato-proxy-ready-probe\r\n\r\n").into_bytes();
+    let request =
+        format!("GET {path} HTTP/1.0\r\nHost: ato-proxy-ready-probe\r\n\r\n").into_bytes();
     let mut backoff = PROXY_READY_BACKOFF_MS.iter().copied();
     loop {
         let remaining = timeout.saturating_sub(started.elapsed());
@@ -3812,16 +3832,20 @@ async fn handle_restore_snapshot_lease(
     netns_enabled: bool,
 ) {
     use crate::application::ready_state::backend::select_backend_for_slot;
-    use crate::application::ready_state::binding_grants::{binding_namespace, preflight_resolve_names};
+    use crate::application::ready_state::binding_grants::{
+        binding_namespace, preflight_resolve_names,
+    };
     use crate::application::ready_state::binding_host::{
-        bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal, stop_scrub_over_vsock,
+        bind_before_expose, issue_leases, mount_volumes_before_expose, spawn_lease_renewal,
+        stop_scrub_over_vsock,
     };
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
-        RestoreArtifactClass, ensure_artifact_local, load_and_verify_manifest, parse_restore_snapshot_command,
+        RestoreArtifactClass, ensure_artifact_local, load_and_verify_manifest,
+        parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -3839,7 +3863,10 @@ async fn handle_restore_snapshot_lease(
     let mut prof_parts: Vec<String> = Vec::new();
     macro_rules! prof_mark {
         ($name:literal) => {{
-            prof_parts.push(format!(concat!($name, "={}"), prof_last.elapsed().as_millis()));
+            prof_parts.push(format!(
+                concat!($name, "={}"),
+                prof_last.elapsed().as_millis()
+            ));
             prof_last = std::time::Instant::now();
         }};
     }
@@ -3854,9 +3881,16 @@ async fn handle_restore_snapshot_lease(
         code: &str,
         message: String,
     ) {
-        eprintln!("⚠️  restore lease {lease_id} rejected: {}", scrub_secrets(&message));
-        let report = LeaseReport::Failed { code: code.to_string(), message };
-        if let Err(err) = report_lease_status(client, api_base, runner_token, lease_id, &report).await
+        eprintln!(
+            "⚠️  restore lease {lease_id} rejected: {}",
+            scrub_secrets(&message)
+        );
+        let report = LeaseReport::Failed {
+            code: code.to_string(),
+            message,
+        };
+        if let Err(err) =
+            report_lease_status(client, api_base, runner_token, lease_id, &report).await
         {
             eprintln!(
                 "⚠️  restore lease {lease_id}: failure report failed: {}",
@@ -3870,7 +3904,16 @@ async fn handle_restore_snapshot_lease(
     let cmd = match parse_restore_snapshot_command(&lease.command) {
         Ok(c) => c,
         Err((code, message)) => {
-            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
             return;
         }
     };
@@ -3939,7 +3982,16 @@ async fn handle_restore_snapshot_lease(
     {
         Ok(p) => p,
         Err((code, message)) => {
-            fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
             return;
         }
     };
@@ -3952,7 +4004,16 @@ async fn handle_restore_snapshot_lease(
         match load_and_verify_manifest(&paths.manifest_json, &cmd, runner_supervisor_enabled()) {
             Ok(m) => m,
             Err((code, message)) => {
-                fail(client, api_base, runner_token, &lease_id, slot, &code, message).await;
+                fail(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    slot,
+                    &code,
+                    message,
+                )
+                .await;
                 return;
             }
         };
@@ -3966,8 +4027,10 @@ async fn handle_restore_snapshot_lease(
     // any durable state volumes — captured now (same "manifest is the single
     // source of truth, moved into restore below" reasoning as above) so
     // MountVolumes can be sent before any binding delivery.
-    let has_durable_state =
-        manifest.supervisor_build.as_ref().is_some_and(|s| !s.state_volumes.is_empty());
+    let has_durable_state = manifest
+        .supervisor_build
+        .as_ref()
+        .is_some_and(|s| !s.state_volumes.is_empty());
     prof_mark!("verify_manifest_ms");
 
     // 4. Open the artifact's CAS + select the host backend (both fail-closed).
@@ -4068,23 +4131,29 @@ async fn handle_restore_snapshot_lease(
         .join(&lease_id);
     // Drain any stale spans so `spans=` below carries THIS restore only.
     let _ = snapshot::bench::drain();
-    let receipt =
-        match restore_and_expose(backend.as_ref(), &store, manifest, overlay_root, None, false) {
-            Ok(r) => r,
-            Err(e) => {
-                fail(
-                    client,
-                    api_base,
-                    runner_token,
-                    &lease_id,
-                    slot,
-                    "restore_failed",
-                    format!("{e:#}"),
-                )
-                .await;
-                return;
-            }
-        };
+    let receipt = match restore_and_expose(
+        backend.as_ref(),
+        &store,
+        manifest,
+        overlay_root,
+        None,
+        false,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "restore_failed",
+                format!("{e:#}"),
+            )
+            .await;
+            return;
+        }
+    };
     prof_mark!("backend_restore_ms");
     let prof_spans: Vec<String> = snapshot::bench::drain()
         .into_iter()
@@ -4124,10 +4193,9 @@ async fn handle_restore_snapshot_lease(
     // ANY failure = teardown + typed fail, exactly like the binding gate.
     if has_durable_state {
         let mount_result: anyhow::Result<()> = async {
-            let uds = session
-                .vsock_uds
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("restored session declares durable state but exposes no vsock uds"))?;
+            let uds = session.vsock_uds.clone().ok_or_else(|| {
+                anyhow::anyhow!("restored session declares durable state but exposes no vsock uds")
+            })?;
             tokio::task::spawn_blocking(move || {
                 mount_volumes_before_expose(&uds, true, Duration::from_secs(10))
             })
@@ -4156,57 +4224,57 @@ async fn handle_restore_snapshot_lease(
     // gate returns Ok only at bound-ready (the guest-agent then restarts the
     // workload with the real env). ANY failure = teardown + typed fail — an
     // unbound supervisor session must never reach the proxy/ready steps below.
-    let supervisor_bind: Option<(std::path::PathBuf, String)> = if let Some(names) = &supervisor_names {
-        let step = async {
-            let uds = session
-                .vsock_uds
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("restored supervisor session exposes no vsock uds"))?;
-            let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let leases = issue_leases(
-                resolved_bindings.clone().unwrap_or_default(),
-                now_ms,
-                binding_ttl_ms(),
-            )?;
-            let bind_uds = uds.clone();
-            // Blocking vsock connect + delivery — keep it off the async reactor.
-            tokio::task::spawn_blocking(move || {
-                bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
-            Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+    let supervisor_bind: Option<(std::path::PathBuf, String)> =
+        if let Some(names) = &supervisor_names {
+            let step = async {
+                let uds = session.vsock_uds.clone().ok_or_else(|| {
+                    anyhow::anyhow!("restored supervisor session exposes no vsock uds")
+                })?;
+                let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let leases = issue_leases(
+                    resolved_bindings.clone().unwrap_or_default(),
+                    now_ms,
+                    binding_ttl_ms(),
+                )?;
+                let bind_uds = uds.clone();
+                // Blocking vsock connect + delivery — keep it off the async reactor.
+                tokio::task::spawn_blocking(move || {
+                    bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
+                Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+            };
+            match step.await {
+                Ok(ctx) => {
+                    println!(
+                        "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
+                        names.len()
+                    );
+                    Some(ctx)
+                }
+                Err(e) => {
+                    let _ = teardown(backend.as_ref(), session);
+                    fail(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "bind_failed",
+                        format!("{e:#}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            None
         };
-        match step.await {
-            Ok(ctx) => {
-                println!(
-                    "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
-                    names.len()
-                );
-                Some(ctx)
-            }
-            Err(e) => {
-                let _ = teardown(backend.as_ref(), session);
-                fail(
-                    client,
-                    api_base,
-                    runner_token,
-                    &lease_id,
-                    slot,
-                    "bind_failed",
-                    format!("{e:#}"),
-                )
-                .await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
     prof_mark!("bind_before_expose_ms");
 
     // 6. Bring the per-slot root proxy up and prove readiness THROUGH it BEFORE
@@ -4304,7 +4372,8 @@ async fn handle_restore_snapshot_lease(
         payload.execution_id,
         payload.ready_url.as_deref().unwrap_or("none")
     );
-    if let Err(err) = report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await {
+    if let Err(err) = report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await
+    {
         eprintln!(
             "⚠️  restore lease {lease_id}: ready report failed: {}",
             scrub_secrets(&format!("{err:#}"))
@@ -4368,9 +4437,12 @@ async fn handle_restore_snapshot_lease(
         } else {
             poll_control_once(client, &control_url, runner_token).await
         };
-        if let Some(reason) =
-            restore_hold_break_reason(std::time::Instant::now(), preview_deadline, vmm_exited, control)
-        {
+        if let Some(reason) = restore_hold_break_reason(
+            std::time::Instant::now(),
+            preview_deadline,
+            vmm_exited,
+            control,
+        ) {
             break reason;
         }
     };
@@ -4408,9 +4480,15 @@ async fn handle_restore_snapshot_lease(
     };
     let proxy_stopped = stop_proxy(proxy_handle).await;
     let cleanup = StopCleanup::from_teardown(vm_stopped, proxy_stopped);
-    if let Err(err) =
-        report_lease_stopped_with_reason(client, api_base, runner_token, &lease_id, &cleanup, reason)
-            .await
+    if let Err(err) = report_lease_stopped_with_reason(
+        client,
+        api_base,
+        runner_token,
+        &lease_id,
+        &cleanup,
+        reason,
+    )
+    .await
     {
         eprintln!(
             "⚠️  restore lease {lease_id}: stopped ack failed: {}",
@@ -5493,10 +5571,16 @@ mod tests {
         };
         let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
         // Neither: no binding kind.
-        assert!(!has(&advertised_lease_kinds_for(false, false, false, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, false),
+            RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+        ));
         // Supervisor-ready but NOT restore-ready (no KVM): still refused — the
         // binding kind requires BOTH.
-        assert!(!has(&advertised_lease_kinds_for(false, false, true, false), RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND));
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, true, false),
+            RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND
+        ));
         // Restore-ready but not supervisor-ready (flag off / no vsock capability):
         // plain restore advertised, binding kind NOT.
         let plain = advertised_lease_kinds_for(false, true, false, false);
@@ -5515,10 +5599,16 @@ mod tests {
         };
         let has = |kinds: &[String], k: &str| kinds.iter().any(|x| x == k);
         // Neither restore- nor preview-ready: preview kind NOT advertised.
-        assert!(!has(&advertised_lease_kinds_for(false, false, false, false), RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, false),
+            RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
+        ));
         // Preview opted-in but NOT restore-ready (no KVM): still refused — the preview
         // kind requires BOTH the restore capability and the operator opt-in.
-        assert!(!has(&advertised_lease_kinds_for(false, false, false, true), RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND));
+        assert!(!has(
+            &advertised_lease_kinds_for(false, false, false, true),
+            RESTORE_SNAPSHOT_PREVIEW_LEASE_KIND
+        ));
         // Restore-ready but NOT preview-opted-in (ATO_RUNNER_PREVIEW unset): plain
         // restore advertised, preview kind NOT.
         let plain = advertised_lease_kinds_for(false, true, false, false);
@@ -5539,7 +5629,10 @@ mod tests {
         let past = now - Duration::from_secs(1);
 
         // Non-preview lease (deadline None): never breaks "preview_expired".
-        assert_eq!(restore_hold_break_reason(now, None, false, ControlOutcome::Continue), None);
+        assert_eq!(
+            restore_hold_break_reason(now, None, false, ControlOutcome::Continue),
+            None
+        );
         assert_eq!(
             restore_hold_break_reason(now, None, true, ControlOutcome::Continue),
             Some("workload_exited")
@@ -6442,7 +6535,9 @@ mod tests {
             let mut buf = [0u8; 1024];
             let n = s.read(&mut buf).expect("upgrade request");
             assert!(
-                String::from_utf8_lossy(&buf[..n]).to_lowercase().contains("upgrade: websocket"),
+                String::from_utf8_lossy(&buf[..n])
+                    .to_lowercase()
+                    .contains("upgrade: websocket"),
                 "proxy forwarded the upgrade request"
             );
             s.write_all(
@@ -6464,13 +6559,19 @@ mod tests {
         });
 
         let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port).await.expect("proxy up");
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy up");
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut c = tokio::net::TcpStream::connect(&listen).await.expect("connect proxy");
-        c.write_all(b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+        let mut c = tokio::net::TcpStream::connect(&listen)
             .await
-            .unwrap();
+            .expect("connect proxy");
+        c.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+        )
+        .await
+        .unwrap();
         let mut buf = vec![0u8; 1024];
         let n = c.read(&mut buf).await.unwrap();
         assert!(
@@ -6480,10 +6581,18 @@ mod tests {
         // Full-duplex frames after the upgrade, same connection.
         c.write_all(b"frame-one").await.unwrap();
         let n = c.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"frame-one", "first WS frame echoed through the proxy");
+        assert_eq!(
+            &buf[..n],
+            b"frame-one",
+            "first WS frame echoed through the proxy"
+        );
         c.write_all(b"frame-two").await.unwrap();
         let n = c.read(&mut buf).await.unwrap();
-        assert_eq!(&buf[..n], b"frame-two", "second WS frame — the pipe stays open bidirectionally");
+        assert_eq!(
+            &buf[..n],
+            b"frame-two",
+            "second WS frame — the pipe stays open bidirectionally"
+        );
 
         // Close the client FIRST so the proxy propagates EOF to the upstream (whose
         // echo loop then breaks); the upstream thread is detached (not joined — it
@@ -6512,12 +6621,15 @@ mod tests {
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf); // the GET request
             // Headers + event 1, flushed — available to a STREAMING proxy immediately.
-            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n").unwrap();
+            s.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+                .unwrap();
             s.write_all(b"data: 1\n\n").unwrap();
             s.flush().unwrap();
             // Hold events 2 & 3 until the test confirms it saw event 1 (recv_timeout
             // so a failed test can't block this detached thread forever).
-            let released = cont_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+            let released = cont_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok();
             if released {
                 let _ = s.write_all(b"data: 2\n\ndata: 3\n\n");
                 let _ = s.flush();
@@ -6526,10 +6638,14 @@ mod tests {
         });
 
         let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port).await.expect("proxy up");
+        let handle = start_root_proxy(&listen, upstream_port)
+            .await
+            .expect("proxy up");
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut c = tokio::net::TcpStream::connect(&listen).await.expect("connect proxy");
+        let mut c = tokio::net::TcpStream::connect(&listen)
+            .await
+            .expect("connect proxy");
         c.write_all(b"GET /events HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\n\r\n")
             .await
             .unwrap();
@@ -6541,7 +6657,10 @@ mod tests {
         // events 2 & 3. A buffering proxy delivers nothing here → this loop times out.
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         while !acc.contains("data: 1") {
-            assert!(tokio::time::Instant::now() < deadline, "event 1 never streamed through: {acc:?}");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "event 1 never streamed through: {acc:?}"
+            );
             match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
                 _ => panic!("read timed out before event 1 (proxy buffered to EOF?): {acc:?}"),
@@ -6549,15 +6668,24 @@ mod tests {
         }
         // The stream came through the proxy with its SSE content type + event 1, and
         // event 2 does NOT exist yet (the upstream is blocked on the channel).
-        assert!(acc.contains("content-type: text/event-stream"), "SSE content-type seen through proxy: {acc:?}");
+        assert!(
+            acc.contains("content-type: text/event-stream"),
+            "SSE content-type seen through proxy: {acc:?}"
+        );
         assert!(acc.contains("data: 1"), "event 1 received: {acc:?}");
-        assert!(!acc.contains("data: 2"), "event 2 must NOT have arrived before release: {acc:?}");
+        assert!(
+            !acc.contains("data: 2"),
+            "event 2 must NOT have arrived before release: {acc:?}"
+        );
 
         // Phase 2: release events 2 & 3, then read them in order.
         cont_tx.send(()).unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
         while !acc.contains("data: 3") {
-            assert!(tokio::time::Instant::now() < deadline, "events 2/3 never arrived: {acc:?}");
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "events 2/3 never arrived: {acc:?}"
+            );
             match tokio::time::timeout(std::time::Duration::from_secs(2), c.read(&mut buf)).await {
                 Ok(Ok(n)) if n > 0 => acc.push_str(&String::from_utf8_lossy(&buf[..n])),
                 _ => break,
@@ -6583,8 +6711,13 @@ mod tests {
         assert!(validate_multi_slot_public_url(1, Some("http://h:{port}")).is_ok());
         assert!(validate_multi_slot_public_url(2, Some("http://h:{port}")).is_ok());
         assert!(validate_multi_slot_public_url(3, Some("http://h/{slot}/")).is_ok());
-        let err = validate_multi_slot_public_url(2, None).unwrap_err().to_string();
-        assert!(err.contains("public URL template"), "actionable message, got: {err}");
+        let err = validate_multi_slot_public_url(2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("public URL template"),
+            "actionable message, got: {err}"
+        );
         assert!(err.contains("ATO_RUNNER_PUBLIC_URL_TEMPLATE"));
     }
 
@@ -6647,7 +6780,10 @@ mod tests {
             Some(8080),
             Some(true),
         );
-        assert_eq!(payload.ready_url.as_deref(), Some("https://runner.example:8420"));
+        assert_eq!(
+            payload.ready_url.as_deref(),
+            Some("https://runner.example:8420")
+        );
 
         // And the proxy actually serves end-to-end after the probe.
         let response = reqwest::Client::new()
@@ -6692,7 +6828,11 @@ mod tests {
             "the budget must buy more than one attempt (attempts={})",
             probe.attempts
         );
-        assert!(probe.wait_ms >= 500, "budget must be spent (wait_ms={})", probe.wait_ms);
+        assert!(
+            probe.wait_ms >= 500,
+            "budget must be spent (wait_ms={})",
+            probe.wait_ms
+        );
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "timeout must not overshoot the budget by seconds"
@@ -7162,7 +7302,10 @@ mod tests {
             .expect("write session record");
         assert!(overlay.exists());
         reap_orphan_restore_overlays(root.path(), &snapshot::FirecrackerBackend::new());
-        assert!(!overlay.exists(), "a stale orphan overlay should be removed");
+        assert!(
+            !overlay.exists(),
+            "a stale orphan overlay should be removed"
+        );
     }
 
     #[test]

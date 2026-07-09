@@ -45,15 +45,33 @@ const ENTROPY_BITS_THRESHOLD: f64 = 3.5;
 /// `pub(crate)`: also the single source of truth for the Docker-import ENV
 /// secret-safety classifier (`docker_import`), so the two policies cannot drift.
 pub(crate) const PROVIDER_KEY_PREFIXES: &[&str] = &[
-    "sk-", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "AKIA", "ASIA", "xoxb-", "xoxp-",
-    "AIza", "ya29.", "glpat-",
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "AKIA",
+    "ASIA",
+    "xoxb-",
+    "xoxp-",
+    "AIza",
+    "ya29.",
+    "glpat-",
 ];
 
 /// Env-NAME substrings that mark a value as sensitive (mirrors capsule
 /// `SENSITIVE_ENV_MARKERS`). Matched ASCII-uppercased. `pub(crate)`: shared
 /// with the Docker-import ENV secret-safety classifier (`docker_import`).
 pub(crate) const SENSITIVE_ENV_MARKERS: &[&str] = &[
-    "KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE", "ACCESS",
+    "KEY",
+    "SECRET",
+    "TOKEN",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE",
+    "ACCESS",
 ];
 
 /// What a finding is.
@@ -138,7 +156,10 @@ impl ScanReport {
     /// The build fails closed on these (alongside any
     /// [`declared_hits`](Self::declared_hits), which block on every layer).
     pub fn blocking(&self) -> Vec<&SecretFinding> {
-        self.heuristic.iter().filter(|f| Self::is_blocking(f)).collect()
+        self.heuristic
+            .iter()
+            .filter(|f| Self::is_blocking(f))
+            .collect()
     }
 
     /// **Advisory** findings — high-entropy token runs (any layer) and
@@ -146,7 +167,10 @@ impl ScanReport {
     /// memory). Reported for review, never gating (they false-positive on real
     /// OS/RAM images and lockfile/minified assets).
     pub fn advisory(&self) -> Vec<&SecretFinding> {
-        self.heuristic.iter().filter(|f| !Self::is_blocking(f)).collect()
+        self.heuristic
+            .iter()
+            .filter(|f| !Self::is_blocking(f))
+            .collect()
     }
 }
 
@@ -312,9 +336,7 @@ fn scan_env_assignments(layer: &'static str, bytes: &[u8], out: &mut Vec<SecretF
             .iter()
             .map(|&b| (b as char).to_ascii_uppercase())
             .collect();
-        let sensitive = SENSITIVE_ENV_MARKERS
-            .iter()
-            .any(|m| name_upper.contains(m));
+        let sensitive = SENSITIVE_ENV_MARKERS.iter().any(|m| name_upper.contains(m));
         if !sensitive {
             continue;
         }
@@ -358,7 +380,8 @@ fn scan_entropy_runs(layer: &'static str, bytes: &[u8], out: &mut Vec<SecretFind
         if overlaps(out, start, i) {
             continue;
         }
-        if distinct_count(run) >= MIN_ENTROPY_DISTINCT && class_count(run) >= MIN_ENTROPY_CLASS_COUNT
+        if distinct_count(run) >= MIN_ENTROPY_DISTINCT
+            && class_count(run) >= MIN_ENTROPY_CLASS_COUNT
         {
             let bits = shannon_bits(run);
             if bits >= ENTROPY_BITS_THRESHOLD {
@@ -414,7 +437,11 @@ pub fn scan_layer(layer: &'static str, bytes: &[u8]) -> Vec<SecretFinding> {
 /// the **advisory** scan of large opaque layers (memory/vmstate) so the build
 /// doesn't block tens of seconds; the build GATE (declared markers + app/dep) is
 /// never budgeted.
-pub fn scan_layer_budgeted(layer: &'static str, bytes: &[u8], budget: usize) -> (Vec<SecretFinding>, bool) {
+pub fn scan_layer_budgeted(
+    layer: &'static str,
+    bytes: &[u8],
+    budget: usize,
+) -> (Vec<SecretFinding>, bool) {
     if budget == 0 || bytes.len() <= budget {
         (scan_layer_heuristics(layer, bytes), false)
     } else {
@@ -522,7 +549,10 @@ mod tests {
 
     #[test]
     fn env_assignment_in_app_is_detected() {
-        let report = scan_build_layers(&layers_with_app(b"OPENAI_API_KEY=supersecretvalue123\n"), &[]);
+        let report = scan_build_layers(
+            &layers_with_app(b"OPENAI_API_KEY=supersecretvalue123\n"),
+            &[],
+        );
         let f = report
             .heuristic
             .iter()
@@ -534,12 +564,16 @@ mod tests {
 
     #[test]
     fn high_entropy_base64_run_is_detected() {
-        let report =
-            scan_build_layers(&layers_with_app(b"A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz9+/="), &[]);
-        assert!(report
-            .heuristic
-            .iter()
-            .any(|f| f.kind == FindingKind::HighEntropyToken && f.detail.starts_with("base64")));
+        let report = scan_build_layers(
+            &layers_with_app(b"A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz9+/="),
+            &[],
+        );
+        assert!(
+            report
+                .heuristic
+                .iter()
+                .any(|f| f.kind == FindingKind::HighEntropyToken && f.detail.starts_with("base64"))
+        );
     }
 
     #[test]
@@ -553,7 +587,11 @@ mod tests {
         assert!(
             report.heuristic.is_empty(),
             "unexpected findings: {:?}",
-            report.heuristic.iter().map(|f| f.summary()).collect::<Vec<_>>()
+            report
+                .heuristic
+                .iter()
+                .map(|f| f.summary())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -585,20 +623,24 @@ mod tests {
     #[test]
     fn entropy_ignores_single_class_run() {
         let report = scan_build_layers(&layers_with_app(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), &[]);
-        assert!(!report
-            .heuristic
-            .iter()
-            .any(|f| f.kind == FindingKind::HighEntropyToken));
+        assert!(
+            !report
+                .heuristic
+                .iter()
+                .any(|f| f.kind == FindingKind::HighEntropyToken)
+        );
     }
 
     #[test]
     fn provider_prefix_requires_token_suffix() {
         // "sk-" appears inside "task-force" but with a short suffix -> no finding.
         let report = scan_build_layers(&layers_with_app(b"a task-force meeting"), &[]);
-        assert!(!report
-            .heuristic
-            .iter()
-            .any(|f| f.kind == FindingKind::ProviderKeyPrefix));
+        assert!(
+            !report
+                .heuristic
+                .iter()
+                .any(|f| f.kind == FindingKind::ProviderKeyPrefix)
+        );
     }
 
     #[test]
@@ -607,17 +649,29 @@ mod tests {
         //  - embedded (preceded by a token byte) -> not a token boundary
         //  - long but single-class (low distinct) -> not key-shaped
         //  - short suffix (< 20)
-        let noise = b"x Xsk-ABCDEFGHIJ1234567890abc then sk-aaaaaaaaaaaaaaaaaaaaaaaaaa and sk-short9chars";
+        let noise =
+            b"x Xsk-ABCDEFGHIJ1234567890abc then sk-aaaaaaaaaaaaaaaaaaaaaaaaaa and sk-short9chars";
         let report = scan_build_layers(&layers_with_app(noise), &[]);
         assert!(
-            !report.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix),
+            !report
+                .heuristic
+                .iter()
+                .any(|f| f.kind == FindingKind::ProviderKeyPrefix),
             "binary-noise sk- runs must not be flagged: {:?}",
-            report.heuristic.iter().map(|f| f.summary()).collect::<Vec<_>>()
+            report
+                .heuristic
+                .iter()
+                .map(|f| f.summary())
+                .collect::<Vec<_>>()
         );
         // A genuine key shape (boundary + long + mixed-class) still fires.
         let real = b"token sk-proj-AbCdEf0123456789GhIjKlMnOp here";
         let r2 = scan_build_layers(&layers_with_app(real), &[]);
-        assert!(r2.heuristic.iter().any(|f| f.kind == FindingKind::ProviderKeyPrefix));
+        assert!(
+            r2.heuristic
+                .iter()
+                .any(|f| f.kind == FindingKind::ProviderKeyPrefix)
+        );
     }
 
     #[test]

@@ -59,7 +59,11 @@ pub(crate) fn sanitize_description(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(DESCRIPTION_MAX_CHARS + 1));
     let mut last_space = true; // leading whitespace is dropped
     for c in raw.chars() {
-        let c = if c.is_control() || c.is_whitespace() { ' ' } else { c };
+        let c = if c.is_control() || c.is_whitespace() {
+            ' '
+        } else {
+            c
+        };
         if c == ' ' {
             if last_space {
                 continue;
@@ -131,7 +135,9 @@ fn preflight_resolve_with(
         match resolver.resolve(name) {
             Ok(value) => resolved.push((name.clone(), value)),
             Err(e) => {
-                let purpose = describe(name).map(|d| format!(" — {d}")).unwrap_or_default();
+                let purpose = describe(name)
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
                 missing.push(format!(
                     "  {name}{purpose}\n    reason: {e}\n    grant:  {}",
                     grant_hint(name, namespace)
@@ -169,8 +175,15 @@ mod tests {
         );
         // A malformed / short / non-hex digest must NOT degrade into a weaker,
         // shareable namespace — it fails closed (security boundary).
-        for bad in ["", "abc", "not-a-hash", "blake3:", "blake3:abc",
-                    &full[..32], &format!("{}zz", &full[..62])] {
+        for bad in [
+            "",
+            "abc",
+            "not-a-hash",
+            "blake3:",
+            "blake3:abc",
+            &full[..32],
+            &format!("{}zz", &full[..62]),
+        ] {
             assert!(binding_namespace(bad).is_err(), "must reject {bad:?}");
         }
     }
@@ -206,14 +219,26 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("2 binding(s) not granted"), "{err}");
-        assert!(err.contains("missing_a") && err.contains("missing_b"), "{err}");
-        assert!(err.contains("ato secrets set"), "must carry the grant hint: {err}");
-        assert!(!err.contains('v') || !err.contains("value"), "no values in errors");
+        assert!(
+            err.contains("missing_a") && err.contains("missing_b"),
+            "{err}"
+        );
+        assert!(
+            err.contains("ato secrets set"),
+            "must carry the grant hint: {err}"
+        );
+        assert!(
+            !err.contains('v') || !err.contains("value"),
+            "no values in errors"
+        );
     }
 
     #[test]
     fn description_sanitizes_control_chars_and_truncates() {
-        assert_eq!(sanitize_description("  line1\nline2\t x  "), "line1 line2 x");
+        assert_eq!(
+            sanitize_description("  line1\nline2\t x  "),
+            "line1 line2 x"
+        );
         assert_eq!(sanitize_description("<b>bold</b>"), "<b>bold</b>"); // plain text, not stripped — render as text node
         let long = "あ".repeat(300);
         let s = sanitize_description(&long);
@@ -262,7 +287,10 @@ description = "Bar key\nwith a newline"
         let msg = format!("{err}");
         assert!(msg.contains("2 binding(s) not granted"), "{msg}");
         assert!(msg.contains("BAR — Bar key with a newline"), "{msg}");
-        assert!(msg.contains("ato secrets set BAZ --namespace rs-abc"), "{msg}");
+        assert!(
+            msg.contains("ato secrets set BAZ --namespace rs-abc"),
+            "{msg}"
+        );
         assert!(!msg.contains('\u{0}'));
 
         let ok = preflight_resolve(&OnlyFoo, &["FOO".to_string()], &manifest, "rs-abc")

@@ -1300,7 +1300,10 @@ pub fn validate_and_normalize_state_mount_target(raw: &str) -> Result<String, St
 /// v1.6 (ato#983): validate a `[state.<name>].size_mb` against the shared
 /// bounds. `None` ⇒ [`DEFAULT_STATE_VOLUME_SIZE_MB`]. Shared by the manifest
 /// validator and the snapshot builder so both enforce the identical range.
-pub fn validate_state_volume_size_mb(state_name: &str, size_mb: Option<u32>) -> Result<u32, String> {
+pub fn validate_state_volume_size_mb(
+    state_name: &str,
+    size_mb: Option<u32>,
+) -> Result<u32, String> {
     let size = size_mb.unwrap_or(DEFAULT_STATE_VOLUME_SIZE_MB);
     if size < MIN_STATE_VOLUME_SIZE_MB || size > MAX_STATE_VOLUME_SIZE_MB {
         return Err(format!(
