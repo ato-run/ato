@@ -43,7 +43,7 @@ broke every staging preview.)
     `SNAPSHOT_BUILDER_AGENT_TOKEN`, `ATO_API_URL=https://staging.api.ato.run`,
     `ATO_BUILDER_SUPERVISOR=1`, `ATO_FC_VSOCK=1`,
     `ATO_GUEST_AGENT_BIN=/usr/local/lib/ato/guest-agent-musl`, and
-    `ATO_FC_WORK=/var/lib/ato/fc-work`.
+    `ATO_FC_WORK=/var/lib/ato/fc-work` lives in the shared `/etc/ato/runner.env` (both units need it — see below).
 
 ## /tmp capacity: why ATO_FC_WORK is set
 
@@ -53,13 +53,21 @@ roughly 1–2 GiB per build and are not pruned between jobs — a ~10-job batch
 fills the tmpfs and every subsequent build fails with ENOSPC
 (`failed to setup loop device` / `tar: Cannot write: No space left on device`).
 
+**The restore path leaks into /tmp too.** The runner agent (`ato runner serve`)
+uses the same Firecracker backend for preview restores, so every restore also
+extracts rootfs/mem into `$ATO_FC_WORK` — a handful of MiroTalk preview
+restores refilled the tmpfs even after the builder had been moved off it.
+`ATO_FC_WORK` therefore lives in the **shared** `/etc/ato/runner.env` (read by
+both units), not only in the builder override.
+
 Mitigations in place:
 
-1. `ATO_FC_WORK=/var/lib/ato/fc-work` moves the scratch space onto the real
-   disk (the env var is honoured by `crates/snapshot/src/firecracker.rs`).
-2. `ExecStopPost=/bin/rm -rf /var/lib/ato/fc-work/{rootfs,mem,vmstate}` scrubs
-   the caches on every unit stop/restart, so a crashed batch cannot strand
-   partial artifacts.
+1. `ATO_FC_WORK=/var/lib/ato/fc-work` in `/etc/ato/runner.env` moves the
+   scratch space onto the real disk for BOTH the builder and the runner agent
+   (the env var is honoured by `crates/snapshot/src/firecracker.rs`).
+2. `ExecStopPost=/bin/rm -rf /var/lib/ato/fc-work/{rootfs,mem,vmstate}` on the
+   builder unit scrubs the caches on every unit stop/restart, so a crashed
+   batch cannot strand partial artifacts.
 
 For very large batches, restart the unit between batches
 (`systemctl restart ato-snapshot-builder`) to trigger the scrub.
