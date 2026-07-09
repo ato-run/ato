@@ -82,6 +82,21 @@ const L4_CANARIES: &[&[u8]] = &[
     b"BEGIN EC PRIVATE KEY",
 ];
 
+/// ato-api Hardware Binding Layer (RFC `docs/rfcs/draft/snapshot-artifact-format.md`,
+/// `asf.*` namespace): the logical composition of everything this builder seals
+/// (memory image + vmstate + rootfs + receipt) — the same for both the recipe
+/// and dockerfile_import lanes, since both produce the identical Firecracker
+/// snapshot shape. Only one format exists today; a new one is an RFC update in
+/// ato-api, not a local choice made here.
+const SNAPSHOT_FORMAT_ID: &str = "asf.fc-memsnap-v1";
+
+/// ato-api Hardware Binding Layer (RFC `docs/rfcs/draft/snapshot-codec-registry.md`,
+/// `asc.*` namespace): how the artifact bytes are encoded — today, byte-identical
+/// to the raw layer bytes (no chunking/compression/checksum verified at restore).
+/// Required on every sealed ack post-flag-day (ato-api#217); a missing value
+/// fails the ack closed the same as a missing capsule_manifest_hash would.
+const SNAPSHOT_CODEC_ID: &str = "asc.raw-v1.v1";
+
 struct Config {
     api_url: String,
     token: String,
@@ -201,6 +216,10 @@ struct Artifact {
     rootfs_bytes: u64,
     mem_bytes: u64,
     vmstate_bytes: u64,
+    /// ato-api Hardware Binding Layer: required on every sealed ack post-flag-day
+    /// (see SNAPSHOT_FORMAT_ID / SNAPSHOT_CODEC_ID doc comments above).
+    snapshot_format_id: String,
+    snapshot_codec_id: String,
     // ── #932 non-secret build provenance (diagnostics; never registry identity) ──
     /// Which manifest built this artifact: "recipe_toml" | "repo_capsule_toml" |
     /// "dockerfile_import" (ato#1002 — an import has no manifest; the value names
@@ -890,6 +909,8 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         rootfs_bytes: manifest_out.layers.rootfs.as_ref().map(|m| m.total_len).unwrap_or(0),
         mem_bytes: manifest_out.layers.memory.as_ref().map(|m| m.total_len).unwrap_or(0),
         vmstate_bytes: manifest_out.layers.vmstate.as_ref().map(|m| m.total_len).unwrap_or(0),
+        snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+        snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
         // #932 build provenance — lands in receipt_json via the sealed ack (diagnostics
         // only; the ato-api registry identity comparison never reads these).
         manifest_source: produced.manifest_source,
@@ -1363,6 +1384,8 @@ mod tests {
             synthesized_probe: true,
             declared_command: "app.py".into(),
             normalized_guest_command: "python3 app.py".into(),
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: None,
             docker_import_receipt: None,
         };
@@ -1378,7 +1401,8 @@ mod tests {
             [
                 "artifact_location", "artifact_manifest_hash", "capsule_manifest_hash", "declared_command", "execution_id",
                 "healthcheck_url_path", "manifest_source", "mem_bytes", "no_secret_scan_clean", "normalized_guest_command",
-                "rootfs_bytes", "runner_class_id", "snapshot_backend", "synthesized_probe", "vmstate_bytes"
+                "rootfs_bytes", "runner_class_id", "snapshot_backend", "snapshot_codec_id", "snapshot_format_id",
+                "synthesized_probe", "vmstate_bytes"
             ]
         );
         assert_eq!(obj["no_secret_scan_clean"], serde_json::json!(true));
@@ -1415,6 +1439,8 @@ mod tests {
             synthesized_probe: true,
             declared_command: "docker-entrypoint.sh node server.js".into(),
             normalized_guest_command: "docker-entrypoint.sh node server.js".into(),
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: Some(SupervisorAck { binding_names: vec![] }),
             docker_import_receipt: Some(serde_json::json!({
                 "importer_version": "ato-docker-import/0.1.0",
@@ -1456,6 +1482,8 @@ mod tests {
             synthesized_probe: true,
             declared_command: "app.py".into(),
             normalized_guest_command: "python3 app.py".into(),
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: Some(SupervisorAck { binding_names: vec!["openai_api_key".into()] }),
             docker_import_receipt: None,
         };
@@ -1466,5 +1494,56 @@ mod tests {
         );
         // Still no secret value anywhere in the ack.
         assert!(!serde_json::to_string(&v).unwrap().to_lowercase().contains("sk-"));
+    }
+
+    #[test]
+    fn sealed_ack_always_carries_snapshot_format_and_codec_ids_matching_ato_api_charsets() {
+        // ato-api Hardware Binding Layer flag-day (ato-api#217): snapshot_format_id
+        // / snapshot_codec_id are REQUIRED on every sealed ack — never optional,
+        // never omitted (unlike supervisor_build/docker_import_receipt). A missing
+        // value fails ato-api's ack closed the same as a missing
+        // capsule_manifest_hash would. This is a regression test for exactly that:
+        // both fields must always serialize, with the exact values ato-api's
+        // hwc./asf./asc. anchored regexes expect.
+        let a = Artifact {
+            capsule_manifest_hash: "blake3:c".into(),
+            execution_id: "exec-1".into(),
+            artifact_manifest_hash: "blake3:a".into(),
+            runner_class_id: "rc".into(),
+            snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
+            healthcheck_url_path: "/health".into(),
+            no_secret_scan_clean: true,
+            rootfs_bytes: 1,
+            mem_bytes: 2,
+            vmstate_bytes: 3,
+            manifest_source: "recipe_toml".into(),
+            synthesized_probe: true,
+            declared_command: "app.py".into(),
+            normalized_guest_command: "python3 app.py".into(),
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
+            supervisor_build: None,
+            docker_import_receipt: None,
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["snapshot_format_id"], "asf.fc-memsnap-v1");
+        assert_eq!(v["snapshot_codec_id"], "asc.raw-v1.v1");
+        // ato-api anchors these to /^asf\.[a-z0-9_.-]{1,124}$/ and
+        // /^asc\.[a-z0-9_.-]{1,124}$/ respectively (LABEL_RE charset minus the
+        // namespace prefix) — check the same charset here without pulling in a
+        // regex dependency for one test.
+        fn matches_ato_api_label_charset(prefix: &str, value: &str) -> bool {
+            let Some(rest) = value.strip_prefix(prefix) else {
+                return false;
+            };
+            !rest.is_empty()
+                && rest.len() <= 124
+                && rest
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '.' | '-'))
+        }
+        assert!(matches_ato_api_label_charset("asf.", v["snapshot_format_id"].as_str().unwrap()));
+        assert!(matches_ato_api_label_charset("asc.", v["snapshot_codec_id"].as_str().unwrap()));
     }
 }
