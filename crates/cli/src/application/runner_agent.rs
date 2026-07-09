@@ -261,6 +261,11 @@ pub fn build_heartbeat_body(
         // plane gates dispatch on this so a runner is never sent a kind it would
         // reject on-device (e.g. `run_capsule` before that execution path ships).
         "supported_lease_kinds": advertised_lease_kinds(),
+        // ato-api Hardware Binding Layer: snapshot codecs this runner can decode
+        // (empty when this host cannot restore snapshots at all). No legacy
+        // passthrough exists for codec on the control-plane side, so omitting
+        // this field is never safe once that gate is live — always send it.
+        "supported_snapshot_codecs": advertised_snapshot_codecs(),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -1210,6 +1215,39 @@ pub(crate) fn advertised_lease_kinds() -> Vec<String> {
         supervisor_restore_ready(),
         crate::application::ready_state::flags::runner_preview_enabled(),
     )
+}
+
+/// Snapshot artifact codecs this runner can DECODE at restore time (ato-api
+/// Hardware Binding Layer; RFC `docs/rfcs/draft/snapshot-codec-registry.md`,
+/// `asc.*` namespace). This is a small, independent slice that must reach
+/// every runner BEFORE ato-api's control-plane codec gating is deployed to
+/// production: unlike a hardware contract (which has a legacy exact-host
+/// `runner_class_id` passthrough on the control-plane side), codec
+/// compatibility has NO passthrough there — a snapshot naming a codec no
+/// online runner has advertised fails closed with `codec_not_supported`, with
+/// no fallback. Only `asc.raw-v1.v1` exists today (Phase 1 of that rollout);
+/// this constant grows only via an RFC update in ato-api, matching the same
+/// curated-registry discipline as `SUPPORTED_LEASE_KINDS`.
+const SUPPORTED_SNAPSHOT_CODECS: &[&str] = &["asc.raw-v1.v1"];
+
+/// Pure: which codecs to advertise given this host's restore-readiness. A host
+/// that cannot restore a Ready-State snapshot at all (no KVM / no firecracker
+/// backend) has nothing to decode, so it advertises none — same honesty
+/// principle as `restore_snapshot` itself only being advertised when
+/// `restore_ready` (see `advertised_lease_kinds_for`).
+fn advertised_snapshot_codecs_for(restore_ready: bool) -> Vec<String> {
+    if restore_ready {
+        SUPPORTED_SNAPSHOT_CODECS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn advertised_snapshot_codecs() -> Vec<String> {
+    advertised_snapshot_codecs_for(ready_state_restore_ready())
 }
 
 /// Fail-closed dispatch guard. The control plane already gates native-inference
@@ -5383,6 +5421,31 @@ mod tests {
             kinds.contains(&RUN_CAPSULE_LEASE_KIND),
             "must advertise run_capsule now that execution is wired"
         );
+    }
+
+    #[test]
+    fn heartbeat_advertises_supported_snapshot_codecs_field() {
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        assert!(
+            body["supported_snapshot_codecs"].is_array(),
+            "supported_snapshot_codecs must always be present (no legacy passthrough for codec)"
+        );
+    }
+
+    #[test]
+    fn advertised_snapshot_codecs_for_is_empty_when_not_restore_ready() {
+        // A host that cannot restore a Ready-State snapshot at all has nothing
+        // to decode — it must explicitly advertise zero codecs (never omit the
+        // field, which the control plane would otherwise treat identically to a
+        // legacy-unreported runner for hardware, but codec has no such
+        // passthrough anyway; explicit `[]` is simply the honest answer).
+        assert_eq!(advertised_snapshot_codecs_for(false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn advertised_snapshot_codecs_for_advertises_raw_v1_when_restore_ready() {
+        let codecs = advertised_snapshot_codecs_for(true);
+        assert_eq!(codecs, vec!["asc.raw-v1.v1".to_string()]);
     }
 
     #[test]
