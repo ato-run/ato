@@ -790,6 +790,68 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 } => rt.block_on(crate::application::gpu_provision::run_provision(
                     &profile, force, resume, enroll, json, dry_run,
                 )),
+                crate::cli::RunnerCommands::Setup {
+                    fix,
+                    yes,
+                    artifact_root,
+                    api_url,
+                    official_preview,
+                    public_base_url,
+                    max_slots,
+                    caddyfile,
+                } => {
+                    // clap enforces official_preview ⇔ public_base_url via `requires`.
+                    let official = official_preview.then(|| {
+                        crate::application::runner_bootstrap::official_preview::OfficialPreviewConfig {
+                            public_base_url: public_base_url.unwrap_or_default(),
+                            max_slots: max_slots.unwrap_or(1),
+                            caddyfile_path: caddyfile.unwrap_or_else(|| {
+                                crate::application::runner_bootstrap::official_preview::DEFAULT_CADDYFILE_PATH
+                                    .to_string()
+                            }),
+                        }
+                    });
+                    crate::application::runner_bootstrap::setup::run(
+                        crate::application::runner_bootstrap::setup::SetupOptions {
+                            fix,
+                            yes,
+                            artifact_root,
+                            api_url,
+                            official,
+                        },
+                    )
+                }
+                crate::cli::RunnerCommands::Smoke { proxy_listen, keep, json } => {
+                    rt.block_on(crate::application::runner_bootstrap::smoke::run(
+                        crate::application::runner_bootstrap::smoke::SmokeOptions {
+                            proxy_listen,
+                            keep,
+                            json,
+                        },
+                    ))
+                }
+                crate::cli::RunnerCommands::Enroll {
+                    api_url,
+                    site_base,
+                    display_name,
+                    public_base_url,
+                    headless,
+                    enrollment_token,
+                    start,
+                } => rt.block_on(crate::application::runner_enroll::run_enroll(
+                    crate::application::runner_enroll::EnrollOptions {
+                        api_url,
+                        site_base,
+                        display_name,
+                        public_base_url,
+                        headless,
+                        enrollment_token,
+                        start,
+                    },
+                )),
+                crate::cli::RunnerCommands::Status { json } => {
+                    rt.block_on(crate::application::runner_enroll::run_status(json))
+                }
             }
         }
 
@@ -798,6 +860,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 crate::application::native_inference_doctor::run(json)
             }
             crate::cli::DoctorTarget::Disk { json } => crate::application::disk_doctor::run(json),
+            crate::cli::DoctorTarget::DesktopRunner { json } => {
+                crate::application::desktop_runner::diagnostics::run(json)
+            }
+            crate::cli::DoctorTarget::Runner { json } => {
+                crate::application::runner_bootstrap::doctor::run(json)
+            }
         },
 
         Commands::Login {

@@ -1,0 +1,9 @@
+{
+  "class": "negative",
+  "eligibility": "fail",
+  "eligibility_reason_contains": "requires external services (external.*)",
+  "seal": "failed",
+  "seal_failure_stage": "eligibility",
+  "manifest_source": "repo",
+  "notes": "R3. External managed DBs stay out of scope in v1.2 too."
+}

@@ -1,0 +1,10 @@
+{
+  "class": "positive",
+  "eligibility": "pass",
+  "runtime": "python",
+  "probe_synthesized": false,
+  "start_cmd": "python3 app.py",
+  "seal": "sealed",
+  "manifest_source": "repo",
+  "notes": "pip install --no-cache-dir -r requirements.txt path (pinned flask)."
+}

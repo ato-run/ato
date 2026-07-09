@@ -8,10 +8,6 @@ use crate::proc_util::CommandNoWindowExt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use protocol::handle::{
-    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
-    normalize_capsule_handle,
-};
 use base64::Engine as _;
 use capsule::common::paths::ato_path;
 use capsule::state::session::{
@@ -19,6 +15,10 @@ use capsule::state::session::{
     materialized_launch_record_path, read_materialized_launch_record, read_session_records,
     session_record_path, session_root as shared_session_root,
     validate_record_for_install_profile_key, validate_record_only,
+};
+use protocol::handle::{
+    CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
+    normalize_capsule_handle,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, error, info, warn};
@@ -2024,6 +2024,114 @@ pub(crate) fn spawn_runner_login() -> Result<RunnerChild> {
         &runner_login_log_path(),
         "ato runner login",
     )
+}
+
+/// A spawned `ato run <source>` (Desktop Runner local cold-OCI path) child plus
+/// the **separate** log files capturing its stdout (the session receipt JSON,
+/// on success) and stderr (the structured placement error, on failure). Kept
+/// distinct from [`RunnerChild`] because the run path must parse stdout as JSON
+/// without stderr interleaving, and the waiter thread reads both after exit.
+pub(crate) struct DesktopRunnerRunChild {
+    pub child: std::process::Child,
+    pub stdout_log: PathBuf,
+    pub stderr_log: PathBuf,
+}
+
+/// Spawn `ato run <source>` on the Desktop Runner local cold-OCI path. Sets the
+/// env vars the CLI's `desktop_runner::execute::is_explicitly_selected` gate
+/// requires (`ATO_RUN_PROVIDER=desktop` + `ATO_DESKTOP_RUNNER_EXECUTE=1`), and
+/// `ATO_READY_STATE_ENABLED=1` when `ready_state_enabled` is requested. stdout
+/// and stderr are redirected to **separate, per-run unique** log files so a
+/// background waiter can parse the session receipt (stdout JSON) and the
+/// structured placement error (stderr, see PR 1) independently, and a second
+/// run cannot overwrite the first run's logs before its waiter reads them. The
+/// child is its own process-group leader so the Desktop can reap it (and any
+/// container it spawned) on shutdown.
+pub(crate) fn spawn_desktop_runner_run(
+    source: &str,
+    ready_state_enabled: bool,
+) -> Result<DesktopRunnerRunChild> {
+    let ato_bin = resolve_ato_binary()?;
+    let mut cmd = ato_helper_command(&ato_bin);
+    cmd.args(["run", source]);
+    cmd.env("ATO_RUN_PROVIDER", "desktop");
+    cmd.env("ATO_DESKTOP_RUNNER_EXECUTE", "1");
+    if ready_state_enabled {
+        cmd.env("ATO_READY_STATE_ENABLED", "1");
+    }
+
+    let run_id = unique_desktop_runner_run_id(source);
+    let (stdout_log, stderr_log) = desktop_runner_run_log_paths(&run_id);
+    if let Some(parent) = stdout_log.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let stdout_file = std::fs::File::create(&stdout_log).with_context(|| {
+        format!(
+            "create desktop-runner run stdout log {}",
+            stdout_log.display()
+        )
+    })?;
+    let stderr_file = std::fs::File::create(&stderr_log).with_context(|| {
+        format!(
+            "create desktop-runner run stderr log {}",
+            stderr_log.display()
+        )
+    })?;
+    cmd.stdout(Stdio::from(stdout_file));
+    cmd.stderr(Stdio::from(stderr_file));
+    // Own process-group leader so the Desktop can reap the run child (and any
+    // container it spawned) with one group-directed signal — mirrors
+    // `spawn_runner_command`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawn `ato run {source}` (Desktop Runner)"))?;
+    Ok(DesktopRunnerRunChild {
+        child,
+        stdout_log,
+        stderr_log,
+    })
+}
+
+/// Build a per-run unique id (`<ms>-<pid>-<short-source-hash>`) so two
+/// consecutive `ato://run` intents get distinct log files. Pure so the
+/// uniqueness contract is unit-testable without spawning.
+pub(crate) fn unique_desktop_runner_run_id(source: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let pid = std::process::id();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let hash = short_source_hash(source);
+    format!("{ms}-{pid}-{hash}")
+}
+
+/// Short, filesystem-safe hash of the source for the run id. Truncated so the
+/// log filename stays readable; not a security primitive.
+fn short_source_hash(source: &str) -> String {
+    // FNV-1a 32-bit over the UTF-8 bytes, hex-encoded. Stable across platforms
+    // and std-only (no extra dep).
+    let mut hash: u32 = 0x811c9dc5;
+    for byte in source.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    format!("{hash:08x}")
+}
+
+/// Per-run log paths under `logs/desktop-runner-runs/<run_id>.{stdout,stderr}.log`.
+/// Pure (no fs side effects) so the uniqueness / path-shape contract is
+/// unit-testable.
+pub(crate) fn desktop_runner_run_log_paths(run_id: &str) -> (PathBuf, PathBuf) {
+    let dir = capsule::common::paths::ato_path_or_workspace_tmp("logs").join("desktop-runner-runs");
+    let stdout = dir.join(format!("{run_id}.stdout.log"));
+    let stderr = dir.join(format!("{run_id}.stderr.log"));
+    (stdout, stderr)
 }
 
 fn spawn_runner_command(args: &[&str], log_path: &Path, context: &str) -> Result<RunnerChild> {
@@ -5734,9 +5842,9 @@ fn pop_last_codepoint_width(line: &mut Vec<u8>) -> Option<usize> {
 #[cfg(test)]
 mod fast_path_tests {
     use super::*;
-    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use capsule::state::session::record::{GuestSessionDisplay, SCHEMA_VERSION_V2};
     use capsule::state::session::write_session_record_atomic;
+    use protocol::handle::{CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, TrustState};
     use serial_test::serial;
     use tempfile::TempDir;
 
@@ -6393,5 +6501,60 @@ mod preflight_retry_tests {
     fn retryable_empty_stdout_is_not_retried() {
         assert!(!preflight_stdout_is_retryable(""));
         assert!(!preflight_stdout_is_retryable("not json"));
+    }
+}
+
+#[cfg(test)]
+mod desktop_runner_run_log_tests {
+    use super::*;
+
+    #[test]
+    fn log_paths_are_unique_per_run_id() {
+        let (a_out, a_err) = desktop_runner_run_log_paths("run-a");
+        let (b_out, b_err) = desktop_runner_run_log_paths("run-b");
+        assert_ne!(a_out, b_out, "stdout paths must differ per run");
+        assert_ne!(a_err, b_err, "stderr paths must differ per run");
+    }
+
+    #[test]
+    fn log_paths_live_under_desktop_runner_runs_dir_and_carry_run_id() {
+        let (out, err) = desktop_runner_run_log_paths("1700000000000-1234-abc123");
+        assert!(
+            out.to_string_lossy().contains("desktop-runner-runs"),
+            "stdout path should live under desktop-runner-runs/: {}",
+            out.display()
+        );
+        assert!(
+            err.to_string_lossy().contains("desktop-runner-runs"),
+            "stderr path should live under desktop-runner-runs/: {}",
+            err.display()
+        );
+        assert!(out.to_string_lossy().ends_with(".stdout.log"));
+        assert!(err.to_string_lossy().ends_with(".stderr.log"));
+        // The run id appears in both filenames so the waiter can trace a log
+        // back to its run.
+        assert!(
+            out.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("1700000000000-1234-abc123")
+        );
+    }
+
+    #[test]
+    fn unique_run_id_is_unique_across_calls_and_carries_source_hash() {
+        // Two ids produced back-to-back share the pid + (likely) source but
+        // should differ in the timestamp component on any non-degenerate
+        // clock; the source hash is deterministic.
+        let id1 = unique_desktop_runner_run_id("community/hello");
+        let id2 = unique_desktop_runner_run_id("community/hello");
+        // Same source → same trailing hash.
+        let hash1 = id1.rsplit('-').next().unwrap();
+        let hash2 = id2.rsplit('-').next().unwrap();
+        assert_eq!(hash1, hash2, "same source must hash identically");
+        // Different sources → different hashes.
+        let id_other = unique_desktop_runner_run_id("acme/chat");
+        let hash_other = id_other.rsplit('-').next().unwrap();
+        assert_ne!(hash1, hash_other, "different sources must hash differently");
     }
 }

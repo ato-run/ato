@@ -45,9 +45,22 @@ const TAB_STRIP_LEFT_PAD: f32 = 80.0;
 const TAB_STRIP_LEFT_PAD: f32 = 8.0;
 /// Height of the chrome row (back/forward/reload/URL/menu).
 const CHROME_HEIGHT: f32 = 44.0;
-/// Combined offset — the WebView starts this many pixels below the
-/// AppWindow's content origin.
-const TOTAL_TOP: f32 = TAB_STRIP_HEIGHT + CHROME_HEIGHT;
+
+/// Browser chrome (tab strip + URL/back/forward/reload row) is a
+/// developer affordance only. Release builds show no URL bar and no
+/// arbitrary-URL input anywhere in the shell — the WebView (e.g. the
+/// Ato PWA Home) fills the whole window.
+const CHROME_VISIBLE: bool = cfg!(debug_assertions);
+
+/// Pixels between the AppWindow's content origin and the WebView top —
+/// the space reserved for the debug-only browser chrome.
+fn webview_top_offset() -> f32 {
+    if CHROME_VISIBLE {
+        TAB_STRIP_HEIGHT + CHROME_HEIGHT
+    } else {
+        0.0
+    }
+}
 
 /// Default URL for new tabs created via the `+` button. Mirrors
 /// Safari's "new tab opens a configured home page" convention.
@@ -198,7 +211,7 @@ impl WebLinkViewShell {
         if current == self.window_size {
             return;
         }
-        let top = TOTAL_TOP as i32;
+        let top = webview_top_offset() as i32;
         let w = f32::from(current.width) as u32;
         let h = (f32::from(current.height) as u32).saturating_sub(top as u32);
         for tab in &self.tabs {
@@ -221,7 +234,7 @@ fn build_tab(
     queue: CapsuleNavQueue,
     cx: &mut Context<WebLinkViewShell>,
 ) -> Tab {
-    let top = TOTAL_TOP as i32;
+    let top = webview_top_offset() as i32;
     let w = f32::from(win_size.width) as u32;
     let h = (f32::from(win_size.height) as u32).saturating_sub(top as u32);
     let webview_rect = Rect {
@@ -370,13 +383,12 @@ impl Render for WebLinkViewShell {
             .map(|t| t.url_input.clone())
             .unwrap_or_else(|| unreachable!("WebLinkViewShell has no active tab"));
 
-        let inner = div()
-            .size_full()
-            .bg(rgb(0xffffff))
-            .flex()
-            .flex_col()
-            .child(tab_strip(tab_snapshots, entity.clone()))
-            .child(chrome_strip(url_input, entity));
+        let mut inner = div().size_full().bg(rgb(0xffffff)).flex().flex_col();
+        if CHROME_VISIBLE {
+            inner = inner
+                .child(tab_strip(tab_snapshots, entity.clone()))
+                .child(chrome_strip(url_input, entity));
+        }
 
         paste_render_wrap!(inner, cx, &self.paste.focus_handle)
     }
