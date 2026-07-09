@@ -1,8 +1,8 @@
 //! Runner Enrollment v0: `ato runner enroll` + `ato runner status`.
 //!
 //! After `ato runner setup --fix` (host prepared) and `ato runner smoke` (host can build
-//! + serve), `enroll` registers this machine as a Connected Capsule Runner against the
-//! control plane and wires up the systemd env file; `status` reports the local + control-
+//! and serve), `enroll` registers this machine as a Connected Capsule Runner against the
+//! control plane and wires up the systemd env file; `status` reports the local and control-
 //! plane view. Both reuse the existing `ato runner login` registration and the
 //! `credentials.json` the runner agent already reads.
 //!
@@ -437,7 +437,6 @@ pub(crate) async fn run_status(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     /// Mirror write_runner_env's key split for the tests.
     fn upsert(
