@@ -64,6 +64,8 @@ pub(crate) enum SubstrateScope {
 
 impl SubstrateScope {
     /// The snake_case wire label (matches the serde representation).
+    /// Reserved for a future non-serde wire-format call site; unused today.
+    #[allow(dead_code)]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::PerSessionVm => "per_session_vm",

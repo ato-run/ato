@@ -45,6 +45,10 @@ mod scanner;
 mod seal;
 pub mod state_volume;
 mod uffd;
+// U1 (#854) spike: plumbing exercised only by #[ignore]d KVM-gated smokes
+// (ATO_FC_UFFD), not yet wired into the default restore path — see the
+// module doc for scope. Real, tested, deliberately unused until U2+.
+#[allow(dead_code)]
 mod uffd_page_server;
 
 pub use backend::{

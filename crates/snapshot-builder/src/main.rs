@@ -15,7 +15,7 @@
 //! v1.2 PR 3d-2: a `[secrets.*]` capsule may build via the SUPERVISOR path (agent-as-
 //! init rootfs + the backend's placeholder build drive, #962) — but ONLY when the
 //! operator opts this builder in with `ATO_BUILDER_SUPERVISOR=1` AND `ATO_GUEST_AGENT_BIN`
-//! + `ATO_FC_VSOCK=1` are set; otherwise secret capsules keep failing closed at
+//! AND `ATO_FC_VSOCK=1` are set; otherwise secret capsules keep failing closed at
 //! eligibility exactly as before. No secret VALUE ever reaches this daemon either way —
 //! the build uses backend-internal placeholders and the seal stays pre-bind.
 //!
