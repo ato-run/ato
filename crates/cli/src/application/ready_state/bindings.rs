@@ -127,8 +127,15 @@ mode = "warm"
     fn no_bindings_passes_every_mode() {
         let m = manifest("");
         assert!(!requires_runtime_bindings(&m).requires_bindings());
-        for mode in [BindingGuardMode::BuildSeal, BindingGuardMode::VerifyOnly, BindingGuardMode::Serve] {
-            assert!(ensure_no_unwired_runtime_bindings(&m, mode).is_ok(), "{mode:?}");
+        for mode in [
+            BindingGuardMode::BuildSeal,
+            BindingGuardMode::VerifyOnly,
+            BindingGuardMode::Serve,
+        ] {
+            assert!(
+                ensure_no_unwired_runtime_bindings(&m, mode).is_ok(),
+                "{mode:?}"
+            );
         }
     }
 
@@ -141,7 +148,10 @@ mode = "warm"
         assert!(ensure_no_unwired_runtime_bindings(&m, BindingGuardMode::BuildSeal).is_ok());
         let err = ensure_no_unwired_runtime_bindings(&m, BindingGuardMode::VerifyOnly).unwrap_err();
         assert!(err.to_string().contains("runtime bindings are not wired"));
-        assert!(err.to_string().contains("openai"), "summary names the requirement: {err}");
+        assert!(
+            err.to_string().contains("openai"),
+            "summary names the requirement: {err}"
+        );
         assert!(ensure_no_unwired_runtime_bindings(&m, BindingGuardMode::Serve).is_err());
     }
 
@@ -156,7 +166,12 @@ mode = "warm"
     #[test]
     fn explicit_binding_requires_bindings() {
         let m = manifest("[bindings.session]\nkind = \"oauth\"\n");
-        assert!(requires_runtime_bindings(&m).bindings.iter().any(|b| b == "session"));
+        assert!(
+            requires_runtime_bindings(&m)
+                .bindings
+                .iter()
+                .any(|b| b == "session")
+        );
         assert!(ensure_no_unwired_runtime_bindings(&m, BindingGuardMode::VerifyOnly).is_err());
     }
 

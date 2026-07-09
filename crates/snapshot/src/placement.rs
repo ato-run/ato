@@ -257,7 +257,10 @@ mod tests {
             snapshot_kind: Some(SnapshotKind::MicroVm),
             ..Default::default()
         };
-        let candidates = vec![microvm_caps("firecracker", false), microvm_caps("fake", true)];
+        let candidates = vec![
+            microvm_caps("firecracker", false),
+            microvm_caps("fake", true),
+        ];
         assert_eq!(select_ready_state_backend(&req, &candidates), Ok(1));
     }
 

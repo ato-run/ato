@@ -10,8 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{
-    Check, DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH, FC_VERSION,
-    GUEST_KERNEL_INSTALL_PATH,
+    Check, DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH, FC_VERSION, GUEST_KERNEL_INSTALL_PATH,
 };
 
 // ── Pure parsers ──
@@ -31,10 +30,7 @@ pub(crate) fn cpu_has_virt(cpuinfo: &str) -> bool {
     cpuinfo
         .lines()
         .filter(|l| l.starts_with("flags") || l.starts_with("Features"))
-        .any(|l| {
-            l.split_whitespace()
-                .any(|f| f == "vmx" || f == "svm")
-        })
+        .any(|l| l.split_whitespace().any(|f| f == "vmx" || f == "svm"))
 }
 
 /// True when `groups_output` (space-separated group names) contains `group`.
@@ -89,7 +85,9 @@ fn cmd_stdout_any(bin: &str, args: &[&str]) -> Option<String> {
 pub(crate) fn dir_writable_by(path: &Path, user: Option<&str>) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Some(user) = user else { return true }; // genuine root
-    let Ok(md) = std::fs::metadata(path) else { return false };
+    let Ok(md) = std::fs::metadata(path) else {
+        return false;
+    };
     let mode = md.mode();
     if mode & 0o002 != 0 {
         return true; // world-writable
@@ -150,7 +148,6 @@ pub(crate) fn snapshot_builder_source() -> Option<PathBuf> {
         .map(|n| dir.join(n))
         .find(|p| is_executable_file(p))
 }
-
 
 /// The user the runner will actually run AS: `SUDO_USER` when invoked via sudo
 /// (so `ato runner setup --fix` checks/repairs the OPERATOR's groups, not root's),
@@ -260,7 +257,11 @@ pub(crate) fn gather() -> Vec<Check> {
                 ),
             }
         }
-        Err(e) => Check::blocked("os_ubuntu", "Ubuntu", format!("cannot read /etc/os-release: {e}")),
+        Err(e) => Check::blocked(
+            "os_ubuntu",
+            "Ubuntu",
+            format!("cannot read /etc/os-release: {e}"),
+        ),
     });
 
     // Architecture: v0's Firecracker + guest kernel are x86_64-pinned, so a
@@ -291,7 +292,11 @@ pub(crate) fn gather() -> Vec<Check> {
 
     // /dev/kvm: exists AND this user can open it (existence alone is not access).
     checks.push(if Path::new("/dev/kvm").exists() {
-        match std::fs::OpenOptions::new().read(true).write(true).open("/dev/kvm") {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/kvm")
+        {
             Ok(_) => Check::ok("kvm_device", "/dev/kvm", "present, read-write"),
             Err(e) => Check::missing(
                 "kvm_device",
@@ -319,9 +324,10 @@ pub(crate) fn gather() -> Vec<Check> {
         Some(u) => cmd_stdout("id", &["-nG", u]).unwrap_or_default(),
         None => String::new(),
     };
-    for (id, label, group) in
-        [("kvm_group", "user in kvm group", "kvm"), ("docker_group", "user in docker group", "docker")]
-    {
+    for (id, label, group) in [
+        ("kvm_group", "user in kvm group", "kvm"),
+        ("docker_group", "user in docker group", "docker"),
+    ] {
         checks.push(match &operator {
             None => Check::ok(id, label, "running as root (group not required)"),
             Some(u) if groups_contain(&groups, group) => {
@@ -354,10 +360,14 @@ pub(crate) fn gather() -> Vec<Check> {
     // the KVM validations all ran on the pinned stack. When the binary was resolved
     // from an explicit ATO_FC_BIN, `setup --fix` (which installs to FC_INSTALL_PATH)
     // would NOT change what this host uses — so the fix hint points at the env var.
-    let fc_from_env =
-        std::env::var("ATO_FC_BIN").ok().map(|v| !v.trim().is_empty()).unwrap_or(false);
+    let fc_from_env = std::env::var("ATO_FC_BIN")
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
     let fc_fix_bad = if fc_from_env {
-        format!("ATO_FC_BIN overrides the binary — point it at Firecracker {FC_VERSION} or unset it and run `ato runner setup --fix`")
+        format!(
+            "ATO_FC_BIN overrides the binary — point it at Firecracker {FC_VERSION} or unset it and run `ato runner setup --fix`"
+        )
     } else {
         format!("ato runner setup --fix installs the pinned {FC_VERSION}")
     };
@@ -413,17 +423,26 @@ pub(crate) fn gather() -> Vec<Check> {
     // the builder unit runs /usr/local/bin/ato-snapshot-builder. Setup must not write
     // a unit whose ExecStart it cannot make exist — so these are checked and the fix
     // hints reflect what setup can actually do.
-    checks.push(if is_executable_file(Path::new(super::ATO_CLI_INSTALL_PATH)) {
-        Check::ok("ato_cli_binary", "ato binary", format!("{} (executable)", super::ATO_CLI_INSTALL_PATH))
-    } else {
-        // The running executable IS ato, so setup can always install it.
-        Check::missing(
-            "ato_cli_binary",
-            "ato binary",
-            format!("{} not installed", super::ATO_CLI_INSTALL_PATH),
-            format!("ato runner setup --fix installs the running ato binary to {}", super::ATO_CLI_INSTALL_PATH),
-        )
-    });
+    checks.push(
+        if is_executable_file(Path::new(super::ATO_CLI_INSTALL_PATH)) {
+            Check::ok(
+                "ato_cli_binary",
+                "ato binary",
+                format!("{} (executable)", super::ATO_CLI_INSTALL_PATH),
+            )
+        } else {
+            // The running executable IS ato, so setup can always install it.
+            Check::missing(
+                "ato_cli_binary",
+                "ato binary",
+                format!("{} not installed", super::ATO_CLI_INSTALL_PATH),
+                format!(
+                    "ato runner setup --fix installs the running ato binary to {}",
+                    super::ATO_CLI_INSTALL_PATH
+                ),
+            )
+        },
+    );
     checks.push(if is_executable_file(Path::new(super::BUILDER_INSTALL_PATH)) {
         Check::ok(
             "snapshot_builder_binary",
@@ -454,7 +473,12 @@ pub(crate) fn gather() -> Vec<Check> {
     checks.push(if Path::new("/dev/net/tun").exists() {
         Check::ok("tun_tap", "tun/tap", "/dev/net/tun present")
     } else {
-        Check::missing("tun_tap", "tun/tap", "/dev/net/tun absent", "sudo modprobe tun")
+        Check::missing(
+            "tun_tap",
+            "tun/tap",
+            "/dev/net/tun absent",
+            "sudo modprobe tun",
+        )
     });
     checks.push(if Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
         Check::ok("cgroup_v2", "cgroup v2", "unified hierarchy mounted")
@@ -472,14 +496,35 @@ pub(crate) fn gather() -> Vec<Check> {
     for (id, bin) in [("tool_git", "git"), ("tool_curl", "curl")] {
         checks.push(match which(bin) {
             Some(p) => Check::ok(id, bin_label(bin), p),
-            None => Check::missing(id, bin_label(bin), "not installed", format!("apt install {bin}")),
+            None => Check::missing(
+                id,
+                bin_label(bin),
+                "not installed",
+                format!("apt install {bin}"),
+            ),
         });
     }
     for (id, bin, hint) in [
-        ("tool_cargo", "cargo", "rustup.rs (only needed to build ato/snapshot-builder from source)"),
-        ("tool_node", "node", "nodesource or nvm (only needed for a local ato-api control plane)"),
-        ("tool_pnpm", "pnpm", "npm i -g pnpm (only needed for a local ato-api control plane)"),
-        ("tool_wrangler", "wrangler", "pnpm add -g wrangler (only needed for a local ato-api control plane)"),
+        (
+            "tool_cargo",
+            "cargo",
+            "rustup.rs (only needed to build ato/snapshot-builder from source)",
+        ),
+        (
+            "tool_node",
+            "node",
+            "nodesource or nvm (only needed for a local ato-api control plane)",
+        ),
+        (
+            "tool_pnpm",
+            "pnpm",
+            "npm i -g pnpm (only needed for a local ato-api control plane)",
+        ),
+        (
+            "tool_wrangler",
+            "wrangler",
+            "pnpm add -g wrangler (only needed for a local ato-api control plane)",
+        ),
     ] {
         checks.push(match which(bin) {
             Some(p) => Check::ok(id, bin_label(bin), p),
@@ -496,7 +541,11 @@ pub(crate) fn gather() -> Vec<Check> {
     checks.push(match std::fs::metadata(&root_dir) {
         Ok(m) if m.is_dir() => {
             if dir_writable_by(Path::new(&root_dir), operator.as_deref()) {
-                Check::ok("artifact_root", "artifact root", format!("{root_dir} (writable)"))
+                Check::ok(
+                    "artifact_root",
+                    "artifact root",
+                    format!("{root_dir} (writable)"),
+                )
             } else {
                 Check::missing(
                     "artifact_root",
@@ -521,12 +570,21 @@ pub(crate) fn gather() -> Vec<Check> {
     checks.push(match std::fs::read_to_string(ENV_FILE) {
         Ok(text) => {
             let vals = env_file_values(&text);
-            let missing: Vec<&str> = ["ATO_SNAPSHOT_ARTIFACT_ROOT", "ATO_API_URL", "ATO_FC_BIN", "ATO_FC_KERNEL"]
-                .into_iter()
-                .filter(|k| !vals.contains_key(*k))
-                .collect();
+            let missing: Vec<&str> = [
+                "ATO_SNAPSHOT_ARTIFACT_ROOT",
+                "ATO_API_URL",
+                "ATO_FC_BIN",
+                "ATO_FC_KERNEL",
+            ]
+            .into_iter()
+            .filter(|k| !vals.contains_key(*k))
+            .collect();
             if missing.is_empty() {
-                Check::ok("env_file", "runner env file", format!("{ENV_FILE} complete"))
+                Check::ok(
+                    "env_file",
+                    "runner env file",
+                    format!("{ENV_FILE} complete"),
+                )
             } else {
                 Check::missing(
                     "env_file",
@@ -546,7 +604,9 @@ pub(crate) fn gather() -> Vec<Check> {
 
     // Public URL + runner token: needed before serving publicly, but not for the
     // build/smoke paths — Warn with the exact follow-up.
-    let env_vals = std::fs::read_to_string(ENV_FILE).map(|t| env_file_values(&t)).unwrap_or_default();
+    let env_vals = std::fs::read_to_string(ENV_FILE)
+        .map(|t| env_file_values(&t))
+        .unwrap_or_default();
     checks.push(
         match std::env::var("ATO_RUNNER_PUBLIC_BASE_URL")
             .ok()
@@ -580,12 +640,18 @@ pub(crate) fn gather() -> Vec<Check> {
     // installed-but-stopped unit, so keying off its exit status would misreport a
     // written-but-not-started unit (the documented happy path after `setup --fix`)
     // as "not installed". Check the unit file, THEN read its state (exit-agnostic).
-    for (id, unit) in
-        [("unit_builder", super::BUILDER_UNIT), ("unit_runner", super::RUNNER_UNIT)]
-    {
+    for (id, unit) in [
+        ("unit_builder", super::BUILDER_UNIT),
+        ("unit_runner", super::RUNNER_UNIT),
+    ] {
         let installed = Path::new(super::SYSTEMD_DIR).join(unit).exists();
         checks.push(if !installed {
-            Check::missing(id, unit_label(unit), "not installed", "ato runner setup --fix writes the unit")
+            Check::missing(
+                id,
+                unit_label(unit),
+                "not installed",
+                "ato runner setup --fix writes the unit",
+            )
         } else {
             let state = cmd_stdout_any("systemctl", &["is-active", unit]).unwrap_or_default();
             if state == "active" {
@@ -594,7 +660,10 @@ pub(crate) fn gather() -> Vec<Check> {
                 Check::warn(
                     id,
                     unit_label(unit),
-                    format!("installed, {}", if state.is_empty() { "inactive" } else { &state }),
+                    format!(
+                        "installed, {}",
+                        if state.is_empty() { "inactive" } else { &state }
+                    ),
                     format!("systemctl enable --now {unit} (once its env/token is configured)"),
                 )
             }
@@ -617,7 +686,11 @@ fn bin_label(bin: &str) -> &'static str {
 }
 
 fn unit_label(unit: &str) -> &'static str {
-    if unit.contains("builder") { "snapshot-builder service" } else { "runner-agent service" }
+    if unit.contains("builder") {
+        "snapshot-builder service"
+    } else {
+        "runner-agent service"
+    }
 }
 
 #[cfg(test)]
@@ -658,8 +731,14 @@ mod tests {
         let vals = env_file_values(
             "# comment\nATO_API_URL=http://x\n\n  ATO_FC_BIN = /usr/local/bin/firecracker \n#ATO_OFF=1\n",
         );
-        assert_eq!(vals.get("ATO_API_URL").map(String::as_str), Some("http://x"));
-        assert_eq!(vals.get("ATO_FC_BIN").map(String::as_str), Some("/usr/local/bin/firecracker"));
+        assert_eq!(
+            vals.get("ATO_API_URL").map(String::as_str),
+            Some("http://x")
+        );
+        assert_eq!(
+            vals.get("ATO_FC_BIN").map(String::as_str),
+            Some("/usr/local/bin/firecracker")
+        );
         assert!(!vals.contains_key("ATO_OFF"));
     }
 }

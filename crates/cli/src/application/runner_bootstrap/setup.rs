@@ -21,13 +21,13 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use super::official_preview::OfficialPreviewConfig;
 use super::{
     ATO_CLI_INSTALL_PATH, BUILDER_INSTALL_PATH, BUILDER_UNIT, Check, CheckStatus,
     DEFAULT_ARTIFACT_ROOT, ENV_FILE, FC_INSTALL_PATH, FC_TGZ_SHA256, FC_TGZ_URL, FC_VERSION,
     GUEST_KERNEL_INSTALL_PATH, GUEST_KERNEL_SHA256, GUEST_KERNEL_URL, RUNNER_UNIT, SYSTEMD_DIR,
     checks, official_preview,
 };
-use super::official_preview::OfficialPreviewConfig;
 
 pub(crate) struct SetupOptions {
     pub fix: bool,
@@ -73,7 +73,10 @@ pub(crate) fn validate_artifact_root(v: &str) -> Result<()> {
     if v.contains("..") {
         bail!("--artifact-root must not contain '..' (got {v:?})");
     }
-    if !v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+    if !v
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+    {
         bail!("--artifact-root may only contain [A-Za-z0-9_/.-] (got {v:?})");
     }
     Ok(())
@@ -102,15 +105,30 @@ pub(crate) struct FixAction {
 }
 
 /// Derive the fix plan from failed checks. Pure — testable without a host.
-pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPlan) -> Vec<FixAction> {
-    let failed =
-        |id: &str| checks.iter().any(|c| c.id == id && c.status == CheckStatus::Missing);
-    let is_ok = |id: &str| checks.iter().any(|c| c.id == id && c.status == CheckStatus::Ok);
+pub(crate) fn derive_plan(
+    checks: &[Check],
+    opts: &SetupOptions,
+    bins: &BinaryPlan,
+) -> Vec<FixAction> {
+    let failed = |id: &str| {
+        checks
+            .iter()
+            .any(|c| c.id == id && c.status == CheckStatus::Missing)
+    };
+    let is_ok = |id: &str| {
+        checks
+            .iter()
+            .any(|c| c.id == id && c.status == CheckStatus::Ok)
+    };
     // The x86_64 stack (Firecracker + guest kernel) must NOT be planned on a
     // non-x86_64 host — the arch check is Blocked there, and Blocked is never fixed.
-    let arch_ok = !checks.iter().any(|c| c.id == "arch" && c.status == CheckStatus::Blocked);
-    let artifact_root =
-        opts.artifact_root.clone().unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
+    let arch_ok = !checks
+        .iter()
+        .any(|c| c.id == "arch" && c.status == CheckStatus::Blocked);
+    let artifact_root = opts
+        .artifact_root
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
     let mut plan = Vec::new();
 
     // apt-able prerequisites in ONE transaction (docker.io only when Docker itself
@@ -122,9 +140,9 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
     if failed("tool_curl") {
         pkgs.push("curl");
     }
-    let docker_missing = checks
-        .iter()
-        .any(|c| c.id == "docker" && c.status == CheckStatus::Missing && c.detail.contains("not installed"));
+    let docker_missing = checks.iter().any(|c| {
+        c.id == "docker" && c.status == CheckStatus::Missing && c.detail.contains("not installed")
+    });
     if docker_missing {
         pkgs.push("docker.io");
     }
@@ -134,7 +152,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
             title: format!("Install packages: {}", pkgs.join(", ")),
             commands: vec![
                 "apt-get update -qq".to_string(),
-                format!("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {}", pkgs.join(" ")),
+                format!(
+                    "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {}",
+                    pkgs.join(" ")
+                ),
             ],
         });
     }
@@ -164,7 +185,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
     if !need_groups.is_empty() {
         plan.push(FixAction {
             id: "usermod_groups",
-            title: format!("Add the operating user to group(s): {}", need_groups.join(", ")),
+            title: format!(
+                "Add the operating user to group(s): {}",
+                need_groups.join(", ")
+            ),
             commands: vec![format!(
                 "usermod -aG {} \"${{SUDO_USER:-$USER}}\"",
                 need_groups.join(",")
@@ -199,7 +223,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
         // GUEST_KERNEL_INSTALL_PATH is a compile-time const (not user input); the
         // .tmp lives under its root-owned parent dir, and the final mv is atomic
         // only after the sha256 check passes.
-        let parent = Path::new(GUEST_KERNEL_INSTALL_PATH).parent().unwrap().display();
+        let parent = Path::new(GUEST_KERNEL_INSTALL_PATH)
+            .parent()
+            .unwrap()
+            .display();
         plan.push(FixAction {
             id: "kernel_install",
             title: format!("Install guest kernel vmlinux-5.10.223 (sha256-verified) to {GUEST_KERNEL_INSTALL_PATH}"),
@@ -239,7 +266,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
             plan.push(FixAction {
                 id: "install_ato_cli",
                 title: format!("Install the ato binary to {ATO_CLI_INSTALL_PATH}"),
-                commands: vec![format!("<install> {} -> {ATO_CLI_INSTALL_PATH}", src.display())],
+                commands: vec![format!(
+                    "<install> {} -> {ATO_CLI_INSTALL_PATH}",
+                    src.display()
+                )],
             });
         }
     }
@@ -248,7 +278,10 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
             plan.push(FixAction {
                 id: "install_snapshot_builder",
                 title: format!("Install ato-snapshot-builder to {BUILDER_INSTALL_PATH}"),
-                commands: vec![format!("<install> {} -> {BUILDER_INSTALL_PATH}", src.display())],
+                commands: vec![format!(
+                    "<install> {} -> {BUILDER_INSTALL_PATH}",
+                    src.display()
+                )],
             });
         }
     }
@@ -273,12 +306,17 @@ pub(crate) fn derive_plan(checks: &[Check], opts: &SetupOptions, bins: &BinaryPl
         units.push(BUILDER_UNIT);
     }
     if !units.is_empty() {
-        let mut commands: Vec<String> =
-            units.iter().map(|u| format!("<write> {SYSTEMD_DIR}/{u}")).collect();
+        let mut commands: Vec<String> = units
+            .iter()
+            .map(|u| format!("<write> {SYSTEMD_DIR}/{u}"))
+            .collect();
         commands.push("systemctl daemon-reload".to_string());
         plan.push(FixAction {
             id: "systemd_units",
-            title: format!("Write {} (existing files backed up), then daemon-reload", units.join(" + ")),
+            title: format!(
+                "Write {} (existing files backed up), then daemon-reload",
+                units.join(" + ")
+            ),
             commands,
         });
     }
@@ -358,7 +396,10 @@ pub(crate) fn env_file_missing_lines(
 ) -> Vec<String> {
     let wanted: Vec<(&str, String)> = vec![
         ("ATO_SNAPSHOT_ARTIFACT_ROOT", artifact_root.to_string()),
-        ("ATO_API_URL", api_url.unwrap_or("https://api.ato.run").to_string()),
+        (
+            "ATO_API_URL",
+            api_url.unwrap_or("https://api.ato.run").to_string(),
+        ),
         ("ATO_FC_BIN", FC_INSTALL_PATH.to_string()),
         ("ATO_FC_KERNEL", GUEST_KERNEL_INSTALL_PATH.to_string()),
         ("ATO_SNAPSHOT_BACKEND", "firecracker".to_string()),
@@ -511,8 +552,10 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
         }
     }
     let bins = BinaryPlan::resolve();
-    let blocked: Vec<&Check> =
-        checks.iter().filter(|c| c.status == CheckStatus::Blocked).collect();
+    let blocked: Vec<&Check> = checks
+        .iter()
+        .filter(|c| c.status == CheckStatus::Blocked)
+        .collect();
     let plan = derive_plan(&checks, &opts, &bins);
 
     if !blocked.is_empty() {
@@ -558,8 +601,10 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
         }
     }
 
-    let artifact_root =
-        opts.artifact_root.clone().unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
+    let artifact_root = opts
+        .artifact_root
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ARTIFACT_ROOT.to_string());
     for a in &plan {
         println!("→ {}", a.title);
         match a.id {
@@ -601,7 +646,11 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                 for cmd in &a.commands {
                     if let Some(rest) = cmd.strip_prefix("<write> ") {
                         let path = Path::new(rest);
-                        let unit = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                        let unit = path
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
                         let bak = backup_then_write(path, &render_unit(&unit))?;
                         if let Some(b) = bak {
                             println!("   (previous {unit} backed up to {})", b.display());
@@ -612,7 +661,10 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                 }
             }
             "caddyfile" => {
-                let cfg = opts.official.as_ref().expect("caddyfile action only in official mode");
+                let cfg = opts
+                    .official
+                    .as_ref()
+                    .expect("caddyfile action only in official mode");
                 let content = official_preview::render_caddyfile(
                     &official_preview::base_hostname(&cfg.public_base_url),
                     cfg.max_slots,
@@ -623,7 +675,10 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                 }
             }
             "env_official" => {
-                let cfg = opts.official.as_ref().expect("env_official action only in official mode");
+                let cfg = opts
+                    .official
+                    .as_ref()
+                    .expect("env_official action only in official mode");
                 let existing_text = std::fs::read_to_string(ENV_FILE).unwrap_or_default();
                 let existing = checks::env_file_values(&existing_text);
                 let (lines, _conflicts) = official_preview::official_env_lines(&existing, cfg);
@@ -671,14 +726,19 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
     }
     println!("  {n}. ato runner login                      # enroll this host");
     n += 1;
-    println!("  {n}. edit {ENV_FILE}: set SNAPSHOT_BUILDER_AGENT_TOKEN (builder) + ATO_RUNNER_PUBLIC_BASE_URL (tunnel)");
+    println!(
+        "  {n}. edit {ENV_FILE}: set SNAPSHOT_BUILDER_AGENT_TOKEN (builder) + ATO_RUNNER_PUBLIC_BASE_URL (tunnel)"
+    );
     n += 1;
     if !written_units.is_empty() {
         println!("  {n}. systemctl enable --now {}", written_units.join(" "));
         n += 1;
     }
     println!("  {n}. ato runner smoke                      # verify the full local path");
-    println!("  {}. ato doctor runner                     # confirm everything is green", n + 1);
+    println!(
+        "  {}. ato doctor runner                     # confirm everything is green",
+        n + 1
+    );
     if let Some(cfg) = &opts.official {
         println!();
         println!("Official-preview firewall (this host must expose ONLY Caddy):");
@@ -711,10 +771,22 @@ mod tests {
     use super::*;
 
     fn check(id: &'static str, status: CheckStatus) -> Check {
-        Check { id, label: "x", status, detail: "not installed".into(), fix: None }
+        Check {
+            id,
+            label: "x",
+            status,
+            detail: "not installed".into(),
+            fix: None,
+        }
     }
     fn opts() -> SetupOptions {
-        SetupOptions { fix: false, yes: false, artifact_root: None, api_url: None, official: None }
+        SetupOptions {
+            fix: false,
+            yes: false,
+            artifact_root: None,
+            api_url: None,
+            official: None,
+        }
     }
     fn official_opts() -> SetupOptions {
         SetupOptions {
@@ -728,7 +800,10 @@ mod tests {
     }
     /// Both binaries available (release layout) — the common case.
     fn bins() -> BinaryPlan {
-        BinaryPlan { ato_source: Some("/src/ato".into()), builder_source: Some("/src/ato-snapshot-builder".into()) }
+        BinaryPlan {
+            ato_source: Some("/src/ato".into()),
+            builder_source: Some("/src/ato-snapshot-builder".into()),
+        }
     }
 
     #[test]
@@ -779,9 +854,17 @@ mod tests {
         assert!(pos("install_snapshot_builder") < pos("systemd_units"));
         // Downloads are pinned: the verify command carries the exact sha256.
         let fc = plan.iter().find(|a| a.id == "firecracker_install").unwrap();
-        assert!(fc.commands.iter().any(|c| c.contains(FC_TGZ_SHA256) && c.contains("sha256sum -c")));
+        assert!(
+            fc.commands
+                .iter()
+                .any(|c| c.contains(FC_TGZ_SHA256) && c.contains("sha256sum -c"))
+        );
         let k = plan.iter().find(|a| a.id == "kernel_install").unwrap();
-        assert!(k.commands.iter().any(|c| c.contains(GUEST_KERNEL_SHA256) && c.contains("sha256sum -c")));
+        assert!(
+            k.commands
+                .iter()
+                .any(|c| c.contains(GUEST_KERNEL_SHA256) && c.contains("sha256sum -c"))
+        );
         // Nothing in the plan touches the Blocked check.
         assert!(plan.iter().all(|a| a.id != "cpu_virt"));
     }
@@ -802,14 +885,28 @@ mod tests {
         let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
         assert_eq!(
             ids,
-            vec!["caddy_install", "caddyfile", "unit_runner_loopback", "env_official", "caddy_service"]
+            vec![
+                "caddy_install",
+                "caddyfile",
+                "unit_runner_loopback",
+                "env_official",
+                "caddy_service"
+            ]
         );
         // Caddy is enabled AFTER the Caddyfile it serves is written.
         let pos = |id: &str| ids.iter().position(|x| *x == id).unwrap();
         assert!(pos("caddyfile") < pos("caddy_service"));
         // The loopback rewrite reloads systemd.
-        let loopback = plan.iter().find(|a| a.id == "unit_runner_loopback").unwrap();
-        assert!(loopback.commands.iter().any(|c| c == "systemctl daemon-reload"));
+        let loopback = plan
+            .iter()
+            .find(|a| a.id == "unit_runner_loopback")
+            .unwrap();
+        assert!(
+            loopback
+                .commands
+                .iter()
+                .any(|c| c == "systemctl daemon-reload")
+        );
     }
 
     #[test]
@@ -829,9 +926,17 @@ mod tests {
     #[test]
     fn custom_artifact_root_flows_into_the_plan() {
         let checks = vec![check("artifact_root", CheckStatus::Missing)];
-        let o = SetupOptions { artifact_root: Some("/srv/snapshots".into()), ..opts() };
+        let o = SetupOptions {
+            artifact_root: Some("/srv/snapshots".into()),
+            ..opts()
+        };
         let plan = derive_plan(&checks, &o, &bins());
-        assert!(plan[0].commands.iter().any(|c| c.contains("/srv/snapshots")));
+        assert!(
+            plan[0]
+                .commands
+                .iter()
+                .any(|c| c.contains("/srv/snapshots"))
+        );
     }
 
     #[test]
@@ -848,16 +953,30 @@ mod tests {
         let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
         assert!(ids.contains(&"install_ato_cli") && ids.contains(&"install_snapshot_builder"));
         let units = plan.iter().find(|a| a.id == "systemd_units").unwrap();
-        assert_eq!(units.commands.iter().filter(|c| c.starts_with("<write>")).count(), 2);
+        assert_eq!(
+            units
+                .commands
+                .iter()
+                .filter(|c| c.starts_with("<write>"))
+                .count(),
+            2
+        );
 
         // No snapshot-builder source ⇒ NO builder install AND NO builder unit (its
         // ExecStart could never be made to exist), but the runner unit is still written.
-        let no_builder = BinaryPlan { ato_source: Some("/src/ato".into()), builder_source: None };
+        let no_builder = BinaryPlan {
+            ato_source: Some("/src/ato".into()),
+            builder_source: None,
+        };
         let plan = derive_plan(&checks, &opts(), &no_builder);
         let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
         assert!(!ids.contains(&"install_snapshot_builder"));
         let units = plan.iter().find(|a| a.id == "systemd_units").unwrap();
-        let written: Vec<&String> = units.commands.iter().filter(|c| c.starts_with("<write>")).collect();
+        let written: Vec<&String> = units
+            .commands
+            .iter()
+            .filter(|c| c.starts_with("<write>"))
+            .collect();
         assert_eq!(written.len(), 1);
         assert!(written[0].contains(RUNNER_UNIT) && !written[0].contains(BUILDER_UNIT));
     }
@@ -871,7 +990,10 @@ mod tests {
         assert_eq!(src, "/src/ato");
         assert_eq!(dest, ATO_CLI_INSTALL_PATH);
         // And the unit ExecStart uses that exact dest — so the written unit is runnable.
-        assert!(render_unit(RUNNER_UNIT).contains(&format!("ExecStart={ATO_CLI_INSTALL_PATH} runner serve")));
+        assert!(
+            render_unit(RUNNER_UNIT)
+                .contains(&format!("ExecStart={ATO_CLI_INSTALL_PATH} runner serve"))
+        );
         assert!(render_unit(BUILDER_UNIT).contains(&format!("ExecStart={BUILDER_INSTALL_PATH}")));
     }
 
@@ -890,9 +1012,18 @@ mod tests {
         ];
         let plan = derive_plan(&checks, &opts(), &bins());
         let ids: Vec<&str> = plan.iter().map(|a| a.id).collect();
-        assert!(!ids.contains(&"firecracker_install"), "must not install x86_64 FC on non-x86_64");
-        assert!(!ids.contains(&"kernel_install"), "must not install x86_64 kernel on non-x86_64");
-        assert!(ids.contains(&"docker_enable"), "arch-independent fixes still planned");
+        assert!(
+            !ids.contains(&"firecracker_install"),
+            "must not install x86_64 FC on non-x86_64"
+        );
+        assert!(
+            !ids.contains(&"kernel_install"),
+            "must not install x86_64 kernel on non-x86_64"
+        );
+        assert!(
+            ids.contains(&"docker_enable"),
+            "arch-independent fixes still planned"
+        );
     }
 
     #[test]
@@ -906,7 +1037,9 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"NEW");
         // Existing dest: previous content backed up, new content installed.
         std::fs::write(&src, b"NEWER").unwrap();
-        let bak = install_binary_with_backup(&src, &dest).unwrap().expect("backup expected");
+        let bak = install_binary_with_backup(&src, &dest)
+            .unwrap()
+            .expect("backup expected");
         assert_eq!(std::fs::read(&bak).unwrap(), b"NEW");
         assert_eq!(std::fs::read(&dest).unwrap(), b"NEWER");
         // src == dest ⇒ no-op (never truncates the running binary onto itself).
@@ -917,11 +1050,22 @@ mod tests {
     #[test]
     fn env_file_merge_is_append_only() {
         let mut existing = BTreeMap::new();
-        existing.insert("ATO_API_URL".to_string(), "https://staging-api.ato.run".to_string());
+        existing.insert(
+            "ATO_API_URL".to_string(),
+            "https://staging-api.ato.run".to_string(),
+        );
         existing.insert("ATO_FC_BIN".to_string(), "/opt/fc/firecracker".to_string());
-        let lines = env_file_missing_lines(&existing, "/var/lib/ato/snapshots", Some("https://api.ato.run"));
+        let lines = env_file_missing_lines(
+            &existing,
+            "/var/lib/ato/snapshots",
+            Some("https://api.ato.run"),
+        );
         // Operator-set keys are NOT re-emitted (their values stay untouched)…
-        assert!(lines.iter().all(|l| !l.starts_with("ATO_API_URL=") && !l.starts_with("ATO_FC_BIN=")));
+        assert!(
+            lines
+                .iter()
+                .all(|l| !l.starts_with("ATO_API_URL=") && !l.starts_with("ATO_FC_BIN="))
+        );
         // …and only the genuinely missing keys are appended.
         assert_eq!(
             lines,
@@ -939,7 +1083,10 @@ mod tests {
             let text = render_unit(unit);
             assert!(text.contains(&format!("EnvironmentFile={ENV_FILE}")));
             assert!(text.contains("Restart=on-failure"));
-            assert!(!text.to_lowercase().contains("token="), "unit must not embed a token: {text}");
+            assert!(
+                !text.to_lowercase().contains("token="),
+                "unit must not embed a token: {text}"
+            );
         }
         assert!(render_unit(BUILDER_UNIT).contains("ato-snapshot-builder"));
         assert!(render_unit(RUNNER_UNIT).contains("runner serve"));
@@ -985,9 +1132,18 @@ mod tests {
         let checks = vec![check("firecracker", CheckStatus::Missing)];
         let plan = derive_plan(&checks, &opts(), &bins());
         let fc = &plan[0].commands[0];
-        assert!(fc.contains("mktemp -d"), "must download into a private tmp dir: {fc}");
-        assert!(fc.contains(FC_TGZ_SHA256) && fc.contains("sha256sum -c"), "must pin sha256");
-        assert!(!fc.contains("/tmp/ato-fc.tgz"), "must not use a predictable /tmp path");
+        assert!(
+            fc.contains("mktemp -d"),
+            "must download into a private tmp dir: {fc}"
+        );
+        assert!(
+            fc.contains(FC_TGZ_SHA256) && fc.contains("sha256sum -c"),
+            "must pin sha256"
+        );
+        assert!(
+            !fc.contains("/tmp/ato-fc.tgz"),
+            "must not use a predictable /tmp path"
+        );
     }
 
     #[test]
@@ -999,7 +1155,9 @@ mod tests {
         assert!(bak.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a=1\n");
         // Existing file: backed up with the ORIGINAL content preserved.
-        let bak = backup_then_write(&path, "a=2\n").unwrap().expect("backup expected");
+        let bak = backup_then_write(&path, "a=2\n")
+            .unwrap()
+            .expect("backup expected");
         assert_eq!(std::fs::read_to_string(&bak).unwrap(), "a=1\n");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a=2\n");
     }

@@ -73,8 +73,13 @@ pub fn decide_mem_backend(inputs: &MemBackendInputs) -> MemBackendDecision {
 
     // Binding-required capsules are never UFFD until Phase 8 BindingLease.
     if !inputs.capsule_no_bindings {
-        reasons.push("capsule requires bindings → File (UFFD is no-binding-only until Phase 8)".into());
-        return MemBackendDecision { choice: MemBackendChoice::File, reasons };
+        reasons.push(
+            "capsule requires bindings → File (UFFD is no-binding-only until Phase 8)".into(),
+        );
+        return MemBackendDecision {
+            choice: MemBackendChoice::File,
+            reasons,
+        };
     }
     reasons.push("capsule has no bindings".into());
 
@@ -83,25 +88,37 @@ pub fn decide_mem_backend(inputs: &MemBackendInputs) -> MemBackendDecision {
         // The choice is Unsupported; the CALLER maps it to File where
         // `fallback_allowed`, or fails closed in `validation_mode` (never silently
         // cold-paths when a sealed artifact is required).
-        return MemBackendDecision { choice: MemBackendChoice::Unsupported, reasons };
+        return MemBackendDecision {
+            choice: MemBackendChoice::Unsupported,
+            reasons,
+        };
     }
     reasons.push("host supports UFFD".into());
 
     if !inputs.runner_class_compatible {
         reasons.push("runner class not UFFD-compatible → File".into());
-        return MemBackendDecision { choice: MemBackendChoice::File, reasons };
+        return MemBackendDecision {
+            choice: MemBackendChoice::File,
+            reasons,
+        };
     }
 
     if !inputs.local_cas_has_memory {
         reasons.push("memory image not in local CAS → File".into());
-        return MemBackendDecision { choice: MemBackendChoice::File, reasons };
+        return MemBackendDecision {
+            choice: MemBackendChoice::File,
+            reasons,
+        };
     }
     reasons.push("memory image available in local CAS".into());
 
     // UFFD-eligible. Remote only when explicitly enabled AND reachable.
     if inputs.remote_preview_enabled && inputs.remote_available {
         reasons.push("remote read-through explicitly enabled + reachable".into());
-        return MemBackendDecision { choice: MemBackendChoice::UffdRemote, reasons };
+        return MemBackendDecision {
+            choice: MemBackendChoice::UffdRemote,
+            reasons,
+        };
     }
     if inputs.remote_preview_enabled && !inputs.remote_available {
         reasons.push("remote requested but not reachable → local CAS".into());
@@ -109,10 +126,16 @@ pub fn decide_mem_backend(inputs: &MemBackendInputs) -> MemBackendDecision {
 
     if inputs.hotset_profile_available {
         reasons.push("valid hotset profile available → prefetch".into());
-        MemBackendDecision { choice: MemBackendChoice::UffdHotset, reasons }
+        MemBackendDecision {
+            choice: MemBackendChoice::UffdHotset,
+            reasons,
+        }
     } else {
         reasons.push("no hotset profile → demand-only".into());
-        MemBackendDecision { choice: MemBackendChoice::UffdLocal, reasons }
+        MemBackendDecision {
+            choice: MemBackendChoice::UffdLocal,
+            reasons,
+        }
     }
 }
 
@@ -175,7 +198,10 @@ mod tests {
 
     #[test]
     fn eligible_demand_only_is_uffd_local() {
-        assert_eq!(decide_mem_backend(&uffd_ready()).choice, MemBackendChoice::UffdLocal);
+        assert_eq!(
+            decide_mem_backend(&uffd_ready()).choice,
+            MemBackendChoice::UffdLocal
+        );
     }
 
     #[test]
@@ -190,7 +216,11 @@ mod tests {
         let mut i = uffd_ready();
         // reachable but NOT explicitly enabled → never auto-remote.
         i.remote_available = true;
-        assert_eq!(decide_mem_backend(&i).choice, MemBackendChoice::UffdLocal, "remote must be opt-in");
+        assert_eq!(
+            decide_mem_backend(&i).choice,
+            MemBackendChoice::UffdLocal,
+            "remote must be opt-in"
+        );
         // enabled + reachable → remote.
         i.remote_preview_enabled = true;
         assert_eq!(decide_mem_backend(&i).choice, MemBackendChoice::UffdRemote);
@@ -202,6 +232,9 @@ mod tests {
     #[test]
     fn baseline_selects_file_family() {
         // baseline (binding unknown = false) → File.
-        assert_eq!(decide_mem_backend(&MemBackendInputs::baseline()).choice, MemBackendChoice::File);
+        assert_eq!(
+            decide_mem_backend(&MemBackendInputs::baseline()).choice,
+            MemBackendChoice::File
+        );
     }
 }

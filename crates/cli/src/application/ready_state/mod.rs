@@ -67,16 +67,25 @@ pub(crate) fn assemble_build_layers(
     artifact: Option<&Path>,
 ) -> Result<snapshot::BuildLayers> {
     let rootfs = if backend_id == "fake" {
-        let path = artifact
-            .ok_or_else(|| anyhow::anyhow!("Ready-State seal: the build produced no artifact to seal"))?;
-        std::fs::read(path)
-            .map_err(|e| anyhow::anyhow!("Ready-State seal: read build artifact {}: {e}", path.display()))?
+        let path = artifact.ok_or_else(|| {
+            anyhow::anyhow!("Ready-State seal: the build produced no artifact to seal")
+        })?;
+        std::fs::read(path).map_err(|e| {
+            anyhow::anyhow!(
+                "Ready-State seal: read build artifact {}: {e}",
+                path.display()
+            )
+        })?
     } else {
         // firecracker (qemu/kata never reach here — select_backend fails closed).
         let path = std::env::var("ATO_FC_ROOTFS")
             .ok()
             .filter(|v| !v.is_empty())
-            .or_else(|| std::env::var("ATO_FC_TEST_ROOTFS").ok().filter(|v| !v.is_empty()))
+            .or_else(|| {
+                std::env::var("ATO_FC_TEST_ROOTFS")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+            })
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Ready-State Firecracker build requires a bootable ext4 via ATO_FC_ROOTFS \
@@ -212,7 +221,14 @@ port = 8080
             vmstate: vec![1u8; 128],
             memory: (0..2000u32).map(|i| (i % 256) as u8).collect(),
         };
-        build::seal(root, hash.to_string(), &eligible_manifest(), layers, &backend).unwrap();
+        build::seal(
+            root,
+            hash.to_string(),
+            &eligible_manifest(),
+            layers,
+            &backend,
+        )
+        .unwrap();
     }
 
     // `ATO_READY_STATE_ENABLED` is process-global, so ALL flag-dependent `decide`
@@ -231,20 +247,35 @@ port = 8080
 
         // flag OFF → None (legacy), even for an eligible capsule with no artifact.
         set(None);
-        assert!(decide_ready_state_run(&eligible_manifest(), "blake3:x", root).unwrap().is_none());
+        assert!(
+            decide_ready_state_run(&eligible_manifest(), "blake3:x", root)
+                .unwrap()
+                .is_none()
+        );
 
         // flag ON, NOT eligible → None (legacy).
         set(Some("1"));
-        assert!(decide_ready_state_run(&non_eligible_manifest(), "blake3:x", root).unwrap().is_none());
+        assert!(
+            decide_ready_state_run(&non_eligible_manifest(), "blake3:x", root)
+                .unwrap()
+                .is_none()
+        );
 
         // flag ON, eligible, NO artifact → Err (fail closed, no silent cold run).
         let err = decide_ready_state_run(&eligible_manifest(), "blake3:missing", root).unwrap_err();
-        assert!(err.to_string().contains("Ready-State artifact not found"), "{err}");
+        assert!(
+            err.to_string().contains("Ready-State artifact not found"),
+            "{err}"
+        );
 
         // flag ON, eligible, artifact EXISTS → Some(plan).
         let hash = "blake3:present";
         seal_fake_artifact(root, hash);
-        assert!(decide_ready_state_run(&eligible_manifest(), hash, root).unwrap().is_some());
+        assert!(
+            decide_ready_state_run(&eligible_manifest(), hash, root)
+                .unwrap()
+                .is_some()
+        );
 
         set(prev.as_deref());
     }
@@ -253,7 +284,11 @@ port = 8080
     fn capsule_manifest_hash_is_deterministic_and_prefixed() {
         let m: toml::Value = toml::from_str("name='x'\nversion='1.0.0'").unwrap();
         let h1 = capsule_manifest_hash(&m).unwrap();
-        assert_eq!(h1, capsule_manifest_hash(&m).unwrap(), "build/run must agree on the key");
+        assert_eq!(
+            h1,
+            capsule_manifest_hash(&m).unwrap(),
+            "build/run must agree on the key"
+        );
         assert!(h1.starts_with("blake3:"), "{h1}");
     }
 

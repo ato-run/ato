@@ -84,7 +84,11 @@ mod tests {
         assert_eq!(h.id(), "fake-sess-1");
         let m = h.capture_metrics().await.unwrap();
         match m.metadata {
-            RuntimeMetadata::MicroVm { vm_id, snapshot_backend, exit_code } => {
+            RuntimeMetadata::MicroVm {
+                vm_id,
+                snapshot_backend,
+                exit_code,
+            } => {
                 assert_eq!(vm_id, "fake-sess-1");
                 assert_eq!(snapshot_backend, "fake");
                 assert_eq!(exit_code, None);

@@ -16,14 +16,21 @@ use snapshot::ReadyStateManifest;
 fn safe_component(id: &str) -> String {
     let s: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() { "_".to_string() } else { s }
 }
 
 /// Directory holding one sealed artifact.
 pub(crate) fn artifact_dir(root: &Path, capsule_manifest_hash: &str) -> PathBuf {
-    root.join("ready-state").join(safe_component(capsule_manifest_hash))
+    root.join("ready-state")
+        .join(safe_component(capsule_manifest_hash))
 }
 
 /// Open (creating if needed) the CapsuleFS store for an artifact.
@@ -48,13 +55,17 @@ pub(crate) fn save_manifest(root: &Path, manifest: &ReadyStateManifest) -> Resul
 }
 
 /// Load a previously sealed manifest, if present.
-pub(crate) fn load_manifest(root: &Path, capsule_manifest_hash: &str) -> Result<Option<ReadyStateManifest>> {
+pub(crate) fn load_manifest(
+    root: &Path,
+    capsule_manifest_hash: &str,
+) -> Result<Option<ReadyStateManifest>> {
     let path = manifest_path(root, capsule_manifest_hash);
     if !path.exists() {
         return Ok(None);
     }
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-    let manifest = serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    let manifest =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
     Ok(Some(manifest))
 }
 
@@ -86,7 +97,10 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
-            layers: snapshot::ReadyStateLayers { rootfs: Some(rootfs), ..Default::default() },
+            layers: snapshot::ReadyStateLayers {
+                rootfs: Some(rootfs),
+                ..Default::default()
+            },
             hotset_profile: Default::default(),
             snapshot_backend: snapshot::SnapshotBackendInfo {
                 kind: "fake".to_string(),
