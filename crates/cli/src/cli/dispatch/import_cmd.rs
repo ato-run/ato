@@ -1084,6 +1084,33 @@ fn run_shadow_workspace_keep_alive(
             break;
         }
         if let Ok(Some(status)) = child.try_wait() {
+            // A process that exits with success() is not necessarily a
+            // failure: the "detached shadow" pattern (a launcher that spawns
+            // a backgrounded workload via start_new_session/setsid and then
+            // exits on its own) is intentional and supported — the actual
+            // workload lives on in the detached child, not this pid. The
+            // single readiness probe just above can race the child's listen
+            // socket becoming reachable (observed under contended CI
+            // runners), so before declaring `exited_before_readiness`, give
+            // the workload a few quick extra chances to answer rather than
+            // failing on the very first miss that happens to coincide with
+            // the launcher's own exit.
+            if status.success() {
+                let mut became_ready = false;
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    if let Ok(resp) = client.get(&primary_url).send()
+                        && resp.status().is_success()
+                    {
+                        became_ready = true;
+                        break;
+                    }
+                }
+                if became_ready {
+                    readiness_state = "ready".to_string();
+                    break;
+                }
+            }
             let combined = read_error_excerpt_from_log(&log_path);
             let (phase, error_class) = if status.success() {
                 ("readiness", "exited_before_readiness")
