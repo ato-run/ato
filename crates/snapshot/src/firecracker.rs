@@ -198,7 +198,12 @@ impl FirecrackerConfig {
         // `<dir>/blake3_<64-hex>.sock` (76 bytes of file name) and AF_UNIX caps
         // sun_path at ~108 bytes — `/tmp/ato-vsock-slots/ato-slot-0/…` was
         // exactly 108 and failed SUN_LEN on the first live restore.
-        c.vsock_slot_dir = Some(PathBuf::from("/run/ato/vsk").join(index.to_string()));
+        // This is a HOST-side dial path convention (AF_UNIX, always Linux —
+        // Firecracker itself is Linux-only), never a native filesystem path
+        // of the platform running this code — build it with an explicit
+        // forward slash rather than `PathBuf::join`, which would emit `\` on
+        // a non-Linux *build/test* host and corrupt the socket path string.
+        c.vsock_slot_dir = Some(PathBuf::from(format!("/run/ato/vsk/{index}")));
         c
     }
 }
@@ -2768,6 +2773,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // netns / SupervisorDrive placeholder gen (/dev/urandom) are Linux/Unix-only
     fn build_placeholders_are_unique_and_prefixed() {
         let a = generate_build_placeholder().unwrap();
         let b = generate_build_placeholder().unwrap();
@@ -2776,6 +2782,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // netns / SupervisorDrive placeholder gen (/dev/urandom) are Linux/Unix-only
     fn supervisor_drive_validates_names_and_never_logs_values() {
         // Valid lowercase binding names prepare fine; each gets a distinct placeholder.
         let drive = SupervisorDrive::prepare(&SupervisorBindings {
