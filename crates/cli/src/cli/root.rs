@@ -1221,4 +1221,30 @@ pub(crate) enum DoctorTarget {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+
+    /// Report this host's readiness to act as a local Desktop Runner: the
+    /// isolation substrate (macOS Apple Containerization / `container`), what it
+    /// can run today (cold OCI), and what is not yet supported (Ready-State
+    /// restore, CRIU, bindings). Read-only: it only probes, never starts the
+    /// `container` service or launches a workload.
+    #[command(name = "desktop-runner")]
+    DesktopRunner {
+        /// Emit machine-readable JSON on stdout instead of a human summary.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// Check this Ubuntu host's readiness as an all-in-one Ato snapshot builder +
+    /// capsule runner: KVM, Firecracker, guest kernel, Docker, groups, tun/tap,
+    /// artifact root, env file, runner token and the systemd services — plus the
+    /// derived Ready-State verdict (can it build_ready_state / restore_snapshot
+    /// today?). Diagnostics only: it installs and reconfigures nothing (the sole
+    /// write is a transient probe file in the artifact root to test writability,
+    /// removed immediately). The fixable set is applied by `ato runner setup --fix`.
+    #[command(name = "runner")]
+    Runner {
+        /// Emit machine-readable JSON on stdout instead of a human table.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }

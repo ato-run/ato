@@ -292,6 +292,33 @@ impl CapsuleManifest {
                 })
             })
             .unwrap_or(false);
+
+        // v1.5 per-service secret scoping (ato#982) is a SNAPSHOT-SUPERVISOR feature
+        // (`derive_supervisor_services` scopes each secret to the naming service). A
+        // TARGET-based service runs the OCI/container orchestration path, which does
+        // not honour `secrets` — so accepting it there would silently no-op a
+        // security-sensitive field (the author would believe a secret is scoped when
+        // it is not). Fail-closed: reject `secrets` on a target-based service.
+        if let Some(services) = self.services.as_ref() {
+            for (name, service) in services {
+                let has_target = service
+                    .target
+                    .as_deref()
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false);
+                let has_secrets = service.secrets.as_ref().is_some_and(|s| !s.is_empty());
+                if has_target && has_secrets {
+                    errors.push(ValidationError::InvalidService(
+                        name.clone(),
+                        "`secrets` (per-service secret scoping) is only supported for snapshot \
+                         supervisor services (`target` unset); a target-based/OCI service would \
+                         silently ignore it. Remove `secrets` here or drop `target`."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
         let mut requires_web_services_validation = false;
 
         for (label, target) in &named_targets {
@@ -1141,6 +1168,12 @@ impl CapsuleManifest {
             }
 
             let mut shared_state_bindings = HashMap::new();
+            // v1.6 (ato#983): every snapshot-mode (single-VM) durable mount target,
+            // normalized, across ALL services — used below to reject an exact
+            // duplicate or a prefix-overlap between two DIFFERENT state names (the
+            // `shared_state_bindings` map above only catches the SAME state name
+            // bound twice; two distinct states can still collide on target path).
+            let mut snapshot_state_targets: Vec<(String, String, String)> = Vec::new();
             for (state_name, requirement) in &self.state {
                 let trimmed_name = state_name.trim();
                 if trimmed_name.is_empty() || !is_kebab_case(trimmed_name) {
@@ -1215,25 +1248,56 @@ impl CapsuleManifest {
             }
 
             if let Some(services) = self.services.as_ref() {
+                // The set of service names the runtime actually matches
+                // `service_target` against: declared `[services.*]` PLUS implicit
+                // services synthesized from dependency targets referenced via a
+                // service target's `needs`/`depends_on` (see
+                // routing::router::services::resolve_services, which auto-creates
+                // a service for each such target without an explicit
+                // `[services.<dep>]`). Validating only against declared
+                // `[services.*]` is too strict and rejects valid capsules whose
+                // `service_target` names a depends_on target that becomes an
+                // implicit service (e.g. a `db` pulled in by the app target's
+                // `depends_on`).
+                let resolved_service_names: std::collections::HashSet<String> = {
+                    let mut set: std::collections::HashSet<String> =
+                        services.keys().cloned().collect();
+                    for (svc_name, svc) in services {
+                        let target_label = svc
+                            .target
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or(svc_name.as_str());
+                        if let Some(target) = named_targets.get(target_label) {
+                            for dep in &target.needs {
+                                set.insert(dep.clone());
+                            }
+                        }
+                    }
+                    set
+                };
                 for (service_name, service) in services {
                     if service.state_bindings.is_empty() {
                         continue;
                     }
 
-                    let Some(target_label) = service
+                    let target_label = service
                         .target
                         .as_ref()
                         .map(|value| value.trim())
-                        .filter(|value| !value.is_empty())
-                    else {
-                        errors.push(ValidationError::InvalidStateBinding(
-                            service_name.clone(),
-                            "state_bindings require target-based services".to_string(),
-                        ));
-                        continue;
-                    };
+                        .filter(|value| !value.is_empty());
 
-                    if let Some(target) = named_targets.get(target_label)
+                    // v1.6 (ato#983): a service with NO `target` is a snapshot-mode
+                    // (single-VM) supervisor service — every existing
+                    // `[services.<name>]` fixture in the snapshot builder is shaped
+                    // this way (it has no OCI container to route a mount into via
+                    // `[targets.<label>]`). It gets its own validation rules below
+                    // instead of the OCI target-routed ones.
+                    let is_snapshot_service = target_label.is_none();
+
+                    if let Some(target_label) = target_label
+                        && let Some(target) = named_targets.get(target_label)
                         && !target.runtime.eq_ignore_ascii_case("oci")
                     {
                         errors.push(ValidationError::InvalidStateBinding(
@@ -1251,26 +1315,48 @@ impl CapsuleManifest {
                         let state_name = binding.state.trim();
                         let target = binding.target.trim();
 
-                        // `service_target`, when present, must name a declared
-                        // `[services.<name>]`. At runtime the mount is routed by
-                        // matching `service_target` against SERVICE names (not
-                        // target names — see routing::router::services::
-                        // state_mounts_for_service). A value that matches no
-                        // service silently drops the mount, so a persistent
-                        // volume is never attached and its data is lost on
-                        // restart. Fail closed instead of mounting nothing.
-                        //
-                        // Compared raw (no trim) to mirror the runtime matcher
-                        // exactly: an empty/whitespace or space-padded value is
-                        // also rejected, since the runtime would never match it.
-                        if let Some(svc_target) = binding.service_target.as_deref()
-                            && !services.contains_key(svc_target)
+                        if is_snapshot_service {
+                            // `service_target` names which CONTAINER a mount goes
+                            // into — a concept that doesn't exist for a snapshot
+                            // service (exactly one shared VM filesystem, not
+                            // per-service containers). Fail closed rather than
+                            // silently ignore a value that means nothing here.
+                            if binding.service_target.is_some() {
+                                errors.push(ValidationError::InvalidStateBinding(
+                                    service_name.clone(),
+                                    format!(
+                                        "service_target is not applicable to a snapshot (single-VM) \
+                                         service — mounts are VM-wide, not per-container; leave it \
+                                         unset (binding for state '{state_name}')"
+                                    ),
+                                ));
+                            }
+                        } else if let Some(svc_target) = binding.service_target.as_deref()
+                            && !resolved_service_names.contains(svc_target)
                         {
+                            // `service_target`, when present, must resolve to a
+                            // service the runtime can actually mount onto: a declared
+                            // `[services.<name>]` OR an implicit service synthesized
+                            // from a dependency target (a `needs`/`depends_on` label
+                            // of some service's target — see `resolved_service_names`
+                            // above). At runtime the mount is routed by matching
+                            // `service_target` against the RESOLVED service names
+                            // (routing::router::services::resolve_services +
+                            // state_mounts_for_service). A value that matches no
+                            // resolved service silently drops the mount, so a
+                            // persistent volume is never attached and its data is
+                            // lost on restart. Fail closed instead of mounting
+                            // nothing.
+                            //
+                            // Compared raw (no trim) to mirror the runtime matcher
+                            // exactly: an empty/whitespace or space-padded value is
+                            // also rejected, since the runtime would never match it.
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
                                 format!(
-                                    "service_target '{svc_target}' does not reference a declared [services.*] \
-                                     (binding for state '{state_name}' would never be mounted)"
+                                    "service_target '{svc_target}' does not resolve to a service \
+                                     (no declared [services.*] and no depends_on/needs target named \
+                                     '{svc_target}'); binding for state '{state_name}' would never be mounted"
                                 ),
                             ));
                         }
@@ -1325,7 +1411,49 @@ impl CapsuleManifest {
                             }
 
                             match self.state.get(state_name) {
-                                Some(_) => {}
+                                Some(requirement) => {
+                                    // v1.6 (ato#983): a snapshot durable-volume
+                                    // binding names PERSISTENT, EXCLUSIVE state
+                                    // only in this MVP. NOTE this is an
+                                    // ownership/diagnostic boundary, not a
+                                    // security boundary — every service in a
+                                    // snapshot shares one guest VM filesystem, so
+                                    // another service COULD still read a mounted
+                                    // path if it knows it; this only decides who
+                                    // the manifest declares as the OWNER.
+                                    if is_snapshot_service {
+                                        if requirement.durability != StateDurability::Persistent {
+                                            errors.push(ValidationError::InvalidStateBinding(
+                                                service_name.clone(),
+                                                format!(
+                                                    "state '{state_name}': a snapshot durable-volume \
+                                                     binding requires durability=\"persistent\" \
+                                                     (ephemeral in-VM state needs no binding at all)"
+                                                ),
+                                            ));
+                                        }
+                                        if requirement.sharing == StateSharing::SameCapsule {
+                                            errors.push(ValidationError::InvalidStateBinding(
+                                                service_name.clone(),
+                                                format!(
+                                                    "state '{state_name}': sharing=\"same-capsule\" is \
+                                                     not supported for a snapshot (single-VM) \
+                                                     durable-volume binding in this release — each \
+                                                     state has exactly one owning service"
+                                                ),
+                                            ));
+                                        }
+                                        if let Err(e) = validate_state_volume_size_mb(
+                                            state_name,
+                                            requirement.size_mb,
+                                        ) {
+                                            errors.push(ValidationError::InvalidStateBinding(
+                                                service_name.clone(),
+                                                e,
+                                            ));
+                                        }
+                                    }
+                                }
                                 None => errors.push(ValidationError::InvalidStateBinding(
                                     service_name.clone(),
                                     format!("state '{}' is not declared under [state]", state_name),
@@ -1333,7 +1461,21 @@ impl CapsuleManifest {
                             }
                         }
 
-                        if !is_valid_mount_path(target) {
+                        if is_snapshot_service {
+                            match validate_and_normalize_state_mount_target(target) {
+                                Ok(normalized) => {
+                                    snapshot_state_targets.push((
+                                        service_name.clone(),
+                                        state_name.to_string(),
+                                        normalized,
+                                    ));
+                                }
+                                Err(e) => errors.push(ValidationError::InvalidStateBinding(
+                                    service_name.clone(),
+                                    e,
+                                )),
+                            }
+                        } else if !is_valid_mount_path(target) {
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
                                 format!("target '{}' must be an absolute path", binding.target),
@@ -1342,6 +1484,34 @@ impl CapsuleManifest {
                             errors.push(ValidationError::InvalidStateBinding(
                                 service_name.clone(),
                                 format!("target '{}' is bound more than once", target),
+                            ));
+                        }
+                    }
+                }
+
+                // v1.6 (ato#983): cross-service mount-target collision check for
+                // snapshot-mode bindings. `shared_state_bindings` above only
+                // catches the SAME state name bound twice; two DIFFERENT state
+                // names can still target the same or an overlapping path (e.g.
+                // `/ato/state/db` and `/ato/state/db/backup`), which would make a
+                // later slice's mount step try to mount two volumes onto (or
+                // under) the same directory. O(n^2) is fine — a capsule declares a
+                // handful of durable volumes, not thousands.
+                for i in 0..snapshot_state_targets.len() {
+                    for j in (i + 1)..snapshot_state_targets.len() {
+                        let (service_a, state_a, target_a) = &snapshot_state_targets[i];
+                        let (service_b, state_b, target_b) = &snapshot_state_targets[j];
+                        let path_a = std::path::Path::new(target_a);
+                        let path_b = std::path::Path::new(target_b);
+                        if path_a == path_b || path_a.starts_with(path_b) || path_b.starts_with(path_a) {
+                            errors.push(ValidationError::InvalidStateBinding(
+                                service_a.clone(),
+                                format!(
+                                    "target '{target_a}' (state '{state_a}') conflicts with target \
+                                     '{target_b}' (state '{state_b}' on service '{service_b}') — \
+                                     durable mount targets must not be identical or nested under one \
+                                     another"
+                                ),
                             ));
                         }
                     }
@@ -2163,6 +2333,187 @@ mod tests {
             has_err(&validate_service_target_binding(" main "), "service_target"),
             "space-padded service_target must be rejected (runtime does not trim)"
         );
+    }
+
+    /// v1.6 (ato#983) Slice 1: a snapshot-mode service is one whose
+    /// `[services.<name>]` has NO `target` field (every v1.5 supervisor/snapshot
+    /// fixture is shaped this way — it has no `[targets.<label>]` to route an OCI
+    /// mount into).
+    fn validate_snapshot_state_binding(state_block: &str, binding_line: &str) -> Result<(), Vec<super::ValidationError>> {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"snap-state\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"app\"\n\
+             [targets.app]\nruntime = \"source\"\nrun = \"python3 app.py\"\nport = 8080\n\
+             {state_block}\n\
+             [services.api]\nentrypoint = \"python3 api.py\"\n{binding_line}\n\
+             [services.api.network]\npublish = true\n"
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        manifest.validate()
+    }
+
+    fn persistent_state_decl(name: &str, extra: &str) -> String {
+        format!(
+            "[state.{name}]\nkind = \"filesystem\"\ndurability = \"persistent\"\n\
+             purpose = \"x\"\nattach = \"explicit\"\nschema_id = \"sha256:{}\"\n{extra}",
+            "0".repeat(64)
+        )
+    }
+
+    #[test]
+    fn snapshot_service_state_binding_is_accepted() {
+        let r = validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        );
+        assert!(r.is_ok(), "valid snapshot-mode state binding should validate: {r:?}");
+    }
+
+    #[test]
+    fn snapshot_service_target_omitted_no_longer_blanket_rejected() {
+        // Before v1.6 ANY `target: None` service with state_bindings was rejected
+        // outright ("state_bindings require target-based services"). That message
+        // must no longer appear for a well-formed snapshot binding.
+        let r = validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        );
+        assert!(!has_err(&r, "require target-based services"));
+    }
+
+    #[test]
+    fn snapshot_service_target_field_set_is_rejected() {
+        let r = validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\", \
+             service_target = \"api\" }]",
+        );
+        assert!(has_err(&r, "service_target"), "{r:?}");
+    }
+
+    #[test]
+    fn snapshot_sharing_same_capsule_is_rejected() {
+        let r = validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", "sharing = \"same-capsule\"\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        );
+        assert!(has_err(&r, "same-capsule"), "{r:?}");
+    }
+
+    #[test]
+    fn snapshot_sharing_omitted_defaults_to_exclusive_and_is_accepted() {
+        // StateSharing::Exclusive is the #[default] — an omitted `sharing` must
+        // NOT be treated as same-capsule.
+        let r = validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", ""),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        );
+        assert!(r.is_ok(), "{r:?}");
+    }
+
+    #[test]
+    fn snapshot_durability_ephemeral_is_rejected() {
+        let r = validate_snapshot_state_binding(
+            "[state.dbdata]\nkind = \"filesystem\"\ndurability = \"ephemeral\"\npurpose = \"x\"\n",
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        );
+        assert!(has_err(&r, "durability"), "{r:?}");
+    }
+
+    #[test]
+    fn snapshot_size_mb_bounds_are_enforced() {
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", "size_mb = 0\n"),
+                "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+            ),
+            "out of range"
+        ));
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", "size_mb = 4294967295\n"),
+                "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+            ),
+            "out of range"
+        ));
+        assert!(validate_snapshot_state_binding(
+            &persistent_state_decl("dbdata", "size_mb = 4096\n"),
+            "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/dbdata\" }]",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn snapshot_mount_target_must_be_under_ato_state() {
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", ""),
+                "state_bindings = [{ state = \"dbdata\", target = \"/var/lib/dbdata\" }]",
+            ),
+            "must be under"
+        ));
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", ""),
+                "state_bindings = [{ state = \"dbdata\", target = \"/ato/state\" }]",
+            ),
+            "itself"
+        ));
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", ""),
+                "state_bindings = [{ state = \"dbdata\", target = \"/ato/state/../etc\" }]",
+            ),
+            "'.', '..'"
+        ));
+        assert!(has_err(
+            &validate_snapshot_state_binding(
+                &persistent_state_decl("dbdata", ""),
+                "state_bindings = [{ state = \"dbdata\", target = \"relative/path\" }]",
+            ),
+            "absolute"
+        ));
+    }
+
+    #[test]
+    fn snapshot_same_state_name_bound_by_two_services_is_rejected() {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"snap-state\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"app\"\n\
+             [targets.app]\nruntime = \"source\"\nrun = \"python3 app.py\"\nport = 8080\n\
+             {}\n\
+             [services.api]\nentrypoint = \"a\"\n\
+             state_bindings = [{{ state = \"dbdata\", target = \"/ato/state/dbdata\" }}]\n\
+             [services.api.network]\npublish = true\n\
+             [services.worker]\nentrypoint = \"w\"\n\
+             state_bindings = [{{ state = \"dbdata\", target = \"/ato/state/dbdata2\" }}]\n",
+            persistent_state_decl("dbdata", "")
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        let r = manifest.validate();
+        assert!(has_err(&r, "dbdata") && (has_err(&r, "shared mutable state") || has_err(&r, "same-capsule")), "{r:?}");
+    }
+
+    #[test]
+    fn snapshot_two_different_states_with_colliding_targets_are_rejected() {
+        let toml = format!(
+            "schema_version = \"0.3\"\nname = \"snap-state\"\nversion = \"0.1.0\"\ntype = \"app\"\n\
+             default_target = \"app\"\n\
+             [targets.app]\nruntime = \"source\"\nrun = \"python3 app.py\"\nport = 8080\n\
+             {}\n{}\n\
+             [services.api]\nentrypoint = \"a\"\n\
+             state_bindings = [{{ state = \"dba\", target = \"/ato/state/db\" }}]\n\
+             [services.api.network]\npublish = true\n\
+             [services.worker]\nentrypoint = \"w\"\n\
+             state_bindings = [{{ state = \"dbb\", target = \"/ato/state/db/backup\" }}]\n",
+            persistent_state_decl("dba", ""),
+            persistent_state_decl("dbb", "")
+        );
+        let manifest: crate::foundation::types::manifest::CapsuleManifest =
+            toml::from_str(&toml).expect("parse manifest");
+        assert!(has_err(&manifest.validate(), "conflicts with target"));
     }
 
     #[test]

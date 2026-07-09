@@ -51,6 +51,8 @@
 //! Treat additions as additive (add new fields with `#[serde(default)]`,
 //! new enum variants behind tolerance rules) and renames as breaking.
 
+pub mod binding_control;
+pub mod binding_lease;
 pub mod ccp;
 pub mod config;
 pub mod consent;

@@ -615,6 +615,9 @@ impl WebViewManager {
 
         // Pull bridge activity into app state first so rebuilds always see the latest guest messages.
         state.extend_activity(self.bridge.drain_activity());
+        // Pull Desktop Runner run outcomes (session receipts / structured
+        // placement errors) posted by `desktop_run_agent`'s background waiter.
+        state.extend_activity(crate::desktop_run_agent::drain_pending_activity());
 
         // RFC: SURFACE_CLOSE_SEMANTICS §6.4 — mirror retention size
         // into AppState so omnibar suggestions / chrome can render
@@ -3696,6 +3699,15 @@ fn target_handle_for_version(canonical_handle: &str, latest: &str) -> String {
 ///   - `run` → acknowledged in the activity log only. The full
 ///     run-capsule-on-this-device path (store-ref resolution + a native pre-run
 ///     confirmation) is a follow-up.
+///
+/// **PR-D1 note:** this function (and the `WebViewManager` pane whose
+/// navigation handler feeds it) has no live construction site in the current
+/// Focus-mode Desktop — see the module doc on `crate::intent`. The real,
+/// gated `ato://run` consent flow this PR adds lives in
+/// `system_capsule::ato_start::dispatch_run_intent`, reached from the live
+/// `app.rs` `NavigateToUrl` action, not here. Kept compiling (and its own
+/// tests green) as a documented-dead code path rather than deleted, since
+/// removing it is a separate decision outside this PR's scope.
 fn dispatch_privileged_intent(state: &mut AppState, intent: crate::intent::PrivilegedIntent) {
     use crate::intent::PrivilegedIntent;
     use crate::runner_agent::RunnerStatus;
@@ -3710,13 +3722,18 @@ fn dispatch_privileged_intent(state: &mut AppState, intent: crate::intent::Privi
             let (tone, message) = match &status {
                 RunnerStatus::Registering => (
                     ActivityTone::Info,
-                    "Connected Runner: registration started — authorize in your browser".to_string(),
+                    "Connected Runner: registration started — authorize in your browser"
+                        .to_string(),
                 ),
-                RunnerStatus::Error(_) => {
-                    (ActivityTone::Warning, format!("Connected Runner: {}", status.label()))
-                }
+                RunnerStatus::Error(_) => (
+                    ActivityTone::Warning,
+                    format!("Connected Runner: {}", status.label()),
+                ),
                 // Already registered (Serving / Stopped) → no browser flow began.
-                _ => (ActivityTone::Info, format!("Connected Runner: {}", status.label())),
+                _ => (
+                    ActivityTone::Info,
+                    format!("Connected Runner: {}", status.label()),
+                ),
             };
             state.push_activity(tone, message);
         }
@@ -3736,14 +3753,41 @@ fn dispatch_privileged_intent(state: &mut AppState, intent: crate::intent::Privi
                 format!("Connected Runner: {}", status.label()),
             );
         }
-        PrivilegedIntent::Run { source, run_id } => {
-            let detail = run_id.map(|id| format!(" (run {id})")).unwrap_or_default();
-            state.push_activity(
-                ActivityTone::Info,
-                format!(
-                    "Run requested for {source}{detail}. Open it from Discover to run on this device."
-                ),
-            );
+        PrivilegedIntent::Run {
+            source,
+            run_id,
+            origin,
+        } => {
+            // Spawn `ato run <source>` on the Desktop Runner local cold-OCI
+            // path (ATO_RUN_PROVIDER=desktop + ATO_DESKTOP_RUNNER_EXECUTE=1).
+            // The run outcome (session receipt or structured placement error)
+            // is surfaced in the activity log by `desktop_run_agent`'s
+            // background waiter + render-loop drain — no longer a stub. The
+            // managed-runner fallback stays distinct: a host that cannot serve
+            // a local cold-OCI backend makes `ato run` exit non-zero with the
+            // PR 1 structured placement error, which the activity log shows.
+            //
+            // PR-D1: this dead pane path never shows the consent wizard the
+            // live `ato://run` gate (`system_capsule::ato_start::dispatch_run_intent`)
+            // now requires — see the module note above. `origin` is only
+            // threaded through for the log line; it does not drive any
+            // decision here.
+            let ready_state_enabled = false; // M3: cold-OCI only; local Ready-State restore is not supported.
+            match crate::desktop_run_agent::launch(&source, run_id.as_deref(), ready_state_enabled)
+            {
+                Ok(()) => {
+                    let detail = run_id.map(|id| format!(" (run {id})")).unwrap_or_default();
+                    state.push_activity(
+                        ActivityTone::Info,
+                        format!(
+                            "Run started{detail} for {source} on the Desktop Runner (requested from {origin})."
+                        ),
+                    );
+                }
+                Err(reason) => {
+                    state.push_activity(ActivityTone::Error, reason);
+                }
+            }
         }
     }
 }
@@ -5704,12 +5748,16 @@ mod tests {
         // host alone: a downgraded scheme or a non-default port is a different
         // origin and must not receive the account cookie.
         assert!(!should_install_ato_auth_cookies("http://app.ato.run/"));
-        assert!(!should_install_ato_auth_cookies("https://app.ato.run:8443/"));
+        assert!(!should_install_ato_auth_cookies(
+            "https://app.ato.run:8443/"
+        ));
         // The legacy dock page is https-gated too.
         assert!(should_install_ato_auth_cookies("https://ato.run/dock"));
         assert!(!should_install_ato_auth_cookies("http://ato.run/dock"));
         // Look-alike / unrelated hosts never receive account cookies.
-        assert!(!should_install_ato_auth_cookies("https://app.evil.example/"));
+        assert!(!should_install_ato_auth_cookies(
+            "https://app.evil.example/"
+        ));
         assert!(!should_install_ato_auth_cookies("https://notapp.ato.run/"));
         assert!(!should_install_ato_auth_cookies("https://custom.example/"));
         // Loopback (http, any port) is only injected into in debug builds.

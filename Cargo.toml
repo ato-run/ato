@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     "crates/cli",
     "crates/capsule",
+    "crates/capsulefs",
+    "crates/snapshot",
+    "crates/snapshot-builder",
     "crates/protocol",
+    "crates/guest-agent",
     "crates/cli/lock-draft-engine",
     "crates/nacelle",
     "crates/netd",

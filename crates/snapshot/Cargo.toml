@@ -1,0 +1,45 @@
+[package]
+name = "snapshot"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+description = "Backend-agnostic build/restore of Ready-State Capsule warm state. Defines SnapshotBackend + Ready-State artifact types; ships a KVM-free FakeSnapshotBackend and a Firecracker skeleton (Unsupported without /dev/kvm)."
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "snapshot"
+path = "src/lib.rs"
+
+# Dev/KVM-host latency benchmark tool (not part of the product CLI).
+[[bin]]
+name = "ready-state-bench"
+path = "src/bin/ready_state_bench.rs"
+
+[dependencies]
+anyhow = "1.0"
+blake3 = "1.5"
+capsule = { path = "../capsule" }
+capsulefs = { path = "../capsulefs" }
+# BindingName: the rootfs_builder validates each secret's derived binding name against
+# the SAME canonical rule the guest-agent enforces, so an unbootable supervisor.json
+# (uppercase binding name → agent exit(2) before vsock listener) is rejected at emission.
+protocol = { path = "../protocol" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_jcs = "0.1"
+# Docker import provenance (ato#994): dockerfile/context hashing is sha256 to match
+# the registry digest algebra the rest of the receipt speaks (image digests are
+# sha256:…); blake3 stays the CAS-internal hash.
+sha2 = "0.10"
+thiserror = "2.0"
+# U1 (#854): the UFFD page-server uses raw userfaultfd ioctls + SCM_RIGHTS recvmsg
+# (Linux-only; the module body is cfg(target_os="linux")-gated).
+libc = "0.2"
+
+[dev-dependencies]
+serde_json = "1.0"
+tempfile = "3"

@@ -287,6 +287,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
@@ -335,6 +340,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new("node_modules/a.js")));
@@ -379,6 +389,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/**".to_string()],
@@ -429,6 +444,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["**/node_modules/**".to_string()],
@@ -477,6 +497,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -534,6 +559,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -583,6 +613,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         })
         .expect("filter")
     }
@@ -664,6 +699,11 @@ mod tests {
             foundation_requirements: None,
             host_capabilities: vec![],
             ingress: None,
+            snapshot: None,
+            secrets: Default::default(),
+            bindings: Default::default(),
+            external: Default::default(),
+            context: None,
         };
         m.pack = Some(PackConfig { include, exclude });
         m
