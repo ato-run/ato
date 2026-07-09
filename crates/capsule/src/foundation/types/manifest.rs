@@ -1259,26 +1259,26 @@ pub const MAX_STATE_VOLUME_SIZE_MB: u32 = 65_536;
 /// files. An app that needs a specific env var (e.g. Postgres `PGDATA`) can
 /// point it at a path under `/ato/state/` instead.
 pub fn validate_and_normalize_state_mount_target(raw: &str) -> Result<String, String> {
-    use std::path::{Component, Path};
-
-    let path = Path::new(raw);
-    if !path.is_absolute() {
+    // A mount target names a path INSIDE the Linux guest microVM — always
+    // POSIX-style, regardless of the platform this validator itself runs on
+    // (a builder host). Parsed manually as a plain string rather than via
+    // `std::path::Path`: on Windows, `Path::new("/ato/state/x").is_absolute()`
+    // is FALSE (Windows absolute paths need a drive letter/UNC prefix), which
+    // would wrongly reject every legitimate guest path when this validator
+    // (or its tests) run on a non-Linux host.
+    if !raw.starts_with('/') {
         return Err(format!("mount target '{raw}' must be an absolute path"));
     }
     let mut normal_parts: Vec<&str> = Vec::new();
-    for component in path.components() {
+    for component in raw.split('/') {
         match component {
-            Component::RootDir => {}
-            Component::Normal(part) => {
-                normal_parts.push(part.to_str().ok_or_else(|| {
-                    format!("mount target '{raw}' has a non-UTF-8 path component")
-                })?);
-            }
-            Component::CurDir | Component::ParentDir | Component::Prefix(_) => {
+            "" | "." => {}
+            ".." => {
                 return Err(format!(
                     "mount target '{raw}' must be a plain absolute path (no '.', '..', or drive prefix)"
                 ));
             }
+            part => normal_parts.push(part),
         }
     }
     let normalized = format!("/{}", normal_parts.join("/"));

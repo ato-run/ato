@@ -418,6 +418,13 @@ mod tests {
     // ── pack command shape ───────────────────────────────────────────────────
 
     #[test]
+    // snapshot-builder only ever runs on Linux in production (it shells out to
+    // `tar`/`curl` and needs the Firecracker/KVM toolchain to be meaningful at
+    // all); this asserts the EXACT argv strings including path separators,
+    // which legitimately follow the host platform via `PathBuf::join` —
+    // Windows would (correctly, for a Windows host) produce a `\`-separated
+    // argv here, which is not what this test is proving.
+    #[cfg(unix)]
     fn pack_runs_the_exact_tar_command() {
         let r = FakeRunner::new(vec![ok()]);
         let archive = pack_artifact(&r, Path::new("/work/job_9")).unwrap();
@@ -447,6 +454,7 @@ mod tests {
     // ── upload retry/backoff ─────────────────────────────────────────────────
 
     #[test]
+    #[cfg(unix)] // same host-path-separator reasoning as pack_runs_the_exact_tar_command
     fn upload_shape_is_the_contract_curl_invocation() {
         let s = store();
         let r = FakeRunner::new(vec![ok(), ok()]); // tar, then curl first-try success

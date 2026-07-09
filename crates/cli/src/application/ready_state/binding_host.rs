@@ -408,14 +408,19 @@ pub(crate) fn stop_scrub(channel: &mut dyn AgentChannel) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use guest_agent::{BindingSession, TmpfsBindingSink};
     use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretValue};
 
     /// In-process channel: drives a real guest-agent session + tmpfs sink.
+    /// `TmpfsBindingSink` (guest-agent) is unix-only, so every test using this
+    /// channel is `#[cfg(unix)]`.
+    #[cfg(unix)]
     struct MockChannel {
         session: BindingSession<TmpfsBindingSink>,
         now_ms: u64,
     }
+    #[cfg(unix)]
     impl AgentChannel for MockChannel {
         fn request(&mut self, msg: HostToAgent) -> Result<AgentToHost> {
             Ok(self.session.handle(msg, self.now_ms))
@@ -433,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn gate_opens_when_all_required_delivered() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
@@ -456,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn gate_fails_closed_when_a_required_binding_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
@@ -481,6 +488,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn revoke_scrubs_the_binding_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
@@ -500,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn stop_scrub_wipes_all_bindings_before_teardown() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
@@ -531,6 +540,7 @@ mod tests {
     /// non-serializable lease), a bound session cannot be re-sealed, and stop-scrub
     /// wipes tmpfs. (The live Firecracker+vsock hardware E2E is the remaining step.)
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn no_secret_e2e_host_artifacts_stay_clean_and_tmpfs_is_scrubbed() {
         let dir = tempfile::tempdir().unwrap();
         let secret = "TOP-SECRET-DB-PASSWORD-42";
@@ -646,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn renewal_extends_leases_and_stays_bound_ready() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
@@ -681,6 +692,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // uses TmpfsBindingSink (guest-agent), which is unix-only
     fn revoked_grant_scrubs_and_remaining_leases_renew_ack_only() {
         let dir = tempfile::tempdir().unwrap();
         let mut ch = MockChannel {
