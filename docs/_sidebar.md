@@ -15,6 +15,7 @@
 - [Execution Identity](execution-identity.md)
 - [Desktop](desktop.md)
 - [Connected Runner](runner.md)
+- [Snapshot (Ready-State)](snapshot.md)
 - [Publishing to the Ato Store](publishing-to-ato-store.md)
 
 **Reference**

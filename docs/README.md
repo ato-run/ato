@@ -217,6 +217,7 @@ The public surface of this directory is **topic-first, with roles separated insi
 | [**Execution Identity →**](execution-identity.md) | Launch-envelope identity |
 | [**Desktop →**](desktop.md) | Focused session shell for managed recipe executions |
 | [**Connected Runner →**](runner.md) | Enroll your own machine to serve dispatched runs |
+| [**Snapshot (Ready-State) →**](snapshot.md) | Sealed warm state: build once, restore to ready in seconds |
 | [**Publishing to the Ato Store →**](publishing-to-ato-store.md) | Ship your own app to the Store |
 
 ### Reference
