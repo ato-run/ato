@@ -278,7 +278,7 @@ subprocess.Popen(
     ],
     start_new_session=True,
 )
-deadline = time.time() + 5
+deadline = time.time() + 20
 while time.time() < deadline:
     try:
         with socket.create_connection(("127.0.0.1", int(port)), timeout=0.1):

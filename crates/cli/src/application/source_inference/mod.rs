@@ -3084,7 +3084,28 @@ pub(crate) fn write_sidecar(
     };
     let raw = serde_json::to_string_pretty(&sidecar)
         .context("Failed to serialize source inference sidecar")?;
-    fs::write(path, raw).with_context(|| format!("Failed to write {}", path.display()))
+    write_file_retrying_transient_lock(path, raw.as_bytes())
+        .with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// A write immediately after `create_dir_all` into a brand-new directory can
+/// transiently fail with "Access is denied" / `PermissionDenied` on Windows
+/// CI runners — real-time antivirus (Windows Defender) briefly locking a
+/// just-created path for scanning is the well-documented cause. Retry a
+/// handful of times with a short backoff before giving up; any other error
+/// kind fails immediately (this is not a general-purpose retry-everything).
+fn write_file_retrying_transient_lock(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::write(path, contents) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempt < 4 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * attempt));
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn prompt_selection_if_allowed(
