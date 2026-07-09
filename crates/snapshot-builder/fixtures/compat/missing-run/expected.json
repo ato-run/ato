@@ -1,0 +1,9 @@
+{
+  "class": "negative",
+  "eligibility": "fail",
+  "eligibility_reason_contains": "no run command",
+  "seal": "failed",
+  "seal_failure_stage": "eligibility",
+  "manifest_source": "repo",
+  "notes": "R7: run command required for ALL runtimes including static web."
+}

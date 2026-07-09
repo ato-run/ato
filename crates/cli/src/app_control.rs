@@ -941,6 +941,7 @@ fn build_managed_service_graph(
                 depends_on: (!record.depends_on.is_empty()).then_some(record.depends_on.clone()),
                 expose: None,
                 env: None,
+                secrets: None,
                 state_bindings: Vec::new(),
                 readiness_probe: None,
                 network: None,

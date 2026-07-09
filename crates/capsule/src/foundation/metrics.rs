@@ -36,6 +36,13 @@ pub enum RuntimeMetadata {
         module_hash: String,
         engine: String,
     },
+    /// A restored Ready-State microVM session (snapshot backend). Additive —
+    /// produced only on the Ready-State run path; legacy runs never emit it.
+    MicroVm {
+        vm_id: String,
+        snapshot_backend: String,
+        exit_code: Option<i32>,
+    },
 }
 
 /// 計測セッションの基礎情報と壁時計タイマー。

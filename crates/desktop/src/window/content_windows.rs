@@ -82,6 +82,9 @@ pub enum ContentWindowKind {
     AppWindow {
         route: GuestRoute,
     },
+    /// Dedicated Ato PWA Home window (`ato_home_shell`) — the control
+    /// surface behind the Shell Icon Bar's fixed Ato icon.
+    Home,
     Store,
     Start,
     /// `ato-settings` system capsule. Replaces the Phase-1 `Launcher`

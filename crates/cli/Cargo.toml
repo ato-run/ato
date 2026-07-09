@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 description = "ato CLI (meta-runtime)"
 authors = ["ato-run"]
@@ -30,6 +30,8 @@ path = "src/main.rs"
 
 [dependencies]
 capsule = { path = "../capsule", version = "0.11.0" }
+snapshot = { path = "../snapshot", version = "0.1.0" }
+capsulefs = { path = "../capsulefs", version = "0.1.0" }
 protocol = { path = "../protocol", version = "0.1.0" }
 lock-draft-engine = { path = "lock-draft-engine", version = "0.1.0" }
 anyhow = "1.0"
@@ -101,6 +103,7 @@ axoupdater = "0.10.0"
 
 
 [dev-dependencies]
+guest-agent = { path = "../guest-agent" }
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"

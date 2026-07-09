@@ -185,6 +185,11 @@ fn background_process_info(
         last_event: Some("spawned".to_string()),
         last_error: None,
         exit_code: None,
+        ready_state_backend_id: None,
+        ready_state_overlay_root: None,
+        ready_state_session_id: None,
+        ready_state_tap_dev: None,
+        ready_state_vsock_uds: None,
     }
 }
 
@@ -847,6 +852,11 @@ mod tests {
             last_event: None,
             last_error: None,
             exit_code: None,
+            ready_state_backend_id: None,
+            ready_state_overlay_root: None,
+            ready_state_session_id: None,
+            ready_state_tap_dev: None,
+            ready_state_vsock_uds: None,
         };
         manager.write_pid(&info).expect("write pid record");
         (manager, dir)
