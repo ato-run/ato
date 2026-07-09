@@ -261,29 +261,29 @@ pub(crate) fn derive_plan(
     // the units, so a unit is only ever written when its binary exists (a fresh
     // Ubuntu host would otherwise get a unit that dies on `No such file or
     // directory`). The `<install> src -> dest` pseudo-command is executed by run().
-    if failed("ato_cli_binary") {
-        if let Some(src) = &bins.ato_source {
-            plan.push(FixAction {
-                id: "install_ato_cli",
-                title: format!("Install the ato binary to {ATO_CLI_INSTALL_PATH}"),
-                commands: vec![format!(
-                    "<install> {} -> {ATO_CLI_INSTALL_PATH}",
-                    src.display()
-                )],
-            });
-        }
+    if failed("ato_cli_binary")
+        && let Some(src) = &bins.ato_source
+    {
+        plan.push(FixAction {
+            id: "install_ato_cli",
+            title: format!("Install the ato binary to {ATO_CLI_INSTALL_PATH}"),
+            commands: vec![format!(
+                "<install> {} -> {ATO_CLI_INSTALL_PATH}",
+                src.display()
+            )],
+        });
     }
-    if failed("snapshot_builder_binary") {
-        if let Some(src) = &bins.builder_source {
-            plan.push(FixAction {
-                id: "install_snapshot_builder",
-                title: format!("Install ato-snapshot-builder to {BUILDER_INSTALL_PATH}"),
-                commands: vec![format!(
-                    "<install> {} -> {BUILDER_INSTALL_PATH}",
-                    src.display()
-                )],
-            });
-        }
+    if failed("snapshot_builder_binary")
+        && let Some(src) = &bins.builder_source
+    {
+        plan.push(FixAction {
+            id: "install_snapshot_builder",
+            title: format!("Install ato-snapshot-builder to {BUILDER_INSTALL_PATH}"),
+            commands: vec![format!(
+                "<install> {} -> {BUILDER_INSTALL_PATH}",
+                src.display()
+            )],
+        });
     }
     // env file + units are written by us (not shell) so backup semantics are exact;
     // the plan records them as pseudo-commands for the confirmation display.
