@@ -233,6 +233,7 @@ fn import_and_seal(
         port_override: app.port_override,
         readiness_http_path: app.readiness.map(String::from),
         volume_policy: Default::default(),
+        host_bind_relay: false,
         image_tag: format!("ato-import-smoke-{}", app.repo),
         out_ext4: &ext4,
         size_mib: 2048,
