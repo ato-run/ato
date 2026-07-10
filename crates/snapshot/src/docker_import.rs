@@ -34,8 +34,16 @@ use serde::Serialize;
 
 /// Build-tool probe + Dockerfile build execution (the importer's build stage).
 pub mod build;
+/// Phase 5: multi-image (compose) rootfs packing — one image per service subtree.
+pub mod multi_image;
 /// Imported-image → ServiceSpec mapping + rootfs export/injection/pack.
 pub mod rootfs;
+/// Phase 1.5: recipe-owned static seed files for ephemeral tmpfs mounts.
+pub mod seed_files;
+pub use rootfs::{
+    EphemeralMountSeed, EphemeralMountSource, EphemeralMountSpec, EphemeralSeedFile, VolumePolicy,
+    validate_ephemeral_mount_path, validate_ephemeral_mounts,
+};
 
 use crate::rootfs_builder::{valid_env_var_name, validate_subdir};
 use crate::scanner::{PROVIDER_KEY_PREFIXES, SENSITIVE_ENV_MARKERS};
@@ -153,6 +161,26 @@ pub struct DockerImportOptions {
     pub readiness_http_path: Option<String>,
     /// Packed ext4 size — changes the artifact bytes, therefore identity.
     pub size_mib: u64,
+    /// The normalized, sorted ephemeral tmpfs mounts baked into the guest init
+    /// (legacy `volumes=tmpfs` image VOLUMEs, structured `volumes`, and explicit
+    /// `ephemeral_mounts` all normalize here — `source` records which), each
+    /// carrying its recipe-owned static seed FILES (per file: destination,
+    /// recipe-root source path, content blake3 digest — NEVER content; digests
+    /// are filled by build-time staging before this record is assembled).
+    /// Skipped when EMPTY so every pre-existing (no-mount) import keeps a
+    /// byte-identical descriptor envelope — and therefore the same
+    /// `import_identity_digest` / `import_descriptor_blake3`; any mount (or a
+    /// change to a mount's path/seed/size/files, including a seed-file content
+    /// change flipping its digest) intentionally gets a NEW identity (its init
+    /// and runtime semantics differ).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ephemeral_mounts: Vec<rootfs::EphemeralMountSpec>,
+    /// ato#1026: `true` when the init starts a localhost→guest-IP relay for a
+    /// loopback-binding app. Skipped when false so every pre-existing import
+    /// keeps a byte-identical descriptor envelope (same identity digest); an
+    /// opted-in build intentionally gets a NEW identity (its init differs).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub host_bind_relay: bool,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -460,13 +488,36 @@ pub fn import_execution_id(
     plan: &rootfs::ImportedServicePlan,
     receipt: &DockerImportReceipt,
 ) -> String {
-    // v0 emits exactly ONE service ([`rootfs::IMPORTED_SERVICE_NAME`]); the
-    // envelope is folded over the plan's first service so a future
-    // multi-service import must extend it DELIBERATELY (new envelope version),
-    // never silently. The fallbacks mirror the derive defaults and are
-    // unreachable for plans produced by `derive_imported_service_plan`.
+    let envelope = import_execution_envelope(
+        plan,
+        &receipt.platform,
+        &receipt.final_image_digest,
+        receipt.import_options.secret_env_policy,
+    );
+    let canonical = serde_jcs::to_string(&envelope).unwrap_or_else(|_| envelope.to_string());
+    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
+}
+
+/// The shared `ato-import-exec/1` execution envelope — WHAT EXECUTES: the derived
+/// service pinned to the image that runs it + platform + secret policy. Both
+/// import lanes (Dockerfile [`import_execution_id`] and registry-image
+/// [`oci_import_execution_id`]) fold their plan through THIS one envelope, so an
+/// identical derived service on an identical image digest is the same execution
+/// regardless of how the image was acquired (built vs pulled).
+///
+/// v0 emits exactly ONE service ([`rootfs::IMPORTED_SERVICE_NAME`]); the envelope
+/// is folded over the plan's first service so a future multi-service import must
+/// extend it DELIBERATELY (new envelope version), never silently. The fallbacks
+/// mirror the derive defaults and are unreachable for plans produced by
+/// `derive_imported_service_plan`.
+fn import_execution_envelope(
+    plan: &rootfs::ImportedServicePlan,
+    platform: &str,
+    final_image_digest: &str,
+    secret_env_policy: SecretEnvPolicy,
+) -> serde_json::Value {
     let svc = plan.supervisor.services.as_deref().and_then(|s| s.first());
-    let envelope = serde_json::json!({
+    serde_json::json!({
         "v": "ato-import-exec/1",
         "service": {
             "name": svc.map(|s| s.name.clone()).unwrap_or_else(|| rootfs::IMPORTED_SERVICE_NAME.to_string()),
@@ -477,14 +528,12 @@ pub fn import_execution_id(
             "port": plan.port,
             "readiness_http_path": plan.readiness_http_path,
         },
-        "platform": receipt.platform,
-        "final_image_digest": receipt.final_image_digest,
+        "platform": platform,
+        "final_image_digest": final_image_digest,
         // Serde form ("reject" / "convert_placeholders") — the same stable
         // literal the receipt records.
-        "secret_env_policy": receipt.import_options.secret_env_policy,
-    });
-    let canonical = serde_jcs::to_string(&envelope).unwrap_or_else(|_| envelope.to_string());
-    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
+        "secret_env_policy": secret_env_policy,
+    })
 }
 
 /// The import DESCRIPTOR hash: `blake3:<hex>` over the **same** JCS input envelope
@@ -536,6 +585,16 @@ pub struct DockerfileImportRequest<'a> {
     pub port_override: Option<u16>,
     /// Explicit readiness path (`None` = synthesized `GET /`).
     pub readiness_http_path: Option<String>,
+    /// ato#1024: how to treat image-declared VOLUMEs (default fail-closed).
+    pub volume_policy: rootfs::VolumePolicy,
+    /// Explicit, image-independent ephemeral tmpfs mounts (with optional
+    /// copy-up seeding, per-mount size cap, and recipe-owned static seed
+    /// files — `source_digest` empty here, filled by build-time staging).
+    /// Normalized + merged with the image-VOLUME expansion into the plan's
+    /// single sorted mount list.
+    pub ephemeral_mounts: Vec<rootfs::EphemeralMountSpec>,
+    /// ato#1026: start the localhost→guest-IP relay (default off).
+    pub host_bind_relay: bool,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -593,16 +652,28 @@ pub fn run_dockerfile_import(
     let probe = build::probe_build_tool(runner)?;
     let built =
         build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
-    let plan = rootfs::derive_imported_service_plan(
+    let mut plan = rootfs::derive_imported_service_plan_with_mounts(
         &built.image_config,
         req.policy,
         req.port_override,
         req.readiness_http_path.clone(),
+        req.volume_policy,
+        req.ephemeral_mounts.clone(),
+        req.host_bind_relay,
     )?;
+    // Stage the mounts' recipe-owned seed files from the build context (the
+    // recipe root) — resolve each source without escaping the root, secret-scan
+    // the content, and fill every `source_digest`, fail-closed. The digest-filled
+    // mounts REPLACE the plan's list (they are the receipt/identity record); the
+    // content side table feeds only the guest-init render.
+    let (staged_mounts, seed_contents) =
+        seed_files::stage_all_mounts(req.context_dir, &plan.ephemeral_mounts)?;
+    plan.ephemeral_mounts = staged_mounts;
     let rootfs_bytes = rootfs::pack_imported_rootfs(
         probe.tool,
         &req.image_tag,
         &plan,
+        &seed_contents,
         req.out_ext4,
         req.size_mib,
     )?;
@@ -612,6 +683,11 @@ pub fn run_dockerfile_import(
         port_override: req.port_override,
         readiness_http_path: req.readiness_http_path.clone(),
         size_mib: req.size_mib,
+        // The normalized+sorted, digest-filled mount list (image-VOLUME
+        // expansion + explicit mounts + staged seed files) — the
+        // identity/receipt record.
+        ephemeral_mounts: plan.ephemeral_mounts.clone(),
+        host_bind_relay: req.host_bind_relay,
     };
     let receipt = assemble_receipt(
         &probe,
@@ -622,6 +698,251 @@ pub fn run_dockerfile_import(
         exported_rootfs_digest,
     );
     Ok(DockerfileImportOutcome {
+        receipt,
+        plan,
+        rootfs_path: req.out_ext4.display().to_string(),
+        rootfs_bytes,
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ato#1028 Registry Image Import v1.8 (`oci_image_import`)
+//
+// Pull a PUBLIC registry image and pack it into a Ready-State rootfs, REUSING
+// the entire Dockerfile-import backend after the image is materialized. Only the
+// ACQUIRE stage differs (pull+inspect vs build — [`build::pull_and_inspect_image`]);
+// plan derivation, rootfs pack, seal → restore-verify → scan → ack are the SAME
+// code path. v1 scope: public registry, single image, linux/amd64, no auth, one
+// public web service, existing secret/env gate.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Provenance of the resolved registry image. `original_ref` is provenance-ONLY:
+/// the artifact identity keys on `resolved_digest`, so the SAME image pulled via
+/// two DIFFERENT tags produces the SAME artifact identity (a tag is not part of
+/// the identity — only the pinned digest is). Non-secret; safe in a receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ResolvedRegistryImage {
+    /// What the job asked for (`ghcr.io/x/y:latest` or an already-pinned
+    /// `…@sha256:…`). Provenance only — never an identity input.
+    pub original_ref: String,
+    /// The registry manifest digest the pull resolved to for [`platform`]
+    /// (`registry/repo@sha256:…`). THE identity input for the image.
+    pub resolved_digest: String,
+    /// Always [`DOCKER_IMPORT_PLATFORM`] in v1.
+    pub platform: String,
+}
+
+/// Non-secret provenance of a completed registry-image import — the OCI-lane
+/// analogue of [`DockerImportReceipt`]. There is no Dockerfile / build context /
+/// base-image list (the image was pulled, not built); the resolved digest + the
+/// inspected image config stand in as the reproducible inputs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OciImageImportReceipt {
+    /// [`DOCKER_IMPORTER_VERSION`] at import time.
+    pub importer_version: String,
+    /// The container CLI that pulled + inspected the image (podman/docker).
+    pub pull_tool: BuildTool,
+    pub pull_tool_version: String,
+    /// Resolved image identity + provenance.
+    pub image: ResolvedRegistryImage,
+    /// The inspected runtime config the plan derived from. An identity input
+    /// (recorded for audit since an import has no Dockerfile) — but pinned by
+    /// `image.resolved_digest`, so it does NOT let two tags of the same image
+    /// diverge in identity.
+    pub image_config: build::DockerImageConfig,
+    /// The local image content id (`.Id`, `sha256:…`) — the exact image that runs
+    /// (an OUTPUT: an execution fact, never a rebuild-inputs identity fact).
+    pub final_image_digest: String,
+    /// sha256 of the packed ext4 rootfs artifact (`sha256:<hex>`).
+    pub exported_rootfs_digest: String,
+    /// The request options that shaped the plan/rootfs — identity inputs.
+    pub import_options: DockerImportOptions,
+    pub warnings: Vec<DockerImportWarning>,
+}
+
+/// One end-to-end registry-image import request (builder-host side).
+#[derive(Debug)]
+pub struct OciImageImportRequest<'a> {
+    /// The registry image reference: a tag OR a digest. Validated fail-closed
+    /// ([`validate_image_ref`]); pinned to a digest before the pack regardless.
+    pub image_ref: String,
+    /// Secret ENV policy for the inspected image config (Store jobs fix `Reject`).
+    pub policy: SecretEnvPolicy,
+    pub port_override: Option<u16>,
+    pub readiness_http_path: Option<String>,
+    /// How to treat image-declared VOLUMEs (default fail-closed, ato#1024).
+    pub volume_policy: rootfs::VolumePolicy,
+    /// Start the localhost→guest-IP relay (default off, ato#1026).
+    pub host_bind_relay: bool,
+    pub out_ext4: &'a std::path::Path,
+    pub size_mib: u64,
+}
+
+/// Everything a caller needs from a completed registry-image import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciImageImportOutcome {
+    pub receipt: OciImageImportReceipt,
+    pub plan: rootfs::ImportedServicePlan,
+    pub rootfs_path: String,
+    pub rootfs_bytes: u64,
+}
+
+/// Validate a registry image reference (tag OR digest) fail-closed. The ref goes
+/// to podman/docker as a NON-shell positional arg (no injection risk there) and,
+/// once resolved, into the QUOTED pack-script `TAG=`; this gate rejects shapes
+/// that are ambiguous or hostile regardless: empty/whitespace-padded, over-long,
+/// a leading `-` (would be read as a CLI flag), or any char outside the OCI
+/// reference charset `[A-Za-z0-9._/:@-]`.
+pub fn validate_image_ref(image: &str) -> Result<(), String> {
+    if image.is_empty() {
+        return Err("image reference is empty".into());
+    }
+    if image.trim() != image {
+        return Err("image reference has leading/trailing whitespace".into());
+    }
+    if image.chars().count() > 512 {
+        return Err("image reference exceeds 512 characters".into());
+    }
+    if image.starts_with('-') {
+        return Err(format!(
+            "image reference {image:?} must not start with '-' (fail-closed)"
+        ));
+    }
+    if !image
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '@'))
+    {
+        return Err(format!(
+            "image reference {image:?} contains characters outside [A-Za-z0-9._/:@-] — \
+             refusing to pass it to the registry client (fail-closed)"
+        ));
+    }
+    Ok(())
+}
+
+/// True when the reference is already digest-pinned (`…@sha256:…`). Both a tag
+/// and a digest ref are accepted inputs — either way the import resolves the
+/// registry manifest digest before the pack, so the artifact is always pinned.
+pub fn is_pinned_digest_ref(image: &str) -> bool {
+    image.contains("@sha256:")
+}
+
+/// The REBUILD-INPUTS identity digest for a registry import: `sha256:<hex>` over
+/// the JCS canonicalization of the INPUTS only — importer version, platform, the
+/// resolved image digest, the normalized image config, and the
+/// [`DockerImportOptions`]. It deliberately does NOT hash `original_ref` (so two
+/// tags of the same image share an identity) nor the OUTPUTS (`final_image_digest`,
+/// `exported_rootfs_digest`, warnings). The OCI-lane analogue of
+/// [`import_identity_digest`].
+pub fn oci_import_identity_digest(receipt: &OciImageImportReceipt) -> String {
+    format!(
+        "sha256:{}",
+        build::sha256_hex(oci_import_descriptor_canonical_json(receipt).as_bytes())
+    )
+}
+
+/// The registry-import DESCRIPTOR hash: `blake3:<hex>` over the SAME input-only
+/// JCS envelope as [`oci_import_identity_digest`] — an import has no capsule.toml,
+/// so the registry's `capsule_manifest_hash` column carries this descriptor hash.
+/// Shared envelope construction so the two digests cannot drift.
+pub fn oci_import_descriptor_blake3(receipt: &OciImageImportReceipt) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(oci_import_descriptor_canonical_json(receipt).as_bytes()).to_hex()
+    )
+}
+
+/// The JCS-canonicalized input-only registry-import descriptor both digests hash.
+/// Keys on `resolved_digest`, NOT `original_ref` — the identity is the pinned
+/// image, so the same digest reached via different tags is one artifact.
+fn oci_import_descriptor_canonical_json(receipt: &OciImageImportReceipt) -> String {
+    let inputs = serde_json::json!({
+        "importer_version": receipt.importer_version,
+        "platform": receipt.image.platform,
+        "resolved_digest": receipt.image.resolved_digest,
+        "image_config": serde_json::to_value(&receipt.image_config).unwrap_or(serde_json::Value::Null),
+        "import_options": serde_json::to_value(&receipt.import_options).unwrap_or(serde_json::Value::Null),
+    });
+    serde_jcs::to_string(&inputs).unwrap_or_else(|_| inputs.to_string())
+}
+
+/// The import EXECUTION identity for a registry import — WHAT EXECUTES (derived
+/// service + platform + the exact image digest that runs it), via the SAME
+/// `ato-import-exec/1` envelope as the Dockerfile lane ([`import_execution_id`]).
+pub fn oci_import_execution_id(
+    plan: &rootfs::ImportedServicePlan,
+    receipt: &OciImageImportReceipt,
+) -> String {
+    let envelope = import_execution_envelope(
+        plan,
+        &receipt.image.platform,
+        &receipt.final_image_digest,
+        receipt.import_options.secret_env_policy,
+    );
+    let canonical = serde_jcs::to_string(&envelope).unwrap_or_else(|_| envelope.to_string());
+    format!("sha256:{}", build::sha256_hex(canonical.as_bytes()))
+}
+
+/// Drive one registry-image import end to end on the builder host: probe the
+/// container tool → pull + digest-pin + inspect the image ([`build::pull_and_inspect_image`])
+/// → derive the SAME service plan the Dockerfile lane derives → pack the pinned
+/// image into a bootable supervisor ext4 → assemble the provenance receipt. The
+/// output ext4 feeds the existing Ready-State build (boot → verify → snapshot →
+/// seal) unchanged.
+pub fn run_oci_image_import(
+    runner: &dyn build::ImportCommandRunner,
+    req: &OciImageImportRequest<'_>,
+) -> Result<OciImageImportOutcome, String> {
+    validate_image_ref(&req.image_ref)?;
+    let probe = build::probe_build_tool(runner)?;
+    let pulled = build::pull_and_inspect_image(runner, probe.tool, &req.image_ref)?;
+    let plan = rootfs::derive_imported_service_plan_with_volumes(
+        &pulled.image_config,
+        req.policy,
+        req.port_override,
+        req.readiness_http_path.clone(),
+        req.volume_policy,
+        req.host_bind_relay,
+    )?;
+    // Pack from the PINNED digest ref (build from the digest, not the tag — the
+    // pack script single-quotes it into TAG= and drives create/export/rmi).
+    let rootfs_bytes = rootfs::pack_imported_rootfs(
+        probe.tool,
+        &pulled.resolved_digest,
+        &plan,
+        &[],
+        req.out_ext4,
+        req.size_mib,
+    )?;
+    let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
+    let import_options = DockerImportOptions {
+        secret_env_policy: req.policy,
+        port_override: req.port_override,
+        readiness_http_path: req.readiness_http_path.clone(),
+        size_mib: req.size_mib,
+        // The normalized ephemeral mount list the plan derived from
+        // volume_policy (OCI v1 has no recipe root, so no seed files — the
+        // param parser rejects them and these mounts always carry empty
+        // `files`).
+        ephemeral_mounts: plan.ephemeral_mounts.clone(),
+        host_bind_relay: req.host_bind_relay,
+    };
+    let receipt = OciImageImportReceipt {
+        importer_version: DOCKER_IMPORTER_VERSION.to_string(),
+        pull_tool: probe.tool,
+        pull_tool_version: probe.version.clone(),
+        image: ResolvedRegistryImage {
+            original_ref: req.image_ref.clone(),
+            resolved_digest: pulled.resolved_digest.clone(),
+            platform: DOCKER_IMPORT_PLATFORM.to_string(),
+        },
+        image_config: pulled.image_config.clone(),
+        final_image_digest: pulled.final_image_digest.clone(),
+        exported_rootfs_digest,
+        import_options,
+        warnings: plan.warnings.clone(),
+    };
+    Ok(OciImageImportOutcome {
         receipt,
         plan,
         rootfs_path: req.out_ext4.display().to_string(),
@@ -915,6 +1236,8 @@ mod tests {
                 port_override: None,
                 readiness_http_path: None,
                 size_mib: 2048,
+                ephemeral_mounts: vec![],
+                host_bind_relay: false,
             },
             warnings: vec![],
         }
@@ -1181,6 +1504,254 @@ mod tests {
     }
 
     #[test]
+    fn host_bind_relay_is_skipped_when_false_and_shifts_identity_when_true() {
+        // ato#1026: host_bind_relay=false is dropped from the serialized envelope
+        // (skip_serializing_if), so a pre-existing import keeps a byte-identical
+        // descriptor + identity digest; =true is a new input => new identity.
+        let base = sample_receipt(); // import_options.host_bind_relay defaults false
+        assert!(!base.import_options.host_bind_relay);
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(
+            !json.contains("host_bind_relay"),
+            "false must be omitted: {json}"
+        );
+
+        let mut relayed = base.clone();
+        relayed.import_options.host_bind_relay = true;
+        let relayed_json = serde_json::to_string(&relayed.import_options).unwrap();
+        assert!(
+            relayed_json.contains("\"host_bind_relay\":true"),
+            "true must serialize: {relayed_json}"
+        );
+
+        // Identity moves ONLY when the flag flips on -- never on the default.
+        assert_ne!(
+            import_descriptor_blake3(&relayed),
+            import_descriptor_blake3(&base)
+        );
+        assert_ne!(
+            import_identity_digest(&relayed),
+            import_identity_digest(&base)
+        );
+    }
+
+    #[test]
+    fn ephemeral_mounts_skipped_when_empty_and_shift_identity_when_present() {
+        // Phase 1: an empty mount list is dropped from the serialized envelope
+        // (skip_serializing_if Vec::is_empty), so a pre-existing (no-mount)
+        // import keeps a byte-identical descriptor + identity digest; any mount
+        // is a new input => new identity.
+        let base = sample_receipt(); // import_options.ephemeral_mounts defaults empty
+        assert!(base.import_options.ephemeral_mounts.is_empty());
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(
+            !json.contains("ephemeral_mounts"),
+            "empty must be omitted: {json}"
+        );
+        let base_id = import_identity_digest(&base);
+
+        let with_mount = |seed, size, source, path: &str| {
+            let mut r = base.clone();
+            r.import_options.ephemeral_mounts = vec![rootfs::EphemeralMountSpec {
+                path: path.into(),
+                seed,
+                size_mib: size,
+                source,
+                files: vec![],
+            }];
+            r
+        };
+        let m = with_mount(
+            rootfs::EphemeralMountSeed::CopyUp,
+            Some(16),
+            rootfs::EphemeralMountSource::Explicit,
+            "/config",
+        );
+        let m_json = serde_json::to_string(&m.import_options).unwrap();
+        assert!(
+            m_json.contains("\"ephemeral_mounts\""),
+            "present when non-empty: {m_json}"
+        );
+        assert!(
+            m_json.contains("\"seed\":\"copy-up\""),
+            "seed serializes kebab-case: {m_json}"
+        );
+        assert!(m_json.contains("\"source\":\"explicit\""), "{m_json}");
+        assert_ne!(
+            import_identity_digest(&m),
+            base_id,
+            "a mount must shift identity"
+        );
+        assert_ne!(
+            import_descriptor_blake3(&m),
+            import_descriptor_blake3(&base)
+        );
+
+        // path / seed / size each independently shift the identity.
+        let a = import_identity_digest(&m);
+        let path_diff = with_mount(
+            rootfs::EphemeralMountSeed::CopyUp,
+            Some(16),
+            rootfs::EphemeralMountSource::Explicit,
+            "/other",
+        );
+        assert_ne!(
+            import_identity_digest(&path_diff),
+            a,
+            "path shifts identity"
+        );
+        let seed_diff = with_mount(
+            rootfs::EphemeralMountSeed::Empty,
+            Some(16),
+            rootfs::EphemeralMountSource::Explicit,
+            "/config",
+        );
+        assert_ne!(
+            import_identity_digest(&seed_diff),
+            a,
+            "seed shifts identity"
+        );
+        let size_diff = with_mount(
+            rootfs::EphemeralMountSeed::CopyUp,
+            Some(512),
+            rootfs::EphemeralMountSource::Explicit,
+            "/config",
+        );
+        assert_ne!(
+            import_identity_digest(&size_diff),
+            a,
+            "size shifts identity"
+        );
+    }
+
+    #[test]
+    fn seed_files_shift_identity_and_the_split_param_is_gone() {
+        // Unified contract: seed files live INSIDE ephemeral_mounts entries.
+        // A file-less mount serializes without `files` (skip-empty), so the
+        // pre-fold Phase-1 envelope is unchanged; a seeded mount is a NEW
+        // identity input, and the CONTENT digest is what moves identity.
+        let seed_file = |digest: &str| rootfs::EphemeralSeedFile {
+            path: "config.yml".into(),
+            source_path: "recipe/config.yml".into(),
+            source_digest: digest.into(),
+            if_missing: true,
+        };
+        let with_files = |files: Vec<rootfs::EphemeralSeedFile>| {
+            let mut r = sample_receipt();
+            r.import_options.ephemeral_mounts = vec![rootfs::EphemeralMountSpec {
+                path: "/config".into(),
+                seed: rootfs::EphemeralMountSeed::CopyUp,
+                size_mib: Some(16),
+                source: rootfs::EphemeralMountSource::Explicit,
+                files,
+            }];
+            r
+        };
+
+        // The retired split param must never reappear in the envelope.
+        let plain = with_files(vec![]);
+        let json = serde_json::to_string(&plain.import_options).unwrap();
+        assert!(
+            !json.contains("ephemeral_seed_mounts"),
+            "the split param is retired: {json}"
+        );
+        assert!(
+            !json.contains("\"files\""),
+            "a file-less mount keeps the pre-fold shape: {json}"
+        );
+
+        let seeded = with_files(vec![seed_file(&format!("blake3:{}", "ab".repeat(32)))]);
+        let s_json = serde_json::to_string(&seeded.import_options).unwrap();
+        assert!(
+            s_json.contains("\"files\"") && s_json.contains("\"source_digest\""),
+            "{s_json}"
+        );
+        assert_ne!(
+            import_descriptor_blake3(&seeded),
+            import_descriptor_blake3(&plain)
+        );
+        assert_ne!(
+            import_identity_digest(&seeded),
+            import_identity_digest(&plain)
+        );
+
+        // The CONTENT digest is an identity input: a different source digest for
+        // the same dest ⇒ a different artifact identity.
+        let other = with_files(vec![seed_file(&format!("blake3:{}", "cd".repeat(32)))]);
+        assert_ne!(
+            import_descriptor_blake3(&other),
+            import_descriptor_blake3(&seeded)
+        );
+    }
+
+    #[test]
+    fn mount_and_file_order_do_not_change_identity() {
+        // Identity must key on the NORMALIZED plan: derive with mounts (and
+        // per-mount files) in two different input orders and assert the
+        // canonicalized envelopes match. The sort lives in
+        // `resolve_ephemeral_mounts` (mounts by path, files by destination).
+        let file = |dest: &str| rootfs::EphemeralSeedFile {
+            path: dest.into(),
+            source_path: format!("recipe/{dest}"),
+            source_digest: String::new(),
+            if_missing: false,
+        };
+        let mount =
+            |path: &str, files: Vec<rootfs::EphemeralSeedFile>| rootfs::EphemeralMountSpec {
+                path: path.into(),
+                seed: rootfs::EphemeralMountSeed::Empty,
+                size_mib: Some(8),
+                source: rootfs::EphemeralMountSource::Explicit,
+                files,
+            };
+        let config = build::DockerImageConfig {
+            entrypoint: vec!["srv".into()],
+            cmd: vec![],
+            working_dir: None,
+            env: BTreeMap::new(),
+            exposed_tcp_ports: vec![8080],
+            user: None,
+            has_healthcheck: false,
+            volumes: vec![],
+        };
+        let derive = |mounts: Vec<rootfs::EphemeralMountSpec>| {
+            rootfs::derive_imported_service_plan_with_mounts(
+                &config,
+                SecretEnvPolicy::Reject,
+                None,
+                None,
+                rootfs::VolumePolicy::Reject,
+                mounts,
+                false,
+            )
+            .unwrap()
+        };
+        let ordered = derive(vec![
+            mount("/config", vec![file("a.yml"), file("b.yml")]),
+            mount("/data", vec![]),
+        ]);
+        let shuffled = derive(vec![
+            mount("/data", vec![]),
+            mount("/config", vec![file("b.yml"), file("a.yml")]),
+        ]);
+        assert_eq!(
+            ordered.ephemeral_mounts, shuffled.ephemeral_mounts,
+            "normalization must sort mounts and files"
+        );
+
+        let receipt_with = |mounts: Vec<rootfs::EphemeralMountSpec>| {
+            let mut r = sample_receipt();
+            r.import_options.ephemeral_mounts = mounts;
+            r
+        };
+        assert_eq!(
+            import_descriptor_blake3(&receipt_with(ordered.ephemeral_mounts.clone())),
+            import_descriptor_blake3(&receipt_with(shuffled.ephemeral_mounts.clone())),
+            "identity is input-order-independent"
+        );
+    }
+
+    #[test]
     fn receipt_serializes_with_full_provenance() {
         let receipt = DockerImportReceipt {
             importer_version: DOCKER_IMPORTER_VERSION.into(),
@@ -1203,6 +1774,8 @@ mod tests {
                 port_override: Some(8080),
                 readiness_http_path: Some("/health".into()),
                 size_mib: 2048,
+                ephemeral_mounts: vec![],
+                host_bind_relay: false,
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
@@ -1221,5 +1794,200 @@ mod tests {
         assert_eq!(v["import_options"]["readiness_http_path"], "/health");
         assert_eq!(v["import_options"]["size_mib"], 2048);
         assert_eq!(v["effective_dockerfile_sha256"], "ab".repeat(32));
+    }
+
+    // --- ato#1028 registry image import ------------------------------------------
+
+    #[test]
+    fn image_ref_validation_accepts_tags_and_digests_and_rejects_hostile_shapes() {
+        for ok in [
+            "metube",
+            "ghcr.io/alexta69/metube:latest",
+            "docker.io/library/redis:7.2-alpine",
+            "ghcr.io/x/y@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "localhost:5000/team/app:v1.2.3",
+        ] {
+            assert!(validate_image_ref(ok).is_ok(), "{ok:?} should be valid");
+        }
+        for (bad, why) in [
+            ("", "empty"),
+            (" metube ", "whitespace"),
+            ("-rm -rf", "leading dash"),
+            ("metube;rm -rf", "shell metacharacter"),
+            ("metube latest", "space"),
+            ("app\nid", "newline"),
+        ] {
+            assert!(
+                validate_image_ref(bad).is_err(),
+                "{bad:?} should fail ({why})"
+            );
+        }
+        let long = format!("registry.example/{}:latest", "a".repeat(520));
+        assert!(validate_image_ref(&long).unwrap_err().contains("512"));
+    }
+
+    #[test]
+    fn digest_ref_detection() {
+        assert!(is_pinned_digest_ref("ghcr.io/x/y@sha256:abcd"));
+        assert!(!is_pinned_digest_ref("ghcr.io/x/y:latest"));
+        assert!(!is_pinned_digest_ref("metube"));
+    }
+
+    fn sample_oci_receipt() -> OciImageImportReceipt {
+        OciImageImportReceipt {
+            importer_version: DOCKER_IMPORTER_VERSION.into(),
+            pull_tool: BuildTool::Podman,
+            pull_tool_version: "podman 4.9".into(),
+            image: ResolvedRegistryImage {
+                original_ref: "ghcr.io/alexta69/metube:latest".into(),
+                resolved_digest: format!("ghcr.io/alexta69/metube@sha256:{}", "ab".repeat(32)),
+                platform: DOCKER_IMPORT_PLATFORM.into(),
+            },
+            image_config: sample_image_config(),
+            final_image_digest: format!("sha256:{}", "01".repeat(32)),
+            exported_rootfs_digest: format!("sha256:{}", "23".repeat(32)),
+            import_options: DockerImportOptions {
+                secret_env_policy: SecretEnvPolicy::Reject,
+                port_override: None,
+                readiness_http_path: None,
+                size_mib: 2048,
+                ephemeral_mounts: vec![],
+                host_bind_relay: false,
+            },
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn oci_identity_is_deterministic_input_only_and_keys_on_digest_not_tag() {
+        let r = sample_oci_receipt();
+        let a = oci_import_identity_digest(&r);
+        assert!(a.starts_with("sha256:") && a.len() == 7 + 64, "{a}");
+        assert_eq!(oci_import_identity_digest(&r.clone()), a, "deterministic");
+
+        // TWO TAGS, SAME DIGEST ⇒ SAME identity (original_ref is provenance-only).
+        let mut other_tag = r.clone();
+        other_tag.image.original_ref = "docker.io/somemirror/metube:v2025.07".into();
+        assert_eq!(
+            oci_import_identity_digest(&other_tag),
+            a,
+            "tag must not be an identity input"
+        );
+
+        // OUTPUTS must not matter.
+        let mut outputs_differ = r.clone();
+        outputs_differ.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        outputs_differ.exported_rootfs_digest = format!("sha256:{}", "ee".repeat(32));
+        outputs_differ.warnings = vec![DockerImportWarning::DockerUserIgnored];
+        assert_eq!(
+            oci_import_identity_digest(&outputs_differ),
+            a,
+            "outputs are not identity inputs"
+        );
+
+        // INPUTS must matter: resolved_digest, platform, image_config, import options.
+        let mut dig = r.clone();
+        dig.image.resolved_digest = format!("ghcr.io/alexta69/metube@sha256:{}", "cd".repeat(32));
+        assert_ne!(
+            oci_import_identity_digest(&dig),
+            a,
+            "resolved_digest must be an identity input"
+        );
+
+        let mut cfg = r.clone();
+        cfg.image_config.cmd = vec!["node".into(), "other.js".into()];
+        assert_ne!(
+            oci_import_identity_digest(&cfg),
+            a,
+            "image config must be an identity input"
+        );
+
+        let mut port = r.clone();
+        port.import_options.port_override = Some(8080);
+        assert_ne!(
+            oci_import_identity_digest(&port),
+            a,
+            "port_override must be an identity input"
+        );
+
+        let mut relay = r.clone();
+        relay.import_options.host_bind_relay = true;
+        assert_ne!(
+            oci_import_identity_digest(&relay),
+            a,
+            "host_bind_relay must be an identity input"
+        );
+    }
+
+    #[test]
+    fn oci_descriptor_blake3_shares_the_identity_envelope() {
+        let r = sample_oci_receipt();
+        let d = oci_import_descriptor_blake3(&r);
+        assert!(d.starts_with("blake3:") && d.len() == 7 + 64, "{d}");
+        assert_eq!(oci_import_descriptor_blake3(&r.clone()), d, "deterministic");
+        // Same input/output split as the sha256 identity, different hash family.
+        let mut outputs_differ = r.clone();
+        outputs_differ.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        assert_eq!(oci_import_descriptor_blake3(&outputs_differ), d);
+        let mut input_differs = r.clone();
+        input_differs.image.resolved_digest = format!("ghcr.io/x/y@sha256:{}", "cd".repeat(32));
+        assert_ne!(oci_import_descriptor_blake3(&input_differs), d);
+        assert_ne!(
+            d.trim_start_matches("blake3:"),
+            oci_import_identity_digest(&r).trim_start_matches("sha256:")
+        );
+    }
+
+    #[test]
+    fn oci_execution_id_matches_the_shared_import_exec_envelope() {
+        // The OCI lane folds its plan through the SAME ato-import-exec/1 envelope
+        // as the Dockerfile lane, so identical service + platform + image digest ⇒
+        // identical execution id across lanes (execution identity is lane-agnostic).
+        let oci = sample_oci_receipt();
+        let plan = sample_plan();
+        let a = oci_import_execution_id(&plan, &oci);
+        assert!(a.starts_with("sha256:") && a.len() == 7 + 64, "{a}");
+        assert_eq!(oci_import_execution_id(&plan, &oci), a, "deterministic");
+
+        // A Dockerfile receipt with the SAME platform + final_image_digest + policy
+        // yields the SAME execution id for the same plan (shared envelope).
+        let mut df = sample_receipt();
+        df.platform = oci.image.platform.clone();
+        df.final_image_digest = oci.final_image_digest.clone();
+        df.import_options.secret_env_policy = oci.import_options.secret_env_policy;
+        assert_eq!(
+            import_execution_id(&plan, &df),
+            a,
+            "execution identity is lane-agnostic"
+        );
+
+        // final_image_digest is an execution fact (shifts the exec id) but NOT a
+        // rebuild-inputs identity fact (leaves oci_import_identity_digest alone).
+        let mut image_differs = oci.clone();
+        image_differs.final_image_digest = format!("sha256:{}", "ff".repeat(32));
+        assert_ne!(oci_import_execution_id(&plan, &image_differs), a);
+        assert_eq!(
+            oci_import_identity_digest(&image_differs),
+            oci_import_identity_digest(&oci)
+        );
+    }
+
+    #[test]
+    fn oci_receipt_serializes_with_provenance_and_records_original_ref() {
+        let r = sample_oci_receipt();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(v["importer_version"], DOCKER_IMPORTER_VERSION);
+        assert_eq!(v["pull_tool"], "podman");
+        assert_eq!(v["image"]["original_ref"], "ghcr.io/alexta69/metube:latest");
+        assert!(
+            v["image"]["resolved_digest"]
+                .as_str()
+                .unwrap()
+                .contains("@sha256:")
+        );
+        assert_eq!(v["image"]["platform"], DOCKER_IMPORT_PLATFORM);
+        // The inspected config is recorded (an import has no Dockerfile to record).
+        assert!(v["image_config"]["cmd"].is_array());
     }
 }
