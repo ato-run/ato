@@ -30,6 +30,7 @@
 pub mod agent_channel;
 mod backend;
 pub mod bench;
+pub mod compose_plan;
 pub mod docker_import;
 mod fake;
 mod firecracker;
@@ -57,6 +58,10 @@ pub use backend::{
     RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
     SnapshotInspection, SnapshotKind, SupervisorBindings, TeardownReceipt,
     ensure_gpu_not_in_snapshot,
+};
+pub use compose_plan::{
+    DependencyKind, Healthcheck, ImportedService, ImportedServiceGraph, MountKind, RestartPolicy,
+    ServiceDependency, ServiceMount, compose_to_graph,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
