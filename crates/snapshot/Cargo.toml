@@ -31,6 +31,7 @@ protocol = { path = "../protocol" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_jcs = "0.1"
+serde_yaml = "0.9"
 # Docker import provenance (ato#994): dockerfile/context hashing is sha256 to match
 # the registry digest algebra the rest of the receipt speaks (image digests are
 # sha256:…); blake3 stays the CAS-internal hash.
