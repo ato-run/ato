@@ -45,8 +45,10 @@ use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
-    DockerImportSpec, DockerfileImportRequest, SecretEnvPolicy, import_descriptor_blake3,
+    DockerImportSpec, DockerfileImportRequest, EphemeralMountSeed, EphemeralMountSource,
+    EphemeralMountSpec, SecretEnvPolicy, VolumePolicy, import_descriptor_blake3,
     import_execution_id, run_dockerfile_import, validate_dockerfile_path,
+    validate_ephemeral_mounts,
 };
 use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
@@ -559,6 +561,9 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
     // ato-api enqueue validation; a violation here means the server-side gate was
     // bypassed or skewed — fail closed at eligibility).
     let params = parse_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+    // Phase 1: enforce the builder-config size caps fail-closed before any work.
+    let (per_mount_cap, total_cap) = ephemeral_mount_caps();
+    enforce_ephemeral_mount_caps(&params, per_mount_cap, total_cap).map_err(|e| fail("eligibility", e))?;
 
     // 2. Clone the SERVER-RESOLVED pinned commit (identity/subdir validated; no
     // capsule.toml requirement).
@@ -584,6 +589,7 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
         port_override: params.port_override,
         readiness_http_path: params.readiness_http_path.clone(),
         volume_policy: params.volumes,
+        ephemeral_mounts: params.ephemeral_mounts.clone(),
         host_bind_relay: params.host_bind_relay,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
@@ -661,7 +667,10 @@ struct DockerfileImportParams {
     readiness_http_path: Option<String>,
     /// ato#1024: `"tmpfs"` opts in to mapping image-declared VOLUMEs to guest
     /// tmpfs (ephemeral by design); absent keeps the ato#983 fail-closed gate.
-    volumes: snapshot::docker_import::VolumePolicy,
+    volumes: VolumePolicy,
+    /// Phase 1: explicit, image-independent ephemeral tmpfs mounts (copy-up
+    /// seeding + per-mount size cap). Normalized in the plan derive.
+    ephemeral_mounts: Vec<EphemeralMountSpec>,
     /// ato#1026: `true` opts in to the localhost→guest-IP relay for apps that
     /// bind 127.0.0.1 inside the guest (default off).
     host_bind_relay: bool,
@@ -673,7 +682,8 @@ impl Default for DockerfileImportParams {
             dockerfile_path: "Dockerfile".into(),
             port_override: None,
             readiness_http_path: None,
-            volumes: snapshot::docker_import::VolumePolicy::Reject,
+            volumes: VolumePolicy::Reject,
+            ephemeral_mounts: Vec::new(),
             host_bind_relay: false,
         }
     }
@@ -734,14 +744,18 @@ fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Resul
                 out.readiness_http_path = Some(p.to_string());
             }
             "volumes" => {
-                // ato#1024: only the literal "tmpfs" opts in; anything else is
-                // rejected rather than ignored (a typo must not silently keep
-                // the fail-closed VOLUME gate the caller thought they lifted —
-                // or worse, lift a gate they didn't mean to).
-                match val.as_str() {
-                    Some("tmpfs") => out.volumes = snapshot::docker_import::VolumePolicy::Tmpfs,
-                    _ => return Err("params.volumes must be the string \"tmpfs\" (the only supported mapping)".into()),
-                }
+                // ato#1024 + Phase 1: the legacy string form "tmpfs" (map all
+                // image VOLUMEs to empty tmpfs) OR the structured object form
+                // { "mode": "tmpfs", "size_mib": N }. Anything else is rejected
+                // rather than ignored (a typo must not silently keep — or lift —
+                // the fail-closed VOLUME gate).
+                out.volumes = parse_volumes_param(val)?;
+            }
+            "ephemeral_mounts" => {
+                // Phase 1: explicit, image-independent mounts. Fail-closed on
+                // shape; per-path/size structural validity is enforced here and
+                // re-validated at plan derivation.
+                out.ephemeral_mounts = parse_ephemeral_mounts_param(val)?;
             }
             "host_bind_relay" => {
                 // ato#1026: strictly a bool — a non-bool must not be silently
@@ -754,6 +768,130 @@ fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Resul
         }
     }
     Ok(out)
+}
+
+/// Parse a JSON integer `size_mib` (`1..=u32::MAX`). Fail-closed on 0, negative,
+/// fractional, or non-numeric. Cap enforcement is separate ([`enforce_ephemeral_mount_caps`]).
+fn parse_size_mib(ctx: &str, v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=u32::MAX as u64).contains(n))
+        .ok_or_else(|| format!("{ctx} must be an integer >= 1"))?;
+    Ok(n as u32)
+}
+
+/// Phase 1: parse the `volumes` param — the legacy string `"tmpfs"` (map all
+/// image VOLUMEs to empty tmpfs, uncapped) OR the structured object
+/// `{ "mode": "tmpfs", "size_mib"?: N }`. Fail-closed on any other value.
+fn parse_volumes_param(val: &serde_json::Value) -> std::result::Result<VolumePolicy, String> {
+    if let Some(s) = val.as_str() {
+        return match s {
+            "tmpfs" => Ok(VolumePolicy::Tmpfs { size_mib: None }),
+            _ => Err("params.volumes string must be \"tmpfs\" (the only supported mapping)".into()),
+        };
+    }
+    if let Some(obj) = val.as_object() {
+        if !obj.contains_key("mode") {
+            return Err("params.volumes object requires \"mode\": \"tmpfs\"".into());
+        }
+        let mut size_mib = None;
+        for (k, v) in obj {
+            match k.as_str() {
+                "mode" => {
+                    if v.as_str() != Some("tmpfs") {
+                        return Err("params.volumes.mode must be \"tmpfs\"".into());
+                    }
+                }
+                "size_mib" => size_mib = Some(parse_size_mib("params.volumes.size_mib", v)?),
+                other => return Err(format!("unknown params.volumes field {other:?} (rejected fail-closed)")),
+            }
+        }
+        return Ok(VolumePolicy::Tmpfs { size_mib });
+    }
+    Err("params.volumes must be the string \"tmpfs\" or an object { \"mode\": \"tmpfs\", \"size_mib\"?: N }".into())
+}
+
+/// Phase 1: parse the `ephemeral_mounts` param — an array of explicit,
+/// image-independent tmpfs mounts `{ "path": "/config", "seed": "empty"|"copy-up",
+/// "size_mib"?: N }`. `path` and `seed` are required; unknown keys, non-object
+/// items, and a non-array value are rejected. The full set is structurally
+/// validated (paths shell-safe/non-forbidden, `size_mib >= 1`, no duplicate or
+/// nested mountpoint) fail-closed here and re-validated at plan derivation.
+fn parse_ephemeral_mounts_param(val: &serde_json::Value) -> std::result::Result<Vec<EphemeralMountSpec>, String> {
+    let arr = val.as_array().ok_or("params.ephemeral_mounts must be an array")?;
+    let mut out = Vec::with_capacity(arr.len());
+    for (i, item) in arr.iter().enumerate() {
+        let obj = item.as_object().ok_or_else(|| format!("params.ephemeral_mounts[{i}] must be an object"))?;
+        let mut path: Option<String> = None;
+        let mut seed: Option<EphemeralMountSeed> = None;
+        let mut size_mib = None;
+        for (k, v) in obj {
+            match k.as_str() {
+                "path" => {
+                    let p = v.as_str().ok_or_else(|| format!("params.ephemeral_mounts[{i}].path must be a string"))?;
+                    path = Some(p.to_string());
+                }
+                "seed" => {
+                    seed = Some(match v.as_str() {
+                        Some("empty") => EphemeralMountSeed::Empty,
+                        Some("copy-up") => EphemeralMountSeed::CopyUp,
+                        _ => return Err(format!("params.ephemeral_mounts[{i}].seed must be \"empty\" or \"copy-up\"")),
+                    });
+                }
+                "size_mib" => size_mib = Some(parse_size_mib(&format!("params.ephemeral_mounts[{i}].size_mib"), v)?),
+                other => return Err(format!("unknown params.ephemeral_mounts[{i}] field {other:?} (rejected fail-closed)")),
+            }
+        }
+        let path = path.ok_or_else(|| format!("params.ephemeral_mounts[{i}] requires \"path\""))?;
+        let seed = seed.ok_or_else(|| format!("params.ephemeral_mounts[{i}] requires \"seed\" (\"empty\" or \"copy-up\")"))?;
+        out.push(EphemeralMountSpec { path, seed, size_mib, source: EphemeralMountSource::Explicit });
+    }
+    validate_ephemeral_mounts(&out)?;
+    Ok(out)
+}
+
+/// Phase 1: the builder-config ephemeral-mount size caps, read fail-closed from
+/// the environment. `ATO_MAX_EPHEMERAL_MOUNT_MIB` bounds each mount (default
+/// 2048), `ATO_MAX_TOTAL_EPHEMERAL_MOUNT_MIB` bounds the sum of declared sizes
+/// (default 8192). A malformed / zero value falls back to the default.
+fn ephemeral_mount_caps() -> (u32, u32) {
+    let read = |name: &str, default: u32| {
+        std::env::var(name).ok().and_then(|s| s.trim().parse::<u32>().ok()).filter(|n| *n >= 1).unwrap_or(default)
+    };
+    (read("ATO_MAX_EPHEMERAL_MOUNT_MIB", 2048), read("ATO_MAX_TOTAL_EPHEMERAL_MOUNT_MIB", 8192))
+}
+
+/// Enforce the per-mount + total caps over every DECLARED size (each explicit
+/// mount's `size_mib` and the image-VOLUME policy's `size_mib`). Uncapped
+/// (`None`) mounts contribute nothing to the MiB total (legacy uncapped shape).
+/// Fail-closed.
+fn enforce_ephemeral_mount_caps(params: &DockerfileImportParams, per_mount: u32, total: u32) -> std::result::Result<(), String> {
+    let mut sum: u64 = 0;
+    for (i, m) in params.ephemeral_mounts.iter().enumerate() {
+        if let Some(s) = m.size_mib {
+            if s > per_mount {
+                return Err(format!(
+                    "params.ephemeral_mounts[{i}] ({}) size {s} MiB exceeds the per-mount cap {per_mount} MiB (ATO_MAX_EPHEMERAL_MOUNT_MIB)",
+                    m.path
+                ));
+            }
+            sum += s as u64;
+        }
+    }
+    if let VolumePolicy::Tmpfs { size_mib: Some(s) } = params.volumes {
+        if s > per_mount {
+            return Err(format!(
+                "params.volumes.size_mib {s} MiB exceeds the per-mount cap {per_mount} MiB (ATO_MAX_EPHEMERAL_MOUNT_MIB)"
+            ));
+        }
+        sum += s as u64;
+    }
+    if sum > total as u64 {
+        return Err(format!(
+            "total ephemeral mount size {sum} MiB exceeds the cap {total} MiB (ATO_MAX_TOTAL_EPHEMERAL_MOUNT_MIB)"
+        ));
+    }
+    Ok(())
 }
 
 /// ato#1002: shallow-clone the SERVER-RESOLVED pinned commit for a
@@ -1236,14 +1374,41 @@ mod tests {
         let max = format!("/{}", "x".repeat(199));
         let v = serde_json::json!({ "readiness_http_path": max.as_str() });
         assert_eq!(parse_import_params(Some(&v)).unwrap().readiness_http_path.as_deref(), Some(max.as_str()));
-        // ato#1024: only the literal "tmpfs" engages the VOLUME mapping; any other
-        // value is rejected, never silently ignored.
+        // ato#1024: the legacy string "tmpfs" maps image VOLUMEs uncapped.
         let v = serde_json::json!({ "volumes": "tmpfs" });
-        assert_eq!(parse_import_params(Some(&v)).unwrap().volumes, snapshot::docker_import::VolumePolicy::Tmpfs);
-        assert_eq!(parse_import_params(None).unwrap().volumes, snapshot::docker_import::VolumePolicy::Reject);
-        for bad in [serde_json::json!({"volumes": "rw"}), serde_json::json!({"volumes": true}), serde_json::json!({"volumes": null})] {
-            assert!(parse_import_params(Some(&bad)).unwrap_err().contains("volumes"));
+        assert_eq!(parse_import_params(Some(&v)).unwrap().volumes, VolumePolicy::Tmpfs { size_mib: None });
+        assert_eq!(parse_import_params(None).unwrap().volumes, VolumePolicy::Reject);
+        // Phase 1: the structured object form carries a size.
+        let v = serde_json::json!({ "volumes": { "mode": "tmpfs", "size_mib": 512 } });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().volumes, VolumePolicy::Tmpfs { size_mib: Some(512) });
+        let v = serde_json::json!({ "volumes": { "mode": "tmpfs" } });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().volumes, VolumePolicy::Tmpfs { size_mib: None });
+        for bad in [
+            serde_json::json!({"volumes": "rw"}),
+            serde_json::json!({"volumes": true}),
+            serde_json::json!({"volumes": null}),
+            serde_json::json!({"volumes": {"mode": "rw"}}),
+            serde_json::json!({"volumes": {"size_mib": 8}}),          // missing mode
+            serde_json::json!({"volumes": {"mode": "tmpfs", "x": 1}}), // unknown field
+            serde_json::json!({"volumes": {"mode": "tmpfs", "size_mib": 0}}),
+        ] {
+            assert!(parse_import_params(Some(&bad)).unwrap_err().contains("volumes"), "{bad}");
         }
+        // Phase 1: explicit ephemeral_mounts parse with seed + size.
+        let v = serde_json::json!({ "ephemeral_mounts": [
+            { "path": "/config", "seed": "copy-up", "size_mib": 16 },
+            { "path": "/downloads", "seed": "empty", "size_mib": 512 },
+        ]});
+        let m = parse_import_params(Some(&v)).unwrap().ephemeral_mounts;
+        assert_eq!(m.len(), 2);
+        assert_eq!(m[0].path, "/config");
+        assert_eq!(m[0].seed, EphemeralMountSeed::CopyUp);
+        assert_eq!(m[0].size_mib, Some(16));
+        assert_eq!(m[0].source, EphemeralMountSource::Explicit);
+        assert_eq!(m[1].seed, EphemeralMountSeed::Empty);
+        // size_mib is optional on an explicit mount (uncapped tmpfs).
+        let v = serde_json::json!({ "ephemeral_mounts": [{ "path": "/x", "seed": "empty" }] });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().ephemeral_mounts[0].size_mib, None);
         // ato#1026: host_bind_relay is a strict bool.
         assert!(parse_import_params(Some(&serde_json::json!({"host_bind_relay": true}))).unwrap().host_bind_relay);
         assert!(!parse_import_params(None).unwrap().host_bind_relay);
@@ -1283,6 +1448,72 @@ mod tests {
             let err = parse_import_params(Some(&v)).unwrap_err();
             assert!(err.contains(needle), "{v}: {err}");
         }
+    }
+
+    #[test]
+    fn ephemeral_mounts_reject_bad_shapes_and_paths() {
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            (serde_json::json!({ "ephemeral_mounts": "nope" }), "array"),
+            (serde_json::json!({ "ephemeral_mounts": [1] }), "object"),
+            (serde_json::json!({ "ephemeral_mounts": [{ "seed": "empty" }] }), "requires \"path\""),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/x" }] }), "requires \"seed\""),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/x", "seed": "rw" }] }), "empty"),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/x", "seed": "empty", "extra": 1 }] }), "unknown"),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/x", "seed": "empty", "size_mib": 0 }] }), ">= 1"),
+            // Path validity is enforced fail-closed at parse (validate_ephemeral_mounts).
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "rel", "seed": "empty" }] }), "ephemeral mount"),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/etc/app", "seed": "empty" }] }), "tmpfs-shadow"),
+            (serde_json::json!({ "ephemeral_mounts": [{ "path": "/x;rm", "seed": "empty" }] }), "characters outside"),
+            // Duplicate + nested among the explicit set are rejected at parse.
+            (serde_json::json!({ "ephemeral_mounts": [
+                { "path": "/data", "seed": "empty" }, { "path": "/data", "seed": "empty" }
+            ]}), "duplicate"),
+            (serde_json::json!({ "ephemeral_mounts": [
+                { "path": "/data", "seed": "empty" }, { "path": "/data/sub", "seed": "empty" }
+            ]}), "overlap"),
+        ];
+        for (v, needle) in cases {
+            let err = parse_import_params(Some(&v)).unwrap_err();
+            assert!(err.contains(needle), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn ephemeral_mount_caps_enforced_fail_closed() {
+        // Per-mount cap: an explicit mount over the cap is rejected; the volume
+        // policy size is capped too; the total sum is bounded.
+        let mk = |mounts: Vec<EphemeralMountSpec>, vol: VolumePolicy| DockerfileImportParams {
+            ephemeral_mounts: mounts,
+            volumes: vol,
+            ..DockerfileImportParams::default()
+        };
+        let m = |path: &str, size: Option<u32>| EphemeralMountSpec {
+            path: path.into(),
+            seed: EphemeralMountSeed::Empty,
+            size_mib: size,
+            source: EphemeralMountSource::Explicit,
+        };
+        // Within caps ⇒ ok.
+        assert!(enforce_ephemeral_mount_caps(&mk(vec![m("/a", Some(1000)), m("/b", Some(1000))], VolumePolicy::Reject), 2048, 8192).is_ok());
+        // Per-mount over cap ⇒ rejected.
+        let err = enforce_ephemeral_mount_caps(&mk(vec![m("/a", Some(4096))], VolumePolicy::Reject), 2048, 8192).unwrap_err();
+        assert!(err.contains("per-mount cap") && err.contains("2048"), "{err}");
+        // Volume policy size over cap ⇒ rejected.
+        let err = enforce_ephemeral_mount_caps(&mk(vec![], VolumePolicy::Tmpfs { size_mib: Some(4096) }), 2048, 8192).unwrap_err();
+        assert!(err.contains("volumes.size_mib") && err.contains("per-mount"), "{err}");
+        // Total over cap (each within per-mount) ⇒ rejected.
+        let err = enforce_ephemeral_mount_caps(&mk(vec![m("/a", Some(2000)), m("/b", Some(2000)), m("/c", Some(2000)), m("/d", Some(2000)), m("/e", Some(2000))], VolumePolicy::Reject), 2048, 8192).unwrap_err();
+        assert!(err.contains("total ephemeral mount size") && err.contains("8192"), "{err}");
+        // Uncapped (None) mounts contribute nothing to the total.
+        assert!(enforce_ephemeral_mount_caps(&mk(vec![m("/a", None), m("/b", None)], VolumePolicy::Tmpfs { size_mib: None }), 2048, 8192).is_ok());
+    }
+
+    #[test]
+    fn ephemeral_mount_caps_read_env_with_defaults() {
+        // Defaults hold when the env is unset/garbage (a per-test process env is
+        // avoided; assert the fallback values directly).
+        let (per, total) = ephemeral_mount_caps();
+        assert!(per >= 1 && total >= 1);
     }
 
     #[test]

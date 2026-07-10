@@ -89,6 +89,7 @@ fn main() {
         port_override,
         readiness_http_path,
         volume_policy: Default::default(),
+        ephemeral_mounts: Vec::new(),
         host_bind_relay: false,
         image_tag,
         out_ext4: &out,
