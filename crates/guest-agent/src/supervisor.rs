@@ -25,9 +25,9 @@ use std::time::Duration;
 use protocol::binding_lease::BindingName;
 use serde::{Deserialize, Serialize};
 
+use crate::BindingSink;
 use crate::tmpfs::DEFAULT_BINDINGS_ROOT;
 use crate::volume_mount::VolumeSpec;
-use crate::BindingSink;
 
 /// Grace window between SIGTERM and SIGKILL when stopping the workload. Bounded so
 /// `StopWorkload` (the pre-snapshot build boundary) always returns even if the
@@ -224,8 +224,16 @@ fn base64_encode(input: &[u8]) -> String {
         let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
         out.push(A[((n >> 18) & 63) as usize] as char);
         out.push(A[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { A[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -412,7 +420,10 @@ impl ServiceSpec {
         // load, never sanitized — same fail-closed discipline as env/binding names.
         if let Some(rootfs) = &self.rootfs {
             validate_service_rootfs(rootfs).map_err(|e| {
-                format!("supervisor.json: service {:?} invalid rootfs: {e}", self.name)
+                format!(
+                    "supervisor.json: service {:?} invalid rootfs: {e}",
+                    self.name
+                )
             })?;
         }
         Ok(())
@@ -572,10 +583,16 @@ impl SupervisorConfig {
         let mut seen_generated = std::collections::BTreeSet::new();
         for g in &self.generated_bindings {
             BindingName::parse(g.name.as_str()).map_err(|e| {
-                format!("supervisor.json: generated binding {:?} invalid name: {e}", g.name)
+                format!(
+                    "supervisor.json: generated binding {:?} invalid name: {e}",
+                    g.name
+                )
             })?;
             if !seen_generated.insert(g.name.clone()) {
-                return Err(format!("supervisor.json: duplicate generated binding name {:?}", g.name));
+                return Err(format!(
+                    "supervisor.json: duplicate generated binding name {:?}",
+                    g.name
+                ));
             }
             if !(1..=1024).contains(&g.bytes) {
                 return Err(format!(
@@ -830,7 +847,11 @@ fn chroot_wrapped_exec(rootfs: &str, cwd: &str, cmd: &[String]) -> String {
     let rq = shell_single_quote(rootfs);
     let quoted_cmd: Vec<String> = cmd.iter().map(|a| shell_single_quote(a)).collect();
     // Innermost: inside the new root, cd into the workload's cwd then exec it.
-    let in_chroot = format!("cd {} && exec {}", shell_single_quote(cwd), quoted_cmd.join(" "));
+    let in_chroot = format!(
+        "cd {} && exec {}",
+        shell_single_quote(cwd),
+        quoted_cmd.join(" ")
+    );
     // Middle: within the private mount namespace, mount the pseudo-filesystems under
     // the service rootfs, then chroot + run the innermost script.
     let in_ns = format!(
@@ -839,7 +860,10 @@ fn chroot_wrapped_exec(rootfs: &str, cwd: &str, cmd: &[String]) -> String {
         inner = shell_single_quote(&in_chroot),
     );
     // Outer: launch the whole thing in a fresh private mount namespace.
-    format!("exec unshare --mount --propagation private /bin/sh -c {}", shell_single_quote(&in_ns))
+    format!(
+        "exec unshare --mount --propagation private /bin/sh -c {}",
+        shell_single_quote(&in_ns)
+    )
 }
 
 /// Phase 5: validate a per-service rootfs subtree path. It is rendered into the
@@ -853,7 +877,10 @@ pub(crate) fn validate_service_rootfs(path: &str) -> Result<(), String> {
     if path.len() > 200 {
         return Err(format!("rootfs {path:?} exceeds 200 chars"));
     }
-    if !path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+    {
         return Err(format!(
             "rootfs {path:?} contains characters outside [A-Za-z0-9/_.-] — refusing to render it into the guest spawn script (fail-closed)"
         ));
@@ -915,7 +942,11 @@ impl Workload for ChildWorkload {
         // rootfs (applied after chroot, inside spawn_script), so the OUTER process
         // must start from a directory that exists in the base rootfs ("/"). A
         // plain service keeps its cwd as the outer working directory (unchanged).
-        let outer_cwd: &str = if plan.rootfs.is_some() { "/" } else { plan.cwd.as_str() };
+        let outer_cwd: &str = if plan.rootfs.is_some() {
+            "/"
+        } else {
+            plan.cwd.as_str()
+        };
         c.arg("-c").arg(spawn_script(plan)).current_dir(outer_cwd);
         #[cfg(unix)]
         {
@@ -1114,7 +1145,11 @@ fn default_readiness_timeout() -> Duration {
 /// so a capsule with no run_once tasks is unaffected. Tests set the phase directly
 /// via [`Supervisor::with_phase`] rather than the env (no cross-test env races).
 fn default_exec_phase() -> ExecPhase {
-    match std::env::var("ATO_EXEC_PHASE").ok().as_deref().map(str::trim) {
+    match std::env::var("ATO_EXEC_PHASE")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
         Some("seal_once") => ExecPhase::SealOnce,
         Some("restore") => ExecPhase::Restore,
         _ => ExecPhase::Run,
@@ -2046,7 +2081,8 @@ mod tests {
     #[test]
     fn run_once_kind_and_timing_parse_and_defaults() {
         // kind defaults to "service"; a plain service has kind Service, run_at empty.
-        let svc = SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["x"]}]}"#).unwrap();
+        let svc =
+            SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["x"]}]}"#).unwrap();
         assert_eq!(svc.services()[0].kind, ServiceKind::Service);
         assert!(svc.services()[0].run_at.is_empty());
         // A run_once round-trips kind + timing.
@@ -2064,8 +2100,14 @@ mod tests {
         // The DAG is over BOTH edge kinds. postgres → migrate → api → worker.
         let order = dag_cfg(r#"["run"]"#).start_order().unwrap();
         let pos = |n: &str| order.iter().position(|x| x == n).unwrap();
-        assert!(pos("postgres") < pos("migrate"), "readiness dep orders postgres first");
-        assert!(pos("migrate") < pos("api"), "success dep orders migrate before api");
+        assert!(
+            pos("postgres") < pos("migrate"),
+            "readiness dep orders postgres first"
+        );
+        assert!(
+            pos("migrate") < pos("api"),
+            "success dep orders migrate before api"
+        );
         assert!(pos("api") < pos("worker"), "api before worker");
 
         // A cycle THROUGH a success edge is detected (fail-closed at parse):
@@ -2180,10 +2222,19 @@ mod tests {
         assert!(started.contains(&vec!["postgres".to_string()]));
         assert!(started.contains(&vec!["api".to_string()]));
         assert!(started.contains(&vec!["worker".to_string()]));
-        assert!(!started.iter().any(|c| c == &vec!["migrate".to_string(), "up".to_string()]),
-            "a run_once is never a long-running service");
+        assert!(
+            !started
+                .iter()
+                .any(|c| c == &vec!["migrate".to_string(), "up".to_string()]),
+            "a run_once is never a long-running service"
+        );
         // api must have started AFTER migrate's run_once completed (success gate).
-        let api_idx = st.starts.borrow().iter().position(|p| p.cmd == vec!["api"]).unwrap();
+        let api_idx = st
+            .starts
+            .borrow()
+            .iter()
+            .position(|p| p.cmd == vec!["api"])
+            .unwrap();
         assert!(api_idx > 0, "api gated behind its success-dependency");
     }
 
@@ -2197,17 +2248,31 @@ mod tests {
         // (depends_on_success=[migrate]) must still start (the migration was sealed
         // into the image at build, so the gate is satisfied by the skip).
         let mut sup = fast_readiness(
-            Supervisor::new(dag_cfg(r#"["seal_once"]"#), dir.path(), move || fake.clone()),
+            Supervisor::new(dag_cfg(r#"["seal_once"]"#), dir.path(), move || {
+                fake.clone()
+            }),
             probe,
         )
         .with_phase(ExecPhase::Run);
 
         assert!(sup.on_bound_ready(true).unwrap());
-        assert!(st.run_onces.borrow().is_empty(), "run_once skipped out of phase");
-        assert!(sup.run_once_results().is_empty(), "no result recorded for a skipped run_once");
+        assert!(
+            st.run_onces.borrow().is_empty(),
+            "run_once skipped out of phase"
+        );
+        assert!(
+            sup.run_once_results().is_empty(),
+            "no result recorded for a skipped run_once"
+        );
         // api + worker still started (success gate satisfied by the seal-time skip).
-        assert!(st.starts.borrow().iter().any(|p| p.cmd == vec!["api"]), "api started");
-        assert!(st.starts.borrow().iter().any(|p| p.cmd == vec!["worker"]), "worker started");
+        assert!(
+            st.starts.borrow().iter().any(|p| p.cmd == vec!["api"]),
+            "api started"
+        );
+        assert!(
+            st.starts.borrow().iter().any(|p| p.cmd == vec!["worker"]),
+            "worker started"
+        );
     }
 
     #[test]
@@ -2218,12 +2283,20 @@ mod tests {
         let probe = FakeProbe::ready_after(5432, 0);
         // migrate runs at seal_once; drive the SealOnce phase → it executes.
         let mut sup = fast_readiness(
-            Supervisor::new(dag_cfg(r#"["seal_once","restore"]"#), dir.path(), move || fake.clone()),
+            Supervisor::new(
+                dag_cfg(r#"["seal_once","restore"]"#),
+                dir.path(),
+                move || fake.clone(),
+            ),
             probe,
         )
         .with_phase(ExecPhase::SealOnce);
         assert!(sup.on_bound_ready(true).unwrap());
-        assert_eq!(st.run_onces.borrow().len(), 1, "run_once executes at a matching phase");
+        assert_eq!(
+            st.run_onces.borrow().len(),
+            1,
+            "run_once executes at a matching phase"
+        );
         assert_eq!(sup.run_once_results()[0].phase, ExecPhase::SealOnce);
     }
 
@@ -2242,15 +2315,26 @@ mod tests {
         .with_phase(ExecPhase::Run);
 
         let err = sup.on_bound_ready(true).unwrap_err();
-        assert!(err.to_string().contains("exit code 3"), "names the failing exit code: {err}");
+        assert!(
+            err.to_string().contains("exit code 3"),
+            "names the failing exit code: {err}"
+        );
         assert!(!sup.started(), "the group is not marked started");
-        assert!(!sup.is_running(), "no service left running after a failed migration");
+        assert!(
+            !sup.is_running(),
+            "no service left running after a failed migration"
+        );
         assert_eq!(*st.live.borrow(), 0);
         // The failed outcome is still RECORDED (a receipt reports the failure).
         assert_eq!(sup.run_once_results().len(), 1);
         assert_eq!(sup.run_once_results()[0].exit_code, 3);
         // api never started (its migration failed).
-        assert!(st.starts.borrow().iter().all(|p| p.cmd != vec!["api".to_string()]));
+        assert!(
+            st.starts
+                .borrow()
+                .iter()
+                .all(|p| p.cmd != vec!["api".to_string()])
+        );
     }
 
     #[test]
@@ -2401,7 +2485,10 @@ mod tests {
     impl FakeWorkload {
         /// Make the run_once whose cmd joins to `key` exit with `code`.
         fn set_run_once_exit(&self, key: &str, code: i32) {
-            self.0.run_once_exit.borrow_mut().insert(key.to_string(), code);
+            self.0
+                .run_once_exit
+                .borrow_mut()
+                .insert(key.to_string(), code);
         }
     }
     impl Workload for FakeWorkload {
@@ -2424,7 +2511,13 @@ mod tests {
         fn run_once(&mut self, plan: &SpawnPlan) -> std::io::Result<i32> {
             self.0.run_onces.borrow_mut().push(plan.clone());
             let key = plan.cmd.join(" ");
-            Ok(self.0.run_once_exit.borrow().get(&key).copied().unwrap_or(0))
+            Ok(self
+                .0
+                .run_once_exit
+                .borrow()
+                .get(&key)
+                .copied()
+                .unwrap_or(0))
         }
     }
 
@@ -2715,20 +2808,38 @@ mod tests {
         assert_eq!(plan.rootfs.as_deref(), Some("/opt/ato/services/web/rootfs"));
         let script = spawn_script(&plan);
         // Ordering is load-bearing: unshare (new mount ns) → chroot → exec cmd.
-        let ns = script.find("unshare --mount").expect("enters a mount namespace");
-        let cr = script.find("chroot").expect("chroots into the service rootfs");
+        let ns = script
+            .find("unshare --mount")
+            .expect("enters a mount namespace");
+        let cr = script
+            .find("chroot")
+            .expect("chroots into the service rootfs");
         assert!(ns < cr, "unshare must precede chroot:\n{script}");
         // The pseudo-filesystems are mounted under the SERVICE rootfs subtree, not
         // the base `/` (the rootfs path is single-quoted, then concatenated with
         // /proc etc. — assert on substrings that survive the nested quote layers).
-        assert!(script.contains("mount -t proc proc"), "mounts proc:\n{script}");
-        assert!(script.contains("/opt/ato/services/web/rootfs"), "targets the service rootfs:\n{script}");
+        assert!(
+            script.contains("mount -t proc proc"),
+            "mounts proc:\n{script}"
+        );
+        assert!(
+            script.contains("/opt/ato/services/web/rootfs"),
+            "targets the service rootfs:\n{script}"
+        );
         // The workload cwd is applied INSIDE the chroot, AFTER the chroot call.
-        let cd = script.find("cd ").expect("cd into workload cwd inside chroot");
+        let cd = script
+            .find("cd ")
+            .expect("cd into workload cwd inside chroot");
         assert!(cr < cd, "cd happens after chroot:\n{script}");
-        assert!(script.contains("/srv/app"), "cwd present inside chroot:\n{script}");
+        assert!(
+            script.contains("/srv/app"),
+            "cwd present inside chroot:\n{script}"
+        );
         // The command tokens survive into the innermost exec (through the quote layers).
-        assert!(script.contains("node") && script.contains("server.js"), "{script}");
+        assert!(
+            script.contains("node") && script.contains("server.js"),
+            "{script}"
+        );
     }
 
     #[test]
@@ -2751,7 +2862,10 @@ mod tests {
         };
         let script = spawn_script(&plan_spawn_service(&svc, bindings.path()).unwrap());
         assert!(script.contains("exec 'python3' 'app.py'"), "{script}");
-        assert!(!script.contains("unshare") && !script.contains("chroot"), "{script}");
+        assert!(
+            !script.contains("unshare") && !script.contains("chroot"),
+            "{script}"
+        );
     }
 
     #[test]
@@ -2776,10 +2890,18 @@ mod tests {
             depends_on_success: Vec::new(),
         };
         let script = spawn_script(&plan_spawn_service(&svc, dir.path()).unwrap());
-        let export = script.find("export OPENAI_API_KEY=").expect("secret exported");
+        let export = script
+            .find("export OPENAI_API_KEY=")
+            .expect("secret exported");
         let unshare = script.find("unshare").expect("enters ns");
-        assert!(export < unshare, "secret must be read before the chroot:\n{script}");
-        assert!(!script.contains("sk-VALUE"), "value never appears in the script");
+        assert!(
+            export < unshare,
+            "secret must be read before the chroot:\n{script}"
+        );
+        assert!(
+            !script.contains("sk-VALUE"),
+            "value never appears in the script"
+        );
     }
 
     #[test]
@@ -2794,8 +2916,14 @@ mod tests {
         )
         .unwrap();
         let svcs = cfg.services();
-        assert_eq!(svcs[0].rootfs.as_deref(), Some("/opt/ato/services/web/rootfs"));
-        assert_eq!(svcs[1].rootfs.as_deref(), Some("/opt/ato/services/redis/rootfs"));
+        assert_eq!(
+            svcs[0].rootfs.as_deref(),
+            Some("/opt/ato/services/web/rootfs")
+        );
+        assert_eq!(
+            svcs[1].rootfs.as_deref(),
+            Some("/opt/ato/services/redis/rootfs")
+        );
         // A malformed rootfs is rejected AT LOAD (never sanitized).
         assert!(
             SupervisorConfig::from_json(
@@ -2814,7 +2942,10 @@ mod tests {
         // A legacy config (no rootfs) serializes WITHOUT the field (skip_if None).
         let legacy = SupervisorConfig::from_json(r#"{"cmd":["true"]}"#).unwrap();
         let json = serde_json::to_string(&legacy.services()[0]).unwrap();
-        assert!(!json.contains("rootfs"), "None rootfs must be omitted: {json}");
+        assert!(
+            !json.contains("rootfs"),
+            "None rootfs must be omitted: {json}"
+        );
     }
 
     // ── Phase 7 (generated internal bindings) ──
@@ -2883,14 +3014,16 @@ mod tests {
         )
         .is_err());
         // Duplicate generated binding name.
-        assert!(SupervisorConfig::from_json(
-            r#"{"services":[{"name":"api","cmd":["true"]}],
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"api","cmd":["true"]}],
                 "generated_bindings":[
                     {"name":"db_password","generator":"random_base64","bytes":32,"targets":["api"]},
                     {"name":"db_password","generator":"random_base64","bytes":16,"targets":["api"]}
                 ]}"#
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2902,10 +3035,16 @@ mod tests {
         let b = SupervisorConfig::from_json(generated_config_json()).unwrap();
         let ja = serde_json::to_string(&a.generated_bindings).unwrap();
         let jb = serde_json::to_string(&b.generated_bindings).unwrap();
-        assert_eq!(ja, jb, "same spec ⇒ identical serialization (identity stable)");
+        assert_eq!(
+            ja, jb,
+            "same spec ⇒ identical serialization (identity stable)"
+        );
         // The spec records only name/generator/scope/targets — no value/secret.
         assert!(ja.contains("db_password") && ja.contains("random_base64"));
-        assert!(!ja.contains("=="), "base64 padding of a value must never appear in the spec");
+        assert!(
+            !ja.contains("=="),
+            "base64 padding of a value must never appear in the spec"
+        );
     }
 
     #[test]
@@ -2938,7 +3077,10 @@ mod tests {
             let plan = plan_spawn_service(&svc, dir.path()).unwrap();
             assert_eq!(plan.secret_env.len(), 1);
             assert_eq!(plan.secret_env[0].1, dir.path().join("db_password"));
-            assert!(!format!("{plan:?}").contains(value.trim()), "value must not enter the plan");
+            assert!(
+                !format!("{plan:?}").contains(value.trim()),
+                "value must not enter the plan"
+            );
         }
         // The spec itself never carries the value.
         assert!(!format!("{:?}", cfg.generated_bindings).contains(value.trim()));
