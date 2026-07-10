@@ -805,6 +805,16 @@ pub struct CapsuleManifest {
     /// milestone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<super::ready_state::ContextConfig>,
+
+    /// Phase 7: RUN-time generated internal bindings (`[generated_bindings.<name>]`).
+    ///
+    /// Each declares an INTERNAL secret (DB password, redis password, internal
+    /// session/JWT key) that the guest-agent generates per RUN from the OS RNG
+    /// and injects into every target service — the value is never stored in the
+    /// artifact, receipt, logs, or identity (only this spec is). `skip` when
+    /// empty so existing capsules are byte-identical and keep their identity.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub generated_bindings: BTreeMap<String, super::ready_state::GeneratedBindingSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

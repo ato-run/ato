@@ -292,6 +292,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new(".ato/source-inference/provenance.json")));
@@ -345,6 +346,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         })
         .expect("filter");
         assert!(!filter.should_include_file(Path::new("node_modules/a.js")));
@@ -394,6 +396,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/**".to_string()],
@@ -449,6 +452,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         };
         manifest.pack = Some(PackConfig {
             include: vec!["**/node_modules/**".to_string()],
@@ -502,6 +506,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -564,6 +569,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         };
         manifest.pack = Some(PackConfig {
             include: vec!["apps/dashboard/.next/standalone/**".to_string()],
@@ -618,6 +624,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         })
         .expect("filter")
     }
@@ -704,6 +711,7 @@ mod tests {
             bindings: Default::default(),
             external: Default::default(),
             context: None,
+            generated_bindings: Default::default(),
         };
         m.pack = Some(PackConfig { include, exclude });
         m
