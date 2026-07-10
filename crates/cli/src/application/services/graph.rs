@@ -298,7 +298,6 @@ mod tests {
             readiness_probe: None,
             network: ResolvedServiceNetwork::default(),
             run_once: false,
-            run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
                 target: name.to_string(),
                 runtime: "oci".to_string(),
