@@ -242,7 +242,9 @@ pub fn compose_to_graph(yaml: &str) -> Result<ImportedServiceGraph, String> {
 
         for (to, kind) in parse_depends_on(&name, svc.get(Value::from("depends_on")))? {
             if !names.contains(&to) {
-                return Err(format!("service '{name}': depends_on unknown service '{to}'"));
+                return Err(format!(
+                    "service '{name}': depends_on unknown service '{to}'"
+                ));
             }
             dependencies.push(ServiceDependency {
                 from: name.clone(),
@@ -376,8 +378,16 @@ fn validate_service_keys(name: &str, svc: &serde_yaml::Mapping) -> Result<(), St
                 ));
             }
             // Other container-runtime escape hatches.
-            "pid" | "ipc" | "userns_mode" | "cgroup_parent" | "runtime" | "cap_drop"
-            | "security_opt" | "sysctls" | "device_cgroup_rules" | "group_add" => {
+            "pid"
+            | "ipc"
+            | "userns_mode"
+            | "cgroup_parent"
+            | "runtime"
+            | "cap_drop"
+            | "security_opt"
+            | "sysctls"
+            | "device_cgroup_rules"
+            | "group_add" => {
                 return Err(format!(
                     "service '{name}': `{key}` is a container-runtime dependency and is not supported (fail-closed)"
                 ));
@@ -573,7 +583,9 @@ fn parse_volumes(name: &str, val: Option<&Value>) -> Result<Vec<ServiceMount>, S
                 mounts.push(parse_volume_long(name, m)?);
             }
             other => {
-                return Err(format!("service '{name}': unsupported volume entry {other:?}"));
+                return Err(format!(
+                    "service '{name}': unsupported volume entry {other:?}"
+                ));
             }
         }
     }
@@ -774,7 +786,10 @@ services:
         assert_eq!(g.public_service, "web");
         // Canonical order → postgres before web.
         assert_eq!(
-            g.services.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            g.services
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["postgres", "web"]
         );
 
@@ -879,8 +894,13 @@ services:
             assert_eq!(g.services[0].restart, expected, "restart={raw}");
         }
         // Unknown policy fails closed.
-        let bad = "services:\n  web:\n    image: nginx\n    ports: [\"80:80\"]\n    restart: bogus\n";
-        assert!(compose_to_graph(bad).unwrap_err().contains("restart policy"));
+        let bad =
+            "services:\n  web:\n    image: nginx\n    ports: [\"80:80\"]\n    restart: bogus\n";
+        assert!(
+            compose_to_graph(bad)
+                .unwrap_err()
+                .contains("restart policy")
+        );
     }
 
     /// Wrap a single-service snippet with a public web service so only the
@@ -898,7 +918,10 @@ services:
                 "Docker socket",
             ),
             ("    network_mode: host\n", "network_mode: host"),
-            ("    network_mode: \"service:other\"\n", "container-runtime network"),
+            (
+                "    network_mode: \"service:other\"\n",
+                "container-runtime network",
+            ),
             ("    devices:\n      - /dev/snd\n", "devices"),
             ("    cap_add:\n      - NET_ADMIN\n", "cap_add"),
             (
@@ -912,7 +935,8 @@ services:
         ];
         for (extra, needle) in cases {
             let yaml = with_bad(extra);
-            let err = compose_to_graph(&yaml).expect_err(&format!("expected rejection for {extra:?}"));
+            let err =
+                compose_to_graph(&yaml).expect_err(&format!("expected rejection for {extra:?}"));
             assert!(err.contains(needle), "for {extra:?} got: {err}");
         }
     }

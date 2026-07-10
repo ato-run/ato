@@ -66,7 +66,11 @@ pub struct StateSchemaVersion {
 
 impl StateSchemaVersion {
     pub fn new(schema_name: impl Into<String>, version: u32, revision: u32) -> Self {
-        Self { schema_name: schema_name.into(), version, revision }
+        Self {
+            schema_name: schema_name.into(),
+            version,
+            revision,
+        }
     }
 }
 
@@ -106,7 +110,10 @@ pub enum CompatError {
     /// The volume was written by a NEWER revision than this artifact
     /// understands (forward-incompatible). Attaching it read-write risks the
     /// older app silently dropping fields it does not know about.
-    RevisionTooNew { artifact_understands: u32, volume_written_at: u32 },
+    RevisionTooNew {
+        artifact_understands: u32,
+        volume_written_at: u32,
+    },
 }
 
 impl std::fmt::Display for CompatError {
@@ -122,7 +129,10 @@ impl std::fmt::Display for CompatError {
                 "state schema version mismatch: artifact expects v{expected}, volume is v{found} \
                  — cross-version migration is not supported; fail closed"
             ),
-            CompatError::RevisionTooNew { artifact_understands, volume_written_at } => write!(
+            CompatError::RevisionTooNew {
+                artifact_understands,
+                volume_written_at,
+            } => write!(
                 f,
                 "state volume revision {volume_written_at} is newer than the artifact understands \
                  ({artifact_understands}) — refusing to attach forward-incompatible state read-write"
@@ -151,7 +161,10 @@ pub fn compat_gate(
         });
     }
     if want.version != volume.version {
-        return Err(CompatError::VersionMismatch { expected: want.version, found: volume.version });
+        return Err(CompatError::VersionMismatch {
+            expected: want.version,
+            found: volume.version,
+        });
     }
     if volume.revision > want.revision {
         return Err(CompatError::RevisionTooNew {
@@ -207,7 +220,11 @@ pub fn mark_clean_detach(image_path: &Path) {
 
 /// Read the current detach state from the marker's presence.
 pub fn detach_state(image_path: &Path) -> DetachState {
-    if dirty_marker_path(image_path).exists() { DetachState::Dirty } else { DetachState::Clean }
+    if dirty_marker_path(image_path).exists() {
+        DetachState::Dirty
+    } else {
+        DetachState::Clean
+    }
 }
 
 /// Where a dirty volume is moved so it is preserved for inspection/recovery but
@@ -215,8 +232,15 @@ pub fn detach_state(image_path: &Path) -> DetachState {
 /// subdir of the volume's own directory (so it stays on the same filesystem →
 /// `rename` is atomic, and stays OUTSIDE the artifact).
 pub fn quarantine_path(image_path: &Path, now_unix_secs: u64) -> PathBuf {
-    let dir = image_path.parent().unwrap_or_else(|| Path::new(".")).join("quarantine");
-    let stem = image_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    let dir = image_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("quarantine");
+    let stem = image_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
     dir.join(format!("{stem}.dirty.{now_unix_secs}"))
 }
 
@@ -230,7 +254,11 @@ pub fn quarantine_volume(image_path: &Path, quarantine_path: &Path) -> Result<()
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     std::fs::rename(image_path, quarantine_path).map_err(|e| {
-        format!("quarantine {} -> {}: {e}", image_path.display(), quarantine_path.display())
+        format!(
+            "quarantine {} -> {}: {e}",
+            image_path.display(),
+            quarantine_path.display()
+        )
     })?;
     // The stale in-use marker follows the volume out of the way so the freshly
     // created replacement starts Clean.
@@ -254,8 +282,15 @@ pub struct QuotaPolicy {
 /// Why a requested volume size is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuotaError {
-    PerVolume { requested: u64, limit: u64 },
-    OwnerTotal { existing: u64, requested: u64, limit: u64 },
+    PerVolume {
+        requested: u64,
+        limit: u64,
+    },
+    OwnerTotal {
+        existing: u64,
+        requested: u64,
+        limit: u64,
+    },
 }
 
 impl std::fmt::Display for QuotaError {
@@ -265,7 +300,11 @@ impl std::fmt::Display for QuotaError {
                 f,
                 "state volume size {requested} B exceeds the per-volume quota of {limit} B"
             ),
-            QuotaError::OwnerTotal { existing, requested, limit } => write!(
+            QuotaError::OwnerTotal {
+                existing,
+                requested,
+                limit,
+            } => write!(
                 f,
                 "state volume of {requested} B would push this owner's total durable state to \
                  {} B, over the {limit} B quota (currently {existing} B)",
@@ -440,7 +479,10 @@ mod tests {
         let err = compat_gate(&c, &StateSchemaVersion::new("sqlite-app-db", 3, 9)).unwrap_err();
         assert_eq!(
             err,
-            CompatError::RevisionTooNew { artifact_understands: 7, volume_written_at: 9 }
+            CompatError::RevisionTooNew {
+                artifact_understands: 7,
+                volume_written_at: 9
+            }
         );
     }
 
@@ -448,7 +490,13 @@ mod tests {
     fn compat_gate_rejects_version_mismatch() {
         let c = contract("sqlite-app-db", 3, 7);
         let err = compat_gate(&c, &StateSchemaVersion::new("sqlite-app-db", 4, 0)).unwrap_err();
-        assert_eq!(err, CompatError::VersionMismatch { expected: 3, found: 4 });
+        assert_eq!(
+            err,
+            CompatError::VersionMismatch {
+                expected: 3,
+                found: 4
+            }
+        );
     }
 
     #[test]
@@ -466,7 +514,11 @@ mod tests {
         let img = dir.path().join("dbdata.img");
         std::fs::write(&img, b"x").unwrap();
         mark_in_use(&img).unwrap();
-        assert_eq!(detach_state(&img), DetachState::Dirty, "in-use before detach");
+        assert_eq!(
+            detach_state(&img),
+            DetachState::Dirty,
+            "in-use before detach"
+        );
         mark_clean_detach(&img);
         assert_eq!(detach_state(&img), DetachState::Clean);
         assert_eq!(attach_decision(&img), DirtyAction::AttachClean);
@@ -495,8 +547,15 @@ mod tests {
         quarantine_volume(&img, &q).unwrap();
 
         assert!(!img.exists(), "dirty volume moved out of the attach path");
-        assert!(q.exists(), "dirty volume preserved in quarantine for recovery");
-        assert_eq!(std::fs::read(&q).unwrap(), b"torn-contents", "contents preserved, not deleted");
+        assert!(
+            q.exists(),
+            "dirty volume preserved in quarantine for recovery"
+        );
+        assert_eq!(
+            std::fs::read(&q).unwrap(),
+            b"torn-contents",
+            "contents preserved, not deleted"
+        );
         // A freshly-created replacement at the original path starts Clean.
         assert_eq!(detach_state(&img), DetachState::Clean);
     }
@@ -505,38 +564,60 @@ mod tests {
     fn quarantine_path_is_a_sibling_under_a_quarantine_dir_not_inside_the_artifact() {
         let img = Path::new("/work/state/owner/dbdata.img");
         let q = quarantine_path(img, 42);
-        assert_eq!(q, Path::new("/work/state/owner/quarantine/dbdata.img.dirty.42"));
+        assert_eq!(
+            q,
+            Path::new("/work/state/owner/quarantine/dbdata.img.dirty.42")
+        );
     }
 
     // --- quota -------------------------------------------------------------
 
     #[test]
     fn quota_accepts_a_request_within_both_ceilings() {
-        let p = QuotaPolicy { max_volume_bytes: 100, max_owner_total_bytes: 500 };
+        let p = QuotaPolicy {
+            max_volume_bytes: 100,
+            max_owner_total_bytes: 500,
+        };
         assert!(check_quota(&p, 300, 100).is_ok());
     }
 
     #[test]
     fn quota_rejects_an_oversize_single_volume() {
-        let p = QuotaPolicy { max_volume_bytes: 100, max_owner_total_bytes: 500 };
+        let p = QuotaPolicy {
+            max_volume_bytes: 100,
+            max_owner_total_bytes: 500,
+        };
         assert_eq!(
             check_quota(&p, 0, 101).unwrap_err(),
-            QuotaError::PerVolume { requested: 101, limit: 100 }
+            QuotaError::PerVolume {
+                requested: 101,
+                limit: 100
+            }
         );
     }
 
     #[test]
     fn quota_rejects_when_owner_total_would_be_exceeded() {
-        let p = QuotaPolicy { max_volume_bytes: 100, max_owner_total_bytes: 500 };
+        let p = QuotaPolicy {
+            max_volume_bytes: 100,
+            max_owner_total_bytes: 500,
+        };
         assert_eq!(
             check_quota(&p, 450, 100).unwrap_err(),
-            QuotaError::OwnerTotal { existing: 450, requested: 100, limit: 500 }
+            QuotaError::OwnerTotal {
+                existing: 450,
+                requested: 100,
+                limit: 500
+            }
         );
     }
 
     #[test]
     fn quota_total_check_saturates_and_does_not_overflow() {
-        let p = QuotaPolicy { max_volume_bytes: u64::MAX, max_owner_total_bytes: u64::MAX };
+        let p = QuotaPolicy {
+            max_volume_bytes: u64::MAX,
+            max_owner_total_bytes: u64::MAX,
+        };
         // existing + requested would overflow u64; saturating_add keeps it at
         // MAX which is <= the MAX ceiling, so this is accepted (no panic).
         assert!(check_quota(&p, u64::MAX, 10).is_ok());
@@ -553,7 +634,10 @@ mod tests {
 
         FileCopyBackupHook.export(&img, &dest).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"durable-bytes");
-        assert!(img.exists(), "source (state volume) is untouched by an export");
+        assert!(
+            img.exists(),
+            "source (state volume) is untouched by an export"
+        );
         assert_eq!(std::fs::read(&img).unwrap(), b"durable-bytes");
     }
 
@@ -562,14 +646,20 @@ mod tests {
     #[test]
     fn plan_attach_creates_fresh_when_no_backing_file_exists() {
         let c = contract("s", 1, 0);
-        let q = QuotaPolicy { max_volume_bytes: 1000, max_owner_total_bytes: 1000 };
+        let q = QuotaPolicy {
+            max_volume_bytes: 1000,
+            max_owner_total_bytes: 1000,
+        };
         assert_eq!(plan_attach(&c, None, &q, 0, 100), AttachPlan::CreateFresh);
     }
 
     #[test]
     fn plan_attach_reuses_a_clean_compatible_volume() {
         let c = contract("s", 1, 5);
-        let q = QuotaPolicy { max_volume_bytes: 1000, max_owner_total_bytes: 1000 };
+        let q = QuotaPolicy {
+            max_volume_bytes: 1000,
+            max_owner_total_bytes: 1000,
+        };
         let header = StateSchemaVersion::new("s", 1, 3);
         assert_eq!(
             plan_attach(&c, Some((&header, DetachState::Clean)), &q, 100, 100),
@@ -583,10 +673,19 @@ mod tests {
         // (replaced fresh), not reported as incompatible — its header is not
         // trusted after a torn detach.
         let c = contract("s", 1, 5);
-        let q = QuotaPolicy { max_volume_bytes: 1000, max_owner_total_bytes: 1000 };
+        let q = QuotaPolicy {
+            max_volume_bytes: 1000,
+            max_owner_total_bytes: 1000,
+        };
         let incompat_header = StateSchemaVersion::new("other", 9, 9);
         assert_eq!(
-            plan_attach(&c, Some((&incompat_header, DetachState::Dirty)), &q, 100, 100),
+            plan_attach(
+                &c,
+                Some((&incompat_header, DetachState::Dirty)),
+                &q,
+                100,
+                100
+            ),
             AttachPlan::QuarantineThenFresh
         );
     }
@@ -594,22 +693,34 @@ mod tests {
     #[test]
     fn plan_attach_rejects_a_clean_but_incompatible_volume() {
         let c = contract("s", 1, 5);
-        let q = QuotaPolicy { max_volume_bytes: 1000, max_owner_total_bytes: 1000 };
+        let q = QuotaPolicy {
+            max_volume_bytes: 1000,
+            max_owner_total_bytes: 1000,
+        };
         let header = StateSchemaVersion::new("s", 2, 0); // version mismatch
         assert_eq!(
             plan_attach(&c, Some((&header, DetachState::Clean)), &q, 100, 100),
-            AttachPlan::RejectIncompatible(CompatError::VersionMismatch { expected: 1, found: 2 })
+            AttachPlan::RejectIncompatible(CompatError::VersionMismatch {
+                expected: 1,
+                found: 2
+            })
         );
     }
 
     #[test]
     fn plan_attach_rejects_on_quota_before_anything_else() {
         let c = contract("s", 1, 5);
-        let q = QuotaPolicy { max_volume_bytes: 50, max_owner_total_bytes: 1000 };
+        let q = QuotaPolicy {
+            max_volume_bytes: 50,
+            max_owner_total_bytes: 1000,
+        };
         // requested 100 > per-volume 50 → quota reject even for a fresh volume.
         assert_eq!(
             plan_attach(&c, None, &q, 0, 100),
-            AttachPlan::RejectQuota(QuotaError::PerVolume { requested: 100, limit: 50 })
+            AttachPlan::RejectQuota(QuotaError::PerVolume {
+                requested: 100,
+                limit: 50
+            })
         );
     }
 }
