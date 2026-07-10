@@ -19,6 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::{BuildTool, DOCKER_IMPORT_PLATFORM, DockerImportSpec, ResolvedBaseImage};
@@ -333,7 +334,7 @@ pub fn render_effective_dockerfile(
 /// input the next slice maps into `ServiceSpec` (CMD/ENTRYPOINT/WORKDIR/ENV/
 /// EXPOSE) and into the `docker_user_ignored` / `docker_healthcheck_ignored`
 /// warnings.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DockerImageConfig {
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,
@@ -697,6 +698,94 @@ pub fn run_dockerfile_build(
         dockerfile_sha256,
         effective_dockerfile_sha256,
         build_context_digest: context_digest,
+    })
+}
+
+// ── ato#1028 Registry Image Import v1.8: the OCI-image ACQUIRE stage ──────────
+//
+// The ONLY step that differs from the Dockerfile lane (pull+inspect vs build).
+// Everything downstream — plan derivation, rootfs pack, receipt, seal — is
+// shared with `run_dockerfile_import` unchanged.
+
+/// The result of pulling + inspecting a public registry image for the OCI import
+/// lane ([`super::run_oci_image_import`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PulledImage {
+    /// The registry MANIFEST digest the pull resolved to
+    /// (`registry/repo@sha256:…`) for [`DOCKER_IMPORT_PLATFORM`] — the pinned
+    /// identity the artifact keys on. A tag is not a reproducible identity
+    /// (same rule as [`resolve_base_digests`]); two tags of the same image
+    /// resolve here identically, so they yield the same artifact identity.
+    pub resolved_digest: String,
+    /// The local image content id (`.Id`, `sha256:…`) — the exact image bytes
+    /// that run (the same field the Dockerfile lane records as its final image).
+    pub final_image_digest: String,
+    /// The runtime config — the SAME [`DockerImageConfig`] type the Dockerfile
+    /// lane feeds to `derive_imported_service_plan_with_volumes`.
+    pub image_config: DockerImageConfig,
+}
+
+/// Pull a PUBLIC registry image for [`DOCKER_IMPORT_PLATFORM`] and inspect it:
+/// resolve its registry manifest digest (a tag is not a reproducible identity —
+/// ato#994 base-image policy), its content id, and its runtime config. No auth
+/// (v1 public-only). This is the OCI-image import lane's acquire step; the image
+/// is pulled by the caller-supplied ref (tag OR digest) and pinned to the
+/// resolved digest before anything downstream consumes it.
+pub fn pull_and_inspect_image(
+    runner: &dyn ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<PulledImage, String> {
+    run_tool(
+        runner,
+        tool,
+        &["pull", "--platform", DOCKER_IMPORT_PLATFORM, image_ref],
+        &format!("pull image {image_ref:?}"),
+    )?;
+    let dig = run_tool(
+        runner,
+        tool,
+        &[
+            "image",
+            "inspect",
+            "--format",
+            "{{index .RepoDigests 0}}",
+            image_ref,
+        ],
+        &format!("resolve image digest {image_ref:?}"),
+    )?;
+    let resolved_digest = dig.stdout.trim().to_string();
+    if resolved_digest.is_empty() || !resolved_digest.contains("@sha256:") {
+        return Err(format!(
+            "image {image_ref:?} did not resolve to a registry digest (got {resolved_digest:?}) — \
+             a tag is not a reproducible identity; refusing to continue (fail-closed)"
+        ));
+    }
+    let id_out = run_tool(
+        runner,
+        tool,
+        &["image", "inspect", "--format", "{{.Id}}", image_ref],
+        &format!("inspect image id {image_ref:?}"),
+    )?;
+    let mut final_image_digest = id_out.stdout.trim().to_string();
+    if final_image_digest.is_empty() {
+        return Err(format!("image {image_ref:?} has no Id"));
+    }
+    // podman prints bare hex for .Id; docker prints sha256:… — normalize.
+    if !final_image_digest.starts_with("sha256:") {
+        final_image_digest = format!("sha256:{final_image_digest}");
+    }
+    let cfg_out = run_tool(
+        runner,
+        tool,
+        &["image", "inspect", image_ref],
+        &format!("inspect image config {image_ref:?}"),
+    )?;
+    let image_config = parse_image_config(&cfg_out.stdout)?;
+    Ok(PulledImage {
+        resolved_digest,
+        final_image_digest,
+        image_config,
     })
 }
 
@@ -1288,5 +1377,128 @@ CMD ["/app/serve"]
             cleanup(outside);
         }
         cleanup(dir);
+    }
+
+    // --- pull_and_inspect_image (ato#1028 OCI acquire) -----------------------------
+
+    fn full_pull_script(repo_digest: &str) -> Vec<(&'static str, i32, String, &'static str)> {
+        vec![
+            ("podman pull", 0, String::new(), ""),
+            (
+                "podman image inspect --format {{index .RepoDigests 0}}",
+                0,
+                format!("{repo_digest}\n"),
+                "",
+            ),
+            (
+                "podman image inspect --format {{.Id}}",
+                0,
+                "0123abcd\n".to_string(),
+                "",
+            ),
+            ("podman image inspect", 0, INSPECT_JSON.to_string(), ""),
+        ]
+    }
+
+    /// Owned-string variant of `FakeRunner::new` (the pull digest is built at runtime).
+    fn owned_runner(script: Vec<(&'static str, i32, String, &'static str)>) -> FakeRunner {
+        FakeRunner {
+            script: script
+                .into_iter()
+                .map(|(prefix, status, stdout, stderr)| {
+                    (
+                        prefix.to_string(),
+                        ImportCommandOutput {
+                            status,
+                            stdout,
+                            stderr: stderr.to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn pull_resolves_digest_id_and_config_in_order() {
+        let runner = owned_runner(full_pull_script("docker.io/library/metube@sha256:aaaa"));
+        let pulled =
+            pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/alexta69/metube:latest")
+                .unwrap();
+        assert_eq!(
+            pulled.resolved_digest,
+            "docker.io/library/metube@sha256:aaaa"
+        );
+        assert_eq!(pulled.final_image_digest, "sha256:0123abcd"); // bare hex normalized
+        assert_eq!(pulled.image_config.cmd, vec!["node", "server.js"]);
+        assert_eq!(pulled.image_config.exposed_tcp_ports, vec![3000, 8080]);
+
+        let calls = runner.calls();
+        let idx = |p: &str| {
+            calls
+                .iter()
+                .position(|c| c.starts_with(p))
+                .unwrap_or_else(|| panic!("missing {p}: {calls:?}"))
+        };
+        // Pull precedes every inspect; the pull is platform-pinned.
+        assert!(
+            calls[0]
+                .starts_with("podman pull --platform linux/amd64 ghcr.io/alexta69/metube:latest"),
+            "{:?}",
+            calls[0]
+        );
+        assert!(idx("podman pull") < idx("podman image inspect --format {{index .RepoDigests 0}}"));
+    }
+
+    #[test]
+    fn pull_accepts_a_digest_ref_and_round_trips_the_digest() {
+        // A digest-pinned ref resolves to itself (RepoDigests echoes the manifest digest).
+        let runner = owned_runner(full_pull_script("ghcr.io/alexta69/metube@sha256:beef"));
+        let pulled = pull_and_inspect_image(
+            &runner,
+            BuildTool::Podman,
+            "ghcr.io/alexta69/metube@sha256:beef",
+        )
+        .unwrap();
+        assert_eq!(
+            pulled.resolved_digest,
+            "ghcr.io/alexta69/metube@sha256:beef"
+        );
+    }
+
+    #[test]
+    fn pull_undigestable_image_fails_closed() {
+        let mut script = full_pull_script("docker.io/library/metube@sha256:aaaa");
+        script[1] = (
+            "podman image inspect --format {{index .RepoDigests 0}}",
+            0,
+            "\n".to_string(),
+            "",
+        );
+        let runner = owned_runner(script);
+        let err = pull_and_inspect_image(&runner, BuildTool::Podman, "metube:local").unwrap_err();
+        assert!(
+            err.contains("did not resolve to a registry digest"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn pull_failure_surfaces_stderr_tail() {
+        let mut script = full_pull_script("docker.io/library/metube@sha256:aaaa");
+        script[0] = (
+            "podman pull",
+            125,
+            String::new(),
+            "Error: initializing source: manifest unknown",
+        );
+        let runner = owned_runner(script);
+        let err = pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/nope/nope:latest")
+            .unwrap_err();
+        assert!(
+            err.contains("pull image") && err.contains("manifest unknown"),
+            "{err}"
+        );
     }
 }

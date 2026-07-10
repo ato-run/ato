@@ -340,6 +340,19 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
 }
 
 fn main() -> std::io::Result<()> {
+    // ato#1026: `ato-guest-agent tcp-relay --listen <ip:port> --target <ip:port>`
+    // is a standalone subcommand the generated init backgrounds for imports
+    // that opted into the localhost→guest-IP relay. It never touches the
+    // binding session / supervisor path below, so it is dispatched FIRST.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("tcp-relay") {
+        if let Err(e) = guest_agent::relay::run(&argv[1..]) {
+            eprintln!("ato-guest-agent: {e}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     let mode = std::env::var("ATO_GUEST_AGENT_MODE").unwrap_or_else(|_| "stdio".to_string());
 
     // Required binding names from argv; secrets are delivered to the default tmpfs root
@@ -426,7 +439,10 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+// The guest-agent is a LINUX-ONLY runtime component (it runs inside the
+// Firecracker guest): its behavior tests spawn `sh`, use unix paths/perms, and
+// exercise mount/vsock semantics that do not exist on Windows CI runners.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use guest_agent::supervisor::{SpawnPlan, SupervisorConfig};
@@ -460,6 +476,9 @@ mod tests {
         fn is_running(&self) -> bool {
             *self.0.running.borrow()
         }
+        fn run_once(&mut self, _: &SpawnPlan) -> std::io::Result<i32> {
+            Ok(0) // Phase 6: no run_once tasks in the agent-runtime tests.
+        }
     }
 
     fn deliver_line(name: &str, secret: &str) -> String {
@@ -490,6 +509,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let session = BindingSession::new(vec![], TmpfsBindingSink::new(dir));
         let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
@@ -567,6 +587,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
@@ -634,6 +655,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: volumes.clone(),
+            generated_bindings: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
