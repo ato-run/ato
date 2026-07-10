@@ -473,6 +473,9 @@ mod tests {
         fn is_running(&self) -> bool {
             *self.0.running.borrow()
         }
+        fn run_once(&mut self, _: &SpawnPlan) -> std::io::Result<i32> {
+            Ok(0) // Phase 6: no run_once tasks in the agent-runtime tests.
+        }
     }
 
     fn deliver_line(name: &str, secret: &str) -> String {
