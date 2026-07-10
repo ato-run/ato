@@ -36,6 +36,7 @@ use serde::Serialize;
 pub mod build;
 /// Imported-image → ServiceSpec mapping + rootfs export/injection/pack.
 pub mod rootfs;
+pub use rootfs::VolumePolicy;
 
 use crate::rootfs_builder::{valid_env_var_name, validate_subdir};
 use crate::scanner::{PROVIDER_KEY_PREFIXES, SENSITIVE_ENV_MARKERS};
@@ -153,6 +154,14 @@ pub struct DockerImportOptions {
     pub readiness_http_path: Option<String>,
     /// Packed ext4 size — changes the artifact bytes, therefore identity.
     pub size_mib: u64,
+    /// ato#1024: `Some("tmpfs")` when image-declared VOLUMEs were mapped to
+    /// guest tmpfs. Skipped when `None` so every pre-existing (Reject-policy)
+    /// import keeps a byte-identical descriptor envelope — and therefore the
+    /// same `import_identity_digest` / `import_descriptor_blake3`; a
+    /// tmpfs-mapped build intentionally gets a NEW identity (its init and
+    /// runtime semantics differ).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub volumes: Option<String>,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -536,6 +545,8 @@ pub struct DockerfileImportRequest<'a> {
     pub port_override: Option<u16>,
     /// Explicit readiness path (`None` = synthesized `GET /`).
     pub readiness_http_path: Option<String>,
+    /// ato#1024: how to treat image-declared VOLUMEs (default fail-closed).
+    pub volume_policy: rootfs::VolumePolicy,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -591,13 +602,13 @@ pub fn run_dockerfile_import(
     req: &DockerfileImportRequest<'_>,
 ) -> Result<DockerfileImportOutcome, String> {
     let probe = build::probe_build_tool(runner)?;
-    let built =
-        build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
-    let plan = rootfs::derive_imported_service_plan(
+    let built = build::run_dockerfile_build(runner, &probe, req.context_dir, &req.spec, &req.image_tag)?;
+    let plan = rootfs::derive_imported_service_plan_with_volumes(
         &built.image_config,
         req.policy,
         req.port_override,
         req.readiness_http_path.clone(),
+        req.volume_policy,
     )?;
     let rootfs_bytes = rootfs::pack_imported_rootfs(
         probe.tool,
@@ -612,6 +623,10 @@ pub fn run_dockerfile_import(
         port_override: req.port_override,
         readiness_http_path: req.readiness_http_path.clone(),
         size_mib: req.size_mib,
+        volumes: match req.volume_policy {
+            rootfs::VolumePolicy::Reject => None,
+            rootfs::VolumePolicy::Tmpfs => Some("tmpfs".to_string()),
+        },
     };
     let receipt = assemble_receipt(
         &probe,
@@ -915,6 +930,7 @@ mod tests {
                 port_override: None,
                 readiness_http_path: None,
                 size_mib: 2048,
+                volumes: None,
             },
             warnings: vec![],
         }
@@ -1203,6 +1219,7 @@ mod tests {
                 port_override: Some(8080),
                 readiness_http_path: Some("/health".into()),
                 size_mib: 2048,
+                volumes: None,
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };

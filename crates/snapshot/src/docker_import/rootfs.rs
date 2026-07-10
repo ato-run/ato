@@ -50,7 +50,60 @@ pub struct ImportedServicePlan {
     /// Readiness path (`None` = synthesized `GET /`, mirroring the legacy
     /// builder's `probe_synthesized` contract).
     pub readiness_http_path: Option<String>,
+    /// Declared VOLUME paths mapped to guest tmpfs (ato#1024). Non-empty ONLY
+    /// when the job explicitly opted in via `volumes=tmpfs` — the receipt
+    /// records these so it is auditable that the artifact's mutable state is
+    /// deliberately ephemeral (dies on stop/resume; acceptable for the
+    /// throwaway preview lane, still lossy for a durable install exactly as
+    /// ato#983 warned — hence opt-in + receipt, never a default).
+    pub tmpfs_volumes: Vec<String>,
     pub warnings: Vec<DockerImportWarning>,
+}
+
+/// How the job asked to treat image-declared VOLUMEs (ato#1024).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VolumePolicy {
+    /// Fail closed on any VOLUME (the ato#983 default, unchanged).
+    #[default]
+    Reject,
+    /// Mount each declared VOLUME as guest tmpfs — state is EXPECTED to die.
+    Tmpfs,
+}
+
+/// Paths a VOLUME may never shadow with tmpfs: mounting over these would
+/// replace the OS / the app itself / an already-tmpfs mount rather than the
+/// app's data directory, so they fail closed even under `volumes=tmpfs`.
+const TMPFS_FORBIDDEN_PREFIXES: &[&str] =
+    &["/proc", "/sys", "/dev", "/sbin", "/bin", "/usr", "/lib", "/lib64", "/etc", "/tmp", "/run", "/var/tmp"];
+
+/// Validate one declared VOLUME path for tmpfs mapping. The path is rendered
+/// into the QUOTED init heredoc, so the character set is restricted to what
+/// cannot break out of `mount -t tmpfs tmpfs <path>` (no whitespace, quotes,
+/// or shell metacharacters — fail-closed rather than escaped).
+fn validate_tmpfs_volume_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/') || path == "/" {
+        return Err(format!("VOLUME {path:?} is not an absolute non-root path"));
+    }
+    if path.len() > 200 {
+        return Err(format!("VOLUME {path:?} exceeds 200 chars"));
+    }
+    if !path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+        return Err(format!(
+            "VOLUME {path:?} contains characters outside [A-Za-z0-9/_.-] — refusing to render it into the guest init (fail-closed)"
+        ));
+    }
+    if path.contains("..") {
+        return Err(format!("VOLUME {path:?} contains '..'"));
+    }
+    let normalized = path.trim_end_matches('/');
+    for forbidden in TMPFS_FORBIDDEN_PREFIXES {
+        if normalized == *forbidden || normalized.starts_with(&format!("{forbidden}/")) {
+            return Err(format!(
+                "VOLUME {path:?} would tmpfs-shadow {forbidden} (OS/app surface, not app data) — fail-closed"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Derive the v0 import plan from an image config. Fail-closed on: empty argv,
@@ -61,6 +114,17 @@ pub fn derive_imported_service_plan(
     policy: SecretEnvPolicy,
     port_override: Option<u16>,
     readiness_http_path: Option<String>,
+) -> Result<ImportedServicePlan, String> {
+    derive_imported_service_plan_with_volumes(config, policy, port_override, readiness_http_path, VolumePolicy::Reject)
+}
+
+/// [`derive_imported_service_plan`] with an explicit [`VolumePolicy`] (ato#1024).
+pub fn derive_imported_service_plan_with_volumes(
+    config: &DockerImageConfig,
+    policy: SecretEnvPolicy,
+    port_override: Option<u16>,
+    readiness_http_path: Option<String>,
+    volume_policy: VolumePolicy,
 ) -> Result<ImportedServicePlan, String> {
     // Docker exec semantics: ENTRYPOINT is the argv head, CMD its default args
     // (both already exec-form in image config). Neither alone is unusual but
@@ -74,14 +138,24 @@ pub fn derive_imported_service_plan(
         );
     }
 
-    if !config.volumes.is_empty() {
-        return Err(format!(
-            "image declares VOLUME {} — unmapped mutable state would silently die on a \
-             frozen-snapshot resume (ato#983). Map it to Ato [state] + state_bindings \
-             (import volume mapping is a later slice) or drop the VOLUME",
-            config.volumes.join(", ")
-        ));
-    }
+    let tmpfs_volumes: Vec<String> = match (volume_policy, config.volumes.is_empty()) {
+        (_, true) => Vec::new(),
+        (VolumePolicy::Reject, false) => {
+            return Err(format!(
+                "image declares VOLUME {} — unmapped mutable state would silently die on a \
+                 frozen-snapshot resume (ato#983). Map it to Ato [state] + state_bindings, \
+                 opt in to ephemeral tmpfs mapping with volumes=tmpfs (ato#1024), or drop \
+                 the VOLUME",
+                config.volumes.join(", ")
+            ));
+        }
+        (VolumePolicy::Tmpfs, false) => {
+            for v in &config.volumes {
+                validate_tmpfs_volume_path(v)?;
+            }
+            config.volumes.clone()
+        }
+    };
 
     let port = match (port_override, config.exposed_tcp_ports.as_slice()) {
         (Some(p), _) => p,
@@ -163,12 +237,7 @@ pub fn derive_imported_service_plan(
         services: Some(vec![service]),
         public_service: Some(IMPORTED_SERVICE_NAME.to_string()),
     };
-    Ok(ImportedServicePlan {
-        supervisor,
-        port,
-        readiness_http_path,
-        warnings,
-    })
+    Ok(ImportedServicePlan { supervisor, port, readiness_http_path, tmpfs_volumes, warnings })
 }
 
 /// The pack script for an ALREADY-BUILT imported image: same shared pipeline as
@@ -183,15 +252,17 @@ pub(crate) fn imported_pack_script(
     plan: &ImportedServicePlan,
     size_mib: u64,
 ) -> String {
-    let (agent_prep, launch) = supervisor_prep_and_launch(
-        Some(&plan.supervisor),
-        plan.port,
-        /* start_cmd unused in services shape */ "",
-    );
-    let healthcheck = plan
-        .readiness_http_path
-        .clone()
-        .unwrap_or_else(|| "/".to_string());
+    let (agent_prep, launch) =
+        supervisor_prep_and_launch(Some(&plan.supervisor), plan.port, /* start_cmd unused in services shape */ "");
+    let healthcheck = plan.readiness_http_path.clone().unwrap_or_else(|| "/".to_string());
+    // ato#1024: each opted-in VOLUME becomes a guest tmpfs mount. Paths were
+    // validated fail-closed at plan derivation (validate_tmpfs_volume_path),
+    // so plain interpolation into the quoted init heredoc is safe here.
+    let extra_mounts: String = plan
+        .tmpfs_volumes
+        .iter()
+        .map(|v| format!("mkdir -p {v} 2>/dev/null; mount -t tmpfs tmpfs {v} 2>/dev/null\n"))
+        .collect();
     rootfs_pack_script(&PackScriptInputs {
         tool,
         tag_init: format!("TAG={}", shell_single_quote(image_tag)),
@@ -202,6 +273,7 @@ pub(crate) fn imported_pack_script(
         port: plan.port,
         healthcheck,
         size_mib,
+        extra_mounts,
     })
 }
 
@@ -304,6 +376,69 @@ mod tests {
             err.contains("VOLUME /data") && err.contains("[state]"),
             "{err}"
         );
+    }
+
+    // --- ato#1024 VOLUME→tmpfs opt-in -----------------------------------------
+
+    #[test]
+    fn tmpfs_policy_accepts_volumes_and_records_them() {
+        let mut c = config();
+        c.volumes = vec!["/data".into(), "/downloads".into()];
+        let plan = derive_imported_service_plan_with_volumes(
+            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+        )
+        .unwrap();
+        assert_eq!(plan.tmpfs_volumes, vec!["/data", "/downloads"]);
+        // The default (Reject) path never populates the field.
+        let plan = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        assert!(plan.tmpfs_volumes.is_empty());
+    }
+
+    #[test]
+    fn tmpfs_policy_validates_paths_fail_closed() {
+        for (bad, why) in [
+            ("data", "relative"),
+            ("/", "root"),
+            ("/data dir", "whitespace"),
+            ("/data;rm", "shell metacharacter"),
+            ("/data/../etc", "dot-dot"),
+            ("/etc/app", "forbidden prefix /etc"),
+            ("/tmp", "already tmpfs"),
+            ("/usr/local/share", "forbidden prefix /usr"),
+        ] {
+            let mut c = config();
+            c.volumes = vec![bad.to_string()];
+            let err = derive_imported_service_plan_with_volumes(
+                &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+            )
+            .unwrap_err();
+            assert!(err.contains("VOLUME"), "{why}: {err}");
+        }
+    }
+
+    #[test]
+    fn tmpfs_volumes_render_mount_lines_into_init() {
+        let mut c = config();
+        c.volumes = vec!["/data".into()];
+        let plan = derive_imported_service_plan_with_volumes(
+            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+        )
+        .unwrap();
+        let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
+        assert!(
+            script.contains("mkdir -p /data 2>/dev/null; mount -t tmpfs tmpfs /data 2>/dev/null"),
+            "init must mount the declared VOLUME as tmpfs:\n{script}"
+        );
+        // The mount lands INSIDE the quoted INIT heredoc (before `cd /`), not in
+        // the host-side pack section.
+        let init = script.split("<<'INIT'").nth(1).unwrap().split("INIT").next().unwrap();
+        assert!(init.contains("mount -t tmpfs tmpfs /data"), "mount must be in guest init:\n{init}");
+
+        // No volumes ⇒ byte-wise no extra lines (the legacy template shape).
+        let plain = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, 1024);
+        assert!(!plain_script.contains("mkdir -p /data"));
+        assert_eq!(plain_script.matches("mount -t tmpfs").count(), 3, "only the standard /tmp /run /var/tmp mounts");
     }
 
     #[test]
