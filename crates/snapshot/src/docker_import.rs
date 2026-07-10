@@ -159,6 +159,12 @@ pub struct DockerImportOptions {
     /// runtime semantics differ).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub volumes: Option<String>,
+    /// ato#1026: `true` when the init starts a localhost→guest-IP relay for a
+    /// loopback-binding app. Skipped when false so every pre-existing import
+    /// keeps a byte-identical descriptor envelope (same identity digest); an
+    /// opted-in build intentionally gets a NEW identity (its init differs).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub host_bind_relay: bool,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -532,6 +538,8 @@ pub struct DockerfileImportRequest<'a> {
     pub readiness_http_path: Option<String>,
     /// ato#1024: how to treat image-declared VOLUMEs (default fail-closed).
     pub volume_policy: rootfs::VolumePolicy,
+    /// ato#1026: start the localhost→guest-IP relay (default off).
+    pub host_bind_relay: bool,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -594,6 +602,7 @@ pub fn run_dockerfile_import(
         req.port_override,
         req.readiness_http_path.clone(),
         req.volume_policy,
+        req.host_bind_relay,
     )?;
     let rootfs_bytes =
         rootfs::pack_imported_rootfs(probe.tool, &req.image_tag, &plan, req.out_ext4, req.size_mib)?;
@@ -607,6 +616,7 @@ pub fn run_dockerfile_import(
             rootfs::VolumePolicy::Reject => None,
             rootfs::VolumePolicy::Tmpfs => Some("tmpfs".to_string()),
         },
+        host_bind_relay: req.host_bind_relay,
     };
     let receipt = assemble_receipt(&probe, &req.spec, &built, &plan, import_options, exported_rootfs_digest);
     Ok(DockerfileImportOutcome {
@@ -846,6 +856,7 @@ mod tests {
                 readiness_http_path: None,
                 size_mib: 2048,
                 volumes: None,
+                host_bind_relay: false,
             },
             warnings: vec![],
         }
@@ -1039,6 +1050,26 @@ mod tests {
     }
 
     #[test]
+    fn host_bind_relay_is_skipped_when_false_and_shifts_identity_when_true() {
+        // ato#1026: host_bind_relay=false is dropped from the serialized envelope
+        // (skip_serializing_if), so a pre-existing import keeps a byte-identical
+        // descriptor + identity digest; =true is a new input => new identity.
+        let base = sample_receipt(); // import_options.host_bind_relay defaults false
+        assert!(!base.import_options.host_bind_relay);
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(!json.contains("host_bind_relay"), "false must be omitted: {json}");
+
+        let mut relayed = base.clone();
+        relayed.import_options.host_bind_relay = true;
+        let relayed_json = serde_json::to_string(&relayed.import_options).unwrap();
+        assert!(relayed_json.contains("\"host_bind_relay\":true"), "true must serialize: {relayed_json}");
+
+        // Identity moves ONLY when the flag flips on -- never on the default.
+        assert_ne!(import_descriptor_blake3(&relayed), import_descriptor_blake3(&base));
+        assert_ne!(import_identity_digest(&relayed), import_identity_digest(&base));
+    }
+
+    #[test]
     fn receipt_serializes_with_full_provenance() {
         let receipt = DockerImportReceipt {
             importer_version: DOCKER_IMPORTER_VERSION.into(),
@@ -1062,6 +1093,7 @@ mod tests {
                 readiness_http_path: Some("/health".into()),
                 size_mib: 2048,
                 volumes: None,
+                host_bind_relay: false,
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };

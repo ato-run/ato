@@ -584,6 +584,7 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
         port_override: params.port_override,
         readiness_http_path: params.readiness_http_path.clone(),
         volume_policy: params.volumes,
+        host_bind_relay: params.host_bind_relay,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
         size_mib: cfg.rootfs_size_mib,
@@ -661,6 +662,9 @@ struct DockerfileImportParams {
     /// ato#1024: `"tmpfs"` opts in to mapping image-declared VOLUMEs to guest
     /// tmpfs (ephemeral by design); absent keeps the ato#983 fail-closed gate.
     volumes: snapshot::docker_import::VolumePolicy,
+    /// ato#1026: `true` opts in to the localhost→guest-IP relay for apps that
+    /// bind 127.0.0.1 inside the guest (default off).
+    host_bind_relay: bool,
 }
 
 impl Default for DockerfileImportParams {
@@ -670,6 +674,7 @@ impl Default for DockerfileImportParams {
             port_override: None,
             readiness_http_path: None,
             volumes: snapshot::docker_import::VolumePolicy::Reject,
+            host_bind_relay: false,
         }
     }
 }
@@ -737,6 +742,13 @@ fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Resul
                     Some("tmpfs") => out.volumes = snapshot::docker_import::VolumePolicy::Tmpfs,
                     _ => return Err("params.volumes must be the string \"tmpfs\" (the only supported mapping)".into()),
                 }
+            }
+            "host_bind_relay" => {
+                // ato#1026: strictly a bool — a non-bool must not be silently
+                // treated as truthy/falsy.
+                out.host_bind_relay = val
+                    .as_bool()
+                    .ok_or("params.host_bind_relay must be a boolean")?;
             }
             other => return Err(format!("unknown dockerfile_import param {other:?} (rejected fail-closed)")),
         }
@@ -1231,6 +1243,12 @@ mod tests {
         assert_eq!(parse_import_params(None).unwrap().volumes, snapshot::docker_import::VolumePolicy::Reject);
         for bad in [serde_json::json!({"volumes": "rw"}), serde_json::json!({"volumes": true}), serde_json::json!({"volumes": null})] {
             assert!(parse_import_params(Some(&bad)).unwrap_err().contains("volumes"));
+        }
+        // ato#1026: host_bind_relay is a strict bool.
+        assert!(parse_import_params(Some(&serde_json::json!({"host_bind_relay": true}))).unwrap().host_bind_relay);
+        assert!(!parse_import_params(None).unwrap().host_bind_relay);
+        for bad in [serde_json::json!({"host_bind_relay": "yes"}), serde_json::json!({"host_bind_relay": 1})] {
+            assert!(parse_import_params(Some(&bad)).unwrap_err().contains("host_bind_relay"));
         }
     }
 

@@ -322,6 +322,19 @@ impl<S: BindingSink, W: Workload> AgentRuntime<S, W> {
 }
 
 fn main() -> std::io::Result<()> {
+    // ato#1026: `ato-guest-agent tcp-relay --listen <ip:port> --target <ip:port>`
+    // is a standalone subcommand the generated init backgrounds for imports
+    // that opted into the localhost→guest-IP relay. It never touches the
+    // binding session / supervisor path below, so it is dispatched FIRST.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("tcp-relay") {
+        if let Err(e) = guest_agent::relay::run(&argv[1..]) {
+            eprintln!("ato-guest-agent: {e}");
+            std::process::exit(2);
+        }
+        return Ok(());
+    }
+
     let mode = std::env::var("ATO_GUEST_AGENT_MODE").unwrap_or_else(|_| "stdio".to_string());
 
     // Required binding names from argv; secrets are delivered to the default tmpfs root

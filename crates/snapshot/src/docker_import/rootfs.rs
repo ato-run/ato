@@ -57,6 +57,12 @@ pub struct ImportedServicePlan {
     /// throwaway preview lane, still lossy for a durable install exactly as
     /// ato#983 warned — hence opt-in + receipt, never a default).
     pub tmpfs_volumes: Vec<String>,
+    /// ato#1026: when true, the generated init starts an `ato-guest-agent
+    /// tcp-relay` from the guest's own IP:port → `127.0.0.1:port`, so an app
+    /// that binds only loopback is reachable by the readiness probe and the
+    /// app-proxy (both dial the guest's routable IP). Opt-in per import
+    /// (`host_bind_relay`); recorded in the receipt ⇒ new artifact identity.
+    pub host_bind_relay: bool,
     pub warnings: Vec<DockerImportWarning>,
 }
 
@@ -115,16 +121,18 @@ pub fn derive_imported_service_plan(
     port_override: Option<u16>,
     readiness_http_path: Option<String>,
 ) -> Result<ImportedServicePlan, String> {
-    derive_imported_service_plan_with_volumes(config, policy, port_override, readiness_http_path, VolumePolicy::Reject)
+    derive_imported_service_plan_with_volumes(config, policy, port_override, readiness_http_path, VolumePolicy::Reject, false)
 }
 
-/// [`derive_imported_service_plan`] with an explicit [`VolumePolicy`] (ato#1024).
+/// [`derive_imported_service_plan`] with an explicit [`VolumePolicy`] (ato#1024)
+/// and the ato#1026 localhost-relay opt-in.
 pub fn derive_imported_service_plan_with_volumes(
     config: &DockerImageConfig,
     policy: SecretEnvPolicy,
     port_override: Option<u16>,
     readiness_http_path: Option<String>,
     volume_policy: VolumePolicy,
+    host_bind_relay: bool,
 ) -> Result<ImportedServicePlan, String> {
     // Docker exec semantics: ENTRYPOINT is the argv head, CMD its default args
     // (both already exec-form in image config). Neither alone is unusual but
@@ -224,7 +232,7 @@ pub fn derive_imported_service_plan_with_volumes(
         services: Some(vec![service]),
         public_service: Some(IMPORTED_SERVICE_NAME.to_string()),
     };
-    Ok(ImportedServicePlan { supervisor, port, readiness_http_path, tmpfs_volumes, warnings })
+    Ok(ImportedServicePlan { supervisor, port, readiness_http_path, tmpfs_volumes, host_bind_relay, warnings })
 }
 
 /// The pack script for an ALREADY-BUILT imported image: same shared pipeline as
@@ -250,6 +258,20 @@ pub(crate) fn imported_pack_script(
         .iter()
         .map(|v| format!("mkdir -p {v} 2>/dev/null; mount -t tmpfs tmpfs {v} 2>/dev/null\n"))
         .collect();
+    // ato#1026: start the localhost→guest-IP relay BEFORE the app launch. The
+    // guest-agent resolves its own IP from /proc/cmdline (no shell IP-parsing,
+    // no iproute2 in the app image) and the relay retries the loopback target
+    // while the app finishes binding, so starting it first is safe. `port` is
+    // a u16 rendered as digits — nothing to quote.
+    let extra_prelaunch: String = if plan.host_bind_relay {
+        format!(
+            "/usr/local/bin/ato-guest-agent tcp-relay --listen-guest-port {port} \
+             --target 127.0.0.1:{port} >/tmp/ato-relay.log 2>&1 &\n",
+            port = plan.port
+        )
+    } else {
+        String::new()
+    };
     rootfs_pack_script(&PackScriptInputs {
         tool,
         tag_init: format!("TAG={}", shell_single_quote(image_tag)),
@@ -261,6 +283,7 @@ pub(crate) fn imported_pack_script(
         healthcheck,
         size_mib,
         extra_mounts,
+        extra_prelaunch,
     })
 }
 
@@ -361,7 +384,7 @@ mod tests {
         let mut c = config();
         c.volumes = vec!["/data".into(), "/downloads".into()];
         let plan = derive_imported_service_plan_with_volumes(
-            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs, false,
         )
         .unwrap();
         assert_eq!(plan.tmpfs_volumes, vec!["/data", "/downloads"]);
@@ -385,7 +408,7 @@ mod tests {
             let mut c = config();
             c.volumes = vec![bad.to_string()];
             let err = derive_imported_service_plan_with_volumes(
-                &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+                &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs, false,
             )
             .unwrap_err();
             assert!(err.contains("VOLUME"), "{why}: {err}");
@@ -397,7 +420,7 @@ mod tests {
         let mut c = config();
         c.volumes = vec!["/data".into()];
         let plan = derive_imported_service_plan_with_volumes(
-            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs,
+            &c, SecretEnvPolicy::Reject, None, None, VolumePolicy::Tmpfs, false,
         )
         .unwrap();
         let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
@@ -415,6 +438,33 @@ mod tests {
         let plain_script = imported_pack_script("docker", "ato-import-x", &plain, 1024);
         assert!(!plain_script.contains("mkdir -p /data"));
         assert_eq!(plain_script.matches("mount -t tmpfs").count(), 3, "only the standard /tmp /run /var/tmp mounts");
+    }
+
+    // --- ato#1026 localhost→guest-IP relay opt-in ----------------------------
+
+    #[test]
+    fn host_bind_relay_renders_the_relay_line_in_init() {
+        let plan = derive_imported_service_plan_with_volumes(
+            &config(), SecretEnvPolicy::Reject, Some(1737), None, VolumePolicy::Reject, true,
+        )
+        .unwrap();
+        assert!(plan.host_bind_relay);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
+        let init = script.split("<<'INIT'").nth(1).unwrap().split("INIT").next().unwrap();
+        assert!(
+            init.contains("ato-guest-agent tcp-relay --listen-guest-port 1737") && init.contains("--target 127.0.0.1:1737"),
+            "init must start the relay for the declared port:\n{init}"
+        );
+        // The relay starts BEFORE the app launch (so it is listening early;
+        // it also retries the target, but ordering must be prelaunch).
+        let relay_at = init.find("tcp-relay").unwrap();
+        let launch_at = init.find("ato-guest-agent ").map(|_| init.rfind("ato-guest-agent").unwrap()).unwrap();
+        assert!(relay_at <= launch_at, "relay line must precede the agent launch");
+
+        // Opt-out (default) ⇒ no relay line at all.
+        let plain = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        assert!(!plain.host_bind_relay);
+        assert!(!imported_pack_script("docker", "ato-import-x", &plain, 1024).contains("tcp-relay"));
     }
 
     #[test]

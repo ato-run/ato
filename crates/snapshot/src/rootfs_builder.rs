@@ -1293,9 +1293,10 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
         size_mib,
-        // Legacy build: no VOLUME mapping — empty keeps the emitted script
-        // byte-identical to the pre-ato#1024 template.
+        // Legacy build: no VOLUME mapping / no relay — empty keeps the emitted
+        // script byte-identical to the pre-ato#1024/#1026 template.
         extra_mounts: String::new(),
+        extra_prelaunch: String::new(),
     })
 }
 
@@ -1425,6 +1426,11 @@ pub(crate) struct PackScriptInputs<'a> {
     /// already be shell-safe — paths are validated fail-closed upstream
     /// (`validate_tmpfs_volume_path`), never escaped here.
     pub extra_mounts: String,
+    /// Extra init lines rendered AFTER `cd <init_cwd>` and BEFORE the launch
+    /// (ato#1026 localhost relay). MUST be empty for the legacy build (keeps
+    /// its emitted script byte-identical); content is generated, never a
+    /// user-controlled literal.
+    pub extra_prelaunch: String,
 }
 
 /// The bash pipeline that turns an app image into a read-only-bootable ext4:
@@ -1471,7 +1477,7 @@ mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 {extra_mounts}cd {init_cwd}
-{launch}
+{extra_prelaunch}{launch}
 while true; do sleep 1000; done
 INIT
 chmod +x "$BUILD/rootfs/sbin/init"
@@ -1494,6 +1500,7 @@ sync; umount "$MNT"
         hc = i.healthcheck,
         size = i.size_mib,
         extra_mounts = i.extra_mounts,
+        extra_prelaunch = i.extra_prelaunch,
     )
 }
 
