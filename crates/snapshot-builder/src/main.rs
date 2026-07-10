@@ -167,7 +167,13 @@ struct ClaimedJob {
     /// silently substitutes the manifest default for a different requested target.
     target_label: String,
     profile: String,
-    source: ClaimedSource,
+    /// The server-resolved approved source. Present for the source-backed kinds
+    /// (recipe / dockerfile_import), and `None` for the self-contained kinds
+    /// whose whole input is `params` (compose_import; oci_image_import never reads
+    /// it either) — those pack from params, not a checkout. A recipe/dockerfile
+    /// job with no source fails closed at the `source` stage.
+    #[serde(default)]
+    source: Option<ClaimedSource>,
     /// #932: the APPROVED store recipe manifest (`capsule_source_recipes.recipe_toml`),
     /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
     /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
@@ -518,11 +524,17 @@ fn produce_recipe_build(
     } else {
         "repo_capsule_toml"
     };
+    let source = job.source.as_ref().ok_or_else(|| {
+        fail(
+            "source",
+            "recipe job carries no server-resolved source".into(),
+        )
+    })?;
     let src = materialize_source(
-        &job.source.github_owner,
-        &job.source.github_repo,
-        &job.source.commit_sha,
-        job.source.subdirectory.as_deref(),
+        &source.github_owner,
+        &source.github_repo,
+        &source.commit_sha,
+        source.subdirectory.as_deref(),
         job.recipe_toml.as_deref(),
         &jobdir.join("src"),
     )
@@ -564,10 +576,10 @@ fn produce_recipe_build(
         .map_err(|e| fail("manifest", e.to_string()))?;
     let envelope = ReadyStateDeclaredEnvelope {
         source_identifier: store_source_identifier(
-            &job.source.github_owner,
-            &job.source.github_repo,
-            &job.source.commit_sha,
-            job.source.subdirectory.as_deref(),
+            &source.github_owner,
+            &source.github_repo,
+            &source.commit_sha,
+            source.subdirectory.as_deref(),
         ),
         // The REQUESTED target (gate-validated == manifest.default_target): the identity
         // is computed for the target actually being built, never a substituted one.
@@ -667,8 +679,13 @@ fn produce_import_build(
 
     // 2. Clone the SERVER-RESOLVED pinned commit (identity/subdir validated; no
     // capsule.toml requirement).
-    let src =
-        clone_pinned_source(&job.source, &jobdir.join("src")).map_err(|e| fail("source", e))?;
+    let source = job.source.as_ref().ok_or_else(|| {
+        fail(
+            "source",
+            "dockerfile_import job carries no server-resolved source".into(),
+        )
+    })?;
+    let src = clone_pinned_source(source, &jobdir.join("src")).map_err(|e| fail("source", e))?;
 
     // 3. Run the Dockerfile import: probe tool → digest-pinned build → service plan →
     // pack the imported image into a bootable supervisor ext4. DockerImportSpec::new
@@ -1966,9 +1983,13 @@ targets = ["web"]
         });
         let resp: ClaimResponse = serde_json::from_value(body).unwrap();
         assert_eq!(resp.jobs.len(), 1);
-        assert_eq!(resp.jobs[0].source.github_owner, "acme");
-        assert_eq!(resp.jobs[0].source.commit_sha.len(), 40);
-        assert!(resp.jobs[0].source.subdirectory.is_none());
+        let src0 = resp.jobs[0]
+            .source
+            .as_ref()
+            .expect("recipe claim carries a source");
+        assert_eq!(src0.github_owner, "acme");
+        assert_eq!(src0.commit_sha.len(), 40);
+        assert!(src0.subdirectory.is_none());
         // target_label/profile are REQUIRED claim fields (target/profile-scoped registry).
         assert_eq!(resp.jobs[0].target_label, "web");
         assert_eq!(resp.jobs[0].profile, "default");
@@ -2237,12 +2258,12 @@ targets = ["web"]
             capsule_id: "cap_x".into(),
             target_label: "app".into(),
             profile: "default".into(),
-            source: ClaimedSource {
+            source: Some(ClaimedSource {
                 github_owner: "acme".into(),
                 github_repo: "app".into(),
                 commit_sha: "a".repeat(40),
                 subdirectory: None,
-            },
+            }),
             recipe_toml: None,
             kind: kind.into(),
             params,
