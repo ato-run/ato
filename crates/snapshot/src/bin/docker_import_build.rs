@@ -99,6 +99,7 @@ fn main() {
         port_override,
         readiness_http_path,
         volume_policy: Default::default(),
+        host_bind_relay: false,
         image_tag,
         out_ext4: &out,
         size_mib,
