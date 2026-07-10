@@ -410,6 +410,7 @@ pub(crate) fn imported_pack_script(
     tool: &str,
     image_tag: &str,
     plan: &ImportedServicePlan,
+    seed_mounts: &[super::seed_files::RenderedSeedMount],
     size_mib: u64,
 ) -> String {
     let (agent_prep, launch) =
@@ -426,6 +427,12 @@ pub(crate) fn imported_pack_script(
         .enumerate()
         .map(|(i, m)| render_ephemeral_mount(i, m))
         .collect();
+    // Phase 1.5: recipe-owned ephemeral seed mounts (tmpfs mount + static file
+    // writes) render into the SAME init region as the ato#1024 VOLUME mounts,
+    // appended after them. Contents are embedded base64 and decoded in-guest, so
+    // arbitrary bytes need no shell escaping; paths were validated fail-closed
+    // upstream (seed_files::stage_seed_mount).
+    let extra_mounts = extra_mounts + &super::seed_files::render_seed_mounts_init(seed_mounts);
     // ato#1026: start the localhost→guest-IP relay BEFORE the app launch. The
     // guest-agent resolves its own IP from /proc/cmdline (no shell IP-parsing,
     // no iproute2 in the app image) and the relay retries the loopback target
@@ -466,10 +473,11 @@ pub fn pack_imported_rootfs(
     tool: super::BuildTool,
     image_tag: &str,
     plan: &ImportedServicePlan,
+    seed_mounts: &[super::seed_files::RenderedSeedMount],
     out_ext4: &Path,
     size_mib: u64,
 ) -> Result<u64, String> {
-    let script = imported_pack_script(tool.as_str(), image_tag, plan, size_mib);
+    let script = imported_pack_script(tool.as_str(), image_tag, plan, seed_mounts, size_mib);
     let out = Command::new("bash")
         .arg("-c")
         .arg(&script)
@@ -671,7 +679,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
         let init = script.split("<<'INIT'").nth(1).unwrap().split("INIT").next().unwrap();
         // size= appears in the mount cmd; a required-mount failure fails boot.
         assert!(init.contains("mount -t tmpfs -o size=512m tmpfs /downloads || { echo \"required tmpfs mount failed: /downloads\" >&2; exit 1; }"), "{init}");
@@ -689,7 +697,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
         let init = script.split("<<'INIT'").nth(1).unwrap().split("INIT").next().unwrap();
         // Ordered: seed staging → copy image contents in → mkdir → mount(size=) → copy back.
         let seed_at = init.find("seed=/run/ato/seed/0").expect("seed line");
@@ -707,7 +715,7 @@ mod tests {
     #[test]
     fn no_mounts_keeps_the_legacy_init_shape() {
         let plain = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
-        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, 1024);
+        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, &[], 1024);
         assert!(!plain_script.contains("cp -a \"$seed/."), "no copy-up when no mounts");
         assert_eq!(plain_script.matches("mount -t tmpfs").count(), 3, "only the standard /tmp /run /var/tmp mounts");
     }
@@ -721,7 +729,7 @@ mod tests {
         )
         .unwrap();
         assert!(plan.host_bind_relay);
-        let script = imported_pack_script("docker", "ato-import-x", &plan, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
         let init = script.split("<<'INIT'").nth(1).unwrap().split("INIT").next().unwrap();
         assert!(
             init.contains("ato-guest-agent tcp-relay --listen-guest-port 1737") && init.contains("--target 127.0.0.1:1737"),
@@ -736,7 +744,7 @@ mod tests {
         // Opt-out (default) ⇒ no relay line at all.
         let plain = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
         assert!(!plain.host_bind_relay);
-        assert!(!imported_pack_script("docker", "ato-import-x", &plain, 1024).contains("tcp-relay"));
+        assert!(!imported_pack_script("docker", "ato-import-x", &plain, &[], 1024).contains("tcp-relay"));
     }
 
     #[test]
@@ -804,7 +812,7 @@ mod tests {
     #[test]
     fn imported_pack_script_shares_the_pipeline_but_not_the_build() {
         let plan = derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
-        let script = imported_pack_script("podman", "ato-import-abc123", &plan, 1024);
+        let script = imported_pack_script("podman", "ato-import-abc123", &plan, &[], 1024);
         // Imported tag, single-quoted; chosen tool drives create/export/cleanup.
         assert!(script.contains("TAG='ato-import-abc123'"), "{script}");
         assert!(script.contains("CID=$(podman create \"$TAG\")"), "{script}");
