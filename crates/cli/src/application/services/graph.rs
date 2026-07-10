@@ -277,6 +277,7 @@ mod tests {
             secrets: None,
             readiness_probe: None,
             network: None,
+            run_once: false,
         }
     }
 
@@ -296,6 +297,7 @@ mod tests {
                 .collect(),
             readiness_probe: None,
             network: ResolvedServiceNetwork::default(),
+            run_once: false,
             run_once: false,
             runtime: ResolvedServiceRuntime::Oci(ResolvedTargetRuntime {
                 target: name.to_string(),
