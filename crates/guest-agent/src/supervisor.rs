@@ -1500,7 +1500,10 @@ pub fn bindings_root() -> PathBuf {
     }
 }
 
-#[cfg(test)]
+// The guest-agent is a LINUX-ONLY runtime component (it runs inside the
+// Firecracker guest): its behavior tests spawn `sh`, use unix paths/perms, and
+// exercise mount/vsock semantics that do not exist on Windows CI runners.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::cell::RefCell;
