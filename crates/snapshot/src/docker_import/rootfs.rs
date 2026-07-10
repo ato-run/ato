@@ -537,10 +537,10 @@ pub(crate) fn imported_pack_script(
     }
     for sm in seed_contents {
         for f in &sm.files {
-            if let Some((parent, _)) = f.abs_dest.rsplit_once('/') {
-                if !parent.is_empty() {
-                    agent_prep.push_str(&format!("mkdir -p \"$BUILD/rootfs{parent}\"\n"));
-                }
+            if let Some((parent, _)) = f.abs_dest.rsplit_once('/')
+                && !parent.is_empty()
+            {
+                agent_prep.push_str(&format!("mkdir -p \"$BUILD/rootfs{parent}\"\n"));
             }
         }
     }
