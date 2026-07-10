@@ -429,6 +429,7 @@ pub fn derive_imported_service_plan_with_mounts(
 
     let service = ServiceBuildSpec {
         name: IMPORTED_SERVICE_NAME.to_string(),
+        run_once: false,
         cmd,
         cwd: config
             .working_dir
