@@ -688,7 +688,10 @@ fn produce_import_build(
         host_bind_relay: params.host_bind_relay,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
-        size_mib: cfg.rootfs_size_mib,
+        size_mib: params
+            .rootfs_size_mib
+            .map(u64::from)
+            .unwrap_or(cfg.rootfs_size_mib),
     };
     let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
@@ -798,7 +801,10 @@ fn produce_oci_image_import(
         volume_policy: params.volumes,
         host_bind_relay: params.host_bind_relay,
         out_ext4: &ext4,
-        size_mib: cfg.rootfs_size_mib,
+        size_mib: params
+            .rootfs_size_mib
+            .map(u64::from)
+            .unwrap_or(cfg.rootfs_size_mib),
     };
     let outcome = run_oci_image_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
@@ -884,6 +890,10 @@ struct DockerfileImportParams {
     /// ato#1026: `true` opts in to the localhost→guest-IP relay for apps that
     /// bind 127.0.0.1 inside the guest (default off).
     host_bind_relay: bool,
+    /// Optional per-job ext4 rootfs size override (MiB, capped at
+    /// `MAX_ROOTFS_SIZE_MIB`). `None` = the builder config default. A large
+    /// image (Stirling-PDF, etc.) needs more than the 1024 default.
+    rootfs_size_mib: Option<u32>,
 }
 
 impl Default for DockerfileImportParams {
@@ -895,8 +905,29 @@ impl Default for DockerfileImportParams {
             volumes: VolumePolicy::Reject,
             ephemeral_mounts: Vec::new(),
             host_bind_relay: false,
+            rootfs_size_mib: None,
         }
     }
+}
+
+/// The maximum per-job rootfs override (MiB). A big image (e.g. Stirling-PDF ~2-3
+/// GiB extracted) needs a larger ext4 than the 1024 default, but an unbounded
+/// value would let one job exhaust the builder disk + blow up restore memory —
+/// so the override is capped fail-closed. `None`/absent keeps the builder config
+/// default (`cfg.rootfs_size_mib`).
+const MAX_ROOTFS_SIZE_MIB: u32 = 8192;
+
+/// Parse the optional `rootfs_size_mib` import param: an integer in
+/// `1..=MAX_ROOTFS_SIZE_MIB`. Fail-closed on 0, negative, fractional, non-numeric,
+/// or over the cap.
+fn parse_rootfs_size_mib(v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=MAX_ROOTFS_SIZE_MIB as u64).contains(n))
+        .ok_or_else(|| {
+            format!("params.rootfs_size_mib must be an integer in 1..={MAX_ROOTFS_SIZE_MIB}")
+        })?;
+    Ok(n as u32)
 }
 
 /// Strict, fail-closed parse of `dockerfile_import` params — the same bounds the
@@ -965,6 +996,7 @@ fn parse_import_params(
                     .as_bool()
                     .ok_or("params.host_bind_relay must be a boolean")?;
             }
+            "rootfs_size_mib" => out.rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
             other => {
                 return Err(format!(
                     "unknown dockerfile_import param {other:?} (rejected fail-closed)"
@@ -1265,6 +1297,9 @@ struct OciImageImportParams {
     /// otherwise.
     volumes: snapshot::docker_import::VolumePolicy,
     host_bind_relay: bool,
+    /// Optional per-job ext4 rootfs size override (MiB, capped). `None` = the
+    /// builder config default. A large registry image needs > the 1024 default.
+    rootfs_size_mib: Option<u32>,
 }
 
 /// ato#1028: `ephemeral_mounts` opts image-declared VOLUMEs into guest tmpfs
@@ -1335,6 +1370,7 @@ fn parse_oci_import_params(
     let mut readiness_http_path = None;
     let mut volumes = snapshot::docker_import::VolumePolicy::Reject;
     let mut host_bind_relay = false;
+    let mut rootfs_size_mib = None;
     for (key, val) in obj {
         match key.as_str() {
             "image" => {
@@ -1362,6 +1398,7 @@ fn parse_oci_import_params(
                     .as_bool()
                     .ok_or("params.host_bind_relay must be a boolean")?;
             }
+            "rootfs_size_mib" => rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
             other => {
                 return Err(format!(
                     "unknown oci_image_import param {other:?} (rejected fail-closed)"
@@ -1377,6 +1414,7 @@ fn parse_oci_import_params(
         readiness_http_path,
         volumes,
         host_bind_relay,
+        rootfs_size_mib,
     })
 }
 
@@ -1832,6 +1870,42 @@ targets = ["web"]
         assert_eq!(params.dockerfile_path, "docker/prod.Dockerfile");
         assert_eq!(params.port_override, Some(8080));
         assert!(params.readiness_http_path.is_none());
+    }
+
+    #[test]
+    fn parse_import_params_rootfs_size_mib_is_capped() {
+        // Accepted within 1..=8192; overrides the default.
+        let out = parse_import_params(Some(&serde_json::json!({"rootfs_size_mib": 4096}))).unwrap();
+        assert_eq!(out.rootfs_size_mib, Some(4096));
+        // Absent = None (builder config default applies downstream).
+        assert!(
+            parse_import_params(Some(&serde_json::json!({})))
+                .unwrap()
+                .rootfs_size_mib
+                .is_none()
+        );
+        // Over the cap / zero / non-integer reject fail-closed.
+        for bad in [
+            serde_json::json!({"rootfs_size_mib": 8193}),
+            serde_json::json!({"rootfs_size_mib": 0}),
+            serde_json::json!({"rootfs_size_mib": -1}),
+            serde_json::json!({"rootfs_size_mib": 1.5}),
+            serde_json::json!({"rootfs_size_mib": "big"}),
+        ] {
+            assert!(parse_import_params(Some(&bad)).is_err(), "{bad}");
+        }
+        // Same for the oci lane.
+        let oci = parse_oci_import_params(Some(
+            &serde_json::json!({"image":"ghcr.io/x/y:1","rootfs_size_mib":6144}),
+        ))
+        .unwrap();
+        assert_eq!(oci.rootfs_size_mib, Some(6144));
+        assert!(
+            parse_oci_import_params(Some(
+                &serde_json::json!({"image":"ghcr.io/x/y:1","rootfs_size_mib":9000})
+            ))
+            .is_err()
+        );
     }
 
     #[test]
