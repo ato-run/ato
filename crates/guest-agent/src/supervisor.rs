@@ -73,6 +73,14 @@ pub struct ServiceSpec {
     /// ready as soon as its process is started.
     #[serde(default)]
     pub readiness: Option<ReadinessSpec>,
+    /// Phase 5 multi-image rootfs: when `Some`, this service's image was exported
+    /// into its OWN subtree (`/opt/ato/services/<name>/rootfs`) instead of
+    /// overlaying a single `/`, so the workload is launched inside a fresh MOUNT
+    /// NAMESPACE and `chroot`ed into that subtree (see [`spawn_script`]). `None` =
+    /// the legacy single-rootfs launch (byte-identical to before — skipped when
+    /// serializing so every pre-Phase-5 config is unchanged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs: Option<String>,
 }
 
 /// v1.5 (ato#973): a service's readiness check. A dependent starts only once this
@@ -146,6 +154,7 @@ impl SupervisorConfig {
             bindings_env: self.bindings_env.clone(),
             depends_on: Vec::new(),
             readiness: None,
+            rootfs: None,
         }]
     }
 }
@@ -176,6 +185,14 @@ impl ServiceSpec {
             }
             BindingName::parse(binding.as_str()).map_err(|e| {
                 format!("supervisor.json: service {:?} invalid binding name {binding:?}: {e}", self.name)
+            })?;
+        }
+        // Phase 5: the per-service rootfs is interpolated (chroot/mount targets)
+        // into the spawn shell script, so a malformed path is REJECTED at config
+        // load, never sanitized — same fail-closed discipline as env/binding names.
+        if let Some(rootfs) = &self.rootfs {
+            validate_service_rootfs(rootfs).map_err(|e| {
+                format!("supervisor.json: service {:?} invalid rootfs: {e}", self.name)
             })?;
         }
         Ok(())
@@ -369,6 +386,10 @@ pub struct SpawnPlan {
     /// agent's). Deterministic per service name (see [`service_log_paths`]).
     pub stdout_log: PathBuf,
     pub stderr_log: PathBuf,
+    /// Phase 5: when `Some`, the workload runs inside a fresh mount namespace and
+    /// is `chroot`ed into this per-service rootfs subtree before exec (see
+    /// [`spawn_script`]). `None` = the legacy single-rootfs launch.
+    pub rootfs: Option<String>,
 }
 
 /// Build the spawn plan from the config + bindings root. Verifies each binding file
@@ -426,6 +447,7 @@ pub fn plan_spawn_service(service: &ServiceSpec, bindings_root: &Path) -> std::i
         secret_env,
         stdout_log,
         stderr_log,
+        rootfs: service.rootfs.clone(),
     })
 }
 
@@ -463,9 +485,68 @@ fn spawn_script(plan: &SpawnPlan) -> String {
             shell_single_quote(&path.to_string_lossy())
         ));
     }
-    let quoted: Vec<String> = plan.cmd.iter().map(|a| shell_single_quote(a)).collect();
-    script.push_str(&format!("exec {}\n", quoted.join(" ")));
+    // Phase 5: a service with its own rootfs subtree is launched inside a fresh
+    // MOUNT NAMESPACE and chroot'ed into it; the plain case execs the command
+    // directly (byte-identical to before). Secrets are exported into the env
+    // ABOVE, before the namespace/chroot, so the workload inherits them across the
+    // chroot exec (the tmpfs binding files live in the OUTER rootfs and are gone
+    // after chroot).
+    match &plan.rootfs {
+        None => {
+            let quoted: Vec<String> = plan.cmd.iter().map(|a| shell_single_quote(a)).collect();
+            script.push_str(&format!("exec {}\n", quoted.join(" ")));
+        }
+        Some(rootfs) => {
+            script.push_str(&chroot_wrapped_exec(rootfs, &plan.cwd, &plan.cmd));
+            script.push('\n');
+        }
+    }
     script
+}
+
+/// Phase 5: a POSIX-shell one-liner that enters a fresh MOUNT NAMESPACE, mounts the
+/// pseudo-filesystems inside the service's own rootfs subtree, then `chroot`s into it
+/// and `exec`s the workload. Ordering is load-bearing: `unshare --mount` (private
+/// namespace) → per-rootfs `mount` of proc/sys/dev/tmp → `chroot` → `cd <cwd>` →
+/// `exec <cmd>`. Every interpolated value is single-quoted (the rootfs path was
+/// already validated to a safe charset at config load; the cmd/cwd are quoted
+/// defensively) so nothing can break out of the nested `sh -c` layers.
+fn chroot_wrapped_exec(rootfs: &str, cwd: &str, cmd: &[String]) -> String {
+    let rq = shell_single_quote(rootfs);
+    let quoted_cmd: Vec<String> = cmd.iter().map(|a| shell_single_quote(a)).collect();
+    // Innermost: inside the new root, cd into the workload's cwd then exec it.
+    let in_chroot = format!("cd {} && exec {}", shell_single_quote(cwd), quoted_cmd.join(" "));
+    // Middle: within the private mount namespace, mount the pseudo-filesystems under
+    // the service rootfs, then chroot + run the innermost script.
+    let in_ns = format!(
+        "mount -t proc proc {r}/proc 2>/dev/null;          mount -t sysfs sysfs {r}/sys 2>/dev/null;          mount -t devtmpfs devtmpfs {r}/dev 2>/dev/null || mount --bind /dev {r}/dev 2>/dev/null;          mount -t tmpfs tmpfs {r}/tmp 2>/dev/null;          exec chroot {r} /bin/sh -c {inner}",
+        r = rq,
+        inner = shell_single_quote(&in_chroot),
+    );
+    // Outer: launch the whole thing in a fresh private mount namespace.
+    format!("exec unshare --mount --propagation private /bin/sh -c {}", shell_single_quote(&in_ns))
+}
+
+/// Phase 5: validate a per-service rootfs subtree path. It is rendered into the
+/// chroot/mount lines of the spawn script, so the charset is restricted to what
+/// cannot break out of those commands (no whitespace, quotes, or shell
+/// metacharacters — fail-closed rather than escaped). Absolute, non-root, no `..`.
+pub(crate) fn validate_service_rootfs(path: &str) -> Result<(), String> {
+    if !path.starts_with('/') || path == "/" {
+        return Err(format!("rootfs {path:?} is not an absolute non-root path"));
+    }
+    if path.len() > 200 {
+        return Err(format!("rootfs {path:?} exceeds 200 chars"));
+    }
+    if !path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+        return Err(format!(
+            "rootfs {path:?} contains characters outside [A-Za-z0-9/_.-] — refusing to render it into the guest spawn script (fail-closed)"
+        ));
+    }
+    if path.contains("..") {
+        return Err(format!("rootfs {path:?} contains '..'"));
+    }
+    Ok(())
 }
 
 /// The workload process, behind a trait so the supervisor orchestration is testable
@@ -492,7 +573,12 @@ impl Workload for ChildWorkload {
             return Err(std::io::Error::other("supervisor cmd is empty"));
         }
         let mut c = std::process::Command::new("/bin/sh");
-        c.arg("-c").arg(spawn_script(plan)).current_dir(&plan.cwd);
+        // Phase 5: for a chroot'ed service the real cwd lives INSIDE the service
+        // rootfs (applied after chroot, inside spawn_script), so the OUTER process
+        // must start from a directory that exists in the base rootfs ("/"). A
+        // plain service keeps its cwd as the outer working directory (unchanged).
+        let outer_cwd: &str = if plan.rootfs.is_some() { "/" } else { plan.cwd.as_str() };
+        c.arg("-c").arg(spawn_script(plan)).current_dir(outer_cwd);
         #[cfg(unix)]
         {
             // Own process group (pgid = child pid). The supervisor cmd is often a
@@ -1140,6 +1226,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".into(), "openai".into())]),
             depends_on: Vec::new(),
             readiness: None,
+            rootfs: None,
         };
         let plan = plan_spawn_service(&api, dir.path()).unwrap();
         assert!(plan.stdout_log.to_string_lossy().ends_with("api.stdout.log"));
@@ -1163,6 +1250,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             depends_on: Vec::new(),
             readiness: None,
+            rootfs: None,
         };
         let plan = plan_spawn_service(&svc, bindings.path()).unwrap();
         let mut w = ChildWorkload::default();
@@ -1617,5 +1705,133 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    // ── Phase 5 (multi-image rootfs): per-service mount-ns + chroot launch ──
+
+    #[test]
+    fn validate_service_rootfs_accepts_the_layout_path_and_rejects_unsafe_ones() {
+        assert!(validate_service_rootfs("/opt/ato/services/web/rootfs").is_ok());
+        assert!(validate_service_rootfs("/opt/ato/services/postgres/rootfs").is_ok());
+        for (bad, why) in [
+            ("opt/x", "relative"),
+            ("/", "root"),
+            ("/opt/ato dir", "whitespace"),
+            ("/opt/ato;rm", "shell metacharacter"),
+            ("/opt/../etc", "dot-dot"),
+        ] {
+            assert!(validate_service_rootfs(bad).is_err(), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_rootfs_service_spawn_script_wraps_the_launch_in_unshare_and_chroot() {
+        let bindings = tempfile::tempdir().unwrap();
+        let svc = ServiceSpec {
+            name: "web".into(),
+            cmd: vec!["node".into(), "server.js".into()],
+            cwd: "/srv/app".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::new(),
+            depends_on: Vec::new(),
+            readiness: None,
+            rootfs: Some("/opt/ato/services/web/rootfs".into()),
+        };
+        let plan = plan_spawn_service(&svc, bindings.path()).unwrap();
+        assert_eq!(plan.rootfs.as_deref(), Some("/opt/ato/services/web/rootfs"));
+        let script = spawn_script(&plan);
+        // Ordering is load-bearing: unshare (new mount ns) → chroot → exec cmd.
+        let ns = script.find("unshare --mount").expect("enters a mount namespace");
+        let cr = script.find("chroot").expect("chroots into the service rootfs");
+        assert!(ns < cr, "unshare must precede chroot:\n{script}");
+        // The pseudo-filesystems are mounted under the SERVICE rootfs subtree, not
+        // the base `/` (the rootfs path is single-quoted, then concatenated with
+        // /proc etc. — assert on substrings that survive the nested quote layers).
+        assert!(script.contains("mount -t proc proc"), "mounts proc:\n{script}");
+        assert!(script.contains("/opt/ato/services/web/rootfs"), "targets the service rootfs:\n{script}");
+        // The workload cwd is applied INSIDE the chroot, AFTER the chroot call.
+        let cd = script.find("cd ").expect("cd into workload cwd inside chroot");
+        assert!(cr < cd, "cd happens after chroot:\n{script}");
+        assert!(script.contains("/srv/app"), "cwd present inside chroot:\n{script}");
+        // The command tokens survive into the innermost exec (through the quote layers).
+        assert!(script.contains("node") && script.contains("server.js"), "{script}");
+    }
+
+    #[test]
+    fn a_plain_service_without_rootfs_execs_directly_unchanged() {
+        // No rootfs → byte-identical legacy launch: a direct `exec`, no unshare/chroot.
+        let bindings = tempfile::tempdir().unwrap();
+        let svc = ServiceSpec {
+            name: "app".into(),
+            cmd: vec!["python3".into(), "app.py".into()],
+            cwd: "/app".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::new(),
+            depends_on: Vec::new(),
+            readiness: None,
+            rootfs: None,
+        };
+        let script = spawn_script(&plan_spawn_service(&svc, bindings.path()).unwrap());
+        assert!(script.contains("exec 'python3' 'app.py'"), "{script}");
+        assert!(!script.contains("unshare") && !script.contains("chroot"), "{script}");
+    }
+
+    #[test]
+    fn a_rootfs_service_reads_its_secret_before_the_chroot() {
+        // The secret export must precede the unshare/chroot so the workload inherits
+        // it across the chroot exec (the tmpfs binding file is in the OUTER rootfs,
+        // gone after chroot).
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "openai", "sk-VALUE");
+        let svc = ServiceSpec {
+            name: "web".into(),
+            cmd: vec!["node".into(), "server.js".into()],
+            cwd: "/srv".into(),
+            base_env: BTreeMap::new(),
+            bindings_env: BTreeMap::from([("OPENAI_API_KEY".into(), "openai".into())]),
+            depends_on: Vec::new(),
+            readiness: None,
+            rootfs: Some("/opt/ato/services/web/rootfs".into()),
+        };
+        let script = spawn_script(&plan_spawn_service(&svc, dir.path()).unwrap());
+        let export = script.find("export OPENAI_API_KEY=").expect("secret exported");
+        let unshare = script.find("unshare").expect("enters ns");
+        assert!(export < unshare, "secret must be read before the chroot:\n{script}");
+        assert!(!script.contains("sk-VALUE"), "value never appears in the script");
+    }
+
+    #[test]
+    fn supervisor_config_parses_and_validates_per_service_rootfs() {
+        // A multi-image supervisor.json carries a rootfs per service; it loads and
+        // round-trips the field.
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"web","cmd":["node","server.js"],"rootfs":"/opt/ato/services/web/rootfs"},
+                {"name":"redis","cmd":["redis-server"],"rootfs":"/opt/ato/services/redis/rootfs"}
+            ]}"#,
+        )
+        .unwrap();
+        let svcs = cfg.services();
+        assert_eq!(svcs[0].rootfs.as_deref(), Some("/opt/ato/services/web/rootfs"));
+        assert_eq!(svcs[1].rootfs.as_deref(), Some("/opt/ato/services/redis/rootfs"));
+        // A malformed rootfs is rejected AT LOAD (never sanitized).
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"web","cmd":["a"],"rootfs":"/opt/../etc"}]}"#
+            )
+            .is_err(),
+            "dot-dot rootfs rejected"
+        );
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"web","cmd":["a"],"rootfs":"relative/path"}]}"#
+            )
+            .is_err(),
+            "relative rootfs rejected"
+        );
+        // A legacy config (no rootfs) serializes WITHOUT the field (skip_if None).
+        let legacy = SupervisorConfig::from_json(r#"{"cmd":["true"]}"#).unwrap();
+        let json = serde_json::to_string(&legacy.services()[0]).unwrap();
+        assert!(!json.contains("rootfs"), "None rootfs must be omitted: {json}");
     }
 }
