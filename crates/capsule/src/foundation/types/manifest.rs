@@ -397,6 +397,16 @@ pub struct ServiceSpec {
     /// Service-to-service network exposure controls.
     #[serde(default)]
     pub network: Option<ServiceNetworkSpec>,
+
+    /// One-shot lifecycle (Phase 6 service DAG): run this service to
+    /// completion during the BUILD boot (`run_at: ["seal_once"]`) before any
+    /// dependent starts. Exit 0 = success (dependents may start); non-zero
+    /// fails the build. A restore resumes the sealed memory, so the task never
+    /// re-runs per preview. `readiness_probe` must not be set together with
+    /// `run_once` (a one-shot task is waited on for EXIT, not readiness).
+    /// Typical uses: DB migrations, permission init, bootstrap seed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
