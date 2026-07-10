@@ -235,6 +235,7 @@ fn import_and_seal(
         volume_policy: Default::default(),
         ephemeral_mounts: Vec::new(),
         host_bind_relay: false,
+        ephemeral_seed_mounts: Vec::new(),
         image_tag: format!("ato-import-smoke-{}", app.repo),
         out_ext4: &ext4,
         size_mib: 2048,
