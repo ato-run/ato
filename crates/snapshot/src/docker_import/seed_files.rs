@@ -634,7 +634,7 @@ mod tests {
                 n = (n << 6) | val(c).unwrap();
                 bits += 6;
             }
-            let mut shift = bits as i32 - 8;
+            let mut shift = bits - 8;
             while shift >= 0 {
                 out.push(((n >> shift as u32) & 0xff) as u8);
                 shift -= 8;
