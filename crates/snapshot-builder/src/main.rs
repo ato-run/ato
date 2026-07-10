@@ -47,9 +47,10 @@ use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::seed_files::{EphemeralMountSpec as SeedMountSpec, SeedFileSpec, SeedMode};
 use snapshot::docker_import::{
     DockerImportSpec, DockerfileImportRequest, EphemeralMountSeed, EphemeralMountSource,
-    EphemeralMountSpec, SecretEnvPolicy, VolumePolicy, import_descriptor_blake3,
-    import_execution_id, run_dockerfile_import, validate_dockerfile_path,
-    validate_ephemeral_mounts,
+    EphemeralMountSpec, OciImageImportRequest, SecretEnvPolicy, VolumePolicy,
+    import_descriptor_blake3, import_execution_id, oci_import_descriptor_blake3,
+    oci_import_execution_id, run_dockerfile_import, run_oci_image_import,
+    validate_dockerfile_path, validate_ephemeral_mounts, validate_image_ref,
 };
 use snapshot::rootfs_builder::{
     RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
@@ -254,6 +255,14 @@ struct Artifact {
     /// `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     docker_import_receipt: Option<serde_json::Value>,
+    /// ato#1028: non-secret registry-image-import provenance — the full
+    /// `OciImageImportReceipt` (importer version, resolved image digest +
+    /// original ref, normalized image config, options, warnings). Present ONLY
+    /// on an `oci_image_import` artifact; omitted entirely for recipe /
+    /// dockerfile_import builds (`skip_serializing_if`), so those acks stay
+    /// byte-identical against the `.strict()` ack schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oci_import_receipt: Option<serde_json::Value>,
 }
 
 /// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
@@ -282,7 +291,7 @@ fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
         // ato#1002: advertise both build lanes — the server hands a job ONLY if its
         // kind is listed here (an older ato-api ignores the field and keeps handing
         // recipe jobs exactly as before).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import"] }))
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import"] }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -417,6 +426,7 @@ struct ProducedBuild {
     declared_command: String,
     normalized_guest_command: String,
     docker_import_receipt: Option<serde_json::Value>,
+    oci_import_receipt: Option<serde_json::Value>,
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -426,9 +436,10 @@ fn produce_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::result::
     match job.kind.as_str() {
         "recipe" => produce_recipe_build(cfg, job, jobdir),
         "dockerfile_import" => produce_import_build(cfg, job, jobdir),
+        "oci_image_import" => produce_oci_image_import(cfg, job, jobdir),
         other => Err((
             "claim_kind".into(),
-            format!("unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import)"),
+            format!("unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import, oci_image_import)"),
         )),
     }
 }
@@ -546,6 +557,7 @@ fn produce_recipe_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
         declared_command: spec.declared_start_cmd,
         normalized_guest_command: spec.start_cmd,
         docker_import_receipt: None,
+        oci_import_receipt: None,
     })
 }
 
@@ -658,6 +670,94 @@ fn produce_import_build(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::r
         declared_command: argv_display.clone(),
         normalized_guest_command: argv_display,
         docker_import_receipt: Some(docker_import_receipt),
+        oci_import_receipt: None,
+    })
+}
+
+/// ato#1028 `oci_image_import` producer: validate the job params fail-closed, then
+/// PULL a public registry image and pack it into a Ready-State rootfs, reusing the
+/// whole Dockerfile-import backend after the image is materialized
+/// ([`run_oci_image_import`]). Unlike the recipe / dockerfile_import lanes there is
+/// NO git clone — the artifact comes from the registry image named in `params.image`,
+/// not from a checkout (the job's `source` is provenance for the Store recipe only,
+/// unused here). Secret policy is fixed to `Reject` (the Store job shape carries no
+/// secret-conversion opt-in), same as the dockerfile_import lane.
+fn produce_oci_image_import(cfg: &Config, job: &ClaimedJob, jobdir: &Path) -> std::result::Result<ProducedBuild, (String, String)> {
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+
+    // 1. Strict params validation BEFORE any network/pull work (same bounds as the
+    // ato-api enqueue validation; a violation here means the server-side gate was
+    // bypassed or skewed — fail closed at eligibility).
+    let params = parse_oci_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+
+    // 2. Run the registry-image import: probe tool → pull + digest-pin + inspect →
+    // service plan → pack the pinned image into a bootable supervisor ext4. No
+    // capsule.toml, no source checkout. The out_ext4 parent (jobdir) must exist.
+    std::fs::create_dir_all(jobdir).map_err(|e| fail("rootfs_build", e.to_string()))?;
+    let ext4 = jobdir.join("rootfs.ext4");
+    let req = OciImageImportRequest {
+        image_ref: params.image,
+        policy: SecretEnvPolicy::Reject,
+        port_override: params.port_override,
+        readiness_http_path: params.readiness_http_path.clone(),
+        volume_policy: params.volumes,
+        host_bind_relay: params.host_bind_relay,
+        out_ext4: &ext4,
+        size_mib: cfg.rootfs_size_mib,
+    };
+    let outcome = run_oci_image_import(&SystemImportCommandRunner, &req).map_err(|e| fail("rootfs_build", e))?;
+    let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+
+    // Import identity (ato#1002 review D3, ato#1028): execution_id = the import
+    // EXECUTION identity (derived service + platform + final image digest),
+    // host-independent, never a job id. capsule_manifest_hash = the blake3 import
+    // DESCRIPTOR hash over the input-only envelope keyed on the RESOLVED image
+    // digest (a registry import has no capsule.toml — a descriptor hash, not a
+    // manifest hash; two tags of the same image share it).
+    let execution_id = oci_import_execution_id(&outcome.plan, &outcome.receipt);
+    let capsule_manifest_hash = oci_import_descriptor_blake3(&outcome.receipt);
+    let oci_import_receipt = serde_json::to_value(&outcome.receipt)
+        .map_err(|e| fail("artifact_metadata", format!("serialize oci import receipt: {e}")))?;
+
+    // v0 imports emit exactly ONE public service; its argv (ENTRYPOINT+CMD, exec
+    // form) lands in supervisor.json verbatim — no sh -lc normalization — so the
+    // declared and guest commands are the same string (diagnostics only).
+    let argv_display = outcome
+        .plan
+        .supervisor
+        .services
+        .as_ref()
+        .and_then(|s| s.first())
+        .map(|s| s.cmd.join(" "))
+        .unwrap_or_default();
+
+    // ato#1002 review (D4): a registry import is a SUPERVISOR artifact end to end —
+    // the packed rootfs runs guest-agent + supervisor even with ZERO bindings — so
+    // the sealed ack ALWAYS carries supervisor_build (binding_names may be []).
+    // Under the fixed Reject policy the set is always empty today; the mapping
+    // stays general for a future with-bindings job shape.
+    let binding_names = outcome.plan.supervisor.binding_names.clone();
+    let supervisor = Some(SupervisorBindings {
+        binding_names: binding_names.clone(),
+        state_volumes: vec![],
+        state_owner_scope: None,
+    });
+    let supervisor_ack = Some(SupervisorAck { binding_names });
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: outcome.plan.port,
+        healthcheck: outcome.plan.readiness_http_path.clone().unwrap_or_else(|| "/".to_string()),
+        execution_id,
+        capsule_manifest_hash,
+        supervisor,
+        supervisor_ack,
+        manifest_source: "oci_image_import".to_string(),
+        synthesized_probe: outcome.plan.readiness_http_path.is_none(),
+        declared_command: argv_display.clone(),
+        normalized_guest_command: argv_display,
+        docker_import_receipt: None,
+        oci_import_receipt: Some(oci_import_receipt),
     })
 }
 
@@ -730,27 +830,8 @@ fn parse_import_params(params: Option<&serde_json::Value>) -> std::result::Resul
                 validate_dockerfile_path(p)?;
                 out.dockerfile_path = p.to_string();
             }
-            "port_override" => {
-                let n = val
-                    .as_u64()
-                    .filter(|n| (1..=65535).contains(n))
-                    .ok_or("params.port_override must be an integer in 1..65535")?;
-                out.port_override = Some(n as u16);
-            }
-            "readiness_http_path" => {
-                let p = val.as_str().ok_or("params.readiness_http_path must be a string")?;
-                if !p.starts_with('/') {
-                    return Err("params.readiness_http_path must start with '/'".into());
-                }
-                if p.chars().count() > 200 {
-                    return Err("params.readiness_http_path exceeds 200 characters".into());
-                }
-                // Interpolated into the builder-host pack script (`{hc}` inside a
-                // `#` comment) — the same NUL/newline gate rootfs_builder applies
-                // to run/build commands, or a newline runs as root on the builder.
-                reject_control_chars("params.readiness_http_path", p)?;
-                out.readiness_http_path = Some(p.to_string());
-            }
+            "port_override" => out.port_override = Some(parse_port_override_value(val)?),
+            "readiness_http_path" => out.readiness_http_path = Some(parse_readiness_http_path_value(val)?),
             "volumes" => {
                 // ato#1024 + Phase 1: the legacy string form "tmpfs" (map all
                 // image VOLUMEs to empty tmpfs) OR the structured object form
@@ -975,6 +1056,137 @@ fn parse_seed_files(mi: usize, val: &serde_json::Value) -> std::result::Result<V
     Ok(out)
 }
 
+/// Shared strict parse of a `port_override` JSON value (integer in 1..=65535).
+/// Used by both the `dockerfile_import` and `oci_image_import` param parsers so
+/// the bound cannot drift between lanes.
+fn parse_port_override_value(val: &serde_json::Value) -> std::result::Result<u16, String> {
+    let n = val
+        .as_u64()
+        .filter(|n| (1..=65535).contains(n))
+        .ok_or("params.port_override must be an integer in 1..65535")?;
+    Ok(n as u16)
+}
+
+/// Shared strict parse of a `readiness_http_path` JSON value: starts `/`, ≤200
+/// chars, single-line. 200 (not 256) because the value is acked verbatim as
+/// `healthcheck_url_path`, which ato-api's strict artifact schema caps at 200;
+/// single-line because it is interpolated into the builder-host pack script (a
+/// newline would break out of its `#` comment and run as root on the builder —
+/// [`reject_control_chars`]).
+fn parse_readiness_http_path_value(val: &serde_json::Value) -> std::result::Result<String, String> {
+    let p = val.as_str().ok_or("params.readiness_http_path must be a string")?;
+    if !p.starts_with('/') {
+        return Err("params.readiness_http_path must start with '/'".into());
+    }
+    if p.chars().count() > 200 {
+        return Err("params.readiness_http_path exceeds 200 characters".into());
+    }
+    reject_control_chars("params.readiness_http_path", p)?;
+    Ok(p.to_string())
+}
+
+/// ato#1028: validated `oci_image_import` job params. `image` is REQUIRED (there is
+/// no default registry image); `platform` defaults to (and in v1 must equal)
+/// `linux/amd64`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OciImageImportParams {
+    image: String,
+    platform: String,
+    port_override: Option<u16>,
+    readiness_http_path: Option<String>,
+    /// ato#1024: `Tmpfs` when `ephemeral_mounts` is a non-empty well-formed list
+    /// (image-declared VOLUMEs → guest tmpfs); `Reject` (the ato#983 default)
+    /// otherwise.
+    volumes: snapshot::docker_import::VolumePolicy,
+    host_bind_relay: bool,
+}
+
+/// ato#1028: `ephemeral_mounts` opts image-declared VOLUMEs into guest tmpfs
+/// (ephemeral by design, ato#1024). v1 reuses the Dockerfile-import backend's
+/// [`snapshot::docker_import::VolumePolicy`], which maps ALL image-declared
+/// VOLUMEs when engaged — so a NON-EMPTY well-formed list engages `Tmpfs`, an
+/// empty/absent list keeps the fail-closed VOLUME gate. Each entry is shape-
+/// validated (absolute non-root, ≤200 chars, single-line, no duplicate) fail-
+/// closed; v1 does NOT enforce a per-path subset (the backend maps every
+/// declared VOLUME), so the list is an explicit ephemerality acknowledgement —
+/// a per-path allow-list is a documented follow-up.
+fn parse_ephemeral_mounts(val: &serde_json::Value) -> std::result::Result<snapshot::docker_import::VolumePolicy, String> {
+    let arr = val
+        .as_array()
+        .ok_or("params.ephemeral_mounts must be an array of absolute path strings")?;
+    if arr.len() > 64 {
+        return Err("params.ephemeral_mounts has more than 64 entries".into());
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in arr {
+        let p = entry.as_str().ok_or("params.ephemeral_mounts entries must be strings")?;
+        if !p.starts_with('/') || p == "/" {
+            return Err(format!("params.ephemeral_mounts entry {p:?} must be an absolute non-root path"));
+        }
+        if p.chars().count() > 200 {
+            return Err(format!("params.ephemeral_mounts entry {p:?} exceeds 200 characters"));
+        }
+        reject_control_chars("params.ephemeral_mounts entry", p)?;
+        if seen.contains(&p) {
+            return Err(format!("params.ephemeral_mounts entry {p:?} is duplicated"));
+        }
+        seen.push(p);
+    }
+    Ok(if arr.is_empty() {
+        snapshot::docker_import::VolumePolicy::Reject
+    } else {
+        snapshot::docker_import::VolumePolicy::Tmpfs { size_mib: None }
+    })
+}
+
+/// Strict, fail-closed parse of `oci_image_import` params (ato#1028) — the same
+/// bounds the ato-api enqueue validation enforces. `image` is required + shape-
+/// validated ([`validate_image_ref`]); `platform` must be `linux/amd64` (v1);
+/// `port_override` / `readiness_http_path` share the dockerfile_import validators;
+/// `ephemeral_mounts` maps to the VOLUME policy; `host_bind_relay` is a strict
+/// bool. Unknown keys, non-object params, and absent/null params (no `image`)
+/// are rejected.
+fn parse_oci_import_params(params: Option<&serde_json::Value>) -> std::result::Result<OciImageImportParams, String> {
+    let v = params
+        .filter(|v| !v.is_null())
+        .ok_or("oci_image_import params are required (must carry an \"image\")")?;
+    let obj = v.as_object().ok_or("oci_image_import params must be a JSON object")?;
+    let mut image: Option<String> = None;
+    let mut platform = snapshot::docker_import::DOCKER_IMPORT_PLATFORM.to_string();
+    let mut port_override = None;
+    let mut readiness_http_path = None;
+    let mut volumes = snapshot::docker_import::VolumePolicy::Reject;
+    let mut host_bind_relay = false;
+    for (key, val) in obj {
+        match key.as_str() {
+            "image" => {
+                let s = val.as_str().ok_or("params.image must be a string")?;
+                validate_image_ref(s)?;
+                image = Some(s.to_string());
+            }
+            "platform" => {
+                let p = val.as_str().ok_or("params.platform must be a string")?;
+                if p != snapshot::docker_import::DOCKER_IMPORT_PLATFORM {
+                    return Err(format!(
+                        "params.platform must be {:?} (v1 imports linux/amd64 only)",
+                        snapshot::docker_import::DOCKER_IMPORT_PLATFORM
+                    ));
+                }
+                platform = p.to_string();
+            }
+            "port_override" => port_override = Some(parse_port_override_value(val)?),
+            "readiness_http_path" => readiness_http_path = Some(parse_readiness_http_path_value(val)?),
+            "ephemeral_mounts" => volumes = parse_ephemeral_mounts(val)?,
+            "host_bind_relay" => {
+                host_bind_relay = val.as_bool().ok_or("params.host_bind_relay must be a boolean")?;
+            }
+            other => return Err(format!("unknown oci_image_import param {other:?} (rejected fail-closed)")),
+        }
+    }
+    let image = image.ok_or("params.image is required for an oci_image_import job")?;
+    Ok(OciImageImportParams { image, platform, port_override, readiness_http_path, volumes, host_bind_relay })
+}
+
 /// ato#1002: shallow-clone the SERVER-RESOLVED pinned commit for a
 /// `dockerfile_import` job. Mirrors `materialize_source`'s identity validation +
 /// subdir containment (lexical + canonical) but deliberately WITHOUT its
@@ -1169,6 +1381,7 @@ fn process_job(cfg: &Config, backend: &FirecrackerBackend, job: &ClaimedJob) -> 
         normalized_guest_command: produced.normalized_guest_command,
         supervisor_build: produced.supervisor_ack,
         docker_import_receipt: produced.docker_import_receipt,
+        oci_import_receipt: produced.oci_import_receipt,
     })
 }
 
@@ -1655,6 +1868,128 @@ mod tests {
         assert!(!dest.exists(), "validation must reject before any clone IO");
     }
 
+    // ── ato#1028: oci_image_import claim + params ────────────────────────────
+
+    #[test]
+    fn parses_an_oci_image_import_claim() {
+        // An oci_image_import job carries kind = "oci_image_import" + params (image).
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_5", "capsule_id": "cap_5",
+                "source": { "source_kind": "github", "github_owner": "acme", "github_repo": "app", "commit_sha": "e".repeat(40), "subdirectory": null },
+                "recipe_toml": null,
+                "kind": "oci_image_import",
+                "params": { "image": "ghcr.io/alexta69/metube:latest", "port_override": 8081, "readiness_http_path": "/", "ephemeral_mounts": ["/downloads"] },
+                "target_label": "app", "profile": "default", "claim_expires_at": "2026-01-01T00:00:00.000Z"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        assert_eq!(resp.jobs[0].kind, "oci_image_import");
+        let p = parse_oci_import_params(resp.jobs[0].params.as_ref()).unwrap();
+        assert_eq!(p.image, "ghcr.io/alexta69/metube:latest");
+        assert_eq!(p.platform, "linux/amd64");
+        assert_eq!(p.port_override, Some(8081));
+        assert_eq!(p.readiness_http_path.as_deref(), Some("/"));
+        assert_eq!(p.volumes, snapshot::docker_import::VolumePolicy::Tmpfs { size_mib: None });
+        assert!(!p.host_bind_relay);
+    }
+
+    #[test]
+    fn oci_import_params_parse_full_shape_and_defaults() {
+        // Minimal: just image ⇒ defaults (platform linux/amd64, Reject volumes, no relay).
+        let p = parse_oci_import_params(Some(&serde_json::json!({ "image": "redis:7" }))).unwrap();
+        assert_eq!(p.image, "redis:7");
+        assert_eq!(p.platform, "linux/amd64");
+        assert!(p.port_override.is_none());
+        assert!(p.readiness_http_path.is_none());
+        assert_eq!(p.volumes, snapshot::docker_import::VolumePolicy::Reject);
+        assert!(!p.host_bind_relay);
+        // Full object with explicit platform + relay + empty ephemeral_mounts (Reject).
+        let v = serde_json::json!({
+            "image": "ghcr.io/x/y@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "platform": "linux/amd64",
+            "port_override": 3000,
+            "readiness_http_path": "/health",
+            "host_bind_relay": true,
+            "ephemeral_mounts": [],
+        });
+        let p = parse_oci_import_params(Some(&v)).unwrap();
+        assert!(is_digest_pinned(&p.image));
+        assert_eq!(p.port_override, Some(3000));
+        assert_eq!(p.readiness_http_path.as_deref(), Some("/health"));
+        assert!(p.host_bind_relay);
+        assert_eq!(p.volumes, snapshot::docker_import::VolumePolicy::Reject, "empty ephemeral_mounts keeps the fail-closed gate");
+    }
+
+    fn is_digest_pinned(image: &str) -> bool {
+        image.contains("@sha256:")
+    }
+
+    #[test]
+    fn oci_import_params_reject_every_out_of_bounds_shape() {
+        let cases: Vec<(serde_json::Value, &str)> = vec![
+            // image is REQUIRED.
+            (serde_json::json!({ "port_override": 3000 }), "image is required"),
+            (serde_json::json!({ "image": "" }), "empty"),
+            (serde_json::json!({ "image": "-rm" }), "'-'"),
+            (serde_json::json!({ "image": "metube;rm" }), "[A-Za-z0-9._/:@-]"),
+            (serde_json::json!({ "image": 7 }), "string"),
+            // platform is linux/amd64 only in v1.
+            (serde_json::json!({ "image": "redis:7", "platform": "linux/arm64" }), "linux/amd64"),
+            (serde_json::json!({ "image": "redis:7", "platform": 1 }), "string"),
+            // shared port/readiness bounds.
+            (serde_json::json!({ "image": "redis:7", "port_override": 0 }), "1..65535"),
+            (serde_json::json!({ "image": "redis:7", "port_override": 65536 }), "1..65535"),
+            (serde_json::json!({ "image": "redis:7", "readiness_http_path": "health" }), "start with '/'"),
+            (serde_json::json!({ "image": "redis:7", "readiness_http_path": "/x\nid\n#" }), "newline"),
+            // ephemeral_mounts shape.
+            (serde_json::json!({ "image": "redis:7", "ephemeral_mounts": "tmpfs" }), "array"),
+            (serde_json::json!({ "image": "redis:7", "ephemeral_mounts": ["data"] }), "absolute"),
+            (serde_json::json!({ "image": "redis:7", "ephemeral_mounts": ["/"] }), "absolute"),
+            (serde_json::json!({ "image": "redis:7", "ephemeral_mounts": ["/a", "/a"] }), "duplicated"),
+            (serde_json::json!({ "image": "redis:7", "ephemeral_mounts": [1] }), "strings"),
+            // host_bind_relay strict bool.
+            (serde_json::json!({ "image": "redis:7", "host_bind_relay": "yes" }), "boolean"),
+            // unknown key + non-object + null.
+            (serde_json::json!({ "image": "redis:7", "extra": 1 }), "unknown"),
+            (serde_json::json!("not-an-object"), "object"),
+            (serde_json::json!(null), "required"),
+        ];
+        for (v, needle) in cases {
+            let params = if v.is_null() { None } else { Some(&v) };
+            let err = parse_oci_import_params(params).unwrap_err();
+            assert!(err.contains(needle), "{v}: {err}");
+        }
+        // Absent params (None) also fail — image has no default.
+        assert!(parse_oci_import_params(None).unwrap_err().contains("required"));
+    }
+
+    #[test]
+    fn oci_import_params_validation_failures_fail_at_eligibility() {
+        // Params are validated BEFORE any pull/build work, so a bad-params job acks
+        // failed at eligibility without touching the network.
+        for bad in [
+            serde_json::json!({ "port_override": 3000 }), // missing image
+            serde_json::json!({ "image": "-rm -rf" }),
+            serde_json::json!({ "image": "redis:7", "platform": "linux/arm64" }),
+            serde_json::json!({ "image": "redis:7", "unknown_key": true }),
+            serde_json::json!("not-an-object"),
+        ] {
+            let err = produce_build(&test_cfg(), &import_job("oci_image_import", Some(bad.clone())), Path::new("/nonexistent")).unwrap_err();
+            assert_eq!(err.0, "eligibility", "{bad}");
+        }
+    }
+
+    #[test]
+    fn oci_image_import_is_a_supported_kind_not_a_claim_kind_failure() {
+        // The dispatcher routes "oci_image_import" to its producer (which then fails
+        // at eligibility on absent params here), NOT to the unknown-kind claim_kind
+        // path — proving the kind is advertised/handled.
+        let err = produce_build(&test_cfg(), &import_job("oci_image_import", None), Path::new("/nonexistent")).unwrap_err();
+        assert_eq!(err.0, "eligibility");
+        assert!(err.1.contains("image"), "{}", err.1);
+    }
+
     #[test]
     fn execution_id_is_never_synthesized() {
         // Missing / blank execution_id ⇒ fail closed at artifact_metadata — the builder
@@ -1781,14 +2116,15 @@ mod tests {
             snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: None,
             docker_import_receipt: None,
+            oci_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        // A NO-BINDING recipe ack omits supervisor_build AND docker_import_receipt
-        // entirely (byte-identical vs the pre-3e-2c / pre-#1002 schema, which the
-        // .strict() ato-api validator requires).
+        // A NO-BINDING recipe ack omits supervisor_build, docker_import_receipt AND
+        // oci_import_receipt entirely (byte-identical vs the pre-3e-2c / pre-#1002
+        // schema, which the .strict() ato-api validator requires).
         assert_eq!(
             keys,
             [
@@ -1840,6 +2176,7 @@ mod tests {
                 "build_tool": "podman",
                 "resolved_base_images": [{ "original_ref": "node:20", "resolved_digest": "docker.io/library/node@sha256:ab" }],
             })),
+            oci_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "dockerfile_import");
@@ -1849,10 +2186,57 @@ mod tests {
         // present, never omitted, never null.
         assert_eq!(v["supervisor_build"], serde_json::json!({ "binding_names": [] }));
         // The keys are present ONLY when Some — a recipe ack (None) never carries
-        // docker_import_receipt.
+        // docker_import_receipt, and a dockerfile_import ack never carries
+        // oci_import_receipt.
         let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         assert!(keys.contains(&"docker_import_receipt"));
         assert!(keys.contains(&"supervisor_build"));
+        assert!(!keys.contains(&"oci_import_receipt"));
+    }
+
+    #[test]
+    fn oci_image_import_ack_carries_the_oci_receipt_and_manifest_source() {
+        // ato#1028: an oci_image_import ack adds oci_import_receipt (arbitrary
+        // non-secret JSON) + manifest_source = "oci_image_import"; both optional
+        // server-side, so recipe / dockerfile_import acks keep validating. Like a
+        // dockerfile import it ALWAYS carries supervisor_build (a zero-binding
+        // import is still a supervisor artifact — EMPTY name set).
+        let a = Artifact {
+            capsule_manifest_hash: "blake3:d".into(),
+            execution_id: "sha256:i".into(),
+            artifact_manifest_hash: "blake3:a".into(),
+            runner_class_id: "rc".into(),
+            snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
+            healthcheck_url_path: "/".into(),
+            no_secret_scan_clean: true,
+            rootfs_bytes: 1,
+            mem_bytes: 2,
+            vmstate_bytes: 3,
+            manifest_source: "oci_image_import".into(),
+            synthesized_probe: true,
+            declared_command: "docker-entrypoint.sh".into(),
+            normalized_guest_command: "docker-entrypoint.sh".into(),
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
+            supervisor_build: Some(SupervisorAck { binding_names: vec![] }),
+            docker_import_receipt: None,
+            oci_import_receipt: Some(serde_json::json!({
+                "importer_version": "ato-docker-import/0.1.0",
+                "pull_tool": "podman",
+                "image": { "original_ref": "ghcr.io/alexta69/metube:latest", "resolved_digest": "ghcr.io/alexta69/metube@sha256:ab", "platform": "linux/amd64" },
+            })),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["manifest_source"], "oci_image_import");
+        assert!(v["oci_import_receipt"].is_object());
+        assert_eq!(v["oci_import_receipt"]["pull_tool"], "podman");
+        assert_eq!(v["oci_import_receipt"]["image"]["platform"], "linux/amd64");
+        assert_eq!(v["supervisor_build"], serde_json::json!({ "binding_names": [] }));
+        // oci_import_receipt present, docker_import_receipt absent (mutually exclusive lanes).
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert!(keys.contains(&"oci_import_receipt"));
+        assert!(!keys.contains(&"docker_import_receipt"));
     }
 
     #[test]
@@ -1879,6 +2263,7 @@ mod tests {
             snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: Some(SupervisorAck { binding_names: vec!["openai_api_key".into()] }),
             docker_import_receipt: None,
+            oci_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(
@@ -1918,6 +2303,7 @@ mod tests {
             snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
             supervisor_build: None,
             docker_import_receipt: None,
+            oci_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["snapshot_format_id"], "asf.fc-memsnap-v1");
