@@ -745,7 +745,13 @@ pub fn pull_and_inspect_image(
     let dig = run_tool(
         runner,
         tool,
-        &["image", "inspect", "--format", "{{index .RepoDigests 0}}", image_ref],
+        &[
+            "image",
+            "inspect",
+            "--format",
+            "{{index .RepoDigests 0}}",
+            image_ref,
+        ],
         &format!("resolve image digest {image_ref:?}"),
     )?;
     let resolved_digest = dig.stdout.trim().to_string();
@@ -776,7 +782,11 @@ pub fn pull_and_inspect_image(
         &format!("inspect image config {image_ref:?}"),
     )?;
     let image_config = parse_image_config(&cfg_out.stdout)?;
-    Ok(PulledImage { resolved_digest, final_image_digest, image_config })
+    Ok(PulledImage {
+        resolved_digest,
+        final_image_digest,
+        image_config,
+    })
 }
 
 #[cfg(test)]
@@ -1374,8 +1384,18 @@ CMD ["/app/serve"]
     fn full_pull_script(repo_digest: &str) -> Vec<(&'static str, i32, String, &'static str)> {
         vec![
             ("podman pull", 0, String::new(), ""),
-            ("podman image inspect --format {{index .RepoDigests 0}}", 0, format!("{repo_digest}\n"), ""),
-            ("podman image inspect --format {{.Id}}", 0, "0123abcd\n".to_string(), ""),
+            (
+                "podman image inspect --format {{index .RepoDigests 0}}",
+                0,
+                format!("{repo_digest}\n"),
+                "",
+            ),
+            (
+                "podman image inspect --format {{.Id}}",
+                0,
+                "0123abcd\n".to_string(),
+                "",
+            ),
             ("podman image inspect", 0, INSPECT_JSON.to_string(), ""),
         ]
     }
@@ -1386,7 +1406,14 @@ CMD ["/app/serve"]
             script: script
                 .into_iter()
                 .map(|(prefix, status, stdout, stderr)| {
-                    (prefix.to_string(), ImportCommandOutput { status, stdout, stderr: stderr.to_string() })
+                    (
+                        prefix.to_string(),
+                        ImportCommandOutput {
+                            status,
+                            stdout,
+                            stderr: stderr.to_string(),
+                        },
+                    )
                 })
                 .collect(),
             calls: Mutex::new(Vec::new()),
@@ -1396,16 +1423,31 @@ CMD ["/app/serve"]
     #[test]
     fn pull_resolves_digest_id_and_config_in_order() {
         let runner = owned_runner(full_pull_script("docker.io/library/metube@sha256:aaaa"));
-        let pulled = pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/alexta69/metube:latest").unwrap();
-        assert_eq!(pulled.resolved_digest, "docker.io/library/metube@sha256:aaaa");
+        let pulled =
+            pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/alexta69/metube:latest")
+                .unwrap();
+        assert_eq!(
+            pulled.resolved_digest,
+            "docker.io/library/metube@sha256:aaaa"
+        );
         assert_eq!(pulled.final_image_digest, "sha256:0123abcd"); // bare hex normalized
         assert_eq!(pulled.image_config.cmd, vec!["node", "server.js"]);
         assert_eq!(pulled.image_config.exposed_tcp_ports, vec![3000, 8080]);
 
         let calls = runner.calls();
-        let idx = |p: &str| calls.iter().position(|c| c.starts_with(p)).unwrap_or_else(|| panic!("missing {p}: {calls:?}"));
+        let idx = |p: &str| {
+            calls
+                .iter()
+                .position(|c| c.starts_with(p))
+                .unwrap_or_else(|| panic!("missing {p}: {calls:?}"))
+        };
         // Pull precedes every inspect; the pull is platform-pinned.
-        assert!(calls[0].starts_with("podman pull --platform linux/amd64 ghcr.io/alexta69/metube:latest"), "{:?}", calls[0]);
+        assert!(
+            calls[0]
+                .starts_with("podman pull --platform linux/amd64 ghcr.io/alexta69/metube:latest"),
+            "{:?}",
+            calls[0]
+        );
         assert!(idx("podman pull") < idx("podman image inspect --format {{index .RepoDigests 0}}"));
     }
 
@@ -1413,26 +1455,50 @@ CMD ["/app/serve"]
     fn pull_accepts_a_digest_ref_and_round_trips_the_digest() {
         // A digest-pinned ref resolves to itself (RepoDigests echoes the manifest digest).
         let runner = owned_runner(full_pull_script("ghcr.io/alexta69/metube@sha256:beef"));
-        let pulled =
-            pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/alexta69/metube@sha256:beef").unwrap();
-        assert_eq!(pulled.resolved_digest, "ghcr.io/alexta69/metube@sha256:beef");
+        let pulled = pull_and_inspect_image(
+            &runner,
+            BuildTool::Podman,
+            "ghcr.io/alexta69/metube@sha256:beef",
+        )
+        .unwrap();
+        assert_eq!(
+            pulled.resolved_digest,
+            "ghcr.io/alexta69/metube@sha256:beef"
+        );
     }
 
     #[test]
     fn pull_undigestable_image_fails_closed() {
         let mut script = full_pull_script("docker.io/library/metube@sha256:aaaa");
-        script[1] = ("podman image inspect --format {{index .RepoDigests 0}}", 0, "\n".to_string(), "");
+        script[1] = (
+            "podman image inspect --format {{index .RepoDigests 0}}",
+            0,
+            "\n".to_string(),
+            "",
+        );
         let runner = owned_runner(script);
         let err = pull_and_inspect_image(&runner, BuildTool::Podman, "metube:local").unwrap_err();
-        assert!(err.contains("did not resolve to a registry digest"), "{err}");
+        assert!(
+            err.contains("did not resolve to a registry digest"),
+            "{err}"
+        );
     }
 
     #[test]
     fn pull_failure_surfaces_stderr_tail() {
         let mut script = full_pull_script("docker.io/library/metube@sha256:aaaa");
-        script[0] = ("podman pull", 125, String::new(), "Error: initializing source: manifest unknown");
+        script[0] = (
+            "podman pull",
+            125,
+            String::new(),
+            "Error: initializing source: manifest unknown",
+        );
         let runner = owned_runner(script);
-        let err = pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/nope/nope:latest").unwrap_err();
-        assert!(err.contains("pull image") && err.contains("manifest unknown"), "{err}");
+        let err = pull_and_inspect_image(&runner, BuildTool::Podman, "ghcr.io/nope/nope:latest")
+            .unwrap_err();
+        assert!(
+            err.contains("pull image") && err.contains("manifest unknown"),
+            "{err}"
+        );
     }
 }

@@ -58,7 +58,10 @@ fn parse_args(args: &[String]) -> Result<RelayArgs, String> {
             }
             "--listen-guest-port" => {
                 let v = it.next().ok_or("--listen-guest-port requires a value")?;
-                listen_guest_port = Some(v.parse().map_err(|e| format!("bad --listen-guest-port {v:?}: {e}"))?);
+                listen_guest_port = Some(
+                    v.parse()
+                        .map_err(|e| format!("bad --listen-guest-port {v:?}: {e}"))?,
+                );
             }
             "--target" => {
                 let v = it.next().ok_or("--target requires a value")?;
@@ -68,7 +71,9 @@ fn parse_args(args: &[String]) -> Result<RelayArgs, String> {
         }
     }
     let listen = match (listen, listen_guest_port) {
-        (Some(_), Some(_)) => return Err("--listen and --listen-guest-port are mutually exclusive".into()),
+        (Some(_), Some(_)) => {
+            return Err("--listen and --listen-guest-port are mutually exclusive".into());
+        }
         (Some(l), None) => l,
         (None, Some(port)) => {
             let cmdline = std::fs::read_to_string("/proc/cmdline")
@@ -134,7 +139,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let cfg = parse_args(args)?;
     let listener = TcpListener::bind(cfg.listen)
         .map_err(|e| format!("tcp-relay: bind {} failed: {e}", cfg.listen))?;
-    eprintln!("ato-guest-agent: tcp-relay {} -> {}", cfg.listen, cfg.target);
+    eprintln!(
+        "ato-guest-agent: tcp-relay {} -> {}",
+        cfg.listen, cfg.target
+    );
     for stream in listener.incoming() {
         match stream {
             Ok(client) => {
@@ -172,17 +180,30 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_bad_socket_addr() {
-        assert!(parse_args(&["--listen".into(), "not-an-addr".into(), "--target".into(), "127.0.0.1:1".into()]).is_err());
+        assert!(
+            parse_args(&[
+                "--listen".into(),
+                "not-an-addr".into(),
+                "--target".into(),
+                "127.0.0.1:1".into()
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn parse_args_rejects_both_listen_forms() {
-        assert!(parse_args(&[
-            "--listen".into(), "127.0.0.1:1".into(),
-            "--listen-guest-port".into(), "1".into(),
-            "--target".into(), "127.0.0.1:1".into(),
-        ])
-        .is_err());
+        assert!(
+            parse_args(&[
+                "--listen".into(),
+                "127.0.0.1:1".into(),
+                "--listen-guest-port".into(),
+                "1".into(),
+                "--target".into(),
+                "127.0.0.1:1".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

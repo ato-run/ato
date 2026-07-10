@@ -408,7 +408,10 @@ pub(crate) fn valid_env_var_name(name: &str) -> bool {
 /// and GPU stay rejected. All runtime/port/command detection is the exact same tested
 /// logic as the no-binding path — this reuses [`derive_build_spec`] on a secret-stripped
 /// manifest, so it cannot drift, then attaches the supervisor config.
-pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
+pub fn derive_supervisor_build_spec(
+    m: &CapsuleManifest,
+    probe: &SourceProbe,
+) -> Result<RootfsBuildSpec, String> {
     // A supervisor build is warranted by EITHER an env-delivery secret (the
     // binding-lease path) OR a Phase 7 generated internal binding (the guest
     // generates + injects the value at run) — both need the guest-agent as init.
@@ -540,7 +543,13 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
 fn generated_env_var(binding_name: &str) -> String {
     binding_name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -608,7 +617,9 @@ fn derive_generated_bindings(
                 ));
             }
             if !seen.insert(target.as_str()) {
-                return Err(format!("generated binding '{name}': duplicate target '{target}'"));
+                return Err(format!(
+                    "generated binding '{name}': duplicate target '{target}'"
+                ));
             }
         }
         // Inject ENV_VAR → binding name into each target's secret injection map
@@ -2758,8 +2769,9 @@ readiness_probe = { http_get = "/health" }
 
     #[test]
     fn generated_binding_injects_env_records_spec_and_never_a_value() {
-        let spec = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python())
-            .expect("supervisor spec with generated binding");
+        let spec =
+            derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python())
+                .expect("supervisor spec with generated binding");
         let sup = spec.supervisor.as_ref().unwrap();
         // The SPEC is recorded (name/generator/bytes/scope/targets) — no value.
         assert_eq!(sup.generated_bindings.len(), 1);
@@ -2778,15 +2790,29 @@ readiness_probe = { http_get = "/health" }
         let services = sup.services.as_ref().unwrap();
         let api = services.iter().find(|s| s.name == "api").unwrap();
         let postgres = services.iter().find(|s| s.name == "postgres").unwrap();
-        assert_eq!(api.env_map.get("DB_PASSWORD").map(String::as_str), Some("db_password"));
-        assert_eq!(postgres.env_map.get("DB_PASSWORD").map(String::as_str), Some("db_password"));
-        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
-        assert!(!postgres.env_map.contains_key("OPENAI_API_KEY"), "postgres scopes no external secret");
+        assert_eq!(
+            api.env_map.get("DB_PASSWORD").map(String::as_str),
+            Some("db_password")
+        );
+        assert_eq!(
+            postgres.env_map.get("DB_PASSWORD").map(String::as_str),
+            Some("db_password")
+        );
+        assert_eq!(
+            api.env_map.get("OPENAI_API_KEY").map(String::as_str),
+            Some("openai_api_key")
+        );
+        assert!(
+            !postgres.env_map.contains_key("OPENAI_API_KEY"),
+            "postgres scopes no external secret"
+        );
 
         // Emitted supervisor.json carries the value-free generated_bindings spec at
         // the top level (mirrors the guest's SupervisorConfig.generated_bindings).
         let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
-        let gb = json["generated_bindings"].as_array().expect("generated_bindings array");
+        let gb = json["generated_bindings"]
+            .as_array()
+            .expect("generated_bindings array");
         assert_eq!(gb.len(), 1);
         assert_eq!(gb[0]["name"], "db_password");
         assert_eq!(gb[0]["generator"], "random_base64");
@@ -2795,7 +2821,10 @@ readiness_probe = { http_get = "/health" }
         assert_eq!(gb[0]["targets"][1], "postgres");
         // Nothing in the whole emitted config resembles a value (no base64 padding,
         // no secret bytes) — the value is generated per run inside the guest only.
-        assert!(!gb[0].as_object().unwrap().contains_key("value"), "spec must never carry a value");
+        assert!(
+            !gb[0].as_object().unwrap().contains_key("value"),
+            "spec must never carry a value"
+        );
     }
 
     #[test]
@@ -2804,30 +2833,46 @@ readiness_probe = { http_get = "/health" }
         // the SPEC is in the artifact (so identity is stable), the VALUE never is
         // (it is generated per run). Different runs of the identical artifact then
         // get different values without changing artifact identity.
-        let a = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python()).unwrap();
-        let b = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python()).unwrap();
+        let a = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python())
+            .unwrap();
+        let b = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python())
+            .unwrap();
         let ja = build_supervisor_json(a.supervisor.as_ref().unwrap(), a.port, &a.start_cmd);
         let jb = build_supervisor_json(b.supervisor.as_ref().unwrap(), b.port, &b.start_cmd);
-        assert_eq!(ja.to_string(), jb.to_string(), "same spec ⇒ identical supervisor.json (identity stable)");
+        assert_eq!(
+            ja.to_string(),
+            jb.to_string(),
+            "same spec ⇒ identical supervisor.json (identity stable)"
+        );
     }
 
     #[test]
     fn generated_binding_fail_closed_rules() {
         // Unknown target service.
-        let bad_target = generated_bindings_toml().replace("[\"api\", \"postgres\"]", "[\"api\", \"nope\"]");
-        assert!(derive_supervisor_build_spec(&parse(&bad_target), &probe_python())
-            .unwrap_err()
-            .contains("not a declared service"));
+        let bad_target =
+            generated_bindings_toml().replace("[\"api\", \"postgres\"]", "[\"api\", \"nope\"]");
+        assert!(
+            derive_supervisor_build_spec(&parse(&bad_target), &probe_python())
+                .unwrap_err()
+                .contains("not a declared service")
+        );
         // bytes out of range.
         let bad_bytes = generated_bindings_toml().replace("bytes = 32", "bytes = 99999");
-        assert!(derive_supervisor_build_spec(&parse(&bad_bytes), &probe_python())
-            .unwrap_err()
-            .contains("bytes"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&bad_bytes), &probe_python())
+                .unwrap_err()
+                .contains("bytes")
+        );
         // Uppercase binding name is not a valid BindingName.
-        let bad_name = generated_bindings_toml().replace("[generated_bindings.db_password]", "[generated_bindings.DB_PASSWORD]");
-        assert!(derive_supervisor_build_spec(&parse(&bad_name), &probe_python())
-            .unwrap_err()
-            .contains("BindingName"));
+        let bad_name = generated_bindings_toml().replace(
+            "[generated_bindings.db_password]",
+            "[generated_bindings.DB_PASSWORD]",
+        );
+        assert!(
+            derive_supervisor_build_spec(&parse(&bad_name), &probe_python())
+                .unwrap_err()
+                .contains("BindingName")
+        );
         // Injected env collides with a service's existing secret env (SHARED name
         // via an explicit env on the secret): the api secret env = DB_PASSWORD.
         let collide = format!(
@@ -2839,9 +2884,11 @@ readiness_probe = { http_get = "/health" }
              targets = [\"api\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&collide), &probe_python())
-            .unwrap_err()
-            .contains("collides"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&collide), &probe_python())
+                .unwrap_err()
+                .contains("collides")
+        );
     }
 
     #[test]
@@ -2853,9 +2900,11 @@ readiness_probe = { http_get = "/health" }
              targets = [\"app\"]\n",
             base_toml()
         );
-        assert!(derive_supervisor_build_spec(&parse(&single), &probe_python())
-            .unwrap_err()
-            .contains("multi-service"));
+        assert!(
+            derive_supervisor_build_spec(&parse(&single), &probe_python())
+                .unwrap_err()
+                .contains("multi-service")
+        );
     }
 
     // ── v1.5 (ato#973): app_url selection ──

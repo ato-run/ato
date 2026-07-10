@@ -50,8 +50,12 @@ pub fn service_rootfs_dir(name: &str) -> String {
 
 /// Hostnames [`build_etc_hosts`] bakes unconditionally for the loopback entries —
 /// a service name or alias may not shadow one (ambiguous DNS).
-const RESERVED_HOSTNAMES: &[&str] =
-    &["localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"];
+const RESERVED_HOSTNAMES: &[&str] = &[
+    "localhost",
+    "localhost.localdomain",
+    "ip6-localhost",
+    "ip6-loopback",
+];
 
 // TODO reconcile with Phase 4 on merge: Phase 4 introduces the canonical
 // `ImportedServiceGraph` / `ImportedService` (compose file → per-service image
@@ -101,7 +105,9 @@ pub struct ImportedServiceGraph {
 /// leading/trailing `-` (keys the rootfs subtree, per-service logs, `/etc/hosts`).
 fn valid_service_name(name: &str) -> bool {
     let ok_len = (1..=63).contains(&name.len());
-    let ok_chars = name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let ok_chars = name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     let ends = |b: Option<u8>| b.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
     ok_len && ok_chars && ends(name.bytes().next()) && ends(name.bytes().next_back())
 }
@@ -132,7 +138,10 @@ impl ImportedServiceGraph {
                 ));
             }
             if svc.cmd.is_empty() {
-                return Err(format!("service '{}': empty argv (nothing to start)", svc.name));
+                return Err(format!(
+                    "service '{}': empty argv (nothing to start)",
+                    svc.name
+                ));
             }
             if svc.public {
                 public_count += 1;
@@ -185,9 +194,11 @@ impl ImportedServiceGraph {
         }
         match public_count {
             1 => Ok(()),
-            0 => Err("no public service: exactly one service must be public (the one \
+            0 => Err(
+                "no public service: exactly one service must be public (the one \
                       exposed via the runner proxy)"
-                .into()),
+                    .into(),
+            ),
             n => Err(format!(
                 "{n} services are public; exactly one may be public in a single-VM \
                  multi-image snapshot (the rest are internal)"
@@ -205,7 +216,10 @@ impl ImportedServiceGraph {
 
     /// The PUBLIC service's name (exactly one — enforced by [`validate`]).
     pub fn public_service(&self) -> Option<&str> {
-        self.services.iter().find(|s| s.public).map(|s| s.name.as_str())
+        self.services
+            .iter()
+            .find(|s| s.public)
+            .map(|s| s.name.as_str())
     }
 
     /// The union of every service's required binding names (the leases the guest
@@ -422,7 +436,9 @@ pub fn pack_multi_image_rootfs(
             .join("\n");
         return Err(format!("multi-image rootfs pack failed: {tail}"));
     }
-    std::fs::metadata(out_ext4).map(|m| m.len()).map_err(|e| e.to_string())
+    std::fs::metadata(out_ext4)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -455,13 +471,18 @@ mod tests {
         let mut redis = svc("redis", 6379, false);
         redis.aliases = vec!["cache".into()];
         let postgres = svc("postgres", 5432, false);
-        ImportedServiceGraph { services: vec![web, redis, postgres] }
+        ImportedServiceGraph {
+            services: vec![web, redis, postgres],
+        }
     }
 
     #[test]
     fn service_rootfs_dir_is_the_per_service_subtree_under_services_root() {
         assert_eq!(service_rootfs_dir("web"), "/opt/ato/services/web/rootfs");
-        assert_eq!(service_rootfs_dir("postgres"), "/opt/ato/services/postgres/rootfs");
+        assert_eq!(
+            service_rootfs_dir("postgres"),
+            "/opt/ato/services/postgres/rootfs"
+        );
         assert!(service_rootfs_dir("redis").starts_with(SERVICES_ROOT));
     }
 
@@ -479,29 +500,52 @@ mod tests {
         let err = g.validate().unwrap_err();
         assert!(err.contains("both listen on port 8080"), "{err}");
         assert!(err.contains("UNIQUE port"), "{err}");
-        assert!(err.contains("future work"), "message points at the real fix: {err}");
+        assert!(
+            err.contains("future work"),
+            "message points at the real fix: {err}"
+        );
     }
 
     #[test]
     fn zero_or_multiple_public_services_are_rejected() {
-        let none = ImportedServiceGraph { services: vec![svc("a", 1, false), svc("b", 2, false)] };
+        let none = ImportedServiceGraph {
+            services: vec![svc("a", 1, false), svc("b", 2, false)],
+        };
         assert!(none.validate().unwrap_err().contains("no public service"));
-        let two = ImportedServiceGraph { services: vec![svc("a", 1, true), svc("b", 2, true)] };
+        let two = ImportedServiceGraph {
+            services: vec![svc("a", 1, true), svc("b", 2, true)],
+        };
         assert!(two.validate().unwrap_err().contains("exactly one"));
     }
 
     #[test]
     fn duplicate_name_unknown_dep_and_self_dep_fail_closed() {
-        let dup = ImportedServiceGraph { services: vec![svc("a", 1, true), svc("a", 2, false)] };
-        assert!(dup.validate().unwrap_err().contains("duplicate service name"));
+        let dup = ImportedServiceGraph {
+            services: vec![svc("a", 1, true), svc("a", 2, false)],
+        };
+        assert!(
+            dup.validate()
+                .unwrap_err()
+                .contains("duplicate service name")
+        );
 
         let mut s = svc("web", 8080, true);
         s.depends_on = vec!["ghost".into()];
-        assert!(ImportedServiceGraph { services: vec![s] }.validate().unwrap_err().contains("ghost"));
+        assert!(
+            ImportedServiceGraph { services: vec![s] }
+                .validate()
+                .unwrap_err()
+                .contains("ghost")
+        );
 
         let mut s = svc("web", 8080, true);
         s.depends_on = vec!["web".into()];
-        assert!(ImportedServiceGraph { services: vec![s] }.validate().unwrap_err().contains("depends_on itself"));
+        assert!(
+            ImportedServiceGraph { services: vec![s] }
+                .validate()
+                .unwrap_err()
+                .contains("depends_on itself")
+        );
     }
 
     #[test]
@@ -517,7 +561,9 @@ mod tests {
         // An alias shadowing `localhost` is rejected.
         let mut web = svc("web", 8080, true);
         web.aliases = vec!["localhost".into()];
-        let g = ImportedServiceGraph { services: vec![web] };
+        let g = ImportedServiceGraph {
+            services: vec![web],
+        };
         assert!(g.validate().unwrap_err().contains("reserved"));
     }
 
@@ -528,7 +574,10 @@ mod tests {
             assert!(hosts.contains(h), "hosts missing {h}:\n{hosts}");
         }
         assert!(hosts.contains("127.0.0.1 localhost"), "{hosts}");
-        assert!(hosts.contains("::1 localhost ip6-localhost ip6-loopback"), "{hosts}");
+        assert!(
+            hosts.contains("::1 localhost ip6-localhost ip6-loopback"),
+            "{hosts}"
+        );
     }
 
     #[test]
@@ -544,11 +593,17 @@ mod tests {
         assert_eq!(arr[2]["rootfs"], "/opt/ato/services/web/rootfs");
         assert_eq!(arr[0]["rootfs"], "/opt/ato/services/postgres/rootfs");
         // web depends_on (sorted) + HTTP readiness; internal services TCP-accept.
-        assert_eq!(arr[2]["depends_on"], serde_json::json!(["postgres", "redis"]));
+        assert_eq!(
+            arr[2]["depends_on"],
+            serde_json::json!(["postgres", "redis"])
+        );
         assert_eq!(arr[2]["readiness"]["port"], 8080);
         assert_eq!(arr[2]["readiness"]["http_path"], "/healthz");
         assert_eq!(arr[1]["readiness"]["port"], 6379);
-        assert!(arr[1]["readiness"].get("http_path").is_none(), "internal svc is TCP-accept");
+        assert!(
+            arr[1]["readiness"].get("http_path").is_none(),
+            "internal svc is TCP-accept"
+        );
         assert_eq!(g.public_service(), Some("web"));
     }
 
@@ -560,25 +615,43 @@ mod tests {
         // never a single overlaid `/`.
         for name in ["web", "redis", "postgres"] {
             let subtree = format!("$BUILD/rootfs/opt/ato/services/{name}/rootfs");
-            assert!(script.contains(&format!("mkdir -p \"{subtree}\"")), "no subtree for {name}");
+            assert!(
+                script.contains(&format!("mkdir -p \"{subtree}\"")),
+                "no subtree for {name}"
+            );
             assert!(
                 script.contains(&format!("podman export \"$CID\" | tar -x -C \"{subtree}\"")),
                 "no independent export for {name}:\n{script}"
             );
-            assert!(script.contains(&format!("podman create 'ato-import-{name}'")), "no create for {name}");
+            assert!(
+                script.contains(&format!("podman create 'ato-import-{name}'")),
+                "no create for {name}"
+            );
         }
         // Three distinct create/export pairs (one per image), not one shared export.
         assert_eq!(script.matches("create 'ato-import-").count(), 3);
         assert_eq!(script.matches("tar -x -C").count(), 3);
         // Base rootfs carries the agent + supervisor.json (services[]) + /etc/hosts.
         assert!(script.contains("ATO_GUEST_AGENT_BIN"), "{script}");
-        assert!(script.contains("/usr/local/bin/ato-guest-agent"), "{script}");
-        assert!(script.contains("\"services\""), "supervisor.json is services-shaped");
-        assert!(script.contains("etc/hosts"), "bakes /etc/hosts for discovery");
+        assert!(
+            script.contains("/usr/local/bin/ato-guest-agent"),
+            "{script}"
+        );
+        assert!(
+            script.contains("\"services\""),
+            "supervisor.json is services-shaped"
+        );
+        assert!(
+            script.contains("etc/hosts"),
+            "bakes /etc/hosts for discovery"
+        );
         assert!(script.contains("127.0.0.1 localhost"), "{script}");
         // Failure-safe cleanup reaps containers + images.
         assert!(script.contains("trap cleanup EXIT"), "{script}");
-        assert!(script.contains("rmi -f 'ato-import-"), "cleanup removes imported images");
+        assert!(
+            script.contains("rmi -f 'ato-import-"),
+            "cleanup removes imported images"
+        );
     }
 
     #[test]
@@ -587,9 +660,14 @@ mod tests {
         web.bindings_env = BTreeMap::from([("OPENAI_API_KEY".into(), "openai_api_key".into())]);
         let mut redis = svc("redis", 6379, false);
         redis.bindings_env = BTreeMap::from([("REDIS_PASSWORD".into(), "redis_password".into())]);
-        let g = ImportedServiceGraph { services: vec![web, redis] };
+        let g = ImportedServiceGraph {
+            services: vec![web, redis],
+        };
         assert_eq!(g.binding_names(), vec!["openai_api_key", "redis_password"]);
         let script = multi_image_pack_script("docker", &g, 1024);
-        assert!(script.contains("ato-guest-agent 'openai_api_key' 'redis_password'"), "{script}");
+        assert!(
+            script.contains("ato-guest-agent 'openai_api_key' 'redis_password'"),
+            "{script}"
+        );
     }
 }
