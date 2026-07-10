@@ -343,10 +343,10 @@ pub fn build_supervisor_json(plan: &MultiImagePackPlan<'_>) -> serde_json::Value
                     // services are TCP-accept.
                     if let Some(port) = plan.port(&s.name) {
                         let mut r = serde_json::json!({ "port": port });
-                        if s.name == plan.graph.public_service {
-                            if let Some(path) = &plan.public_readiness_http_path {
-                                r["http_path"] = serde_json::json!(path);
-                            }
+                        if s.name == plan.graph.public_service
+                            && let Some(path) = &plan.public_readiness_http_path
+                        {
+                            r["http_path"] = serde_json::json!(path);
                         }
                         obj["readiness"] = r;
                     }
