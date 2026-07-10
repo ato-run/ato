@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::tmpfs::DEFAULT_BINDINGS_ROOT;
 use crate::volume_mount::VolumeSpec;
+use crate::BindingSink;
 
 /// Grace window between SIGTERM and SIGKILL when stopping the workload. Bounded so
 /// `StopWorkload` (the pre-snapshot build boundary) always returns even if the
@@ -141,6 +142,119 @@ pub struct ReadinessSpec {
     pub http_path: Option<String>,
 }
 
+/// Phase 7 (generated internal bindings): how a run-time generated internal
+/// secret's value is produced inside the guest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratorMethod {
+    /// Draw `bytes` bytes from the OS RNG and standard-base64-encode them.
+    RandomBase64,
+}
+
+/// Phase 7: the lifetime scope of a generated internal binding. Only `run`
+/// (a fresh value per run) is defined today; recorded so the receipt/spec is
+/// explicit and forward-compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedScope {
+    #[default]
+    Run,
+}
+
+/// Phase 7 (generated internal bindings): a RUN-time generated INTERNAL secret
+/// (DB password, redis password, internal session/JWT key). Distinct from an
+/// EXTERNAL api key (which stays on the binding-lease path): the guest-agent
+/// generates the VALUE at run from the OS RNG and materializes it to the tmpfs
+/// binding sink — the same `bindings_env → /run/ato/bindings` mechanism a leased
+/// secret uses — so every `targets` service reads the SAME value.
+///
+/// Holds NO value: only the NAME + generator method + scope + targets (the
+/// SPEC). The spec is what the receipt records and what the artifact identity
+/// hashes (baked into `supervisor.json`); the VALUE is generated per run, never
+/// baked into the artifact, logged, or sent to the host. Two runs of the same
+/// artifact therefore share identity but get different runtime values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratedBindingSpec {
+    /// The binding NAME (also the tmpfs filename). A valid [`BindingName`]. Each
+    /// target service maps an env var to this name in its `bindings_env`.
+    pub name: String,
+    /// How the value is generated at run.
+    pub generator: GeneratorMethod,
+    /// Bytes of OS randomness drawn before encoding (bounded at validation).
+    pub bytes: u32,
+    /// Lifetime scope (`run` = a fresh value per run).
+    #[serde(default)]
+    pub scope: GeneratedScope,
+    /// The services whose env receives this value. Each must be a declared
+    /// service; recorded for audit. The value is shared (one tmpfs file), so
+    /// every target reads the identical value within a run.
+    pub targets: Vec<String>,
+}
+
+impl GeneratorMethod {
+    /// Generate a fresh value from the OS RNG. `bytes` bytes of entropy are drawn
+    /// and encoded per the method. Reads OS randomness AT RUN TIME in the guest.
+    pub fn generate(&self, bytes: usize) -> std::io::Result<String> {
+        match self {
+            GeneratorMethod::RandomBase64 => Ok(base64_encode(&os_random_bytes(bytes)?)),
+        }
+    }
+}
+
+/// Read `n` bytes of OS randomness (`/dev/urandom`). The guest is Linux, so this
+/// is always available; a short read is an error (fail-closed — never generate a
+/// weak/partial secret).
+fn os_random_bytes(n: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = vec![0u8; n];
+    let mut f = std::fs::File::open("/dev/urandom")?;
+    f.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+/// Standard base64 (RFC 4648, `+/`, `=` padding). Small, dependency-free — the
+/// guest-agent has no base64 crate and this is the only encoder it needs.
+fn base64_encode(input: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        let n = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { A[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { A[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+/// Phase 7: generate each spec's value from the OS RNG and materialize it to the
+/// binding `sink` (one tmpfs file per binding name, shared by all target
+/// services). The value is produced HERE, at run — never baked into the artifact
+/// — and returned nowhere (only written to the sink). Returns the binding names
+/// written so the caller can scrub them on stop. Fail-closed: a bad name / RNG /
+/// sink error aborts before any partial state is reported ready.
+pub fn materialize_generated_bindings(
+    specs: &[GeneratedBindingSpec],
+    sink: &dyn crate::BindingSink,
+) -> std::io::Result<Vec<BindingName>> {
+    let mut written = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let name = BindingName::parse(spec.name.as_str()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("generated binding {:?}: invalid name: {e}", spec.name),
+            )
+        })?;
+        let value = spec.generator.generate(spec.bytes as usize)?;
+        sink.deliver(&name, &value)?;
+        written.push(name);
+    }
+    Ok(written)
+}
+
 /// `/etc/ato/supervisor.json` — how the guest-agent launches the workload(s).
 /// Written into the rootfs by the builder for a supervisor (env-secret) capsule.
 /// Holds NO secret value.
@@ -173,6 +287,13 @@ pub struct SupervisorConfig {
     /// `state_bindings` declared the need for it at build time).
     #[serde(default)]
     pub volumes: Vec<VolumeSpec>,
+    /// Phase 7 (generated internal bindings): RUN-time generated internal
+    /// secrets. The guest generates each value from the OS RNG at run and
+    /// materializes it to the tmpfs binding sink so every target service reads
+    /// the SAME value. Holds NO value — only the spec (name/generator/scope/
+    /// targets), which is what the artifact identity hashes.
+    #[serde(default)]
+    pub generated_bindings: Vec<GeneratedBindingSpec>,
 }
 
 fn default_cwd() -> String {
@@ -418,6 +539,43 @@ impl SupervisorConfig {
                 }
             }
             targets.push(target);
+        }
+        // Phase 7 (generated internal bindings): fail-closed at LOAD time. Every
+        // generated binding must have a valid [`BindingName`] (it is the tmpfs
+        // filename each target service reads), bounded `bytes` (never draw an
+        // absurd amount of entropy, never zero), at least one target, and every
+        // target must be a DECLARED service (a value generated for nobody is a
+        // config error). Names must be unique (they key the tmpfs files).
+        let service_names: std::collections::BTreeSet<String> =
+            services.iter().map(|s| s.name.clone()).collect();
+        let mut seen_generated = std::collections::BTreeSet::new();
+        for g in &self.generated_bindings {
+            BindingName::parse(g.name.as_str()).map_err(|e| {
+                format!("supervisor.json: generated binding {:?} invalid name: {e}", g.name)
+            })?;
+            if !seen_generated.insert(g.name.clone()) {
+                return Err(format!("supervisor.json: duplicate generated binding name {:?}", g.name));
+            }
+            if !(1..=1024).contains(&g.bytes) {
+                return Err(format!(
+                    "supervisor.json: generated binding {:?} bytes must be 1..=1024 (got {})",
+                    g.name, g.bytes
+                ));
+            }
+            if g.targets.is_empty() {
+                return Err(format!(
+                    "supervisor.json: generated binding {:?} has no targets (nothing would consume it)",
+                    g.name
+                ));
+            }
+            for t in &g.targets {
+                if !service_names.contains(t) {
+                    return Err(format!(
+                        "supervisor.json: generated binding {:?} target {t:?} is not a declared service",
+                        g.name
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -1021,6 +1179,16 @@ impl<W: Workload> Supervisor<W> {
         if self.started || !bound_ready {
             return Ok(false);
         }
+        // Phase 7 (generated internal bindings): materialize each generated
+        // internal secret's freshly-generated value to the tmpfs sink BEFORE any
+        // service starts — the target services reference these binding files in
+        // their `bindings_env`, so `plan_spawn_service`'s fail-closed
+        // existence check requires them present. Generated on EVERY start (a
+        // restore overwrites whatever build-time value a snapshot froze, so the
+        // frozen value never reaches the restored workload; a rotation restart
+        // regenerates too). Fail-closed: a generation/sink error aborts the
+        // start rather than serving with a missing/partial internal secret.
+        self.materialize_generated_bindings()?;
         // v1.5 readiness graph / Phase-6 DAG: start in dependency (topological)
         // order. `start_order()` already fail-closed on cycle/unknown dep at
         // validation; re-derive here for the concrete order.
@@ -1182,6 +1350,12 @@ impl<W: Workload> Supervisor<W> {
             }
         }
         self.started = false;
+        // Phase 7: scrub the generated internal secrets from tmpfs when the group
+        // stops. Load-bearing for the build boundary: the pre-snapshot
+        // `StopWorkload` must leave no generated value in the frozen image
+        // (matching the leased-secret scrub). A later start (restore or rotation)
+        // regenerates a fresh value.
+        self.scrub_generated_bindings();
         match first_err {
             Some(e) => Err(e),
             None => Ok(any_running),
@@ -1195,6 +1369,31 @@ impl<W: Workload> Supervisor<W> {
             let _ = w.stop();
         }
         self.started = false;
+        self.scrub_generated_bindings();
+    }
+
+    /// Phase 7: generate + materialize every generated internal binding to the
+    /// tmpfs sink at `bindings_root` (the same sink leased secrets land on).
+    fn materialize_generated_bindings(&self) -> std::io::Result<()> {
+        if self.config.generated_bindings.is_empty() {
+            return Ok(());
+        }
+        let sink = crate::tmpfs::TmpfsBindingSink::new(&self.bindings_root);
+        materialize_generated_bindings(&self.config.generated_bindings, &sink)?;
+        Ok(())
+    }
+
+    /// Phase 7: scrub every generated internal binding file (best-effort).
+    fn scrub_generated_bindings(&self) {
+        if self.config.generated_bindings.is_empty() {
+            return;
+        }
+        let sink = crate::tmpfs::TmpfsBindingSink::new(&self.bindings_root);
+        for g in &self.config.generated_bindings {
+            if let Ok(name) = BindingName::parse(g.name.as_str()) {
+                let _ = sink.scrub(&name);
+            }
+        }
     }
 
     pub fn is_running(&self) -> bool {
@@ -2023,6 +2222,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let plan = plan_spawn(&cfg, dir.path()).unwrap();
         assert_eq!(plan.base_env.get("PORT").map(String::as_str), Some("8080"));
@@ -2143,6 +2343,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let fake = FakeWorkload::default();
         let st = fake.0.clone();
@@ -2181,6 +2382,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), FakeWorkload::default);
         assert!(!sup.stop_workload().unwrap(), "nothing to stop ⇒ was_running=false");
@@ -2205,6 +2407,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -2233,6 +2436,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -2256,6 +2460,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -2282,6 +2487,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let mut sup = Supervisor::new(cfg, dir.path(), ChildWorkload::default);
         assert!(sup.on_bound_ready(true).unwrap());
@@ -2447,5 +2653,159 @@ mod tests {
         let legacy = SupervisorConfig::from_json(r#"{"cmd":["true"]}"#).unwrap();
         let json = serde_json::to_string(&legacy.services()[0]).unwrap();
         assert!(!json.contains("rootfs"), "None rootfs must be omitted: {json}");
+    }
+
+    // ── Phase 7 (generated internal bindings) ──
+
+    fn generated_config_json() -> &'static str {
+        // Two services both consume the SAME generated internal secret via their
+        // own env var; a third (redis) does not. The spec carries NO value.
+        r#"{
+            "services":[
+                {"name":"api","cmd":["true"],"bindings_env":{"DB_PASSWORD":"db_password"}},
+                {"name":"postgres","cmd":["true"],"bindings_env":{"POSTGRES_PASSWORD":"db_password"}}
+            ],
+            "generated_bindings":[
+                {"name":"db_password","generator":"random_base64","bytes":32,"scope":"run","targets":["api","postgres"]}
+            ]
+        }"#
+    }
+
+    #[test]
+    fn config_parses_a_generated_binding_spec() {
+        let cfg = SupervisorConfig::from_json(generated_config_json()).unwrap();
+        assert_eq!(cfg.generated_bindings.len(), 1);
+        let g = &cfg.generated_bindings[0];
+        assert_eq!(g.name, "db_password");
+        assert_eq!(g.generator, GeneratorMethod::RandomBase64);
+        assert_eq!(g.bytes, 32);
+        assert_eq!(g.scope, GeneratedScope::Run);
+        assert_eq!(g.targets, vec!["api", "postgres"]);
+    }
+
+    #[test]
+    fn config_rejects_bad_generated_bindings() {
+        // Unknown target service.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"db_password","generator":"random_base64","bytes":32,"targets":["nope"]}]}"#
+        )
+        .is_err());
+        // Empty targets.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"db_password","generator":"random_base64","bytes":32,"targets":[]}]}"#
+        )
+        .is_err());
+        // bytes = 0 (weak) and bytes too large.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"db_password","generator":"random_base64","bytes":0,"targets":["api"]}]}"#
+        )
+        .is_err());
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"db_password","generator":"random_base64","bytes":99999,"targets":["api"]}]}"#
+        )
+        .is_err());
+        // Invalid binding name (uppercase is not a valid BindingName).
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"DB_PASSWORD","generator":"random_base64","bytes":32,"targets":["api"]}]}"#
+        )
+        .is_err());
+        // Unknown generator method.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[{"name":"db_password","generator":"nope","bytes":32,"targets":["api"]}]}"#
+        )
+        .is_err());
+        // Duplicate generated binding name.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[{"name":"api","cmd":["true"]}],
+                "generated_bindings":[
+                    {"name":"db_password","generator":"random_base64","bytes":32,"targets":["api"]},
+                    {"name":"db_password","generator":"random_base64","bytes":16,"targets":["api"]}
+                ]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn generated_spec_is_value_free_and_identity_stable() {
+        // Two builds of the SAME spec serialize BYTE-IDENTICALLY (so they share
+        // artifact identity), and NEITHER serialization carries any value — the
+        // value only exists at run.
+        let a = SupervisorConfig::from_json(generated_config_json()).unwrap();
+        let b = SupervisorConfig::from_json(generated_config_json()).unwrap();
+        let ja = serde_json::to_string(&a.generated_bindings).unwrap();
+        let jb = serde_json::to_string(&b.generated_bindings).unwrap();
+        assert_eq!(ja, jb, "same spec ⇒ identical serialization (identity stable)");
+        // The spec records only name/generator/scope/targets — no value/secret.
+        assert!(ja.contains("db_password") && ja.contains("random_base64"));
+        assert!(!ja.contains("=="), "base64 padding of a value must never appear in the spec");
+    }
+
+    #[test]
+    fn random_base64_generates_distinct_nonempty_values_per_call() {
+        let v1 = GeneratorMethod::RandomBase64.generate(32).unwrap();
+        let v2 = GeneratorMethod::RandomBase64.generate(32).unwrap();
+        assert!(!v1.is_empty() && !v2.is_empty());
+        // 32 bytes → 44 base64 chars (with padding).
+        assert_eq!(v1.len(), 44);
+        assert_ne!(v1, v2, "each RUN gets a different value (OS RNG)");
+    }
+
+    #[test]
+    fn materialize_shares_one_value_across_all_targets_and_writes_no_value_to_the_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig::from_json(generated_config_json()).unwrap();
+        let sink = crate::tmpfs::TmpfsBindingSink::new(dir.path());
+        let written = materialize_generated_bindings(&cfg.generated_bindings, &sink).unwrap();
+        assert_eq!(written.len(), 1);
+        // The single tmpfs file is what BOTH api (DB_PASSWORD) and postgres
+        // (POSTGRES_PASSWORD) read — so the value is identical across targets.
+        let value = std::fs::read_to_string(dir.path().join("db_password")).unwrap();
+        assert!(!value.is_empty());
+        // Plan each target: the injected env resolves to the same file; the plan
+        // carries the PATH, never the value.
+        for svc in cfg.services() {
+            if svc.bindings_env.is_empty() {
+                continue;
+            }
+            let plan = plan_spawn_service(&svc, dir.path()).unwrap();
+            assert_eq!(plan.secret_env.len(), 1);
+            assert_eq!(plan.secret_env[0].1, dir.path().join("db_password"));
+            assert!(!format!("{plan:?}").contains(value.trim()), "value must not enter the plan");
+        }
+        // The spec itself never carries the value.
+        assert!(!format!("{:?}", cfg.generated_bindings).contains(value.trim()));
+    }
+
+    #[test]
+    fn supervisor_materializes_generated_before_start_and_scrubs_on_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig::from_json(generated_config_json()).unwrap();
+        let path = dir.path().join("db_password");
+        assert!(!path.exists(), "no generated value exists before the run");
+
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let mut sup = Supervisor::new(cfg, dir.path(), move || fake.clone());
+        // Bound-ready (no leased bindings required) → generated value materialized
+        // BEFORE the services start (plan_spawn_service's existence check passes).
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert_eq!(st.starts.borrow().len(), 2, "both target services started");
+        assert!(path.exists(), "generated value materialized before start");
+        let run1 = std::fs::read_to_string(&path).unwrap();
+
+        // Stop → generated value scrubbed (the build pre-snapshot must leave none).
+        assert!(sup.stop_workload().unwrap());
+        assert!(!path.exists(), "generated value scrubbed on stop");
+
+        // A fresh start (restore/rotation) regenerates a DIFFERENT value.
+        assert!(sup.on_bound_ready(true).unwrap());
+        let run2 = std::fs::read_to_string(&path).unwrap();
+        assert_ne!(run1, run2, "each run/start gets a fresh generated value");
     }
 }

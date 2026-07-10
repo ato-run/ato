@@ -169,6 +169,52 @@ pub enum SecretClass {
     Session,
 }
 
+/// `[generated_bindings.<name>]` — a RUN-time generated INTERNAL secret (Phase 7).
+///
+/// The value (a DB password, redis password, internal session/JWT key, …) is
+/// generated per RUN inside the guest from the OS RNG and injected into every
+/// `targets` service — it is NEVER stored in the artifact, receipt, logs, or
+/// identity. Only this SPEC is (name/generator/bytes/scope/targets), so two runs
+/// of the same artifact share identity but get different runtime values. Distinct
+/// from an EXTERNAL `[secrets.*]` api key, which stays on the binding-lease path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratedBindingSpec {
+    /// How the value is generated at run (default `random_base64`).
+    #[serde(default)]
+    pub generator: GeneratedGenerator,
+    /// Bytes of OS randomness drawn before encoding (default 32).
+    #[serde(default = "default_generated_bytes")]
+    pub bytes: u32,
+    /// Lifetime scope (`run` = a fresh value per run; the default).
+    #[serde(default)]
+    pub scope: GeneratedBindingScope,
+    /// Services whose env receives this value. Each must be a declared service.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+fn default_generated_bytes() -> u32 {
+    32
+}
+
+/// Generator method for a `[generated_bindings.*]` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedGenerator {
+    /// Draw `bytes` bytes from the OS RNG and standard-base64-encode them.
+    #[default]
+    RandomBase64,
+}
+
+/// Lifetime scope of a generated internal binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GeneratedBindingScope {
+    /// A fresh value generated per run.
+    #[default]
+    Run,
+}
+
 /// `[bindings.<name>]` — a post-restore, user/billing/env-specific injection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindingSpec {
