@@ -20,6 +20,9 @@ use std::collections::HashMap;
 use protocol::binding_control::{AgentToHost, HostToAgent};
 use protocol::binding_lease::{BindingLeaseId, BindingName};
 
+/// ato#1026: app-agnostic localhost→guest-IP TCP relay subcommand for apps
+/// that bind `127.0.0.1` inside the guest.
+pub mod relay;
 pub mod supervisor;
 pub mod tmpfs;
 pub mod volume_mount;
