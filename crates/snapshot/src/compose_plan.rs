@@ -302,19 +302,19 @@ fn reject_external_networks(top: &serde_yaml::Mapping) -> Result<(), String> {
     };
     for (net_name, net_def) in networks {
         let name = net_name.as_str().unwrap_or("<network>");
-        if let Some(def) = net_def.as_mapping() {
-            if let Some(external) = def.get(Value::from("external")) {
-                let is_external = match external {
-                    Value::Bool(b) => *b,
-                    Value::Null => false,
-                    // `external: {name: foo}` (a mapping) or any truthy scalar.
-                    _ => true,
-                };
-                if is_external {
-                    return Err(format!(
-                        "external Docker network '{name}' is not supported (fail-closed)"
-                    ));
-                }
+        if let Some(def) = net_def.as_mapping()
+            && let Some(external) = def.get(Value::from("external"))
+        {
+            let is_external = match external {
+                Value::Bool(b) => *b,
+                Value::Null => false,
+                // `external: {name: foo}` (a mapping) or any truthy scalar.
+                _ => true,
+            };
+            if is_external {
+                return Err(format!(
+                    "external Docker network '{name}' is not supported (fail-closed)"
+                ));
             }
         }
     }
