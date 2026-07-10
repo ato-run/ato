@@ -382,6 +382,9 @@ pub fn derive_imported_service_plan_with_mounts(
         env_map: bindings_env,
         services: Some(vec![service]),
         public_service: Some(IMPORTED_SERVICE_NAME.to_string()),
+        // Phase 7: a Dockerfile import declares no recipe-owned generated
+        // internal bindings (those come from a capsule.toml recipe).
+        generated_bindings: Vec::new(),
     };
     Ok(ImportedServicePlan { supervisor, port, readiness_http_path, ephemeral_mounts, host_bind_relay, warnings })
 }

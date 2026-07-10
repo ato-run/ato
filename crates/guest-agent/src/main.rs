@@ -506,6 +506,7 @@ mod tests {
             bindings_env: BTreeMap::new(),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let session = BindingSession::new(vec![], TmpfsBindingSink::new(dir));
         let sup = Supervisor::new(cfg, dir.to_path_buf(), move || spy.clone());
@@ -583,6 +584,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: Vec::new(),
+            generated_bindings: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
@@ -650,6 +652,7 @@ mod tests {
             bindings_env: BTreeMap::from([("OPENAI_API_KEY".to_string(), "openai".to_string())]),
             services: Vec::new(),
             volumes: volumes.clone(),
+            generated_bindings: Vec::new(),
         };
         let required = vec![BindingName::parse("openai").unwrap()];
         let session = BindingSession::new(required.clone(), TmpfsBindingSink::new(dir));
