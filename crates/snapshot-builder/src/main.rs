@@ -401,15 +401,21 @@ fn derive_job_spec(
     vsock_on: bool,
 ) -> std::result::Result<RootfsBuildSpec, (String, String)> {
     let fail = |e: String| ("eligibility".to_string(), e);
-    if manifest.secrets.is_empty() {
+    // A supervisor build is warranted by EITHER an env-delivery secret OR a
+    // Phase 7 generated internal binding — the SAME predicate
+    // derive_supervisor_build_spec enforces. Dispatching generated-bindings-only
+    // manifests down the v1 path built an artifact whose vsock binding channel
+    // had no supervisor_build ack — the runner then (correctly) refused to
+    // restore the inconsistent artifact (caught by KVM acceptance Test I).
+    if manifest.secrets.is_empty() && manifest.generated_bindings.is_empty() {
         // v1 no-binding path, byte-for-byte unchanged (it also rejects any stray
         // bindings/external/GPU itself).
         return derive_build_spec(manifest, probe).map_err(fail);
     }
     if !supervisor_enabled {
         return Err(fail(
-            "capsule declares [secrets.*]: supervisor builds are disabled on this builder \
-             (operator opt-in: ATO_BUILDER_SUPERVISOR=1)"
+            "capsule declares [secrets.*] or [generated_bindings.*]: supervisor builds are \
+             disabled on this builder (operator opt-in: ATO_BUILDER_SUPERVISOR=1)"
                 .into(),
         ));
     }
@@ -1726,6 +1732,60 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a
+    /// SUPERVISOR build (the guest generates + injects at run — vsock channel,
+    /// supervisor_build ack). Dispatching it down the v1 path built an artifact
+    /// whose vsock channel had no supervisor_build receipt; the runner refused
+    /// to restore it (fail-closed). The dispatch predicate must mirror
+    /// derive_supervisor_build_spec: secrets OR generated_bindings.
+    #[test]
+    fn generated_bindings_only_manifest_dispatches_to_the_supervisor_path() {
+        let toml = r#"
+schema_version = "0.3"
+name = "genbind"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+run = "python3 -m http.server 8080"
+port = 8080
+readiness_probe = { http_get = "/" }
+
+[services.web]
+entrypoint = "exec python3 -m http.server 8080"
+
+[services.web.network]
+publish = true
+
+[generated_bindings.gen_token]
+generator = "random_base64"
+bytes = 32
+scope = "run"
+targets = ["web"]
+"#;
+        let manifest = CapsuleManifest::from_toml(toml).expect("manifest parses");
+        let probe = SourceProbe {
+            has_package_json: false,
+            has_requirements_txt: false,
+            has_pyproject: false,
+            has_index_html: false,
+            has_py_files: true,
+        };
+        // Supervisor disabled ⇒ the supervisor-prerequisite gate must fire (NOT the
+        // silent v1 fallback that produced the inconsistent artifact).
+        let err = derive_job_spec(&manifest, &probe, false, true, true).unwrap_err();
+        assert!(err.1.contains("generated_bindings"), "{err:?}");
+        // Fully enabled ⇒ a supervisor spec with the generated binding and an
+        // EMPTY external binding set (ack carries supervisor_build with []).
+        let spec = derive_job_spec(&manifest, &probe, true, true, true).expect("supervisor spec");
+        let sup = spec.supervisor.as_ref().expect("supervisor present");
+        assert!(sup.binding_names.is_empty());
+        assert_eq!(sup.generated_bindings.len(), 1);
+        assert_eq!(sup.generated_bindings[0].name, "gen_token");
+    }
 
     #[test]
     fn parses_the_ato_api_claim_response() {
