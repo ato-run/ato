@@ -659,6 +659,7 @@ fn produce_import_build(
         policy: SecretEnvPolicy::Reject,
         port_override: params.port_override,
         readiness_http_path: params.readiness_http_path.clone(),
+        volume_policy: params.volumes,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
         size_mib: cfg.rootfs_size_mib,
@@ -742,6 +743,9 @@ struct DockerfileImportParams {
     dockerfile_path: String,
     port_override: Option<u16>,
     readiness_http_path: Option<String>,
+    /// ato#1024: `"tmpfs"` opts in to mapping image-declared VOLUMEs to guest
+    /// tmpfs (ephemeral by design); absent keeps the ato#983 fail-closed gate.
+    volumes: snapshot::docker_import::VolumePolicy,
 }
 
 impl Default for DockerfileImportParams {
@@ -750,6 +754,7 @@ impl Default for DockerfileImportParams {
             dockerfile_path: "Dockerfile".into(),
             port_override: None,
             readiness_http_path: None,
+            volumes: snapshot::docker_import::VolumePolicy::Reject,
         }
     }
 }
@@ -818,11 +823,17 @@ fn parse_import_params(
                 reject_control_chars("params.readiness_http_path", p)?;
                 out.readiness_http_path = Some(p.to_string());
             }
-            other => {
-                return Err(format!(
-                    "unknown dockerfile_import param {other:?} (rejected fail-closed)"
-                ));
+            "volumes" => {
+                // ato#1024: only the literal "tmpfs" opts in; anything else is
+                // rejected rather than ignored (a typo must not silently keep
+                // the fail-closed VOLUME gate the caller thought they lifted —
+                // or worse, lift a gate they didn't mean to).
+                match val.as_str() {
+                    Some("tmpfs") => out.volumes = snapshot::docker_import::VolumePolicy::Tmpfs,
+                    _ => return Err("params.volumes must be the string \"tmpfs\" (the only supported mapping)".into()),
+                }
             }
+            other => return Err(format!("unknown dockerfile_import param {other:?} (rejected fail-closed)")),
         }
     }
     Ok(out)
@@ -1438,13 +1449,15 @@ mod tests {
         // Boundary: exactly 200 chars is legal (the ack schema's healthcheck_url_path max).
         let max = format!("/{}", "x".repeat(199));
         let v = serde_json::json!({ "readiness_http_path": max.as_str() });
-        assert_eq!(
-            parse_import_params(Some(&v))
-                .unwrap()
-                .readiness_http_path
-                .as_deref(),
-            Some(max.as_str())
-        );
+        assert_eq!(parse_import_params(Some(&v)).unwrap().readiness_http_path.as_deref(), Some(max.as_str()));
+        // ato#1024: only the literal "tmpfs" engages the VOLUME mapping; any other
+        // value is rejected, never silently ignored.
+        let v = serde_json::json!({ "volumes": "tmpfs" });
+        assert_eq!(parse_import_params(Some(&v)).unwrap().volumes, snapshot::docker_import::VolumePolicy::Tmpfs);
+        assert_eq!(parse_import_params(None).unwrap().volumes, snapshot::docker_import::VolumePolicy::Reject);
+        for bad in [serde_json::json!({"volumes": "rw"}), serde_json::json!({"volumes": true}), serde_json::json!({"volumes": null})] {
+            assert!(parse_import_params(Some(&bad)).unwrap_err().contains("volumes"));
+        }
     }
 
     #[test]

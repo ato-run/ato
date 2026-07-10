@@ -1452,6 +1452,9 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
         size_mib,
+        // Legacy build: no VOLUME mapping — empty keeps the emitted script
+        // byte-identical to the pre-ato#1024 template.
+        extra_mounts: String::new(),
     })
 }
 
@@ -1580,6 +1583,12 @@ pub(crate) struct PackScriptInputs<'a> {
     pub port: u16,
     pub healthcheck: String,
     pub size_mib: u64,
+    /// Extra mount lines rendered into init after the standard tmpfs mounts
+    /// (ato#1024 VOLUME→tmpfs mapping). MUST be empty for the legacy build
+    /// (keeps its emitted script byte-identical) and each non-empty line must
+    /// already be shell-safe — paths are validated fail-closed upstream
+    /// (`validate_tmpfs_volume_path`), never escaped here.
+    pub extra_mounts: String,
 }
 
 /// The bash pipeline that turns an app image into a read-only-bootable ext4:
@@ -1625,7 +1634,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
-cd {init_cwd}
+{extra_mounts}cd {init_cwd}
 {launch}
 while true; do sleep 1000; done
 INIT
@@ -1648,6 +1657,7 @@ sync; umount "$MNT"
         port = i.port,
         hc = i.healthcheck,
         size = i.size_mib,
+        extra_mounts = i.extra_mounts,
     )
 }
 
