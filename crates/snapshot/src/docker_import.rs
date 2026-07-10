@@ -38,6 +38,8 @@ pub mod build;
 pub mod rootfs;
 /// Phase 1.5: recipe-owned static seed files for ephemeral tmpfs mounts.
 pub mod seed_files;
+/// Phase 5: multi-image (compose) rootfs packing — one image per service subtree.
+pub mod multi_image;
 pub use rootfs::{
     EphemeralMountSeed, EphemeralMountSource, EphemeralMountSpec, VolumePolicy,
     validate_ephemeral_mount_path, validate_ephemeral_mounts,
