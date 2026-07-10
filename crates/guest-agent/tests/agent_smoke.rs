@@ -2,6 +2,8 @@
 //! same framing the vsock transport uses. Proves the binary delivers to tmpfs, reports
 //! bound-ready, scrubs on stop, and never echoes the secret.
 
+// Linux-only runtime component — see the unix gate rationale in src/*.rs tests.
+#![cfg(unix)]
 use std::io::Write;
 use std::process::{Command, Stdio};
 

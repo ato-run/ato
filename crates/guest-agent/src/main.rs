@@ -439,7 +439,10 @@ fn main() -> std::io::Result<()> {
     }
 }
 
-#[cfg(test)]
+// The guest-agent is a LINUX-ONLY runtime component (it runs inside the
+// Firecracker guest): its behavior tests spawn `sh`, use unix paths/perms, and
+// exercise mount/vsock semantics that do not exist on Windows CI runners.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use guest_agent::supervisor::{SpawnPlan, SupervisorConfig};
