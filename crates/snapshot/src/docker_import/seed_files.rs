@@ -1,5 +1,6 @@
-//! Phase 1.5 (snapshot import roadmap) — **static, recipe-owned seed files** for
-//! an ephemeral tmpfs mount.
+//! Build-time **staging** of static, recipe-owned seed files for ephemeral
+//! tmpfs mounts — the filesystem half of the unified `ephemeral_mounts`
+//! contract (`rootfs::EphemeralMountSpec` / `rootfs::EphemeralSeedFile`).
 //!
 //! NO external secrets, NO user input. A Store recipe declares an ephemeral
 //! mount (an otherwise-empty, dies-on-resume tmpfs) and, optionally, a set of
@@ -16,92 +17,22 @@
 //! if_missing = true            # only write when copy-up didn't already provide it
 //! ```
 //!
-//! The builder reads the recipe-root file **at build time**, validates it
-//! fail-closed, scans the CONTENT for secret-looking literals (reusing the
-//! docker_import ENV secret classifier so the two policies cannot drift), stages
-//! it into the guest init, records only `{path, digest}` per file in the receipt
-//! (NEVER the content), and folds the content blake3 digest into the import
-//! identity — so changing a seed file's content changes the artifact identity.
-//!
-//! Fail-closed constraints:
-//! * source: within the recipe root only — relative, no `..`, no absolute, no
-//!   symlink traversal (leaf-symlink rejected + canonical containment check);
-//! * dest: mountpoint-relative — relative, no `..`, no absolute, restricted to a
-//!   shell-safe character set (rendered into the guest init);
-//! * content: UTF-8 text only, rejected if it carries a secret-looking literal
-//!   (the same invariant the baked-`ENV` gate protects).
-//!
-//! // TODO reconcile with Phase 1 (EphemeralMountSpec) on merge — this defines a
-//! minimal self-contained ephemeral-seed-mount shape so Phase 1.5 lands
-//! independently; Phase 1 owns the broader `ephemeral_mounts` concept and the two
-//! should converge to a single type. This module layers the recipe-owned FILES
-//! onto that concept and is orthogonal to the ato#1024 image-`VOLUME`→tmpfs path.
+//! Structural validation (mount paths, destinations, duplicates, nesting) is
+//! `rootfs::validate_ephemeral_mounts` — the single gate. THIS module does the
+//! work that needs the recipe checkout at build time: resolve each source
+//! WITHOUT following a symlink out of the root, read the bytes, scan the
+//! CONTENT for secret-looking literals (reusing the docker_import ENV secret
+//! classifier so the two policies cannot drift), fill the spec's blake3
+//! `source_digest` (an identity input — the receipt records only
+//! `{path, source_path, source_digest, if_missing}`, NEVER the content), and
+//! hand the content to the init renderer (`rootfs::render_ephemeral_mount`
+//! renders mount + copy-up + file writes from the one normalized plan).
 
 use std::path::Path;
 
-use serde::Serialize;
-
+use super::rootfs::{EphemeralMountSpec, EphemeralSeedFile};
 use super::{EnvSecretClass, classify_dockerfile_env};
-use crate::docker_import::rootfs::validate_ephemeral_mount_path;
 use crate::rootfs_builder::validate_subdir;
-
-/// How an ephemeral mount is initialized before the recipe seed files land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum SeedMode {
-    /// The tmpfs starts blank; each seed file is written after the mount.
-    #[default]
-    Empty,
-    /// The image's existing directory content is preserved into the tmpfs first
-    /// (a `cp -a` save/restore around the mount); `if_missing` files then only
-    /// write when copy-up didn't already provide them.
-    CopyUp,
-}
-
-/// Recipe-facing seed file spec (pre-staging): a destination relative to the
-/// mountpoint and a source relative to the recipe root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SeedFileSpec {
-    /// Destination RELATIVE to the mountpoint (e.g. `config.yml`).
-    pub dest: String,
-    /// Source path RELATIVE to the recipe root (e.g. `recipe/config.yml`).
-    pub source: String,
-    /// Only write when the copy-up seed didn't already provide the file.
-    pub if_missing: bool,
-}
-
-/// Recipe-facing ephemeral mount spec (pre-staging).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EphemeralMountSpec {
-    /// Absolute mountpoint (validated like an ato#1024 tmpfs volume path).
-    pub path: String,
-    pub seed: SeedMode,
-    /// Optional tmpfs size cap (MiB). `None` = kernel default.
-    pub size_mib: Option<u64>,
-    pub files: Vec<SeedFileSpec>,
-}
-
-/// Receipt/identity-safe record of a staged seed file: destination + content
-/// blake3 digest. **Never the content.**
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StagedSeedFile {
-    pub dest: String,
-    /// `blake3:<hex>` of the recipe-root source bytes — an identity input.
-    pub digest: String,
-    pub if_missing: bool,
-}
-
-/// Receipt/identity-safe record of a staged ephemeral mount (path + mode + size
-/// + staged files). Folded into the import descriptor envelope, so a different
-/// seed set / content / mode is a different artifact identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct StagedSeedMount {
-    pub path: String,
-    pub seed: SeedMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub size_mib: Option<u64>,
-    pub files: Vec<StagedSeedFile>,
-}
 
 /// One seed file resolved at build time, carrying the CONTENT for guest-init
 /// rendering. Kept OUT of the receipt (content is never recorded).
@@ -113,12 +44,12 @@ pub struct RenderedSeedFile {
     pub content: Vec<u8>,
 }
 
-/// One ephemeral mount resolved at build time (for guest-init rendering).
+/// The staged file CONTENTS for one ephemeral mount, keyed by mountpoint —
+/// the side table `pack_imported_rootfs` aligns (fail-closed) against the
+/// plan's declared `files` before rendering. Never serialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedSeedMount {
+pub struct RenderedMountSeeds {
     pub path: String,
-    pub seed: SeedMode,
-    pub size_mib: Option<u64>,
     pub files: Vec<RenderedSeedFile>,
 }
 
@@ -139,7 +70,10 @@ pub fn validate_seed_dest(dest: &str) -> Result<(), String> {
         return Err("seed file dest is empty".into());
     }
     validate_subdir(dest).map_err(|e| format!("seed file dest {dest:?}: {e}"))?;
-    if !dest.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-')) {
+    if !dest
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+    {
         return Err(format!(
             "seed file dest {dest:?} contains characters outside [A-Za-z0-9/_.-] — refusing to \
              render it into the guest init (fail-closed)"
@@ -152,7 +86,11 @@ pub fn validate_seed_dest(dest: &str) -> Result<(), String> {
 /// the absolute in-guest path. Both halves are pre-restricted to a shell-safe
 /// character set, so the result never needs escaping.
 fn join_mount_dest(mount: &str, dest: &str) -> String {
-    format!("{}/{}", mount.trim_end_matches('/'), dest.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        mount.trim_end_matches('/'),
+        dest.trim_start_matches('/')
+    )
 }
 
 /// Reject secret-looking CONTENT in a recipe seed file. A static, recipe-owned
@@ -190,7 +128,9 @@ fn scan_seed_content(source: &str, content: &[u8]) -> Result<(), String> {
         }
         // A provider-credential-shaped literal anywhere on the line (even without
         // a key half): classified with an empty key so only the value shape gates.
-        for tok in line.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')) {
+        for tok in line.split(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
+        }) {
             let tok = tok.trim_matches(|c| matches!(c, ':' | '='));
             if !tok.is_empty() && classify_dockerfile_env("", tok) != EnvSecretClass::Plain {
                 return Err(format!(
@@ -205,7 +145,10 @@ fn scan_seed_content(source: &str, content: &[u8]) -> Result<(), String> {
 
 /// Split `key: value` / `key = value` / `key=value` at the first `:` or `=`.
 fn split_kv(line: &str) -> Option<(&str, &str)> {
-    let idx = line.char_indices().find(|(_, c)| matches!(c, ':' | '=')).map(|(i, _)| i)?;
+    let idx = line
+        .char_indices()
+        .find(|(_, c)| matches!(c, ':' | '='))
+        .map(|(i, _)| i)?;
     let (k, rest) = line.split_at(idx);
     let v = &rest[1..];
     if k.trim().is_empty() {
@@ -229,78 +172,109 @@ fn strip_quotes(v: &str) -> &str {
 /// Stage ONE seed file from the recipe root: validate the source + dest paths,
 /// resolve the source WITHOUT following a symlink out of the root (leaf-symlink
 /// rejected + canonical containment), read the bytes, scan for secret-looking
-/// content, and compute the content digest. Returns the receipt-safe record and
-/// the content-carrying render record.
+/// content, and fill the content digest. Returns the digest-filled spec (the
+/// receipt/identity record) and the content-carrying render record.
 pub fn stage_seed_file(
     recipe_root: &Path,
     mount: &str,
-    spec: &SeedFileSpec,
-) -> Result<(StagedSeedFile, RenderedSeedFile), String> {
-    validate_seed_source(&spec.source)?;
-    validate_seed_dest(&spec.dest)?;
+    spec: &EphemeralSeedFile,
+) -> Result<(EphemeralSeedFile, RenderedSeedFile), String> {
+    validate_seed_source(&spec.source_path)?;
+    validate_seed_dest(&spec.path)?;
 
     let root_canon = recipe_root
         .canonicalize()
         .map_err(|e| format!("recipe root {}: {e}", recipe_root.display()))?;
-    let src = root_canon.join(&spec.source);
+    let src = root_canon.join(&spec.source_path);
     // The leaf must be a regular file, not a symlink (closes symlink-to-secret
     // traversal even when the target would land back inside the root).
     let meta = std::fs::symlink_metadata(&src)
-        .map_err(|e| format!("seed file source {:?}: {e}", spec.source))?;
+        .map_err(|e| format!("seed file source {:?}: {e}", spec.source_path))?;
     if meta.file_type().is_symlink() {
-        return Err(format!("seed file source {:?} is a symlink — refusing (fail-closed)", spec.source));
+        return Err(format!(
+            "seed file source {:?} is a symlink — refusing (fail-closed)",
+            spec.source_path
+        ));
     }
     if !meta.file_type().is_file() {
-        return Err(format!("seed file source {:?} is not a regular file", spec.source));
+        return Err(format!(
+            "seed file source {:?} is not a regular file",
+            spec.source_path
+        ));
     }
     // Canonical containment (resolves any intermediate directory symlink) — the
     // resolved source must still live inside the recipe root.
     let src_canon = src
         .canonicalize()
-        .map_err(|e| format!("seed file source {:?}: {e}", spec.source))?;
+        .map_err(|e| format!("seed file source {:?}: {e}", spec.source_path))?;
     if !src_canon.starts_with(&root_canon) {
-        return Err(format!("seed file source {:?} escapes the recipe root (fail-closed)", spec.source));
+        return Err(format!(
+            "seed file source {:?} escapes the recipe root (fail-closed)",
+            spec.source_path
+        ));
     }
 
-    let content = std::fs::read(&src_canon).map_err(|e| format!("read seed file {:?}: {e}", spec.source))?;
-    scan_seed_content(&spec.source, &content)?;
+    let content = std::fs::read(&src_canon)
+        .map_err(|e| format!("read seed file {:?}: {e}", spec.source_path))?;
+    scan_seed_content(&spec.source_path, &content)?;
     let digest = format!("blake3:{}", blake3::hash(&content).to_hex());
-    let abs_dest = join_mount_dest(mount, &spec.dest);
+    let abs_dest = join_mount_dest(mount, &spec.path);
     Ok((
-        StagedSeedFile { dest: spec.dest.clone(), digest, if_missing: spec.if_missing },
-        RenderedSeedFile { abs_dest, if_missing: spec.if_missing, content },
+        EphemeralSeedFile {
+            path: spec.path.clone(),
+            source_path: spec.source_path.clone(),
+            source_digest: digest,
+            if_missing: spec.if_missing,
+        },
+        RenderedSeedFile {
+            abs_dest,
+            if_missing: spec.if_missing,
+            content,
+        },
     ))
 }
 
-/// Stage a whole ephemeral mount + its seed files. Validates the mountpoint
-/// (same fail-closed rules as an ato#1024 tmpfs VOLUME path), then stages every
-/// file. Rejects a duplicate destination within one mount (a silent
-/// last-write-wins would be surprising). Returns the receipt-safe mount record
-/// and the render record.
-pub fn stage_seed_mount(
+/// Stage every seed file of ONE normalized mount: returns the mount with each
+/// file's `source_digest` filled (the receipt/identity record) plus this
+/// mount's content side table. A mount with no files passes through unchanged
+/// (image-VOLUME mounts / plain explicit mounts never touch the filesystem).
+pub fn stage_mount_seeds(
     recipe_root: &Path,
-    spec: &EphemeralMountSpec,
-) -> Result<(StagedSeedMount, RenderedSeedMount), String> {
-    validate_ephemeral_mount_path(&spec.path)?;
-    let mut staged = Vec::with_capacity(spec.files.len());
-    let mut rendered = Vec::with_capacity(spec.files.len());
-    let mut seen: Vec<&str> = Vec::new();
-    for f in &spec.files {
-        if seen.contains(&f.dest.as_str()) {
-            return Err(format!(
-                "ephemeral mount {:?} declares seed dest {:?} twice (fail-closed)",
-                spec.path, f.dest
-            ));
-        }
-        seen.push(&f.dest);
-        let (s, r) = stage_seed_file(recipe_root, &spec.path, f)?;
+    mount: &EphemeralMountSpec,
+) -> Result<(EphemeralMountSpec, RenderedMountSeeds), String> {
+    let mut staged = Vec::with_capacity(mount.files.len());
+    let mut rendered = Vec::with_capacity(mount.files.len());
+    for f in &mount.files {
+        let (s, r) = stage_seed_file(recipe_root, &mount.path, f)?;
         staged.push(s);
         rendered.push(r);
     }
+    let mut out = mount.clone();
+    out.files = staged;
     Ok((
-        StagedSeedMount { path: spec.path.clone(), seed: spec.seed, size_mib: spec.size_mib, files: staged },
-        RenderedSeedMount { path: spec.path.clone(), seed: spec.seed, size_mib: spec.size_mib, files: rendered },
+        out,
+        RenderedMountSeeds {
+            path: mount.path.clone(),
+            files: rendered,
+        },
     ))
+}
+
+/// Stage the WHOLE normalized mount list (the plan's `ephemeral_mounts`, already
+/// sorted + structurally validated): fills every `source_digest` and returns the
+/// aligned content table for `pack_imported_rootfs`.
+pub fn stage_all_mounts(
+    recipe_root: &Path,
+    mounts: &[EphemeralMountSpec],
+) -> Result<(Vec<EphemeralMountSpec>, Vec<RenderedMountSeeds>), String> {
+    let mut staged = Vec::with_capacity(mounts.len());
+    let mut rendered = Vec::with_capacity(mounts.len());
+    for m in mounts {
+        let (s, r) = stage_mount_seeds(recipe_root, m)?;
+        staged.push(s);
+        rendered.push(r);
+    }
+    Ok((staged, rendered))
 }
 
 /// Base64-encode with the standard alphabet (no external dep) so ARBITRARY file
@@ -316,65 +290,45 @@ fn base64_encode(data: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(ALPHA[((n >> 18) & 63) as usize] as char);
         out.push(ALPHA[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { ALPHA[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHA[(n & 63) as usize] as char } else { '=' });
-    }
-    out
-}
-
-/// Render the guest-init lines for one ephemeral seed mount: mount the tmpfs,
-/// (optionally) preserve the image's existing directory content via copy-up,
-/// then write each recipe seed file. Content is embedded base64 and decoded in
-/// the guest, so it needs no shell escaping; paths are pre-validated shell-safe.
-///
-/// Emitted into the init AFTER the standard tmpfs mounts and BEFORE `cd` (the
-/// same region as the ato#1024 VOLUME mounts). Requires `base64` in the guest
-/// image (present in coreutils/busybox); a file that fails to decode simply does
-/// not appear and the app's readiness probe fails honestly.
-pub fn render_seed_mount_init(m: &RenderedSeedMount) -> String {
-    let mut out = String::new();
-    let mount = m.path.trim_end_matches('/');
-    let size_opt = m.size_mib.map(|s| format!("-o size={s}m ")).unwrap_or_default();
-    match m.seed {
-        SeedMode::Empty => {
-            out.push_str(&format!(
-                "mkdir -p {mount} 2>/dev/null; mount -t tmpfs {size_opt}tmpfs {mount} 2>/dev/null\n"
-            ));
-        }
-        SeedMode::CopyUp => {
-            // Preserve the baked directory content into the fresh tmpfs.
-            let stash = format!("/tmp/.ato-seed-copyup{}", mount.replace('/', "_"));
-            out.push_str(&format!("mkdir -p {mount} 2>/dev/null\n"));
-            out.push_str(&format!("rm -rf {stash} 2>/dev/null; cp -a {mount} {stash} 2>/dev/null || true\n"));
-            out.push_str(&format!("mount -t tmpfs {size_opt}tmpfs {mount} 2>/dev/null\n"));
-            out.push_str(&format!("cp -a {stash}/. {mount}/ 2>/dev/null || true; rm -rf {stash} 2>/dev/null || true\n"));
-        }
-    }
-    for f in &m.files {
-        let b64 = base64_encode(&f.content);
-        // The dest's parent must exist inside the tmpfs before the write.
-        out.push_str(&format!(
-            "mkdir -p \"$(dirname '{dest}')\" 2>/dev/null\n",
-            dest = f.abs_dest
-        ));
-        let write = format!("printf %s '{b64}' | base64 -d > '{dest}' 2>/dev/null\n", dest = f.abs_dest);
-        if f.if_missing {
-            out.push_str(&format!("[ -e '{dest}' ] || {{ {write}}}", dest = f.abs_dest, write = write));
+        out.push(if chunk.len() > 1 {
+            ALPHA[((n >> 6) & 63) as usize] as char
         } else {
-            out.push_str(&write);
-        }
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHA[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
 
-/// Render the init lines for every ephemeral seed mount, in order.
-pub fn render_seed_mounts_init(mounts: &[RenderedSeedMount]) -> String {
-    mounts.iter().map(render_seed_mount_init).collect()
+/// Render the guest-init lines that write ONE staged seed file (called by
+/// `rootfs::render_ephemeral_mount` AFTER the mount + copy-up lines, so the
+/// whole mount renders from one place). Content is embedded base64 and decoded
+/// in-guest (`base64` is present in coreutils/busybox); the dest path is
+/// pre-validated shell-safe. A failed directory create or write FAILS guest
+/// boot — a seed file is part of the artifact's identity, so an artifact
+/// missing it must never seal (fail-closed, never `2>/dev/null`).
+pub(crate) fn render_seed_file_write(f: &RenderedSeedFile) -> String {
+    let dest = &f.abs_dest;
+    let b64 = base64_encode(&f.content);
+    let write = format!(
+        "mkdir -p \"$(dirname '{dest}')\" || {{ echo \"seed file dir create failed: {dest}\" >&2; exit 1; }}\n\
+         printf %s '{b64}' | base64 -d > '{dest}' || {{ echo \"seed file write failed: {dest}\" >&2; exit 1; }}\n"
+    );
+    if f.if_missing {
+        format!("if [ ! -e '{dest}' ]; then\n{write}fi\n")
+    } else {
+        write
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::docker_import::rootfs::{EphemeralMountSeed, EphemeralMountSource};
     use std::fs;
     use std::os::unix::fs::symlink;
 
@@ -382,12 +336,36 @@ mod tests {
     fn recipe_root() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("recipe")).unwrap();
-        fs::write(dir.path().join("recipe/config.yml"), "port: 3000\nrequire_auth: false\n").unwrap();
+        fs::write(
+            dir.path().join("recipe/config.yml"),
+            "port: 3000\nrequire_auth: false\n",
+        )
+        .unwrap();
         dir
     }
 
-    fn spec(dest: &str, source: &str, if_missing: bool) -> SeedFileSpec {
-        SeedFileSpec { dest: dest.into(), source: source.into(), if_missing }
+    fn spec(dest: &str, source: &str, if_missing: bool) -> EphemeralSeedFile {
+        EphemeralSeedFile {
+            path: dest.into(),
+            source_path: source.into(),
+            source_digest: String::new(),
+            if_missing,
+        }
+    }
+
+    fn mount(
+        path: &str,
+        seed: EphemeralMountSeed,
+        size_mib: Option<u32>,
+        files: Vec<EphemeralSeedFile>,
+    ) -> EphemeralMountSpec {
+        EphemeralMountSpec {
+            path: path.into(),
+            seed,
+            size_mib,
+            source: EphemeralMountSource::Explicit,
+            files,
+        }
     }
 
     // --- source containment ---------------------------------------------------
@@ -397,7 +375,8 @@ mod tests {
         let dir = recipe_root();
         // A lexical absolute / parent escape is rejected by the path validator.
         for bad in ["/etc/passwd", "../outside.yml", "recipe/../../x"] {
-            let err = stage_seed_file(dir.path(), "/config", &spec("config.yml", bad, false)).unwrap_err();
+            let err = stage_seed_file(dir.path(), "/config", &spec("config.yml", bad, false))
+                .unwrap_err();
             assert!(err.contains("seed file source"), "{bad}: {err}");
         }
     }
@@ -405,14 +384,27 @@ mod tests {
     #[test]
     fn parent_dir_in_dest_is_rejected() {
         let dir = recipe_root();
-        let err = stage_seed_file(dir.path(), "/config", &spec("../evil.yml", "recipe/config.yml", false)).unwrap_err();
-        assert!(err.contains("seed file dest") && err.contains(".."), "{err}");
+        let err = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("../evil.yml", "recipe/config.yml", false),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("seed file dest") && err.contains(".."),
+            "{err}"
+        );
     }
 
     #[test]
     fn absolute_dest_is_rejected() {
         let dir = recipe_root();
-        let err = stage_seed_file(dir.path(), "/config", &spec("/abs.yml", "recipe/config.yml", false)).unwrap_err();
+        let err = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("/abs.yml", "recipe/config.yml", false),
+        )
+        .unwrap_err();
         assert!(err.contains("seed file dest"), "{err}");
     }
 
@@ -423,7 +415,12 @@ mod tests {
         let outside = dir.path().join("outside_secret");
         fs::write(&outside, "port: 1\n").unwrap();
         symlink(&outside, dir.path().join("recipe/link.yml")).unwrap();
-        let err = stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/link.yml", false)).unwrap_err();
+        let err = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("config.yml", "recipe/link.yml", false),
+        )
+        .unwrap_err();
         assert!(err.contains("symlink"), "{err}");
     }
 
@@ -434,7 +431,12 @@ mod tests {
         fs::write(escape.path().join("secret.yml"), "port: 1\n").unwrap();
         // recipe/esc -> <outside dir>; recipe/esc/secret.yml canonicalizes outside.
         symlink(escape.path(), dir.path().join("recipe/esc")).unwrap();
-        let err = stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/esc/secret.yml", false)).unwrap_err();
+        let err = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("config.yml", "recipe/esc/secret.yml", false),
+        )
+        .unwrap_err();
         // Either the leaf-file check (its parent is a symlink dir) or the canonical
         // containment check fires — both are fail-closed rejections.
         assert!(err.contains("seed file source"), "{err}");
@@ -451,11 +453,18 @@ mod tests {
             ("k3.yml", "note: ghp_0123456789abcdefghij0123456789abcd\n"),
         ] {
             fs::write(dir.path().join("recipe").join(name), body).unwrap();
-            let err = stage_seed_file(dir.path(), "/config", &spec("config.yml", &format!("recipe/{name}"), false))
-                .unwrap_err();
+            let err = stage_seed_file(
+                dir.path(),
+                "/config",
+                &spec("config.yml", &format!("recipe/{name}"), false),
+            )
+            .unwrap_err();
             assert!(err.contains("secret"), "{name}: {err}");
             // The secret value must never be echoed back.
-            assert!(!err.contains("sk-abcdefghijklmnopqrstuvwxyz"), "{name}: {err}");
+            assert!(
+                !err.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+                "{name}: {err}"
+            );
         }
     }
 
@@ -467,7 +476,14 @@ mod tests {
             "# api_key: sk-notarealsecretjustacomment\nport: 3000\nrequire_auth: false\n",
         )
         .unwrap();
-        assert!(stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/ok.yml", false)).is_ok());
+        assert!(
+            stage_seed_file(
+                dir.path(),
+                "/config",
+                &spec("config.yml", "recipe/ok.yml", false)
+            )
+            .is_ok()
+        );
     }
 
     // --- digest + identity ----------------------------------------------------
@@ -475,100 +491,125 @@ mod tests {
     #[test]
     fn digest_records_content_and_changes_with_content() {
         let dir = recipe_root();
-        let (staged, _) = stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/config.yml", true)).unwrap();
-        assert_eq!(staged.dest, "config.yml");
-        assert!(staged.digest.starts_with("blake3:") && staged.digest.len() == 7 + 64, "{}", staged.digest);
+        let (staged, _) = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("config.yml", "recipe/config.yml", true),
+        )
+        .unwrap();
+        assert_eq!(staged.path, "config.yml");
+        assert_eq!(staged.source_path, "recipe/config.yml");
+        assert!(
+            staged.source_digest.starts_with("blake3:") && staged.source_digest.len() == 7 + 64,
+            "{}",
+            staged.source_digest
+        );
         assert!(staged.if_missing);
-        let before = staged.digest.clone();
+        let before = staged.source_digest.clone();
         // Changing the content changes the digest (⇒ changes the identity envelope).
         fs::write(dir.path().join("recipe/config.yml"), "port: 4000\n").unwrap();
-        let (staged2, _) = stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/config.yml", true)).unwrap();
-        assert_ne!(staged2.digest, before);
+        let (staged2, _) = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("config.yml", "recipe/config.yml", true),
+        )
+        .unwrap();
+        assert_ne!(staged2.source_digest, before);
     }
 
     #[test]
     fn staged_record_never_serializes_content() {
         let dir = recipe_root();
-        let (staged, _) = stage_seed_file(dir.path(), "/config", &spec("config.yml", "recipe/config.yml", true)).unwrap();
+        let (staged, _) = stage_seed_file(
+            dir.path(),
+            "/config",
+            &spec("config.yml", "recipe/config.yml", true),
+        )
+        .unwrap();
         let json = serde_json::to_string(&staged).unwrap();
-        assert!(json.contains("digest") && json.contains("config.yml"));
-        assert!(!json.contains("port: 3000"), "content must never appear in the receipt record: {json}");
+        assert!(json.contains("source_digest") && json.contains("config.yml"));
+        assert!(
+            !json.contains("port: 3000"),
+            "content must never appear in the receipt record: {json}"
+        );
+    }
+
+    // --- staging a whole mount list --------------------------------------------
+
+    #[test]
+    fn stage_all_mounts_fills_digests_and_aligns_content() {
+        let dir = recipe_root();
+        let mounts = vec![
+            mount(
+                "/config",
+                EphemeralMountSeed::CopyUp,
+                Some(16),
+                vec![spec("config.yml", "recipe/config.yml", true)],
+            ),
+            mount("/downloads", EphemeralMountSeed::Empty, Some(512), vec![]),
+        ];
+        let (staged, rendered) = stage_all_mounts(dir.path(), &mounts).unwrap();
+        assert_eq!(staged.len(), 2);
+        assert_eq!(rendered.len(), 2);
+        assert!(staged[0].files[0].source_digest.starts_with("blake3:"));
+        assert_eq!(rendered[0].path, "/config");
+        assert_eq!(rendered[0].files[0].abs_dest, "/config/config.yml");
+        assert_eq!(
+            rendered[0].files[0].content,
+            b"port: 3000\nrequire_auth: false\n"
+        );
+        // The file-less mount passes through untouched with no content entries.
+        assert_eq!(staged[1], mounts[1]);
+        assert!(rendered[1].files.is_empty());
     }
 
     // --- rendering + if_missing semantics -------------------------------------
 
     #[test]
-    fn empty_seed_renders_mount_and_unguarded_write() {
-        let dir = recipe_root();
-        let m = EphemeralMountSpec {
-            path: "/config".into(),
-            seed: SeedMode::Empty,
-            size_mib: Some(16),
-            files: vec![spec("config.yml", "recipe/config.yml", false)],
+    fn unguarded_write_renders_fail_closed() {
+        let f = RenderedSeedFile {
+            abs_dest: "/config/config.yml".into(),
+            if_missing: false,
+            content: b"port: 3000\n".to_vec(),
         };
-        let (_staged, rendered) = stage_seed_mount(dir.path(), &m).unwrap();
-        let init = render_seed_mount_init(&rendered);
-        assert!(init.contains("mount -t tmpfs -o size=16m tmpfs /config"), "{init}");
+        let init = render_seed_file_write(&f);
         assert!(init.contains("base64 -d > '/config/config.yml'"), "{init}");
-        // if_missing=false ⇒ no `[ -e … ] ||` guard.
-        assert!(!init.contains("[ -e '/config/config.yml' ]"), "{init}");
+        assert!(
+            init.contains("seed file write failed") && init.contains("exit 1"),
+            "must fail boot on a failed write: {init}"
+        );
+        // if_missing=false ⇒ no existence guard.
+        assert!(!init.contains("[ ! -e '/config/config.yml' ]"), "{init}");
     }
 
     #[test]
     fn if_missing_true_guards_the_write() {
-        let dir = recipe_root();
-        let m = EphemeralMountSpec {
-            path: "/config".into(),
-            seed: SeedMode::CopyUp,
-            size_mib: None,
-            files: vec![spec("config.yml", "recipe/config.yml", true)],
+        let f = RenderedSeedFile {
+            abs_dest: "/config/config.yml".into(),
+            if_missing: true,
+            content: b"port: 3000\n".to_vec(),
         };
-        let (_staged, rendered) = stage_seed_mount(dir.path(), &m).unwrap();
-        let init = render_seed_mount_init(&rendered);
-        // copy-up preserves the baked dir, then only writes when absent.
-        assert!(init.contains("cp -a /config /tmp/.ato-seed-copyup_config"), "{init}");
-        assert!(init.contains("[ -e '/config/config.yml' ] ||"), "{init}");
-        // No size option when size_mib is None.
-        assert!(init.contains("mount -t tmpfs tmpfs /config"), "{init}");
+        let init = render_seed_file_write(&f);
+        assert!(
+            init.contains("if [ ! -e '/config/config.yml' ]; then"),
+            "{init}"
+        );
+        assert!(init.trim_end().ends_with("fi"), "{init}");
     }
 
     #[test]
     fn base64_roundtrips_arbitrary_bytes() {
         // The encoder must match the guest's `base64 -d`.
-        for data in [&b""[..], b"a", b"ab", b"abc", b"port: 3000\n\"quotes'\t\x00\xff"] {
+        for data in [
+            &b""[..],
+            b"a",
+            b"ab",
+            b"abc",
+            b"port: 3000\n\"quotes'\t\x00\xff",
+        ] {
             let b64 = base64_encode(data);
             let back = decode_b64(&b64);
             assert_eq!(back, data, "roundtrip failed for {data:?} -> {b64}");
-        }
-    }
-
-    #[test]
-    fn duplicate_dest_in_one_mount_is_rejected() {
-        let dir = recipe_root();
-        let m = EphemeralMountSpec {
-            path: "/config".into(),
-            seed: SeedMode::Empty,
-            size_mib: None,
-            files: vec![
-                spec("config.yml", "recipe/config.yml", false),
-                spec("config.yml", "recipe/config.yml", true),
-            ],
-        };
-        let err = stage_seed_mount(dir.path(), &m).unwrap_err();
-        assert!(err.contains("twice"), "{err}");
-    }
-
-    #[test]
-    fn bad_mountpoint_is_rejected() {
-        let dir = recipe_root();
-        for bad in ["relative", "/", "/etc/app", "/config bad"] {
-            let m = EphemeralMountSpec {
-                path: bad.into(),
-                seed: SeedMode::Empty,
-                size_mib: None,
-                files: vec![],
-            };
-            assert!(stage_seed_mount(dir.path(), &m).is_err(), "{bad}");
         }
     }
 
