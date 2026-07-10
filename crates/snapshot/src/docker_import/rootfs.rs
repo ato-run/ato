@@ -523,6 +523,27 @@ pub(crate) fn imported_pack_script(
         plan.port,
         /* start_cmd unused in services shape */ "",
     );
+    // Stage every ephemeral mountpoint (and each seed file's parent directory)
+    // into the rootfs AT PACK TIME, while the ext4 tree is writable. The guest
+    // root is mounted READ-ONLY: a boot-time `mkdir -p` can only no-op on a
+    // directory the image already ships — an image that declares VOLUME
+    // /downloads without RUN mkdir (metube, youtube-dl-server, homepage's
+    // /app/config…) has NO such directory in its export, so the mount target
+    // must be created here or the fail-closed mount check kills the boot.
+    let mut agent_prep = agent_prep;
+    for m in &plan.ephemeral_mounts {
+        // Paths passed validate_ephemeral_mount_path (shell-safe charset).
+        agent_prep.push_str(&format!("mkdir -p \"$BUILD/rootfs{}\"\n", m.path));
+    }
+    for sm in seed_contents {
+        for f in &sm.files {
+            if let Some((parent, _)) = f.abs_dest.rsplit_once('/')
+                && !parent.is_empty()
+            {
+                agent_prep.push_str(&format!("mkdir -p \"$BUILD/rootfs{parent}\"\n"));
+            }
+        }
+    }
     let healthcheck = plan
         .readiness_http_path
         .clone()
@@ -934,6 +955,59 @@ mod tests {
         assert!(
             !script.contains("2>/dev/null; mount"),
             "no silent mount failures: {script}"
+        );
+    }
+
+    #[test]
+    fn pack_script_stages_mountpoints_at_pack_time_for_the_ro_root() {
+        // The guest root mounts READ-ONLY: a mountpoint the image does not ship
+        // (VOLUME without RUN mkdir — metube /downloads, homepage /app/config)
+        // cannot be created by the boot-time mkdir. The pack script must create
+        // it in the staged tree while the ext4 is writable.
+        let mut m = mount(
+            "/downloads",
+            EphemeralMountSeed::Empty,
+            Some(512),
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![EphemeralSeedFile {
+            path: "nested/dir/seed.txt".into(),
+            source_path: "recipe/seed.txt".into(),
+            source_digest: format!("blake3:{}", "ab".repeat(32)),
+            if_missing: false,
+        }];
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![m],
+            false,
+        )
+        .unwrap();
+        let seeds = vec![super::super::seed_files::RenderedMountSeeds {
+            path: "/downloads".into(),
+            files: vec![super::super::seed_files::RenderedSeedFile {
+                abs_dest: "/downloads/nested/dir/seed.txt".into(),
+                if_missing: false,
+                content: b"x".to_vec(),
+            }],
+        }];
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024);
+        // Pack-time staging (runs against $BUILD/rootfs, before mkfs+copy).
+        assert!(
+            script.contains("mkdir -p \"$BUILD/rootfs/downloads\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("mkdir -p \"$BUILD/rootfs/downloads/nested/dir\""),
+            "{script}"
+        );
+        // The boot-time fail-closed mount check stays.
+        assert!(
+            script.contains("required tmpfs mount failed: /downloads"),
+            "{script}"
         );
     }
 
