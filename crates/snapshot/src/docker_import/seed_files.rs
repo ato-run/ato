@@ -325,7 +325,9 @@ pub(crate) fn render_seed_file_write(f: &RenderedSeedFile) -> String {
     }
 }
 
-#[cfg(test)]
+// Staging resolves sources with unix symlink/permission semantics (the builder
+// is a linux host component); the containment tests create real symlinks.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::docker_import::rootfs::{EphemeralMountSeed, EphemeralMountSource};
