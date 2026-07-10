@@ -337,6 +337,17 @@ pub enum SecretEnvPolicy {
 /// `$VAR`, `<value>`) downgrade a sensitive key to [`EnvSecretClass::SecretPlaceholder`].
 pub fn classify_dockerfile_env(key: &str, value: &str) -> EnvSecretClass {
     let key_upper = key.to_ascii_uppercase();
+    // Public-key-material allowlist: the official language base images (python,
+    // php, ruby, node, …) set `GPG_KEY`/`GPG_KEYS` to PGP FINGERPRINTS — the
+    // public key IDs their entrypoints use to VERIFY release signatures, never
+    // private key material. The "KEY" marker would otherwise reject every import
+    // built FROM those images (the metube / yt-dlp-web-ui blocker). Scoped hard:
+    // ONLY the exact `GPG_KEY(S)` names AND only when the value is a set of
+    // fingerprint-shaped hex tokens — a real secret (an armored block or an
+    // `sk-…` token) is not fingerprint-shaped and still rejects.
+    if matches!(key_upper.as_str(), "GPG_KEY" | "GPG_KEYS") && is_pgp_fingerprint_set(value) {
+        return EnvSecretClass::Plain;
+    }
     let sensitive_key = SENSITIVE_ENV_MARKERS.iter().any(|m| key_upper.contains(m));
     if sensitive_key {
         return if is_placeholder_value(value) {
@@ -369,6 +380,31 @@ fn is_placeholder_value(value: &str) -> bool {
         return !rest.is_empty() && valid_env_var_name(rest);
     }
     v.starts_with('<') && v.ends_with('>')
+}
+
+/// True when `value` is one or more PGP key fingerprints — hex tokens of 40
+/// (v4 full fingerprint), 16 (long key id), or 8 (short key id) chars, separated
+/// by whitespace or commas (official base images list several: e.g. php sets
+/// two space-separated fingerprints). A fingerprint is a PUBLIC key identifier;
+/// this is the ONLY value shape the `GPG_KEY(S)` allowlist accepts, so an
+/// attacker who stuffed real key material into `GPG_KEY` still fails closed
+/// (armored blocks, provider tokens, and arbitrary strings are not hex-only).
+fn is_pgp_fingerprint_set(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for tok in v.split(|c: char| c.is_whitespace() || c == ',') {
+        if tok.is_empty() {
+            continue;
+        }
+        any = true;
+        if !matches!(tok.len(), 8 | 16 | 40) || !tok.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    any
 }
 
 /// A value shaped like a real provider credential: a known prefix starting the token
@@ -1047,6 +1083,58 @@ mod tests {
                 "{k}"
             );
         }
+    }
+
+    #[test]
+    fn gpg_key_fingerprints_are_public_and_pass() {
+        // The exact values python/php/ruby official images ship (public PGP
+        // fingerprints used to VERIFY release signatures).
+        for (k, v) in [
+            ("GPG_KEY", "7169605F62C751356D054A26A821E680E5FA6305"), // python
+            ("GPG_KEY", "A035C8C19219BA821ECEA86B64E628F8D684696D"), // python (other)
+            (
+                "GPG_KEYS",
+                "1729F83938DA44E27BA0F4D3DBDB397470D12172 BFDDD28642824F8118EF77909B67A5C12229118F",
+            ), // php: two
+            ("gpg_key", "0123456789ABCDEF"), // 16-hex long id, case-insensitive name
+            ("GPG_KEY", "A821E680"),         // 8-hex short id
+        ] {
+            assert_eq!(
+                classify_dockerfile_env(k, v),
+                EnvSecretClass::Plain,
+                "{k}={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpg_key_with_real_secret_material_still_rejects() {
+        // The allowlist is value-shape-gated: anything that is NOT a set of
+        // fingerprint-shaped hex tokens falls through to the "KEY" marker and
+        // rejects. An attacker cannot smuggle a credential through GPG_KEY.
+        for v in [
+            "sk-abcdefghijklmnopqrstuvwxyz012345",   // provider token
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----", // armored block
+            "7169605F62C751356D054A26A821E680E5FA6305extra", // 40-hex + junk
+            "not-hex-at-all-but-long-enough-value-here", // non-hex
+            "7169605F",                              // 8-hex OK shape but paired w/ junk below
+        ] {
+            // (the last is actually valid short-id; keep the clearly-bad ones)
+            if v == "7169605F" {
+                continue;
+            }
+            assert_eq!(
+                classify_dockerfile_env("GPG_KEY", v),
+                EnvSecretClass::SecretLiteral,
+                "{v}"
+            );
+        }
+        // A fingerprint value under a DIFFERENT sensitive key is NOT allowlisted
+        // (only GPG_KEY(S) verify public release signatures).
+        assert_eq!(
+            classify_dockerfile_env("API_KEY", "7169605F62C751356D054A26A821E680E5FA6305"),
+            EnvSecretClass::SecretLiteral
+        );
     }
 
     #[test]
