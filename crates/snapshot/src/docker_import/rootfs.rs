@@ -29,6 +29,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use serde::Serialize;
+
 use crate::rootfs_builder::{
     PackScriptInputs, ServiceBuildSpec, SupervisorBuildSpec, rootfs_pack_script,
     shell_single_quote, supervisor_prep_and_launch,
@@ -50,7 +52,253 @@ pub struct ImportedServicePlan {
     /// Readiness path (`None` = synthesized `GET /`, mirroring the legacy
     /// builder's `probe_synthesized` contract).
     pub readiness_http_path: Option<String>,
+    /// Size-capped ephemeral tmpfs mounts, with optional copy-up seeding
+    /// (ato#1024 generalized). Normalized + sorted by path; non-empty ONLY when
+    /// the job opted in (legacy `volumes=tmpfs`, structured `volumes`, or
+    /// explicit `ephemeral_mounts`). The receipt records these so it is
+    /// auditable that the artifact's mutable state is deliberately ephemeral
+    /// (dies on stop/resume; acceptable for the throwaway preview lane, still
+    /// lossy for a durable install exactly as ato#983 warned — hence opt-in +
+    /// receipt, never a default).
+    pub ephemeral_mounts: Vec<EphemeralMountSpec>,
+    /// ato#1026: when true, the generated init starts an `ato-guest-agent
+    /// tcp-relay` from the guest's own IP:port → `127.0.0.1:port`, so an app
+    /// that binds only loopback is reachable by the readiness probe and the
+    /// app-proxy (both dial the guest's routable IP). Opt-in per import
+    /// (`host_bind_relay`); recorded in the receipt ⇒ new artifact identity.
+    pub host_bind_relay: bool,
     pub warnings: Vec<DockerImportWarning>,
+}
+
+/// How the job asked to treat IMAGE-declared VOLUMEs (ato#1024). Explicit
+/// `ephemeral_mounts` are a separate, image-independent input (Phase 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VolumePolicy {
+    /// Fail closed on any image VOLUME that no ephemeral mount covers (the
+    /// ato#983 default, unchanged).
+    #[default]
+    Reject,
+    /// Mount each declared image VOLUME as guest tmpfs — state is EXPECTED to
+    /// die. `size_mib` caps each such mount (`None` = uncapped, legacy shape).
+    Tmpfs { size_mib: Option<u32> },
+}
+
+/// How an ephemeral mount is initialized before the app runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EphemeralMountSeed {
+    /// Fresh empty tmpfs (the legacy `volumes=tmpfs` behavior).
+    Empty,
+    /// Copy the image's existing directory contents INTO the tmpfs at boot, so
+    /// an app that ships defaults under the path (e.g. `/app/config`) sees them
+    /// on a writable overlay (writes still die on stop/resume).
+    CopyUp,
+}
+
+/// Where an ephemeral mount came from — audit provenance in the receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EphemeralMountSource {
+    /// Expanded from an image-declared VOLUME under `VolumePolicy::Tmpfs`.
+    ImageVolume,
+    /// Declared explicitly by the job's `ephemeral_mounts`, independent of any
+    /// image VOLUME.
+    Explicit,
+}
+
+/// One static, recipe-owned seed file for an ephemeral mount. `source_digest`
+/// is EMPTY at request/parse time and filled by build-time staging
+/// (`seed_files::stage_all_mounts`) — only digest-filled specs reach the
+/// receipt/identity envelope. All four fields serialize: the destination, the
+/// recipe-root source path, the content blake3, and the write mode are each
+/// identity inputs (a content change flips `source_digest` ⇒ a new artifact).
+/// The CONTENT itself never lives on this type (never in a receipt).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EphemeralSeedFile {
+    /// Destination RELATIVE to the mountpoint (e.g. `config.yml`).
+    pub path: String,
+    /// Source RELATIVE to the recipe root (e.g. `recipe/config.yml`).
+    pub source_path: String,
+    /// `blake3:<hex>` of the source bytes — filled at staging, an identity input.
+    pub source_digest: String,
+    /// Only write when the (copy-up) seed didn't already provide the file.
+    pub if_missing: bool,
+}
+
+/// One normalized ephemeral tmpfs mount. Serialized into the receipt + the
+/// import identity envelope (path+seed+size_mib+source+files), so any change
+/// moves the artifact identity; the normalized+sorted order (mounts by path,
+/// files by destination) makes identity stable regardless of input order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EphemeralMountSpec {
+    pub path: String,
+    pub seed: EphemeralMountSeed,
+    /// tmpfs size cap in MiB (`None` = uncapped). Enforced against the builder
+    /// config caps upstream (`snapshot-builder`), `>= 1` here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_mib: Option<u32>,
+    pub source: EphemeralMountSource,
+    /// Static, recipe-owned seed files written into the mount at boot (after
+    /// the mount + any copy-up). Skipped when EMPTY so every file-less mount
+    /// keeps the exact pre-fold serialization (and every no-mount import keeps
+    /// the legacy descriptor envelope byte-identical).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<EphemeralSeedFile>,
+}
+
+/// Paths an ephemeral mount may never shadow with tmpfs: mounting over these
+/// would replace the OS / the app itself / an already-tmpfs mount rather than
+/// the app's data directory, so they fail closed.
+const TMPFS_FORBIDDEN_PREFIXES: &[&str] = &[
+    "/proc", "/sys", "/dev", "/sbin", "/bin", "/usr", "/lib", "/lib64", "/etc", "/tmp", "/run",
+    "/var/tmp",
+];
+
+/// Validate one ephemeral mount path. The path is rendered into the QUOTED init
+/// heredoc, so the character set is restricted to what cannot break out of
+/// `mount -t tmpfs tmpfs <path>` (no whitespace, quotes, or shell
+/// metacharacters — fail-closed rather than escaped).
+pub fn validate_ephemeral_mount_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/') || path == "/" {
+        return Err(format!(
+            "ephemeral mount {path:?} is not an absolute non-root path"
+        ));
+    }
+    if path.len() > 200 {
+        return Err(format!("ephemeral mount {path:?} exceeds 200 chars"));
+    }
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+    {
+        return Err(format!(
+            "ephemeral mount {path:?} contains characters outside [A-Za-z0-9/_.-] — refusing to render it into the guest init (fail-closed)"
+        ));
+    }
+    if path.contains("..") {
+        return Err(format!("ephemeral mount {path:?} contains '..'"));
+    }
+    let normalized = path.trim_end_matches('/');
+    for forbidden in TMPFS_FORBIDDEN_PREFIXES {
+        if normalized == *forbidden || normalized.starts_with(&format!("{forbidden}/")) {
+            return Err(format!(
+                "ephemeral mount {path:?} would tmpfs-shadow {forbidden} (OS/app surface, not app data) — fail-closed"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Path with any trailing `/` stripped, for overlap/duplicate comparison
+/// (`/data` and `/data/` are the same mountpoint).
+fn normalize_mount_path(path: &str) -> &str {
+    let t = path.trim_end_matches('/');
+    if t.is_empty() { "/" } else { t }
+}
+
+/// Fail-closed validation of the FULL normalized mount set (image-volume +
+/// explicit): each path shell-safe + non-forbidden, each `size_mib >= 1`, no
+/// duplicate mountpoint, no parent/child overlap between any two mounts (a
+/// tmpfs over a parent would hide a sibling child mount). Per-mount seed FILES
+/// are validated here too — destination mount-relative + shell-safe, source
+/// recipe-root-relative (lexically; symlink/containment checks need the
+/// filesystem and land in `seed_files` staging), no duplicate destination —
+/// this is THE single structural gate for the whole unified mount contract.
+pub fn validate_ephemeral_mounts(mounts: &[EphemeralMountSpec]) -> Result<(), String> {
+    for m in mounts {
+        validate_ephemeral_mount_path(&m.path)?;
+        if m.size_mib == Some(0) {
+            return Err(format!(
+                "ephemeral mount {:?} size_mib must be >= 1",
+                m.path
+            ));
+        }
+        let mut dests: Vec<&str> = Vec::with_capacity(m.files.len());
+        for f in &m.files {
+            super::seed_files::validate_seed_dest(&f.path)?;
+            super::seed_files::validate_seed_source(&f.source_path)?;
+            if dests.contains(&f.path.as_str()) {
+                return Err(format!(
+                    "ephemeral mount {:?} declares seed dest {:?} twice (fail-closed)",
+                    m.path, f.path
+                ));
+            }
+            dests.push(&f.path);
+        }
+    }
+    for i in 0..mounts.len() {
+        for j in (i + 1)..mounts.len() {
+            let a = normalize_mount_path(&mounts[i].path);
+            let b = normalize_mount_path(&mounts[j].path);
+            if a == b {
+                return Err(format!("duplicate ephemeral mount path {a:?}"));
+            }
+            if b.starts_with(&format!("{a}/")) || a.starts_with(&format!("{b}/")) {
+                return Err(format!(
+                    "ephemeral mounts {a:?} and {b:?} overlap (one is nested under the other) — fail-closed"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalize the image-VOLUME policy + explicit mounts into the final, sorted,
+/// fully-validated mount set. Explicit mounts are image-independent; under
+/// `VolumePolicy::Tmpfs` each image VOLUME not already covered by an explicit
+/// mount (exact mountpoint) is added as an empty ImageVolume mount; under
+/// `Reject` any image VOLUME left uncovered fails closed (ato#983).
+fn resolve_ephemeral_mounts(
+    image_volumes: &[String],
+    volume_policy: VolumePolicy,
+    explicit: Vec<EphemeralMountSpec>,
+) -> Result<Vec<EphemeralMountSpec>, String> {
+    let covered: std::collections::BTreeSet<String> = explicit
+        .iter()
+        .map(|m| normalize_mount_path(&m.path).to_string())
+        .collect();
+    let mut mounts = explicit;
+    match volume_policy {
+        VolumePolicy::Reject => {
+            let uncovered: Vec<&str> = image_volumes
+                .iter()
+                .filter(|v| !covered.contains(normalize_mount_path(v)))
+                .map(|s| s.as_str())
+                .collect();
+            if !uncovered.is_empty() {
+                return Err(format!(
+                    "image declares VOLUME {} — unmapped mutable state would silently die on a \
+                     frozen-snapshot resume (ato#983). Map it to Ato [state] + state_bindings, \
+                     opt in to ephemeral tmpfs mapping with volumes=tmpfs (ato#1024), declare an \
+                     ephemeral_mounts entry for it, or drop the VOLUME",
+                    uncovered.join(", ")
+                ));
+            }
+        }
+        VolumePolicy::Tmpfs { size_mib } => {
+            for v in image_volumes {
+                if covered.contains(normalize_mount_path(v)) {
+                    continue; // an explicit mount already owns this path (richer)
+                }
+                mounts.push(EphemeralMountSpec {
+                    path: v.clone(),
+                    seed: EphemeralMountSeed::Empty,
+                    size_mib,
+                    source: EphemeralMountSource::ImageVolume,
+                    files: Vec::new(),
+                });
+            }
+        }
+    }
+    // Sort by normalized mountpoint (and each mount's files by destination) so
+    // identity is input-order-independent and the copy-up seed index is
+    // deterministic.
+    mounts.sort_by(|a, b| normalize_mount_path(&a.path).cmp(normalize_mount_path(&b.path)));
+    for m in &mut mounts {
+        m.files.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    validate_ephemeral_mounts(&mounts)?;
+    Ok(mounts)
 }
 
 /// Derive the v0 import plan from an image config. Fail-closed on: empty argv,
@@ -61,6 +309,50 @@ pub fn derive_imported_service_plan(
     policy: SecretEnvPolicy,
     port_override: Option<u16>,
     readiness_http_path: Option<String>,
+) -> Result<ImportedServicePlan, String> {
+    derive_imported_service_plan_with_volumes(
+        config,
+        policy,
+        port_override,
+        readiness_http_path,
+        VolumePolicy::Reject,
+        false,
+    )
+}
+
+/// [`derive_imported_service_plan`] with an explicit [`VolumePolicy`] (ato#1024)
+/// and the ato#1026 localhost-relay opt-in. No explicit ephemeral mounts.
+pub fn derive_imported_service_plan_with_volumes(
+    config: &DockerImageConfig,
+    policy: SecretEnvPolicy,
+    port_override: Option<u16>,
+    readiness_http_path: Option<String>,
+    volume_policy: VolumePolicy,
+    host_bind_relay: bool,
+) -> Result<ImportedServicePlan, String> {
+    derive_imported_service_plan_with_mounts(
+        config,
+        policy,
+        port_override,
+        readiness_http_path,
+        volume_policy,
+        Vec::new(),
+        host_bind_relay,
+    )
+}
+
+/// The richest import-plan entry point (Phase 1): image-VOLUME policy PLUS
+/// explicit, image-independent ephemeral mounts (with optional copy-up seeding
+/// and per-mount size caps). All forms normalize into the plan's single sorted
+/// [`EphemeralMountSpec`] list.
+pub fn derive_imported_service_plan_with_mounts(
+    config: &DockerImageConfig,
+    policy: SecretEnvPolicy,
+    port_override: Option<u16>,
+    readiness_http_path: Option<String>,
+    volume_policy: VolumePolicy,
+    explicit_mounts: Vec<EphemeralMountSpec>,
+    host_bind_relay: bool,
 ) -> Result<ImportedServicePlan, String> {
     // Docker exec semantics: ENTRYPOINT is the argv head, CMD its default args
     // (both already exec-form in image config). Neither alone is unusual but
@@ -74,14 +366,8 @@ pub fn derive_imported_service_plan(
         );
     }
 
-    if !config.volumes.is_empty() {
-        return Err(format!(
-            "image declares VOLUME {} — unmapped mutable state would silently die on a \
-             frozen-snapshot resume (ato#983). Map it to Ato [state] + state_bindings \
-             (import volume mapping is a later slice) or drop the VOLUME",
-            config.volumes.join(", ")
-        ));
-    }
+    let ephemeral_mounts =
+        resolve_ephemeral_mounts(&config.volumes, volume_policy, explicit_mounts)?;
 
     let port = match (port_override, config.exposed_tcp_ports.as_slice()) {
         (Some(p), _) => p,
@@ -162,13 +448,61 @@ pub fn derive_imported_service_plan(
         env_map: bindings_env,
         services: Some(vec![service]),
         public_service: Some(IMPORTED_SERVICE_NAME.to_string()),
+        // Phase 7: a Dockerfile import declares no recipe-owned generated
+        // internal bindings (those come from a capsule.toml recipe).
+        generated_bindings: Vec::new(),
     };
     Ok(ImportedServicePlan {
         supervisor,
         port,
         readiness_http_path,
+        ephemeral_mounts,
+        host_bind_relay,
         warnings,
     })
+}
+
+/// Render one ephemeral mount into the guest init (goes into `extra_mounts`,
+/// after the standard tmpfs mounts, before `cd`): the tmpfs mount, the optional
+/// copy-up seeding, and the mount's static seed-file writes — all from the ONE
+/// normalized plan entry. `index` uniquifies the copy-up seed staging dir;
+/// `seeds` carries the build-time file CONTENT for this mount (aligned by the
+/// caller). A failed mount, copy, or seed write fails guest boot (`exit 1`) —
+/// these are MANAGED state mounts, never `2>/dev/null`. Paths are pre-validated
+/// (`validate_ephemeral_mount_path` / `validate_seed_dest`) so plain
+/// interpolation is shell-safe; file content is embedded base64 and decoded
+/// in-guest, so arbitrary bytes need no shell escaping.
+fn render_ephemeral_mount(
+    index: usize,
+    m: &EphemeralMountSpec,
+    seeds: &[super::seed_files::RenderedSeedFile],
+) -> String {
+    let path = &m.path;
+    let size_opt = m
+        .size_mib
+        .map(|n| format!(" -o size={n}m"))
+        .unwrap_or_default();
+    let mount_line = format!(
+        "mount -t tmpfs{size_opt} tmpfs {path} || {{ echo \"required tmpfs mount failed: {path}\" >&2; exit 1; }}\n"
+    );
+    let mut out = match m.seed {
+        EphemeralMountSeed::Empty => format!("mkdir -p {path}\n{mount_line}"),
+        EphemeralMountSeed::CopyUp => {
+            let seed = format!("/run/ato/seed/{index}");
+            format!(
+                "seed={seed}; mkdir -p \"$seed\"\n\
+                 if [ -d {path} ]; then cp -a {path}/. \"$seed/\"; \
+                 elif [ -e {path} ]; then echo \"ephemeral mountpoint is not a directory: {path}\" >&2; exit 1; fi\n\
+                 mkdir -p {path}\n\
+                 {mount_line}\
+                 cp -a \"$seed/.\" {path}/\n"
+            )
+        }
+    };
+    for f in seeds {
+        out.push_str(&super::seed_files::render_seed_file_write(f));
+    }
+    out
 }
 
 /// The pack script for an ALREADY-BUILT imported image: same shared pipeline as
@@ -181,6 +515,7 @@ pub(crate) fn imported_pack_script(
     tool: &str,
     image_tag: &str,
     plan: &ImportedServicePlan,
+    seed_contents: &[super::seed_files::RenderedMountSeeds],
     size_mib: u64,
 ) -> String {
     let (agent_prep, launch) = supervisor_prep_and_launch(
@@ -192,6 +527,42 @@ pub(crate) fn imported_pack_script(
         .readiness_http_path
         .clone()
         .unwrap_or_else(|| "/".to_string());
+    // Render each normalized ephemeral mount — the tmpfs mount, the copy-up
+    // seeding, AND the mount's static seed-file writes come from the ONE plan
+    // entry (`seed_contents` carries only the build-time file bytes, looked up
+    // by mountpoint; alignment is validated fail-closed in
+    // `pack_imported_rootfs` before this renders). Paths were validated
+    // fail-closed at plan derivation, so plain interpolation into the quoted
+    // init heredoc is safe. Unlike the standard /tmp /run /var/tmp compat
+    // mounts, these are MANAGED state mounts — a failed mount/copy/write MUST
+    // fail guest boot (exit 1), never `2>/dev/null`.
+    let extra_mounts: String = plan
+        .ephemeral_mounts
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let seeds = seed_contents
+                .iter()
+                .find(|s| s.path == m.path)
+                .map(|s| s.files.as_slice())
+                .unwrap_or(&[]);
+            render_ephemeral_mount(i, m, seeds)
+        })
+        .collect();
+    // ato#1026: start the localhost→guest-IP relay BEFORE the app launch. The
+    // guest-agent resolves its own IP from /proc/cmdline (no shell IP-parsing,
+    // no iproute2 in the app image) and the relay retries the loopback target
+    // while the app finishes binding, so starting it first is safe. `port` is
+    // a u16 rendered as digits — nothing to quote.
+    let extra_prelaunch: String = if plan.host_bind_relay {
+        format!(
+            "/usr/local/bin/ato-guest-agent tcp-relay --listen-guest-port {port} \
+             --target 127.0.0.1:{port} >/tmp/ato-relay.log 2>&1 &\n",
+            port = plan.port
+        )
+    } else {
+        String::new()
+    };
     rootfs_pack_script(&PackScriptInputs {
         tool,
         tag_init: format!("TAG={}", shell_single_quote(image_tag)),
@@ -202,6 +573,8 @@ pub(crate) fn imported_pack_script(
         port: plan.port,
         healthcheck,
         size_mib,
+        extra_mounts,
+        extra_prelaunch,
     })
 }
 
@@ -216,10 +589,12 @@ pub fn pack_imported_rootfs(
     tool: super::BuildTool,
     image_tag: &str,
     plan: &ImportedServicePlan,
+    seed_contents: &[super::seed_files::RenderedMountSeeds],
     out_ext4: &Path,
     size_mib: u64,
 ) -> Result<u64, String> {
-    let script = imported_pack_script(tool.as_str(), image_tag, plan, size_mib);
+    validate_mount_seed_alignment(plan, seed_contents)?;
+    let script = imported_pack_script(tool.as_str(), image_tag, plan, seed_contents, size_mib);
     let out = Command::new("bash")
         .arg("-c")
         .arg(&script)
@@ -241,6 +616,41 @@ pub fn pack_imported_rootfs(
     std::fs::metadata(out_ext4)
         .map(|m| m.len())
         .map_err(|e| e.to_string())
+}
+
+/// Fail-closed alignment between the plan's declared seed files (identity) and
+/// the staged content table (what the init will actually write). A plan mount
+/// declaring N files MUST have exactly N staged contents; content for an
+/// unknown mountpoint is equally fatal. Anything less would seal an artifact
+/// whose identity promises files its init never writes (or vice versa).
+fn validate_mount_seed_alignment(
+    plan: &ImportedServicePlan,
+    seed_contents: &[super::seed_files::RenderedMountSeeds],
+) -> Result<(), String> {
+    for s in seed_contents {
+        if !plan.ephemeral_mounts.iter().any(|m| m.path == s.path) {
+            return Err(format!(
+                "staged seed content for {:?} has no matching ephemeral mount in the plan (fail-closed)",
+                s.path
+            ));
+        }
+    }
+    for m in &plan.ephemeral_mounts {
+        let staged = seed_contents
+            .iter()
+            .find(|s| s.path == m.path)
+            .map(|s| s.files.len())
+            .unwrap_or(0);
+        if staged != m.files.len() {
+            return Err(format!(
+                "ephemeral mount {:?} declares {} seed file(s) but {} were staged — refusing to pack a rootfs whose identity and init disagree (fail-closed)",
+                m.path,
+                m.files.len(),
+                staged
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -303,6 +713,544 @@ mod tests {
         assert!(
             err.contains("VOLUME /data") && err.contains("[state]"),
             "{err}"
+        );
+    }
+
+    // --- Phase 1 ephemeral mounts (ato#1024 generalized) ----------------------
+
+    fn mount(
+        path: &str,
+        seed: EphemeralMountSeed,
+        size_mib: Option<u32>,
+        source: EphemeralMountSource,
+    ) -> EphemeralMountSpec {
+        EphemeralMountSpec {
+            path: path.into(),
+            seed,
+            size_mib,
+            source,
+            files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tmpfs_policy_expands_image_volumes_and_records_them() {
+        let mut c = config();
+        c.volumes = vec!["/data".into(), "/downloads".into()];
+        let plan = derive_imported_service_plan_with_volumes(
+            &c,
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Tmpfs { size_mib: None },
+            false,
+        )
+        .unwrap();
+        // Legacy volumes=tmpfs ⇒ empty seed, no size, source=ImageVolume; sorted by path.
+        assert_eq!(
+            plan.ephemeral_mounts,
+            vec![
+                mount(
+                    "/data",
+                    EphemeralMountSeed::Empty,
+                    None,
+                    EphemeralMountSource::ImageVolume
+                ),
+                mount(
+                    "/downloads",
+                    EphemeralMountSeed::Empty,
+                    None,
+                    EphemeralMountSource::ImageVolume
+                ),
+            ]
+        );
+        // A structured size flows through to every expanded image-VOLUME mount.
+        let plan = derive_imported_service_plan_with_volumes(
+            &c,
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Tmpfs {
+                size_mib: Some(512),
+            },
+            false,
+        )
+        .unwrap();
+        assert!(
+            plan.ephemeral_mounts
+                .iter()
+                .all(|m| m.size_mib == Some(512))
+        );
+        // The default (Reject) path never populates the field.
+        let plan =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        assert!(plan.ephemeral_mounts.is_empty());
+    }
+
+    #[test]
+    fn explicit_mounts_are_image_independent_and_normalize() {
+        // Explicit ephemeral_mounts work under the default Reject policy (the
+        // image declares no VOLUME here) and normalize into the sorted list.
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![
+                mount(
+                    "/downloads",
+                    EphemeralMountSeed::Empty,
+                    Some(512),
+                    EphemeralMountSource::Explicit,
+                ),
+                mount(
+                    "/config",
+                    EphemeralMountSeed::CopyUp,
+                    Some(16),
+                    EphemeralMountSource::Explicit,
+                ),
+            ],
+            false,
+        )
+        .unwrap();
+        // Sorted by mountpoint (/config before /downloads).
+        assert_eq!(plan.ephemeral_mounts[0].path, "/config");
+        assert_eq!(plan.ephemeral_mounts[0].seed, EphemeralMountSeed::CopyUp);
+        assert_eq!(plan.ephemeral_mounts[1].path, "/downloads");
+    }
+
+    fn seed_file(dest: &str) -> EphemeralSeedFile {
+        EphemeralSeedFile {
+            path: dest.into(),
+            source_path: format!("recipe/{dest}"),
+            source_digest: String::new(),
+            if_missing: false,
+        }
+    }
+
+    #[test]
+    fn mount_files_are_structurally_validated_in_the_single_gate() {
+        // Duplicate destination within one mount.
+        let mut m = mount(
+            "/config",
+            EphemeralMountSeed::Empty,
+            None,
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![seed_file("config.yml"), seed_file("config.yml")];
+        let err = validate_ephemeral_mounts(std::slice::from_ref(&m)).unwrap_err();
+        assert!(err.contains("twice"), "{err}");
+
+        // A dest escaping the mount and an absolute source are both rejected here
+        // (lexically), before any staging touches the filesystem.
+        let mut m = mount(
+            "/config",
+            EphemeralMountSeed::Empty,
+            None,
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![EphemeralSeedFile {
+            path: "../evil.yml".into(),
+            source_path: "recipe/config.yml".into(),
+            source_digest: String::new(),
+            if_missing: false,
+        }];
+        assert!(
+            validate_ephemeral_mounts(std::slice::from_ref(&m))
+                .unwrap_err()
+                .contains("seed file dest")
+        );
+        let mut m = mount(
+            "/config",
+            EphemeralMountSeed::Empty,
+            None,
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![EphemeralSeedFile {
+            path: "config.yml".into(),
+            source_path: "/etc/passwd".into(),
+            source_digest: String::new(),
+            if_missing: false,
+        }];
+        assert!(
+            validate_ephemeral_mounts(std::slice::from_ref(&m))
+                .unwrap_err()
+                .contains("seed file source")
+        );
+    }
+
+    #[test]
+    fn pack_script_renders_mount_copyup_and_seed_writes_from_one_plan() {
+        let mut m = mount(
+            "/config",
+            EphemeralMountSeed::CopyUp,
+            Some(16),
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![EphemeralSeedFile {
+            path: "config.yml".into(),
+            source_path: "recipe/config.yml".into(),
+            source_digest: format!("blake3:{}", "ab".repeat(32)),
+            if_missing: true,
+        }];
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![m],
+            false,
+        )
+        .unwrap();
+        let seeds = vec![super::super::seed_files::RenderedMountSeeds {
+            path: "/config".into(),
+            files: vec![super::super::seed_files::RenderedSeedFile {
+                abs_dest: "/config/config.yml".into(),
+                if_missing: true,
+                content: b"port: 3000\n".to_vec(),
+            }],
+        }];
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024);
+        // Mount + copy-up + guarded seed write render together, all fail-closed.
+        assert!(
+            script.contains("mount -t tmpfs -o size=16m tmpfs /config"),
+            "{script}"
+        );
+        assert!(
+            script.contains("required tmpfs mount failed: /config"),
+            "{script}"
+        );
+        assert!(
+            script.contains("if [ ! -e '/config/config.yml' ]; then"),
+            "{script}"
+        );
+        assert!(
+            script.contains("base64 -d > '/config/config.yml'"),
+            "{script}"
+        );
+        assert!(script.contains("seed file write failed"), "{script}");
+        assert!(
+            !script.contains("2>/dev/null; mount"),
+            "no silent mount failures: {script}"
+        );
+    }
+
+    #[test]
+    fn seed_alignment_is_fail_closed_both_directions() {
+        let mut m = mount(
+            "/config",
+            EphemeralMountSeed::Empty,
+            None,
+            EphemeralMountSource::Explicit,
+        );
+        m.files = vec![seed_file("config.yml")];
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![m],
+            false,
+        )
+        .unwrap();
+        // Declared files but nothing staged: the identity would promise a file
+        // the init never writes.
+        let err = validate_mount_seed_alignment(&plan, &[]).unwrap_err();
+        assert!(
+            err.contains("declares 1 seed file(s) but 0 were staged"),
+            "{err}"
+        );
+        // Staged content for a mountpoint the plan does not declare.
+        let plain =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let stray = vec![super::super::seed_files::RenderedMountSeeds {
+            path: "/config".into(),
+            files: vec![],
+        }];
+        let err = validate_mount_seed_alignment(&plain, &stray).unwrap_err();
+        assert!(err.contains("no matching ephemeral mount"), "{err}");
+    }
+
+    #[test]
+    fn explicit_mount_covers_an_image_volume_under_reject() {
+        // An explicit ephemeral_mount for a path that IS an image VOLUME
+        // satisfies the ato#983 Reject gate (no volumes=tmpfs needed) and the
+        // image VOLUME is NOT double-added.
+        let mut c = config();
+        c.volumes = vec!["/config".into()];
+        let plan = derive_imported_service_plan_with_mounts(
+            &c,
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![mount(
+                "/config",
+                EphemeralMountSeed::CopyUp,
+                Some(16),
+                EphemeralMountSource::Explicit,
+            )],
+            false,
+        )
+        .unwrap();
+        assert_eq!(plan.ephemeral_mounts.len(), 1);
+        assert_eq!(
+            plan.ephemeral_mounts[0].source,
+            EphemeralMountSource::Explicit
+        );
+        // An UNCOVERED image VOLUME still fails closed under Reject.
+        c.volumes = vec!["/config".into(), "/other".into()];
+        let err = derive_imported_service_plan_with_mounts(
+            &c,
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![mount(
+                "/config",
+                EphemeralMountSeed::CopyUp,
+                None,
+                EphemeralMountSource::Explicit,
+            )],
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("VOLUME /other") && err.contains("[state]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn mount_validation_fails_closed() {
+        // Bad paths (reuse validate_ephemeral_mount_path rules).
+        for (bad, why) in [
+            ("data", "relative"),
+            ("/", "root"),
+            ("/data dir", "whitespace"),
+            ("/data;rm", "shell metacharacter"),
+            ("/data/../etc", "dot-dot"),
+            ("/etc/app", "forbidden prefix /etc"),
+            ("/tmp", "already tmpfs"),
+            ("/usr/local/share", "forbidden prefix /usr"),
+        ] {
+            let err = derive_imported_service_plan_with_mounts(
+                &config(),
+                SecretEnvPolicy::Reject,
+                None,
+                None,
+                VolumePolicy::Reject,
+                vec![mount(
+                    bad,
+                    EphemeralMountSeed::Empty,
+                    None,
+                    EphemeralMountSource::Explicit,
+                )],
+                false,
+            )
+            .unwrap_err();
+            assert!(err.contains("ephemeral mount"), "{why}: {err}");
+        }
+        // size_mib = 0 rejected.
+        let err = validate_ephemeral_mounts(&[mount(
+            "/x",
+            EphemeralMountSeed::Empty,
+            Some(0),
+            EphemeralMountSource::Explicit,
+        )])
+        .unwrap_err();
+        assert!(err.contains("size_mib must be >= 1"), "{err}");
+        // Duplicate mountpoint (/data and /data/ normalize equal).
+        let err = validate_ephemeral_mounts(&[
+            mount(
+                "/data",
+                EphemeralMountSeed::Empty,
+                None,
+                EphemeralMountSource::Explicit,
+            ),
+            mount(
+                "/data/",
+                EphemeralMountSeed::Empty,
+                None,
+                EphemeralMountSource::Explicit,
+            ),
+        ])
+        .unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+        // Nested / parent-child overlap.
+        let err = validate_ephemeral_mounts(&[
+            mount(
+                "/data",
+                EphemeralMountSeed::Empty,
+                None,
+                EphemeralMountSource::Explicit,
+            ),
+            mount(
+                "/data/sub",
+                EphemeralMountSeed::Empty,
+                None,
+                EphemeralMountSource::Explicit,
+            ),
+        ])
+        .unwrap_err();
+        assert!(err.contains("overlap"), "{err}");
+    }
+
+    #[test]
+    fn empty_seed_renders_mkdir_mount_no_cp_with_size() {
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![mount(
+                "/downloads",
+                EphemeralMountSeed::Empty,
+                Some(512),
+                EphemeralMountSource::Explicit,
+            )],
+            false,
+        )
+        .unwrap();
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let init = script
+            .split("<<'INIT'")
+            .nth(1)
+            .unwrap()
+            .split("INIT")
+            .next()
+            .unwrap();
+        // size= appears in the mount cmd; a required-mount failure fails boot.
+        assert!(init.contains("mount -t tmpfs -o size=512m tmpfs /downloads || { echo \"required tmpfs mount failed: /downloads\" >&2; exit 1; }"), "{init}");
+        assert!(init.contains("mkdir -p /downloads"), "{init}");
+        // Empty seed emits NO copy-up cp and no 2>/dev/null suppression.
+        assert!(
+            !init.contains("cp -a"),
+            "empty seed must not copy-up:\n{init}"
+        );
+        assert!(
+            !init.contains("mount -t tmpfs -o size=512m tmpfs /downloads 2>/dev/null"),
+            "no suppression:\n{init}"
+        );
+    }
+
+    #[test]
+    fn copy_up_renders_seed_cp_mkdir_mount_cp_in_order() {
+        let plan = derive_imported_service_plan_with_mounts(
+            &config(),
+            SecretEnvPolicy::Reject,
+            None,
+            None,
+            VolumePolicy::Reject,
+            vec![mount(
+                "/config",
+                EphemeralMountSeed::CopyUp,
+                Some(16),
+                EphemeralMountSource::Explicit,
+            )],
+            false,
+        )
+        .unwrap();
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let init = script
+            .split("<<'INIT'")
+            .nth(1)
+            .unwrap()
+            .split("INIT")
+            .next()
+            .unwrap();
+        // Ordered: seed staging → copy image contents in → mkdir → mount(size=) → copy back.
+        let seed_at = init.find("seed=/run/ato/seed/0").expect("seed line");
+        let cp_in_at = init.find("cp -a /config/. \"$seed/\"").expect("copy-up-in");
+        let not_dir_at = init
+            .find("ephemeral mountpoint is not a directory: /config")
+            .expect("not-a-dir guard");
+        let mkdir_at = init.find("mkdir -p /config").expect("mkdir");
+        let mount_at = init
+            .find("mount -t tmpfs -o size=16m tmpfs /config")
+            .expect("mount size=");
+        let cp_back_at = init.find("cp -a \"$seed/.\" /config/").expect("copy-back");
+        assert!(
+            seed_at < cp_in_at
+                && cp_in_at < mkdir_at
+                && mkdir_at < mount_at
+                && mount_at < cp_back_at,
+            "wrong order:\n{init}"
+        );
+        assert!(not_dir_at > seed_at, "not-a-dir guard present:\n{init}");
+        // Mount failure fails boot; nothing suppressed with 2>/dev/null.
+        assert!(
+            init.contains("|| { echo \"required tmpfs mount failed: /config\" >&2; exit 1; }"),
+            "{init}"
+        );
+    }
+
+    #[test]
+    fn no_mounts_keeps_the_legacy_init_shape() {
+        let plain =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, &[], 1024);
+        assert!(
+            !plain_script.contains("cp -a \"$seed/."),
+            "no copy-up when no mounts"
+        );
+        assert_eq!(
+            plain_script.matches("mount -t tmpfs").count(),
+            3,
+            "only the standard /tmp /run /var/tmp mounts"
+        );
+    }
+
+    // --- ato#1026 localhost→guest-IP relay opt-in ----------------------------
+
+    #[test]
+    fn host_bind_relay_renders_the_relay_line_in_init() {
+        let plan = derive_imported_service_plan_with_volumes(
+            &config(),
+            SecretEnvPolicy::Reject,
+            Some(1737),
+            None,
+            VolumePolicy::Reject,
+            true,
+        )
+        .unwrap();
+        assert!(plan.host_bind_relay);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let init = script
+            .split("<<'INIT'")
+            .nth(1)
+            .unwrap()
+            .split("INIT")
+            .next()
+            .unwrap();
+        assert!(
+            init.contains("ato-guest-agent tcp-relay --listen-guest-port 1737")
+                && init.contains("--target 127.0.0.1:1737"),
+            "init must start the relay for the declared port:\n{init}"
+        );
+        // The relay starts BEFORE the app launch (so it is listening early;
+        // it also retries the target, but ordering must be prelaunch).
+        let relay_at = init.find("tcp-relay").unwrap();
+        let launch_at = init
+            .find("ato-guest-agent ")
+            .map(|_| init.rfind("ato-guest-agent").unwrap())
+            .unwrap();
+        assert!(
+            relay_at <= launch_at,
+            "relay line must precede the agent launch"
+        );
+
+        // Opt-out (default) ⇒ no relay line at all.
+        let plain =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        assert!(!plain.host_bind_relay);
+        assert!(
+            !imported_pack_script("docker", "ato-import-x", &plain, &[], 1024)
+                .contains("tcp-relay")
         );
     }
 
@@ -392,7 +1340,7 @@ mod tests {
     fn imported_pack_script_shares_the_pipeline_but_not_the_build() {
         let plan =
             derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
-        let script = imported_pack_script("podman", "ato-import-abc123", &plan, 1024);
+        let script = imported_pack_script("podman", "ato-import-abc123", &plan, &[], 1024);
         // Imported tag, single-quoted; chosen tool drives create/export/cleanup.
         assert!(script.contains("TAG='ato-import-abc123'"), "{script}");
         assert!(script.contains("CID=$(podman create \"$TAG\")"), "{script}");

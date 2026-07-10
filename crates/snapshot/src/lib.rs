@@ -32,6 +32,7 @@
 pub mod agent_channel;
 mod backend;
 pub mod bench;
+pub mod compose_plan;
 pub mod docker_import;
 mod fake;
 mod firecracker;
@@ -46,6 +47,7 @@ mod scan_cache;
 mod scanner;
 mod seal;
 pub mod state_volume;
+pub mod state_volume_persistence;
 mod uffd;
 // U1 (#854) spike: plumbing exercised only by #[ignore]d KVM-gated smokes
 // (ATO_FC_UFFD), not yet wired into the default restore path — see the
@@ -59,6 +61,10 @@ pub use backend::{
     RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend, SnapshotError,
     SnapshotInspection, SnapshotKind, SupervisorBindings, TeardownReceipt,
     ensure_gpu_not_in_snapshot,
+};
+pub use compose_plan::{
+    DependencyKind, Healthcheck, ImportedService, ImportedServiceGraph, MountKind, RestartPolicy,
+    ServiceDependency, ServiceMount, compose_to_graph,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
