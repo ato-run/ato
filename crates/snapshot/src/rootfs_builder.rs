@@ -94,6 +94,31 @@ pub struct SupervisorBuildSpec {
     /// for the legacy single-service build (its sole service is implicitly public).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_service: Option<String>,
+    /// Phase 7 (generated internal bindings): RUN-time generated internal
+    /// secrets. Non-secret — the SPEC only (name/generator/bytes/scope/targets),
+    /// never a value. Emitted into `supervisor.json` so the guest-agent generates
+    /// each value at run and injects it into every target service; recorded in the
+    /// receipt and hashed into the artifact identity (spec, not value).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_bindings: Vec<GeneratedBindingBuildSpec>,
+}
+
+/// Phase 7 (generated internal bindings): one `[generated_bindings.<name>]`
+/// entry, resolved for the supervisor build. Non-secret — safe in a receipt and
+/// in the artifact identity. Holds NO value; the value is generated per run
+/// inside the guest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GeneratedBindingBuildSpec {
+    /// The binding NAME (tmpfs filename each target service reads).
+    pub name: String,
+    /// Generator method (`random_base64`).
+    pub generator: String,
+    /// Bytes of OS randomness drawn before encoding.
+    pub bytes: u32,
+    /// Lifetime scope (`run`).
+    pub scope: String,
+    /// The services whose env receives this value.
+    pub targets: Vec<String>,
 }
 
 /// v1.5 (ato#973): one service in a multi-service supervisor build. Non-secret —
@@ -334,8 +359,15 @@ pub(crate) fn valid_env_var_name(name: &str) -> bool {
 /// logic as the no-binding path — this reuses [`derive_build_spec`] on a secret-stripped
 /// manifest, so it cannot drift, then attaches the supervisor config.
 pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) -> Result<RootfsBuildSpec, String> {
-    if m.secrets.is_empty() {
-        return Err("supervisor build requires at least one [secrets.*] (delivery = \"env\")".into());
+    // A supervisor build is warranted by EITHER an env-delivery secret (the
+    // binding-lease path) OR a Phase 7 generated internal binding (the guest
+    // generates + injects the value at run) — both need the guest-agent as init.
+    if m.secrets.is_empty() && m.generated_bindings.is_empty() {
+        return Err(
+            "supervisor build requires at least one [secrets.*] (delivery = \"env\") or \
+             [generated_bindings.*]"
+                .into(),
+        );
     }
     for (name, s) in &m.secrets {
         // Only `env` delivery is supervisor env injection. `file` is a request-time
@@ -398,7 +430,7 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
     // v1.5 (ato#973): when the capsule declares `[services.<name>]`, derive a
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
-    let services = derive_supervisor_services(m, &env_map, spec.port)?;
+    let mut services = derive_supervisor_services(m, &env_map, spec.port)?;
 
     // v1.5 per-service secret scoping (ato#982): in a MULTI-service build a secret
     // reaches only the service(s) that named it. Fail-closed: every REQUIRED secret
@@ -421,13 +453,137 @@ pub fn derive_supervisor_build_spec(m: &CapsuleManifest, probe: &SourceProbe) ->
         binding_names.retain(|n| scoped.contains(n.as_str()));
     }
 
+    // Phase 7 (generated internal bindings): resolve `[generated_bindings.*]`.
+    // Fail-closed and it INJECTS each generated value's env var into every target
+    // service's `env_map` (so the guest reads the tmpfs file the guest-agent
+    // materializes at run) and returns the value-free build specs for the receipt
+    // + supervisor.json. Requires a multi-service build — the value is injected
+    // into NAMED target services.
+    let generated_bindings = derive_generated_bindings(m, services.as_mut())?;
+
     // app_url selection: the sole public service (exactly one, enforced in derive)
     // is the app_url / ready_url target. Recorded in the receipt; None for legacy.
     let public_service = services
         .as_ref()
         .and_then(|svcs| svcs.iter().find(|s| s.public).map(|s| s.name.clone()));
-    spec.supervisor = Some(SupervisorBuildSpec { binding_names, env_map, services, public_service });
+    spec.supervisor = Some(SupervisorBuildSpec {
+        binding_names,
+        env_map,
+        services,
+        public_service,
+        generated_bindings,
+    });
     Ok(spec)
+}
+
+/// The env var each target service uses for a generated binding: the
+/// UPPERCASED, sanitized binding name (`db_password` → `DB_PASSWORD`,
+/// `session.key` → `SESSION_KEY`). A single convention keeps the recipe terse;
+/// the derived name is validated as a POSIX identifier before injection.
+fn generated_env_var(binding_name: &str) -> String {
+    binding_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+        .collect()
+}
+
+/// Phase 7 (generated internal bindings): resolve `[generated_bindings.<name>]`
+/// into value-free build specs AND inject each generated value's env var into
+/// every target service's `env_map`. Fail-closed at emission (mirrors the guest
+/// agent's own `SupervisorConfig::validate`, which never trusts the builder):
+/// each name must be a valid [`BindingName`] (the tmpfs filename), the derived
+/// env var a POSIX identifier, `bytes` bounded, targets non-empty and every one a
+/// DECLARED service, and the injected env var must not collide with a secret /
+/// port env the service already carries. Generated bindings require a
+/// multi-service build (the value is injected into named target services).
+fn derive_generated_bindings(
+    m: &CapsuleManifest,
+    services: Option<&mut Vec<ServiceBuildSpec>>,
+) -> Result<Vec<GeneratedBindingBuildSpec>, String> {
+    use capsule::foundation::types::ready_state::{GeneratedBindingScope, GeneratedGenerator};
+    if m.generated_bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(services) = services else {
+        return Err(
+            "[generated_bindings] requires a multi-service capsule ([services.*]) — the \
+             generated value is injected into named target services"
+                .into(),
+        );
+    };
+    // Own the names so the immutable borrow of `services` is released before the
+    // per-target env injection mutates `services` below.
+    let declared: std::collections::BTreeSet<String> =
+        services.iter().map(|s| s.name.clone()).collect();
+    // Deterministic order (BTreeMap by name) so supervisor.json + the receipt are
+    // reproducible from the manifest alone.
+    let mut out = Vec::with_capacity(m.generated_bindings.len());
+    for (name, spec) in &m.generated_bindings {
+        if let Err(e) = BindingName::parse(name.as_str()) {
+            return Err(format!(
+                "generated binding '{name}': the name is the tmpfs binding filename and must be a \
+                 valid BindingName ({e})"
+            ));
+        }
+        if !(1..=1024).contains(&spec.bytes) {
+            return Err(format!(
+                "generated binding '{name}': bytes must be 1..=1024 (got {})",
+                spec.bytes
+            ));
+        }
+        if spec.targets.is_empty() {
+            return Err(format!(
+                "generated binding '{name}': at least one target service is required (nothing \
+                 would consume the value)"
+            ));
+        }
+        let env_var = generated_env_var(name);
+        if !valid_env_var_name(&env_var) {
+            return Err(format!(
+                "generated binding '{name}': derived env var {env_var:?} is not a POSIX identifier"
+            ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for target in &spec.targets {
+            if !declared.contains(target.as_str()) {
+                return Err(format!(
+                    "generated binding '{name}': target '{target}' is not a declared service"
+                ));
+            }
+            if !seen.insert(target.as_str()) {
+                return Err(format!("generated binding '{name}': duplicate target '{target}'"));
+            }
+        }
+        // Inject ENV_VAR → binding name into each target's secret injection map
+        // (same `bindings_env` mechanism as a leased secret). NOT added to
+        // `binding_names`: a generated binding is not leased, so the guest must
+        // never WAIT for it — the guest-agent materializes it at run instead.
+        for svc in services.iter_mut() {
+            if !spec.targets.iter().any(|t| t == &svc.name) {
+                continue;
+            }
+            if svc.env_map.contains_key(&env_var) || svc.base_env.contains_key(&env_var) {
+                return Err(format!(
+                    "generated binding '{name}': injected env {env_var:?} collides with an \
+                     existing env var in service '{}'",
+                    svc.name
+                ));
+            }
+            svc.env_map.insert(env_var.clone(), name.clone());
+        }
+        out.push(GeneratedBindingBuildSpec {
+            name: name.clone(),
+            generator: match spec.generator {
+                GeneratedGenerator::RandomBase64 => "random_base64".to_string(),
+            },
+            bytes: spec.bytes,
+            scope: match spec.scope {
+                GeneratedBindingScope::Run => "run".to_string(),
+            },
+            targets: spec.targets.clone(),
+        });
+    }
+    Ok(out)
 }
 
 /// Build the `/etc/ato/supervisor.json` value from the supervisor spec. A
@@ -495,15 +651,41 @@ fn build_supervisor_json(
                         .collect::<Vec<_>>()
                 );
             }
+            emit_generated_bindings(&mut obj, sup);
             obj
         }
-        None => serde_json::json!({
-            "cmd": ["/bin/sh", "-lc", start_cmd],
-            "cwd": "/app",
-            "base_env": { "PORT": port.to_string() },
-            "bindings_env": sup.env_map,
-        }),
+        None => {
+            let mut obj = serde_json::json!({
+                "cmd": ["/bin/sh", "-lc", start_cmd],
+                "cwd": "/app",
+                "base_env": { "PORT": port.to_string() },
+                "bindings_env": sup.env_map,
+            });
+            emit_generated_bindings(&mut obj, sup);
+            obj
+        }
     }
+}
+
+/// Phase 7 (generated internal bindings): emit the value-free `generated_bindings`
+/// array into `supervisor.json` (mirrors the guest's `SupervisorConfig.
+/// generated_bindings`, a top-level array). Only the SPEC — no value.
+fn emit_generated_bindings(obj: &mut serde_json::Value, sup: &SupervisorBuildSpec) {
+    if sup.generated_bindings.is_empty() {
+        return;
+    }
+    obj["generated_bindings"] = serde_json::json!(
+        sup.generated_bindings
+            .iter()
+            .map(|g| serde_json::json!({
+                "name": g.name,
+                "generator": g.generator,
+                "bytes": g.bytes,
+                "scope": g.scope,
+                "targets": g.targets,
+            }))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// A service name: 1–63 chars of lowercase `[a-z0-9-]`, not leading/trailing `-`
@@ -2148,6 +2330,125 @@ readiness_probe = { http_get = "/health" }
         assert!(arr[1]["base_env"].get("PORT").is_none(), "internal service has no PORT injected");
         assert_eq!(arr[0]["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
         assert!(!json.to_string().contains("sk-"), "no secret value in the emitted config");
+    }
+
+    // ── Phase 7 (generated internal bindings) ──
+
+    fn generated_bindings_toml() -> String {
+        // A public `api` + an internal `postgres`, both fed the SAME generated
+        // internal DB password. One external secret too (realistic: an api key on
+        // the lease path coexists with an internal generated credential).
+        format!(
+            "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n\
+             [services.api]\nentrypoint = \"python3 api.py\"\nsecrets = [\"openai_api_key\"]\n\
+             [services.api.network]\npublish = true\n\
+             [services.postgres]\nentrypoint = \"postgres\"\n\
+             [generated_bindings.db_password]\ngenerator = \"random_base64\"\nbytes = 32\n\
+             scope = \"run\"\ntargets = [\"api\", \"postgres\"]\n",
+            base_toml()
+        )
+    }
+
+    #[test]
+    fn generated_binding_injects_env_records_spec_and_never_a_value() {
+        let spec = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python())
+            .expect("supervisor spec with generated binding");
+        let sup = spec.supervisor.as_ref().unwrap();
+        // The SPEC is recorded (name/generator/bytes/scope/targets) — no value.
+        assert_eq!(sup.generated_bindings.len(), 1);
+        let g = &sup.generated_bindings[0];
+        assert_eq!(g.name, "db_password");
+        assert_eq!(g.generator, "random_base64");
+        assert_eq!(g.bytes, 32);
+        assert_eq!(g.scope, "run");
+        assert_eq!(g.targets, vec!["api", "postgres"]);
+        // A generated binding is NOT leased — the guest must never wait for it, so
+        // it stays out of the agent argv (binding_names = the external secret only).
+        assert_eq!(sup.binding_names, vec!["openai_api_key"]);
+        // BOTH target services get the injected env → the same binding name → the
+        // same run-time value (one shared tmpfs file). postgres also gets it even
+        // though it scopes no [secrets.*].
+        let services = sup.services.as_ref().unwrap();
+        let api = services.iter().find(|s| s.name == "api").unwrap();
+        let postgres = services.iter().find(|s| s.name == "postgres").unwrap();
+        assert_eq!(api.env_map.get("DB_PASSWORD").map(String::as_str), Some("db_password"));
+        assert_eq!(postgres.env_map.get("DB_PASSWORD").map(String::as_str), Some("db_password"));
+        assert_eq!(api.env_map.get("OPENAI_API_KEY").map(String::as_str), Some("openai_api_key"));
+        assert!(!postgres.env_map.contains_key("OPENAI_API_KEY"), "postgres scopes no external secret");
+
+        // Emitted supervisor.json carries the value-free generated_bindings spec at
+        // the top level (mirrors the guest's SupervisorConfig.generated_bindings).
+        let json = build_supervisor_json(sup, spec.port, &spec.start_cmd);
+        let gb = json["generated_bindings"].as_array().expect("generated_bindings array");
+        assert_eq!(gb.len(), 1);
+        assert_eq!(gb[0]["name"], "db_password");
+        assert_eq!(gb[0]["generator"], "random_base64");
+        assert_eq!(gb[0]["bytes"], 32);
+        assert_eq!(gb[0]["scope"], "run");
+        assert_eq!(gb[0]["targets"][1], "postgres");
+        // Nothing in the whole emitted config resembles a value (no base64 padding,
+        // no secret bytes) — the value is generated per run inside the guest only.
+        assert!(!gb[0].as_object().unwrap().contains_key("value"), "spec must never carry a value");
+    }
+
+    #[test]
+    fn generated_binding_spec_is_identity_stable_two_builds_same_bytes() {
+        // Two builds of the same manifest emit BYTE-IDENTICAL supervisor.json —
+        // the SPEC is in the artifact (so identity is stable), the VALUE never is
+        // (it is generated per run). Different runs of the identical artifact then
+        // get different values without changing artifact identity.
+        let a = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python()).unwrap();
+        let b = derive_supervisor_build_spec(&parse(&generated_bindings_toml()), &probe_python()).unwrap();
+        let ja = build_supervisor_json(a.supervisor.as_ref().unwrap(), a.port, &a.start_cmd);
+        let jb = build_supervisor_json(b.supervisor.as_ref().unwrap(), b.port, &b.start_cmd);
+        assert_eq!(ja.to_string(), jb.to_string(), "same spec ⇒ identical supervisor.json (identity stable)");
+    }
+
+    #[test]
+    fn generated_binding_fail_closed_rules() {
+        // Unknown target service.
+        let bad_target = generated_bindings_toml().replace("[\"api\", \"postgres\"]", "[\"api\", \"nope\"]");
+        assert!(derive_supervisor_build_spec(&parse(&bad_target), &probe_python())
+            .unwrap_err()
+            .contains("not a declared service"));
+        // bytes out of range.
+        let bad_bytes = generated_bindings_toml().replace("bytes = 32", "bytes = 99999");
+        assert!(derive_supervisor_build_spec(&parse(&bad_bytes), &probe_python())
+            .unwrap_err()
+            .contains("bytes"));
+        // Uppercase binding name is not a valid BindingName.
+        let bad_name = generated_bindings_toml().replace("[generated_bindings.db_password]", "[generated_bindings.DB_PASSWORD]");
+        assert!(derive_supervisor_build_spec(&parse(&bad_name), &probe_python())
+            .unwrap_err()
+            .contains("BindingName"));
+        // Injected env collides with a service's existing secret env (SHARED name
+        // via an explicit env on the secret): the api secret env = DB_PASSWORD.
+        let collide = format!(
+            "{}\n[secrets.db_password_secret]\nrequired = true\nenv = \"DB_PASSWORD\"\n\
+             [services.api]\nentrypoint = \"a\"\nsecrets = [\"db_password_secret\"]\n\
+             [services.api.network]\npublish = true\n\
+             [services.postgres]\nentrypoint = \"postgres\"\n\
+             [generated_bindings.db_password]\ngenerator = \"random_base64\"\nbytes = 32\n\
+             targets = [\"api\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&collide), &probe_python())
+            .unwrap_err()
+            .contains("collides"));
+    }
+
+    #[test]
+    fn generated_binding_requires_a_multi_service_capsule() {
+        // A generated binding with NO [services.*] fails closed — the value is
+        // injected into named target services.
+        let single = format!(
+            "{}\n[generated_bindings.db_password]\ngenerator = \"random_base64\"\nbytes = 32\n\
+             targets = [\"app\"]\n",
+            base_toml()
+        );
+        assert!(derive_supervisor_build_spec(&parse(&single), &probe_python())
+            .unwrap_err()
+            .contains("multi-service"));
     }
 
     // ── v1.5 (ato#973): app_url selection ──
