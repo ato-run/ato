@@ -277,6 +277,14 @@ struct Artifact {
     /// byte-identical against the `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     oci_import_receipt: Option<serde_json::Value>,
+    /// ato#1049: non-secret compose-import provenance — the full
+    /// `ComposeImportReceipt` (importer version, per-service pinned digests +
+    /// kinds, public entrypoint, self-contained-env note). Present ONLY on a
+    /// `compose_import` artifact; omitted entirely for the other lanes
+    /// (`skip_serializing_if`), so those acks stay byte-identical against the
+    /// `.strict()` ack schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compose_import_receipt: Option<serde_json::Value>,
 }
 
 /// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
@@ -305,7 +313,7 @@ fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
         // ato#1002: advertise both build lanes — the server hands a job ONLY if its
         // kind is listed here (an older ato-api ignores the field and keeps handing
         // recipe jobs exactly as before).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import"] }))
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import", "compose_import"] }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -462,6 +470,9 @@ struct ProducedBuild {
     normalized_guest_command: String,
     docker_import_receipt: Option<serde_json::Value>,
     oci_import_receipt: Option<serde_json::Value>,
+    /// ato#1049: the sealed `compose_import` receipt (multi-service resolution +
+    /// self-contained-env note), threaded into the ack like the other lanes.
+    compose_import_receipt: Option<serde_json::Value>,
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -476,10 +487,11 @@ fn produce_build(
         "recipe" => produce_recipe_build(cfg, job, jobdir),
         "dockerfile_import" => produce_import_build(cfg, job, jobdir),
         "oci_image_import" => produce_oci_image_import(cfg, job, jobdir),
+        "compose_import" => produce_compose_import(cfg, job, jobdir),
         other => Err((
             "claim_kind".into(),
             format!(
-                "unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import, oci_image_import)"
+                "unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import, oci_image_import, compose_import)"
             ),
         )),
     }
@@ -627,6 +639,7 @@ fn produce_recipe_build(
         normalized_guest_command: spec.start_cmd,
         docker_import_receipt: None,
         oci_import_receipt: None,
+        compose_import_receipt: None,
     })
 }
 
@@ -761,6 +774,7 @@ fn produce_import_build(
         normalized_guest_command: argv_display,
         docker_import_receipt: Some(docker_import_receipt),
         oci_import_receipt: None,
+        compose_import_receipt: None,
     })
 }
 
@@ -862,6 +876,89 @@ fn produce_oci_image_import(
         normalized_guest_command: argv_display,
         docker_import_receipt: None,
         oci_import_receipt: Some(oci_import_receipt),
+        compose_import_receipt: None,
+    })
+}
+
+/// ato#1049: produce a `compose_import` build — a self-contained Docker Compose
+/// file (image-only services) packed into ONE bootable supervisor rootfs. The
+/// guest runs every compose service under the `depends_on` DAG; the single
+/// public service is proxied. No capsule.toml, no source checkout — the compose
+/// file IS the plan (parsed into the canonical graph, each image pulled +
+/// digest-pinned, joined + packed via the v1.5 multi-image backend).
+fn produce_compose_import(
+    cfg: &Config,
+    job: &ClaimedJob,
+    jobdir: &Path,
+) -> std::result::Result<ProducedBuild, (String, String)> {
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+
+    // 1. Strict params validation BEFORE any network/pull work.
+    let params =
+        parse_compose_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+
+    // 2. Run the compose import: parse → per-service pull+pin → join → pack.
+    std::fs::create_dir_all(jobdir).map_err(|e| fail("rootfs_build", e.to_string()))?;
+    let ext4 = jobdir.join("rootfs.ext4");
+    let req = snapshot::docker_import::ComposeImportRequest {
+        compose_yaml: &params.compose_yaml,
+        public_readiness_http_path: params.readiness_http_path.clone(),
+        out_ext4: &ext4,
+        size_mib: cfg.rootfs_size_mib.max(COMPOSE_ROOTFS_FLOOR_MIB),
+    };
+    let outcome = snapshot::docker_import::run_compose_import(&SystemImportCommandRunner, &req)
+        .map_err(|e| fail("rootfs_build", e))?;
+    let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+
+    // Import identity: execution_id = WHAT EXECUTES (the joined pinned service
+    // images + public entrypoint); capsule_manifest_hash = the blake3 descriptor
+    // over the SAME input envelope (a compose import has no capsule.toml).
+    let execution_id = snapshot::docker_import::compose_import_execution_id(&outcome.receipt);
+    let capsule_manifest_hash =
+        snapshot::docker_import::compose_import_descriptor_blake3(&outcome.receipt);
+    let compose_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
+        fail(
+            "artifact_metadata",
+            format!("serialize compose import receipt: {e}"),
+        )
+    })?;
+
+    // A compose import is a SUPERVISOR artifact end to end (guest-agent +
+    // supervisor drive every service). Self-contained ⇒ no external bindings.
+    let binding_names = outcome.binding_names.clone();
+    let supervisor = Some(SupervisorBindings {
+        binding_names: binding_names.clone(),
+        state_volumes: vec![],
+        state_owner_scope: None,
+    });
+    let supervisor_ack = Some(SupervisorAck { binding_names });
+
+    let public_svc_cmd = outcome
+        .receipt
+        .services
+        .iter()
+        .find(|s| s.name == outcome.receipt.public_service)
+        .map(|s| format!("{} ({})", s.name, s.resolved_digest))
+        .unwrap_or_default();
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: outcome.public_port,
+        healthcheck: outcome
+            .public_readiness_http_path
+            .clone()
+            .unwrap_or_else(|| "/".to_string()),
+        execution_id,
+        capsule_manifest_hash,
+        supervisor,
+        supervisor_ack,
+        manifest_source: "compose_import".to_string(),
+        synthesized_probe: outcome.synthesized_probe,
+        declared_command: public_svc_cmd.clone(),
+        normalized_guest_command: public_svc_cmd,
+        docker_import_receipt: None,
+        oci_import_receipt: None,
+        compose_import_receipt: Some(compose_import_receipt),
     })
 }
 
@@ -1380,6 +1477,75 @@ fn parse_oci_import_params(
     })
 }
 
+/// ato#1049: validated `compose_import` job params. The compose file itself is
+/// the plan; the only tunables are the public service's readiness path and the
+/// per-job rootfs size (a multi-service stack needs more than the 1024 default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposeImportParams {
+    /// The raw Docker Compose YAML (image-only services). Bounded here — the
+    /// enqueue gate bounds it too; a skew fails closed.
+    compose_yaml: String,
+    /// Optional HTTP readiness path for the PUBLIC service (`None` = TCP-accept).
+    readiness_http_path: Option<String>,
+}
+
+/// The compose file's hard size ceiling (bytes). A compose file is small;
+/// anything past this is hostile/mistaken input, rejected before any pull.
+const MAX_COMPOSE_YAML_BYTES: usize = 128 * 1024;
+
+/// A compose stack packs MULTIPLE service images into one rootfs, so it needs
+/// more than the single-image 1024 default. Floor the ext4 at this (unless the
+/// builder config already asks for more). A dedicated per-job `rootfs_size_mib`
+/// param lands with the size-override PR (ato#1051); until then the floor keeps
+/// a 2–3 service stack (e.g. Blinko: blinko + postgres) from failing ENOSPC.
+const COMPOSE_ROOTFS_FLOOR_MIB: u64 = 4096;
+
+/// Strict, fail-closed parse of `compose_import` params: `compose_yaml` required
+/// (non-empty, ≤128 KiB); `readiness_http_path` shares the import validator;
+/// `rootfs_size_mib` shares the 1..=8192 cap. Unknown keys / non-object / absent
+/// params reject.
+fn parse_compose_import_params(
+    params: Option<&serde_json::Value>,
+) -> std::result::Result<ComposeImportParams, String> {
+    let v = params
+        .filter(|v| !v.is_null())
+        .ok_or("compose_import params are required (must carry \"compose_yaml\")")?;
+    let obj = v
+        .as_object()
+        .ok_or("compose_import params must be a JSON object")?;
+    let mut compose_yaml: Option<String> = None;
+    let mut readiness_http_path = None;
+    for (key, val) in obj {
+        match key.as_str() {
+            "compose_yaml" => {
+                let s = val.as_str().ok_or("params.compose_yaml must be a string")?;
+                if s.trim().is_empty() {
+                    return Err("params.compose_yaml must not be empty".into());
+                }
+                if s.len() > MAX_COMPOSE_YAML_BYTES {
+                    return Err(format!(
+                        "params.compose_yaml exceeds {MAX_COMPOSE_YAML_BYTES} bytes (fail-closed)"
+                    ));
+                }
+                compose_yaml = Some(s.to_string());
+            }
+            "readiness_http_path" => {
+                readiness_http_path = Some(parse_readiness_http_path_value(val)?)
+            }
+            other => {
+                return Err(format!(
+                    "unknown compose_import param {other:?} (rejected fail-closed)"
+                ));
+            }
+        }
+    }
+    Ok(ComposeImportParams {
+        compose_yaml: compose_yaml
+            .ok_or("params.compose_yaml is required for a compose_import job")?,
+        readiness_http_path,
+    })
+}
+
 /// ato#1002: shallow-clone the SERVER-RESOLVED pinned commit for a
 /// `dockerfile_import` job. Mirrors `materialize_source`'s identity validation +
 /// subdir containment (lexical + canonical) but deliberately WITHOUT its
@@ -1674,6 +1840,7 @@ fn process_job(
         supervisor_build: produced.supervisor_ack,
         docker_import_receipt: produced.docker_import_receipt,
         oci_import_receipt: produced.oci_import_receipt,
+        compose_import_receipt: produced.compose_import_receipt,
     })
 }
 
@@ -1832,6 +1999,39 @@ targets = ["web"]
         assert_eq!(params.dockerfile_path, "docker/prod.Dockerfile");
         assert_eq!(params.port_override, Some(8080));
         assert!(params.readiness_http_path.is_none());
+    }
+
+    #[test]
+    fn parse_compose_import_params_requires_compose_yaml_and_rejects_unknown() {
+        // compose_yaml required + non-empty.
+        assert!(parse_compose_import_params(None).is_err());
+        assert!(parse_compose_import_params(Some(&serde_json::json!({}))).is_err());
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({ "compose_yaml": "  " })))
+                .is_err()
+        );
+        // Happy path: compose_yaml + optional readiness path.
+        let ok = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "readiness_http_path": "/health",
+        })))
+        .unwrap();
+        assert!(ok.compose_yaml.contains("image: x:1"));
+        assert_eq!(ok.readiness_http_path.as_deref(), Some("/health"));
+        // Unknown key rejected fail-closed.
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({
+                "compose_yaml": "services: {}",
+                "surprise": true
+            })))
+            .is_err()
+        );
+        // Over-size compose rejected.
+        let huge = "x".repeat(MAX_COMPOSE_YAML_BYTES + 1);
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({ "compose_yaml": huge })))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2782,6 +2982,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
@@ -2860,6 +3061,7 @@ targets = ["web"]
                 "resolved_base_images": [{ "original_ref": "node:20", "resolved_digest": "docker.io/library/node@sha256:ab" }],
             })),
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "dockerfile_import");
@@ -2914,6 +3116,7 @@ targets = ["web"]
                 "pull_tool": "podman",
                 "image": { "original_ref": "ghcr.io/alexta69/metube:latest", "resolved_digest": "ghcr.io/alexta69/metube@sha256:ab", "platform": "linux/amd64" },
             })),
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "oci_image_import");
@@ -2957,6 +3160,7 @@ targets = ["web"]
             }),
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(
@@ -3002,6 +3206,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["snapshot_format_id"], "asf.fc-memsnap-v1");
