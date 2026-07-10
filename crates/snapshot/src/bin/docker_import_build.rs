@@ -91,7 +91,6 @@ fn main() {
         volume_policy: Default::default(),
         ephemeral_mounts: Vec::new(),
         host_bind_relay: false,
-        ephemeral_seed_mounts: Vec::new(),
         image_tag,
         out_ext4: &out,
         size_mib,
