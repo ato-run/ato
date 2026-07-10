@@ -531,6 +531,16 @@ pub(crate) fn imported_pack_script(
     // /app/config…) has NO such directory in its export, so the mount target
     // must be created here or the fail-closed mount check kills the boot.
     let mut agent_prep = agent_prep;
+    // The supervisor prep ends with the supervisor.json QUOTED heredoc whose
+    // terminator (`ATOSUPERVISORJSON`) must be ALONE on its line — appending
+    // our mkdir right after it (no separating newline) folds the mkdir into
+    // the terminator line, so the heredoc never closes, the whole pack script
+    // mis-parses, and the ext4 is never written (surfacing downstream as the
+    // `No such file or directory (os error 2)` from the metadata() call).
+    // Guarantee the separation.
+    if !agent_prep.is_empty() && !agent_prep.ends_with('\n') {
+        agent_prep.push('\n');
+    }
     for m in &plan.ephemeral_mounts {
         // Paths passed validate_ephemeral_mount_path (shell-safe charset).
         agent_prep.push_str(&format!("mkdir -p \"$BUILD/rootfs{}\"\n", m.path));
@@ -1008,6 +1018,18 @@ mod tests {
         assert!(
             script.contains("required tmpfs mount failed: /downloads"),
             "{script}"
+        );
+        // Completeness: the appended mkdirs must NOT fold into the
+        // supervisor.json heredoc terminator — the script must reach the ext4
+        // build. A truncated script (broken heredoc) is exactly the os-error-2
+        // regression: the ext4 is never written and metadata() fails ENOENT.
+        assert!(
+            script.contains("mkfs.ext4"),
+            "pack script truncated before mkfs (broken heredoc):\n{script}"
+        );
+        assert!(
+            script.contains("ATOSUPERVISORJSON\n"),
+            "supervisor.json heredoc terminator must be alone on its line:\n{script}"
         );
     }
 
