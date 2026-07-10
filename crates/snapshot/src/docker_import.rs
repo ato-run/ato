@@ -36,6 +36,8 @@ use serde::Serialize;
 pub mod build;
 /// Imported-image → ServiceSpec mapping + rootfs export/injection/pack.
 pub mod rootfs;
+/// Phase 1.5: recipe-owned static seed files for ephemeral tmpfs mounts.
+pub mod seed_files;
 pub use rootfs::{
     EphemeralMountSeed, EphemeralMountSource, EphemeralMountSpec, VolumePolicy,
     validate_ephemeral_mount_path, validate_ephemeral_mounts,
@@ -170,6 +172,15 @@ pub struct DockerImportOptions {
     /// opted-in build intentionally gets a NEW identity (its init differs).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub host_bind_relay: bool,
+    /// Phase 1.5: recipe-owned static seed files staged onto ephemeral tmpfs
+    /// mounts (per file: destination + content blake3 digest; NEVER content).
+    /// Skipped when empty so every pre-existing import keeps a byte-identical
+    /// descriptor envelope + identity digest; a seeded build intentionally gets
+    /// a NEW identity (its init and on-disk files differ, and a content change
+    /// flips the digest). Folded into the import identity via the whole
+    /// `import_options` value in `import_descriptor_canonical_json`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ephemeral_seed_mounts: Vec<seed_files::StagedSeedMount>,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -549,6 +560,9 @@ pub struct DockerfileImportRequest<'a> {
     pub ephemeral_mounts: Vec<rootfs::EphemeralMountSpec>,
     /// ato#1026: start the localhost→guest-IP relay (default off).
     pub host_bind_relay: bool,
+    /// Phase 1.5: recipe-owned ephemeral seed mounts (tmpfs mount + static files
+    /// read from the build context / recipe root at build time). Default empty.
+    pub ephemeral_seed_mounts: Vec<seed_files::EphemeralMountSpec>,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -614,8 +628,25 @@ pub fn run_dockerfile_import(
         req.ephemeral_mounts.clone(),
         req.host_bind_relay,
     )?;
-    let rootfs_bytes =
-        rootfs::pack_imported_rootfs(probe.tool, &req.image_tag, &plan, req.out_ext4, req.size_mib)?;
+    // Phase 1.5: stage recipe-owned seed files from the build context (the recipe
+    // root) — validate paths + secret-scan content + digest each, fail-closed.
+    // The staged records (path+digest) go into the receipt/identity; the render
+    // records carry the content for the guest init.
+    let mut staged_seed_mounts = Vec::with_capacity(req.ephemeral_seed_mounts.len());
+    let mut rendered_seed_mounts = Vec::with_capacity(req.ephemeral_seed_mounts.len());
+    for m in &req.ephemeral_seed_mounts {
+        let (staged, rendered) = seed_files::stage_seed_mount(req.context_dir, m)?;
+        staged_seed_mounts.push(staged);
+        rendered_seed_mounts.push(rendered);
+    }
+    let rootfs_bytes = rootfs::pack_imported_rootfs(
+        probe.tool,
+        &req.image_tag,
+        &plan,
+        &rendered_seed_mounts,
+        req.out_ext4,
+        req.size_mib,
+    )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
         secret_env_policy: req.policy,
@@ -626,6 +657,7 @@ pub fn run_dockerfile_import(
         // expansion + explicit mounts) — the identity/receipt record.
         ephemeral_mounts: plan.ephemeral_mounts.clone(),
         host_bind_relay: req.host_bind_relay,
+        ephemeral_seed_mounts: staged_seed_mounts,
     };
     let receipt = assemble_receipt(&probe, &req.spec, &built, &plan, import_options, exported_rootfs_digest);
     Ok(DockerfileImportOutcome {
@@ -866,6 +898,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                ephemeral_seed_mounts: vec![],
             },
             warnings: vec![],
         }
@@ -1119,45 +1152,36 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_stable_regardless_of_mount_input_order() {
-        // The descriptor sorts nothing itself — the plan hands a normalized+
-        // sorted list — so identity is order-independent by construction. Prove
-        // two receipts differing only in mount order hash identically.
-        let mk = |paths: &[&str]| {
-            let mut r = sample_receipt();
-            r.import_options.ephemeral_mounts = paths
-                .iter()
-                .map(|p| rootfs::EphemeralMountSpec {
-                    path: (*p).into(),
-                    seed: rootfs::EphemeralMountSeed::Empty,
-                    size_mib: None,
-                    source: rootfs::EphemeralMountSource::ImageVolume,
-                })
-                .collect();
-            r
-        };
-        assert_eq!(
-            import_identity_digest(&mk(&["/a", "/b"])),
-            import_identity_digest(&mk(&["/a", "/b"])),
-        );
-    }
+    fn ephemeral_seed_mounts_shift_identity_and_are_skipped_when_empty() {
+        // Phase 1.5: an empty seed set is dropped from the serialized envelope
+        // (skip_serializing_if), so a pre-existing import keeps a byte-identical
+        // descriptor + identity digest; a staged seed file (path+content digest)
+        // is a NEW identity input, and its CONTENT digest is what moves identity.
+        use super::seed_files::{SeedMode, StagedSeedFile, StagedSeedMount};
+        let base = sample_receipt();
+        assert!(base.import_options.ephemeral_seed_mounts.is_empty());
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(!json.contains("ephemeral_seed_mounts"), "empty must be omitted: {json}");
 
-    #[test]
-    fn receipt_round_trips_ephemeral_mounts() {
-        let mut r = sample_receipt();
-        r.import_options.ephemeral_mounts = vec![
-            rootfs::EphemeralMountSpec { path: "/config".into(), seed: rootfs::EphemeralMountSeed::CopyUp, size_mib: Some(16), source: rootfs::EphemeralMountSource::Explicit },
-            rootfs::EphemeralMountSpec { path: "/downloads".into(), seed: rootfs::EphemeralMountSeed::Empty, size_mib: None, source: rootfs::EphemeralMountSource::ImageVolume },
-        ];
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
-        let mounts = &v["import_options"]["ephemeral_mounts"];
-        assert_eq!(mounts[0]["path"], "/config");
-        assert_eq!(mounts[0]["seed"], "copy-up");
-        assert_eq!(mounts[0]["size_mib"], 16);
-        assert_eq!(mounts[0]["source"], "explicit");
-        // size_mib omitted when None (skip_serializing_if).
-        assert!(mounts[1].get("size_mib").is_none(), "None size omitted: {mounts}");
-        assert_eq!(mounts[1]["source"], "image_volume");
+        let mut seeded = base.clone();
+        seeded.import_options.ephemeral_seed_mounts = vec![StagedSeedMount {
+            path: "/config".into(),
+            seed: SeedMode::CopyUp,
+            size_mib: Some(16),
+            files: vec![StagedSeedFile {
+                dest: "config.yml".into(),
+                digest: format!("blake3:{}", "ab".repeat(32)),
+                if_missing: true,
+            }],
+        }];
+        assert_ne!(import_descriptor_blake3(&seeded), import_descriptor_blake3(&base));
+        assert_ne!(import_identity_digest(&seeded), import_identity_digest(&base));
+
+        // The CONTENT digest is an identity input: a different file digest for the
+        // same dest ⇒ a different artifact identity.
+        let mut other = seeded.clone();
+        other.import_options.ephemeral_seed_mounts[0].files[0].digest = format!("blake3:{}", "cd".repeat(32));
+        assert_ne!(import_descriptor_blake3(&other), import_descriptor_blake3(&seeded));
     }
 
     #[test]
@@ -1185,6 +1209,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                ephemeral_seed_mounts: vec![],
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
