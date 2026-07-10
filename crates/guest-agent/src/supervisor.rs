@@ -42,6 +42,33 @@ fn valid_env_var_name(name: &str) -> bool {
         && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Phase 6 (service DAG): a managed entry is either a long-running `service`
+/// (starts on every bound-ready and stays up) or a `run_once` task (a
+/// migration / one-shot that RUNS TO COMPLETION at its declared timing and must
+/// exit 0). Default `service` keeps every pre-Phase-6 config byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceKind {
+    #[default]
+    Service,
+    RunOnce,
+}
+
+/// Phase 6 (service DAG): WHEN a `run_once` task executes. A migration typically
+/// declares `["seal_once","restore"]` — bake the schema at seal, re-apply it on
+/// every restore. The supervisor runs a `run_once` only if the CURRENT phase is
+/// in its `run_at` list.
+/// - `seal_once`: once, during BUILD, before the pre-seal snapshot is taken.
+/// - `restore`: on every restore (snapshot wake).
+/// - `run`: on every plain run (non-snapshot boot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecPhase {
+    SealOnce,
+    Restore,
+    Run,
+}
+
 /// v1.5 (ato#973): one process the supervisor manages. A capsule with a single
 /// service is the common case (byte-identical to the pre-v1.5 single-`cmd`
 /// config); a multi-service capsule (frontend + backend + redis…) lists several.
@@ -66,11 +93,12 @@ pub struct ServiceSpec {
     pub bindings_env: BTreeMap<String, String>,
     /// v1.5 readiness graph (ato#973): services this one must NOT start before —
     /// each named dependency must be READY (its readiness probe passes, or it is
-    /// simply started when it declares no probe) first.
+    /// simply started when it declares no probe) first. LEGACY spelling; merged
+    /// into the Phase-6 `depends_on_ready` set (both mean the readiness gate).
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// v1.5: how to tell this service is READY (so dependents may start). `None` =
-    /// ready as soon as its process is started.
+    /// ready as soon as its process is started. Only valid for `kind = service`.
     #[serde(default)]
     pub readiness: Option<ReadinessSpec>,
     /// Phase 5 multi-image rootfs: when `Some`, this service's image was exported
@@ -81,6 +109,23 @@ pub struct ServiceSpec {
     /// serializing so every pre-Phase-5 config is unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs: Option<String>,
+    /// Phase 6 (service DAG): `service` vs `run_once`. Default `service`.
+    #[serde(default)]
+    pub kind: ServiceKind,
+    /// Phase 6: execution timing for a `run_once` task — the phases it runs at. A
+    /// `run_once` MUST declare at least one phase (fail-closed — no implicit
+    /// timing); a `service` MUST leave this empty.
+    #[serde(default)]
+    pub run_at: Vec<ExecPhase>,
+    /// Phase 6: readiness-gate dependencies — each target must be a `service` and
+    /// must be READY before this entry starts. Successor spelling of `depends_on`.
+    #[serde(default)]
+    pub depends_on_ready: Vec<String>,
+    /// Phase 6: success-gate dependencies — each target must be a `run_once` and
+    /// must have EXITED 0 (in this phase, or been sealed at an earlier phase)
+    /// before this entry starts.
+    #[serde(default)]
+    pub depends_on_success: Vec<String>,
 }
 
 /// v1.5 (ato#973): a service's readiness check. A dependent starts only once this
@@ -155,11 +200,29 @@ impl SupervisorConfig {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: None,
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         }]
     }
 }
 
 impl ServiceSpec {
+    /// Phase 6: all READINESS-gate dependencies — the legacy `depends_on` ∪ the
+    /// Phase-6 `depends_on_ready` (both mean "wait until the target service is
+    /// READY"). Deduplication is unnecessary: a name repeated across the two lists
+    /// only makes the gate idempotent.
+    fn ready_deps(&self) -> impl Iterator<Item = &String> {
+        self.depends_on.iter().chain(self.depends_on_ready.iter())
+    }
+
+    /// Phase 6: EVERY dependency edge (for the DAG / topological sort + cycle
+    /// detection) — readiness-gate ∪ success-gate.
+    fn all_deps(&self) -> impl Iterator<Item = &String> {
+        self.ready_deps().chain(self.depends_on_success.iter())
+    }
+
     /// Fail-closed per-service validation (see [`SupervisorConfig::validate`]).
     fn validate(&self) -> Result<(), String> {
         if self.cmd.is_empty() {
@@ -170,6 +233,36 @@ impl ServiceSpec {
         }
         if self.name.trim().is_empty() {
             return Err("supervisor.json: a service has an empty `name`".into());
+        }
+        // Phase 6: kind/timing coherence, fail-closed. A `run_once` must declare
+        // explicit timing and cannot carry a long-running readiness probe; a
+        // `service` must not declare run timing.
+        match self.kind {
+            ServiceKind::RunOnce => {
+                if self.run_at.is_empty() {
+                    return Err(format!(
+                        "supervisor.json: run_once service {:?} must declare `run_at` timing \
+                         (one or more of seal_once/restore/run)",
+                        self.name
+                    ));
+                }
+                if self.readiness.is_some() {
+                    return Err(format!(
+                        "supervisor.json: run_once service {:?} must not declare `readiness` \
+                         (a one-shot task has no long-running readiness)",
+                        self.name
+                    ));
+                }
+            }
+            ServiceKind::Service => {
+                if !self.run_at.is_empty() {
+                    return Err(format!(
+                        "supervisor.json: service {:?} declares `run_at` but is not a run_once \
+                         (timing is only meaningful for run_once)",
+                        self.name
+                    ));
+                }
+            }
         }
         for var in self.base_env.keys() {
             if !valid_env_var_name(var) {
@@ -269,6 +362,33 @@ impl SupervisorConfig {
         // not self-loop, and the graph must be acyclic (the start order is a
         // topological sort — a cycle has no valid order). Validate now, fail-closed.
         self.start_order()?;
+        // Phase 6: dependency-EDGE kind coherence. A readiness gate can only wait on
+        // a long-running `service` (a run_once has no lasting readiness); a success
+        // gate can only wait on a `run_once` (a service never "exits 0"). Fail-closed
+        // on a mismatch so a mis-declared DAG never silently gates on nothing.
+        let by_name: BTreeMap<&str, &ServiceSpec> =
+            services.iter().map(|s| (s.name.as_str(), s)).collect();
+        for svc in &services {
+            for dep in svc.ready_deps() {
+                // Existence already guaranteed by start_order above.
+                if by_name[dep.as_str()].kind != ServiceKind::Service {
+                    return Err(format!(
+                        "supervisor.json: service {:?} readiness-depends on {:?} which is a \
+                         run_once (a readiness gate needs a long-running service)",
+                        svc.name, dep
+                    ));
+                }
+            }
+            for dep in &svc.depends_on_success {
+                if by_name[dep.as_str()].kind != ServiceKind::RunOnce {
+                    return Err(format!(
+                        "supervisor.json: service {:?} success-depends on {:?} which is not a \
+                         run_once (a success gate needs a run_once that exits 0)",
+                        svc.name, dep
+                    ));
+                }
+            }
+        }
         // v1.6 (ato#983) Slice 3: durable state volumes. Fail-closed at LOAD
         // time — before ever attempting a real mount — on anything the
         // builder should never have produced: an empty state_name/fs_label, a
@@ -334,7 +454,10 @@ impl SupervisorConfig {
         // Adjacency (deps) validated against the declared set.
         let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for svc in &services {
-            for d in &svc.depends_on {
+            // Phase 6: the DAG is over EVERY edge kind (readiness-gate ∪
+            // success-gate), so a cycle through any mix of edges is detected.
+            let edges: Vec<String> = svc.all_deps().cloned().collect();
+            for d in &edges {
                 if d == &svc.name {
                     return Err(format!(
                         "supervisor.json: service {:?} depends on itself",
@@ -348,7 +471,7 @@ impl SupervisorConfig {
                     ));
                 }
             }
-            deps.insert(svc.name.clone(), svc.depends_on.clone());
+            deps.insert(svc.name.clone(), edges);
         }
         // Kahn-ish DFS post-order over a name-sorted iteration (deterministic).
         let mut order: Vec<String> = Vec::with_capacity(services.len());
@@ -591,6 +714,29 @@ pub trait Workload {
     fn stop(&mut self) -> std::io::Result<bool>;
     /// Whether the workload child is currently running.
     fn is_running(&self) -> bool;
+    /// Phase 6: run a `run_once` task TO COMPLETION and return its exit code (0 =
+    /// success). A signal death maps to `128 + signal` (always non-zero) so the
+    /// caller treats it as a failure. Output goes to the plan's per-service log
+    /// files, same as a long-running service — the secret is still read only in the
+    /// child at exec (via [`spawn_script`]), never in the agent.
+    fn run_once(&mut self, plan: &SpawnPlan) -> std::io::Result<i32>;
+}
+
+/// Map an [`ExitStatus`](std::process::ExitStatus) to an int exit code: the normal
+/// code, or `128 + signal` for a signal death (always non-zero), or `-1` if neither
+/// is available. Used so a `run_once` killed by a signal still reads as a failure.
+fn exit_code_of(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    -1
 }
 
 /// A real OS process workload (`std::process::Command`), used by the guest binary.
@@ -703,6 +849,39 @@ impl Workload for ChildWorkload {
     fn is_running(&self) -> bool {
         self.child.is_some()
     }
+
+    fn run_once(&mut self, plan: &SpawnPlan) -> std::io::Result<i32> {
+        if plan.cmd.is_empty() {
+            return Err(std::io::Error::other("run_once cmd is empty"));
+        }
+        let mut c = std::process::Command::new("/bin/sh");
+        c.arg("-c").arg(spawn_script(plan)).current_dir(&plan.cwd);
+        #[cfg(unix)]
+        {
+            // Own process group, same as a service spawn: a run_once may itself be a
+            // shell wrapper whose real work is a grandchild.
+            use std::os::unix::process::CommandExt;
+            c.process_group(0);
+        }
+        for (k, v) in &plan.base_env {
+            c.env(k, v); // non-secret only
+        }
+        // Per-task logs: capture the migration's stdout/stderr (diagnostics + the
+        // receipt points at these paths). Best-effort file creation like a service.
+        if let Some(parent) = plan.stdout_log.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(out) = std::fs::File::create(&plan.stdout_log) {
+            c.stdout(std::process::Stdio::from(out));
+        }
+        if let Ok(err) = std::fs::File::create(&plan.stderr_log) {
+            c.stderr(std::process::Stdio::from(err));
+        }
+        // Run to completion (spawn + wait). A run_once is NOT stored in `self.child`:
+        // it has already exited, so `is_running` stays false and `stop` is a no-op.
+        let status = c.status()?;
+        Ok(exit_code_of(status))
+    }
 }
 
 /// Ties a [`SupervisorConfig`] to a [`Workload`] + bindings root. The guest binary
@@ -772,6 +951,34 @@ fn default_readiness_timeout() -> Duration {
     Duration::from_millis(ms)
 }
 
+/// Phase 6: the execution phase this boot is running under. `ATO_EXEC_PHASE`
+/// (`seal_once`|`restore`|`run`) selects it; anything else (incl. unset) is `run`,
+/// so a capsule with no run_once tasks is unaffected. Tests set the phase directly
+/// via [`Supervisor::with_phase`] rather than the env (no cross-test env races).
+fn default_exec_phase() -> ExecPhase {
+    match std::env::var("ATO_EXEC_PHASE").ok().as_deref().map(str::trim) {
+        Some("seal_once") => ExecPhase::SealOnce,
+        Some("restore") => ExecPhase::Restore,
+        _ => ExecPhase::Run,
+    }
+}
+
+/// Phase 6: the recorded outcome of one `run_once` task execution — captured in the
+/// supervisor's agent state so a boot receipt can report the migration's exit
+/// status and where its captured output landed. Holds NO secret value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunOnceResult {
+    /// The run_once service name.
+    pub name: String,
+    /// The phase it ran at (one of its declared `run_at` phases).
+    pub phase: ExecPhase,
+    /// Its exit code (0 = success; non-zero fails the whole guest).
+    pub exit_code: i32,
+    /// Per-task captured stdout/stderr paths (service_log_paths style).
+    pub stdout_log: PathBuf,
+    pub stderr_log: PathBuf,
+}
+
 pub struct Supervisor<W: Workload> {
     config: SupervisorConfig,
     bindings_root: PathBuf,
@@ -782,6 +989,11 @@ pub struct Supervisor<W: Workload> {
     readiness_timeout: Duration,
     /// Poll interval while waiting for a dependency's readiness.
     readiness_poll: Duration,
+    /// Phase 6: which execution phase this boot runs under (gates run_once timing).
+    phase: ExecPhase,
+    /// Phase 6: recorded run_once outcomes (exit status + captured-log paths) — the
+    /// agent-state surface a boot receipt reports.
+    run_once_results: Vec<RunOnceResult>,
 }
 
 impl<W: Workload> Supervisor<W> {
@@ -799,6 +1011,8 @@ impl<W: Workload> Supervisor<W> {
             probe: Box::new(TcpReadinessProbe),
             readiness_timeout: default_readiness_timeout(),
             readiness_poll: Duration::from_millis(100),
+            phase: default_exec_phase(),
+            run_once_results: Vec::new(),
         }
     }
 
@@ -815,20 +1029,41 @@ impl<W: Workload> Supervisor<W> {
         self
     }
 
-    /// Start EVERY service exactly once, when the session is bound-ready. Each
-    /// service's env is composed from tmpfs and spawned. A compose/spawn error on
-    /// any service is fail-closed: already-started services in this call are
-    /// stopped so the caller never sees a partially-running group reported healthy.
-    /// No-op if already started or not yet bound-ready.
+    /// Phase 6: set the execution phase (gates which run_once tasks execute).
+    /// Chainable. Production reads it from `ATO_EXEC_PHASE`; tests set it here.
+    pub fn with_phase(mut self, phase: ExecPhase) -> Self {
+        self.phase = phase;
+        self
+    }
+
+    /// Phase 6: the execution phase this supervisor runs under.
+    pub fn phase(&self) -> ExecPhase {
+        self.phase
+    }
+
+    /// Phase 6: recorded run_once outcomes (exit status + captured-log paths) — the
+    /// agent-state surface a boot receipt reports.
+    pub fn run_once_results(&self) -> &[RunOnceResult] {
+        &self.run_once_results
+    }
+
+    /// Start EVERY service exactly once, when the session is bound-ready, driving the
+    /// Phase-6 dependency DAG: services start in topological order; a `run_once` task
+    /// whose declared timing includes the current phase RUNS TO COMPLETION at its
+    /// slot and must exit 0 (a non-zero run_once fails the WHOLE guest). Two gate
+    /// kinds are honored before an entry starts — readiness-gate deps (each target
+    /// service must be READY) and success-gate deps (each target run_once must have
+    /// EXITED 0, or been sealed at an earlier phase and skipped now). A compose/spawn
+    /// error or a failed run_once is fail-closed: already-started services in this
+    /// call are stopped so the caller never sees a partially-running group reported
+    /// healthy. No-op if already started or not yet bound-ready.
     pub fn on_bound_ready(&mut self, bound_ready: bool) -> std::io::Result<bool> {
         if self.started || !bound_ready {
             return Ok(false);
         }
-        // v1.5 readiness graph: start in dependency (topological) order and, before
-        // starting a service, WAIT for each of its dependencies to be READY — a
-        // dependency with a readiness probe must actually answer, not merely have a
-        // process spawned. `start_order()` already fail-closed on cycle/unknown dep
-        // at validation; re-derive here for the concrete order.
+        // v1.5 readiness graph / Phase-6 DAG: start in dependency (topological)
+        // order. `start_order()` already fail-closed on cycle/unknown dep at
+        // validation; re-derive here for the concrete order.
         let order = self
             .config
             .start_order()
@@ -838,11 +1073,19 @@ impl<W: Workload> Supervisor<W> {
             services.iter().map(|s| (s.name.as_str(), s)).collect();
         // Readiness of a started service, remembered so a later dependent can gate.
         let mut ready: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        // Phase 6: run_once outcomes so far, so a success-gate dependent can gate.
+        // A run_once that RAN and exited 0 is in `succeeded`; one whose timing
+        // excludes this phase is in `skipped` (it was applied at an earlier sealed
+        // phase — its success is baked into the image, so the gate is satisfied).
+        let mut succeeded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut skipped: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
         for name in &order {
             let svc = by_name[name.as_str()];
-            // Gate: every dependency must be READY first.
-            for dep in &svc.depends_on {
+            // Readiness gate: every readiness-dep (legacy `depends_on` ∪
+            // `depends_on_ready`) must be READY first. Targets are validated to be
+            // long-running services.
+            for dep in svc.ready_deps() {
                 if !ready.contains(dep) {
                     let dep_spec = by_name[dep.as_str()];
                     if let Err(e) = self.wait_ready(dep, dep_spec) {
@@ -852,24 +1095,84 @@ impl<W: Workload> Supervisor<W> {
                     ready.insert(dep.clone());
                 }
             }
-            let plan = match plan_spawn_service(svc, &self.bindings_root) {
-                Ok(p) => p,
-                Err(e) => {
+            // Success gate: every success-dep run_once must have exited 0 (or been
+            // skipped this phase). Topological order guarantees it was processed
+            // already; a failed run_once would have returned before reaching here, so
+            // this is a defensive fail-closed check.
+            for dep in &svc.depends_on_success {
+                if !succeeded.contains(dep) && !skipped.contains(dep) {
                     self.stop_all_started();
-                    return Err(e);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("service '{name}': success-dependency '{dep}' did not succeed"),
+                    ));
                 }
-            };
-            let mut w = (self.make_workload)();
-            if let Err(e) = w.start(&plan) {
-                self.stop_all_started();
-                // Name the service in the diagnostic (per-service logs at
-                // service_log_paths(name) hold its output).
-                return Err(std::io::Error::new(
-                    e.kind(),
-                    format!("service '{name}' failed to start: {e}"),
-                ));
             }
-            self.workloads.push(w);
+
+            match svc.kind {
+                ServiceKind::RunOnce => {
+                    // Timing gate: only run when THIS phase is in the task's `run_at`.
+                    if !svc.run_at.contains(&self.phase) {
+                        skipped.insert(name.clone());
+                        continue;
+                    }
+                    let plan = match plan_spawn_service(svc, &self.bindings_root) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.stop_all_started();
+                            return Err(e);
+                        }
+                    };
+                    let mut w = (self.make_workload)();
+                    let code = match w.run_once(&plan) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            self.stop_all_started();
+                            return Err(std::io::Error::new(
+                                e.kind(),
+                                format!("run_once '{name}' failed to execute: {e}"),
+                            ));
+                        }
+                    };
+                    // Record the outcome in agent state (a boot receipt reports it).
+                    self.run_once_results.push(RunOnceResult {
+                        name: name.clone(),
+                        phase: self.phase,
+                        exit_code: code,
+                        stdout_log: plan.stdout_log.clone(),
+                        stderr_log: plan.stderr_log.clone(),
+                    });
+                    if code != 0 {
+                        // A failed migration fails the WHOLE guest, fail-closed.
+                        self.stop_all_started();
+                        return Err(std::io::Error::other(format!(
+                            "run_once '{name}' failed with exit code {code} at phase {:?}",
+                            self.phase
+                        )));
+                    }
+                    succeeded.insert(name.clone());
+                }
+                ServiceKind::Service => {
+                    let plan = match plan_spawn_service(svc, &self.bindings_root) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.stop_all_started();
+                            return Err(e);
+                        }
+                    };
+                    let mut w = (self.make_workload)();
+                    if let Err(e) = w.start(&plan) {
+                        self.stop_all_started();
+                        // Name the service in the diagnostic (per-service logs at
+                        // service_log_paths(name) hold its output).
+                        return Err(std::io::Error::new(
+                            e.kind(),
+                            format!("service '{name}' failed to start: {e}"),
+                        ));
+                    }
+                    self.workloads.push(w);
+                }
+            }
         }
         self.started = true;
         Ok(true)
@@ -1285,6 +1588,10 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: None,
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         };
         let plan = plan_spawn_service(&api, dir.path()).unwrap();
         assert!(
@@ -1320,6 +1627,10 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: None,
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         };
         let plan = plan_spawn_service(&svc, bindings.path()).unwrap();
         let mut w = ChildWorkload::default();
@@ -1363,6 +1674,9 @@ mod tests {
             }
             fn is_running(&self) -> bool {
                 false
+            }
+            fn run_once(&mut self, _: &SpawnPlan) -> std::io::Result<i32> {
+                Err(std::io::Error::other("boom"))
             }
         }
         let cfg = SupervisorConfig::from_json(
@@ -1514,6 +1828,278 @@ mod tests {
         );
     }
 
+    // ── Phase 6: run_once / migration DAG ──
+
+    /// A run_once cfg mirroring the Blinko/Postgres migration shape from the plan.
+    fn dag_cfg(migrate_run_at: &str) -> SupervisorConfig {
+        SupervisorConfig::from_json(&format!(
+            r#"{{"services":[
+                {{"name":"postgres","cmd":["postgres"],"readiness":{{"port":5432}}}},
+                {{"name":"migrate","cmd":["migrate","up"],"kind":"run_once",
+                  "run_at":{migrate_run_at},"depends_on_ready":["postgres"]}},
+                {{"name":"api","cmd":["api"],"depends_on_success":["migrate"],"depends_on_ready":["postgres"]}},
+                {{"name":"worker","cmd":["worker"],"depends_on_ready":["postgres","api"]}}
+            ]}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn run_once_kind_and_timing_parse_and_defaults() {
+        // kind defaults to "service"; a plain service has kind Service, run_at empty.
+        let svc = SupervisorConfig::from_json(r#"{"services":[{"name":"a","cmd":["x"]}]}"#).unwrap();
+        assert_eq!(svc.services()[0].kind, ServiceKind::Service);
+        assert!(svc.services()[0].run_at.is_empty());
+        // A run_once round-trips kind + timing.
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[{"name":"m","cmd":["migrate"],"kind":"run_once","run_at":["seal_once","restore"]}]}"#,
+        )
+        .unwrap();
+        let m = &cfg.services()[0];
+        assert_eq!(m.kind, ServiceKind::RunOnce);
+        assert_eq!(m.run_at, vec![ExecPhase::SealOnce, ExecPhase::Restore]);
+    }
+
+    #[test]
+    fn run_once_dag_topological_order_and_cycle_detection() {
+        // The DAG is over BOTH edge kinds. postgres → migrate → api → worker.
+        let order = dag_cfg(r#"["run"]"#).start_order().unwrap();
+        let pos = |n: &str| order.iter().position(|x| x == n).unwrap();
+        assert!(pos("postgres") < pos("migrate"), "readiness dep orders postgres first");
+        assert!(pos("migrate") < pos("api"), "success dep orders migrate before api");
+        assert!(pos("api") < pos("worker"), "api before worker");
+
+        // A cycle THROUGH a success edge is detected (fail-closed at parse):
+        // a(run_once) depends_on_success b(run_once), b depends_on_ready a-as-service?
+        // Build a pure cycle across the two edge kinds: svc → run_once → svc.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[
+                    {"name":"svc","cmd":["x"],"depends_on_success":["m"]},
+                    {"name":"m","cmd":["y"],"kind":"run_once","run_at":["run"],"depends_on_ready":["svc"]}
+                ]}"#
+            )
+            .is_err(),
+            "cycle across success+ready edges rejected"
+        );
+        // Self dependency via a new edge kind → rejected.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"m","cmd":["y"],"kind":"run_once","run_at":["run"],"depends_on_success":["m"]}]}"#
+            )
+            .is_err(),
+            "self success-dependency rejected"
+        );
+        // Unknown target via a new edge kind → rejected.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"api","cmd":["x"],"depends_on_success":["ghost"]}]}"#
+            )
+            .is_err(),
+            "unknown success-dependency target rejected"
+        );
+    }
+
+    #[test]
+    fn config_rejects_incoherent_kind_timing_and_edge_targets() {
+        // run_once must declare timing.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"m","cmd":["x"],"kind":"run_once"}]}"#
+            )
+            .is_err(),
+            "run_once without run_at rejected"
+        );
+        // run_once must not declare a long-running readiness probe.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"m","cmd":["x"],"kind":"run_once","run_at":["run"],"readiness":{"port":8080}}]}"#
+            )
+            .is_err(),
+            "run_once with readiness rejected"
+        );
+        // a plain service must not declare run_at.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[{"name":"a","cmd":["x"],"run_at":["run"]}]}"#
+            )
+            .is_err(),
+            "service with run_at rejected"
+        );
+        // a readiness gate must point at a service, not a run_once.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[
+                    {"name":"m","cmd":["x"],"kind":"run_once","run_at":["run"]},
+                    {"name":"a","cmd":["y"],"depends_on_ready":["m"]}
+                ]}"#
+            )
+            .is_err(),
+            "depends_on_ready on a run_once rejected"
+        );
+        // a success gate must point at a run_once, not a service.
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"services":[
+                    {"name":"svc","cmd":["x"]},
+                    {"name":"a","cmd":["y"],"depends_on_success":["svc"]}
+                ]}"#
+            )
+            .is_err(),
+            "depends_on_success on a service rejected"
+        );
+        // The coherent DAG loads.
+        assert!(SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"svc","cmd":["x"]},
+                {"name":"m","cmd":["y"],"kind":"run_once","run_at":["run"],"depends_on_ready":["svc"]},
+                {"name":"a","cmd":["z"],"depends_on_success":["m"]}
+            ]}"#
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn depends_on_success_gates_a_service_on_run_once_exit_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let probe = FakeProbe::ready_after(5432, 0); // postgres ready immediately
+        // Phase = Run so the migrate (run_at=["run"]) executes.
+        let mut sup = fast_readiness(
+            Supervisor::new(dag_cfg(r#"["run"]"#), dir.path(), move || fake.clone()),
+            probe,
+        )
+        .with_phase(ExecPhase::Run);
+
+        assert!(sup.on_bound_ready(true).unwrap());
+        // migrate ran exactly once (as a run_once, NOT a long-running service).
+        assert_eq!(st.run_onces.borrow().len(), 1);
+        assert_eq!(st.run_onces.borrow()[0].cmd, vec!["migrate", "up"]);
+        // The long-running services started; migrate is NOT among them.
+        let started: Vec<Vec<String>> = st.starts.borrow().iter().map(|p| p.cmd.clone()).collect();
+        assert!(started.contains(&vec!["postgres".to_string()]));
+        assert!(started.contains(&vec!["api".to_string()]));
+        assert!(started.contains(&vec!["worker".to_string()]));
+        assert!(!started.iter().any(|c| c == &vec!["migrate".to_string(), "up".to_string()]),
+            "a run_once is never a long-running service");
+        // api must have started AFTER migrate's run_once completed (success gate).
+        let api_idx = st.starts.borrow().iter().position(|p| p.cmd == vec!["api"]).unwrap();
+        assert!(api_idx > 0, "api gated behind its success-dependency");
+    }
+
+    #[test]
+    fn run_once_timing_skips_out_of_phase_and_still_satisfies_success_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let probe = FakeProbe::ready_after(5432, 0);
+        // migrate runs only at seal_once; we're at Run → it must be SKIPPED, yet api
+        // (depends_on_success=[migrate]) must still start (the migration was sealed
+        // into the image at build, so the gate is satisfied by the skip).
+        let mut sup = fast_readiness(
+            Supervisor::new(dag_cfg(r#"["seal_once"]"#), dir.path(), move || fake.clone()),
+            probe,
+        )
+        .with_phase(ExecPhase::Run);
+
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert!(st.run_onces.borrow().is_empty(), "run_once skipped out of phase");
+        assert!(sup.run_once_results().is_empty(), "no result recorded for a skipped run_once");
+        // api + worker still started (success gate satisfied by the seal-time skip).
+        assert!(st.starts.borrow().iter().any(|p| p.cmd == vec!["api"]), "api started");
+        assert!(st.starts.borrow().iter().any(|p| p.cmd == vec!["worker"]), "worker started");
+    }
+
+    #[test]
+    fn run_once_executes_when_phase_matches_timing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        let probe = FakeProbe::ready_after(5432, 0);
+        // migrate runs at seal_once; drive the SealOnce phase → it executes.
+        let mut sup = fast_readiness(
+            Supervisor::new(dag_cfg(r#"["seal_once","restore"]"#), dir.path(), move || fake.clone()),
+            probe,
+        )
+        .with_phase(ExecPhase::SealOnce);
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert_eq!(st.run_onces.borrow().len(), 1, "run_once executes at a matching phase");
+        assert_eq!(sup.run_once_results()[0].phase, ExecPhase::SealOnce);
+    }
+
+    #[test]
+    fn a_failed_run_once_fails_the_whole_guest_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeWorkload::default();
+        let st = fake.0.clone();
+        // migrate exits non-zero → the WHOLE guest fails; no service is left running.
+        fake.set_run_once_exit("migrate up", 3);
+        let probe = FakeProbe::ready_after(5432, 0);
+        let mut sup = fast_readiness(
+            Supervisor::new(dag_cfg(r#"["run"]"#), dir.path(), move || fake.clone()),
+            probe,
+        )
+        .with_phase(ExecPhase::Run);
+
+        let err = sup.on_bound_ready(true).unwrap_err();
+        assert!(err.to_string().contains("exit code 3"), "names the failing exit code: {err}");
+        assert!(!sup.started(), "the group is not marked started");
+        assert!(!sup.is_running(), "no service left running after a failed migration");
+        assert_eq!(*st.live.borrow(), 0);
+        // The failed outcome is still RECORDED (a receipt reports the failure).
+        assert_eq!(sup.run_once_results().len(), 1);
+        assert_eq!(sup.run_once_results()[0].exit_code, 3);
+        // api never started (its migration failed).
+        assert!(st.starts.borrow().iter().all(|p| p.cmd != vec!["api".to_string()]));
+    }
+
+    #[test]
+    fn run_once_exit_status_and_captured_output_recorded_in_receipt() {
+        // Real child: a run_once that prints and exits 0. Its exit code + captured
+        // stdout land in the supervisor's agent state (the receipt surface).
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"db-migrate","cmd":["sh","-c","echo APPLIED; exit 0"],"cwd":"/tmp","kind":"run_once","run_at":["run"]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut sup =
+            Supervisor::new(cfg, dir.path(), ChildWorkload::default).with_phase(ExecPhase::Run);
+        assert!(sup.on_bound_ready(true).unwrap());
+        assert_eq!(sup.run_once_results().len(), 1);
+        let r = &sup.run_once_results()[0];
+        assert_eq!(r.name, "db-migrate");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.phase, ExecPhase::Run);
+        // The task's stdout was captured to its per-task log (service_log_paths style).
+        let out = std::fs::read_to_string(&r.stdout_log).unwrap_or_default();
+        assert!(out.contains("APPLIED"), "run_once stdout captured: {out:?}");
+        let _ = std::fs::remove_file(&r.stdout_log);
+        let _ = std::fs::remove_file(&r.stderr_log);
+    }
+
+    #[test]
+    fn a_real_run_once_nonzero_exit_fails_the_guest_and_records_the_code() {
+        // Real child exiting 7 → run_once fails the guest; the exact code is recorded.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig::from_json(
+            r#"{"services":[
+                {"name":"m","cmd":["sh","-c","exit 7"],"cwd":"/tmp","kind":"run_once","run_at":["run"]}
+            ]}"#,
+        )
+        .unwrap();
+        let mut sup =
+            Supervisor::new(cfg, dir.path(), ChildWorkload::default).with_phase(ExecPhase::Run);
+        let err = sup.on_bound_ready(true).unwrap_err();
+        assert!(err.to_string().contains("exit code 7"), "{err}");
+        assert_eq!(sup.run_once_results()[0].exit_code, 7);
+        let r = &sup.run_once_results()[0];
+        let _ = std::fs::remove_file(&r.stdout_log);
+        let _ = std::fs::remove_file(&r.stderr_log);
+    }
+
     #[test]
     fn config_rejects_malformed_env_var_and_binding_names() {
         // A supervisor config is fail-closed: bad env var / binding names are
@@ -1606,6 +2192,17 @@ mod tests {
         starts: RefCell<Vec<SpawnPlan>>,
         stops: RefCell<u32>,
         live: RefCell<i32>,
+        /// Phase 6: run_once executions recorded (plan per run), and a per-cmd exit
+        /// code table (cmd.join(" ") → code, default 0) so a test can make a specific
+        /// run_once fail.
+        run_onces: RefCell<Vec<SpawnPlan>>,
+        run_once_exit: RefCell<BTreeMap<String, i32>>,
+    }
+    impl FakeWorkload {
+        /// Make the run_once whose cmd joins to `key` exit with `code`.
+        fn set_run_once_exit(&self, key: &str, code: i32) {
+            self.0.run_once_exit.borrow_mut().insert(key.to_string(), code);
+        }
     }
     impl Workload for FakeWorkload {
         fn start(&mut self, plan: &SpawnPlan) -> std::io::Result<()> {
@@ -1623,6 +2220,11 @@ mod tests {
         }
         fn is_running(&self) -> bool {
             *self.0.live.borrow() > 0
+        }
+        fn run_once(&mut self, plan: &SpawnPlan) -> std::io::Result<i32> {
+            self.0.run_onces.borrow_mut().push(plan.clone());
+            let key = plan.cmd.join(" ");
+            Ok(self.0.run_once_exit.borrow().get(&key).copied().unwrap_or(0))
         }
     }
 
@@ -1898,6 +2500,10 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: Some("/opt/ato/services/web/rootfs".into()),
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         };
         let plan = plan_spawn_service(&svc, bindings.path()).unwrap();
         assert_eq!(plan.rootfs.as_deref(), Some("/opt/ato/services/web/rootfs"));
@@ -1932,6 +2538,10 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: None,
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         };
         let script = spawn_script(&plan_spawn_service(&svc, bindings.path()).unwrap());
         assert!(script.contains("exec 'python3' 'app.py'"), "{script}");
@@ -1954,6 +2564,10 @@ mod tests {
             depends_on: Vec::new(),
             readiness: None,
             rootfs: Some("/opt/ato/services/web/rootfs".into()),
+            kind: ServiceKind::Service,
+            run_at: Vec::new(),
+            depends_on_ready: Vec::new(),
+            depends_on_success: Vec::new(),
         };
         let script = spawn_script(&plan_spawn_service(&svc, dir.path()).unwrap());
         let export = script.find("export OPENAI_API_KEY=").expect("secret exported");
