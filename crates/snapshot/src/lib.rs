@@ -45,6 +45,7 @@ mod scan_cache;
 mod scanner;
 mod seal;
 pub mod state_volume;
+pub mod state_volume_persistence;
 mod uffd;
 // U1 (#854) spike: plumbing exercised only by #[ignore]d KVM-gated smokes
 // (ATO_FC_UFFD), not yet wired into the default restore path — see the
