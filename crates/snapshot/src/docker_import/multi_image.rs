@@ -489,6 +489,13 @@ mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
+# Bring up loopback: multi-image service discovery + the guest-agent's own
+# dependency-readiness probe talk over 127.0.0.1 (every service NAME resolves to
+# loopback via /etc/hosts). The kernel `ip=` boot arg configures eth0 only, and
+# a single-image app is reached on the guest IP so never needed lo — but here a
+# down lo means every 127.0.0.1 connect (e.g. web→postgres, readiness→:5432)
+# fails. Best-effort across the tools a web base image ships (ip/ifconfig/busybox).
+ip link set lo up 2>/dev/null || ifconfig lo up 2>/dev/null || busybox ip link set lo up 2>/dev/null || busybox ifconfig lo up 2>/dev/null || true
 {volume_mounts}mkdir -p /run/ato/bindings
 export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings
 /usr/local/bin/ato-guest-agent {args} 2>&1 | tee /tmp/agent.log > /dev/console &
@@ -812,6 +819,12 @@ volumes:
         // Base rootfs carries the agent + supervisor.json + /etc/hosts.
         assert!(script.contains("supervisor.json"), "{script}");
         assert!(script.contains("ATOETCHOSTS"), "{script}");
+        // Loopback must be brought up: multi-image service discovery + the
+        // dependency-readiness probe use 127.0.0.1, which is dead if lo is down.
+        assert!(
+            script.contains("ip link set lo up"),
+            "init must bring up loopback:\n{script}"
+        );
         // Cleanup reaps images.
         assert!(
             script.contains("rmi -f 'ato-import-migrate' 'ato-import-postgres' 'ato-import-web'"),
