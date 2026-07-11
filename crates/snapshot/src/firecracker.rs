@@ -147,14 +147,8 @@ impl Default for FirecrackerConfig {
             cpu_template: std::env::var("ATO_FC_CPU_TEMPLATE")
                 .ok()
                 .filter(|v| !v.is_empty()),
-            // 90s default (was 30): a multi-service compose_import (e.g. a web app
-            // that waits on a bundled postgres, then runs first-boot DB migrations)
-            // legitimately needs more than 30s to answer readiness on the very
-            // first boot. A fast single-image app becomes healthy early and returns
-            // immediately regardless, so the higher ceiling only helps slow starts.
-            // Override with ATO_FC_BOOT_TIMEOUT_S.
             boot_timeout: Duration::from_secs(
-                env_or("ATO_FC_BOOT_TIMEOUT_S", "90").parse().unwrap_or(90),
+                env_or("ATO_FC_BOOT_TIMEOUT_S", "30").parse().unwrap_or(30),
             ),
             // Legacy single-slot by default; `for_slot` fills these when netns-on.
             netns: None,
@@ -1542,6 +1536,22 @@ impl SnapshotBackend for FirecrackerBackend {
         }
         let vmstate_path = build_dir.join("vmstate");
         let mem_path = build_dir.join("mem");
+        // Build-scoped scratch cleanup (skipped when ATO_KEEP_BUILD_DIR is set, so a
+        // failed build is still inspectable). Removes BOTH the build dir
+        // (vmstate/mem/console) AND the rootfs cache file. The rootfs is a
+        // content-addressed `<work>/rootfs/<hash>.ext4` that a BUILD uses exactly
+        // once (the boot-to-seal here); a runner rehydrates it from CAS on demand,
+        // so leaving it behind just accumulates one ~rootfs-sized (multi-GB) file
+        // per build until the builder disk fills — which surfaces downstream as the
+        // firecracker `PUT /snapshot/create: Resource temporarily unavailable`
+        // (EAGAIN). Called on EVERY exit path below. A concurrent build has a
+        // DIFFERENT rootfs hash ⇒ a different path, so this never races it.
+        let cleanup_scratch = || {
+            if !keep_build_dir_enabled() {
+                let _ = std::fs::remove_dir_all(&build_dir);
+                let _ = std::fs::remove_file(&rootfs_path);
+            }
+        };
         let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
         let path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
 
@@ -1712,9 +1722,7 @@ impl SnapshotBackend for FirecrackerBackend {
                 // discarding the build dir — a silent delete made guest-side
                 // failures undiagnosable.
                 self.emit_build_failure_diagnostics(&build_dir);
-                if !keep_build_dir_enabled() {
-                    let _ = std::fs::remove_dir_all(&build_dir);
-                }
+                cleanup_scratch();
                 return Err(e);
             }
         };
@@ -1772,9 +1780,7 @@ impl SnapshotBackend for FirecrackerBackend {
             Ok(o) => o,
             Err(e) => {
                 self.emit_build_failure_diagnostics(&build_dir);
-                if !keep_build_dir_enabled() {
-                    let _ = std::fs::remove_dir_all(&build_dir);
-                }
+                cleanup_scratch();
                 return Err(e);
             }
         };
@@ -1820,9 +1826,7 @@ impl SnapshotBackend for FirecrackerBackend {
             build_receipt_id: None,
             supervisor_build: supervisor_receipt,
         };
-        if !keep_build_dir_enabled() {
-            let _ = std::fs::remove_dir_all(&build_dir);
-        }
+        cleanup_scratch();
         Ok(BuildReadyStateReceipt {
             manifest,
             sealed_bytes,
