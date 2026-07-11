@@ -327,14 +327,22 @@ fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
 }
 
 fn ack_sealed(cfg: &Config, job_id: &str, artifact: &Artifact) -> Result<()> {
-    ureq::post(&format!(
+    let res = ureq::post(&format!(
         "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
         cfg.api_url
     ))
     .set("authorization", &format!("Bearer {}", cfg.token))
-    .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "sealed", "artifact": artifact }))
-    .map_err(|e| anyhow!("sealed ack: {e}"))?;
-    Ok(())
+    .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "sealed", "artifact": artifact }));
+    match res {
+        Ok(_) => Ok(()),
+        // Surface the server's rejection BODY (e.g. the zod validation issues), not
+        // just "status code 400" — a bare status is undebuggable for a schema skew.
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(anyhow!("sealed ack: status {code}: {body}"))
+        }
+        Err(e) => Err(anyhow!("sealed ack: {e}")),
+    }
 }
 
 fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<()> {
