@@ -376,8 +376,25 @@ pub(crate) fn multi_image_pack_script(
     size_mib: u64,
 ) -> String {
     let services = &plan.graph.services;
+    // The base rootfs `/` needs a real userland: the generated init is `#!/bin/sh`
+    // and runs `mount`, so a shell + mount + their libs must exist at `/` (a
+    // single-image import gets this for free because its one image IS extracted
+    // onto `/`; a multi-image build puts every image in a SUBTREE, leaving `/`
+    // empty → "No working init found" kernel panic). Extract the PUBLIC service's
+    // image onto `/` FIRST (it is always a full app image with a shell), then the
+    // ato bits (guest-agent, supervisor.json, /etc/hosts, /sbin/init) overlay on
+    // top. Each service — including the public one — still runs from its own
+    // subtree via the guest-agent's chroot, so the base copy is only init's
+    // userland, never a started service.
+    let public_tag = shell_single_quote(&plan.facts_of(&plan.graph.public_service).image_tag);
+    let mut export_blocks = format!(
+        "CID=$({tool} create {public_tag})\n\
+         CIDS=\"$CIDS $CID\"\n\
+         {tool} export \"$CID\" | tar -x -C \"$BUILD/rootfs\"\n\
+         {tool} rm -f \"$CID\" >/dev/null 2>&1 || true; CID=\"\"\n\
+         # The base image's own init/hosts are replaced by ours below.\n"
+    );
     // Per-service export blocks (each image → its own subtree, never overlaid).
-    let mut export_blocks = String::new();
     for s in services {
         let subtree = format!("$BUILD/rootfs{}", service_rootfs_dir(&s.name));
         export_blocks.push_str(&format!(
@@ -775,6 +792,23 @@ volumes:
             "{script}"
         );
         assert!(script.contains("required tmpfs mount failed"), "{script}");
+        // The base rootfs `/` must get a real userland (a shell + mount for the
+        // `#!/bin/sh` init) — the PUBLIC service's image is extracted onto `/`
+        // BEFORE its own subtree, else the guest kernel-panics with "No working
+        // init found". The public service here is `web` (the one with `ports:`).
+        let base_extract = "export \"$CID\" | tar -x -C \"$BUILD/rootfs\"";
+        assert!(
+            script.contains(base_extract),
+            "public image not extracted onto base /:\n{script}"
+        );
+        let base_pos = script.find(base_extract).unwrap();
+        let web_subtree_pos = script
+            .find("$BUILD/rootfs/opt/ato/services/web/rootfs")
+            .unwrap();
+        assert!(
+            base_pos < web_subtree_pos,
+            "base extract must precede the web subtree export"
+        );
         // Base rootfs carries the agent + supervisor.json + /etc/hosts.
         assert!(script.contains("supervisor.json"), "{script}");
         assert!(script.contains("ATOETCHOSTS"), "{script}");
