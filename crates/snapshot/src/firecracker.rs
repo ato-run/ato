@@ -147,8 +147,14 @@ impl Default for FirecrackerConfig {
             cpu_template: std::env::var("ATO_FC_CPU_TEMPLATE")
                 .ok()
                 .filter(|v| !v.is_empty()),
+            // 90s default (was 30): a multi-service compose_import (e.g. a web app
+            // that waits on a bundled postgres, then runs first-boot DB migrations)
+            // legitimately needs more than 30s to answer readiness on the very
+            // first boot. A fast single-image app becomes healthy early and returns
+            // immediately regardless, so the higher ceiling only helps slow starts.
+            // Override with ATO_FC_BOOT_TIMEOUT_S.
             boot_timeout: Duration::from_secs(
-                env_or("ATO_FC_BOOT_TIMEOUT_S", "30").parse().unwrap_or(30),
+                env_or("ATO_FC_BOOT_TIMEOUT_S", "90").parse().unwrap_or(90),
             ),
             // Legacy single-slot by default; `for_slot` fills these when netns-on.
             netns: None,
