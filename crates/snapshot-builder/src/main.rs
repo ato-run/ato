@@ -487,6 +487,11 @@ struct ProducedBuild {
     /// ato#1049: the sealed `compose_import` receipt (multi-service resolution +
     /// self-contained-env note), threaded into the ack like the other lanes.
     compose_import_receipt: Option<serde_json::Value>,
+    /// Per-job readiness `boot_timeout` (seconds) applied to the shared
+    /// `build_ready_state` boot. Only `compose_import` sets it (heavy multi-image
+    /// stacks need a larger budget than the env default); other lanes leave it
+    /// `None` and inherit the backend env/default. Clamped in the backend.
+    boot_timeout_s: Option<u32>,
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -660,6 +665,7 @@ fn produce_recipe_build(
         docker_import_receipt: None,
         oci_import_receipt: None,
         compose_import_receipt: None,
+        boot_timeout_s: None,
     })
 }
 
@@ -800,6 +806,7 @@ fn produce_import_build(
         docker_import_receipt: Some(docker_import_receipt),
         oci_import_receipt: None,
         compose_import_receipt: None,
+        boot_timeout_s: None,
     })
 }
 
@@ -902,6 +909,7 @@ fn produce_oci_image_import(
         docker_import_receipt: None,
         oci_import_receipt: Some(oci_import_receipt),
         compose_import_receipt: None,
+        boot_timeout_s: None,
     })
 }
 
@@ -989,6 +997,7 @@ fn produce_compose_import(
         docker_import_receipt: None,
         oci_import_receipt: None,
         compose_import_receipt: Some(compose_import_receipt),
+        boot_timeout_s: params.boot_timeout_s,
     })
 }
 
@@ -1521,6 +1530,11 @@ struct ComposeImportParams {
     /// COMPOSE_ROOTFS_FLOOR default. A large image (e.g. Stirling-PDF ~2–3 GiB
     /// extracted) needs more than the 4096 floor or the pack fails ENOSPC.
     rootfs_size_mib: Option<u32>,
+    /// Optional per-job readiness `boot_timeout` (seconds, capped). `None` = the
+    /// backend env/default. A heavy stack (Java/Spring — Stirling-PDF, or a big
+    /// JVM warmup) can take longer than the default to answer HTTP; a plain
+    /// 2-service app should not pay that budget. Clamped in the backend.
+    boot_timeout_s: Option<u32>,
 }
 
 /// The compose file's hard size ceiling (bytes). A compose file is small;
@@ -1539,6 +1553,13 @@ const COMPOSE_ROOTFS_FLOOR_MIB: u64 = 4096;
 /// fail-closed. `None`/absent keeps the floor default.
 const MAX_ROOTFS_SIZE_MIB: u32 = 8192;
 
+/// The maximum per-job readiness `boot_timeout` override (seconds). A heavy
+/// image legitimately needs longer than the env default, but an unbounded value
+/// would let one job pin the builder on a hung guest — so the override is capped
+/// fail-closed (the backend clamps to the same ceiling). Kept in lockstep with
+/// `firecracker::MAX_JOB_BOOT_TIMEOUT_S`. `None`/absent keeps the env/default.
+const MAX_BOOT_TIMEOUT_S: u32 = 600;
+
 /// Parse the optional `rootfs_size_mib` param: an integer in `1..=MAX`. Fail
 /// closed on 0, negative, fractional, non-numeric, or over the cap.
 fn parse_rootfs_size_mib(v: &serde_json::Value) -> std::result::Result<u32, String> {
@@ -1547,6 +1568,18 @@ fn parse_rootfs_size_mib(v: &serde_json::Value) -> std::result::Result<u32, Stri
         .filter(|n| (1..=MAX_ROOTFS_SIZE_MIB as u64).contains(n))
         .ok_or_else(|| {
             format!("params.rootfs_size_mib must be an integer in 1..={MAX_ROOTFS_SIZE_MIB}")
+        })?;
+    Ok(n as u32)
+}
+
+/// Parse the optional `boot_timeout_s` param: an integer in `1..=MAX`. Fail
+/// closed on 0, negative, fractional, non-numeric, or over the cap.
+fn parse_boot_timeout_s(v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=MAX_BOOT_TIMEOUT_S as u64).contains(n))
+        .ok_or_else(|| {
+            format!("params.boot_timeout_s must be an integer in 1..={MAX_BOOT_TIMEOUT_S}")
         })?;
     Ok(n as u32)
 }
@@ -1567,6 +1600,7 @@ fn parse_compose_import_params(
     let mut compose_yaml: Option<String> = None;
     let mut readiness_http_path = None;
     let mut rootfs_size_mib = None;
+    let mut boot_timeout_s = None;
     for (key, val) in obj {
         match key.as_str() {
             "compose_yaml" => {
@@ -1585,6 +1619,7 @@ fn parse_compose_import_params(
                 readiness_http_path = Some(parse_readiness_http_path_value(val)?)
             }
             "rootfs_size_mib" => rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
+            "boot_timeout_s" => boot_timeout_s = Some(parse_boot_timeout_s(val)?),
             other => {
                 return Err(format!(
                     "unknown compose_import param {other:?} (rejected fail-closed)"
@@ -1597,6 +1632,7 @@ fn parse_compose_import_params(
             .ok_or("params.compose_yaml is required for a compose_import job")?,
         readiness_http_path,
         rootfs_size_mib,
+        boot_timeout_s,
     })
 }
 
@@ -1703,7 +1739,11 @@ fn process_job(
     // ato#1001) and the artifact seals per the no-binding contract.
     let store =
         CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
-    let receipt = backend
+    // A per-job readiness boot_timeout (compose_import heavy stacks — Java/Spring)
+    // overrides the backend env/default for THIS build only; other lanes pass
+    // None and inherit unchanged. Clamped fail-closed inside `with_boot_timeout`.
+    let job_backend = backend.with_boot_timeout(produced.boot_timeout_s.map(u64::from));
+    let receipt = job_backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
@@ -2077,6 +2117,7 @@ targets = ["web"]
         assert!(ok.compose_yaml.contains("image: x:1"));
         assert_eq!(ok.readiness_http_path.as_deref(), Some("/health"));
         assert!(ok.rootfs_size_mib.is_none()); // absent ⇒ the COMPOSE_ROOTFS_FLOOR default
+        assert!(ok.boot_timeout_s.is_none()); // absent ⇒ the backend env/default
         // rootfs_size_mib accepted within 1..=8192; over-cap / zero rejected.
         let sized = parse_compose_import_params(Some(&serde_json::json!({
             "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
@@ -2092,6 +2133,23 @@ targets = ["web"]
                 })))
                 .is_err(),
                 "rootfs_size_mib={bad} must reject"
+            );
+        }
+        // boot_timeout_s accepted within 1..=600; over-cap / zero rejected.
+        let timed = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "boot_timeout_s": 300,
+        })))
+        .unwrap();
+        assert_eq!(timed.boot_timeout_s, Some(300));
+        for bad in [601, 0] {
+            assert!(
+                parse_compose_import_params(Some(&serde_json::json!({
+                    "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+                    "boot_timeout_s": bad,
+                })))
+                .is_err(),
+                "boot_timeout_s={bad} must reject"
             );
         }
         // Unknown key rejected fail-closed.
