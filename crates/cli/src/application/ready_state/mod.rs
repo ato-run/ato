@@ -10,6 +10,7 @@
 //! `application/pipeline/phases/run.rs` (Execute phase), both behind
 //! `ATO_READY_STATE_ENABLED`; a legacy run never touches this.
 
+pub(crate) mod ai_grant;
 pub(crate) mod backend;
 pub(crate) mod binding_grants;
 pub(crate) mod binding_host;
