@@ -4148,6 +4148,9 @@ where
                             .expect("set when the binding gate is active"),
                         binding_names.clone(),
                         ready_state::flags::binding_ttl_ms(),
+                        // Local `ato run` resolves from the user's own store — no
+                        // ato-api AI grant on this path (P3b is runner-lease only).
+                        None,
                     )
                 });
                 let exit = crate::executors::source::wait_for_pid_exit(serving_pid as u32).await;

@@ -410,6 +410,7 @@ async fn smoke_pipeline(
             with_bindings: false,
             is_preview: false,
             max_duration_secs: None,
+            run_id: None,
             idle_timeout_secs: None,
         };
         // locate_artifact must map cas:// to <workdir>/<job>/{manifest.json,cas}.

@@ -83,6 +83,11 @@ pub(crate) struct RestoreSnapshotCommand {
     /// idle-activity signal, so `max_duration_secs` is the sole hard cap. Optional
     /// on the wire; `None` for non-preview leases.
     pub idle_timeout_secs: Option<u64>,
+    /// P3b AI-keyless: the run this lease dispatches. ato-api has always sent
+    /// `run_id` on the restore command; parsing it (additive, optional — absent
+    /// on a hand-rolled lease → None) lets the runner ask ato-api for the run's
+    /// AI grant at claim. Never an identity/verification input.
+    pub run_id: Option<String>,
 }
 
 /// Parse + validate a `restore_snapshot` / `restore_snapshot_with_bindings` /
@@ -162,6 +167,12 @@ pub(crate) fn parse_restore_snapshot_command(
         is_preview,
         max_duration_secs,
         idle_timeout_secs,
+        run_id: command
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -706,6 +717,17 @@ mod tests {
         ))
         .unwrap();
         assert!(c.artifact_fetch_url.is_none());
+        // P3b: run_id is OPTIONAL/additive — absent (hand-rolled lease) is None;
+        // present (every ato-api lease) is carried; blank normalizes to None.
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({}))).unwrap();
+        assert!(c.run_id.is_none());
+        let c =
+            parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "run_id": "01RUNID" })))
+                .unwrap();
+        assert_eq!(c.run_id.as_deref(), Some("01RUNID"));
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "run_id": "  " })))
+            .unwrap();
+        assert!(c.run_id.is_none());
     }
 
     // ── ato#1006 (UNIT C): the preview lease kind + duration fields ────────────
@@ -1065,6 +1087,7 @@ mod tests {
             is_preview: false,
             max_duration_secs: None,
             idle_timeout_secs: None,
+            run_id: None,
         };
         // Exact match ⇒ ok, classified NoBinding.
         let (_, class) = load_and_verify_manifest(&mpath, &base, false).unwrap();
