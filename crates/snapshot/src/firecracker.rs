@@ -78,6 +78,10 @@ const KVM_DEVICE: &str = "/dev/kvm";
 const SNAPSHOT_FORMAT: &str = "fc-full-file-v1";
 const DEVICE_PROFILE: &str = "virtio-blk+virtio-net+vsock";
 const NETWORK_MODEL: &str = "tap";
+/// Ceiling for a per-job `boot_timeout` override (`with_boot_timeout`). A build
+/// that hasn't reached readiness in 10 min is wedged; the cap keeps a single job
+/// from pinning the builder forever regardless of what the job requests.
+const MAX_JOB_BOOT_TIMEOUT_S: u64 = 600;
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
@@ -232,6 +236,21 @@ impl FirecrackerBackend {
             sessions: Arc::default(),
             page_servers: Arc::default(),
         }
+    }
+
+    /// Return a clone of this backend with a per-job readiness `boot_timeout`
+    /// override (compose_import: heavy images — Java/Spring, big JVMs — need a
+    /// larger budget than the env default; a plain 2-service app should not be
+    /// forced to wait the whole ceiling before failing). `None` keeps the
+    /// env/default. The override is CLAMPED to `[1, MAX_JOB_BOOT_TIMEOUT_S]` so a
+    /// job can never pin the builder on a hung guest indefinitely. Cloning is
+    /// cheap: `config` is small and the session/page-server maps are `Arc`s.
+    pub fn with_boot_timeout(&self, secs: Option<u64>) -> Self {
+        let mut b = self.clone();
+        if let Some(s) = secs {
+            b.config.boot_timeout = Duration::from_secs(s.clamp(1, MAX_JOB_BOOT_TIMEOUT_S));
+        }
+        b
     }
 
     pub fn kvm_present() -> bool {
@@ -785,6 +804,20 @@ impl FirecrackerBackend {
         Ok(())
     }
 
+    /// True when the buffered HTTP status line reports a 2xx or 3xx code — the
+    /// app answered. Many apps redirect `/` (302 → login/dashboard) as their
+    /// first live response, so a redirect is a valid readiness signal, not a
+    /// failure; only a 4xx/5xx (or non-HTTP bytes) keeps the poll waiting.
+    /// Parses `HTTP/1.x NNN ...`: first token starts with `HTTP/`, second is
+    /// the numeric status.
+    fn http_status_ready(buf: &[u8]) -> bool {
+        let line = String::from_utf8_lossy(buf);
+        let mut tok = line.split_whitespace();
+        let is_http = tok.next().is_some_and(|v| v.starts_with("HTTP/"));
+        let code = tok.next().and_then(|c| c.parse::<u16>().ok());
+        is_http && code.is_some_and(|c| (200..400).contains(&c))
+    }
+
     /// Poll the guest healthcheck (contract-driven port/path) until ready.
     fn wait_health(&self, port: u16, path: &str) -> Result<u128, SnapshotError> {
         self.wait_health_until(port, path, || None)
@@ -821,7 +854,7 @@ impl FirecrackerBackend {
                 if s.write_all(req.as_bytes()).is_ok()
                     && let Ok(n) = s.read(&mut buf)
                     && n > 0
-                    && String::from_utf8_lossy(&buf[..n]).contains(" 200")
+                    && Self::http_status_ready(&buf[..n])
                 {
                     return Ok(start.elapsed().as_millis());
                 }
@@ -2504,6 +2537,64 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── readiness status classification: 2xx/3xx = the app answered ──
+
+    #[test]
+    fn http_status_ready_accepts_2xx_and_3xx_rejects_errors_and_garbage() {
+        // 2xx and 3xx (a `/` → login redirect is a valid live signal).
+        for line in [
+            "HTTP/1.0 200 OK\r\n",
+            "HTTP/1.1 204 No Content\r\n",
+            "HTTP/1.1 301 Moved Permanently\r\n",
+            "HTTP/1.1 302 Found\r\nLocation: /lo",
+            "HTTP/1.1 307 Temporary Redirect\r\n",
+            "HTTP/1.1 399 Weird\r\n",
+        ] {
+            assert!(
+                FirecrackerBackend::http_status_ready(line.as_bytes()),
+                "{line:?} should be ready"
+            );
+        }
+        // 4xx/5xx (app up but the probe path errors) keeps waiting, and
+        // non-HTTP / truncated bytes never falsely pass.
+        for line in [
+            "HTTP/1.1 404 Not Found\r\n",
+            "HTTP/1.1 500 Internal Server Error\r\n",
+            "HTTP/1.1 100 Continue\r\n",
+            "SSH-2.0-OpenSSH\r\n",
+            "garbage",
+            "HTTP/1.",
+            "",
+        ] {
+            assert!(
+                !FirecrackerBackend::http_status_ready(line.as_bytes()),
+                "{line:?} should NOT be ready"
+            );
+        }
+    }
+
+    #[test]
+    fn with_boot_timeout_overrides_and_clamps() {
+        let b = FirecrackerBackend::new();
+        let base = b.config.boot_timeout;
+        // None inherits the env/default unchanged.
+        assert_eq!(b.with_boot_timeout(None).config.boot_timeout, base);
+        // A per-job value overrides.
+        assert_eq!(
+            b.with_boot_timeout(Some(300)).config.boot_timeout,
+            Duration::from_secs(300)
+        );
+        // Clamped fail-closed to [1, MAX_JOB_BOOT_TIMEOUT_S].
+        assert_eq!(
+            b.with_boot_timeout(Some(9999)).config.boot_timeout,
+            Duration::from_secs(MAX_JOB_BOOT_TIMEOUT_S)
+        );
+        assert_eq!(
+            b.with_boot_timeout(Some(0)).config.boot_timeout,
+            Duration::from_secs(1)
+        );
+    }
 
     // ── #948 N-slot: per-slot netns config derivation + host-path isolation ──
 
