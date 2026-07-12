@@ -929,7 +929,12 @@ fn produce_compose_import(
         compose_yaml: &params.compose_yaml,
         public_readiness_http_path: params.readiness_http_path.clone(),
         out_ext4: &ext4,
-        size_mib: cfg.rootfs_size_mib.max(COMPOSE_ROOTFS_FLOOR_MIB),
+        // An explicit per-job override wins (capped in the parser); otherwise the
+        // larger of the builder config default and the multi-service floor.
+        size_mib: params
+            .rootfs_size_mib
+            .map(u64::from)
+            .unwrap_or_else(|| cfg.rootfs_size_mib.max(COMPOSE_ROOTFS_FLOOR_MIB)),
     };
     let outcome = snapshot::docker_import::run_compose_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
@@ -1512,6 +1517,10 @@ struct ComposeImportParams {
     compose_yaml: String,
     /// Optional HTTP readiness path for the PUBLIC service (`None` = TCP-accept).
     readiness_http_path: Option<String>,
+    /// Optional per-job ext4 rootfs size override (MiB, capped). `None` = the
+    /// COMPOSE_ROOTFS_FLOOR default. A large image (e.g. Stirling-PDF ~2–3 GiB
+    /// extracted) needs more than the 4096 floor or the pack fails ENOSPC.
+    rootfs_size_mib: Option<u32>,
 }
 
 /// The compose file's hard size ceiling (bytes). A compose file is small;
@@ -1520,10 +1529,27 @@ const MAX_COMPOSE_YAML_BYTES: usize = 128 * 1024;
 
 /// A compose stack packs MULTIPLE service images into one rootfs, so it needs
 /// more than the single-image 1024 default. Floor the ext4 at this (unless the
-/// builder config already asks for more). A dedicated per-job `rootfs_size_mib`
-/// param lands with the size-override PR (ato#1051); until then the floor keeps
-/// a 2–3 service stack (e.g. Blinko: blinko + postgres) from failing ENOSPC.
+/// builder config or an explicit `rootfs_size_mib` asks for more) so a 2–3
+/// service stack (e.g. Blinko: blinko + postgres) does not fail ENOSPC.
 const COMPOSE_ROOTFS_FLOOR_MIB: u64 = 4096;
+
+/// The maximum per-job rootfs override (MiB). A big image (Stirling-PDF, etc.)
+/// needs a larger ext4 than the floor, but an unbounded value would let one job
+/// exhaust the builder disk + blow up restore memory — so the override is capped
+/// fail-closed. `None`/absent keeps the floor default.
+const MAX_ROOTFS_SIZE_MIB: u32 = 8192;
+
+/// Parse the optional `rootfs_size_mib` param: an integer in `1..=MAX`. Fail
+/// closed on 0, negative, fractional, non-numeric, or over the cap.
+fn parse_rootfs_size_mib(v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=MAX_ROOTFS_SIZE_MIB as u64).contains(n))
+        .ok_or_else(|| {
+            format!("params.rootfs_size_mib must be an integer in 1..={MAX_ROOTFS_SIZE_MIB}")
+        })?;
+    Ok(n as u32)
+}
 
 /// Strict, fail-closed parse of `compose_import` params: `compose_yaml` required
 /// (non-empty, ≤128 KiB); `readiness_http_path` shares the import validator;
@@ -1540,6 +1566,7 @@ fn parse_compose_import_params(
         .ok_or("compose_import params must be a JSON object")?;
     let mut compose_yaml: Option<String> = None;
     let mut readiness_http_path = None;
+    let mut rootfs_size_mib = None;
     for (key, val) in obj {
         match key.as_str() {
             "compose_yaml" => {
@@ -1557,6 +1584,7 @@ fn parse_compose_import_params(
             "readiness_http_path" => {
                 readiness_http_path = Some(parse_readiness_http_path_value(val)?)
             }
+            "rootfs_size_mib" => rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
             other => {
                 return Err(format!(
                     "unknown compose_import param {other:?} (rejected fail-closed)"
@@ -1568,6 +1596,7 @@ fn parse_compose_import_params(
         compose_yaml: compose_yaml
             .ok_or("params.compose_yaml is required for a compose_import job")?,
         readiness_http_path,
+        rootfs_size_mib,
     })
 }
 
@@ -2047,6 +2076,24 @@ targets = ["web"]
         .unwrap();
         assert!(ok.compose_yaml.contains("image: x:1"));
         assert_eq!(ok.readiness_http_path.as_deref(), Some("/health"));
+        assert!(ok.rootfs_size_mib.is_none()); // absent ⇒ the COMPOSE_ROOTFS_FLOOR default
+        // rootfs_size_mib accepted within 1..=8192; over-cap / zero rejected.
+        let sized = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "rootfs_size_mib": 8192,
+        })))
+        .unwrap();
+        assert_eq!(sized.rootfs_size_mib, Some(8192));
+        for bad in [8193, 0] {
+            assert!(
+                parse_compose_import_params(Some(&serde_json::json!({
+                    "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+                    "rootfs_size_mib": bad,
+                })))
+                .is_err(),
+                "rootfs_size_mib={bad} must reject"
+            );
+        }
         // Unknown key rejected fail-closed.
         assert!(
             parse_compose_import_params(Some(&serde_json::json!({
