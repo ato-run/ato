@@ -272,13 +272,17 @@ port = 8080
             "{err}"
         );
 
-        // flag ON, eligible, artifact EXISTS → Some(plan).
+        // flag ON, eligible, artifact EXISTS → Some(plan). The plan must NOT
+        // pin a host class itself: `None` delegates host-class resolution to
+        // the backend at restore time (same contract as `runner serve`).
         let hash = "blake3:present";
         seal_fake_artifact(root, hash);
+        let plan = decide_ready_state_run(&eligible_manifest(), hash, root)
+            .unwrap()
+            .expect("sealed artifact must yield a restore plan");
         assert!(
-            decide_ready_state_run(&eligible_manifest(), hash, root)
-                .unwrap()
-                .is_some()
+            plan.host_runner_class.is_none(),
+            "CLI restore must delegate host runner-class resolution to the backend"
         );
 
         set(prev.as_deref());

@@ -248,4 +248,76 @@ path = "/health"
         let err = seal(dir.path(), "blake3:gpu".to_string(), &m, layers, &backend).unwrap_err();
         assert!(format!("{err:#}").contains("GPU"));
     }
+
+    /// Wraps the Fake backend and records the `runner_class` the CLI hands to
+    /// `build_ready_state`, so delegation is asserted explicitly rather than
+    /// inferred from the sealed output.
+    struct RecordingBackend {
+        inner: snapshot::FakeSnapshotBackend,
+        seen_runner_class:
+            std::sync::Mutex<Option<Option<capsule::foundation::install_lifecycle::RunnerClassId>>>,
+    }
+
+    impl SnapshotBackend for RecordingBackend {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn probe(&self) -> snapshot::BackendCapabilities {
+            self.inner.probe()
+        }
+        fn build_ready_state(
+            &self,
+            input: BuildReadyStateInput<'_>,
+        ) -> Result<BuildReadyStateReceipt, snapshot::SnapshotError> {
+            *self.seen_runner_class.lock().unwrap() = Some(input.runner_class.clone());
+            self.inner.build_ready_state(input)
+        }
+        fn inspect(
+            &self,
+            store: &capsulefs::CasStore,
+            manifest: &snapshot::ReadyStateManifest,
+        ) -> Result<snapshot::SnapshotInspection, snapshot::SnapshotError> {
+            self.inner.inspect(store, manifest)
+        }
+        fn restore(
+            &self,
+            input: snapshot::RestoreReadyStateInput<'_>,
+        ) -> Result<snapshot::RestoreReceipt, snapshot::SnapshotError> {
+            self.inner.restore(input)
+        }
+        fn stop(
+            &self,
+            session: snapshot::RestoredSession,
+        ) -> Result<snapshot::TeardownReceipt, snapshot::SnapshotError> {
+            self.inner.stop(session)
+        }
+    }
+
+    #[test]
+    fn seal_delegates_runner_class_resolution_to_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = RecordingBackend {
+            inner: snapshot::FakeSnapshotBackend::new(),
+            seen_runner_class: std::sync::Mutex::new(None),
+        };
+        let m = parse("[snapshot]\nmode=\"warm\"\n");
+        let layers = BuildLayers {
+            rootfs: b"r".to_vec(),
+            runtime: None,
+            dependency: None,
+            app: Some(b"a".to_vec()),
+            vmstate: vec![0u8; 64],
+            memory: vec![0u8; 4096],
+        };
+        let receipt = seal(dir.path(), "blake3:rc".to_string(), &m, layers, &backend).unwrap();
+        assert_eq!(
+            *backend.seen_runner_class.lock().unwrap(),
+            Some(None),
+            "CLI seal must pass runner_class=None so the backend resolves its own class"
+        );
+        assert!(
+            receipt.manifest.runner_class_id.is_none(),
+            "Fake echoes the input verbatim: an unpinned seal proves the CLI delegated"
+        );
+    }
 }
