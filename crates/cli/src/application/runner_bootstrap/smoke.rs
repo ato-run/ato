@@ -332,6 +332,7 @@ async fn smoke_pipeline(
         // against — mirroring the real snapshot-builder. Passing the generic
         // from_host() class here would seal an artifact this same host then refuses.
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs: rootfs_bytes,
             runtime: None,
@@ -344,6 +345,7 @@ async fn smoke_pipeline(
             ports: vec![spec.port],
             healthcheck: Some(spec.healthcheck.clone()),
             expected_ready_ms: Some(8000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
@@ -407,6 +409,10 @@ async fn smoke_pipeline(
                 .unwrap_or_default(),
             snapshot_backend: sealed.manifest.snapshot_backend.kind.clone(),
             healthcheck_url_path: None,
+            session_surface: None,
+            surface_contract_version: None,
+            session_id: None,
+            accepted_session_surfaces: None,
             with_bindings: false,
             is_preview: false,
             max_duration_secs: None,

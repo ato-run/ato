@@ -286,6 +286,7 @@ fn build_capsule(
             store,
             capsule_manifest_hash: format!("blake3:durable-state-smoke-{name}"),
             runner_class: None,
+            surface_requirement: None,
             layers: BuildLayers {
                 rootfs: rootfs_bytes,
                 runtime: None,
@@ -298,6 +299,7 @@ fn build_capsule(
                 ports: vec![spec.port],
                 healthcheck: Some(spec.healthcheck.clone()),
                 expected_ready_ms: Some(8000),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],

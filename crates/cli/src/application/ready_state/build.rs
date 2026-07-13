@@ -51,6 +51,7 @@ pub(crate) fn restore_contract_from_manifest(m: &CapsuleManifest) -> RestoreCont
         expected_ready_ms,
         ports,
         healthcheck,
+        ..Default::default()
     }
 }
 
@@ -127,12 +128,14 @@ pub(crate) fn seal(
 
     let store = store::open_store(state_root, &capsule_manifest_hash)?;
     let runner_class = Some(RunnerClassFacts::from_host().id());
+    let surface_requirement = manifest.resolve_default_target()?.surface.clone();
 
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash,
             runner_class,
+            surface_requirement,
             layers,
             restore_contract: restore_contract_from_manifest(manifest),
             sanitizer_contract: sanitizer_contract_from_manifest(manifest),
