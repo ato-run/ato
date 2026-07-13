@@ -7,7 +7,11 @@
 use std::{
     collections::{BTreeSet, HashSet},
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -29,6 +33,7 @@ use tokio_tungstenite::{
         handshake::server::{Callback, ErrorResponse, Request, Response},
     },
 };
+use url::Url;
 
 /// Header carrying the API-to-runner assertion. Browser credentials are never
 /// forwarded to the private RFB endpoint.
@@ -37,6 +42,9 @@ pub const SURFACE_ASSERTION_HEADER: &str = "x-ato-surface-assertion";
 const RFB_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
+const MAX_CONSUMED_GRANTS: usize = 4096;
+const RFB_CLIENT_HANDSHAKE_BYTES: usize = 14;
+const MAX_TRACKED_CLIENT_MESSAGE_BYTES: usize = MAX_CLIENT_MESSAGE_BYTES;
 
 /// Immutable identity used to scope every access grant accepted by a gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +85,37 @@ pub struct PixelGatewayConfig {
     pub allowed_origins: BTreeSet<String>,
 }
 
+fn is_normalized_allowed_origin(origin: &str) -> bool {
+    let Ok(url) = Url::parse(origin) else {
+        return false;
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.origin().ascii_serialization() != origin
+    {
+        return false;
+    }
+    let loopback_host = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    url.scheme() == "https" || (url.scheme() == "http" && loopback_host)
+}
+
+fn is_private_rfb_address(address: SocketAddr) -> bool {
+    match address.ip() {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => {
+            ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+        }
+    }
+}
+
 impl PixelGatewayConfig {
     fn validate(&self) -> Result<(), PixelGatewayError> {
         if self.scope.session_id.trim().is_empty() {
@@ -94,11 +133,18 @@ impl PixelGatewayConfig {
                 "at least one allowed origin is required",
             ));
         }
-        if self.allowed_origins.iter().any(|origin| {
-            !(origin.starts_with("https://") || origin.starts_with("http://localhost"))
-        }) {
+        if self
+            .allowed_origins
+            .iter()
+            .any(|origin| !is_normalized_allowed_origin(origin))
+        {
             return Err(PixelGatewayError::InvalidConfig(
-                "origins must use https, except localhost development origins",
+                "origins must be normalized HTTPS origins, except exact loopback development origins",
+            ));
+        }
+        if !is_private_rfb_address(self.private_rfb_addr) {
+            return Err(PixelGatewayError::InvalidConfig(
+                "private RFB endpoint must use a private or loopback address",
             ));
         }
         Ok(())
@@ -129,11 +175,19 @@ pub struct PixelGatewayHandle {
     local_addr: SocketAddr,
     cancel_tx: watch::Sender<bool>,
     task: AsyncMutex<Option<JoinHandle<Result<(), PixelGatewayError>>>>,
+    last_input_activity_unix_millis: Arc<AtomicU64>,
 }
 
 impl PixelGatewayHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Timestamp of the latest parsed RFB keyboard or pointer input. Routine
+    /// framebuffer requests do not extend a preview session. It starts at
+    /// gateway creation so an untouched session can still time out.
+    pub fn last_input_activity_unix_millis(&self) -> u64 {
+        self.last_input_activity_unix_millis.load(Ordering::Relaxed)
     }
 
     pub async fn stop(&self) -> Result<(), PixelGatewayError> {
@@ -163,12 +217,20 @@ pub async fn start_pixel_gateway(
         .map_err(PixelGatewayError::Bind)?;
     let local_addr = listener.local_addr().map_err(PixelGatewayError::Bind)?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
-    let task = tokio::spawn(run_gateway(listener, config, authorizer, cancel_rx));
+    let last_input_activity_unix_millis = Arc::new(AtomicU64::new(now_unix_millis()));
+    let task = tokio::spawn(run_gateway(
+        listener,
+        config,
+        authorizer,
+        cancel_rx,
+        Arc::clone(&last_input_activity_unix_millis),
+    ));
 
     Ok(PixelGatewayHandle {
         local_addr,
         cancel_tx,
         task: AsyncMutex::new(Some(task)),
+        last_input_activity_unix_millis,
     })
 }
 
@@ -177,6 +239,7 @@ async fn run_gateway(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     mut cancel_rx: watch::Receiver<bool>,
+    last_input_activity_unix_millis: Arc<AtomicU64>,
 ) -> Result<(), PixelGatewayError> {
     let consumed_grants = Arc::new(Mutex::new(HashSet::<String>::new()));
     let mut connections = tokio::task::JoinSet::new();
@@ -193,12 +256,15 @@ async fn run_gateway(
                 let config = config.clone();
                 let authorizer = Arc::clone(&authorizer);
                 let consumed_grants = Arc::clone(&consumed_grants);
+                let last_input_activity_unix_millis =
+                    Arc::clone(&last_input_activity_unix_millis);
                 connections.spawn(async move {
                     if let Err(error) = serve_pixel_connection(
                         stream,
                         config,
                         authorizer,
                         consumed_grants,
+                        last_input_activity_unix_millis,
                     ).await {
                         tracing::debug!(%peer, %error, "pixel gateway connection closed");
                     }
@@ -216,6 +282,7 @@ async fn serve_pixel_connection(
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
     consumed_grants: Arc<Mutex<HashSet<String>>>,
+    last_input_activity_unix_millis: Arc<AtomicU64>,
 ) -> Result<(), PixelGatewayError> {
     let callback = HandshakeAuthorizer {
         allowed_origins: config.allowed_origins.clone(),
@@ -231,7 +298,128 @@ async fn serve_pixel_connection(
         .await
         .map_err(PixelGatewayError::RfbConnect)?;
 
-    relay_rfb(websocket, rfb).await
+    relay_rfb(websocket, rfb, last_input_activity_unix_millis).await
+}
+
+/// Parses the pinned RFB 3.8 client stream only far enough to distinguish
+/// keyboard/pointer input from protocol housekeeping. Parsing is observational:
+/// every byte is still relayed unchanged, and an unknown extension disables
+/// activity tracking for that connection instead of rewriting the stream.
+struct RfbClientInputTracker {
+    handshake_remaining: usize,
+    pending: Vec<u8>,
+    supported: bool,
+}
+
+impl RfbClientInputTracker {
+    fn new() -> Self {
+        Self {
+            handshake_remaining: RFB_CLIENT_HANDSHAKE_BYTES,
+            pending: Vec::new(),
+            supported: true,
+        }
+    }
+
+    fn observe(&mut self, bytes: &[u8]) -> bool {
+        if !self.supported
+            || self
+                .pending
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|size| size > MAX_TRACKED_CLIENT_MESSAGE_BYTES)
+        {
+            self.supported = false;
+            self.pending.clear();
+            return false;
+        }
+        self.pending.extend_from_slice(bytes);
+
+        if self.handshake_remaining > 0 {
+            let consumed = self.handshake_remaining.min(self.pending.len());
+            self.pending.drain(..consumed);
+            self.handshake_remaining -= consumed;
+            if self.handshake_remaining > 0 {
+                return false;
+            }
+        }
+
+        let mut input_observed = false;
+        loop {
+            match tracked_rfb_client_message(&self.pending) {
+                Ok(Some((length, is_input))) => {
+                    self.pending.drain(..length);
+                    input_observed |= is_input;
+                }
+                Ok(None) => break,
+                Err(()) => {
+                    self.supported = false;
+                    self.pending.clear();
+                    break;
+                }
+            }
+        }
+        input_observed
+    }
+}
+
+fn tracked_rfb_client_message(bytes: &[u8]) -> Result<Option<(usize, bool)>, ()> {
+    let Some(message_type) = bytes.first().copied() else {
+        return Ok(None);
+    };
+    let fixed = |length: usize, is_input: bool| {
+        if bytes.len() < length {
+            Ok(None)
+        } else {
+            Ok(Some((length, is_input)))
+        }
+    };
+    match message_type {
+        0 => fixed(20, false), // SetPixelFormat
+        2 => {
+            if bytes.len() < 4 {
+                return Ok(None);
+            }
+            let count = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+            let length = count
+                .checked_mul(4)
+                .and_then(|payload| payload.checked_add(4))
+                .filter(|length| *length <= MAX_TRACKED_CLIENT_MESSAGE_BYTES)
+                .ok_or(())?;
+            fixed(length, false) // SetEncodings
+        }
+        3 => fixed(10, false), // FramebufferUpdateRequest
+        4 => fixed(8, true),   // KeyEvent
+        5 => fixed(6, true),   // PointerEvent
+        6 => {
+            if bytes.len() < 8 {
+                return Ok(None);
+            }
+            let signed_length = i32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            let payload = signed_length.checked_abs().ok_or(())? as usize;
+            let length = payload
+                .checked_add(8)
+                .filter(|length| *length <= MAX_TRACKED_CLIENT_MESSAGE_BYTES)
+                .ok_or(())?;
+            fixed(length, false) // ClientCutText (disabled by the v1 profile)
+        }
+        150 => fixed(10, false), // EnableContinuousUpdates
+        248 => {
+            if bytes.len() < 9 {
+                return Ok(None);
+            }
+            fixed(9 + usize::from(bytes[8]), false) // ClientFence
+        }
+        250 => fixed(4, true),   // XvpOp
+        251 => fixed(24, false), // SetDesktopSize
+        255 => fixed(12, true),  // QEMUExtendedKeyEvent
+        _ => Err(()),
+    }
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 struct HandshakeAuthorizer {
@@ -314,9 +502,13 @@ fn authorize_upgrade(
     let mut consumed = consumed_grants
         .lock()
         .map_err(|_| UpgradeRejection::Internal)?;
-    if !consumed.insert(access.grant_id) {
+    if consumed.contains(&access.grant_id) {
         return Err(UpgradeRejection::Unauthorized);
     }
+    if consumed.len() >= MAX_CONSUMED_GRANTS {
+        return Err(UpgradeRejection::Internal);
+    }
+    consumed.insert(access.grant_id);
     Ok(())
 }
 
@@ -339,6 +531,7 @@ fn rejection(status: StatusCode) -> ErrorResponse {
 async fn relay_rfb<S>(
     websocket: tokio_tungstenite::WebSocketStream<S>,
     rfb: TcpStream,
+    last_input_activity_unix_millis: Arc<AtomicU64>,
 ) -> Result<(), PixelGatewayError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -355,9 +548,15 @@ where
     });
 
     let client_to_rfb = async {
+        let mut input_tracker = RfbClientInputTracker::new();
         while let Some(message) = ws_stream.next().await {
             match message? {
-                Message::Binary(bytes) => rfb_write.write_all(&bytes).await?,
+                Message::Binary(bytes) => {
+                    rfb_write.write_all(&bytes).await?;
+                    if input_tracker.observe(&bytes) {
+                        last_input_activity_unix_millis.store(now_unix_millis(), Ordering::Relaxed);
+                    }
+                }
                 Message::Ping(bytes) => {
                     if outbound_tx.send(Message::Pong(bytes)).await.is_err() {
                         break;
@@ -482,6 +681,32 @@ mod tests {
         addr
     }
 
+    #[test]
+    fn config_rejects_lookalike_origins_and_public_rfb_addresses() {
+        assert!(is_normalized_allowed_origin("https://app.ato.run"));
+        assert!(is_normalized_allowed_origin("http://localhost:5173"));
+        assert!(!is_normalized_allowed_origin(
+            "http://localhost.evil.example"
+        ));
+        assert!(!is_normalized_allowed_origin("https://app.ato.run/path"));
+        assert!(is_private_rfb_address("127.0.0.1:5900".parse().unwrap()));
+        assert!(is_private_rfb_address("172.16.0.2:5900".parse().unwrap()));
+        assert!(!is_private_rfb_address("8.8.8.8:5900".parse().unwrap()));
+    }
+
+    #[test]
+    fn input_tracker_counts_pointer_and_keyboard_but_not_frame_requests() {
+        let mut tracker = RfbClientInputTracker::new();
+        assert!(!tracker.observe(b"RFB 003.008\n"));
+        assert!(!tracker.observe(&[1, 1])); // security selection + ClientInit
+        assert!(!tracker.observe(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1]));
+
+        assert!(!tracker.observe(&[5, 0]));
+        assert!(tracker.observe(&[0, 1, 0, 1]));
+        assert!(tracker.observe(&[4, 1, 0, 0, 0, 0, 0, 65]));
+        assert!(!tracker.observe(&[150, 1, 0, 0, 0, 0, 0, 1, 0, 1]));
+    }
+
     #[tokio::test]
     async fn gateway_relays_binary_rfb_bytes_after_authorization() {
         let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -494,6 +719,7 @@ mod tests {
             stream.write_all(b"world").await.unwrap();
         });
         let gateway = gateway_for(upstream_addr).await;
+        let initial_activity = gateway.last_input_activity_unix_millis();
 
         let (mut websocket, response) =
             connect_async(request(gateway.local_addr(), ORIGIN_VALUE, Some("valid")))
@@ -503,12 +729,14 @@ mod tests {
             response.headers().get(SEC_WEBSOCKET_PROTOCOL).unwrap(),
             "binary"
         );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         websocket
             .send(Message::binary(b"hello".to_vec()))
             .await
             .unwrap();
         let reply = websocket.next().await.unwrap().unwrap();
         assert_eq!(reply.into_data(), b"world".as_slice());
+        assert_eq!(gateway.last_input_activity_unix_millis(), initial_activity);
 
         gateway.stop().await.unwrap();
         upstream_task.await.unwrap();

@@ -124,6 +124,7 @@ mod e2e_tests {
                 store: &store,
                 capsule_manifest_hash: "blake3:capsule".to_string(),
                 runner_class: None,
+                surface_requirement: None,
                 layers: BuildLayers {
                     rootfs: b"rootfs".to_vec(),
                     runtime: None,
