@@ -49,14 +49,16 @@ already use. It is not a new service and not a new lane.
 
 ### 3.2 Inputs
 
-Provided by ato-api when the submission enters `fetching`:
+Provided by ato-api when the candidate enters `fetching`:
 
-- `submission_id`, `attempt_no`.
+- `candidate_id`, `attempt_no`.
 - `source_provider = github`, `provider_repository_id`, `provider_owner`,
   `provider_repo`.
 - `commit_algorithm`, `commit_oid` (the pinned immutable commit).
-- The **GitHub Trees listing** (recursive): the authoritative path set and blob
-  OIDs.
+- The **GitHub Trees listing** (assembled recursive-first with a non-recursive
+  fallback when the recursive response is truncated — see
+  [ADR-011](ADR-011-source-materialization-placement.md)): the authoritative path
+  set and blob OIDs.
 - A short-lived **GitHub App installation token**, scoped to **public reads
   only**.
 
@@ -81,7 +83,7 @@ Provided by ato-api when the submission enters `fetching`:
    `source-archives/v1/sha256/{source_archive_hash}.tar.zst`. The builder does
    not hold R2 credentials; the write is mediated by the API.
 7. **Emit a receipt** recording commit OID, both hashes, caps observed, and the
-   final state, and advance the submission to `analyzing`.
+   final state, and advance the candidate to `analyzing`.
 
 ### 3.4 Caps
 
@@ -95,8 +97,11 @@ Enforced during checkout/walk; exceeding any cap fails the job (routes to
 | File count | 50,000 files |
 | Single file size | 50 MiB |
 
-These bound builder resource use against a hostile or merely huge repo and sit
-under GitHub's Trees truncation threshold (see [ADR-011](ADR-011-source-materialization-placement.md)).
+These bound builder resource use against a hostile or merely huge repo. The
+**50,000-file** cap is the enumeration limit the Worker enforces while assembling
+the Trees listing (recursive-first + non-recursive fallback under an API-call
+budget); a recursive listing that merely truncates is *not* a block on its own
+(see [ADR-011](ADR-011-source-materialization-placement.md)).
 
 ### 3.5 The frozen archive is the only QA input
 
@@ -107,7 +112,7 @@ sees byte-identical source and that `materialized_source_tree_hash` /
 
 ### 3.6 Retention and GC
 
-- A `blocked_*` submission's archive (if one was produced before the block) is
+- A `blocked_*` candidate's archive (if one was produced before the block) is
   **retained 30 days**, then **GC'd if unreferenced**.
 - **Hashes, provenance, and receipts are kept for audit** regardless of archive
   GC — so a blocked decision remains explainable after its bytes are collected.
@@ -115,7 +120,7 @@ sees byte-identical source and that `materialized_source_tree_hash` /
 
 ## 4. Interface
 
-### 4.1 Outputs (recorded on the submission)
+### 4.1 Outputs (recorded on the candidate)
 
 - `materialized_source_tree_hash` — A1v2 `sha256` identity.
 - `source_archive_hash` — `sha256` of the `tar.zst` bytes.
@@ -126,7 +131,7 @@ sees byte-identical source and that `materialized_source_tree_hash` /
 
 | Condition | Pipeline result |
 |-----------|-----------------|
-| Trees `truncated=true` (detected on the Worker) | `blocked_repo` |
+| >50,000 files, or Trees enumeration API-call budget exceeded (Worker) | `blocked_repo` |
 | Cap exceeded | `blocked_repo` |
 | A1v2 admissibility violation | `blocked_repo` / `blocked_incompatible` |
 | Checkout ↔ listing mismatch | `failed_internal` (retryable, max 3) |

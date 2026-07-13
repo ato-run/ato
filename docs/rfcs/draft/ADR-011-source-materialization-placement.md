@@ -38,11 +38,11 @@ work on the builder:
 - Resolve the requested ref (branch/tag/URL) to an **immutable commit OID** and
   pin it. Mutable refs are never carried forward as identity (consistent with
   [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md) §3.2).
-- Fetch the **GitHub Trees listing, recursive-first** (one API call for the
-  whole tree). If GitHub returns `truncated=true`, the repo is too large to
-  enumerate reliably → route to `blocked_repo`.
-- Hand the pinned commit and the Trees listing (path set + blob OIDs) to the
-  builder job as inputs. **No repository content is materialized on the
+- **Enumerate the tree, recursive-first with a non-recursive fallback** (see the
+  normative flow below), assembling the authoritative path set + blob OIDs
+  within an explicit API-call budget.
+- Hand the pinned commit and the assembled Trees listing (path set + blob OIDs)
+  to the builder job as inputs. **No repository content is materialized on the
   Worker.**
 
 **Builder does the content work** via a new job kind `source_materialize` on the
@@ -58,15 +58,28 @@ work on the builder:
 Access uses a **GitHub App installation token**, scoped to **public repos
 only**.
 
-### Why recursive-first Trees listing
+### Tree enumeration flow (normative)
 
-- The MVP file cap is **50,000 files**. GitHub's Trees API truncates at roughly
-  **100,000 entries / 7 MB** of response. So the entire admissible range sits
-  *under* the truncation threshold: a single recursive call enumerates any repo
-  we would accept, and `truncated=true` is itself a clean, cheap signal that the
-  repo is out of range (`blocked_repo`).
-- A **non-recursive** walk costs one API call *per directory*, which is both
-  slower and a rate-limit risk, for no benefit inside our size envelope.
+The earlier draft claimed a recursive call always fits under GitHub's truncation
+threshold for repos below the 50,000-file cap. **That is wrong.** GitHub's
+recursive Trees response has a **~7 MB response-size cap** in addition to the
+entry-count cap, so `truncated=true` can occur **well below 50,000 entries** (a
+repo with long paths hits the byte cap first). GitHub's own docs recommend
+falling back to non-recursive traversal when a recursive listing is truncated.
+
+Normative enumeration:
+
+1. **Recursive-first.** One recursive Trees call. If `truncated=false`, that is
+   the authoritative listing — done.
+2. **Non-recursive fallback.** If `truncated=true`, walk the tree
+   **non-recursively, one call per directory**, accumulating the path set + blob
+   OIDs, **under an explicit API-call budget**.
+3. **Block only on real limits.** Route to `blocked_repo` **only** when the file
+   count exceeds **50,000** or the **API-call budget is exceeded** — never merely
+   because the first recursive call was truncated.
+
+- A non-recursive walk costs one API call per directory, so the API-call budget
+  (not `truncated` itself) is the guard against pathological directory fan-out.
 
 ## Alternatives Considered
 
@@ -87,18 +100,20 @@ only**.
 ### Option C: Builder fetches the tree itself, no API Trees listing
 
 - Pro: one authority.
-- Con: loses the independent cross-check. Having the Worker fetch the
+- Con: loses the independent cross-check. Having the Worker assemble the
   authoritative Trees listing and the builder verify the checkout against it
-  gives a cheap integrity gate (path set + OIDs) and a fast pre-checkout
-  `truncated` rejection. Rejected.
+  gives a cheap integrity gate (path set + OIDs) and a fast pre-checkout oversize
+  rejection (file-count / API-call budget). Rejected.
 
 ## Consequences
 
 - **Good**: heavy work runs where heavy work belongs; the Worker stays within
   its limits; the builder reuses `materialize_source` and its lease/receipt
   machinery instead of a parallel implementation.
-- **Good**: the recursive Trees call doubles as the oversize gate, so oversize
-  repos are rejected before any checkout.
+- **Good**: tree enumeration doubles as the oversize gate (file-count / API-call
+  budget), so oversize repos are rejected before any checkout — while a merely
+  truncated recursive listing is handled by the non-recursive fallback, not
+  mistaken for oversize.
 - **Bad / cost**: one lease handoff (Worker → builder) is added to the critical
   path, and the builder must reconcile its checkout against the API listing.
   This is the price of keeping materialization off the Worker.

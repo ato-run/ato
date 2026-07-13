@@ -83,5 +83,5 @@
 - [ADR-009 Artifact Build Producer Contract](draft/ADR-009-artifact-build-producer-contract.md)
 - [ADR-010 Runtime Connectivity and Placement](draft/ADR-010-runtime-connectivity-and-placement.md)
 - [ADR-011 Source Materialization Placement](draft/ADR-011-source-materialization-placement.md)
-- [ADR-012 Capsule Lifecycle Column](draft/ADR-012-capsule-lifecycle-column.md)
+- [ADR-012 Capsule + Revision Lifecycle](draft/ADR-012-capsule-lifecycle-column.md)
 - [ADR-013 Manifest Validator WASM Split](draft/ADR-013-manifest-validator-wasm-split.md)
