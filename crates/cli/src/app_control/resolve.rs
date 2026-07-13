@@ -22,8 +22,8 @@ use capsule::router::{
 use super::guest_contract::{GuestContract, parse_guest_contract, preview_guest_contract};
 use super::sample_recipes::{resolve_sample_recipe_for_github, resolve_sample_recipe_for_input};
 use crate::install::{
-    download_github_repository_at_ref, fetch_capsule_detail, fetch_capsule_manifest_toml,
-    fetch_github_install_draft, parse_capsule_request,
+    GitHubInstallDraftResolvedRef, download_github_repository_at_ref, fetch_capsule_detail,
+    fetch_capsule_manifest_toml, fetch_github_install_draft, parse_capsule_request,
 };
 
 const ACTION: &str = "resolve_handle";
@@ -513,6 +513,14 @@ fn build_store_resolution(
     })
 }
 
+fn immutable_github_materialization_ref(resolved: &GitHubInstallDraftResolvedRef) -> Result<&str> {
+    let sha = resolved.sha.trim();
+    if sha.is_empty() {
+        anyhow::bail!("GitHub resolver returned an empty immutable commit SHA");
+    }
+    Ok(sha)
+}
+
 fn build_github_resolution(
     input: String,
     normalized_handle: String,
@@ -528,13 +536,18 @@ fn build_github_resolution(
         .ok_or_else(|| anyhow::anyhow!("github handle does not support CLI resolution"))?;
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     let draft = rt.block_on(fetch_github_install_draft(&cli_ref))?;
+    let mut materialized_source = None;
     let manifest_toml = if let Some(preview_toml) = draft.preview_toml.clone() {
         preview_toml
     } else if draft.capsule_toml.exists {
+        // The resolver may report a mutable branch name for display, but the
+        // archive fetch must use the immutable commit it already resolved.
+        let immutable_ref = immutable_github_materialization_ref(&draft.resolved_ref)?;
         let checkout = rt.block_on(download_github_repository_at_ref(
             &cli_ref,
-            Some(&draft.resolved_ref.ref_name),
+            Some(immutable_ref),
         ))?;
+        materialized_source = Some(checkout.materialized_source_identity(immutable_ref));
         std::fs::read_to_string(checkout.checkout_dir.join("capsule.toml")).with_context(|| {
             format!(
                 "failed to read inferred repository manifest for {}",
@@ -560,6 +573,7 @@ fn build_github_resolution(
         commit_sha: draft.resolved_ref.sha.clone(),
         default_branch: Some(draft.repo.default_branch.clone()),
         fetched_at: chrono::Utc::now().to_rfc3339(),
+        materialized_source,
     });
     persist_metadata_cache(&canonical, &normalized_handle, &plan, snapshot.clone())?;
     let mut notes = vec![format!(
@@ -1335,5 +1349,18 @@ runtime = "oci""#,
             scheme, bare,
             "capsule:// and bare github.com forms must resolve to the same recipe"
         );
+    }
+
+    #[test]
+    fn github_materialization_uses_resolved_sha_not_moving_ref() {
+        let resolved = GitHubInstallDraftResolvedRef {
+            ref_name: "main".to_string(),
+            sha: "0123456789abcdef0123456789abcdef01234567".to_string(),
+        };
+        assert_eq!(
+            immutable_github_materialization_ref(&resolved).expect("immutable ref"),
+            resolved.sha
+        );
+        assert_ne!(resolved.ref_name, resolved.sha);
     }
 }
