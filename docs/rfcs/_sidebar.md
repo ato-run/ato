@@ -40,6 +40,7 @@
 - [Draft Index](draft/README.md)
 - [A1 GC](draft/A1_GC.md)
 - [A1 Projection Strategy](draft/A1_PROJECTION_STRATEGY.md)
+- [A1 Source Tree Profile](draft/A1_SOURCE_TREE_PROFILE.md)
 - [Agent Interface Spec](draft/AGENT_INTERFACE_SPEC.md)
 - [App Session Materialization](draft/APP_SESSION_MATERIALIZATION.md)
 - [Association Spec](draft/ASSOCIATION_SPEC.md)
@@ -54,6 +55,8 @@
 - [Discussion Authority Schema Distribution](draft/DISCUSSION_AUTHORITY_SCHEMA_DISTRIBUTION.md)
 - [Draft ID](draft/DRAFT_ID.md)
 - [Engine and Workload Model](draft/ENGINE_AND_WORKLOAD_MODEL.md)
+- [Execution Identity Spec](draft/EXECUTION_IDENTITY_SPEC.md)
+- [GitHub Capsule Request Pipeline](draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md)
 - [Hash and Provenance Policy](draft/HASH_AND_PROVENANCE_POLICY.md)
 - [Host Panel Routing](draft/HOST_PANEL_ROUTING.md)
 - [License Spec](draft/LICENSE_SPEC.md)
@@ -62,6 +65,7 @@
 - [Pure Transforms and Lock Layers](draft/PURE_TRANSFORMS_AND_LOCK_LAYERS.md)
 - [Refactor Layer Proposal](draft/REFACTOR_LAYER_PROPOSAL.md)
 - [Run and Install Semantics](draft/run-install-semantics.md)
+- [Source Materialization Spec](draft/SOURCE_MATERIALIZATION_SPEC.md)
 - [Spec AI Agent Execution Env](draft/SPEC_AI_AGENT_EXECUTION_ENV.md)
 - [Spec Demo Capsule Packs](draft/SPEC_DEMO_CAPSULE_PACKS.md)
 - [Spec Secret Auto Injection](draft/SPEC_SECRET_AUTO_INJECTION.md)
@@ -71,3 +75,13 @@
 - [Beyond Reproducible Build](draft/beyond-reproducible-build.md)
 - [Beyond Reproducible Build (JA)](draft/beyond-reproducible-build.ja.md)
 - [secrets-age backend](draft/secrets-age-backend.md)
+
+**Draft ADRs**
+
+- [ADR-008 Desktop IPC Boundary Principal Visibility](draft/ADR-008-desktop-ipc-boundary-principal-visibility.md)
+- [ADR-008 Phase Materialization Boundaries](draft/ADR-008-phase-materialization-boundaries.md)
+- [ADR-009 Artifact Build Producer Contract](draft/ADR-009-artifact-build-producer-contract.md)
+- [ADR-010 Runtime Connectivity and Placement](draft/ADR-010-runtime-connectivity-and-placement.md)
+- [ADR-011 Source Materialization Placement](draft/ADR-011-source-materialization-placement.md)
+- [ADR-012 Capsule Lifecycle Column](draft/ADR-012-capsule-lifecycle-column.md)
+- [ADR-013 Manifest Validator WASM Split](draft/ADR-013-manifest-validator-wasm-split.md)
