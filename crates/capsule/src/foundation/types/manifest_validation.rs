@@ -54,7 +54,7 @@ impl CapsuleManifest {
             }
         }
 
-        let schema_is_v03 = self.schema_version.trim() == "0.3";
+        let schema_is_v03 = self.schema_version.trim() == MANIFEST_SCHEMA_V03;
 
         if !is_supported_schema_version(&self.schema_version) {
             errors.push(ValidationError::InvalidSchemaVersion(
