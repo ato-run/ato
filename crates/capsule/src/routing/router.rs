@@ -8,10 +8,10 @@ use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
 use crate::types::{
-    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, IngressConfig, Mount,
-    MountOwnership, NamedTarget, OrchestrationPlan, ReadinessProbe, ResolvedService,
-    ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime, ServiceConnectionInfo,
-    ServiceSpec, ValidationMode,
+    CapsuleManifest, ConfigField, ConfigKind, ExternalInjectionSpec, IngressConfig,
+    MANIFEST_SCHEMA_V03, Mount, MountOwnership, NamedTarget, OrchestrationPlan, ReadinessProbe,
+    ResolvedService, ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
+    ServiceConnectionInfo, ServiceSpec, ValidationMode,
 };
 
 mod lock_routing;
@@ -163,7 +163,7 @@ impl CompatManifestBridge {
     }
 
     pub fn is_schema_v03(&self) -> bool {
-        self.manifest.schema_version.trim() == "0.3"
+        self.manifest.schema_version.trim() == MANIFEST_SCHEMA_V03
     }
 
     pub fn ipc_section(&self) -> Result<Option<toml::Value>> {
@@ -422,7 +422,7 @@ pub fn execution_descriptor_from_manifest_parts(
         && (manifest
             .get("schema_version")
             .and_then(|v| v.as_str())
-            .map(|v| v.trim() == "0.3")
+            .map(|v| v.trim() == MANIFEST_SCHEMA_V03)
             .unwrap_or(false)
             || manifest.get("run").is_some()
             || manifest.get("packages").is_some());
