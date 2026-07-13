@@ -5,6 +5,7 @@
 
 use crate::ato_lock::AtoLock;
 use crate::lock_runtime::ResolvedLockRuntimeModel;
+use crate::types::MANIFEST_SCHEMA_VERSION;
 
 /// Build a synthesized `capsule.toml`-shaped `toml::Value` from an `AtoLock`
 /// plus its resolved runtime model. The resulting value is fed into
@@ -22,7 +23,7 @@ pub(super) fn synthesize_manifest_from_lock(
     }
     manifest.insert(
         "schema_version".to_string(),
-        toml::Value::String("0.3".to_string()),
+        toml::Value::String(MANIFEST_SCHEMA_VERSION.to_string()),
     );
     manifest.insert(
         "type".to_string(),

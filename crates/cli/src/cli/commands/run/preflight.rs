@@ -12,6 +12,7 @@ use capsule::importer::{
     probe_required_node_lockfile, probe_required_python_lockfile,
 };
 use capsule::lockfile::parse_lockfile_text;
+use capsule::types::MANIFEST_SCHEMA_VERSION;
 
 pub(crate) fn preflight_native_sandbox(
     nacelle_override: Option<PathBuf>,
@@ -226,7 +227,7 @@ pub(crate) async fn run_v03_lifecycle_steps(
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    if schema_version != "0.3" {
+    if schema_version != MANIFEST_SCHEMA_VERSION {
         return Ok(());
     }
 

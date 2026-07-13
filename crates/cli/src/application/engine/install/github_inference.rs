@@ -1,5 +1,6 @@
 use super::*;
 use anyhow::bail;
+use capsule::types::MANIFEST_SCHEMA_VERSION;
 use rand::Rng;
 use std::net::TcpListener;
 
@@ -78,7 +79,9 @@ pub(super) fn normalize_github_install_preview_toml(
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
 
-    if matches!(incoming_schema.as_str(), "0.3" | "0.2") && parsed.get("targets").is_none() {
+    if matches!(incoming_schema.as_str(), MANIFEST_SCHEMA_VERSION | "0.2")
+        && parsed.get("targets").is_none()
+    {
         {
             let table = parsed
                 .as_table_mut()
@@ -88,7 +91,7 @@ pub(super) fn normalize_github_install_preview_toml(
             if incoming_schema == "0.2" {
                 table.insert(
                     "schema_version".to_string(),
-                    toml::Value::String("0.3".to_string()),
+                    toml::Value::String(MANIFEST_SCHEMA_VERSION.to_string()),
                 );
             }
         }
@@ -167,13 +170,13 @@ pub(super) fn normalize_github_install_preview_toml(
     }
 
     let schema_is_v02 = incoming_schema == "0.2";
-    let schema_is_v03 = incoming_schema == "0.3";
+    let schema_is_v03 = incoming_schema == MANIFEST_SCHEMA_VERSION;
 
     // Upgrade schema_version 0.2 → 0.3 for multi-target manifests too.
     if schema_is_v02 && let Some(table) = parsed.as_table_mut() {
         table.insert(
             "schema_version".to_string(),
-            toml::Value::String("0.3".to_string()),
+            toml::Value::String(MANIFEST_SCHEMA_VERSION.to_string()),
         );
     }
 
@@ -277,7 +280,7 @@ fn rewrite_github_install_preview_toml_port(
     let changed = if parsed
         .get("schema_version")
         .and_then(toml::Value::as_str)
-        .map(|value| value.trim() == "0.3")
+        .map(|value| value.trim() == MANIFEST_SCHEMA_VERSION)
         .unwrap_or(false)
         && parsed.get("targets").is_none()
     {

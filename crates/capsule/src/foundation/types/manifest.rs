@@ -1007,18 +1007,24 @@ pub struct PolymorphismConfig {
     pub implements: Vec<String>,
 }
 
+/// The current (and only supported) capsule manifest schema version.
+///
+/// All production code must reference this constant instead of the literal
+/// string so a future version bump happens in exactly one place.
+pub const MANIFEST_SCHEMA_VERSION: &str = "0.3";
+
 fn default_schema_version() -> String {
-    "0.3".to_string()
+    MANIFEST_SCHEMA_VERSION.to_string()
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
-    matches!(value.trim(), "0.3")
+    value.trim() == MANIFEST_SCHEMA_VERSION
 }
 
 fn is_v03_schema(raw: &toml::Value) -> bool {
     raw.get("schema_version")
         .and_then(toml::Value::as_str)
-        .map(|value| value.trim() == "0.3")
+        .map(|value| value.trim() == MANIFEST_SCHEMA_VERSION)
         .unwrap_or(false)
 }
 
