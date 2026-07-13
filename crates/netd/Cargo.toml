@@ -69,7 +69,7 @@ http-body-util = "0.1"
 # http: Request/Response/HeaderMap types used directly in ingress/hop_by_hop.
 http = "1"
 # tokio-tungstenite: WebSocket upgrade relay via tokio::io::copy_bidirectional.
-tokio-tungstenite = "0.28"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 # Internal surface assertions use the same compact HMAC-SHA256 envelope as
 # the control plane. Keys stay in runner memory and are zeroized on drop.

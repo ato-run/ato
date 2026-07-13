@@ -216,6 +216,9 @@ field は `role / protocol / exposure / port / readiness`。`exposure` に serde
 設けず、省略・未知値を deserialize 時点で拒否する。`pixel_rfb` と `guest_control` は
 `public_proxy` にできない。Pixel は TCP accept だけでは ready ではなく、gateway が最初の
 framebuffer update を観測した `first_frame` を readiness とする。
+この観測は private RFB への直結 probe ではなく、one-time assertion と exact allowed
+`Origin` を用いた public WebSocket gateway 経路で input message を送った後に行う。
+probe または gateway cleanup が失敗した session は `ready` にしてはならない。
 
 ## 9. State ownership
 
