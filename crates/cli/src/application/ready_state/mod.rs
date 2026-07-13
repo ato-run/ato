@@ -34,7 +34,7 @@ mod kvm_smoke;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use capsule::foundation::install_lifecycle::{RunnerClassFacts, RunnerClassId};
+use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsule::types::CapsuleManifest;
 
 /// The Ready-State artifact key for a capsule manifest: `blake3:<hex>` over the
@@ -159,7 +159,10 @@ pub(crate) fn decide_ready_state_run(
         state_root: state_root.to_path_buf(),
         capsule_manifest_hash: capsule_manifest_hash.to_string(),
         sanitize_after_restore: manifest.snapshot_config().sanitize_after_restore,
-        host_runner_class: Some(RunnerClassFacts::from_host().id()),
+        // `None` delegates host-class resolution to the backend at restore
+        // time (Firecracker recomputes its real facts; same contract as
+        // `runner serve`). See `build::seal` for the build-side counterpart.
+        host_runner_class: None,
     }))
 }
 

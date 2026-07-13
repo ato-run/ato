@@ -10,7 +10,6 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use capsule::foundation::install_lifecycle::RunnerClassFacts;
 use capsule::types::CapsuleManifest;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
@@ -126,7 +125,13 @@ pub(crate) fn seal(
     super::binding_host::ensure_pre_bind_before_seal(/* session_is_bound = */ false)?;
 
     let store = store::open_store(state_root, &capsule_manifest_hash)?;
-    let runner_class = Some(RunnerClassFacts::from_host().id());
+    // Delegate runner-class resolution to the backend (same contract as the
+    // snapshot-builder daemon and `runner serve`): `None` lets Firecracker pin
+    // the seal to its real facts (snapshot format, VMM version, guest kernel
+    // hash) instead of the KVM-free `from_host()` probe whose backend facets
+    // are sentinels. The Fake backend seals unpinned, matching builder-driven
+    // fake seals.
+    let runner_class = None;
 
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
