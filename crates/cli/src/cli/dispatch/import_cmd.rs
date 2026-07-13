@@ -544,9 +544,25 @@ fn materialize_source(input: &NormalizedGitHubInput) -> Result<MaterializedSourc
         (revision_id, source_tree_hash)
     } else {
         let resolved = resolve_github_source(input)?;
-        clone_public_github_repo(input, &checkout_dir)?;
+        clone_public_github_repo(input, &checkout_dir, &resolved.revision_id)?;
         checkout_resolved_revision(&checkout_dir, &resolved.revision_id)?;
-        (resolved.revision_id, resolved.source_tree_hash)
+        let git_metadata = checkout_dir.join(".git");
+        if git_metadata.exists() {
+            fs::remove_dir_all(&git_metadata).with_context(|| {
+                format!(
+                    "failed to remove source VCS metadata at {}",
+                    git_metadata.display()
+                )
+            })?;
+        }
+        let source_tree_hash = capsule::source_identity::materialized_tree_hash(&checkout_dir)
+            .with_context(|| {
+                format!(
+                    "GitHub source at {} was not fully materialized",
+                    checkout_dir.display()
+                )
+            })?;
+        (resolved.revision_id, source_tree_hash)
     };
 
     copy_source_tree(&checkout_dir, &shadow_dir)?;
@@ -627,13 +643,29 @@ fn resolve_github_source(input: &NormalizedGitHubInput) -> Result<ImportSource> 
     })
 }
 
-fn clone_public_github_repo(input: &NormalizedGitHubInput, target_dir: &Path) -> Result<()> {
+fn immutable_git_fetch_args(revision_id: &str) -> Vec<String> {
+    vec![
+        "fetch".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "--no-tags".to_string(),
+        "origin".to_string(),
+        revision_id.to_string(),
+    ]
+}
+
+fn clone_public_github_repo(
+    input: &NormalizedGitHubInput,
+    target_dir: &Path,
+    revision_id: &str,
+) -> Result<()> {
     let parent = target_dir
         .parent()
         .ok_or_else(|| anyhow::anyhow!("checkout target has no parent"))?;
     fs::create_dir_all(parent)?;
     let clone_url = format!("{}.git", input.source_url_normalized);
-    let output = Command::new("git")
+    fs::create_dir_all(target_dir)?;
+    let init = Command::new("git")
         .arg("-c")
         .arg("credential.helper=")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -641,22 +673,60 @@ fn clone_public_github_repo(input: &NormalizedGitHubInput, target_dir: &Path) ->
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .current_dir(parent)
-        .arg("clone")
-        .arg("--depth")
-        .arg("1")
-        .arg(&clone_url)
+        .arg("init")
+        .arg("--quiet")
         .arg(target_dir)
         .stdin(Stdio::null())
         .output()
-        .with_context(|| format!("failed to run git clone for {clone_url}"))?;
-    if output.status.success() {
-        return Ok(());
+        .with_context(|| format!("failed to initialize checkout for {clone_url}"))?;
+    if !init.status.success() {
+        bail!(
+            "failed to initialize checkout for {}: {}",
+            clone_url,
+            String::from_utf8_lossy(&init.stderr).trim()
+        );
     }
-    bail!(
-        "failed to clone {}: {}",
-        clone_url,
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
+
+    let remote = Command::new("git")
+        .arg("-c")
+        .arg("credential.helper=")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .current_dir(target_dir)
+        .args(["remote", "add", "origin", clone_url.as_str()])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to configure checkout for {clone_url}"))?;
+    if !remote.status.success() {
+        bail!(
+            "failed to configure checkout for {}: {}",
+            clone_url,
+            String::from_utf8_lossy(&remote.stderr).trim()
+        );
+    }
+
+    let fetch = Command::new("git")
+        .arg("-c")
+        .arg("credential.helper=")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .current_dir(target_dir)
+        .args(immutable_git_fetch_args(revision_id))
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to fetch resolved revision {revision_id}"))?;
+    if !fetch.status.success() {
+        bail!(
+            "failed to fetch resolved revision {}: {}",
+            revision_id,
+            String::from_utf8_lossy(&fetch.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 fn checkout_resolved_revision(checkout_dir: &Path, revision_id: &str) -> Result<()> {
@@ -2203,6 +2273,15 @@ mod tests {
         let error = normalize_github_import_input("capsule://store/foo/bar")
             .expect_err("capsule scheme rejected");
         assert!(error.to_string().contains("capsule:// imports"));
+    }
+
+    #[test]
+    fn github_fetch_is_pinned_to_resolved_commit() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let args = immutable_git_fetch_args(sha);
+        assert_eq!(args.last().map(String::as_str), Some(sha));
+        assert!(!args.iter().any(|arg| arg == "main"));
+        assert!(args.windows(2).any(|pair| pair == ["--depth", "1"]));
     }
 
     #[test]

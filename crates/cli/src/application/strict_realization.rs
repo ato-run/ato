@@ -20,14 +20,15 @@
 //!
 //! ## Evidence scope (#501)
 //!
-//! The host/provider realization-evidence producer (declared/materialized
-//! content hashes, provider enforcement capability, state bindings) is #501 and
-//! is not yet wired into the launch path. Until it lands, [`launch_environment`]
-//! supplies the conservative default, so strict mode is genuinely fail-closed:
-//! a required input whose identity cannot yet be grounded is blocked rather than
-//! waved through. The default profile is unaffected and never consults the gate.
+//! Source evidence is grounded by re-hashing the materialized workspace at the
+//! prelaunch boundary and comparing it with the source observation captured in
+//! the just-written receipt. Other provider evidence remains conservative, so
+//! strict mode continues to fail closed for inputs that are not yet grounded.
+
+use std::path::Path;
 
 use capsule::engine::execution_graph::LaunchGraphBundle;
+use capsule::execution_identity::{ExecutionReceiptDocument, Tracked, TrackingStatus};
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::realization::bundle::RealizationEnvironment;
 use capsule::realization::{
@@ -46,14 +47,45 @@ pub(crate) fn launch_profile(strict_realization: bool) -> LaunchProfile {
     }
 }
 
-/// The host/provider realization evidence available to the launch path today.
+/// Build the provider evidence available at the pre-launch boundary.
 ///
-/// Conservative by design: the producer that grounds declared/materialized
-/// content identity, provider enforcement capability, and state bindings is
-/// #501. Returning the default keeps strict mode honestly fail-closed until that
-/// evidence exists, and keeps this seam in one obvious place for #501 to enrich.
-pub(crate) fn launch_environment() -> RealizationEnvironment {
-    RealizationEnvironment::default()
+/// Source identity is grounded in the receipt's prelaunch observation and a
+/// fresh hash of the same workspace. Provider capability and state-binding
+/// evidence remain at their conservative defaults until those providers are
+/// wired into this seam.
+pub(crate) fn launch_environment(
+    workspace_root: &Path,
+    receipt: &ExecutionReceiptDocument,
+) -> anyhow::Result<RealizationEnvironment> {
+    filesystem_source_environment(workspace_root, receipt_source_hash(receipt))
+}
+
+fn receipt_source_hash(receipt: &ExecutionReceiptDocument) -> Option<String> {
+    let tracked = match receipt {
+        ExecutionReceiptDocument::V1(receipt) => &receipt.source.source_tree_hash,
+        ExecutionReceiptDocument::V2(receipt) => &receipt.source.source_tree_hash,
+    };
+    known_value(tracked)
+}
+
+fn known_value(value: &Tracked<String>) -> Option<String> {
+    (value.status == TrackingStatus::Known)
+        .then(|| value.value.clone())
+        .flatten()
+}
+
+fn filesystem_source_environment(
+    workspace_root: &Path,
+    declared_source_hash: Option<String>,
+) -> anyhow::Result<RealizationEnvironment> {
+    capsule::source_identity::verify_fully_materialized(workspace_root)?;
+    let materialized_source_hash =
+        crate::application::execution_observers::hash_source_tree(workspace_root)?;
+    Ok(RealizationEnvironment {
+        declared_source_hash,
+        materialized_source_hash: Some(materialized_source_hash),
+        ..RealizationEnvironment::default()
+    })
 }
 
 /// Enforce the strict realization gate over a launch bundle before execution.
@@ -64,10 +96,10 @@ pub(crate) fn launch_environment() -> RealizationEnvironment {
 /// bundle's materialized evidence — then blocks the launch with a typed
 /// [`AtoExecutionError`] if any required input cannot be verified.
 ///
-/// Today the #499 overlay is conservative/empty because the materialized-hash
-/// producer is #501; the same call path carries real verifier verdicts the
-/// moment that evidence exists (see
-/// [`materialization_request_from_launch_bundle`]).
+/// The launch environment recomputes the materialized source hash from the
+/// filesystem immediately before this gate, so the #499 overlay compares the
+/// receipt's declared tree with current bytes instead of trusting cached
+/// resolution metadata (see [`materialization_request_from_launch_bundle`]).
 pub(crate) fn enforce_strict_realization(
     bundle: &LaunchGraphBundle,
     env: &RealizationEnvironment,
@@ -163,8 +195,18 @@ mod tests {
         RealizationContract, RealizationEvidence, RealizationNodeKind, RealizationNodeStatus,
         RealizationResult, RealizationStatus, UnrealizableReason,
     };
+    use std::fs;
 
     const HASH_A: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+
+    fn source_test_dir() -> tempfile::TempDir {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        fs::create_dir_all(&target).expect("create target test directory");
+        tempfile::Builder::new()
+            .prefix("strict-source-")
+            .tempdir_in(target)
+            .expect("create strict source test directory")
+    }
 
     fn contract_with(
         node: RealizationNodeStatus,
@@ -195,6 +237,33 @@ mod tests {
         );
         assert!(evaluate_contract(&contract, &[], LaunchProfile::Normal).is_ok());
         assert!(evaluate_contract(&contract, &[], launch_profile(false)).is_ok());
+    }
+
+    #[test]
+    fn filesystem_source_provider_recomputes_materialized_identity() {
+        let root = source_test_dir();
+        fs::write(root.path().join("app.txt"), b"first").expect("write source");
+        let declared = crate::application::execution_observers::hash_source_tree(root.path())
+            .expect("declared source hash");
+        let first = filesystem_source_environment(root.path(), Some(declared.clone()))
+            .expect("source environment");
+        assert_eq!(
+            first.declared_source_hash.as_deref(),
+            Some(declared.as_str())
+        );
+        assert_eq!(
+            first.materialized_source_hash.as_deref(),
+            Some(declared.as_str())
+        );
+
+        fs::write(root.path().join("app.txt"), b"second").expect("mutate source");
+        let changed = filesystem_source_environment(root.path(), Some(declared.clone()))
+            .expect("changed source environment");
+        assert_eq!(
+            changed.declared_source_hash.as_deref(),
+            Some(declared.as_str())
+        );
+        assert_ne!(changed.materialized_source_hash, Some(declared));
     }
 
     #[test]
