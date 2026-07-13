@@ -24,14 +24,14 @@ explicit restore endpoints:
     "protocol": "http",
     "exposure": "host_internal",
     "port": 8080,
-    "readiness": "http_health"
+    "readiness": { "kind": "http_get", "path": "/health" }
   },
   {
     "role": "pixel_rfb",
     "protocol": "tcp",
     "exposure": "guest_private",
     "port": 5900,
-    "readiness": "first_frame"
+    "readiness": { "kind": "first_frame" }
   }
 ]
 ```

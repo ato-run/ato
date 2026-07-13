@@ -82,8 +82,31 @@ run = "main.py"
 | `required_env` | Optional | 起動前に fail-closed で存在確認する必須環境変数名 |
 | `port` | `runtime=web` では Required | 1..65535 |
 | `working_dir` | Optional | 実行時 working directory |
+| `surface` | Optional | target の presentation requirement。nested table に `kind` と非空 `profiles` を宣言する |
 
 `public` は struct 上は残っているが、`runtime=web` では validation error になる。現行 CLI 仕様では廃止済み。
+
+### 3.1 Target presentation surface
+
+HTTP UI ではない GUI など、target が必要とする表示方法を
+`[targets.<label>.surface]` で宣言できる。
+
+```toml
+[targets.desktop.surface]
+kind = "pixel_stream"
+profiles = ["ato.pixel-stream.v1"]
+```
+
+- `kind`: `web` / `pixel_stream` / `terminal`
+- `profiles`: 空でない versioned profile identifier の配列
+- 省略は legacy Web compatibility を許容する
+- table を明示した場合、`kind` / `profiles` の欠落、空配列、未知 kind は fail-closed
+- 宣言は concrete URL や credential を含めない
+- normalized target から `ato.lock.json`、Ready-State artifact へ
+  `surface_requirement` として伝播する
+
+選択と wire contract の詳細は `docs/rfcs/draft/SESSION_SURFACE_CONTRACT.md`、
+Pixel profile は `docs/rfcs/draft/PIXEL_STREAM_PROFILE_V1.md` を参照する。
 
 ---
 
