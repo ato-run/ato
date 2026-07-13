@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use protocol::session_surface::{
     AcceptedSessionSurface, ClientSessionSurfaceCapabilities, PIXEL_STREAM_PROFILE,
     RunnerSessionSurfaceCapabilities, SESSION_SURFACE_CONTRACT_VERSION, SessionSurfaceDescriptor,
-    SessionSurfaceKind, SessionSurfaceTransport, SupportedSessionSurface, WEB_SURFACE_PROFILE,
-    negotiate_session_surface,
+    SessionSurfaceKind, SessionSurfaceRequirement, SessionSurfaceTransport,
+    SupportedSessionSurface, WEB_SURFACE_PROFILE, negotiate_session_surface,
 };
 use snapshot::ReadyStateManifest;
 
@@ -325,9 +325,23 @@ fn verify_surface_negotiation(
     {
         return Err("explicit session_surface has no valid session_id binding".into());
     }
-    let requirement = manifest.surface_requirement.as_ref().ok_or_else(|| {
-        "explicit session_surface lease has no artifact surface_requirement".to_string()
-    })?;
+    let legacy_web_requirement;
+    let requirement = match manifest.surface_requirement.as_ref() {
+        Some(requirement) => requirement,
+        None if descriptor.kind() == SessionSurfaceKind::Web => {
+            legacy_web_requirement = SessionSurfaceRequirement {
+                kind: SessionSurfaceKind::Web,
+                profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
+            };
+            &legacy_web_requirement
+        }
+        None => {
+            return Err(format!(
+                "legacy artifact without surface_requirement accepts only an explicit Web surface, not {:?}",
+                descriptor.kind()
+            ));
+        }
+    };
     let accepted = cmd.accepted_session_surfaces.clone().ok_or_else(|| {
         "explicit session_surface lease omitted accepted_session_surfaces".to_string()
     })?;
@@ -880,6 +894,44 @@ mod tests {
         base
     }
 
+    fn explicit_web_surface_command() -> RestoreSnapshotCommand {
+        parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-web-1",
+            "accepted_session_surfaces": [{
+                "kind": "web",
+                "profiles": ["ato.web-surface.v1"]
+            }],
+            "session_surface": {
+                "kind": "web",
+                "profile": "ato.web-surface.v1",
+                "surface_id": "surface-web-1",
+                "embed_policy": "sandboxed"
+            }
+        })))
+        .expect("valid explicit Web surface")
+    }
+
+    fn explicit_pixel_surface_command() -> RestoreSnapshotCommand {
+        parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-pixel-1",
+            "accepted_session_surfaces": [{
+                "kind": "pixel_stream",
+                "profiles": ["ato.pixel-stream.v1"]
+            }],
+            "session_surface": {
+                "kind": "pixel_stream",
+                "profile": "ato.pixel-stream.v1",
+                "surface_id": "surface-pixel-1",
+                "transport": "rfb_websocket",
+                "viewport": { "width": 1280, "height": 720 },
+                "capabilities": {}
+            }
+        })))
+        .expect("valid explicit Pixel surface")
+    }
+
     #[test]
     fn parses_a_full_restore_lease() {
         let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({}))).unwrap();
@@ -943,6 +995,38 @@ mod tests {
             Some(SessionSurfaceDescriptor::PixelStream { ref surface_id, .. })
                 if surface_id == "surface-pixel-1"
         ));
+    }
+
+    #[test]
+    fn legacy_artifact_accepts_an_explicit_canonical_web_surface() {
+        let manifest = manifest_with(None, false);
+        let command = explicit_web_surface_command();
+
+        verify_surface_negotiation(&manifest, &command, false)
+            .expect("legacy Web artifact must remain compatible with a canonical Web lease");
+    }
+
+    #[test]
+    fn legacy_artifact_rejects_an_explicit_pixel_surface() {
+        let manifest = manifest_with(None, false);
+        let command = explicit_pixel_surface_command();
+
+        let error = verify_surface_negotiation(&manifest, &command, true)
+            .expect_err("legacy artifact must not inherit a Pixel requirement");
+
+        assert!(error.contains("only an explicit Web surface"), "{error}");
+    }
+
+    #[test]
+    fn legacy_artifact_rejects_an_unknown_explicit_surface() {
+        let manifest = manifest_with(None, false);
+        let mut command = explicit_web_surface_command();
+        command.session_surface = Some(SessionSurfaceDescriptor::Unknown);
+
+        let error = verify_surface_negotiation(&manifest, &command, false)
+            .expect_err("legacy artifact must not inherit an unknown requirement");
+
+        assert!(error.contains("only an explicit Web surface"), "{error}");
     }
 
     #[test]

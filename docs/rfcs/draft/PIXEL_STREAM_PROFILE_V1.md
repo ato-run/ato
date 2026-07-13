@@ -84,12 +84,15 @@ Build readiness:
 Session readiness:
 
 1. snapshot restore
-2. guest-private RFB endpoint への接続
-3. gateway が最初の framebuffer update を受信
-4. authenticated WebSocket endpoint を publish
-5. ready response を返す
+2. authenticated WebSocket gateway を public session URL に起動
+3. token-free URL、exact allowed `Origin`、one-time assertion header で public gateway へ接続
+4. gateway 越しに RFB handshake、button なし pointer event、framebuffer request を順に送る
+5. 同じ ordered stream で最初の完全な framebuffer update を受信
+6. probe assertion を破棄し ready response を返す
 
-TCP connect 成功だけを ready としてはならない。endpoint contract は次を必須とする。
+private TCP connect や gateway listener の bind 成功だけを ready としてはならない。public ingress、
+Origin/assertion authorization、browser→RFB input、RFB→browser first frame の全経路が成功しなければ
+gateway を停止して session を失敗させる。endpoint contract は次を必須とする。
 
 ```json
 {

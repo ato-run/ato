@@ -126,6 +126,7 @@ pub const ENV_SURFACE_ALLOWED_ORIGINS_JSON: &str = "ATO_SURFACE_ALLOWED_ORIGINS_
 #[derive(Clone)]
 struct SurfaceGatewayRuntime {
     authorizer: Arc<dyn netd::pixel_gateway::SurfaceAccessAuthorizer>,
+    assertion_keyring: Arc<netd::pixel_authorization::SurfaceAssertionKeyring>,
     allowed_origins: BTreeSet<String>,
 }
 
@@ -171,8 +172,10 @@ fn load_surface_gateway_runtime() -> Result<Option<SurfaceGatewayRuntime>> {
 
     let keys: BTreeMap<String, String> =
         serde_json::from_str(&keys_json).context("invalid surface assertion keyring JSON")?;
-    let keyring = netd::pixel_authorization::SurfaceAssertionKeyring::new(keys)
-        .context("invalid surface assertion keyring")?;
+    let keyring = Arc::new(
+        netd::pixel_authorization::SurfaceAssertionKeyring::new(keys)
+            .context("invalid surface assertion keyring")?,
+    );
     let origins: Vec<String> =
         serde_json::from_str(&origins_json).context("invalid surface allowed-origins JSON")?;
     let allowed_origins: BTreeSet<String> = origins
@@ -185,8 +188,9 @@ fn load_surface_gateway_runtime() -> Result<Option<SurfaceGatewayRuntime>> {
 
     Ok(Some(SurfaceGatewayRuntime {
         authorizer: Arc::new(netd::pixel_authorization::HmacSurfaceAccessAuthorizer::new(
-            Arc::new(keyring),
+            Arc::clone(&keyring),
         )),
+        assertion_keyring: keyring,
         allowed_origins,
     }))
 }
@@ -4524,8 +4528,9 @@ async fn handle_restore_snapshot_lease(
 
     // 6. Materialize the selected surface gateway and prove its protocol-level
     // readiness BEFORE claiming a URL. Web retains the HTTP-through-proxy probe.
-    // Pixel connects only to the sealed private RFB endpoint, waits for a complete
-    // first framebuffer update, and then exposes an authenticated WS adapter.
+    // Pixel must traverse the authenticated public WebSocket path, send a parsed
+    // input message, and receive a complete first framebuffer update. A private
+    // RFB socket accepting traffic is not sufficient evidence for browser Ready.
     let candidate = public_ready_url(
         public_base_url.as_deref(),
         public_url_template.as_deref(),
@@ -4533,7 +4538,7 @@ async fn handle_restore_snapshot_lease(
     );
     let (gateway_handle, gateway_started) = if let Some(rfb_port) = pixel_rfb_port {
         let setup = async {
-            candidate
+            let public_ready_url = candidate
                 .as_deref()
                 .context("pixel_stream requires a configured public runner URL")?;
             let workload_addr = workload_addr
@@ -4551,28 +4556,41 @@ async fn handle_restore_snapshot_lease(
                 .as_ref()
                 .and_then(|descriptor| descriptor.surface_id())
                 .context("pixel_stream lease is missing surface_id")?;
+            let scope = netd::pixel_gateway::PixelGatewayScope {
+                session_id: session_id.clone(),
+                surface_id: surface_id.to_string(),
+            };
+            let readiness_assertion = runtime
+                .assertion_keyring
+                .issue_readiness_assertion(&scope)
+                .context("issue one-time pixel gateway readiness assertion")?;
+            let probe_origin = runtime
+                .allowed_origins
+                .iter()
+                .next()
+                .context("pixel_stream gateway has no allowed probe origin")?;
 
             let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
             let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
             private_rfb_addr.set_port(rfb_port);
             let timeout = Duration::from_millis(proxy_ready_timeout_ms());
-            let frame = netd::rfb_probe::wait_for_first_rfb_frame(private_rfb_addr, timeout)
-                .await
-                .context("private RFB endpoint did not produce a first frame")?;
-            let handle = netd::pixel_gateway::start_pixel_gateway(
+            let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
                 netd::pixel_gateway::PixelGatewayConfig {
                     listen_addr,
                     private_rfb_addr,
-                    scope: netd::pixel_gateway::PixelGatewayScope {
-                        session_id: session_id.clone(),
-                        surface_id: surface_id.to_string(),
-                    },
+                    scope,
                     allowed_origins: runtime.allowed_origins.clone(),
                 },
                 Arc::clone(&runtime.authorizer),
+                netd::rfb_probe::PixelGatewayProbeRequest::new(
+                    public_ready_url,
+                    probe_origin,
+                    readiness_assertion.as_str(),
+                ),
+                timeout,
             )
             .await
-            .context("start authenticated pixel gateway")?;
+            .context("authenticated public pixel gateway path did not become interactive")?;
             Ok::<_, anyhow::Error>((handle, private_rfb_addr, frame))
         }
         .await;
@@ -4588,7 +4606,7 @@ async fn handle_restore_snapshot_lease(
                     frame.height,
                     frame.bytes
                 );
-                prof_parts.push("pixel_first_frame=1".to_string());
+                prof_parts.push("pixel_public_first_frame=1".to_string());
                 (Some(RestoreGatewayHandle::Pixel(handle)), Some(true))
             }
             Err(err) => {
