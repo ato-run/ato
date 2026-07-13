@@ -1479,6 +1479,52 @@ pub fn materialize_source(
     manifest_override: Option<&str>,
     dest: &Path,
 ) -> Result<PathBuf, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned(owner, repo, commit, dest)?;
+
+    let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
+    if let Some(toml) = manifest_override {
+        // The recipe manifest is authoritative for Store-recipe jobs: write it at the
+        // contained root (overwriting a repo capsule.toml if one exists) so every later
+        // stage — manifest parse, eligibility, rootfs COPY — sees exactly the approved
+        // recipe, never a divergent repo file.
+        std::fs::write(root.join("capsule.toml"), toml)
+            .map_err(|e| format!("write recipe manifest as capsule.toml: {e}"))?;
+    }
+    Ok(root)
+}
+
+/// SOURCE_MATERIALIZATION_SPEC step 1: shallow-checkout the pinned public commit and
+/// return the (optionally sub-directoried) source root **without** requiring or writing
+/// a `capsule.toml`. The `source_materialize` job freezes the repo tree exactly as it
+/// is (there is no recipe to apply and no manifest to resolve), so unlike
+/// [`materialize_source`] it neither demands the repo carry a `capsule.toml` nor writes
+/// one. Same identity validation, full-SHA pin, and lexical+canonical containment as the
+/// recipe lane — it reuses the same [`git_checkout_pinned`] + [`contained_source_root`]
+/// helpers, only passing `require_manifest = false`.
+pub fn checkout_source_tree(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+    dest: &Path,
+) -> Result<PathBuf, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned(owner, repo, commit, dest)?;
+    contained_source_root(dest, subdir, false)
+}
+
+/// Validate the server-resolved source identity as an input boundary: `owner`/`repo`
+/// as conservative GitHub identities and `commit` as a pinned 40-hex sha (never a
+/// branch/tag). Shared by [`materialize_source`] and [`checkout_source_tree`] so both
+/// lanes enforce the same fail-closed gate before any network use.
+fn validate_source_identity(owner: &str, repo: &str, commit: &str) -> Result<(), String> {
     if !valid_github_owner(owner) {
         return Err(format!("invalid github owner {owner:?}"));
     }
@@ -1490,9 +1536,14 @@ pub fn materialize_source(
             "refusing non-pinned commit {commit:?} (need a full 40-char sha)"
         ));
     }
-    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
-        validate_subdir(s)?;
-    }
+    Ok(())
+}
+
+/// Shallow-clone `owner/repo` and check out the pinned `commit` into `dest`. The pure
+/// git steps shared by [`materialize_source`] (recipe lane) and [`checkout_source_tree`]
+/// (source_materialize lane); callers validate the identity (`validate_source_identity`)
+/// and any subdir before calling, and resolve/contain the source root afterward.
+fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
         let mut c = Command::new("git");
@@ -1517,17 +1568,7 @@ pub fn materialize_source(
         Some(dest),
     )?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
-
-    let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
-    if let Some(toml) = manifest_override {
-        // The recipe manifest is authoritative for Store-recipe jobs: write it at the
-        // contained root (overwriting a repo capsule.toml if one exists) so every later
-        // stage — manifest parse, eligibility, rootfs COPY — sees exactly the approved
-        // recipe, never a divergent repo file.
-        std::fs::write(root.join("capsule.toml"), toml)
-            .map_err(|e| format!("write recipe manifest as capsule.toml: {e}"))?;
-    }
-    Ok(root)
+    Ok(())
 }
 
 /// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout.
@@ -2099,6 +2140,35 @@ readiness_probe = { http_get = "/health" }
             materialize_source("acme", "", &sha, None, None, dir.path())
                 .unwrap_err()
                 .contains("repo")
+        );
+    }
+
+    #[test]
+    fn checkout_source_tree_validates_identity_before_any_network() {
+        // The source_materialize lane shares the recipe lane's fail-closed identity
+        // gate: a non-pinned commit and path-like owner/repo are rejected before git
+        // ever runs, and (unlike materialize_source) no capsule.toml is required.
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "a".repeat(40);
+        assert!(
+            checkout_source_tree("acme", "app", "main", None, dir.path())
+                .unwrap_err()
+                .contains("non-pinned")
+        );
+        assert!(
+            checkout_source_tree("../evil", "app", &sha, None, dir.path())
+                .unwrap_err()
+                .contains("owner")
+        );
+        assert!(
+            checkout_source_tree("acme", "a/b", &sha, None, dir.path())
+                .unwrap_err()
+                .contains("repo")
+        );
+        assert!(
+            checkout_source_tree("acme", "app", &sha, Some("../escape"), dir.path())
+                .unwrap_err()
+                .contains("..")
         );
     }
 
