@@ -18,7 +18,7 @@
 //! All realization *logic* lives in `capsule`; this module makes no launch
 //! decisions of its own beyond "strict on ⇒ consult the gate".
 //!
-//! ## Evidence scope (#501)
+//! ## Evidence scope
 //!
 //! Source evidence is grounded by re-hashing the materialized workspace at the
 //! prelaunch boundary and comparing it with the source observation captured in
@@ -96,10 +96,11 @@ fn filesystem_source_environment(
 /// bundle's materialized evidence — then blocks the launch with a typed
 /// [`AtoExecutionError`] if any required input cannot be verified.
 ///
-/// The launch environment recomputes the materialized source hash from the
-/// filesystem immediately before this gate, so the #499 overlay compares the
-/// receipt's declared tree with current bytes instead of trusting cached
-/// resolution metadata (see [`materialization_request_from_launch_bundle`]).
+/// The production run pipeline passes its just-written execution receipt and
+/// workspace into [`launch_environment`], which recomputes the materialized
+/// source hash immediately before this gate. The #499 overlay therefore
+/// compares the receipt's declared tree with current bytes instead of trusting
+/// cached resolution metadata (see [`materialization_request_from_launch_bundle`]).
 pub(crate) fn enforce_strict_realization(
     bundle: &LaunchGraphBundle,
     env: &RealizationEnvironment,

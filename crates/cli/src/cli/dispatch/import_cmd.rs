@@ -398,6 +398,8 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
             }
         }
     };
+    let final_shadow_tree_hash = materialize_shadow_recipe(&materialized.shadow_dir, &recipe_toml)?;
+    materialized.source.source_tree_hash = final_shadow_tree_hash;
     let recipe_hash = blake3_label(recipe_toml.as_bytes());
     let target_label = infer_target_label(&recipe_toml);
     let mut run = if args.run && args.keep_alive {
@@ -405,7 +407,7 @@ pub(super) fn execute_import_command(args: ImportArgs) -> Result<()> {
     } else if args.run && (args.readiness_only || args.emit_json) {
         run_shadow_workspace_readiness_only(&materialized, &recipe_toml)?
     } else if args.run {
-        run_shadow_workspace(&materialized, &recipe_toml)?
+        run_shadow_workspace(&materialized)?
     } else {
         ImportRun {
             status: "not_run".to_string(),
@@ -555,14 +557,13 @@ fn materialize_source(input: &NormalizedGitHubInput) -> Result<MaterializedSourc
                 )
             })?;
         }
-        let source_tree_hash = capsule::source_identity::materialized_tree_hash(&checkout_dir)
-            .with_context(|| {
-                format!(
-                    "GitHub source at {} was not fully materialized",
-                    checkout_dir.display()
-                )
-            })?;
-        (resolved.revision_id, source_tree_hash)
+        capsule::source_identity::verify_fully_materialized(&checkout_dir).with_context(|| {
+            format!(
+                "GitHub source at {} was not fully materialized",
+                checkout_dir.display()
+            )
+        })?;
+        (resolved.revision_id, resolved.source_tree_hash)
     };
 
     copy_source_tree(&checkout_dir, &shadow_dir)?;
@@ -773,6 +774,12 @@ fn copy_source_tree(source: &Path, destination: &Path) -> Result<()> {
         {
             continue;
         }
+        if entry.file_type().is_symlink() {
+            bail!(
+                "source tree contains an unsupported symbolic link at {}",
+                path.display()
+            );
+        }
         let target = destination.join(relative);
         if entry.file_type().is_dir() {
             fs::create_dir_all(&target)?;
@@ -783,9 +790,30 @@ fn copy_source_tree(source: &Path, destination: &Path) -> Result<()> {
             fs::copy(path, &target).with_context(|| {
                 format!("failed to copy {} to {}", path.display(), target.display())
             })?;
+        } else {
+            bail!(
+                "source tree contains an unsupported filesystem entry at {}",
+                path.display()
+            );
         }
     }
     Ok(())
+}
+
+/// Materialize the exact manifest consumed by `ato run`, then bind the import
+/// identity to the same source-tree observer used by execution receipts and
+/// the strict-realization prelaunch recheck.
+fn materialize_shadow_recipe(shadow_dir: &Path, recipe_toml: &str) -> Result<String> {
+    let shadow_manifest = shadow_dir.join(CAPSULE_TOML);
+    fs::write(&shadow_manifest, recipe_toml)
+        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
+    capsule::source_identity::verify_fully_materialized(shadow_dir).with_context(|| {
+        format!(
+            "shadow source at {} was not fully materialized",
+            shadow_dir.display()
+        )
+    })?;
+    crate::application::execution_observers::hash_source_tree(shadow_dir)
 }
 
 fn load_or_infer_recipe(
@@ -851,11 +879,7 @@ fn infer_minimal_recipe(repo_name: &str) -> String {
     )
 }
 
-fn run_shadow_workspace(materialized: &MaterializedSource, recipe_toml: &str) -> Result<ImportRun> {
-    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
-    fs::write(&shadow_manifest, recipe_toml)
-        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
-
+fn run_shadow_workspace(materialized: &MaterializedSource) -> Result<ImportRun> {
     let import_probe_id = new_import_run_id("probe", &materialized.source)?;
     let output = run_ato_shadow(&materialized.shadow_dir, &import_probe_id)?;
     Ok(import_run_from_output(&output))
@@ -867,10 +891,6 @@ fn run_shadow_workspace_readiness_only(
     materialized: &MaterializedSource,
     recipe_toml: &str,
 ) -> Result<ImportRun> {
-    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
-    fs::write(&shadow_manifest, recipe_toml)
-        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
-
     // Extract port from recipe for readiness waiting.
     // If the declared port is already in use, remap to a free port and inform
     // the child subprocess via ATO_UI_OVERRIDE_PORT so it binds the same port.
@@ -1112,10 +1132,6 @@ fn run_shadow_workspace_keep_alive(
     materialized: &mut MaterializedSource,
     recipe_toml: &str,
 ) -> Result<ImportRun> {
-    let shadow_manifest = materialized.shadow_dir.join(CAPSULE_TOML);
-    fs::write(&shadow_manifest, recipe_toml)
-        .with_context(|| format!("failed to write {}", shadow_manifest.display()))?;
-
     let declared_port = infer_port(recipe_toml).unwrap_or(1111);
     let actual_port = if crate::runtime::port_manager::is_port_available(declared_port) {
         declared_port
@@ -2251,6 +2267,15 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn source_identity_test_dir(prefix: &str) -> tempfile::TempDir {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        fs::create_dir_all(&target).expect("create target test directory");
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir_in(target)
+            .expect("create source identity test directory")
+    }
+
     #[test]
     fn normalizes_supported_github_inputs() {
         for input in [
@@ -2282,6 +2307,47 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some(sha));
         assert!(!args.iter().any(|arg| arg == "main"));
         assert!(args.windows(2).any(|pair| pair == ["--depth", "1"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_source_tree_rejects_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = source_identity_test_dir("import-symlink-");
+        let source = root.path().join("source");
+        let shadow = root.path().join("shadow");
+        fs::create_dir_all(&source).expect("create source");
+        fs::write(source.join("app.txt"), b"source bytes").expect("write source");
+        symlink("app.txt", source.join("app-link.txt")).expect("create source symlink");
+
+        let error = copy_source_tree(&source, &shadow).expect_err("symlink must fail closed");
+        assert!(error.to_string().contains("unsupported symbolic link"));
+    }
+
+    #[test]
+    fn shadow_identity_is_hashed_after_recipe_materialization() {
+        let root = source_identity_test_dir("import-final-shadow-");
+        let shadow = root.path().join("shadow");
+        fs::create_dir_all(&shadow).expect("create shadow");
+        fs::write(shadow.join("app.txt"), b"source bytes").expect("write source");
+        let before = crate::application::execution_observers::hash_source_tree(&shadow)
+            .expect("hash pre-recipe tree");
+        let recipe = "schema_version = \"0.3\"\nname = \"final-shadow\"\n";
+
+        let final_hash =
+            materialize_shadow_recipe(&shadow, recipe).expect("materialize final shadow");
+
+        assert_ne!(final_hash, before);
+        assert_eq!(
+            final_hash,
+            crate::application::execution_observers::hash_source_tree(&shadow)
+                .expect("hash receipt source tree")
+        );
+        assert_eq!(
+            fs::read_to_string(shadow.join(CAPSULE_TOML)).expect("read materialized recipe"),
+            recipe
+        );
     }
 
     #[test]
