@@ -21,7 +21,7 @@ use capsule::lockfile::{
     verify_lockfile_external_dependencies,
 };
 use capsule::types::{
-    CapsuleManifest, CapsuleType, ConfigField, ConfigKind, MANIFEST_SCHEMA_VERSION, StateDurability,
+    CapsuleManifest, CapsuleType, ConfigField, ConfigKind, MANIFEST_SCHEMA_V03, StateDurability,
 };
 use serde_json::Value as JsonValue;
 use tracing::debug;
@@ -1982,7 +1982,7 @@ where
         );
         prepared.engine_override_declared = loaded_manifest.raw.get("engine").is_some();
         let manifest = loaded_manifest.model.clone();
-        if manifest.schema_version.trim() == MANIFEST_SCHEMA_VERSION
+        if manifest.schema_version.trim() == MANIFEST_SCHEMA_V03
             && manifest.capsule_type == CapsuleType::Library
         {
             anyhow::bail!(

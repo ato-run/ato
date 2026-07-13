@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::common::paths::manifest_dir;
 use crate::error::{CapsuleError, Result};
-use crate::types::{CapsuleManifest, MANIFEST_SCHEMA_VERSION, ValidationMode};
+use crate::types::{CURRENT_MANIFEST_SCHEMA_VERSION, CapsuleManifest, ValidationMode};
 
 #[derive(Debug, Clone)]
 pub struct LoadedManifest {
@@ -55,7 +55,7 @@ pub fn load_manifest_with_validation_mode(
 
     // Ensure schema_version is set for downstream consumers.
     if model.schema_version.trim().is_empty() {
-        model.schema_version = MANIFEST_SCHEMA_VERSION.to_string();
+        model.schema_version = CURRENT_MANIFEST_SCHEMA_VERSION.to_string();
     }
 
     let normalized_text = model.to_toml().map_err(|e| {

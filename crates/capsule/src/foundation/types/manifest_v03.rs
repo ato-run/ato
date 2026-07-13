@@ -1758,7 +1758,7 @@ pub(super) fn normalize_v03_manifest_value_with_path(
     if !table.contains_key("schema_version") {
         table.insert(
             "schema_version".to_string(),
-            toml::Value::String(MANIFEST_SCHEMA_VERSION.to_string()),
+            toml::Value::String(MANIFEST_SCHEMA_V03.to_string()),
         );
     }
 
