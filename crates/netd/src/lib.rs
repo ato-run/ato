@@ -10,5 +10,6 @@ pub mod egress;
 pub mod identity;
 pub mod ingress;
 pub mod net;
+pub mod pixel_gateway;
 pub mod server;
 pub mod state;
