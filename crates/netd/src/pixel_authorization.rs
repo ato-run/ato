@@ -8,7 +8,11 @@ use std::{collections::BTreeMap, fmt, sync::Arc, time::SystemTime};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
-use protocol::session_surface::{SurfaceAssertionClaims, SurfacePrincipalKind};
+use protocol::session_surface::{
+    SURFACE_GATEWAY_ASSERTION_AUDIENCE, SurfaceAssertionClaims, SurfaceAssertionPrincipal,
+    SurfacePrincipalKind,
+};
+use rand::{RngCore, rngs::OsRng};
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -19,6 +23,9 @@ use crate::pixel_gateway::{
 const MAX_ASSERTION_BYTES: usize = 8 * 1024;
 const MAX_ASSERTION_REMAINING_TTL_SECS: u64 = 5 * 60;
 const MIN_KEY_BYTES: usize = 32;
+const READINESS_ASSERTION_TTL_SECS: u64 = 30;
+const READINESS_ASSERTION_PRINCIPAL: &str = "runner-readiness-probe";
+const READINESS_ASSERTION_RANDOM_BYTES: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -60,6 +67,77 @@ impl SurfaceAssertionKeyring {
     fn key(&self, kid: &str) -> Option<&[u8]> {
         self.keys.get(kid).map(|key| key.as_slice())
     }
+
+    /// Issues one short-lived, user-principal assertion used only to prove the
+    /// authenticated public gateway path before a session is reported ready.
+    /// The assertion is carried in the normal header, consumed once by the
+    /// gateway, and zeroized by the caller after the probe.
+    pub fn issue_readiness_assertion(
+        &self,
+        scope: &PixelGatewayScope,
+    ) -> Result<ReadinessSurfaceAssertion, SurfaceAssertionIssueError> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| SurfaceAssertionIssueError::Clock)?
+            .as_secs();
+        let exp = now
+            .checked_add(READINESS_ASSERTION_TTL_SECS)
+            .ok_or(SurfaceAssertionIssueError::Clock)?;
+        let (kid, key) = self
+            .keys
+            .iter()
+            .next()
+            .ok_or(SurfaceAssertionIssueError::NoSigningKey)?;
+        let mut random = [0_u8; READINESS_ASSERTION_RANDOM_BYTES];
+        OsRng
+            .try_fill_bytes(&mut random)
+            .map_err(|_| SurfaceAssertionIssueError::Entropy)?;
+        let claims = SurfaceAssertionClaims {
+            aud: SURFACE_GATEWAY_ASSERTION_AUDIENCE.to_string(),
+            session_id: scope.session_id.clone(),
+            surface_id: scope.surface_id.clone(),
+            principal: SurfaceAssertionPrincipal {
+                kind: SurfacePrincipalKind::User,
+                id: READINESS_ASSERTION_PRINCIPAL.to_string(),
+            },
+            exp,
+            jti: format!("ready-{}", hex::encode(random)),
+            kid: kid.clone(),
+        };
+        let encoded = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).map_err(|_| SurfaceAssertionIssueError::Encoding)?);
+        let mut mac =
+            HmacSha256::new_from_slice(key).map_err(|_| SurfaceAssertionIssueError::Signing)?;
+        mac.update(encoded.as_bytes());
+        Ok(ReadinessSurfaceAssertion(Zeroizing::new(format!(
+            "{encoded}.{}",
+            hex::encode(mac.finalize().into_bytes())
+        ))))
+    }
+}
+
+/// Secret readiness credential. It intentionally has no `Debug` or `Display`
+/// implementation so normal diagnostics cannot expose it.
+pub struct ReadinessSurfaceAssertion(Zeroizing<String>);
+
+impl ReadinessSurfaceAssertion {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SurfaceAssertionIssueError {
+    #[error("surface readiness assertion clock is invalid")]
+    Clock,
+    #[error("surface readiness assertion keyring has no signing key")]
+    NoSigningKey,
+    #[error("surface readiness assertion entropy is unavailable")]
+    Entropy,
+    #[error("surface readiness assertion encoding failed")]
+    Encoding,
+    #[error("surface readiness assertion signing failed")]
+    Signing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -233,6 +311,29 @@ mod tests {
 
         assert_eq!(access.principal, "user-1");
         assert_eq!(access.grant_id, "grant-1");
+    }
+
+    #[test]
+    fn readiness_assertion_uses_the_normal_hmac_scope_and_is_not_debuggable() {
+        let keyring = keyring();
+        let assertion = keyring
+            .issue_readiness_assertion(&scope())
+            .expect("issue readiness assertion");
+        let access = HmacSurfaceAccessAuthorizer::new(Arc::clone(&keyring))
+            .authorize(assertion.as_str(), &scope())
+            .expect("normal authorizer accepts readiness assertion");
+
+        assert_eq!(access.principal, READINESS_ASSERTION_PRINCIPAL);
+        assert!(access.grant_id.starts_with("ready-"));
+        let wrong_scope = PixelGatewayScope {
+            session_id: "other-session".to_string(),
+            surface_id: scope().surface_id,
+        };
+        assert!(
+            HmacSurfaceAccessAuthorizer::new(keyring)
+                .authorize(assertion.as_str(), &wrong_scope)
+                .is_err()
+        );
     }
 
     #[test]
