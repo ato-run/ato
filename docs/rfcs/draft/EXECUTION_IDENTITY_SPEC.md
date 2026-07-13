@@ -89,15 +89,20 @@ execution_id = "blake3:" + hex(blake3(JCS(execution_identity_facets)))
   the field set is versioned with the manifest schema so a facet cannot be
   silently added or dropped.
 
-### 3.4 Rootfs/kernel identity (prerequisite)
+### 3.4 Rootfs/kernel identity (prerequisite — resolved 2026-07-13)
 
 `rootfs_base_id` and `guest_kernel_id` are facets of `execution_id` and are
-resolved from the artifact's `RunnerClass`. Today those come from a sentinel;
-**RunnerClass sentinel resolution is a separate prerequisite PR** and is out of
-scope here. Until it lands, `execution_id` is computed with the runner-class
-facets from whatever the RunnerClass resolves to; the pipeline treats a
-runner-class change as a potential identity change (open question — pipeline
-spec §8).
+resolved from the artifact's `RunnerClass`. The scope investigation found the
+original "all-sentinel" premise wrong: the production builder + `runner serve`
+path already resolves real `snapshot_format` / `vmm_version` /
+`guest_kernel_id` via `FirecrackerBackend::runner_facts()`
+(`crates/snapshot/src/firecracker.rs:304`), and the CLI path now delegates to
+the same backend resolver (PR #1058) instead of the sentinel-bearing
+`from_host()` probe. Two facets remain intentionally unresolved —
+`cpu_template` (a deliberate snapshot flag-day if ever enabled) and
+`rootfs_base_id` (`"unset"` by design under the per-capsule full-rootfs layer
+model). The pipeline treats a runner-class change as a potential identity
+change (pipeline spec §8, item 3).
 
 ### 3.5 Teardown receipt required for publication
 
@@ -124,9 +129,10 @@ and reproducible from its artifact alone.
 
 ## 6. Known limitations
 
-- Runner-class rootfs/kernel identity depends on the sentinel-resolution
-  prerequisite; until then the runner-class facets are as precise as the
-  sentinel allows.
+- Runner-class kernel identity is real in the builder/runner path
+  (`runner_facts()`); `cpu_template` and `rootfs_base_id` remain unset by
+  deliberate decision (§3.4), so the runner-class facets are exactly as precise
+  as those decisions allow.
 - Whether a runner-class derivation change should force re-verification of
   existing snapshots is unresolved (pipeline spec §8, item 3).
 

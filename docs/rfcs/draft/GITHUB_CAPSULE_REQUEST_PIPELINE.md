@@ -244,14 +244,33 @@ submission_id + attempt_no + source_tree_hash + recipe_hash
 
 ### 5.1 MVP lanes
 
-Two lanes only. Which one a repo takes is decided by a **step-0 eligibility
-measurement** (out of scope here; the pipeline records the chosen lane):
+Two lanes only:
 
 - **Lane A — static web**: the repo already contains committed build output
   (e.g. a `dist/` or `public/` a static server can serve). **Zero repo command
-  execution.** The safest lane; the MVP prioritizes it.
+  execution.**
 - **Lane B — docker-import reuse**: reuse the docker-import v1.7 path for repos
   that ship a usable container definition.
+
+**Step-0 eligibility measurement (2026-07-13) — Lane B is the first lane.**
+A systematic 1-in-10 sample (n=102) of the real candidate corpus (the 1,016
+distinct repos in production `capsule_submissions`; the
+`store_publish_requests` lead table is empty in both envs) measured:
+
+| Metric | n=102 | extrapolated |
+|---|--:|--:|
+| Lane A eligible (servable as committed, zero commands) | 2.9% | ~30 |
+| Lane A ∩ license allowlist | **2.0%** | **~20** |
+| Lane B eligible (Dockerfile/compose) | 88% | ~895 |
+| Lane B ∩ license allowlist | **44%** | **~448** |
+| needs-build (static after `npm build`; excluded from Lane A) | 46% | ~470 |
+
+Only one sampled repo is a genuine committed-output static app; per the
+approved plan rule ("if Lane A population is insufficient, promote Lane B"),
+**the MVP starts with Lane B**. Lane A stays fully specified and gated behind
+its own kill switch for the organic-submission funnel, on which there is no
+data yet (the lead table has captured zero organic leads). Rejects observed in
+the sample: submodules 8.8%, LFS 2.0%, truncated trees / >50k entries 0%.
 
 ### 5.2 Constrained generation
 
@@ -341,10 +360,19 @@ Carried forward as explicit open questions (see also §12 of
 2. **Queue escalation criterion.** When does cron + `waitUntil` stop being
    enough and justify a dedicated Cloudflare Queue? Needs a measured threshold
    (backlog depth / median time-in-state), not a guess.
-3. **RunnerClassId derivation-change compatibility.** How a change to
-   `rootfs_base_id` / `guest_kernel_id` affects `execution_id` for *existing*
-   published snapshots — i.e. when a runner-class change should force
-   re-verification vs. remain compatible.
+3. **RunnerClassId derivation-change compatibility.** Narrowed by the 2026-07-13
+   scope investigation: the production builder + `runner serve` path already
+   resolves real `snapshot_format` / `vmm_version` / `guest_kernel_id` via
+   `FirecrackerBackend::runner_facts()`, and the CLI-path asymmetry
+   (`from_host()` sentinels) is fixed by delegating to the backend (PR #1058).
+   What remains open, as two *separate deliberate decisions* rather than one
+   backfill:
+   - **`cpu_template`**: enabling it (T2CL/T2A) changes `runner_facts()` output
+     → a snapshot flag-day (codec-playbook rebuild in both envs, builders
+     colocated per env). Only worth scheduling for cross-silicon warm-pool
+     portability.
+   - **`rootfs_base_id`**: stays `"unset"` by design under the per-capsule
+     full-rootfs layer model; resolving it first requires a base-image concept.
 
 ## 9. References
 
