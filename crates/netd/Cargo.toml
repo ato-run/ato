@@ -70,6 +70,7 @@ http-body-util = "0.1"
 http = "1"
 # tokio-tungstenite: WebSocket upgrade relay via tokio::io::copy_bidirectional.
 tokio-tungstenite = "0.28"
+futures-util = "0.3"
 # url: Url parsing for upstream_url in RegisterIngress.
 url = "2"
 # bytes: Bytes type used in BoxBody.
@@ -97,7 +98,6 @@ http-body-util = "0.1"
 http = "1"
 tokio-tungstenite = "0.28"
 bytes = "1"
-futures-util = "0.3"
 serial_test = "3"
 # async-trait: needed by fake Resolver impls in egress unit tests.
 async-trait = "0.1"
