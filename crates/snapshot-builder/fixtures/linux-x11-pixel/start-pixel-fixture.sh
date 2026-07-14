@@ -66,18 +66,34 @@ AFTER_HASH=$(xwd -display "$DISPLAY" -root -silent | sha256sum | cut -d ' ' -f 1
 # The RFB listener is guest-private. It deliberately has no session password:
 # session authorization is generated only after restore and enforced by the
 # host gateway. Network policy must prevent direct public access to port 5900.
-x11vnc \
-  -display "$DISPLAY" \
-  -listen 0.0.0.0 \
-  -rfbport 5900 \
-  -nopw \
-  -forever \
-  -shared \
-  -noclipboard \
-  -nosetclipboard \
-  -wait 33 \
-  -defer 33 \
-  -quiet &
+#
+# x11vnc runs under a restart supervisor, NOT as a one-shot: the Ready-State
+# artifact is a MEMORY snapshot, and x11vnc's internal select() timers trip on
+# the large wall-clock jump between seal and restore, so it can exit exactly
+# once right after the guest resumes. A one-shot x11vnc (in the fatal `wait`
+# set below) would then tear the whole fixture down and the restored guest
+# would refuse the host gateway's RFB connect. The loop rebinds 5900 within a
+# second, so the gateway's readiness retry connects on the restored session.
+run_x11vnc() {
+  while true; do
+    x11vnc \
+      -display "$DISPLAY" \
+      -listen 0.0.0.0 \
+      -rfbport 5900 \
+      -nopw \
+      -forever \
+      -shared \
+      -noclipboard \
+      -nosetclipboard \
+      -wait 33 \
+      -defer 33 \
+      -quiet || true
+    # Xvfb gone ⇒ nothing to serve; let the fixture tear down normally.
+    kill -0 "$XVFB_PID" 2>/dev/null || return 0
+    sleep 0.2
+  done
+}
+run_x11vnc &
 VNC_PID=$!
 
 ATO_PIXEL_APP_PID="$APP_PID" \
@@ -85,4 +101,6 @@ ATO_PIXEL_WINDOW_ID="$WINDOW_ID" \
   /opt/ato-pixel-fixture/health.py &
 HEALTH_PID=$!
 
-wait -n "$XVFB_PID" "$WM_PID" "$APP_PID" "$VNC_PID" "$HEALTH_PID"
+# x11vnc is deliberately NOT in the fatal wait set — its supervisor loop owns
+# its lifecycle so a single post-restore blip never tears the fixture down.
+wait -n "$XVFB_PID" "$WM_PID" "$APP_PID" "$HEALTH_PID"
