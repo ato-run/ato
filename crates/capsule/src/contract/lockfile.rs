@@ -12,6 +12,7 @@ use lock_draft_engine::{
     LockDraftRuntimePlatform as DraftRuntimePlatform, ManifestSource as DraftManifestSource,
     RepoFileEntry as DraftRepoFileEntry, RepoFileKind as DraftRepoFileKind, evaluate_lock_draft,
 };
+use protocol::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
@@ -155,6 +156,10 @@ pub struct RuntimeArtifact {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TargetEntry {
+    /// Immutable capsule-authored presentation requirement copied from the
+    /// normalized manifest. Access grants never belong in the lockfile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_requirement: Option<SessionSurfaceRequirement>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub python_lockfile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1786,6 +1791,13 @@ async fn finalize_lockfile_from_draft(
     )
     .await?;
 
+    // The lock is the resolved layer between capsule.toml and materialization.
+    // Copy the normalized target requirement verbatim so builders and control
+    // planes never need to reinterpret authoring TOML or infer a Web fallback.
+    for (label, surface_requirement) in surface_requirements_from_manifest(manifest_text)? {
+        targets.entry(label).or_default().surface_requirement = Some(surface_requirement);
+    }
+
     let tools = if tools.uv.is_none()
         && tools.pnpm.is_none()
         && tools.yarn.is_none()
@@ -1823,6 +1835,32 @@ async fn finalize_lockfile_from_draft(
         },
         targets,
     })
+}
+
+fn surface_requirements_from_manifest(
+    manifest_text: &str,
+) -> Result<HashMap<String, SessionSurfaceRequirement>> {
+    let manifest = CapsuleManifest::from_toml(manifest_text).map_err(|error| {
+        CapsuleError::Pack(format!(
+            "session-surface lock propagation could not parse the manifest: {error}"
+        ))
+    })?;
+    let Some(targets) = manifest.targets.as_ref() else {
+        return Ok(HashMap::new());
+    };
+    let mut requirements = HashMap::new();
+    for (label, target) in targets.named_targets() {
+        let Some(requirement) = target.surface.as_ref() else {
+            continue;
+        };
+        requirement.validate().map_err(|error| {
+            CapsuleError::Pack(format!(
+                "target {label:?} has invalid surface requirement: {error}"
+            ))
+        })?;
+        requirements.insert(label.clone(), requirement.clone());
+    }
+    Ok(requirements)
 }
 
 struct LockfileConfigContext<'a> {

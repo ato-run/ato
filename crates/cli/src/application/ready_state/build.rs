@@ -50,6 +50,7 @@ pub(crate) fn restore_contract_from_manifest(m: &CapsuleManifest) -> RestoreCont
         expected_ready_ms,
         ports,
         healthcheck,
+        ..Default::default()
     }
 }
 
@@ -132,12 +133,14 @@ pub(crate) fn seal(
     // are sentinels. The Fake backend seals unpinned, matching builder-driven
     // fake seals.
     let runner_class = None;
+    let surface_requirement = manifest.resolve_default_target()?.surface.clone();
 
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash,
             runner_class,
+            surface_requirement,
             layers,
             restore_contract: restore_contract_from_manifest(manifest),
             sanitizer_contract: sanitizer_contract_from_manifest(manifest),

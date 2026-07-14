@@ -4367,3 +4367,78 @@ target = "web"
     assert!(m_no.validate().is_ok());
     assert!(m_with.validate().is_ok());
 }
+
+#[test]
+fn v03_target_surface_requirement_parses_and_validates() {
+    let toml = r#"
+schema_version = "0.3"
+name = "pixel-desktop"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+run = "./desktop"
+
+[targets.desktop.surface]
+kind = "pixel_stream"
+profiles = ["ato.pixel-stream.v1"]
+"#;
+
+    let manifest = CapsuleManifest::from_toml(toml).expect("parse surface requirement");
+    manifest
+        .validate()
+        .expect("valid pixel surface requirement");
+    let target = manifest.resolve_default_target().expect("default target");
+    let surface = target.surface.as_ref().expect("surface requirement");
+
+    assert_eq!(
+        surface.kind,
+        protocol::session_surface::SessionSurfaceKind::PixelStream
+    );
+    assert_eq!(
+        surface.profiles.as_deref(),
+        Some(["ato.pixel-stream.v1".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn v03_target_surface_requirement_rejects_omitted_or_unknown_capabilities() {
+    for surface in [
+        "kind = \"pixel_stream\"",
+        "kind = \"future_surface\"\nprofiles = [\"ato.future.v1\"]",
+        "kind = \"pixel_stream\"\nprofiles = []",
+    ] {
+        let toml = format!(
+            r#"
+schema_version = "0.3"
+name = "pixel-desktop"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source"
+driver = "native"
+run = "./desktop"
+
+[targets.desktop.surface]
+{surface}
+"#
+        );
+        let manifest = CapsuleManifest::from_toml(&toml).expect("shape parses");
+        let errors = manifest
+            .validate()
+            .expect_err("invalid surface must fail closed");
+        assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                ValidationError::InvalidTarget(message)
+                    if message.contains("surface")
+            )),
+            "{errors:?}"
+        );
+    }
+}
