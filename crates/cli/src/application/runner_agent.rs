@@ -150,6 +150,8 @@ pub fn load_runner_credentials() -> Result<RunnerCredentials> {
 // Capabilities
 // ─────────────────────────────────────────────
 
+const SESSION_HORIZON_EXTENSION_CAPABILITY: &str = "session-horizon-extension-v1";
+
 pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -172,6 +174,7 @@ pub fn collect_capabilities() -> Vec<String> {
         caps.push("python".to_string());
     }
     caps.push("source-sandbox".to_string());
+    caps.push(SESSION_HORIZON_EXTENSION_CAPABILITY.to_string());
     caps
 }
 
@@ -5191,7 +5194,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_include_os_arch_and_source_sandbox() {
+    fn capabilities_include_runtime_features() {
         let caps = collect_capabilities();
         assert!(caps.contains(&std::env::consts::OS.to_string()));
         assert!(caps.contains(&std::env::consts::ARCH.to_string()));
@@ -5201,6 +5204,7 @@ mod tests {
             std::env::consts::ARCH
         )));
         assert!(caps.contains(&"source-sandbox".to_string()));
+        assert!(caps.contains(&SESSION_HORIZON_EXTENSION_CAPABILITY.to_string()));
     }
 
     #[test]
