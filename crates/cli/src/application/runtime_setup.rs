@@ -1081,8 +1081,12 @@ mod tests {
     }
 
     /// Run `f` with `ATO_HOME` pointed at `home`, restoring the prior value.
-    /// Serialised by callers (`#[serial]`) — it mutates a process-global var.
+    /// Callers use `#[serial]`; the shared lock also coordinates non-serial tests.
     fn with_ato_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        // `serial_test` only coordinates tests using its own lock. The CLI test
+        // suite also has a shared environment lock, so take both before changing
+        // ATO_HOME to avoid another test restoring it during this probe.
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
         let prev = std::env::var_os("ATO_HOME");
         unsafe { std::env::set_var("ATO_HOME", home) };
         let out = f();
