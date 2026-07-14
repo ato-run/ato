@@ -1,4 +1,4 @@
-//! Multi-service OCI execution via PodmanProvider.
+//! Multi-service OCI execution via a ready runtime provider.
 //!
 //! This is the **official** path for capsules that declare a `[services]` graph
 //! where every service target uses `runtime = "oci"`.
@@ -8,14 +8,14 @@
 //!
 //! # Execution order
 //! 1. `execute_multi_service` — public entry point, reads the plan, lock, and manifest.
-//!    Performs provider readiness check before delegating to `execute_service_graph_with_provider`.
+//!    Selects a ready provider before delegating to `execute_service_graph_with_provider`.
 //! 2. `execute_service_graph_with_provider<P: OciProvider>` — testable core, accepts any provider.
 //!
 //! # Invariants
 //! * Every OCI service must have a resolved image digest in the lock file.
 //! * Container id, host port, and network id are **Session/Receipt** data — not identity.
 //! * Persistent state bindings are preserved on failure; ephemeral ones are deleted.
-//! * Internal service-to-service connections use Podman network aliases, not localhost.
+//! * Internal service-to-service connections use OCI network aliases, not localhost.
 //! * Only the main (published) service exposes a host port.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,16 +41,13 @@ use capsule::execution_identity::OciProviderReceiptEvidence;
 use super::launch_context::RuntimeLaunchContext;
 use crate::adapters::runtime::ingress_router;
 use crate::adapters::runtime::oci_provider::{
-    DefaultOciProviderSelector, OciImageResolutionMode, OciImageResolutionRequest,
-    OciPlatformPolicy, OciProvider, OciProviderError, OciProviderSelector, build_digest_pull_ref,
-    normalize_oci_image_ref,
+    OciImageResolutionMode, OciImageResolutionRequest, OciPlatformPolicy, OciProvider,
+    OciProviderError, build_digest_pull_ref, normalize_oci_image_ref,
+    select_ready_runtime_oci_provider,
 };
 use crate::adapters::runtime::oci_session_store::{
     IngressRouteRecord, OciServiceRecord, OciSessionIngressRecord, OciSessionMeta,
     OciSessionRecord, OciSessionStatus, OciSessionStore, now_iso8601,
-};
-use crate::application::preflight::{
-    OciProviderReadinessMode, OciProviderReadinessRequirements, preflight_oci_provider_readiness,
 };
 use crate::application::provider_projection::oci::OciProjectionPlan;
 use crate::application::provider_projection::strict_oci::{
@@ -76,10 +73,10 @@ fn oci_run_once_timeout_secs() -> u64 {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Execute a multi-service OCI capsule through the official PodmanProvider path.
+/// Execute a multi-service OCI capsule through the ready runtime provider.
 ///
-/// Reads the manifest, lock, and service graph from `plan`, performs provider
-/// readiness check, then delegates to `execute_service_graph_with_provider`.
+/// Reads the manifest, lock, and service graph from `plan`, selects a ready
+/// provider, then delegates to `execute_service_graph_with_provider`.
 pub(crate) async fn execute_multi_service(
     plan: &ManifestData,
     reporter: Arc<CliReporter>,
@@ -119,17 +116,11 @@ pub(crate) async fn execute_multi_service(
     // Compute which mount sources are ephemeral (safe to delete on failure).
     let ephemeral_mount_sources = collect_ephemeral_mount_sources(plan);
 
-    // Provider readiness check in Required mode (before image resolution so
-    // we can use the provider to resolve digests for compat-path capsules).
-    preflight_oci_provider_readiness(
-        &DefaultOciProviderSelector,
-        OciProviderReadinessMode::Required,
-        OciProviderReadinessRequirements::default(),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))?;
-
-    let provider = DefaultOciProviderSelector.select_provider();
+    // Select a ready provider before image resolution so compat-path capsules
+    // can resolve digests without requiring a separate `ato lock` step.
+    let provider = select_ready_runtime_oci_provider()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))?;
 
     // Build the image map. Prefer the lock-resolved digest when present; fall
     // back to resolving the declared image ref via the OCI provider so that
