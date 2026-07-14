@@ -29,7 +29,7 @@ until DISPLAY="$DISPLAY" xdpyinfo >/dev/null 2>&1; do
 done
 
 setxkbmap -display "$DISPLAY" us
-openbox --display "$DISPLAY" >/dev/null 2>&1 &
+openbox >/dev/null 2>&1 &
 WM_PID=$!
 sleep 0.2
 
