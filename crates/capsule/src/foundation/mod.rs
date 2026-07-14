@@ -17,4 +17,5 @@ pub mod podman;
 pub mod provision_receipt;
 pub mod reporter;
 pub mod runtime_setup;
+pub mod source_identity;
 pub mod types;

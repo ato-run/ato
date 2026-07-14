@@ -122,6 +122,7 @@ fn run_capsule(
         store: &store,
         capsule_manifest_hash: format!("blake3:{id}"),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs,
             runtime: None,
@@ -134,6 +135,7 @@ fn run_capsule(
             ports: vec![port],
             healthcheck: Some(hc.clone()),
             expected_ready_ms: Some(8000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],

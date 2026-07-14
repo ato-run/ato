@@ -21,6 +21,12 @@
 
 use std::path::{Path, PathBuf};
 
+use protocol::session_surface::{
+    AcceptedSessionSurface, ClientSessionSurfaceCapabilities, PIXEL_STREAM_PROFILE,
+    RunnerSessionSurfaceCapabilities, SESSION_SURFACE_CONTRACT_VERSION, SessionSurfaceDescriptor,
+    SessionSurfaceKind, SessionSurfaceRequirement, SessionSurfaceTransport,
+    SupportedSessionSurface, WEB_SURFACE_PROFILE, negotiate_session_surface,
+};
 use snapshot::ReadyStateManifest;
 
 /// Lease kind for restoring a sealed Ready-State snapshot (matches ato-api's
@@ -38,8 +44,8 @@ pub(crate) const RESTORE_SNAPSHOT_WITH_BINDINGS_LEASE_KIND: &str = "restore_snap
 
 /// Public Preview Runner v0 (ato#1006, UNIT C): lease kind for a login-free,
 /// time-limited preview restore. Wire-identical to `restore_snapshot` (a NO-BINDING
-/// artifact — see [`classify_restore_artifact`]) PLUS two always-set duration fields
-/// (`max_duration_secs`, `idle_timeout_secs`) that arm the runner's hard TTL. A
+/// artifact — see [`classify_restore_artifact`]) PLUS a required hard TTL
+/// (`max_duration_secs`) and optional input-idle timeout (`idle_timeout_secs`). A
 /// separate kind — not an additive field — so the control plane capability-gates
 /// dispatch on `supported_lease_kinds`: only a runner that opted in
 /// (`ATO_RUNNER_PREVIEW=1`) ever advertises it, and only a snapshot the server
@@ -65,6 +71,17 @@ pub(crate) struct RestoreSnapshotCommand {
     pub runner_class_id: String,
     pub snapshot_backend: String,
     pub healthcheck_url_path: Option<String>,
+    /// Immutable descriptor selected by capsule × client × runner negotiation.
+    /// Access URLs and grants are intentionally absent from the lease contract.
+    /// Legacy Web leases omit this field and `surface_contract_version` together.
+    pub session_surface: Option<SessionSurfaceDescriptor>,
+    pub surface_contract_version: Option<String>,
+    /// Control-plane session binding for the surface gateway assertion scope.
+    /// Required only for an explicit canonical surface lease.
+    pub session_id: Option<String>,
+    /// Launch-client capability set used in the API-side selection. Explicit
+    /// surface leases must carry it so the runner can repeat the intersection.
+    pub accepted_session_surfaces: Option<Vec<AcceptedSessionSurface>>,
     /// v1.2 PR 3e: true iff the lease kind is `restore_snapshot_with_bindings`.
     /// The kind PROMISES a supervisor artifact; `classify_restore_artifact`
     /// fail-closes any kind↔artifact mismatch in either direction.
@@ -78,10 +95,10 @@ pub(crate) struct RestoreSnapshotCommand {
     /// every other kind — an additive/optional wire field (`#[serde(default)]`
     /// semantics), byte-compatible for non-preview leases which never carry it.
     pub max_duration_secs: Option<u64>,
-    /// ato#1006 (UNIT C): the preview lane's idle timeout, in seconds. Parsed and
-    /// threaded, but a NO-OP stub in v0 — the restore path exposes no controllable
-    /// idle-activity signal, so `max_duration_secs` is the sole hard cap. Optional
-    /// on the wire; `None` for non-preview leases.
+    /// ato#1006 (UNIT C): the preview lane's idle timeout, in seconds. For Pixel
+    /// surfaces, parsed RFB keyboard/pointer input resets the timer; framebuffer
+    /// requests, keepalives, and outbound frame activity do not. Optional on the
+    /// wire; `None` for non-preview leases.
     pub idle_timeout_secs: Option<u64>,
     /// P3b AI-keyless: the run this lease dispatches. ato-api has always sent
     /// `run_id` on the restore command; parsing it (additive, optional — absent
@@ -142,6 +159,91 @@ pub(crate) fn parse_restore_snapshot_command(
             "restore_snapshot_preview lease is missing required field \"max_duration_secs\"",
         ));
     }
+    // The additive migration permits one legacy shape only: both fields absent,
+    // which means an existing Web restore. Once either canonical field is present,
+    // both are authoritative and malformed/unknown values fail closed. In
+    // particular, an explicit pixel_stream descriptor can never fall back to Web.
+    let fields = command.as_object();
+    let surface_present = fields.is_some_and(|fields| fields.contains_key("session_surface"));
+    let version_present =
+        fields.is_some_and(|fields| fields.contains_key("surface_contract_version"));
+    let (surface_contract_version, session_surface) = match (version_present, surface_present) {
+        (false, false) => (None, None),
+        (false, true) => {
+            return Err(err(
+                "restore_snapshot lease has session_surface but is missing surface_contract_version",
+            ));
+        }
+        (true, false) => {
+            return Err(err(
+                "restore_snapshot lease has surface_contract_version but is missing session_surface",
+            ));
+        }
+        (true, true) => {
+            let version = command
+                .get("surface_contract_version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| err("surface_contract_version must be a non-empty string"))?;
+            if version != SESSION_SURFACE_CONTRACT_VERSION {
+                return Err(err(&format!(
+                    "unsupported surface_contract_version {version:?}"
+                )));
+            }
+            let descriptor: SessionSurfaceDescriptor = serde_json::from_value(
+                command
+                    .get("session_surface")
+                    .cloned()
+                    .expect("field presence was checked"),
+            )
+            .map_err(|error| err(&format!("malformed session_surface: {error}")))?;
+            descriptor
+                .validate()
+                .map_err(|error| err(&format!("invalid session_surface: {error}")))?;
+            (Some(version.to_string()), Some(descriptor))
+        }
+    };
+    let accepted_present =
+        fields.is_some_and(|fields| fields.contains_key("accepted_session_surfaces"));
+    let accepted_session_surfaces = if accepted_present {
+        let accepted: Vec<AcceptedSessionSurface> = serde_json::from_value(
+            command
+                .get("accepted_session_surfaces")
+                .cloned()
+                .expect("field presence was checked"),
+        )
+        .map_err(|error| err(&format!("malformed accepted_session_surfaces: {error}")))?;
+        ClientSessionSurfaceCapabilities {
+            accepted_session_surfaces: Some(accepted.clone()),
+        }
+        .validate()
+        .map_err(|error| err(&format!("invalid accepted_session_surfaces: {error}")))?;
+        Some(accepted)
+    } else {
+        None
+    };
+    if session_surface.is_some() && accepted_session_surfaces.is_none() {
+        return Err(err(
+            "explicit session_surface lease is missing accepted_session_surfaces",
+        ));
+    }
+    let session_id = if fields.is_some_and(|fields| fields.contains_key("session_id")) {
+        Some(
+            command
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| err("session_id must be a non-empty string"))?,
+        )
+    } else {
+        None
+    };
+    if session_surface.is_some() && session_id.is_none() {
+        return Err(err("explicit session_surface lease is missing session_id"));
+    }
     Ok(RestoreSnapshotCommand {
         snapshot_id: req("snapshot_id")?,
         capsule_id: req("capsule_id")?,
@@ -163,6 +265,10 @@ pub(crate) fn parse_restore_snapshot_command(
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty()),
+        session_surface,
+        surface_contract_version,
+        session_id,
+        accepted_session_surfaces,
         with_bindings,
         is_preview,
         max_duration_secs,
@@ -174,6 +280,99 @@ pub(crate) fn parse_restore_snapshot_command(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
     })
+}
+
+fn local_runner_surface_capabilities(
+    pixel_surface_enabled: bool,
+) -> RunnerSessionSurfaceCapabilities {
+    let mut supported = vec![SupportedSessionSurface {
+        kind: SessionSurfaceKind::Web,
+        profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
+        transports: Some(vec![SessionSurfaceTransport::Https]),
+    }];
+    if pixel_surface_enabled {
+        supported.push(SupportedSessionSurface {
+            kind: SessionSurfaceKind::PixelStream,
+            profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+            transports: Some(vec![SessionSurfaceTransport::RfbWebsocket]),
+        });
+    }
+    RunnerSessionSurfaceCapabilities {
+        supported_session_surfaces: Some(supported),
+    }
+}
+
+fn verify_surface_negotiation(
+    manifest: &ReadyStateManifest,
+    cmd: &RestoreSnapshotCommand,
+    pixel_surface_enabled: bool,
+) -> std::result::Result<(), String> {
+    if let Some(requirement) = &manifest.surface_requirement {
+        requirement
+            .validate()
+            .map_err(|error| format!("artifact surface_requirement is invalid: {error}"))?;
+    }
+
+    let Some(descriptor) = &cmd.session_surface else {
+        return match &manifest.surface_requirement {
+            // The migration explicitly permits a Web artifact/lease pair to omit
+            // canonical fields. Non-Web artifacts must never inherit that fallback.
+            None => Ok(()),
+            Some(requirement) if requirement.kind == SessionSurfaceKind::Web => Ok(()),
+            Some(requirement) => Err(format!(
+                "artifact requires {:?} but lease omitted session_surface",
+                requirement.kind
+            )),
+        };
+    };
+
+    if cmd.surface_contract_version.as_deref() != Some(SESSION_SURFACE_CONTRACT_VERSION) {
+        return Err("explicit session_surface has no supported surface_contract_version".into());
+    }
+    if cmd
+        .session_id
+        .as_deref()
+        .is_none_or(|session_id| session_id.trim().is_empty())
+    {
+        return Err("explicit session_surface has no valid session_id binding".into());
+    }
+    let legacy_web_requirement;
+    let requirement = match manifest.surface_requirement.as_ref() {
+        Some(requirement) => requirement,
+        None if descriptor.kind() == SessionSurfaceKind::Web => {
+            legacy_web_requirement = SessionSurfaceRequirement {
+                kind: SessionSurfaceKind::Web,
+                profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
+            };
+            &legacy_web_requirement
+        }
+        None => {
+            return Err(format!(
+                "legacy artifact without surface_requirement accepts only an explicit Web surface, not {:?}",
+                descriptor.kind()
+            ));
+        }
+    };
+    let accepted = cmd.accepted_session_surfaces.clone().ok_or_else(|| {
+        "explicit session_surface lease omitted accepted_session_surfaces".to_string()
+    })?;
+    let selected = negotiate_session_surface(
+        requirement,
+        &ClientSessionSurfaceCapabilities {
+            accepted_session_surfaces: Some(accepted),
+        },
+        &local_runner_surface_capabilities(pixel_surface_enabled),
+    )
+    .map_err(|error| format!("runner surface renegotiation failed: {error}"))?;
+    let claimed = descriptor
+        .as_selected_surface()
+        .map_err(|error| format!("lease session_surface is invalid: {error}"))?;
+    if claimed != selected {
+        return Err(format!(
+            "lease session_surface selection {claimed:?} does not match runner renegotiation {selected:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// The on-disk location of a fetched artifact: `manifest.json` beside a `cas/` dir.
@@ -610,6 +809,23 @@ pub(crate) fn load_and_verify_manifest(
     cmd: &RestoreSnapshotCommand,
     supervisor_enabled: bool,
 ) -> std::result::Result<(ReadyStateManifest, RestoreArtifactClass), (String, String)> {
+    load_and_verify_manifest_with_surface_capabilities(
+        manifest_json,
+        cmd,
+        supervisor_enabled,
+        false,
+    )
+}
+
+/// Same artifact gate as [`load_and_verify_manifest`], with the runner's live
+/// Pixel capability made explicit. The caller must pass true only when the
+/// configured gateway and Linux/x86_64 Ready-State path are both operational.
+pub(crate) fn load_and_verify_manifest_with_surface_capabilities(
+    manifest_json: &Path,
+    cmd: &RestoreSnapshotCommand,
+    supervisor_enabled: bool,
+    pixel_surface_enabled: bool,
+) -> std::result::Result<(ReadyStateManifest, RestoreArtifactClass), (String, String)> {
     let err = |m: String| ("artifact_verification_failed".to_string(), m);
     let bytes = std::fs::read(manifest_json)
         .map_err(|e| err(format!("read {}: {e}", manifest_json.display())))?;
@@ -653,6 +869,7 @@ pub(crate) fn load_and_verify_manifest(
             )));
         }
     }
+    verify_surface_negotiation(&manifest, cmd, pixel_surface_enabled).map_err(err)?;
     let class = classify_restore_artifact(&manifest, cmd.with_bindings, supervisor_enabled)?;
     Ok((manifest, class))
 }
@@ -688,6 +905,44 @@ mod tests {
         base
     }
 
+    fn explicit_web_surface_command() -> RestoreSnapshotCommand {
+        parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-web-1",
+            "accepted_session_surfaces": [{
+                "kind": "web",
+                "profiles": ["ato.web-surface.v1"]
+            }],
+            "session_surface": {
+                "kind": "web",
+                "profile": "ato.web-surface.v1",
+                "surface_id": "surface-web-1",
+                "embed_policy": "sandboxed"
+            }
+        })))
+        .expect("valid explicit Web surface")
+    }
+
+    fn explicit_pixel_surface_command() -> RestoreSnapshotCommand {
+        parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-pixel-1",
+            "accepted_session_surfaces": [{
+                "kind": "pixel_stream",
+                "profiles": ["ato.pixel-stream.v1"]
+            }],
+            "session_surface": {
+                "kind": "pixel_stream",
+                "profile": "ato.pixel-stream.v1",
+                "surface_id": "surface-pixel-1",
+                "transport": "rfb_websocket",
+                "viewport": { "width": 1280, "height": 720 },
+                "capabilities": {}
+            }
+        })))
+        .expect("valid explicit Pixel surface")
+    }
+
     #[test]
     fn parses_a_full_restore_lease() {
         let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({}))).unwrap();
@@ -697,6 +952,11 @@ mod tests {
         assert!(!c.with_bindings);
         // ato#1002: artifact_fetch_url is OPTIONAL — absent (old leases) parses as None.
         assert!(c.artifact_fetch_url.is_none());
+        // Legacy Web leases omit the versioned surface fields entirely.
+        assert!(c.surface_contract_version.is_none());
+        assert!(c.session_surface.is_none());
+        assert!(c.session_id.is_none());
+        assert!(c.accepted_session_surfaces.is_none());
         // v1.2 PR 3e: the with-bindings kind parses identically, flagged.
         let c = parse_restore_snapshot_command(&cmd_json(
             serde_json::json!({ "kind": "restore_snapshot_with_bindings" }),
@@ -728,6 +988,168 @@ mod tests {
         let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({ "run_id": "  " })))
             .unwrap();
         assert!(c.run_id.is_none());
+    }
+
+    #[test]
+    fn parses_and_revalidates_an_explicit_pixel_surface_descriptor() {
+        let c = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-pixel-1",
+            "accepted_session_surfaces": [{
+                "kind": "pixel_stream",
+                "profiles": ["ato.pixel-stream.v1"]
+            }],
+            "session_surface": {
+                "kind": "pixel_stream",
+                "profile": "ato.pixel-stream.v1",
+                "surface_id": "surface-pixel-1",
+                "transport": "rfb_websocket",
+                "viewport": { "width": 1280, "height": 720 },
+                "capabilities": { "keyboard": "us", "pointer": true }
+            }
+        })))
+        .expect("valid pixel surface");
+
+        assert_eq!(c.surface_contract_version.as_deref(), Some("1"));
+        assert_eq!(c.session_id.as_deref(), Some("session-pixel-1"));
+        assert!(matches!(
+            c.session_surface,
+            Some(SessionSurfaceDescriptor::PixelStream { ref surface_id, .. })
+                if surface_id == "surface-pixel-1"
+        ));
+    }
+
+    #[test]
+    fn legacy_artifact_accepts_an_explicit_canonical_web_surface() {
+        let manifest = manifest_with(None, false);
+        let command = explicit_web_surface_command();
+
+        verify_surface_negotiation(&manifest, &command, false)
+            .expect("legacy Web artifact must remain compatible with a canonical Web lease");
+    }
+
+    #[test]
+    fn legacy_artifact_rejects_an_explicit_pixel_surface() {
+        let manifest = manifest_with(None, false);
+        let command = explicit_pixel_surface_command();
+
+        let error = verify_surface_negotiation(&manifest, &command, true)
+            .expect_err("legacy artifact must not inherit a Pixel requirement");
+
+        assert!(error.contains("only an explicit Web surface"), "{error}");
+    }
+
+    #[test]
+    fn legacy_artifact_rejects_an_unknown_explicit_surface() {
+        let manifest = manifest_with(None, false);
+        let mut command = explicit_web_surface_command();
+        command.session_surface = Some(SessionSurfaceDescriptor::Unknown);
+
+        let error = verify_surface_negotiation(&manifest, &command, false)
+            .expect_err("legacy artifact must not inherit an unknown requirement");
+
+        assert!(error.contains("only an explicit Web surface"), "{error}");
+    }
+
+    #[test]
+    fn explicit_surface_requires_nonempty_client_capabilities() {
+        let descriptor = serde_json::json!({
+            "kind": "pixel_stream",
+            "profile": "ato.pixel-stream.v1",
+            "surface_id": "surface-pixel-1",
+            "transport": "rfb_websocket",
+            "viewport": { "width": 1280, "height": 720 },
+            "capabilities": {}
+        });
+        let missing = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-pixel-1",
+            "session_surface": descriptor.clone()
+        })))
+        .expect_err("explicit surface without client capabilities must fail");
+        assert!(missing.1.contains("accepted_session_surfaces"));
+
+        let empty = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-pixel-1",
+            "accepted_session_surfaces": [],
+            "session_surface": descriptor
+        })))
+        .expect_err("empty client capabilities must remain distinct and fail");
+        assert!(empty.1.contains("empty"));
+    }
+
+    #[test]
+    fn explicit_surface_requires_session_binding() {
+        let error = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "accepted_session_surfaces": [{
+                "kind": "pixel_stream",
+                "profiles": ["ato.pixel-stream.v1"]
+            }],
+            "session_surface": {
+                "kind": "pixel_stream",
+                "profile": "ato.pixel-stream.v1",
+                "surface_id": "surface-pixel-1",
+                "transport": "rfb_websocket",
+                "viewport": { "width": 1280, "height": 720 },
+                "capabilities": {}
+            }
+        })))
+        .expect_err("explicit surface without session binding must fail");
+        assert!(error.1.contains("session_id"), "{}", error.1);
+    }
+
+    #[test]
+    fn explicit_surface_contract_fields_are_all_or_nothing() {
+        let without_version = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "session_surface": {
+                "kind": "web",
+                "profile": "ato.web-surface.v1",
+                "surface_id": "surface-web-1",
+                "embed_policy": "sandboxed"
+            }
+        })))
+        .expect_err("descriptor without version must fail closed");
+        assert_eq!(without_version.0, "invalid_restore_lease");
+        assert!(without_version.1.contains("surface_contract_version"));
+
+        let without_descriptor = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1"
+        })))
+        .expect_err("version without descriptor must fail closed");
+        assert_eq!(without_descriptor.0, "invalid_restore_lease");
+        assert!(without_descriptor.1.contains("session_surface"));
+    }
+
+    #[test]
+    fn unknown_or_malformed_explicit_surface_never_falls_back_to_web() {
+        let unknown = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_surface": {
+                "kind": "future_surface",
+                "profile": "ato.future.v1",
+                "surface_id": "surface-future-1"
+            }
+        })))
+        .expect_err("unknown descriptor kind must fail");
+        assert_eq!(unknown.0, "invalid_restore_lease");
+        assert!(unknown.1.contains("unsupported"));
+
+        let wrong_transport = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_surface": {
+                "kind": "pixel_stream",
+                "profile": "ato.pixel-stream.v1",
+                "surface_id": "surface-pixel-1",
+                "transport": "https",
+                "viewport": { "width": 1280, "height": 720 },
+                "capabilities": {}
+            }
+        })))
+        .expect_err("pixel transport must be revalidated on the runner");
+        assert_eq!(wrong_transport.0, "invalid_restore_lease");
+        assert!(wrong_transport.1.contains("transport"));
     }
 
     // ── ato#1006 (UNIT C): the preview lease kind + duration fields ────────────
@@ -1046,6 +1468,7 @@ mod tests {
                 runner_class: Some(
                     capsule::foundation::install_lifecycle::RunnerClassFacts::from_host().id(),
                 ),
+                surface_requirement: None,
                 layers: BuildLayers {
                     rootfs: b"rootfs".to_vec(),
                     runtime: None,
@@ -1058,6 +1481,7 @@ mod tests {
                     ports: vec![8080],
                     healthcheck: Some("/health".into()),
                     expected_ready_ms: Some(2000),
+                    ..Default::default()
                 },
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
@@ -1083,6 +1507,10 @@ mod tests {
             runner_class_id: rc.clone(),
             snapshot_backend: m.snapshot_backend.kind.clone(),
             healthcheck_url_path: Some("/health".into()),
+            session_surface: None,
+            surface_contract_version: None,
+            session_id: None,
+            accepted_session_surfaces: None,
             with_bindings: false,
             is_preview: false,
             max_duration_secs: None,
@@ -1112,6 +1540,72 @@ mod tests {
             mutate(&mut c);
             assert!(load_and_verify_manifest(&mpath, &c, false).is_err());
         }
+
+        // Explicit surfaces are re-negotiated from artifact × launch client ×
+        // this runner, then compared with the descriptor selected by the API.
+        let mut pixel_manifest = m.clone();
+        pixel_manifest.surface_requirement =
+            Some(protocol::session_surface::SessionSurfaceRequirement {
+                kind: SessionSurfaceKind::PixelStream,
+                profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+            });
+        std::fs::write(
+            &mpath,
+            serde_json::to_vec(&pixel_manifest).expect("serialize pixel manifest"),
+        )
+        .unwrap();
+        let mut pixel = base.clone();
+        pixel.artifact_manifest_hash = pixel_manifest.id();
+        pixel.surface_contract_version = Some(SESSION_SURFACE_CONTRACT_VERSION.to_string());
+        pixel.session_id = Some("session-pixel-1".to_string());
+        pixel.accepted_session_surfaces = Some(vec![AcceptedSessionSurface {
+            kind: SessionSurfaceKind::PixelStream,
+            profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+        }]);
+        pixel.session_surface = Some(SessionSurfaceDescriptor::PixelStream {
+            profile: PIXEL_STREAM_PROFILE.to_string(),
+            surface_id: "surface-pixel-1".to_string(),
+            transport: SessionSurfaceTransport::RfbWebsocket,
+            viewport: protocol::session_surface::PixelStreamViewport {
+                width: 1280,
+                height: 720,
+            },
+            capabilities: Default::default(),
+        });
+        let disabled =
+            load_and_verify_manifest_with_surface_capabilities(&mpath, &pixel, false, false)
+                .expect_err("disabled local gateway must not advertise Pixel");
+        assert!(disabled.1.contains("runner"), "{}", disabled.1);
+        load_and_verify_manifest_with_surface_capabilities(&mpath, &pixel, false, true)
+            .expect("matching explicit pixel negotiation");
+
+        let mut client_mismatch = pixel.clone();
+        client_mismatch.accepted_session_surfaces = Some(vec![AcceptedSessionSurface {
+            kind: SessionSurfaceKind::Web,
+            profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
+        }]);
+        let mismatch = load_and_verify_manifest_with_surface_capabilities(
+            &mpath,
+            &client_mismatch,
+            false,
+            true,
+        )
+        .expect_err("client mismatch must fail before restore");
+        assert!(mismatch.1.contains("renegotiation"), "{}", mismatch.1);
+
+        let mut omitted = pixel;
+        omitted.session_surface = None;
+        omitted.surface_contract_version = None;
+        omitted.session_id = None;
+        omitted.accepted_session_surfaces = None;
+        let missing =
+            load_and_verify_manifest_with_surface_capabilities(&mpath, &omitted, false, true)
+                .expect_err("pixel artifact must never use legacy Web omission");
+        assert!(
+            missing.1.contains("omitted session_surface"),
+            "{}",
+            missing.1
+        );
     }
 
     // ── ato#1002: safe transport-archive extraction + remote fetch ───────────
