@@ -1167,13 +1167,23 @@ where
         } else {
             // Single-arch manifest: only usable when we already have the digest from the ref.
             if let Some(digest) = &ref_digest {
-                let platform = request.requested_platform.clone().ok_or_else(|| {
-                    OciProviderError::ImagePlatformUnsupported {
+                let platform = request
+                    .requested_platform
+                    .clone()
+                    .or_else(|| {
+                        (request.platform_policy == OciPlatformPolicy::AllowEmulation).then(|| {
+                            OciPlatform {
+                                os: "linux".to_string(),
+                                architecture: "amd64".to_string(),
+                                variant: None,
+                            }
+                        })
+                    })
+                    .ok_or_else(|| OciProviderError::ImagePlatformUnsupported {
                         declared_ref: declared_ref.clone(),
                         platform: "single-platform manifest: specify requested_platform to resolve"
                             .to_string(),
-                    }
-                })?;
+                    })?;
                 Ok(OciResolvedImage {
                     declared_ref: declared_ref.clone(),
                     resolved_digest: digest.clone(),
@@ -3714,6 +3724,33 @@ mod tests {
             err.to_string().contains("allow_emulation"),
             "error should mention allow_emulation: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn digest_single_arch_allow_emulation_defaults_to_linux_amd64() {
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let declared_ref = format!("myimage@{digest}");
+        let provider = PodmanProvider::with_runner(
+            FakeRunner::default().with_output(
+                &["podman", "manifest", "inspect", &declared_ref],
+                output(0, single_arch_manifest_json(), ""),
+            ),
+            PodmanProbePlatform::Linux,
+        );
+
+        let request = OciImageResolutionRequest {
+            target_label: "app".to_string(),
+            declared_ref,
+            requested_platform: None,
+            resolution_mode: OciImageResolutionMode::Required,
+            importer_input_hash: None,
+            platform_policy: OciPlatformPolicy::AllowEmulation,
+        };
+
+        let resolved = provider.resolve_image(&request).await.expect("resolve");
+        assert_eq!(resolved.resolved_digest, digest);
+        assert_eq!(resolved.platform.os, "linux");
+        assert_eq!(resolved.platform.architecture, "amd64");
     }
 
     #[tokio::test]
