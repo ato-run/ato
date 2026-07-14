@@ -78,6 +78,11 @@ const KVM_DEVICE: &str = "/dev/kvm";
 const SNAPSHOT_FORMAT: &str = "fc-full-file-v1";
 const DEVICE_PROFILE: &str = "virtio-blk+virtio-net+vsock";
 const NETWORK_MODEL: &str = "tap";
+/// Ordinary Firecracker control calls should fail promptly when the VMM stops
+/// answering. Full snapshot creation is the exception: writing guest memory to
+/// disk can legitimately exceed this bound on a busy builder.
+const FC_API_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const FC_SNAPSHOT_CREATE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// Ceiling for a per-job `boot_timeout` override (`with_boot_timeout`). A build
 /// that hasn't reached readiness in 10 min is wedged; the cap keeps a single job
 /// from pinning the builder forever regardless of what the job requests.
@@ -1335,6 +1340,7 @@ fn fc_request(
     _method: &str,
     _path: &str,
     _body: Option<&str>,
+    _read_timeout: Duration,
 ) -> std::io::Result<(u16, String)> {
     Err(std::io::Error::other(
         "Firecracker is only supported on Unix hosts",
@@ -1347,9 +1353,10 @@ fn fc_request(
     method: &str,
     path: &str,
     body: Option<&str>,
+    read_timeout: Duration,
 ) -> std::io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(sock)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let body = body.unwrap_or("");
     let req = format!(
@@ -1419,7 +1426,18 @@ impl FcProcess {
         path: &str,
         body: Option<&str>,
     ) -> Result<(), SnapshotError> {
-        let (status, text) = fc_request(&self.sock, method, path, body)
+        self.api_with_read_timeout(b, method, path, body, FC_API_READ_TIMEOUT)
+    }
+
+    fn api_with_read_timeout(
+        &self,
+        b: &FirecrackerBackend,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        read_timeout: Duration,
+    ) -> Result<(), SnapshotError> {
+        let (status, text) = fc_request(&self.sock, method, path, body, read_timeout)
             .map_err(|e| b.backend_err(format!("api {method} {path}: {e}")))?;
         if (200..300).contains(&status) {
             Ok(())
@@ -1725,7 +1743,13 @@ impl SnapshotBackend for FirecrackerBackend {
                         "/vm",
                         Some(&json!({"state":"Paused"}).to_string()),
                     )?;
-                    fc.api(
+                    // Full snapshot creation writes the complete guest memory
+                    // image synchronously. The ordinary 15 s API timeout
+                    // surfaced as EAGAIN/SO_RCVTIMEO on staging even though the
+                    // healthy VMM was still writing. Keep the VM paused and
+                    // wait longer for this one operation; do not retry an
+                    // in-flight request whose completion state is unknown.
+                    fc.api_with_read_timeout(
                         self,
                         "PUT",
                         "/snapshot/create",
@@ -1737,6 +1761,7 @@ impl SnapshotBackend for FirecrackerBackend {
                             })
                             .to_string(),
                         ),
+                        FC_SNAPSHOT_CREATE_READ_TIMEOUT,
                     )?;
                     let vmstate = std::fs::read(&vmstate_path)
                         .map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
