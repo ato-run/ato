@@ -33,8 +33,8 @@ use capsule::runtime::oci::{
     resolve_oci_mount,
 };
 use capsule::types::{
-    IngressConfig, OciImageResolution, OciProviderKind, OrchestrationPlan, ResolvedService,
-    ResolvedServiceRuntime, StateDurability,
+    CapsuleManifest, IngressConfig, OciImageResolution, OciProviderKind, OrchestrationPlan,
+    ResolvedService, ResolvedServiceRuntime, StateDurability,
 };
 
 use capsule::execution_identity::OciProviderReceiptEvidence;
@@ -75,13 +75,130 @@ fn oci_run_once_timeout_secs() -> u64 {
 fn authoritative_workspace_lock(
     workspace_root: &std::path::Path,
     fallback: &AtoLock,
+    manifest: &CapsuleManifest,
 ) -> Result<AtoLock> {
     let lock_path = workspace_root.join("ato.lock.json");
     if !lock_path.exists() {
         return Ok(fallback.clone());
     }
-    ato_lock::load_unvalidated_from_path(&lock_path)
-        .with_context(|| format!("failed to load authoritative lock {}", lock_path.display()))
+
+    let lock = ato_lock::load_unvalidated_from_path(&lock_path)
+        .with_context(|| format!("failed to load authoritative lock {}", lock_path.display()))?;
+    ato_lock::validate_persisted_non_strict(&lock).map_err(|errors| {
+        anyhow::anyhow!(
+            "authoritative lock {} failed persisted validation: {}",
+            lock_path.display(),
+            errors
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    validate_workspace_lock_matches_manifest(&lock, manifest).with_context(|| {
+        format!(
+            "authoritative lock {} is stale or mismatched",
+            lock_path.display()
+        )
+    })?;
+    Ok(lock)
+}
+
+fn validate_workspace_lock_matches_manifest(
+    lock: &AtoLock,
+    manifest: &CapsuleManifest,
+) -> Result<()> {
+    let metadata = lock
+        .contract
+        .entries
+        .get("metadata")
+        .and_then(serde_json::Value::as_object)
+        .context("contract.metadata must be present and be an object")?;
+
+    for (field, expected) in [
+        ("name", manifest.name.as_str()),
+        ("version", manifest.version.as_str()),
+        ("default_target", manifest.default_target.as_str()),
+    ] {
+        let actual = metadata
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .with_context(|| {
+                format!("contract.metadata.{field} must be present and be a string")
+            })?;
+        anyhow::ensure!(
+            actual == expected,
+            "contract.metadata.{field} mismatch: manifest declares '{expected}', lock declares '{actual}'"
+        );
+    }
+
+    let targets = manifest
+        .targets
+        .as_ref()
+        .context("manifest must declare [targets] when ato.lock contains OCI resolutions")?;
+    let oci_images = lock
+        .resolution
+        .entries
+        .get("oci_images")
+        .and_then(serde_json::Value::as_object)
+        .context("resolution.oci_images must be present and be an object")?;
+
+    for target_label in oci_images.keys() {
+        let target = targets.named.get(target_label).with_context(|| {
+            format!("resolution.oci_images.{target_label} references a nonexistent manifest target")
+        })?;
+        anyhow::ensure!(
+            target.runtime.eq_ignore_ascii_case("oci"),
+            "resolution.oci_images.{target_label} references runtime='{}', not runtime='oci'",
+            target.runtime
+        );
+
+        let resolved = resolve_oci_image_for_target(lock, target_label)?
+            .with_context(|| format!("resolution.oci_images.{target_label} is malformed"))?;
+        let declared_ref = target
+            .image
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .with_context(|| format!("OCI target '{target_label}' must declare image"))?;
+        anyhow::ensure!(
+            resolved.declared_ref == declared_ref,
+            "OCI target '{target_label}' image mismatch: manifest declares '{declared_ref}', lock declares '{}'",
+            resolved.declared_ref
+        );
+
+        if let Some((_, declared_digest)) = declared_ref.rsplit_once('@') {
+            anyhow::ensure!(
+                declared_digest == resolved.resolved_digest,
+                "OCI target '{target_label}' digest mismatch: manifest pins '{declared_digest}', lock resolves '{}'",
+                resolved.resolved_digest
+            );
+        }
+        anyhow::ensure!(
+            resolved.platform.os == "linux",
+            "OCI target '{target_label}' lock platform must be linux, got '{}'",
+            resolved.platform.os
+        );
+        anyhow::ensure!(
+            !resolved.platform.architecture.trim().is_empty(),
+            "OCI target '{target_label}' lock platform architecture must not be empty"
+        );
+        if !target.allow_emulation {
+            let host_architecture = match std::env::consts::ARCH {
+                "aarch64" => "arm64",
+                "x86_64" => "amd64",
+                "arm" => "arm",
+                other => other,
+            };
+            anyhow::ensure!(
+                resolved.platform.architecture == host_architecture,
+                "OCI target '{target_label}' lock platform '{}' does not match host architecture '{}' and allow_emulation=false",
+                resolved.platform.architecture,
+                host_architecture
+            );
+        }
+    }
+
+    Ok(())
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -138,7 +255,11 @@ pub(crate) async fn execute_multi_service(
     // Registry installs materialize the canonical lock beside capsule.toml,
     // while the in-memory plan may still carry the pre-install fallback lock.
     // Prefer the materialized declaration before attempting provider resolution.
-    let authoritative_lock = authoritative_workspace_lock(&plan.workspace_root, &plan.lock)?;
+    let typed_manifest = plan
+        .typed_manifest()
+        .context("failed to load typed manifest for authoritative lock validation")?;
+    let authoritative_lock =
+        authoritative_workspace_lock(&plan.workspace_root, &plan.lock, &typed_manifest)?;
 
     // Build the image map. Prefer the lock-resolved digest when present; fall
     // back to resolving the declared image ref via the OCI provider so that
@@ -1936,40 +2057,174 @@ mod tests {
     use super::*;
     use crate::adapters::runtime::oci_provider::FakeOciProvider;
     use capsule::runtime::oci::{OciContainerInspect, engine_state_volume_name};
+    use capsule::types::CapsuleManifest;
     use capsule::types::{
         OciImageResolution, OciPlatform, OrchestrationPlan, ResolvedService,
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };
 
-    #[test]
-    fn workspace_lock_overrides_pre_install_fallback() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let fallback = AtoLock::default();
-        std::fs::write(
-            workspace.path().join("ato.lock.json"),
-            r#"{
-              "schema_version": 1,
-              "resolution": {
-                "oci_images": {
-                  "desktop": {
-                    "declared_ref": "example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "resolved_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "platform": { "os": "linux", "architecture": "amd64" }
-                  }
-                }
-              }
-            }"#,
-        )
-        .expect("write lock");
+    const TEST_DIGEST: &str =
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-        let lock = authoritative_workspace_lock(workspace.path(), &fallback).expect("load lock");
+    fn test_manifest(image: &str, version: &str, allow_emulation: bool) -> CapsuleManifest {
+        CapsuleManifest::from_toml(&format!(
+            r#"schema_version = "0.3"
+name = "test-app"
+version = "{version}"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "oci"
+image = "{image}"
+allow_emulation = {allow_emulation}
+"#
+        ))
+        .expect("test manifest")
+    }
+
+    fn persisted_test_lock(
+        target: &str,
+        declared_ref: &str,
+        resolved_digest: &str,
+        version: &str,
+        platform_os: &str,
+        signed: bool,
+    ) -> String {
+        let signatures = if signed {
+            serde_json::json!([{ "kind": "ed25519", "key_id": "test-key" }])
+        } else {
+            serde_json::json!([])
+        };
+        let mut lock: AtoLock = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "resolution": {
+                "oci_images": {
+                    (target): {
+                        "declared_ref": declared_ref,
+                        "resolved_digest": resolved_digest,
+                        "platform": { "os": platform_os, "architecture": "amd64" }
+                    }
+                }
+            },
+            "contract": {
+                "metadata": {
+                    "name": "test-app",
+                    "version": version,
+                    "default_target": "desktop"
+                }
+            },
+            "signatures": signatures
+        }))
+        .expect("test lock");
+        ato_lock::recompute_lock_id(&mut lock).expect("compute lock id");
+        serde_json::to_string_pretty(&lock).expect("serialize test lock")
+    }
+
+    fn write_workspace_lock(workspace: &tempfile::TempDir, contents: &str) {
+        std::fs::write(workspace.path().join("ato.lock.json"), contents).expect("write lock");
+    }
+
+    #[test]
+    fn workspace_lock_overrides_pre_install_fallback_when_signed_and_consistent() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let image = format!("example/app@{TEST_DIGEST}");
+        let manifest = test_manifest(&image, "1.2.3", true);
+        write_workspace_lock(
+            &workspace,
+            &persisted_test_lock("desktop", &image, TEST_DIGEST, "1.2.3", "linux", true),
+        );
+
+        let lock = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect("load lock");
         let image = resolve_oci_image_for_target(&lock, "desktop")
             .expect("valid OCI entry")
             .expect("desktop entry");
-        assert_eq!(
-            image.resolved_digest,
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        assert_eq!(image.resolved_digest, TEST_DIGEST);
+    }
+
+    #[test]
+    fn workspace_lock_rejects_manifest_digest_mismatch() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manifest_image = format!("example/app@{TEST_DIGEST}");
+        let lock_digest = format!("sha256:{}", "b".repeat(64));
+        let manifest = test_manifest(&manifest_image, "1.2.3", true);
+        write_workspace_lock(
+            &workspace,
+            &persisted_test_lock(
+                "desktop",
+                &manifest_image,
+                &lock_digest,
+                "1.2.3",
+                "linux",
+                false,
+            ),
+        );
+
+        let error = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect_err("digest mismatch must fail closed");
+        assert!(format!("{error:#}").contains("digest mismatch"));
+    }
+
+    #[test]
+    fn workspace_lock_rejects_nonexistent_target() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let image = format!("example/app@{TEST_DIGEST}");
+        let manifest = test_manifest(&image, "1.2.3", true);
+        write_workspace_lock(
+            &workspace,
+            &persisted_test_lock("missing", &image, TEST_DIGEST, "1.2.3", "linux", false),
+        );
+
+        let error = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect_err("nonexistent target must fail closed");
+        assert!(format!("{error:#}").contains("nonexistent manifest target"));
+    }
+
+    #[test]
+    fn workspace_lock_rejects_stale_manifest_version() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let image = format!("example/app@{TEST_DIGEST}");
+        let manifest = test_manifest(&image, "1.2.4", true);
+        write_workspace_lock(
+            &workspace,
+            &persisted_test_lock("desktop", &image, TEST_DIGEST, "1.2.3", "linux", false),
+        );
+
+        let error = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect_err("stale version must fail closed");
+        assert!(format!("{error:#}").contains("version mismatch"));
+    }
+
+    #[test]
+    fn workspace_lock_rejects_invalid_platform() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let image = format!("example/app@{TEST_DIGEST}");
+        let manifest = test_manifest(&image, "1.2.3", true);
+        write_workspace_lock(
+            &workspace,
+            &persisted_test_lock("desktop", &image, TEST_DIGEST, "1.2.3", "windows", false),
+        );
+
+        let error = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect_err("non-linux platform must fail closed");
+        assert!(format!("{error:#}").contains("platform must be linux"));
+    }
+
+    #[test]
+    fn workspace_lock_rejects_malformed_json_without_fallback() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let image = format!("example/app@{TEST_DIGEST}");
+        let manifest = test_manifest(&image, "1.2.3", true);
+        write_workspace_lock(&workspace, "{not-json");
+
+        let error = authoritative_workspace_lock(workspace.path(), &AtoLock::default(), &manifest)
+            .expect_err("malformed lock must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to load authoritative lock")
         );
     }
 
