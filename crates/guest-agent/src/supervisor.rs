@@ -855,7 +855,7 @@ fn chroot_wrapped_exec(rootfs: &str, cwd: &str, cmd: &[String]) -> String {
     // Middle: within the private mount namespace, mount the pseudo-filesystems under
     // the service rootfs, then chroot + run the innermost script.
     let in_ns = format!(
-        "mount -t proc proc {r}/proc 2>/dev/null;          mount -t sysfs sysfs {r}/sys 2>/dev/null;          mount -t devtmpfs devtmpfs {r}/dev 2>/dev/null || mount --bind /dev {r}/dev 2>/dev/null;          mount -t tmpfs tmpfs {r}/tmp 2>/dev/null;          mkdir -p {r}/run 2>/dev/null; mount -t tmpfs tmpfs {r}/run 2>/dev/null;          ln -sf /proc/self/fd {r}/dev/fd 2>/dev/null;          ln -sf /proc/self/fd/0 {r}/dev/stdin 2>/dev/null;          ln -sf /proc/self/fd/1 {r}/dev/stdout 2>/dev/null;          ln -sf /proc/self/fd/2 {r}/dev/stderr 2>/dev/null;          exec chroot {r} /bin/sh -c {inner}",
+        "mount -t proc proc {r}/proc 2>/dev/null;          mount -t sysfs sysfs {r}/sys 2>/dev/null;          mount -t devtmpfs devtmpfs {r}/dev 2>/dev/null || mount --bind /dev {r}/dev 2>/dev/null;          mkdir -p {r}/dev/pts 2>/dev/null; mount -t devpts devpts {r}/dev/pts -o gid=5,mode=620,ptmxmode=666 2>/dev/null;          ln -sf pts/ptmx {r}/dev/ptmx 2>/dev/null;          mount -t tmpfs tmpfs {r}/tmp 2>/dev/null;          mkdir -p {r}/run 2>/dev/null; mount -t tmpfs tmpfs {r}/run 2>/dev/null;          ln -sf /proc/self/fd {r}/dev/fd 2>/dev/null;          ln -sf /proc/self/fd/0 {r}/dev/stdin 2>/dev/null;          ln -sf /proc/self/fd/1 {r}/dev/stdout 2>/dev/null;          ln -sf /proc/self/fd/2 {r}/dev/stderr 2>/dev/null;          exec chroot {r} /bin/sh -c {inner}",
         r = rq,
         inner = shell_single_quote(&in_chroot),
     );
@@ -2842,6 +2842,12 @@ mod tests {
             script.contains("ln -sf /proc/self/fd "),
             "creates /dev/fd -> /proc/self/fd in the chroot:\n{script}"
         );
+        let devtmpfs = script.find("mount -t devtmpfs devtmpfs").unwrap();
+        let devpts = script
+            .find("mount -t devpts devpts")
+            .expect("chroot workloads need a devpts mount for PTYs");
+        assert!(devtmpfs < devpts, "devpts must be mounted after devtmpfs");
+        assert!(script.contains("ln -sf pts/ptmx"));
         // The workload cwd is applied INSIDE the chroot, AFTER the chroot call.
         let cd = script
             .find("cd ")

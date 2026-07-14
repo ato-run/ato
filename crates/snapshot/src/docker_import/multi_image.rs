@@ -487,6 +487,9 @@ export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /dev/pts 2>/dev/null
+mount -t devpts devpts /dev/pts -o gid=5,mode=620,ptmxmode=666 2>/dev/null
+ln -sf pts/ptmx /dev/ptmx 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 # Bring up loopback: multi-image service discovery + the guest-agent's own
@@ -825,6 +828,12 @@ volumes:
             script.contains("ip link set lo up"),
             "init must bring up loopback:\n{script}"
         );
+        let devtmpfs = script.find("mount -t devtmpfs devtmpfs /dev").unwrap();
+        let devpts = script
+            .find("mount -t devpts devpts /dev/pts -o gid=5,mode=620,ptmxmode=666")
+            .expect("init must provide PTYs to interactive workloads");
+        assert!(devtmpfs < devpts, "devpts must be mounted after devtmpfs");
+        assert!(script.contains("ln -sf pts/ptmx /dev/ptmx"));
         // Cleanup reaps images.
         assert!(
             script.contains("rmi -f 'ato-import-migrate' 'ato-import-postgres' 'ato-import-web'"),
