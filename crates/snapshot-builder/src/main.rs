@@ -3398,6 +3398,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
 
         let value = serde_json::to_value(artifact).expect("serialize artifact ack");
