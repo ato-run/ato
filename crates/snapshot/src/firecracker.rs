@@ -1070,6 +1070,39 @@ impl FirecrackerBackend {
     }
 }
 
+/// Guest ports the per-slot ingress must DNAT at restore, derived from the
+/// SEALED endpoint contracts by EXPOSURE — never a per-role special case:
+///
+///   * `host_internal` / `guest_private` TCP+HTTP endpoints are reachable ONLY
+///     through the host-internal ingress ip (a /30 veth), so each one needs its
+///     own DNAT for its host-side consumer (readiness probe, app proxy, pixel
+///     gateway). `guest_private` stays private because the ingress ip itself is
+///     never publicly routable — the consuming gateway is the boundary.
+///   * `public_proxy` endpoints ride the same DNAT (their public exposure is a
+///     separate proxy layer above the ingress, not a different ingress rule).
+///   * vsock endpoints (e.g. `guest_control`) never touch the TCP ingress.
+///
+/// The legacy app/healthcheck port stays first (existing single-port
+/// contracts have no endpoint list); duplicates collapse.
+fn ingress_dnat_ports(contract: &RestoreContract, app_port: u16) -> Vec<u16> {
+    let mut ports = vec![app_port];
+    for endpoint in &contract.endpoints {
+        use protocol::session_surface::EndpointProtocol;
+        if !matches!(
+            endpoint.protocol,
+            EndpointProtocol::Tcp | EndpointProtocol::Http
+        ) {
+            continue;
+        }
+        if let Ok(port) = u16::try_from(endpoint.port)
+            && !ports.contains(&port)
+        {
+            ports.push(port);
+        }
+    }
+    ports
+}
+
 fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
     c.ports.first().copied().unwrap_or(fallback)
 }
@@ -2064,18 +2097,10 @@ impl SnapshotBackend for FirecrackerBackend {
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
-            // Per-slot DNAT targets every exposed guest port (see net_up_netns):
-            // the app/healthcheck port plus any sealed guest_private pixel_rfb
-            // endpoint the host-side gateway must reach through the ingress ip.
-            let mut guest_ports = vec![port];
-            for endpoint in &input.manifest.restore_contract.endpoints {
-                if endpoint.role == protocol::session_surface::EndpointRole::PixelRfb
-                    && let Ok(rfb_port) = u16::try_from(endpoint.port)
-                    && !guest_ports.contains(&rfb_port)
-                {
-                    guest_ports.push(rfb_port);
-                }
-            }
+            // Per-slot DNAT targets every host-reachable sealed endpoint (see
+            // ingress_dnat_ports): derived from the EndpointContract exposures,
+            // never a per-role special case.
+            let guest_ports = ingress_dnat_ports(&input.manifest.restore_contract, port);
             self.net_up(&guest_ports)?;
 
             // U1 (#854)/U2 (#855): when ATO_FC_UFFD is set, start the local page-server
@@ -2514,6 +2539,59 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Pixel Stream v1: ingress DNAT derivation from sealed endpoints ──
+
+    #[test]
+    fn ingress_dnat_ports_enumerates_sealed_tcp_endpoints_by_contract() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+        };
+
+        // Legacy Web contract (no endpoints): exactly the app port, unchanged.
+        let legacy = RestoreContract {
+            ports: vec![8080],
+            healthcheck: Some("/health".into()),
+            ..Default::default()
+        };
+        assert_eq!(ingress_dnat_ports(&legacy, 8080), vec![8080]);
+
+        // Pixel contract: the guest_private RFB endpoint gets its own DNAT (the
+        // host-side gateway dials the ingress ip), the duplicate app_http
+        // endpoint collapses onto the app port, and a vsock endpoint (e.g.
+        // guest_control) never touches the TCP ingress.
+        let pixel = RestoreContract {
+            ports: vec![8080],
+            healthcheck: Some("/health".into()),
+            endpoints: vec![
+                EndpointContract {
+                    role: EndpointRole::AppHttp,
+                    protocol: EndpointProtocol::Http,
+                    exposure: EndpointExposure::HostInternal,
+                    port: 8080,
+                    readiness: EndpointReadiness::HttpGet {
+                        path: "/health".into(),
+                    },
+                },
+                EndpointContract {
+                    role: EndpointRole::PixelRfb,
+                    protocol: EndpointProtocol::Tcp,
+                    exposure: EndpointExposure::GuestPrivate,
+                    port: 5900,
+                    readiness: EndpointReadiness::FirstFrame,
+                },
+                EndpointContract {
+                    role: EndpointRole::GuestControl,
+                    protocol: EndpointProtocol::Vsock,
+                    exposure: EndpointExposure::GuestPrivate,
+                    port: 1025,
+                    readiness: EndpointReadiness::VsockConnect,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(ingress_dnat_ports(&pixel, 8080), vec![8080, 5900]);
+    }
 
     // ── #948 N-slot: per-slot netns config derivation + host-path isolation ──
 
