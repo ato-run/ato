@@ -245,6 +245,13 @@ pub struct OciLogChunk {
 pub trait OciRuntimeClient: Send + Sync {
     async fn pull_image(&self, image: &str) -> Result<()>;
     async fn create_network(&self, request: &OciNetworkRequest) -> Result<String>;
+    /// Create a network that preserves service-to-service connectivity while
+    /// denying external routing.
+    async fn create_internal_network(&self, _request: &OciNetworkRequest) -> Result<String> {
+        Err(CapsuleError::Runtime(
+            "internal OCI networks are unsupported by this runtime client".to_string(),
+        ))
+    }
     async fn remove_network(&self, network_name: &str) -> Result<()>;
     async fn create_container(&self, request: &OciContainerRequest) -> Result<String>;
     async fn start_container(&self, container_id: &str) -> Result<()>;
@@ -302,6 +309,42 @@ impl BollardOciRuntimeClient {
         let marker = format!("{platform} {version}").to_ascii_lowercase();
         marker.contains("podman")
     }
+
+    async fn create_network_with_internal(
+        &self,
+        request: &OciNetworkRequest,
+        internal: bool,
+    ) -> Result<String> {
+        let response = match self
+            .docker
+            .create_network(CreateNetworkOptions {
+                name: request.name.clone(),
+                check_duplicate: true,
+                driver: "bridge".to_string(),
+                internal,
+                attachable: true,
+                ingress: false,
+                ipam: Default::default(),
+                enable_ipv6: false,
+                options: HashMap::<String, String>::new(),
+                labels: request.labels.clone(),
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if is_bollard_eof(&err) && self.is_podman_engine().await => {
+                return create_podman_network_cli(request, internal).await;
+            }
+            Err(err) => return Err(map_bollard_error(err)),
+        };
+
+        response
+            .id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                CapsuleError::Runtime("OCI network create returned empty id".to_string())
+            })
+    }
 }
 
 #[async_trait]
@@ -322,35 +365,11 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
     }
 
     async fn create_network(&self, request: &OciNetworkRequest) -> Result<String> {
-        let response = match self
-            .docker
-            .create_network(CreateNetworkOptions {
-                name: request.name.clone(),
-                check_duplicate: true,
-                driver: "bridge".to_string(),
-                internal: false,
-                attachable: true,
-                ingress: false,
-                ipam: Default::default(),
-                enable_ipv6: false,
-                options: HashMap::<String, String>::new(),
-                labels: request.labels.clone(),
-            })
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if is_bollard_eof(&err) && self.is_podman_engine().await => {
-                return create_podman_network_cli(request).await;
-            }
-            Err(err) => return Err(map_bollard_error(err)),
-        };
+        self.create_network_with_internal(request, false).await
+    }
 
-        response
-            .id
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                CapsuleError::Runtime("OCI network create returned empty id".to_string())
-            })
+    async fn create_internal_network(&self, request: &OciNetworkRequest) -> Result<String> {
+        self.create_network_with_internal(request, true).await
     }
 
     async fn remove_network(&self, network_name: &str) -> Result<()> {
@@ -373,7 +392,11 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
                 key,
                 Some(vec![PortBinding {
                     host_ip: port.host_ip.clone(),
-                    host_port: port.host_port.map(|value| value.to_string()),
+                    host_port: Some(
+                        port.host_port
+                            .map(|value| value.to_string())
+                            .unwrap_or_default(),
+                    ),
                 }]),
             );
         }
@@ -391,6 +414,7 @@ impl OciRuntimeClient for BollardOciRuntimeClient {
             }),
             port_bindings: (!port_bindings.is_empty()).then_some(port_bindings),
             extra_hosts: (!request.extra_hosts.is_empty()).then(|| request.extra_hosts.clone()),
+            network_mode: request.network.clone(),
             ..Default::default()
         };
 
@@ -852,8 +876,12 @@ fn podman_cli_command() -> tokio::process::Command {
     command
 }
 
-async fn create_podman_network_cli(request: &OciNetworkRequest) -> Result<String> {
+async fn create_podman_network_cli(request: &OciNetworkRequest, internal: bool) -> Result<String> {
     let mut args = vec!["network".to_string(), "create".to_string()];
+    if internal {
+        args.push("--opt".to_string());
+        args.push("no_default_route=1".to_string());
+    }
     for (key, value) in &request.labels {
         args.push("--label".to_string());
         args.push(format!("{key}={value}"));

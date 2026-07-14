@@ -354,6 +354,13 @@ pub(crate) trait OciProvider: Send + Sync {
     async fn create_network(&self, request: &OciNetworkRequest)
     -> Result<String, OciProviderError>;
 
+    async fn create_internal_network(
+        &self,
+        _request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        Err(OciProviderError::Unsupported("create_internal_network"))
+    }
+
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError>;
 
     async fn create_container(
@@ -1305,6 +1312,43 @@ where
             return Err(OciProviderError::CommandFailed {
                 provider: "podman",
                 command: "podman network create".into(),
+                status: output.status.code(),
+                message: String::from_utf8_lossy(&output.stderr).to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    async fn create_internal_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        // Netavark's no_default_route keeps host-published ingress available
+        // while preventing containers from routing traffic outside the
+        // session network.
+        let mut args: Vec<String> = vec![
+            "network".into(),
+            "create".into(),
+            "--opt".into(),
+            "no_default_route=1".into(),
+        ];
+        for (k, v) in &request.labels {
+            args.push("--label".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push(request.name.clone());
+        let output = self
+            .podman_command()
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| {
+                podman_async_io_error("podman network create --opt no_default_route=1", e)
+            })?;
+        if !output.status.success() {
+            return Err(OciProviderError::CommandFailed {
+                provider: "podman",
+                command: "podman network create --opt no_default_route=1".into(),
                 status: output.status.code(),
                 message: String::from_utf8_lossy(&output.stderr).to_string(),
             });
@@ -2303,6 +2347,16 @@ where
             .map_err(|err| OciProviderError::operation("create_network", err))
     }
 
+    async fn create_internal_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        self.client
+            .create_internal_network(request)
+            .await
+            .map_err(|err| OciProviderError::operation("create_internal_network", err))
+    }
+
     async fn remove_network(&self, network_name: &str) -> Result<(), OciProviderError> {
         self.client
             .remove_network(network_name)
@@ -2486,6 +2540,18 @@ impl OciProvider for RuntimeOciProvider {
             Self::Podman(provider) => OciProvider::create_network(provider, request).await,
             Self::DockerCompatible(provider) => {
                 OciProvider::create_network(provider, request).await
+            }
+        }
+    }
+
+    async fn create_internal_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        match self {
+            Self::Podman(provider) => OciProvider::create_internal_network(provider, request).await,
+            Self::DockerCompatible(provider) => {
+                OciProvider::create_internal_network(provider, request).await
             }
         }
     }
@@ -2897,6 +2963,17 @@ impl OciProvider for FakeOciProvider {
             .lock()
             .unwrap()
             .push(format!("create_network:{}", request.name));
+        Ok(format!("fake-network-{}", request.name))
+    }
+
+    async fn create_internal_network(
+        &self,
+        request: &OciNetworkRequest,
+    ) -> Result<String, OciProviderError> {
+        self.call_log
+            .lock()
+            .unwrap()
+            .push(format!("create_internal_network:{}", request.name));
         Ok(format!("fake-network-{}", request.name))
     }
 

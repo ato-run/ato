@@ -495,17 +495,21 @@ pub(crate) async fn execute_service_graph_with_provider<P: OciProvider>(
     reporter
         .notify(format!("🔗 Creating OCI network: {network_name}"))
         .await?;
-    let _network_id = provider
-        .create_network(&OciNetworkRequest {
-            name: network_name.clone(),
-            labels: {
-                let mut l = HashMap::new();
-                l.insert("io.ato.session_id".to_string(), session_id.clone());
-                l.insert("io.ato.managed".to_string(), "true".to_string());
-                l
-            },
-        })
-        .await
+    let network_request = OciNetworkRequest {
+        name: network_name.clone(),
+        labels: {
+            let mut l = HashMap::new();
+            l.insert("io.ato.session_id".to_string(), session_id.clone());
+            l.insert("io.ato.managed".to_string(), "true".to_string());
+            l
+        },
+    };
+    let network_result = if egress_allow.is_empty() {
+        provider.create_internal_network(&network_request).await
+    } else {
+        provider.create_network(&network_request).await
+    };
+    let _network_id = network_result
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))
         .context("failed to create session network")?;
 
@@ -2052,6 +2056,25 @@ mod tests {
     fn network_name_uses_session_suffix() {
         let name = network_name("myapp", "ab12cd34");
         assert_eq!(name, "ato-myapp-ab12cd34");
+    }
+
+    #[tokio::test]
+    async fn empty_egress_allow_uses_internal_network() {
+        let provider = make_provider_with_unique_ids();
+
+        run_blinko(&provider)
+            .await
+            .expect("deny-all graph must launch on an internal network");
+
+        assert!(
+            provider
+                .call_log
+                .lock()
+                .expect("call log lock")
+                .iter()
+                .any(|call| call.starts_with("create_internal_network:")),
+            "empty egress_allow must select an internal OCI network"
+        );
     }
 
     #[test]
