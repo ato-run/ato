@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use capsule::CapsuleReporter;
+use capsule::ato_lock::{self, AtoLock};
 use capsule::contract::lock_runtime::resolve_oci_image_for_target;
 use capsule::execution_plan::model::OciPolicyMode;
 use capsule::router::ManifestData;
@@ -69,6 +70,18 @@ fn oci_run_once_timeout_secs() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(OCI_RUN_ONCE_TIMEOUT_SECS_DEFAULT)
+}
+
+fn authoritative_workspace_lock(
+    workspace_root: &std::path::Path,
+    fallback: &AtoLock,
+) -> Result<AtoLock> {
+    let lock_path = workspace_root.join("ato.lock.json");
+    if !lock_path.exists() {
+        return Ok(fallback.clone());
+    }
+    ato_lock::load_unvalidated_from_path(&lock_path)
+        .with_context(|| format!("failed to load authoritative lock {}", lock_path.display()))
 }
 
 // ── Public entry point ────────────────────────────────────────────────────────
@@ -122,6 +135,11 @@ pub(crate) async fn execute_multi_service(
         .await
         .map_err(|e| anyhow::anyhow!("{}: {}", e.code(), e))?;
 
+    // Registry installs materialize the canonical lock beside capsule.toml,
+    // while the in-memory plan may still carry the pre-install fallback lock.
+    // Prefer the materialized declaration before attempting provider resolution.
+    let authoritative_lock = authoritative_workspace_lock(&plan.workspace_root, &plan.lock)?;
+
     // Build the image map. Prefer the lock-resolved digest when present; fall
     // back to resolving the declared image ref via the OCI provider so that
     // compat-path capsules (capsule.toml without ato.lock.json) work without
@@ -134,7 +152,7 @@ pub(crate) async fn execute_multi_service(
         };
         let target_label = rt.target.clone();
 
-        match resolve_oci_image_for_target(&plan.lock, &target_label).context(format!(
+        match resolve_oci_image_for_target(&authoritative_lock, &target_label).context(format!(
             "failed to resolve OCI image for target '{target_label}'"
         ))? {
             Some(image) => {
@@ -1923,6 +1941,37 @@ mod tests {
         ResolvedServiceNetwork, ResolvedServiceRuntime, ResolvedTargetRuntime,
         ServiceConnectionInfo,
     };
+
+    #[test]
+    fn workspace_lock_overrides_pre_install_fallback() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let fallback = AtoLock::default();
+        std::fs::write(
+            workspace.path().join("ato.lock.json"),
+            r#"{
+              "schema_version": 1,
+              "resolution": {
+                "oci_images": {
+                  "desktop": {
+                    "declared_ref": "example/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "resolved_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "platform": { "os": "linux", "architecture": "amd64" }
+                  }
+                }
+              }
+            }"#,
+        )
+        .expect("write lock");
+
+        let lock = authoritative_workspace_lock(workspace.path(), &fallback).expect("load lock");
+        let image = resolve_oci_image_for_target(&lock, "desktop")
+            .expect("valid OCI entry")
+            .expect("desktop entry");
+        assert_eq!(
+            image.resolved_digest,
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
 
     fn make_image(declared_ref: &str) -> OciImageResolution {
         OciImageResolution {
