@@ -70,6 +70,11 @@ http-body-util = "0.1"
 http = "1"
 # tokio-tungstenite: WebSocket upgrade relay via tokio::io::copy_bidirectional.
 tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+# rustls: direct dependency ONLY to pin a process-level CryptoProvider before
+# the pixel probe's first TLS use — the workspace graph carries BOTH ring and
+# aws-lc-rs, so rustls 0.23 cannot auto-select one and panics at the first
+# wss:// connect (released 0.7.9 behavior on a real public gateway URL).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 futures-util = "0.3"
 # Internal surface assertions use the same compact HMAC-SHA256 envelope as
 # the control plane. Keys stay in runner memory and are zeroized on drop.

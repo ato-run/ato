@@ -207,6 +207,13 @@ async fn probe_gateway(
             .map_err(|_| RfbProbeError::InvalidGatewayHeaders)?,
     );
 
+    // The workspace dependency graph carries BOTH rustls crypto providers
+    // (ring via this pin, aws-lc-rs via other consumers), so rustls cannot
+    // auto-select a process-level CryptoProvider — without this, the first
+    // wss:// probe against a real public gateway URL PANICS the runner's
+    // tokio worker (observed live on 0.7.9). Install ring explicitly; Err
+    // means a provider is already installed, which is exactly as good.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let (websocket, response) = connect_async(websocket_request)
         .await
         .map_err(RfbProbeError::WebSocket)?;
