@@ -20,6 +20,7 @@ use capsule::foundation::install_lifecycle::{RunnerClassId, RunnerClassMismatch}
 // placement contract and the manifest-level GPU judgment agree on one type.
 pub use capsule::foundation::types::ready_state::GpuMode;
 use capsulefs::CasStore;
+use protocol::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{NoSecretProof, ReadyStateManifest, RestoreContract, SanitizerContract};
@@ -248,6 +249,9 @@ pub struct BuildReadyStateInput<'a> {
     pub capsule_manifest_hash: String,
     /// Restore-compatibility class this snapshot is built for (plan §5).
     pub runner_class: Option<RunnerClassId>,
+    /// Validated capsule target presentation requirement to seal into the
+    /// artifact. `None` preserves legacy Web artifacts.
+    pub surface_requirement: Option<SessionSurfaceRequirement>,
     /// The raw layer bytes (captured with NO secret / user data present).
     pub layers: BuildLayers,
     /// How a restored session reaches readiness.

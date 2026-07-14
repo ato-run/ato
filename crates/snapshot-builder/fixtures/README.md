@@ -8,3 +8,7 @@ subdirectory: crates/snapshot-builder/fixtures/py-web }`.
 `py-web-bare/` (#932) is the real Store-capsule shape: a bare-`.py` run command and no
 explicit readiness_probe — it seals only through bare-.py normalization + probe synthesis
 (guest runs `python3 app.py`; the synthesized probe GETs `/`).
+
+`linux-x11-pixel/` is the Dockerfile-import fixture for the authenticated
+pixel-stream slice. Its own README documents the explicit private-RFB endpoint
+and PID + WM_CLASS + mapped-window + framebuffer readiness gate.

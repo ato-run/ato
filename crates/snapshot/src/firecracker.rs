@@ -1850,6 +1850,7 @@ impl SnapshotBackend for FirecrackerBackend {
             has_vsock: vsock_enabled(),
             runner_class_id,
             execution_id: input.execution_id.clone(),
+            surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
             snapshot_backend: self.backend_info(),
@@ -2815,6 +2816,7 @@ mod tests {
             store: &store,
             capsule_manifest_hash: "blake3:preflight".to_string(),
             runner_class: None,
+            surface_requirement: None,
             layers: BuildLayers {
                 rootfs: b"....PREFLIGHT_MARKER_XYZ....".to_vec(),
                 runtime: None,
@@ -2827,6 +2829,7 @@ mod tests {
                 ports: vec![8080],
                 healthcheck: Some("/health".to_string()),
                 expected_ready_ms: Some(3000),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
@@ -2959,6 +2962,7 @@ mod tests {
             store: &store,
             capsule_manifest_hash: "blake3:supervisor-no-vsock".to_string(),
             runner_class: None,
+            surface_requirement: None,
             layers: BuildLayers {
                 rootfs: b"rootfs".to_vec(),
                 runtime: None,
@@ -2971,6 +2975,7 @@ mod tests {
                 ports: vec![8080],
                 healthcheck: Some("/health".to_string()),
                 expected_ready_ms: Some(3000),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
@@ -3166,6 +3171,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            surface_requirement: None,
             layers: ReadyStateLayers::default(),
             hotset_profile: Default::default(),
             snapshot_backend: SnapshotBackendInfo {

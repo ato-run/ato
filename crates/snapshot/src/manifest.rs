@@ -13,6 +13,9 @@
 
 use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsulefs::{BlobManifest, HotsetProfile};
+use protocol::session_surface::{
+    EndpointContract, EndpointContractError, SessionSurfaceRequirement,
+};
 use serde::{Deserialize, Serialize};
 
 /// Schema tag for the Ready-State manifest wire format.
@@ -39,6 +42,11 @@ pub struct ReadyStateManifest {
     /// Declared execution id facet, if known (opaque digest string).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// Capsule-authored target presentation requirement copied from the lock/build
+    /// input. A concrete descriptor and rotatable access data are session state,
+    /// never artifact state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_requirement: Option<SessionSurfaceRequirement>,
     /// CapsuleFS layer refs (each a [`BlobManifest`]).
     pub layers: ReadyStateLayers,
     /// Ordered chunk prefetch profile recorded at build time.
@@ -172,9 +180,23 @@ pub struct RestoreContract {
     /// Guest ports the app exposes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
+    /// Role/protocol/exposure-aware endpoints. When present, this is
+    /// authoritative over the legacy Web-only `ports` projection. Pixel RFB
+    /// endpoints must always be explicit here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<EndpointContract>,
     /// Healthcheck path, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub healthcheck: Option<String>,
+}
+
+impl RestoreContract {
+    /// Validates every explicit endpoint before restore or proxy routing.
+    pub fn validate_endpoints(&self) -> Result<(), EndpointContractError> {
+        self.endpoints
+            .iter()
+            .try_for_each(EndpointContract::validate)
+    }
 }
 
 /// Ordered post-resume sanitizer steps and where each runs (plan §8.2).
@@ -297,6 +319,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            surface_requirement: None,
             layers: ReadyStateLayers {
                 rootfs: Some(rootfs),
                 memory: Some(memory),
@@ -336,6 +359,75 @@ mod tests {
         let back: ReadyStateManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
         assert_eq!(back.id(), m.id());
+    }
+
+    #[test]
+    fn surface_requirement_is_artifact_identity_and_legacy_absence_is_supported() {
+        use protocol::session_surface::{
+            PIXEL_STREAM_PROFILE, SessionSurfaceKind, SessionSurfaceRequirement,
+        };
+
+        let (_dir, mut manifest) = manifest_with_layers();
+        let legacy_id = manifest.id();
+        manifest.surface_requirement = Some(SessionSurfaceRequirement {
+            kind: SessionSurfaceKind::PixelStream,
+            profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+        });
+        manifest
+            .surface_requirement
+            .as_ref()
+            .expect("surface requirement")
+            .validate()
+            .expect("valid requirement");
+
+        let json = serde_json::to_value(&manifest).expect("serialize manifest");
+        assert_eq!(json["surface_requirement"]["kind"], "pixel_stream");
+        let round_trip: ReadyStateManifest =
+            serde_json::from_value(json.clone()).expect("parse manifest");
+        assert_eq!(round_trip, manifest);
+        assert_ne!(round_trip.id(), legacy_id);
+
+        let mut legacy = json;
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("surface_requirement");
+        let parsed_legacy: ReadyStateManifest =
+            serde_json::from_value(legacy).expect("parse legacy manifest");
+        assert!(parsed_legacy.surface_requirement.is_none());
+    }
+
+    #[test]
+    fn restore_contract_round_trips_explicit_private_rfb_endpoint() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+        };
+
+        let contract = RestoreContract {
+            endpoints: vec![EndpointContract {
+                role: EndpointRole::PixelRfb,
+                protocol: EndpointProtocol::Tcp,
+                exposure: EndpointExposure::GuestPrivate,
+                port: 5900,
+                readiness: EndpointReadiness::FirstFrame,
+            }],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&contract).expect("serialize endpoint contract");
+        let parsed: RestoreContract = serde_json::from_str(&json).expect("parse endpoint contract");
+
+        assert_eq!(parsed, contract);
+    }
+
+    #[test]
+    fn legacy_restore_contract_without_endpoints_deserializes_empty() {
+        let parsed: RestoreContract = serde_json::from_str(
+            r#"{"ports":[8080],"healthcheck":"/health","expected_ready_ms":2000}"#,
+        )
+        .expect("parse legacy restore contract");
+
+        assert!(parsed.endpoints.is_empty());
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -119,6 +120,80 @@ pub const ENV_RUNNER_API_URL: &str = "ATO_API_URL";
 pub const ENV_RUNNER_TOKEN: &str = "ATO_RUNNER_TOKEN";
 pub const ENV_RUNNER_ID: &str = "ATO_RUNNER_ID";
 pub const ENV_RUNNER_DISPLAY_NAME: &str = "ATO_RUNNER_DISPLAY_NAME";
+pub const ENV_SURFACE_ASSERTION_KEYS_JSON: &str = "ATO_SURFACE_ASSERTION_KEYS_JSON";
+pub const ENV_SURFACE_ALLOWED_ORIGINS_JSON: &str = "ATO_SURFACE_ALLOWED_ORIGINS_JSON";
+
+#[derive(Clone)]
+struct SurfaceGatewayRuntime {
+    authorizer: Arc<dyn netd::pixel_gateway::SurfaceAccessAuthorizer>,
+    assertion_keyring: Arc<netd::pixel_authorization::SurfaceAssertionKeyring>,
+    allowed_origins: BTreeSet<String>,
+}
+
+fn normalize_surface_origin(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value.trim()).context("invalid surface allowed origin")?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        bail!("surface allowed origins must contain only scheme, host, and optional port");
+    }
+    let loopback_host = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() != "https" && !(url.scheme() == "http" && loopback_host) {
+        bail!("surface allowed origins must use HTTPS except on an exact loopback host");
+    }
+    let origin = url.origin().ascii_serialization();
+    if origin == "null" {
+        bail!("surface allowed origin must be a network origin");
+    }
+    Ok(origin)
+}
+
+/// Loads the authenticated pixel gateway's explicit staging configuration.
+/// Omission disables pixel advertisement; partial or malformed configuration
+/// fails runner startup closed. Key contents are never formatted or logged.
+fn load_surface_gateway_runtime() -> Result<Option<SurfaceGatewayRuntime>> {
+    let keys_json = std::env::var(ENV_SURFACE_ASSERTION_KEYS_JSON).ok();
+    let origins_json = std::env::var(ENV_SURFACE_ALLOWED_ORIGINS_JSON).ok();
+    let (keys_json, origins_json) = match (keys_json, origins_json) {
+        (None, None) => return Ok(None),
+        (Some(keys), Some(origins)) => (zeroize::Zeroizing::new(keys), origins),
+        _ => bail!(
+            "{ENV_SURFACE_ASSERTION_KEYS_JSON} and {ENV_SURFACE_ALLOWED_ORIGINS_JSON} must be configured together"
+        ),
+    };
+
+    let keys: BTreeMap<String, String> =
+        serde_json::from_str(&keys_json).context("invalid surface assertion keyring JSON")?;
+    let keyring = Arc::new(
+        netd::pixel_authorization::SurfaceAssertionKeyring::new(keys)
+            .context("invalid surface assertion keyring")?,
+    );
+    let origins: Vec<String> =
+        serde_json::from_str(&origins_json).context("invalid surface allowed-origins JSON")?;
+    let allowed_origins: BTreeSet<String> = origins
+        .into_iter()
+        .map(|origin| normalize_surface_origin(&origin))
+        .collect::<Result<_>>()?;
+    if allowed_origins.is_empty() {
+        bail!("surface allowed origins must not be empty");
+    }
+
+    Ok(Some(SurfaceGatewayRuntime {
+        authorizer: Arc::new(netd::pixel_authorization::HmacSurfaceAccessAuthorizer::new(
+            Arc::clone(&keyring),
+        )),
+        assertion_keyring: keyring,
+        allowed_origins,
+    }))
+}
 
 /// Resolve runner credentials from `credentials.json` (authoritative), else
 /// reconstruct them from the environment (systemd EnvironmentFile). Fail-closed with
@@ -150,6 +225,8 @@ pub fn load_runner_credentials() -> Result<RunnerCredentials> {
 // Capabilities
 // ─────────────────────────────────────────────
 
+const SESSION_HORIZON_EXTENSION_CAPABILITY: &str = "session-horizon-extension-v1";
+
 pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -172,7 +249,31 @@ pub fn collect_capabilities() -> Vec<String> {
         caps.push("python".to_string());
     }
     caps.push("source-sandbox".to_string());
+    caps.push(SESSION_HORIZON_EXTENSION_CAPABILITY.to_string());
     caps
+}
+
+fn advertised_session_surfaces_for(
+    pixel_surface_enabled: bool,
+) -> Vec<protocol::session_surface::SupportedSessionSurface> {
+    use protocol::session_surface::{
+        PIXEL_STREAM_PROFILE, SessionSurfaceKind, SessionSurfaceTransport, SupportedSessionSurface,
+        WEB_SURFACE_PROFILE,
+    };
+
+    let mut surfaces = vec![SupportedSessionSurface {
+        kind: SessionSurfaceKind::Web,
+        profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
+        transports: Some(vec![SessionSurfaceTransport::Https]),
+    }];
+    if pixel_surface_enabled {
+        surfaces.push(SupportedSessionSurface {
+            kind: SessionSurfaceKind::PixelStream,
+            profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+            transports: Some(vec![SessionSurfaceTransport::RfbWebsocket]),
+        });
+    }
+    surfaces
 }
 
 // ─────────────────────────────────────────────
@@ -256,6 +357,7 @@ pub fn build_heartbeat_body(
     arch: &str,
     max_slots: usize,
     active_slots: usize,
+    pixel_surface_enabled: bool,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "capabilities": capabilities,
@@ -268,6 +370,7 @@ pub fn build_heartbeat_body(
         // passthrough exists for codec on the control-plane side, so omitting
         // this field is never safe once that gate is live — always send it.
         "supported_snapshot_codecs": advertised_snapshot_codecs(),
+        "supported_session_surfaces": advertised_session_surfaces_for(pixel_surface_enabled),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -755,6 +858,19 @@ pub async fn run_serve(
     let api_base = api_base
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or(creds.api_base.clone());
+    let configured_surface_gateway = load_surface_gateway_runtime()?;
+    let pixel_surface_enabled = configured_surface_gateway.is_some()
+        && std::env::consts::OS == "linux"
+        && std::env::consts::ARCH == "x86_64"
+        && ready_state_restore_ready();
+    // Keep the value handed to lease tasks identical to what this runner
+    // advertises. A configured keyring alone must not make an unsupported host
+    // capable of accepting a pixel lease during its defence-in-depth recheck.
+    let surface_gateway = if pixel_surface_enabled {
+        configured_surface_gateway
+    } else {
+        None
+    };
 
     if let Some(requested) = display_name.as_deref()
         && requested != creds.display_name
@@ -838,6 +954,7 @@ pub async fn run_serve(
             &arch,
             pool.capacity(),
             pool.active(),
+            pixel_surface_enabled,
         );
         match send_heartbeat_once(
             &client,
@@ -972,6 +1089,7 @@ pub async fn run_serve(
                         let runner_token = creds.runner_token.clone();
                         let public_base_url = public_base_url.clone();
                         let public_url_template = public_url_template.clone();
+                        let surface_gateway = surface_gateway.clone();
                         tokio::spawn(async move {
                             handle_claimed_lease(
                                 &client,
@@ -982,6 +1100,7 @@ pub async fn run_serve(
                                 public_base_url,
                                 public_url_template,
                                 netns_enabled,
+                                surface_gateway,
                             )
                             .await;
                         });
@@ -2394,11 +2513,41 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const STOP_KILL_GRACE: Duration = Duration::from_secs(3);
 /// Window to confirm the proxy task actually terminated after abort.
 const STOP_PROXY_GRACE: Duration = Duration::from_secs(3);
+/// Runner-local defense in depth. The control plane owns the normal product cap,
+/// but no control response may keep one preview workload alive beyond 24 hours.
+const MAX_SESSION_HORIZON_DURATION_SECS: u64 = 24 * 60 * 60;
+/// A continuation may temporarily suppress Pixel input-idle expiry while the
+/// user is in an external auth/checkout tab, but never for more than 5 minutes.
+const MAX_SESSION_HORIZON_IDLE_GRACE_SECS: u64 = 5 * 60;
+const HORIZON_APPLIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionHorizon {
+    generation: u64,
+    max_duration_secs: u64,
+    #[serde(default)]
+    idle_grace_secs: u64,
+}
+
+fn deserialize_session_horizon<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<SessionHorizon>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+}
 
 #[derive(Debug, Deserialize)]
 struct LeaseControl {
     #[serde(default)]
     stop_requested: bool,
+    /// Monotonic total preview duration measured from the immutable serving-start
+    /// instant. A malformed/partial value is ignored without hiding a concurrent
+    /// stop request from this same response.
+    #[serde(default, deserialize_with = "deserialize_session_horizon")]
+    session_horizon: Option<SessionHorizon>,
     /// The owner's consent decision for a needs_consent lease (P4-A). null until
     /// the owner decides; the runner verifies consent_ref before acting on it.
     #[serde(default)]
@@ -2441,7 +2590,7 @@ async fn poll_lease_control(
             // Lease gone or runner invalid/revoked: nothing left to watch.
             // Revocation teardown is the heartbeat loop's job; just stop here.
             ControlOutcome::Done => return,
-            ControlOutcome::Continue => {}
+            ControlOutcome::Continue { .. } => {}
         }
         tokio::time::sleep(Duration::from_secs(STOP_POLL_SECONDS)).await;
     }
@@ -2450,7 +2599,9 @@ async fn poll_lease_control(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlOutcome {
     /// No stop requested (or a transient error) — keep watching.
-    Continue,
+    Continue {
+        session_horizon: Option<SessionHorizon>,
+    },
     /// The owner requested a stop.
     Stop,
     /// The lease/runner is gone (404/401) — stop watching.
@@ -2466,19 +2617,52 @@ async fn poll_control_once(
 ) -> ControlOutcome {
     let response = match client.get(url).bearer_auth(runner_token).send().await {
         Ok(response) => response,
-        Err(_) => return ControlOutcome::Continue,
+        Err(_) => {
+            return ControlOutcome::Continue {
+                session_horizon: None,
+            };
+        }
     };
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::UNAUTHORIZED {
         return ControlOutcome::Done;
     }
     if !status.is_success() {
-        return ControlOutcome::Continue;
+        return ControlOutcome::Continue {
+            session_horizon: None,
+        };
     }
     match response.json::<LeaseControl>().await {
         Ok(control) if control.stop_requested => ControlOutcome::Stop,
-        _ => ControlOutcome::Continue,
+        Ok(control) => ControlOutcome::Continue {
+            session_horizon: control.session_horizon,
+        },
+        Err(_) => ControlOutcome::Continue {
+            session_horizon: None,
+        },
     }
+}
+
+async fn report_session_horizon_applied(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    horizon: SessionHorizon,
+) -> bool {
+    let url = format!(
+        "{}/v1/runner-leases/{}/horizon-applied",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    client
+        .post(url)
+        .bearer_auth(runner_token)
+        .timeout(HORIZON_APPLIED_REQUEST_TIMEOUT)
+        .json(&horizon)
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 // ── ExecutionPlan consent gate (P4-A) ──
@@ -3140,6 +3324,106 @@ async fn stop_proxy(handle: Option<tokio::task::JoinHandle<()>>) -> bool {
     stop_proxy_within(handle, STOP_PROXY_GRACE).await
 }
 
+enum RestoreGatewayHandle {
+    Http(tokio::task::JoinHandle<()>),
+    Pixel(netd::pixel_gateway::PixelGatewayHandle),
+}
+
+impl RestoreGatewayHandle {
+    fn last_input_activity_unix_millis(&self) -> Option<u64> {
+        match self {
+            Self::Http(_) => None,
+            Self::Pixel(handle) => Some(handle.last_input_activity_unix_millis()),
+        }
+    }
+}
+
+async fn stop_restore_gateway(handle: Option<RestoreGatewayHandle>) -> bool {
+    match handle {
+        None => true,
+        Some(RestoreGatewayHandle::Http(handle)) => stop_proxy(Some(handle)).await,
+        Some(RestoreGatewayHandle::Pixel(handle)) => {
+            matches!(
+                tokio::time::timeout(STOP_PROXY_GRACE, handle.stop()).await,
+                Ok(Ok(()))
+            )
+        }
+    }
+}
+
+/// Validates every sealed endpoint contract before routing and returns the
+/// single private RFB port required by a selected pixel surface. A descriptor
+/// can never turn a public or ambiguous artifact endpoint into guest-private
+/// traffic at runtime.
+fn selected_pixel_rfb_port(
+    descriptor: Option<&protocol::session_surface::SessionSurfaceDescriptor>,
+    endpoints: &[protocol::session_surface::EndpointContract],
+) -> Result<Option<u16>> {
+    use protocol::session_surface::{EndpointRole, SessionSurfaceKind};
+
+    for endpoint in endpoints {
+        endpoint
+            .validate()
+            .with_context(|| format!("invalid sealed endpoint contract for {:?}", endpoint.role))?;
+    }
+
+    if descriptor.map(|value| value.kind()) != Some(SessionSurfaceKind::PixelStream) {
+        return Ok(None);
+    }
+
+    let mut pixel_endpoints = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.role == EndpointRole::PixelRfb);
+    let endpoint = pixel_endpoints
+        .next()
+        .context("pixel_stream requires one sealed pixel_rfb endpoint")?;
+    if pixel_endpoints.next().is_some() {
+        bail!("pixel_stream requires exactly one sealed pixel_rfb endpoint");
+    }
+    let port = u16::try_from(endpoint.port)
+        .context("sealed pixel_rfb endpoint port is outside the TCP range")?;
+    Ok(Some(port))
+}
+
+async fn resolve_socket_addr(value: &str) -> Result<std::net::SocketAddr> {
+    tokio::net::lookup_host(value)
+        .await
+        .with_context(|| format!("resolve socket address '{value}'"))?
+        .next()
+        .with_context(|| format!("socket address '{value}' resolved to no addresses"))
+}
+
+fn unix_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn pixel_surface_idle_expired(
+    now_unix_millis: u64,
+    last_input_activity_unix_millis: Option<u64>,
+    idle_timeout_secs: Option<u64>,
+) -> bool {
+    last_input_activity_unix_millis
+        .zip(idle_timeout_secs)
+        .is_some_and(|(last, timeout)| {
+            now_unix_millis.saturating_sub(last) >= timeout.saturating_mul(1_000)
+        })
+}
+
+fn latest_pixel_activity(
+    observed_unix_millis: Option<u64>,
+    horizon_reset_unix_millis: Option<u64>,
+) -> Option<u64> {
+    match (observed_unix_millis, horizon_reset_unix_millis) {
+        (Some(observed), Some(reset)) => Some(observed.max(reset)),
+        (Some(observed), None) => Some(observed),
+        (None, Some(reset)) => Some(reset),
+        (None, None) => None,
+    }
+}
+
 /// Core of [`stop_proxy`] with an injectable confirmation window (tests use a
 /// short one to exercise the unconfirmed/timeout path deterministically).
 async fn stop_proxy_within(handle: Option<tokio::task::JoinHandle<()>>, grace: Duration) -> bool {
@@ -3771,6 +4055,62 @@ fn vmm_alive(_pid: i32) -> bool {
 /// How often the restore hold-loop polls `/control` for a stop + checks the VMM is alive.
 const RESTORE_HOLD_POLL_SECS: u64 = 2;
 
+#[derive(Debug, Clone, Copy)]
+struct PreviewSessionHorizon {
+    serving_started_at: std::time::Instant,
+    generation: u64,
+    max_duration_secs: u64,
+    deadline: std::time::Instant,
+}
+
+impl PreviewSessionHorizon {
+    fn new(serving_started_at: std::time::Instant, max_duration_secs: u64) -> Self {
+        let max_duration_secs = max_duration_secs.min(MAX_SESSION_HORIZON_DURATION_SECS);
+        let deadline = serving_started_at
+            .checked_add(Duration::from_secs(max_duration_secs))
+            .unwrap_or(serving_started_at);
+        Self {
+            serving_started_at,
+            generation: 0,
+            max_duration_secs,
+            deadline,
+        }
+    }
+
+    fn try_apply(&mut self, update: SessionHorizon, now: std::time::Instant) -> bool {
+        if update.generation <= self.generation
+            || update.max_duration_secs < self.max_duration_secs
+            || update.max_duration_secs > MAX_SESSION_HORIZON_DURATION_SECS
+            || update.idle_grace_secs > MAX_SESSION_HORIZON_IDLE_GRACE_SECS
+        {
+            return false;
+        }
+        let Some(deadline) = self
+            .serving_started_at
+            .checked_add(Duration::from_secs(update.max_duration_secs))
+        else {
+            return false;
+        };
+        // A continuation received after its own total horizon cannot resurrect a
+        // workload whose serving budget has already elapsed.
+        if deadline <= now {
+            return false;
+        }
+        self.generation = update.generation;
+        self.max_duration_secs = update.max_duration_secs;
+        self.deadline = deadline;
+        true
+    }
+
+    fn max_duration_secs(&self) -> u64 {
+        self.max_duration_secs
+    }
+
+    fn deadline(&self) -> std::time::Instant {
+        self.deadline
+    }
+}
+
 /// ato#1006 (UNIT C): decide whether the restore hold loop should break this tick,
 /// and with what reason. Pure so the preview max-duration deadline is unit-testable
 /// without a live VM.
@@ -3792,7 +4132,7 @@ fn restore_hold_break_reason(
     match control {
         ControlOutcome::Stop => return Some("user_requested"),
         ControlOutcome::Done => return Some("lease_gone"),
-        ControlOutcome::Continue => {}
+        ControlOutcome::Continue { .. } => {}
     }
     if let Some(deadline) = preview_deadline
         && now >= deadline
@@ -3834,6 +4174,7 @@ async fn handle_restore_snapshot_lease(
     public_base_url: Option<String>,
     public_url_template: Option<String>,
     netns_enabled: bool,
+    surface_gateway: Option<SurfaceGatewayRuntime>,
 ) {
     use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::binding_grants::{
@@ -3848,8 +4189,8 @@ async fn handle_restore_snapshot_lease(
     };
     use crate::application::ready_state::restore::{restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
-        RestoreArtifactClass, ensure_artifact_local, load_and_verify_manifest,
-        parse_restore_snapshot_command,
+        RestoreArtifactClass, ensure_artifact_local,
+        load_and_verify_manifest_with_surface_capabilities, parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -3921,6 +4262,23 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    let pixel_surface_enabled = surface_gateway.is_some();
+    let selected_pixel_surface = cmd.session_surface.as_ref().is_some_and(|descriptor| {
+        descriptor.kind() == protocol::session_surface::SessionSurfaceKind::PixelStream
+    });
+    if selected_pixel_surface && !pixel_surface_enabled {
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "surface_unavailable",
+            "pixel_stream is not enabled on this runner".to_string(),
+        )
+        .await;
+        return;
+    }
     println!(
         "📦 restore lease {lease_id}: snapshot {} (capsule {}, {}/{})",
         cmd.snapshot_id, cmd.capsule_id, cmd.target_label, cmd.profile
@@ -4004,23 +4362,46 @@ async fn handle_restore_snapshot_lease(
 
     // 3. VERIFY the fetched manifest IS exactly the sealed artifact (integrity gate)
     // and classify it (fail-closed narrow supervisor exception, PR 3e).
-    let (manifest, artifact_class) =
-        match load_and_verify_manifest(&paths.manifest_json, &cmd, runner_supervisor_enabled()) {
-            Ok(m) => m,
-            Err((code, message)) => {
-                fail(
-                    client,
-                    api_base,
-                    runner_token,
-                    &lease_id,
-                    slot,
-                    &code,
-                    message,
-                )
-                .await;
-                return;
-            }
-        };
+    let (manifest, artifact_class) = match load_and_verify_manifest_with_surface_capabilities(
+        &paths.manifest_json,
+        &cmd,
+        runner_supervisor_enabled(),
+        pixel_surface_enabled,
+    ) {
+        Ok(m) => m,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    let pixel_rfb_port = match selected_pixel_rfb_port(
+        cmd.session_surface.as_ref(),
+        &manifest.restore_contract.endpoints,
+    ) {
+        Ok(port) => port,
+        Err(error) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                "artifact_verification_failed",
+                format!("{error:#}"),
+            )
+            .await;
+            return;
+        }
+    };
     // Binding names from the SEALED MANIFEST only (the single source of truth) —
     // captured now because `manifest` is moved into the restore below.
     let supervisor_names: Option<Vec<String>> = match &artifact_class {
@@ -4317,94 +4698,208 @@ async fn handle_restore_snapshot_lease(
         };
     prof_mark!("bind_before_expose_ms");
 
-    // 6. Bring the per-slot root proxy up and prove readiness THROUGH it BEFORE
-    // claiming a URL (v1.2 PR 3e-4). The supervisor guest restarts its workload
-    // with the real env after bind — the first accept can lag by 1-2s, so the
-    // probe retries on a backoff up to ATO_PROXY_READY_TIMEOUT_MS. For a web
-    // run the candidate URL IS the product: a probe timeout is a typed failure
-    // (teardown + fail), never a silent ready without ready_url.
+    // 6. Materialize the selected surface gateway and prove its protocol-level
+    // readiness BEFORE claiming a URL. Web retains the HTTP-through-proxy probe.
+    // Pixel must traverse the authenticated public WebSocket path, send a parsed
+    // input message, and receive a complete first framebuffer update. A private
+    // RFB socket accepting traffic is not sufficient evidence for browser Ready.
     let candidate = public_ready_url(
         public_base_url.as_deref(),
         public_url_template.as_deref(),
         &slot,
     );
-    let (proxy_handle, proxy_started) = match (candidate.as_deref(), workload_addr.as_deref()) {
-        (Some(_), Some(addr)) => {
-            let probe_path = cmd.healthcheck_url_path.as_deref().unwrap_or("/");
+    let (gateway_handle, gateway_started) = if let Some(rfb_port) = pixel_rfb_port {
+        let setup = async {
+            let public_ready_url = candidate
+                .as_deref()
+                .context("pixel_stream requires a configured public runner URL")?;
+            let workload_addr = workload_addr
+                .as_deref()
+                .context("restored pixel session reported no workload address")?;
+            let runtime = surface_gateway
+                .as_ref()
+                .context("pixel_stream gateway runtime is not configured")?;
+            let session_id = cmd
+                .session_id
+                .as_ref()
+                .context("pixel_stream lease is missing session_id")?;
+            let surface_id = cmd
+                .session_surface
+                .as_ref()
+                .and_then(|descriptor| descriptor.surface_id())
+                .context("pixel_stream lease is missing surface_id")?;
+            let scope = netd::pixel_gateway::PixelGatewayScope {
+                session_id: session_id.clone(),
+                surface_id: surface_id.to_string(),
+            };
+            let readiness_assertion = runtime
+                .assertion_keyring
+                .issue_readiness_assertion(&scope)
+                .context("issue one-time pixel gateway readiness assertion")?;
+            let probe_origin = runtime
+                .allowed_origins
+                .iter()
+                .next()
+                .context("pixel_stream gateway has no allowed probe origin")?;
+
+            let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
+            let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
+            private_rfb_addr.set_port(rfb_port);
             let timeout = Duration::from_millis(proxy_ready_timeout_ms());
-            let (proxy, probe) =
-                start_root_proxy_ready(&slot.proxy_listen, addr.to_string(), probe_path, timeout)
-                    .await;
-            // One stable line per probe, both outcomes (grep: PROXY_READY_PROF).
-            println!(
-                "PROXY_READY_PROF lease={lease_id} slot={} attempts={} wait_ms={} result={}",
-                slot.index,
-                probe.attempts,
-                probe.wait_ms,
-                probe.result_label(),
-            );
-            prof_parts.push(format!("proxy_ready_wait_ms={}", probe.wait_ms));
-            prof_parts.push(format!("proxy_ready_attempts={}", probe.attempts));
-            match proxy {
-                Ok(handle) => {
-                    println!(
-                        "🔀 restore lease {lease_id}: slot {} proxy {} -> {} (ready after {} attempt(s))",
-                        slot.index, slot.proxy_listen, addr, probe.attempts
-                    );
-                    (Some(handle), Some(true))
-                }
-                Err(err) => {
-                    // Scrub + teardown mirror the stop path: the leases were
-                    // already delivered to the guest, so wipe them before the
-                    // VM (teardown destroys the tmpfs regardless; best-effort).
-                    eprintln!(
-                        "⚠️  restore lease {lease_id}: proxy readiness probe failed; failing the lease: {}",
-                        scrub_secrets(&format!("{err:#}"))
-                    );
-                    if let Some((uds, _)) = supervisor_bind {
-                        let scrub =
-                            tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
-                        match scrub {
-                            Ok(Ok(())) => {
-                                println!("🧹 restore lease {lease_id}: guest bindings scrubbed")
-                            }
-                            Ok(Err(e)) => eprintln!(
-                                "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
-                                scrub_secrets(&format!("{e:#}"))
-                            ),
-                            Err(e) => eprintln!(
-                                "⚠️  restore lease {lease_id}: binding scrub task join error: {e}"
-                            ),
+            let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
+                netd::pixel_gateway::PixelGatewayConfig {
+                    listen_addr,
+                    private_rfb_addr,
+                    scope,
+                    allowed_origins: runtime.allowed_origins.clone(),
+                },
+                Arc::clone(&runtime.authorizer),
+                netd::rfb_probe::PixelGatewayProbeRequest::new(
+                    public_ready_url,
+                    probe_origin,
+                    readiness_assertion.as_str(),
+                ),
+                timeout,
+            )
+            .await
+            .context("authenticated public pixel gateway path did not become interactive")?;
+            Ok::<_, anyhow::Error>((handle, private_rfb_addr, frame))
+        }
+        .await;
+
+        match setup {
+            Ok((handle, private_rfb_addr, frame)) => {
+                println!(
+                    "🖥️  restore lease {lease_id}: slot {} pixel gateway {} -> {} (first frame {}x{}, {} bytes)",
+                    slot.index,
+                    handle.local_addr(),
+                    private_rfb_addr,
+                    frame.width,
+                    frame.height,
+                    frame.bytes
+                );
+                prof_parts.push("pixel_public_first_frame=1".to_string());
+                (Some(RestoreGatewayHandle::Pixel(handle)), Some(true))
+            }
+            Err(err) => {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: pixel surface readiness failed: {}",
+                    scrub_secrets(&format!("{err:#}"))
+                );
+                if let Some((uds, _)) = supervisor_bind {
+                    let scrub =
+                        tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+                    match scrub {
+                        Ok(Ok(())) => {
+                            println!("🧹 restore lease {lease_id}: guest bindings scrubbed")
                         }
+                        Ok(Err(e)) => eprintln!(
+                            "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                            scrub_secrets(&format!("{e:#}"))
+                        ),
+                        Err(e) => eprintln!(
+                            "⚠️  restore lease {lease_id}: binding scrub task join error: {e}"
+                        ),
                     }
-                    let _ = teardown(backend.as_ref(), session);
-                    fail(
-                        client,
-                        api_base,
-                        runner_token,
-                        &lease_id,
-                        slot,
-                        "proxy_ready_timeout",
-                        format!("{err:#}"),
-                    )
-                    .await;
-                    return;
                 }
+                let _ = teardown(backend.as_ref(), session);
+                fail(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    slot,
+                    "surface_not_ready",
+                    format!("{err:#}"),
+                )
+                .await;
+                return;
             }
         }
-        (Some(_), None) => {
-            eprintln!(
-                "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
-            );
-            (None, Some(false))
+    } else {
+        match (candidate.as_deref(), workload_addr.as_deref()) {
+            (Some(_), Some(addr)) => {
+                let probe_path = cmd.healthcheck_url_path.as_deref().unwrap_or("/");
+                let timeout = Duration::from_millis(proxy_ready_timeout_ms());
+                let (proxy, probe) = start_root_proxy_ready(
+                    &slot.proxy_listen,
+                    addr.to_string(),
+                    probe_path,
+                    timeout,
+                )
+                .await;
+                // One stable line per probe, both outcomes (grep: PROXY_READY_PROF).
+                println!(
+                    "PROXY_READY_PROF lease={lease_id} slot={} attempts={} wait_ms={} result={}",
+                    slot.index,
+                    probe.attempts,
+                    probe.wait_ms,
+                    probe.result_label(),
+                );
+                prof_parts.push(format!("proxy_ready_wait_ms={}", probe.wait_ms));
+                prof_parts.push(format!("proxy_ready_attempts={}", probe.attempts));
+                match proxy {
+                    Ok(handle) => {
+                        println!(
+                            "🔀 restore lease {lease_id}: slot {} proxy {} -> {} (ready after {} attempt(s))",
+                            slot.index, slot.proxy_listen, addr, probe.attempts
+                        );
+                        (Some(RestoreGatewayHandle::Http(handle)), Some(true))
+                    }
+                    Err(err) => {
+                        // Scrub + teardown mirror the stop path: the leases were
+                        // already delivered to the guest, so wipe them before the
+                        // VM (teardown destroys the tmpfs regardless; best-effort).
+                        eprintln!(
+                            "⚠️  restore lease {lease_id}: proxy readiness probe failed; failing the lease: {}",
+                            scrub_secrets(&format!("{err:#}"))
+                        );
+                        if let Some((uds, _)) = supervisor_bind {
+                            let scrub =
+                                tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds))
+                                    .await;
+                            match scrub {
+                                Ok(Ok(())) => {
+                                    println!("🧹 restore lease {lease_id}: guest bindings scrubbed")
+                                }
+                                Ok(Err(e)) => eprintln!(
+                                    "⚠️  restore lease {lease_id}: binding scrub failed (teardown destroys tmpfs anyway): {}",
+                                    scrub_secrets(&format!("{e:#}"))
+                                ),
+                                Err(e) => eprintln!(
+                                    "⚠️  restore lease {lease_id}: binding scrub task join error: {e}"
+                                ),
+                            }
+                        }
+                        let _ = teardown(backend.as_ref(), session);
+                        fail(
+                            client,
+                            api_base,
+                            runner_token,
+                            &lease_id,
+                            slot,
+                            "proxy_ready_timeout",
+                            format!("{err:#}"),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            (Some(_), None) => {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: session reported no workload address; reporting ready WITHOUT ready_url"
+                );
+                (None, Some(false))
+            }
+            _ => (None, None),
         }
-        _ => (None, None),
     };
     let payload = decide_ready_payload(
         cmd.execution_id.clone(),
         candidate.as_deref(),
         Some(guest_port),
-        proxy_started,
+        gateway_started,
     );
     prof_mark!("proxy_setup_ms");
     println!(
@@ -4448,22 +4943,27 @@ async fn handle_restore_snapshot_lease(
 
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
     // ato#1006 (UNIT C): a preview lease additionally arms a HARD max-duration cap.
-    // The deadline is computed from serving-start (here, after ready) — the wall-clock
-    // budget a public preview gets. `parse_restore_snapshot_command` guarantees a
-    // preview lease carried `max_duration_secs`, so it is always Some here. The
-    // `idle_timeout_secs` field is parsed + threaded but a NO-OP stub in v0: the
-    // restore path exposes no controllable idle-activity signal, so the max-duration
-    // deadline is the sole hard cap (documented on the struct field).
-    let preview_deadline = if cmd.is_preview {
+    // Every total duration, including later continuation updates, is computed from
+    // this one serving-start instant. Pixel previews also apply the declared idle
+    // timeout to browser-to-RFB input activity observed by the authenticated gateway.
+    let preview_serving_started_at = std::time::Instant::now();
+    let mut preview_horizon = if cmd.is_preview {
         cmd.max_duration_secs
-            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs))
+            .map(|secs| PreviewSessionHorizon::new(preview_serving_started_at, secs))
+    } else {
+        None
+    };
+    let pixel_idle_timeout_secs = if cmd.is_preview && pixel_rfb_port.is_some() {
+        cmd.idle_timeout_secs
     } else {
         None
     };
     if cmd.is_preview {
         println!(
-            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, idle_timeout_secs={:?} [v0 stub])",
-            cmd.max_duration_secs, cmd.idle_timeout_secs
+            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, runner_cap_secs={}, pixel_idle_timeout_secs={:?})",
+            preview_horizon.map(|horizon| horizon.max_duration_secs()),
+            MAX_SESSION_HORIZON_DURATION_SECS,
+            pixel_idle_timeout_secs
         );
     }
     let control_url = format!(
@@ -4471,32 +4971,96 @@ async fn handle_restore_snapshot_lease(
         api_base.trim_end_matches('/'),
         &lease_id
     );
+    let mut pending_horizon_ack = None;
+    let mut pixel_idle_horizon_reset_unix_millis = None;
+    let mut pixel_idle_suppressed_until = None;
     let reason = loop {
         tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
         let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
         // Preserve the original short-circuit: only poll /control while the VM is up.
         let control = if vmm_exited {
-            ControlOutcome::Continue
+            ControlOutcome::Continue {
+                session_horizon: None,
+            }
         } else {
             poll_control_once(client, &control_url, runner_token).await
         };
+
+        // Stop/Done never carries an update, so terminal control wins. A valid
+        // continuation is applied before evaluating the old hard deadline, allowing
+        // an update observed on the boundary to keep this same VMM alive.
+        if !vmm_exited
+            && let ControlOutcome::Continue {
+                session_horizon: Some(update),
+            } = control
+        {
+            let applied_at = std::time::Instant::now();
+            if let Some(horizon) = preview_horizon.as_mut()
+                && horizon.try_apply(update, applied_at)
+            {
+                // Any applied generation restarts normal Pixel idle accounting.
+                // A begin-generation may additionally suppress idle expiry while
+                // the user is in an external auth/checkout tab.
+                pixel_idle_horizon_reset_unix_millis = Some(unix_time_millis());
+                let idle_grace_secs = update
+                    .idle_grace_secs
+                    .min(MAX_SESSION_HORIZON_IDLE_GRACE_SECS);
+                pixel_idle_suppressed_until =
+                    applied_at.checked_add(Duration::from_secs(idle_grace_secs));
+                pending_horizon_ack = Some(update);
+            }
+        }
         if let Some(reason) = restore_hold_break_reason(
             std::time::Instant::now(),
-            preview_deadline,
+            preview_horizon.map(|horizon| horizon.deadline()),
             vmm_exited,
             control,
         ) {
             break reason;
         }
+        let pixel_idle_is_suppressed =
+            pixel_idle_suppressed_until.is_some_and(|until| std::time::Instant::now() < until);
+        let observed_pixel_activity = gateway_handle
+            .as_ref()
+            .and_then(RestoreGatewayHandle::last_input_activity_unix_millis);
+        if !pixel_idle_is_suppressed
+            && pixel_surface_idle_expired(
+                unix_time_millis(),
+                latest_pixel_activity(
+                    observed_pixel_activity,
+                    pixel_idle_horizon_reset_unix_millis,
+                ),
+                pixel_idle_timeout_secs,
+            )
+        {
+            break "preview_idle_expired";
+        }
+        if let Some(applied) = pending_horizon_ack
+            && report_session_horizon_applied(client, api_base, runner_token, &lease_id, applied)
+                .await
+        {
+            println!(
+                "↗ restore lease {lease_id}: session horizon generation {} applied (max_duration_secs={}, idle_grace_secs={})",
+                applied.generation, applied.max_duration_secs, applied.idle_grace_secs
+            );
+            pending_horizon_ack = None;
+        }
     };
     println!("🛑 restore lease {lease_id}: {reason}; tearing down");
 
-    // 8. Teardown: stop the VM + destroy the overlay, stop the proxy, ack /stopped, and
+    // 8. Teardown: revoke ingress first, then stop the VM + destroy the overlay,
+    // ack /stopped, and
     // free the slot ONLY on a fully confirmed teardown (fail closed — a slot held is
     // safer than one offered while a VM may still be up).
     // v1.2 PR 3e (supervisor only): first stop renewing, then best-effort scrub the
     // guest's tmpfs bindings over vsock BEFORE the VM (and its tmpfs) is destroyed —
     // teardown wipes them regardless, so a scrub failure is logged, never fatal.
+    // Stop accepting reconnects before touching guest state. Pixel gateway stop
+    // is idempotent and aborts every active relay before it resolves.
+    let gateway_stopped = stop_restore_gateway(gateway_handle).await;
+    if !gateway_stopped {
+        eprintln!("⚠️  restore lease {lease_id}: surface gateway stop was not confirmed");
+    }
     if let Some(handle) = renewal_handle {
         handle.abort();
     }
@@ -4521,8 +5085,7 @@ async fn handle_restore_snapshot_lease(
             false
         }
     };
-    let proxy_stopped = stop_proxy(proxy_handle).await;
-    let cleanup = StopCleanup::from_teardown(vm_stopped, proxy_stopped);
+    let cleanup = StopCleanup::from_teardown(vm_stopped, gateway_stopped);
     if let Err(err) = report_lease_stopped_with_reason(
         client,
         api_base,
@@ -4540,10 +5103,10 @@ async fn handle_restore_snapshot_lease(
     }
     if cleanup.slot_released {
         slot.release();
-        println!("🔓 restore lease {lease_id}: VM stopped, proxy down, slot released");
+        println!("🔓 restore lease {lease_id}: VM stopped, gateway down, slot released");
     } else {
         eprintln!(
-            "⚠️  restore lease {lease_id}: teardown incomplete (vm_stopped={}, proxy_stopped={}); slot held",
+            "⚠️  restore lease {lease_id}: teardown incomplete (vm_stopped={}, gateway_stopped={}); slot held",
             cleanup.process_terminated, cleanup.proxy_stopped
         );
     }
@@ -4559,6 +5122,7 @@ async fn handle_claimed_lease(
     public_base_url: Option<String>,
     public_url_template: Option<String>,
     netns_enabled: bool,
+    surface_gateway: Option<SurfaceGatewayRuntime>,
 ) {
     println!("📦 lease {} claimed (run {})", lease.id, lease.run_id);
     // Track E (#912): a restore_snapshot lease restores a sealed Ready-State snapshot
@@ -4582,6 +5146,7 @@ async fn handle_claimed_lease(
             public_base_url,
             public_url_template,
             netns_enabled,
+            surface_gateway,
         )
         .await;
         return;
@@ -5191,7 +5756,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_include_os_arch_and_source_sandbox() {
+    fn capabilities_include_runtime_features() {
         let caps = collect_capabilities();
         assert!(caps.contains(&std::env::consts::OS.to_string()));
         assert!(caps.contains(&std::env::consts::ARCH.to_string()));
@@ -5201,12 +5766,13 @@ mod tests {
             std::env::consts::ARCH
         )));
         assert!(caps.contains(&"source-sandbox".to_string()));
+        assert!(caps.contains(&SESSION_HORIZON_EXTENSION_CAPABILITY.to_string()));
     }
 
     #[test]
     fn heartbeat_body_includes_public_base_url_only_when_configured() {
         let caps = vec!["linux".to_string()];
-        let without = build_heartbeat_body(&caps, None, "linux", "aarch64", 1, 0);
+        let without = build_heartbeat_body(&caps, None, "linux", "aarch64", 1, 0, false);
         assert!(
             without.get("public_base_url").is_none(),
             "absent public_base_url must not be sent (null would clear it server-side)"
@@ -5218,6 +5784,7 @@ mod tests {
             "aarch64",
             3,
             1,
+            false,
         );
         assert_eq!(
             with["public_base_url"].as_str(),
@@ -5230,7 +5797,7 @@ mod tests {
 
     #[test]
     fn heartbeat_body_reports_agent_version() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
         assert_eq!(body["agent_version"].as_str(), Some(agent_version()));
         assert_eq!(agent_version(), env!("CARGO_PKG_VERSION"));
     }
@@ -5526,7 +6093,7 @@ mod tests {
 
     #[test]
     fn heartbeat_advertises_supported_lease_kinds() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
         let kinds: Vec<&str> = body["supported_lease_kinds"]
             .as_array()
             .expect("supported_lease_kinds is an array")
@@ -5547,7 +6114,7 @@ mod tests {
 
     #[test]
     fn heartbeat_advertises_supported_snapshot_codecs_field() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
         assert!(
             body["supported_snapshot_codecs"].is_array(),
             "supported_snapshot_codecs must always be present (no legacy passthrough for codec)"
@@ -5671,14 +6238,17 @@ mod tests {
         let now = Instant::now();
         let future = now + Duration::from_secs(60);
         let past = now - Duration::from_secs(1);
+        let continue_control = ControlOutcome::Continue {
+            session_horizon: None,
+        };
 
         // Non-preview lease (deadline None): never breaks "preview_expired".
         assert_eq!(
-            restore_hold_break_reason(now, None, false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, None, false, continue_control),
             None
         );
         assert_eq!(
-            restore_hold_break_reason(now, None, true, ControlOutcome::Continue),
+            restore_hold_break_reason(now, None, true, continue_control),
             Some("workload_exited")
         );
         assert_eq!(
@@ -5692,24 +6262,24 @@ mod tests {
 
         // Preview lease, deadline not yet reached: keep holding.
         assert_eq!(
-            restore_hold_break_reason(now, Some(future), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(future), false, continue_control),
             None
         );
         // Preview lease, deadline passed: breaks "preview_expired".
         assert_eq!(
-            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(past), false, continue_control),
             Some("preview_expired")
         );
         // `now == deadline` counts as expired (>= boundary).
         assert_eq!(
-            restore_hold_break_reason(now, Some(now), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(now), false, continue_control),
             Some("preview_expired")
         );
 
         // Precedence: workload exit / owner stop / gone lease all win over the
         // preview deadline even when it has passed.
         assert_eq!(
-            restore_hold_break_reason(now, Some(past), true, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(past), true, continue_control),
             Some("workload_exited")
         );
         assert_eq!(
@@ -5719,6 +6289,168 @@ mod tests {
         assert_eq!(
             restore_hold_break_reason(now, Some(past), false, ControlOutcome::Done),
             Some("lease_gone")
+        );
+    }
+
+    #[test]
+    fn preview_session_horizon_is_monotonic_from_fixed_serving_start() {
+        use std::time::{Duration, Instant};
+
+        let serving_started_at = Instant::now();
+        let mut horizon = PreviewSessionHorizon::new(serving_started_at, 600);
+        let initial_deadline = serving_started_at + Duration::from_secs(600);
+        assert_eq!(horizon.deadline(), initial_deadline);
+
+        let extension = SessionHorizon {
+            generation: 1,
+            max_duration_secs: 3_600,
+            idle_grace_secs: MAX_SESSION_HORIZON_IDLE_GRACE_SECS,
+        };
+        assert!(horizon.try_apply(extension, serving_started_at + Duration::from_secs(600)));
+        assert_eq!(
+            horizon.deadline(),
+            serving_started_at + Duration::from_secs(3_600),
+            "an extension is total time from serving start, not time added at receipt"
+        );
+
+        let extended_deadline = horizon.deadline();
+        for rejected in [
+            SessionHorizon {
+                generation: 1,
+                max_duration_secs: 7_200,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 0,
+                max_duration_secs: 7_200,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: 1_800,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: MAX_SESSION_HORIZON_DURATION_SECS + 1,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: 7_200,
+                idle_grace_secs: MAX_SESSION_HORIZON_IDLE_GRACE_SECS + 1,
+            },
+        ] {
+            assert!(!horizon.try_apply(rejected, serving_started_at));
+            assert_eq!(horizon.deadline(), extended_deadline);
+            assert_eq!(horizon.generation, 1);
+            assert_eq!(horizon.max_duration_secs(), 3_600);
+        }
+
+        let same_duration_new_generation = SessionHorizon {
+            generation: 2,
+            max_duration_secs: 3_600,
+            idle_grace_secs: 0,
+        };
+        assert!(horizon.try_apply(same_duration_new_generation, serving_started_at));
+        assert_eq!(horizon.generation, 2);
+
+        let late = SessionHorizon {
+            generation: 3,
+            max_duration_secs: 7_200,
+            idle_grace_secs: 0,
+        };
+        assert!(!horizon.try_apply(late, serving_started_at + Duration::from_secs(7_200)));
+        assert_eq!(horizon.generation, 2);
+    }
+
+    #[test]
+    fn preview_session_horizon_caps_initial_command_fail_closed() {
+        use std::time::{Duration, Instant};
+
+        let serving_started_at = Instant::now();
+        let horizon =
+            PreviewSessionHorizon::new(serving_started_at, MAX_SESSION_HORIZON_DURATION_SECS + 1);
+        assert_eq!(
+            horizon.deadline(),
+            serving_started_at + Duration::from_secs(MAX_SESSION_HORIZON_DURATION_SECS)
+        );
+        assert_eq!(
+            horizon.max_duration_secs(),
+            MAX_SESSION_HORIZON_DURATION_SECS
+        );
+    }
+
+    #[test]
+    fn pixel_surface_requires_one_valid_private_first_frame_endpoint() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+            PIXEL_STREAM_PROFILE, PixelStreamViewport, SessionSurfaceDescriptor,
+            SessionSurfaceTransport,
+        };
+
+        let descriptor = SessionSurfaceDescriptor::PixelStream {
+            profile: PIXEL_STREAM_PROFILE.to_string(),
+            surface_id: "surface-1".to_string(),
+            transport: SessionSurfaceTransport::RfbWebsocket,
+            viewport: PixelStreamViewport {
+                width: 1280,
+                height: 720,
+            },
+            capabilities: BTreeMap::new(),
+        };
+        let endpoint = EndpointContract {
+            role: EndpointRole::PixelRfb,
+            protocol: EndpointProtocol::Tcp,
+            exposure: EndpointExposure::GuestPrivate,
+            port: 5900,
+            readiness: EndpointReadiness::FirstFrame,
+        };
+
+        assert_eq!(
+            selected_pixel_rfb_port(Some(&descriptor), std::slice::from_ref(&endpoint)).unwrap(),
+            Some(5900)
+        );
+        assert!(selected_pixel_rfb_port(Some(&descriptor), &[]).is_err());
+        assert!(selected_pixel_rfb_port(Some(&descriptor), &[endpoint.clone(), endpoint]).is_err());
+    }
+
+    #[test]
+    fn surface_origins_are_exact_and_https_except_for_loopback() {
+        assert_eq!(
+            normalize_surface_origin("https://app.ato.run/").unwrap(),
+            "https://app.ato.run"
+        );
+        assert_eq!(
+            normalize_surface_origin("http://localhost:5173").unwrap(),
+            "http://localhost:5173"
+        );
+        assert!(normalize_surface_origin("http://localhost.evil.example").is_err());
+        assert!(normalize_surface_origin("https://app.ato.run/path").is_err());
+        assert!(normalize_surface_origin("https://app.ato.run?next=evil").is_err());
+        assert!(normalize_surface_origin("https://user@app.ato.run").is_err());
+    }
+
+    #[test]
+    fn pixel_preview_idle_timeout_is_saturating_and_activity_based() {
+        assert!(!pixel_surface_idle_expired(10_000, None, Some(5)));
+        assert!(!pixel_surface_idle_expired(10_000, Some(6_000), None));
+        assert!(!pixel_surface_idle_expired(10_000, Some(6_001), Some(4)));
+        assert!(pixel_surface_idle_expired(10_000, Some(6_000), Some(4)));
+        assert!(!pixel_surface_idle_expired(10, Some(20), Some(1)));
+
+        assert_eq!(latest_pixel_activity(None, None), None);
+        assert_eq!(latest_pixel_activity(Some(5_000), None), Some(5_000));
+        assert_eq!(latest_pixel_activity(None, Some(8_000)), Some(8_000));
+        assert_eq!(
+            latest_pixel_activity(Some(5_000), Some(8_000)),
+            Some(8_000),
+            "a newly applied horizon resets idle accounting even before new input"
+        );
+        assert_eq!(
+            latest_pixel_activity(Some(9_000), Some(8_000)),
+            Some(9_000),
+            "real input after the reset remains authoritative"
         );
     }
 
@@ -6992,6 +7724,7 @@ mod tests {
             "aarch64",
             1,
             0,
+            false,
         );
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
@@ -7028,7 +7761,7 @@ mod tests {
             "{\"error\":\"runner_revoked\",\"message\":\"This runner was revoked\"}",
         );
         let client = reqwest::Client::new();
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
         let _ = server.join();
@@ -7073,8 +7806,26 @@ mod tests {
         )
         .expect("parse");
         assert!(stop.stop_requested);
+        let malformed_horizon_stop: LeaseControl = serde_json::from_str(
+            "{\"stop_requested\":true,\"session_horizon\":{\"generation\":2}}",
+        )
+        .expect("a malformed horizon must not hide stop_requested");
+        assert!(malformed_horizon_stop.stop_requested);
+        assert!(malformed_horizon_stop.session_horizon.is_none());
         let go: LeaseControl = serde_json::from_str("{\"stop_requested\":false}").expect("parse");
         assert!(!go.stop_requested);
+        let legacy_horizon: LeaseControl = serde_json::from_str(
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":1,\"max_duration_secs\":3600}}",
+        )
+        .expect("a pre-idle-grace horizon remains compatible");
+        assert_eq!(
+            legacy_horizon.session_horizon,
+            Some(SessionHorizon {
+                generation: 1,
+                max_duration_secs: 3_600,
+                idle_grace_secs: 0,
+            })
+        );
         // A missing field is "no stop requested", never a parse error.
         let empty: LeaseControl = serde_json::from_str("{}").expect("parse");
         assert!(!empty.stop_requested);
@@ -7087,7 +7838,7 @@ mod tests {
         // 200 + stop_requested true -> Stop, with runner-token bearer auth.
         let (base, server) = one_shot_http(
             "HTTP/1.1 200 OK",
-            "{\"lease_id\":\"01L\",\"stop_requested\":true,\"stop_requested_at\":\"t\"}",
+            "{\"lease_id\":\"01L\",\"stop_requested\":true,\"stop_requested_at\":\"t\",\"session_horizon\":{\"generation\":2,\"max_duration_secs\":3600}}",
         );
         let url = format!("{base}/v1/runner-leases/01L/control");
         let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
@@ -7107,12 +7858,69 @@ mod tests {
         let _ = server.join();
         assert!(matches!(outcome, ControlOutcome::Done));
 
-        // 200 + stop_requested false -> Continue.
-        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"stop_requested\":false}");
+        // 200 + stop_requested false carries a typed horizon update.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":2,\"max_duration_secs\":3600,\"idle_grace_secs\":300}}",
+        );
         let url = format!("{base}/v1/runner-leases/01L/control");
         let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
         let _ = server.join();
-        assert!(matches!(outcome, ControlOutcome::Continue));
+        assert!(matches!(
+            outcome,
+            ControlOutcome::Continue {
+                session_horizon: Some(SessionHorizon {
+                    generation: 2,
+                    max_duration_secs: 3_600,
+                    idle_grace_secs: 300,
+                })
+            }
+        ));
+
+        // A partial horizon is ignored while the otherwise valid control response
+        // remains usable. The previous deadline is therefore preserved.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":3}}",
+        );
+        let url = format!("{base}/v1/runner-leases/01L/control");
+        let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(
+            outcome,
+            ControlOutcome::Continue {
+                session_horizon: None
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn report_session_horizon_applied_posts_bearer_ack() {
+        let client = reqwest::Client::new();
+        let applied = SessionHorizon {
+            generation: 2,
+            max_duration_secs: 3_600,
+            idle_grace_secs: 300,
+        };
+        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"ok\":true}");
+        assert!(report_session_horizon_applied(&client, &base, "ato_rnr_t", "01L", applied).await);
+        let request = server.join().expect("server");
+        assert!(request.contains("POST /v1/runner-leases/01L/horizon-applied"));
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: bearer ato_rnr_t")
+        );
+        assert!(request.contains("\"generation\":2"));
+        assert!(request.contains("\"max_duration_secs\":3600"));
+        assert!(request.contains("\"idle_grace_secs\":300"));
+
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 500 Internal Server Error",
+            "{\"error\":\"retry\"}",
+        );
+        assert!(!report_session_horizon_applied(&client, &base, "ato_rnr_t", "01L", applied).await);
+        let _ = server.join();
     }
 
     // ── ExecutionPlan consent gate (P4-A) ──

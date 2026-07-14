@@ -134,6 +134,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            surface_requirement: None,
             layers: crate::manifest::ReadyStateLayers::default(),
             hotset_profile: Default::default(),
             snapshot_backend: crate::manifest::SnapshotBackendInfo {
