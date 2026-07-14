@@ -495,10 +495,10 @@ impl FirecrackerBackend {
         }
     }
 
-    fn net_up(&self, guest_port: u16) -> Result<(), SnapshotError> {
+    fn net_up(&self, guest_ports: &[u16]) -> Result<(), SnapshotError> {
         match self.config.netns.clone() {
             None => self.net_up_root(),
-            Some(ns) => self.net_up_netns(&ns, guest_port),
+            Some(ns) => self.net_up_netns(&ns, guest_ports),
         }
     }
 
@@ -523,7 +523,7 @@ impl FirecrackerBackend {
     /// at `ingress_ip` via a veth `/30` + in-ns DNAT to the guest. All addresses
     /// are integer-derived and passed as argv (no shell). Idempotent: a stale
     /// namespace from a crashed prior run is torn down first.
-    fn net_up_netns(&self, ns: &str, guest_port: u16) -> Result<(), SnapshotError> {
+    fn net_up_netns(&self, ns: &str, guest_ports: &[u16]) -> Result<(), SnapshotError> {
         let tap = &self.config.tap_dev;
         let host_ip = &self.config.host_ip;
         let guest_ip = &self.config.guest_ip;
@@ -547,8 +547,6 @@ impl FirecrackerBackend {
             .ingress_ip
             .as_deref()
             .ok_or_else(|| self.backend_err("netns config missing ingress_ip"))?;
-        let port = guest_port.to_string();
-        let dnat = format!("{guest_ip}:{port}");
         let veth_root_cidr = format!("{veth_root_ip}/30");
         let ingress_cidr = format!("{ingress_ip}/30");
         let host_cidr = format!("{host_ip}/24");
@@ -574,26 +572,36 @@ impl FirecrackerBackend {
         // the guest replies to a same-subnet source. All rules stay inside `ns`
         // (root namespace is left untouched → teardown is just `ip netns del`).
         self.run_in_netns(ns, &["sysctl", "-q", "-w", "net.ipv4.ip_forward=1"])?;
-        self.run_in_netns(
-            ns,
-            &[
-                "iptables",
-                "-t",
-                "nat",
-                "-A",
-                "PREROUTING",
-                "-d",
-                ingress_ip,
-                "-p",
-                "tcp",
-                "--dport",
-                &port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                &dnat,
-            ],
-        )?;
+        // One DNAT per exposed guest port: the app/healthcheck port always, plus
+        // any sealed guest_private pixel_rfb endpoint (the host-side pixel
+        // gateway dials the INGRESS ip — without its own DNAT the RFB connect
+        // is refused by the namespace even though the guest listener is up).
+        // The ingress ip itself stays host-internal (a /30 veth), so this never
+        // widens public exposure.
+        for guest_port in guest_ports {
+            let port = guest_port.to_string();
+            let dnat = format!("{guest_ip}:{port}");
+            self.run_in_netns(
+                ns,
+                &[
+                    "iptables",
+                    "-t",
+                    "nat",
+                    "-A",
+                    "PREROUTING",
+                    "-d",
+                    ingress_ip,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &port,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dnat,
+                ],
+            )?;
+        }
         self.run_in_netns(
             ns,
             &[
@@ -1574,7 +1582,7 @@ impl SnapshotBackend for FirecrackerBackend {
         }
 
         // Build always runs in the root namespace (default config, netns=None).
-        self.net_up(port)?;
+        self.net_up(&[port])?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
             let fc = bench::time("build.start_fc", || {
                 self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
@@ -2056,8 +2064,19 @@ impl SnapshotBackend for FirecrackerBackend {
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
-            // Per-slot DNAT targets this guest port (see net_up_netns).
-            self.net_up(port)?;
+            // Per-slot DNAT targets every exposed guest port (see net_up_netns):
+            // the app/healthcheck port plus any sealed guest_private pixel_rfb
+            // endpoint the host-side gateway must reach through the ingress ip.
+            let mut guest_ports = vec![port];
+            for endpoint in &input.manifest.restore_contract.endpoints {
+                if endpoint.role == protocol::session_surface::EndpointRole::PixelRfb
+                    && let Ok(rfb_port) = u16::try_from(endpoint.port)
+                    && !guest_ports.contains(&rfb_port)
+                {
+                    guest_ports.push(rfb_port);
+                }
+            }
+            self.net_up(&guest_ports)?;
 
             // U1 (#854)/U2 (#855): when ATO_FC_UFFD is set, start the local page-server
             // on a UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
