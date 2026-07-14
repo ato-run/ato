@@ -1250,6 +1250,57 @@ run = "main.sh""#;
     assert!(lockfile.tools.is_none());
 }
 
+#[test]
+fn generate_lockfile_preserves_target_surface_requirement() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("capsule.toml");
+    let manifest_text = r#"
+schema_version = "0.3"
+name = "pixel-desktop"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source/native"
+run = "main.sh"
+
+[targets.desktop.surface]
+kind = "pixel_stream"
+profiles = ["ato.pixel-stream.v1"]
+"#;
+    fs::write(&manifest_path, manifest_text).unwrap();
+    fs::write(temp.path().join("main.sh"), "echo demo").unwrap();
+
+    let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+    let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let lockfile = rt
+        .block_on(generate_lockfile(
+            &manifest_path,
+            &manifest_raw,
+            manifest_text,
+            temp.path(),
+            reporter,
+            false,
+        ))
+        .expect("generate lockfile");
+
+    let surface = lockfile
+        .targets
+        .get("desktop")
+        .and_then(|target| target.surface_requirement.as_ref())
+        .expect("surface requirement in lock");
+    assert_eq!(
+        surface.kind,
+        protocol::session_surface::SessionSurfaceKind::PixelStream
+    );
+    assert_eq!(
+        surface.profiles.as_deref(),
+        Some(["ato.pixel-stream.v1".to_string()].as_slice())
+    );
+}
+
 #[tokio::test]
 async fn run_command_inner_rejects_relative_program() {
     let cmd = std::process::Command::new("echo");

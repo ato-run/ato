@@ -298,6 +298,7 @@ fn import_and_seal(
             store,
             capsule_manifest_hash: format!("blake3:docker-import-smoke-{}", app.repo),
             runner_class: None,
+            surface_requirement: None,
             layers: BuildLayers {
                 rootfs: rootfs_bytes,
                 runtime: None,
@@ -310,6 +311,7 @@ fn import_and_seal(
                 ports: vec![outcome.plan.port],
                 healthcheck: Some(readiness.clone()),
                 expected_ready_ms: Some(20_000),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],

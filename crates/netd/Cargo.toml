@@ -69,7 +69,14 @@ http-body-util = "0.1"
 # http: Request/Response/HeaderMap types used directly in ingress/hop_by_hop.
 http = "1"
 # tokio-tungstenite: WebSocket upgrade relay via tokio::io::copy_bidirectional.
-tokio-tungstenite = "0.28"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+# Internal surface assertions use the same compact HMAC-SHA256 envelope as
+# the control plane. Keys stay in runner memory and are zeroized on drop.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+zeroize = "1.7"
 # url: Url parsing for upstream_url in RegisterIngress.
 url = "2"
 # bytes: Bytes type used in BoxBody.
@@ -97,7 +104,6 @@ http-body-util = "0.1"
 http = "1"
 tokio-tungstenite = "0.28"
 bytes = "1"
-futures-util = "0.3"
 serial_test = "3"
 # async-trait: needed by fake Resolver impls in egress unit tests.
 async-trait = "0.1"

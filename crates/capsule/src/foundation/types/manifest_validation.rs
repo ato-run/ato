@@ -322,6 +322,13 @@ impl CapsuleManifest {
         let mut requires_web_services_validation = false;
 
         for (label, target) in &named_targets {
+            if let Some(surface) = &target.surface
+                && let Err(error) = surface.validate()
+            {
+                errors.push(ValidationError::InvalidTarget(format!(
+                    "target '{label}' has invalid surface requirement: {error}"
+                )));
+            }
             let runtime_raw = target.runtime.trim().to_ascii_lowercase();
             // Split compound selectors (e.g. "web/node" → base="web", compound_driver=Some("node"))
             let (runtime, compound_driver) =
