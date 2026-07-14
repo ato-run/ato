@@ -3,11 +3,27 @@
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
+import socket
 import subprocess
 
 
 APP_PID = int(os.environ["ATO_PIXEL_APP_PID"])
 WINDOW_ID = os.environ["ATO_PIXEL_WINDOW_ID"]
+RFB_PORT = int(os.environ.get("ATO_PIXEL_RFB_PORT", "5900"))
+
+
+def rfb_is_accepting() -> bool:
+    # The snapshot must NOT seal until x11vnc is actually accepting on the RFB
+    # port: the sealed frame is a memory resume, so whatever is (not) listening
+    # at seal time is (not) listening at restore time. Gating readiness on the
+    # window alone let the seal race ahead of the x11vnc bind, and the restored
+    # guest then refused the host gateway's RFB connect (connection refused on
+    # 5900 → pixel surface never becomes interactive).
+    try:
+        with socket.create_connection(("127.0.0.1", RFB_PORT), timeout=1):
+            return True
+    except OSError:
+        return False
 
 
 def gui_is_ready() -> bool:
@@ -27,7 +43,11 @@ def gui_is_ready() -> bool:
             text=True,
             timeout=1,
         ).stdout
-        return "AtoPixelFixture" in wm_class and "Map State: IsViewable" in window
+        return (
+            "AtoPixelFixture" in wm_class
+            and "Map State: IsViewable" in window
+            and rfb_is_accepting()
+        )
     except (OSError, subprocess.SubprocessError):
         return False
 
