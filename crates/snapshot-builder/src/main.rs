@@ -40,6 +40,7 @@ use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
+use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::CapsuleManifest;
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
@@ -52,8 +53,9 @@ use snapshot::docker_import::{
     validate_ephemeral_mounts, validate_image_ref,
 };
 use snapshot::rootfs_builder::{
-    RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
-    materialize_source, reject_control_chars, valid_github_owner, valid_github_repo,
+    RootfsBuildSpec, SourceProbe, build_rootfs, checkout_source_tree, derive_build_spec,
+    derive_supervisor_build_spec, materialize_source, reject_control_chars, valid_github_owner,
+    valid_github_repo,
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
@@ -316,10 +318,13 @@ fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
-        // ato#1002: advertise both build lanes — the server hands a job ONLY if its
-        // kind is listed here (an older ato-api ignores the field and keeps handing
-        // recipe jobs exactly as before).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import", "compose_import"] }))
+        // ato#1002: advertise every lane this builder handles — the server hands a job
+        // ONLY if its kind is listed here (an older ato-api ignores the field and keeps
+        // handing recipe jobs exactly as before). `source_materialize`
+        // (SOURCE_MATERIALIZATION_SPEC) is a non-sealing lane on the SAME claim/ack lease
+        // machinery: it emits a frozen source archive + A1v2 identity, not a snapshot
+        // artifact (dispatched in `run_once`, not `produce_build`).
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import", "compose_import", "source_materialize"] }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -352,6 +357,111 @@ fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<(
         .set("authorization", &format!("Bearer {}", cfg.token))
         .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "failed", "failure_stage": stage, "failure_reason": reason }))
         .map_err(|e| anyhow!("failed ack: {e}"))?;
+    Ok(())
+}
+
+/// SOURCE_MATERIALIZATION_SPEC §4.1: the success ack for a `source_materialize` job —
+/// the frozen source's A1v2 identity, the archive byte identity, and the observed
+/// sizes/count. All non-secret build provenance.
+#[derive(Debug, Clone, Serialize)]
+struct SourceMaterializeOk {
+    materialized_source_tree_hash: String,
+    source_archive_hash: String,
+    file_count: u64,
+    uncompressed_bytes: u64,
+    compressed_bytes: u64,
+    /// TODO(ato-api follow-up): SOURCE_MATERIALIZATION_SPEC §3.3 step 6 uploads the
+    /// archive to R2 at `source-archives/v1/sha256/{source_archive_hash}.tar.zst` via
+    /// an API-mediated write (the builder holds no R2 credentials). That transport does
+    /// not exist yet, so this builder-side slice leaves the frozen archive on local disk
+    /// and reports its path here; the follow-up wires the API-mediated upload + records
+    /// the R2 object, then this field can be dropped.
+    archive_path: String,
+}
+
+/// SOURCE_MATERIALIZATION_SPEC §4.2: the failure ack for a `source_materialize` job —
+/// the terminal pipeline state plus a machine `error_code` and a human `error_detail`.
+/// `pipeline_state` is `blocked_repo` (admissibility / cap violation — terminal) or
+/// `failed_internal` (IO / checkout / contract skew — retryable, ato-api owns the
+/// max-3-retries policy).
+#[derive(Debug, Clone, Serialize)]
+struct SourceMaterializeFail {
+    pipeline_state: String,
+    error_code: String,
+    error_detail: String,
+}
+
+impl SourceMaterializeFail {
+    /// A `failed_internal` failure raised by the builder before/around the archive
+    /// step (missing server-resolved source, git checkout failure) — retryable.
+    fn internal(code: &str, detail: String) -> Self {
+        Self {
+            pipeline_state: "failed_internal".to_string(),
+            error_code: code.to_string(),
+            error_detail: detail.chars().take(1800).collect(),
+        }
+    }
+
+    /// Map a [`SourceMaterializeError`] from the archive step onto the ack: the
+    /// pipeline state and machine code come from the error itself (admissibility /
+    /// cap → `blocked_repo`; archive IO → `failed_internal`), the detail from Display.
+    fn from_materialize_error(err: &SourceMaterializeError) -> Self {
+        Self {
+            pipeline_state: err.pipeline_state().to_string(),
+            error_code: err.error_code().to_string(),
+            error_detail: err.to_string().chars().take(1800).collect(),
+        }
+    }
+}
+
+/// Ack a materialized source on the shared claim/ack lease lane.
+///
+/// TODO(ato-api follow-up): ato-api does not yet accept a `source_materialize` ack —
+/// the claim/dispatch/DB wiring and the API-mediated R2 upload are a separate follow-up
+/// (SOURCE_MATERIALIZATION_SPEC §3.1 puts this on the SAME lease/ack machinery as
+/// snapshot builds). This posts `status = "materialized"` + the `source_materialized`
+/// result to the existing ack endpoint; the follow-up adds the server-side handler that
+/// persists the hashes/caps on the candidate, uploads the archive to R2, and advances
+/// the candidate to `analyzing`.
+fn ack_source_materialized(cfg: &Config, job_id: &str, ok: &SourceMaterializeOk) -> Result<()> {
+    let res = ureq::post(&format!(
+        "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
+        cfg.api_url
+    ))
+    .set("authorization", &format!("Bearer {}", cfg.token))
+    .send_json(
+        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialized", "source_materialized": ok }),
+    );
+    match res {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(anyhow!("source_materialize ack: status {code}: {body}"))
+        }
+        Err(e) => Err(anyhow!("source_materialize ack: {e}")),
+    }
+}
+
+/// Ack a `source_materialize` failure (blocked / internal) on the shared lane.
+///
+/// TODO(ato-api follow-up): same missing server-side handler as
+/// [`ack_source_materialized`]. Posts `status = "materialize_failed"` +
+/// `{pipeline_state, error_code, error_detail}`; ato-api owns mapping `blocked_repo`
+/// (terminal) vs `failed_internal` (retry, max 3).
+fn ack_source_materialize_failed(
+    cfg: &Config,
+    job_id: &str,
+    fail: &SourceMaterializeFail,
+) -> Result<()> {
+    ureq::post(&format!(
+        "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
+        cfg.api_url
+    ))
+    .set("authorization", &format!("Bearer {}", cfg.token))
+    .send_json(
+        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialize_failed", "source_materialize_failure": fail }),
+    )
+    .map_err(|e| anyhow!("source_materialize failed-ack: {e}"))?;
     Ok(())
 }
 
@@ -496,7 +606,9 @@ struct ProducedBuild {
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
 /// is a server/daemon contract skew (the claim advertised `supported_kinds`) — fail
-/// the job closed at `claim_kind`, never guess a lane.
+/// the job closed at `claim_kind`, never guess a lane. `source_materialize` never
+/// reaches here: it is a non-sealing lane intercepted in `run_once` (it produces a
+/// source archive, not a `ProducedBuild`).
 fn produce_build(
     cfg: &Config,
     job: &ClaimedJob,
@@ -1716,6 +1828,61 @@ fn clone_pinned_source(
 
 /// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
 /// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
+/// SOURCE_MATERIALIZATION_SPEC: process a `source_materialize` job. Unlike the build
+/// lanes this seals NO snapshot artifact and needs no KVM/backend — it checks out the
+/// pinned public source, freezes it into a deterministic content-addressed `.tar.zst`
+/// with its A1v2 identity, and reports the hashes on the same claim/ack lease lane.
+///
+/// Steps: (1) check out the SERVER-RESOLVED pinned commit, reusing
+/// [`checkout_source_tree`] (identity-validated, full-SHA pin, contained — but NO
+/// capsule.toml requirement, since a source freeze applies no recipe); (2) run
+/// [`materialize_source_archive`], which enforces A1v2 admissibility + the archive caps
+/// and produces the frozen `.tar.zst` + its identity.
+fn process_source_materialize_job(
+    cfg: &Config,
+    job: &ClaimedJob,
+) -> std::result::Result<SourceMaterializeOk, SourceMaterializeFail> {
+    let jobdir = cfg.work.join(&job.id);
+    let _ = std::fs::remove_dir_all(&jobdir);
+
+    // 1. Materialize the SERVER-RESOLVED pinned source (owner/repo/commit/subdir). A
+    //    source_materialize job carries no recipe manifest and requires no capsule.toml —
+    //    it freezes the repo tree as-is. A missing source is a server/daemon contract
+    //    skew (the kind was claimed but no identity provided): failed_internal.
+    let source = job.source.as_ref().ok_or_else(|| {
+        SourceMaterializeFail::internal(
+            "source_missing",
+            "source_materialize job carries no server-resolved source".to_string(),
+        )
+    })?;
+    let checkout = checkout_source_tree(
+        &source.github_owner,
+        &source.github_repo,
+        &source.commit_sha,
+        source.subdirectory.as_deref(),
+        &jobdir.join("src"),
+    )
+    .map_err(|e| SourceMaterializeFail::internal("checkout", e))?;
+
+    // 2. Freeze the checkout into a deterministic content-addressed archive. An
+    //    inadmissible tree / cap violation maps to blocked_repo; an archive IO error to
+    //    failed_internal — both via SourceMaterializeError::pipeline_state.
+    let out = jobdir.join("source.tar.zst");
+    let ms = materialize_source_archive(&checkout, &out)
+        .map_err(|e| SourceMaterializeFail::from_materialize_error(&e))?;
+
+    Ok(SourceMaterializeOk {
+        materialized_source_tree_hash: ms.materialized_source_tree_hash,
+        source_archive_hash: ms.source_archive_hash,
+        file_count: ms.file_count,
+        uncompressed_bytes: ms.uncompressed_bytes,
+        compressed_bytes: ms.compressed_bytes,
+        // TODO(ato-api follow-up): left on local disk until the API-mediated R2 upload
+        // exists (see `ack_source_materialized`).
+        archive_path: out.display().to_string(),
+    })
+}
+
 fn process_job(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -1942,6 +2109,30 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
     let jobs = claim(cfg)?;
     for job in &jobs {
         eprintln!("[builder] claimed {} (capsule {})", job.id, job.capsule_id);
+        // SOURCE_MATERIALIZATION_SPEC: source_materialize is a non-sealing lane on the
+        // same claim/ack machinery — it emits a frozen source archive + A1v2 identity,
+        // not a snapshot artifact, so it never enters produce_build/seal and has its own
+        // ack shape. Unknown kinds still fall through to process_job → produce_build,
+        // which fails them closed at `claim_kind`.
+        if job.kind == "source_materialize" {
+            match process_source_materialize_job(cfg, job) {
+                Ok(ok) => {
+                    eprintln!(
+                        "[builder] materialized source {} (archive {})",
+                        job.id, ok.source_archive_hash
+                    );
+                    ack_source_materialized(cfg, &job.id, &ok)?;
+                }
+                Err(fail) => {
+                    eprintln!(
+                        "[builder] source_materialize {} -> {}/{}: {}",
+                        job.id, fail.pipeline_state, fail.error_code, fail.error_detail
+                    );
+                    ack_source_materialize_failed(cfg, &job.id, &fail)?;
+                }
+            }
+            continue;
+        }
         match process_job(cfg, backend, job) {
             Ok(artifact) => {
                 eprintln!(
@@ -3367,5 +3558,101 @@ targets = ["web"]
             "asc.",
             v["snapshot_codec_id"].as_str().unwrap()
         ));
+    }
+
+    // ── SOURCE_MATERIALIZATION_SPEC: source_materialize ack payloads ─────────
+
+    #[test]
+    fn source_materialized_ack_carries_exactly_the_result_fields() {
+        // SOURCE_MATERIALIZATION_SPEC §4.1: success ack = the A1v2 identity, the
+        // archive byte identity, and the observed sizes/count (+ the local archive
+        // path until the R2 upload follow-up lands).
+        let ok = SourceMaterializeOk {
+            materialized_source_tree_hash: "sha256:aa".into(),
+            source_archive_hash: "sha256:bb".into(),
+            file_count: 42,
+            uncompressed_bytes: 4096,
+            compressed_bytes: 1024,
+            archive_path: "/work/job_x/source.tar.zst".into(),
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["materialized_source_tree_hash"], "sha256:aa");
+        assert_eq!(v["source_archive_hash"], "sha256:bb");
+        assert_eq!(v["file_count"], 42);
+        assert_eq!(v["uncompressed_bytes"], 4096);
+        assert_eq!(v["compressed_bytes"], 1024);
+        assert_eq!(v["archive_path"], "/work/job_x/source.tar.zst");
+        // No stray fields leak into the ack.
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 6, "unexpected ack fields: {v}");
+    }
+
+    #[test]
+    fn admissibility_failure_maps_to_terminal_blocked_repo() {
+        // An A1v2 admissibility violation (here: a symlink) is a terminal blocked_repo
+        // with a stable machine code; the ack carries pipeline_state/error_code/detail.
+        let err = SourceMaterializeError::Inadmissible(
+            capsule::foundation::blob::SourceAdmissibilityError::Symlink {
+                path: std::path::PathBuf::from("link"),
+            },
+        );
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "blocked_repo");
+        assert_eq!(fail.error_code, "inadmissible_source_tree");
+        assert!(
+            fail.error_detail.contains("symlink"),
+            "{}",
+            fail.error_detail
+        );
+
+        let v = serde_json::to_value(&fail).unwrap();
+        assert_eq!(v["pipeline_state"], "blocked_repo");
+        assert_eq!(v["error_code"], "inadmissible_source_tree");
+        assert!(v.get("error_detail").is_some());
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "unexpected fail fields: {v}"
+        );
+    }
+
+    #[test]
+    fn archive_cap_failure_maps_to_blocked_repo() {
+        // An archive-level cap violation is also terminal blocked_repo, with its own
+        // machine code so the pipeline need not string-match the detail.
+        let err = SourceMaterializeError::CompressedTooLarge {
+            bytes: 200 * 1024 * 1024,
+            limit: 100 * 1024 * 1024,
+        };
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "blocked_repo");
+        assert_eq!(fail.error_code, "compressed_cap_exceeded");
+    }
+
+    #[test]
+    fn archive_io_failure_is_retryable_failed_internal() {
+        // An archive-side IO error is transient — failed_internal (ato-api retries it,
+        // max 3), never a block.
+        let err = SourceMaterializeError::Io {
+            context: "write archive".into(),
+            source: std::io::Error::other("disk full"),
+        };
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "failed_internal");
+        assert_eq!(fail.error_code, "io_error");
+    }
+
+    #[test]
+    fn builder_side_contract_skew_is_failed_internal() {
+        // A source_materialize job with no server-resolved source (or a checkout
+        // failure) is a builder/daemon contract skew — failed_internal, retryable.
+        let fail = SourceMaterializeFail::internal(
+            "source_missing",
+            "source_materialize job carries no server-resolved source".into(),
+        );
+        assert_eq!(fail.pipeline_state, "failed_internal");
+        assert_eq!(fail.error_code, "source_missing");
+        let v = serde_json::to_value(&fail).unwrap();
+        assert_eq!(v["pipeline_state"], "failed_internal");
     }
 }
