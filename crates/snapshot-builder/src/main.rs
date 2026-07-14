@@ -42,6 +42,10 @@ use capsule::engine::execution_graph::{
 };
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsulefs::CasStore;
+use protocol::session_surface::{
+    EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+    PIXEL_STREAM_PROFILE, SessionSurfaceKind,
+};
 use serde::{Deserialize, Serialize};
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
@@ -458,6 +462,13 @@ struct ProducedBuild {
     execution_id: String,
     capsule_manifest_hash: String,
     surface_requirement: Option<SessionSurfaceRequirement>,
+    /// Explicit restore endpoints sealed into the manifest's restore contract.
+    /// Empty for Web artifacts (the legacy `ports` projection stays
+    /// authoritative); a pixel import seals `app_http` + `pixel_rfb` here —
+    /// the runner refuses a pixel descriptor without exactly one sealed
+    /// `pixel_rfb` endpoint, so the pair is derived and validated fail-closed
+    /// at produce time ([`pixel_import_contract`]).
+    endpoints: Vec<EndpointContract>,
     supervisor: Option<SupervisorBindings>,
     // ── sealed-ack facts (Artifact provenance) ──
     supervisor_ack: Option<SupervisorAck>,
@@ -559,6 +570,19 @@ fn produce_recipe_build(
         surface
             .validate()
             .map_err(|error| fail("manifest", format!("invalid surface requirement: {error}")))?;
+        // The recipe lane has no way to seal the explicit `pixel_rfb` restore
+        // endpoint a pixel artifact requires (the runner refuses a pixel
+        // descriptor without exactly one) — sealing the requirement alone would
+        // register an artifact that can NEVER restore. Fail closed here instead;
+        // pixel builds go through the dockerfile_import lane's `pixel_rfb_port`.
+        if surface.kind == SessionSurfaceKind::PixelStream {
+            return Err(fail(
+                "manifest",
+                "pixel_stream surface requirements are not supported by the recipe lane \
+                 (use the dockerfile_import lane with params.pixel_rfb_port)"
+                    .to_string(),
+            ));
+        }
     }
     let envelope = ReadyStateDeclaredEnvelope {
         source_identifier: store_source_identifier(
@@ -630,6 +654,7 @@ fn produce_recipe_build(
         execution_id: declared_execution_id,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
         surface_requirement: target.surface.clone(),
+        endpoints: Vec::new(),
         supervisor,
         supervisor_ack,
         manifest_source: manifest_source.to_string(),
@@ -647,6 +672,62 @@ fn produce_recipe_build(
 /// whose manifest gate stays intact for recipe jobs), then run the v1.7 Dockerfile
 /// import (secret policy fixed to `Reject`: the Store job shape carries no secret
 /// conversion opt-in) and hand the packed ext4 to the SAME steps 4-7 as a recipe job.
+/// Pixel Stream v1: derive the (surface requirement, sealed endpoints) pair a
+/// `dockerfile_import` job opts into via `params.pixel_rfb_port`. `None` keeps
+/// the Web-only import contract byte-identical (no requirement, no endpoints).
+/// Every derived endpoint is re-validated through the protocol contract rules
+/// (`EndpointContract::validate`) so an invalid pair can never reach seal.
+fn pixel_import_contract(
+    pixel_rfb_port: Option<u16>,
+    app_port: u16,
+    healthcheck_path: &str,
+) -> std::result::Result<(Option<SessionSurfaceRequirement>, Vec<EndpointContract>), String> {
+    let Some(rfb_port) = pixel_rfb_port else {
+        return Ok((None, Vec::new()));
+    };
+    if rfb_port == app_port {
+        // Defense in depth: run_dockerfile_import already refuses the collision
+        // at plan derivation; keep the produce-time gate self-contained too.
+        return Err(format!(
+            "pixel_rfb_port {rfb_port} collides with the public app port {app_port}"
+        ));
+    }
+    let requirement = SessionSurfaceRequirement {
+        kind: SessionSurfaceKind::PixelStream,
+        profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
+    };
+    requirement
+        .validate()
+        .map_err(|error| format!("derived pixel surface requirement is invalid: {error}"))?;
+    let endpoints = vec![
+        EndpointContract {
+            role: EndpointRole::AppHttp,
+            protocol: EndpointProtocol::Http,
+            exposure: EndpointExposure::HostInternal,
+            port: u32::from(app_port),
+            readiness: EndpointReadiness::HttpGet {
+                path: healthcheck_path.to_string(),
+            },
+        },
+        EndpointContract {
+            role: EndpointRole::PixelRfb,
+            protocol: EndpointProtocol::Tcp,
+            exposure: EndpointExposure::GuestPrivate,
+            port: u32::from(rfb_port),
+            readiness: EndpointReadiness::FirstFrame,
+        },
+    ];
+    for endpoint in &endpoints {
+        endpoint.validate().map_err(|error| {
+            format!(
+                "derived pixel endpoint contract for {:?} is invalid: {error}",
+                endpoint.role
+            )
+        })?;
+    }
+    Ok((Some(requirement), endpoints))
+}
+
 fn produce_import_build(
     cfg: &Config,
     job: &ClaimedJob,
@@ -697,6 +778,7 @@ fn produce_import_build(
         volume_policy: params.volumes,
         ephemeral_mounts: params.ephemeral_mounts.clone(),
         host_bind_relay: params.host_bind_relay,
+        pixel_rfb_port: params.pixel_rfb_port,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
         size_mib: cfg.rootfs_size_mib,
@@ -754,17 +836,26 @@ fn produce_import_build(
     });
     let supervisor_ack = Some(SupervisorAck { binding_names });
 
+    let healthcheck = outcome
+        .plan
+        .readiness_http_path
+        .clone()
+        .unwrap_or_else(|| "/".to_string());
+    // Pixel Stream v1 (params.pixel_rfb_port): derive + validate the surface
+    // requirement and the explicit endpoint pair BEFORE seal — a pixel artifact
+    // without exactly one sealed pixel_rfb endpoint can never restore.
+    let (surface_requirement, endpoints) =
+        pixel_import_contract(params.pixel_rfb_port, outcome.plan.port, &healthcheck)
+            .map_err(|e| fail("eligibility", e))?;
+
     Ok(ProducedBuild {
         rootfs,
         port: outcome.plan.port,
-        healthcheck: outcome
-            .plan
-            .readiness_http_path
-            .clone()
-            .unwrap_or_else(|| "/".to_string()),
+        healthcheck,
         execution_id,
         capsule_manifest_hash,
-        surface_requirement: None,
+        surface_requirement,
+        endpoints,
         supervisor,
         supervisor_ack,
         manifest_source: "dockerfile_import".to_string(),
@@ -867,6 +958,7 @@ fn produce_oci_image_import(
         execution_id,
         capsule_manifest_hash,
         surface_requirement: None,
+        endpoints: Vec::new(),
         supervisor,
         supervisor_ack,
         manifest_source: "oci_image_import".to_string(),
@@ -897,6 +989,11 @@ struct DockerfileImportParams {
     /// ato#1026: `true` opts in to the localhost→guest-IP relay for apps that
     /// bind 127.0.0.1 inside the guest (default off).
     host_bind_relay: bool,
+    /// Pixel Stream v1: the guest-private RFB port. Presence opts the import
+    /// into `SessionSurface(kind=pixel_stream, ato.pixel-stream.v1)` — the ack
+    /// carries the surface requirement and the sealed manifest carries the
+    /// explicit `app_http` + `pixel_rfb` restore endpoints.
+    pixel_rfb_port: Option<u16>,
 }
 
 impl Default for DockerfileImportParams {
@@ -908,6 +1005,7 @@ impl Default for DockerfileImportParams {
             volumes: VolumePolicy::Reject,
             ephemeral_mounts: Vec::new(),
             host_bind_relay: false,
+            pixel_rfb_port: None,
         }
     }
 }
@@ -977,6 +1075,17 @@ fn parse_import_params(
                 out.host_bind_relay = val
                     .as_bool()
                     .ok_or("params.host_bind_relay must be a boolean")?;
+            }
+            "pixel_rfb_port" => {
+                // Pixel Stream v1: same strict u16 bounds as port_override. The
+                // app-port collision check needs the DERIVED app port, so it
+                // lands after plan derivation (`run_dockerfile_import`).
+                out.pixel_rfb_port = Some(
+                    val.as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .filter(|n| *n > 0)
+                        .ok_or("params.pixel_rfb_port must be an integer in 1..=65535")?,
+                );
             }
             other => {
                 return Err(format!(
@@ -1514,7 +1623,11 @@ fn process_job(
                 ports: vec![produced.port],
                 healthcheck: Some(produced.healthcheck.clone()),
                 expected_ready_ms: Some(8000),
-                ..Default::default()
+                // Pixel Stream v1: the explicit app_http + pixel_rfb endpoint
+                // pair (empty for Web artifacts — the legacy `ports` projection
+                // stays authoritative there, and absent endpoints keep every
+                // pre-existing manifest byte-identical).
+                endpoints: produced.endpoints.clone(),
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
@@ -1876,6 +1989,70 @@ targets = ["web"]
         assert!(m.files[0].if_missing);
         // The digest is a build-time output, never a parse input.
         assert!(m.files[0].source_digest.is_empty());
+    }
+
+    #[test]
+    fn parse_import_params_pixel_rfb_port_is_strictly_bounded() {
+        // Pixel Stream v1: same strict u16 discipline as port_override — a
+        // malformed opt-in must fail closed, never degrade to a Web build.
+        let ok = serde_json::json!({ "pixel_rfb_port": 5900 });
+        assert_eq!(
+            parse_import_params(Some(&ok)).unwrap().pixel_rfb_port,
+            Some(5900)
+        );
+        assert_eq!(
+            parse_import_params(None).unwrap().pixel_rfb_port,
+            None,
+            "absent param stays a Web-only import"
+        );
+        for bad in [
+            serde_json::json!({ "pixel_rfb_port": 0 }),
+            serde_json::json!({ "pixel_rfb_port": 65536 }),
+            serde_json::json!({ "pixel_rfb_port": -1 }),
+            serde_json::json!({ "pixel_rfb_port": "5900" }),
+            serde_json::json!({ "pixel_rfb_port": 5900.5 }),
+        ] {
+            let err = parse_import_params(Some(&bad)).unwrap_err();
+            assert!(err.contains("pixel_rfb_port"), "{err}");
+        }
+    }
+
+    #[test]
+    fn pixel_import_contract_seals_the_validated_endpoint_pair() {
+        // None keeps the Web-only contract byte-identical: no requirement, no
+        // endpoints (the legacy ports projection stays authoritative).
+        let (requirement, endpoints) = pixel_import_contract(None, 8080, "/health").unwrap();
+        assert!(requirement.is_none());
+        assert!(endpoints.is_empty());
+
+        // The opted-in pair: host_internal app_http readiness + guest_private
+        // first_frame RFB, exactly what the runner's restore gate requires.
+        let (requirement, endpoints) = pixel_import_contract(Some(5900), 8080, "/health").unwrap();
+        let requirement = requirement.expect("pixel requirement");
+        assert_eq!(requirement.kind, SessionSurfaceKind::PixelStream);
+        assert_eq!(
+            requirement.profiles.as_deref(),
+            Some(&[PIXEL_STREAM_PROFILE.to_string()][..])
+        );
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0].role, EndpointRole::AppHttp);
+        assert_eq!(endpoints[0].exposure, EndpointExposure::HostInternal);
+        assert_eq!(endpoints[0].port, 8080);
+        assert_eq!(
+            endpoints[0].readiness,
+            EndpointReadiness::HttpGet {
+                path: "/health".to_string()
+            }
+        );
+        assert_eq!(endpoints[1].role, EndpointRole::PixelRfb);
+        assert_eq!(endpoints[1].exposure, EndpointExposure::GuestPrivate);
+        assert_eq!(endpoints[1].port, 5900);
+        assert_eq!(endpoints[1].readiness, EndpointReadiness::FirstFrame);
+
+        // The RFB endpoint is guest-private and the app port is public — the
+        // same port cannot carry both contracts.
+        let err = pixel_import_contract(Some(8080), 8080, "/health").unwrap_err();
+        assert!(err.contains("collides"), "{err}");
     }
 
     #[test]
