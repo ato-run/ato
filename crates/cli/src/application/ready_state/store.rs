@@ -97,6 +97,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            surface_requirement: None,
             layers: snapshot::ReadyStateLayers {
                 rootfs: Some(rootfs),
                 ..Default::default()

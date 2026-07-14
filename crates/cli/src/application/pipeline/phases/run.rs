@@ -3704,9 +3704,8 @@ where
     // process, runtime process, or container has been created yet. In the
     // default profile this is a no-op; in strict mode it blocks the launch with
     // a typed `AtoExecutionError` (recoverable downstream via downcast) when a
-    // required input cannot be verified. The host/provider realization-evidence
-    // producer is #501, so until it lands strict mode is conservatively
-    // fail-closed — see `application::strict_realization`.
+    // required input cannot be verified. Source identity is re-hashed from the
+    // workspace here; other provider evidence remains conservatively fail-closed.
     if request.strict_realization {
         // Fail-closed: strict mode must refuse to launch anything it cannot even
         // inspect. A missing resolved launch graph is a block, not a skip.
@@ -3715,7 +3714,10 @@ where
                 crate::application::strict_realization::missing_launch_graph_error().into(),
             );
         };
-        let env = crate::application::strict_realization::launch_environment();
+        let env = crate::application::strict_realization::launch_environment(
+            &prepared.workspace_root,
+            &execution_receipt_document,
+        )?;
         // Unbox before handing to anyhow: downstream recovery downcasts to
         // `AtoExecutionError` (utils/error.rs), which a boxed wrap would hide.
         crate::application::strict_realization::enforce_strict_realization(

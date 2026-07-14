@@ -26,7 +26,8 @@ use super::{
     lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     read_selected_runtime_tool, required_runtime_version, resolve_external_capsule_dependencies,
-    semantic_manifest_hash_from_text, tool_capsule_env_bindings, verify_lockfile_against_contracts,
+    semantic_manifest_hash_from_text, surface_requirements_from_manifest,
+    tool_capsule_env_bindings, verify_lockfile_against_contracts,
     verify_lockfile_external_dependencies, verify_lockfile_manifest,
 };
 
@@ -1248,6 +1249,76 @@ run = "main.sh""#;
         .unwrap();
 
     assert!(lockfile.tools.is_none());
+}
+
+#[test]
+fn generate_lockfile_preserves_target_surface_requirement() {
+    let temp = TempDir::new().unwrap();
+    let manifest_path = temp.path().join("capsule.toml");
+    let manifest_text = r#"
+schema_version = "0.3"
+name = "pixel-desktop"
+version = "0.1.0"
+type = "app"
+default_target = "desktop"
+
+[targets.desktop]
+runtime = "source/native"
+run = "main.sh"
+
+[targets.desktop.surface]
+kind = "pixel_stream"
+profiles = ["ato.pixel-stream.v1"]
+"#;
+    fs::write(&manifest_path, manifest_text).unwrap();
+    fs::write(temp.path().join("main.sh"), "echo demo").unwrap();
+
+    let manifest_raw: toml::Value = toml::from_str(manifest_text).unwrap();
+    let reporter: Arc<dyn CapsuleReporter + 'static> = Arc::new(crate::reporter::NoOpReporter);
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let lockfile = rt
+        .block_on(generate_lockfile(
+            &manifest_path,
+            &manifest_raw,
+            manifest_text,
+            temp.path(),
+            reporter,
+            false,
+        ))
+        .expect("generate lockfile");
+
+    let surface = lockfile
+        .targets
+        .get("desktop")
+        .and_then(|target| target.surface_requirement.as_ref())
+        .expect("surface requirement in lock");
+    assert_eq!(
+        surface.kind,
+        protocol::session_surface::SessionSurfaceKind::PixelStream
+    );
+    assert_eq!(
+        surface.profiles.as_deref(),
+        Some(["ato.pixel-stream.v1".to_string()].as_slice())
+    );
+}
+
+#[test]
+fn surface_lock_propagation_accepts_validated_compat_target_fields() {
+    let manifest_text = r#"
+schema_version = "0.3"
+name = "compat-static"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "web/static"
+entrypoint = "index.html"
+"#;
+
+    let requirements = surface_requirements_from_manifest(manifest_text)
+        .expect("compat fields outside surface must not be revalidated here");
+    assert!(requirements.is_empty());
 }
 
 #[tokio::test]

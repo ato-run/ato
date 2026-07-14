@@ -221,10 +221,23 @@ pub struct GitHubCheckout {
     pub repository: String,
     pub publisher: String,
     pub checkout_dir: PathBuf,
+    pub source_archive_hash: String,
+    pub materialized_tree_hash: String,
     temp_dir: Option<tempfile::TempDir>,
 }
 
 impl GitHubCheckout {
+    pub fn materialized_source_identity(
+        &self,
+        commit_oid: impl Into<String>,
+    ) -> protocol::handle::MaterializedSourceIdentity {
+        protocol::handle::MaterializedSourceIdentity {
+            commit_oid: commit_oid.into(),
+            source_archive_hash: self.source_archive_hash.clone(),
+            materialized_tree_hash: self.materialized_tree_hash.clone(),
+        }
+    }
+
     pub fn preserve_for_debugging(&mut self) -> PathBuf {
         if let Some(temp_dir) = self.temp_dir.take() {
             std::mem::forget(temp_dir);
@@ -1020,21 +1033,7 @@ pub async fn download_github_repository_at_ref(
                 token,
             )
             .await?;
-            let temp_root = github_checkout_root()?;
-            let temp_dir = tempfile::Builder::new()
-                .prefix("gh-install-")
-                .tempdir_in(temp_root)
-                .with_context(|| "Failed to create GitHub checkout directory")?;
-            let checkout_dir = normalize_github_checkout_dir(
-                unpack_github_tarball(&archive_bytes, temp_dir.path())?,
-                repo,
-            )?;
-            return Ok(GitHubCheckout {
-                repository: normalized,
-                publisher,
-                checkout_dir,
-                temp_dir: Some(temp_dir),
-            });
+            return github_checkout_from_archive(&normalized, publisher, repo, &archive_bytes);
         }
 
         bail!(
@@ -1055,19 +1054,38 @@ pub async fn download_github_repository_at_ref(
         .bytes()
         .await
         .with_context(|| format!("Failed to read GitHub repository archive: {normalized}"))?;
+    github_checkout_from_archive(&normalized, publisher, repo, &archive_bytes)
+}
+
+fn github_checkout_from_archive(
+    repository: &str,
+    publisher: String,
+    repo: &str,
+    archive_bytes: &[u8],
+) -> Result<GitHubCheckout> {
+    let source_archive_hash = capsule::source_identity::source_archive_hash(archive_bytes);
     let temp_root = github_checkout_root()?;
     let temp_dir = tempfile::Builder::new()
         .prefix("gh-install-")
         .tempdir_in(temp_root)
         .with_context(|| "Failed to create GitHub checkout directory")?;
     let checkout_dir = normalize_github_checkout_dir(
-        unpack_github_tarball(&archive_bytes, temp_dir.path())?,
+        unpack_github_tarball(archive_bytes, temp_dir.path())?,
         repo,
     )?;
+    let materialized_tree_hash = capsule::source_identity::materialized_tree_hash(&checkout_dir)
+        .with_context(|| {
+            format!(
+                "GitHub repository source was not fully materialized at {}",
+                checkout_dir.display()
+            )
+        })?;
     Ok(GitHubCheckout {
-        repository: normalized,
+        repository: repository.to_string(),
         publisher,
         checkout_dir,
+        source_archive_hash,
+        materialized_tree_hash,
         temp_dir: Some(temp_dir),
     })
 }

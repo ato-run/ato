@@ -8,6 +8,8 @@ ssot:
   - "apps/ato-store/src/routes/publishers.ts"
 related:
   - "docs/rfcs/draft/CAPSULE_URL_SPEC.md"
+  - "docs/rfcs/draft/SESSION_SURFACE_CONTRACT.md"
+  - "docs/rfcs/draft/PIXEL_STREAM_PROFILE_V1.md"
 ---
 
 # ato.run Authority Policy v1
@@ -21,7 +23,7 @@ related:
 本書は以下を定義する:
 
 - ato.run authority 向けの canonicalization ルール
-- surface mapping（CLI、Desktop omnibar）
+- handle input mapping（CLI、Desktop omnibar）
 - `@version-id` の point-in-time identity 要件（authority 横断の原則を
   ato.run の具体に落としたもの）
 - ato.run 固有の予約 publisher 名
@@ -54,7 +56,11 @@ authority に関する Layer 2 policy を中心に扱い、github.com / localhos
 - `capsule://local/...`
 - `ato://<publisher>/<slug>`
 
-## 3. Surface Mapping
+## 3. Handle Input Mapping
+
+本節の `surface` は handle を入力する操作面という旧来の用語であり、session の
+presentation surface を意味しない。session 表示契約は
+`SESSION_SURFACE_CONTRACT.md` が定める。
 
 - CLI run surface:
   - `github.com/<owner>/<repo>`
@@ -146,21 +152,29 @@ search  topic  user  store  api  registry  help  docs  status
 GitHub:
 
 - handle: `capsule://github.com/owner/repo`
-- resolved snapshot: `{ commit_sha, default_branch, fetched_at }`
+- resolved snapshot identity facet: `{ commit_sha }`
+- resolution metadata: `{ default_branch, fetched_at }`
 
 Registry:
 
 - handle: `capsule://ato.run/publisher/slug[@version]`
-- resolved snapshot: `{ version, release_id|content_hash, fetched_at }`
+- resolved snapshot identity: `{ version, release_id|content_hash }`
+- resolution metadata: `{ fetched_at }`
 
 Loopback registry:
 
 - handle: `capsule://localhost:8787/publisher/slug[@version]`
-- resolved snapshot: `{ version, release_id|content_hash, fetched_at }`
+- resolved snapshot identity: `{ version, release_id|content_hash }`
+- resolution metadata: `{ fetched_at }`
 - host-side resolution fetch で metadata を取得する
 - guest runtime permission とは分離して扱う
 
 LaunchPlan, preview, promotion, materialization, trust evaluation は snapshot 単位で扱う。
+`default_branch` と `fetched_at` は cache/provenance metadata であり、snapshot hash、
+execution identity、artifact identity の入力にしてはならない。materialize 後の source
+identity は resolved commit に加えて source archive hash と最終 tree hash を固定する。
+`materialized_tree_hash` は解決済み submodule commit の内容と Git LFS object の実体を含む
+最終 tree 全体から計算する。`submodule_resolution` や `lfs_mode` の設定値だけでは代替しない。
 
 ## 6. Registry Identity Model
 
@@ -206,9 +220,12 @@ metadata cache と local trust decision は同じ責務にしない。
 ## 9. Handle Identity vs Session Display
 
 - handle は resource identity、snapshot は execution-time concrete identity とする。
-- Desktop は handle から直接 runtime を決め打ちしない。`ato app session start` が返す session envelope の `display_strategy` を最終採用する。
-- `display_strategy` は handle spec に従属する表示ヒントであり、少なくとも `guest_webview`, `web_url`, `terminal_stream`, `service_background`, `unsupported` を持つ。
-- `runtime=web` capsule は `web_url` strategy を返してよく、`metadata.ato_desktop_guest` を必須にしない。
+- 本仕様は presentation surface の選択、transport、access、readiness を定義しない。
+- session 表示は `SESSION_SURFACE_CONTRACT.md` の capsule × client × runner negotiation と tagged descriptor を採用する。
+- Pixel の profile/transport/readiness は `PIXEL_STREAM_PROFILE_V1.md` が定義する。
+- Run UX の `LaunchCardState`、待機、失敗、再接続は Run UX ADR が SSOT であり、本仕様へ移さない。
+- legacy `display_strategy` は移行期間の Web compatibility hint に限り、authority policy や canonical identity の入力にしてはならない。
+- Desktop は handle から runtime / surface を決め打ちしない。
 
 ## 10. Deprecated Aliases
 
@@ -219,4 +236,3 @@ metadata cache と local trust decision は同じ責務にしない。
 - 入力として受け付けるが、内部表現は常に `capsule://ato.run/` に正規化する。
 - `capsule.toml` や lockfile で `capsule://store/` を使用しているものは次の更新タイミングで `capsule://ato.run/` に書き換えることを推奨する。
 - 将来のメジャーバージョンで削除予定。
-
