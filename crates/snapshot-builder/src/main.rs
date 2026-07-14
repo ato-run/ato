@@ -3635,7 +3635,7 @@ targets = ["web"]
         // max 3), never a block.
         let err = SourceMaterializeError::Io {
             context: "write archive".into(),
-            source: std::io::Error::new(std::io::ErrorKind::Other, "disk full"),
+            source: std::io::Error::other("disk full"),
         };
         let fail = SourceMaterializeFail::from_materialize_error(&err);
         assert_eq!(fail.pipeline_state, "failed_internal");
