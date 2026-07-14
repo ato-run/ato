@@ -136,6 +136,7 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
         store,
         capsule_manifest_hash: "blake3:bench".to_string(),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs: rootfs.to_vec(),
             runtime: None,
@@ -148,6 +149,7 @@ fn build_input<'a>(store: &'a CasStore, rootfs: &[u8]) -> BuildReadyStateInput<'
             ports: vec![8080],
             healthcheck: Some("/health".into()),
             expected_ready_ms: Some(3000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],

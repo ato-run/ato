@@ -131,6 +131,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
             execution_id: input.execution_id.clone(),
+            surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
             snapshot_backend: SnapshotBackendInfo {
@@ -291,6 +292,7 @@ mod tests {
             store,
             capsule_manifest_hash: "blake3:capsule".to_string(),
             runner_class: None,
+            surface_requirement: None,
             layers: BuildLayers {
                 rootfs: b"fake rootfs image bytes".to_vec(),
                 runtime: Some(b"python runtime layer".to_vec()),
@@ -303,6 +305,7 @@ mod tests {
                 expected_ready_ms: Some(2000),
                 ports: vec![8080],
                 healthcheck: Some("/health".to_string()),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: secret_markers,

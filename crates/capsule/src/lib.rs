@@ -41,6 +41,7 @@ pub use foundation::metrics;
 pub use foundation::podman;
 pub use foundation::reporter;
 pub use foundation::runtime_setup;
+pub use foundation::source_identity;
 pub use foundation::types;
 
 // ── Layer 2: Contract ─────────────────────────────────────────────────────
