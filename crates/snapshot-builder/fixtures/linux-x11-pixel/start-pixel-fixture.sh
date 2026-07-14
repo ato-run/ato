@@ -67,33 +67,53 @@ AFTER_HASH=$(xwd -display "$DISPLAY" -root -silent | sha256sum | cut -d ' ' -f 1
 # session authorization is generated only after restore and enforced by the
 # host gateway. Network policy must prevent direct public access to port 5900.
 #
-# x11vnc runs under a restart supervisor, NOT as a one-shot: the Ready-State
-# artifact is a MEMORY snapshot, and x11vnc's internal select() timers trip on
-# the large wall-clock jump between seal and restore, so it can exit exactly
-# once right after the guest resumes. A one-shot x11vnc (in the fatal `wait`
-# set below) would then tear the whole fixture down and the restored guest
-# would refuse the host gateway's RFB connect. The loop rebinds 5900 within a
-# second, so the gateway's readiness retry connects on the restored session.
-run_x11vnc() {
-  while true; do
-    x11vnc \
-      -display "$DISPLAY" \
-      -listen 0.0.0.0 \
-      -rfbport 5900 \
-      -nopw \
-      -forever \
-      -shared \
-      -noclipboard \
-      -nosetclipboard \
-      -wait 33 \
-      -defer 33 \
-      -quiet || true
-    # Xvfb gone ⇒ nothing to serve; let the fixture tear down normally.
-    kill -0 "$XVFB_PID" 2>/dev/null || return 0
-    sleep 0.2
+# x11vnc runs under a SERVICE-liveness watchdog, not a process-liveness one:
+# the Ready-State artifact is a MEMORY snapshot, and the resumed x11vnc can
+# come back WEDGED — the process still exists, so an exit-triggered supervisor
+# never fires, but its RFB listener is gone and the host gateway's connect is
+# refused. The watchdog therefore probes the actual service (a TCP connect to
+# the RFB port) once a second; on failure it kills whatever x11vnc is left and
+# starts a fresh one. At build the first pass starts x11vnc normally (the
+# health gate below still waits for the listener before the seal); after a
+# restore the resumed watchdog detects the dead listener within ~1s and
+# rebinds, inside the gateway readiness probe's retry window. Transitions are
+# logged to /dev/console for restore forensics.
+rfb_listener_up() {
+  (exec 3<>/dev/tcp/127.0.0.1/5900) 2>/dev/null || return 1
+  exec 3>&- 3<&-
+  return 0
+}
+watch_x11vnc() {
+  while kill -0 "$XVFB_PID" 2>/dev/null; do
+    if ! rfb_listener_up; then
+      echo "[ato-pixel-fixture] rfb listener down; (re)starting x11vnc" >/dev/console 2>/dev/null || true
+      pkill -x x11vnc 2>/dev/null || true
+      sleep 0.2
+      pkill -9 -x x11vnc 2>/dev/null || true
+      x11vnc \
+        -display "$DISPLAY" \
+        -listen 0.0.0.0 \
+        -rfbport 5900 \
+        -nopw \
+        -forever \
+        -shared \
+        -noclipboard \
+        -nosetclipboard \
+        -wait 33 \
+        -defer 33 \
+        -quiet &
+      attempt=0
+      until rfb_listener_up; do
+        attempt=$((attempt + 1))
+        [ "$attempt" -le 50 ] || break
+        sleep 0.1
+      done
+      echo "[ato-pixel-fixture] rfb listener state after restart: $(rfb_listener_up && echo up || echo down)" >/dev/console 2>/dev/null || true
+    fi
+    sleep 1
   done
 }
-run_x11vnc &
+watch_x11vnc &
 VNC_PID=$!
 
 ATO_PIXEL_APP_PID="$APP_PID" \
