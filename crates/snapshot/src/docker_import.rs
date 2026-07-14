@@ -698,6 +698,7 @@ pub fn run_dockerfile_import(
         &seed_contents,
         req.out_ext4,
         req.size_mib,
+        req.pixel_rfb_port,
     )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
@@ -936,6 +937,7 @@ pub fn run_oci_image_import(
         &[],
         req.out_ext4,
         req.size_mib,
+        None,
     )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
