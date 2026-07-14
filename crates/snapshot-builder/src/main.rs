@@ -41,7 +41,7 @@ use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
 use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
-use capsule::foundation::types::manifest::CapsuleManifest;
+use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsulefs::CasStore;
 use serde::{Deserialize, Serialize};
 use snapshot::docker_import::build::SystemImportCommandRunner;
@@ -238,6 +238,10 @@ struct Artifact {
     snapshot_backend: String,
     artifact_location: String,
     healthcheck_url_path: String,
+    /// Immutable capsule target requirement copied from the sealed manifest.
+    /// Omitted for legacy Web/import artifacts; never contains access material.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface_requirement: Option<SessionSurfaceRequirement>,
     no_secret_scan_clean: bool,
     rootfs_bytes: u64,
     mem_bytes: u64,
@@ -585,6 +589,7 @@ struct ProducedBuild {
     /// (what executes), never a rebuild-inputs / job identity.
     execution_id: String,
     capsule_manifest_hash: String,
+    surface_requirement: Option<SessionSurfaceRequirement>,
     supervisor: Option<SupervisorBindings>,
     // ── sealed-ack facts (Artifact provenance) ──
     supervisor_ack: Option<SupervisorAck>,
@@ -699,6 +704,11 @@ fn produce_recipe_build(
     let target = manifest
         .resolve_default_target()
         .map_err(|e| fail("manifest", e.to_string()))?;
+    if let Some(surface) = &target.surface {
+        surface
+            .validate()
+            .map_err(|error| fail("manifest", format!("invalid surface requirement: {error}")))?;
+    }
     let envelope = ReadyStateDeclaredEnvelope {
         source_identifier: store_source_identifier(
             &source.github_owner,
@@ -768,6 +778,7 @@ fn produce_recipe_build(
         healthcheck: spec.healthcheck.clone(),
         execution_id: declared_execution_id,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
+        surface_requirement: target.surface.clone(),
         supervisor,
         supervisor_ack,
         manifest_source: manifest_source.to_string(),
@@ -909,6 +920,7 @@ fn produce_import_build(
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
         capsule_manifest_hash,
+        surface_requirement: None,
         supervisor,
         supervisor_ack,
         manifest_source: "dockerfile_import".to_string(),
@@ -1012,6 +1024,7 @@ fn produce_oci_image_import(
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
         capsule_manifest_hash,
+        surface_requirement: None,
         supervisor,
         supervisor_ack,
         manifest_source: "oci_image_import".to_string(),
@@ -1100,6 +1113,7 @@ fn produce_compose_import(
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
         capsule_manifest_hash,
+        surface_requirement: None,
         supervisor,
         supervisor_ack,
         manifest_source: "compose_import".to_string(),
@@ -1915,6 +1929,7 @@ fn process_job(
             store: &store,
             capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
             runner_class: None,
+            surface_requirement: produced.surface_requirement.clone(),
             layers: BuildLayers {
                 rootfs: produced.rootfs,
                 runtime: None,
@@ -1927,6 +1942,7 @@ fn process_job(
                 ports: vec![produced.port],
                 healthcheck: Some(produced.healthcheck.clone()),
                 expected_ready_ms: Some(8000),
+                ..Default::default()
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
@@ -2071,6 +2087,7 @@ fn process_job(
         snapshot_backend: manifest_out.snapshot_backend.kind.clone(),
         artifact_location,
         healthcheck_url_path: produced.healthcheck,
+        surface_requirement: manifest_out.surface_requirement.clone(),
         no_secret_scan_clean: true,
         rootfs_bytes: manifest_out
             .layers
@@ -3294,6 +3311,7 @@ targets = ["web"]
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/health".into(),
+            surface_requirement: None,
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
             mem_bytes: 2,
@@ -3351,6 +3369,47 @@ targets = ["web"]
     }
 
     #[test]
+    fn artifact_ack_carries_the_immutable_surface_requirement_when_present() {
+        let surface_requirement: SessionSurfaceRequirement =
+            serde_json::from_value(serde_json::json!({
+                "kind": "pixel_stream",
+                "profiles": ["ato.pixel-stream.v1"]
+            }))
+            .expect("surface requirement");
+        let artifact = Artifact {
+            capsule_manifest_hash: "blake3:c".into(),
+            execution_id: "exec-1".into(),
+            artifact_manifest_hash: "blake3:a".into(),
+            runner_class_id: "rc".into(),
+            snapshot_backend: "firecracker".into(),
+            artifact_location: "cas://job/blake3:a".into(),
+            healthcheck_url_path: "/health".into(),
+            surface_requirement: Some(surface_requirement),
+            no_secret_scan_clean: true,
+            rootfs_bytes: 1,
+            mem_bytes: 2,
+            vmstate_bytes: 3,
+            snapshot_format_id: SNAPSHOT_FORMAT_ID.to_string(),
+            snapshot_codec_id: SNAPSHOT_CODEC_ID.to_string(),
+            manifest_source: "recipe_toml".into(),
+            synthesized_probe: true,
+            declared_command: "app.py".into(),
+            normalized_guest_command: "python3 app.py".into(),
+            supervisor_build: None,
+            docker_import_receipt: None,
+            oci_import_receipt: None,
+            compose_import_receipt: None,
+        };
+
+        let value = serde_json::to_value(artifact).expect("serialize artifact ack");
+        assert_eq!(value["surface_requirement"]["kind"], "pixel_stream");
+        assert_eq!(
+            value["surface_requirement"]["profiles"],
+            serde_json::json!(["ato.pixel-stream.v1"])
+        );
+    }
+
+    #[test]
     fn dockerfile_import_ack_carries_the_receipt_and_the_new_manifest_source() {
         // ato#1002: an import ack adds docker_import_receipt (an arbitrary
         // non-secret JSON object) and manifest_source = "dockerfile_import";
@@ -3367,6 +3426,7 @@ targets = ["web"]
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/".into(),
+            surface_requirement: None,
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
             mem_bytes: 2,
@@ -3422,6 +3482,7 @@ targets = ["web"]
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/".into(),
+            surface_requirement: None,
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
             mem_bytes: 2,
@@ -3470,6 +3531,7 @@ targets = ["web"]
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/health".into(),
+            surface_requirement: None,
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
             mem_bytes: 2,
@@ -3518,6 +3580,7 @@ targets = ["web"]
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
             healthcheck_url_path: "/health".into(),
+            surface_requirement: None,
             no_secret_scan_clean: true,
             rootfs_bytes: 1,
             mem_bytes: 2,
