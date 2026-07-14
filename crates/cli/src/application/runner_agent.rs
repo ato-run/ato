@@ -4696,10 +4696,6 @@ async fn handle_restore_snapshot_lease(
                 session_id: session_id.clone(),
                 surface_id: surface_id.to_string(),
             };
-            let readiness_assertion = runtime
-                .assertion_keyring
-                .issue_readiness_assertion(&scope)
-                .context("issue one-time pixel gateway readiness assertion")?;
             let probe_origin = runtime
                 .allowed_origins
                 .iter()
@@ -4709,24 +4705,50 @@ async fn handle_restore_snapshot_lease(
             let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
             let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
             private_rfb_addr.set_port(rfb_port);
-            let timeout = Duration::from_millis(proxy_ready_timeout_ms());
-            let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
-                netd::pixel_gateway::PixelGatewayConfig {
-                    listen_addr,
-                    private_rfb_addr,
-                    scope,
-                    allowed_origins: runtime.allowed_origins.clone(),
-                },
-                Arc::clone(&runtime.authorizer),
-                netd::rfb_probe::PixelGatewayProbeRequest::new(
-                    public_ready_url,
-                    probe_origin,
-                    readiness_assertion.as_str(),
-                ),
-                timeout,
-            )
-            .await
-            .context("authenticated public pixel gateway path did not become interactive")?;
+            // Same retry discipline as the web path's proxy readiness probe
+            // (`ATO_PROXY_READY_TIMEOUT_MS` is a TOTAL budget, not a single
+            // attempt): the restored guest's RFB server can lag the resume by
+            // 1-2s (or be rebound by an in-guest watchdog), so one probe is a
+            // guaranteed race. Each attempt mints a FRESH one-use readiness
+            // assertion (the previous attempt consumed its grant) and restarts
+            // the gateway listener (`start_ready_pixel_gateway` stops it on
+            // probe failure, so callers can never report ready unproved).
+            let deadline = std::time::Instant::now() + Duration::from_millis(proxy_ready_timeout_ms());
+            const PIXEL_PROBE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+            let (handle, frame) = loop {
+                let readiness_assertion = runtime
+                    .assertion_keyring
+                    .issue_readiness_assertion(&scope)
+                    .context("issue one-time pixel gateway readiness assertion")?;
+                let attempt_budget = deadline.saturating_duration_since(std::time::Instant::now());
+                let attempt = netd::rfb_probe::start_ready_pixel_gateway(
+                    netd::pixel_gateway::PixelGatewayConfig {
+                        listen_addr,
+                        private_rfb_addr,
+                        scope: scope.clone(),
+                        allowed_origins: runtime.allowed_origins.clone(),
+                    },
+                    Arc::clone(&runtime.authorizer),
+                    netd::rfb_probe::PixelGatewayProbeRequest::new(
+                        public_ready_url,
+                        probe_origin,
+                        readiness_assertion.as_str(),
+                    ),
+                    attempt_budget.max(Duration::from_millis(250)),
+                )
+                .await;
+                match attempt {
+                    Ok(ready) => break ready,
+                    Err(error) => {
+                        if std::time::Instant::now() + PIXEL_PROBE_RETRY_BACKOFF >= deadline {
+                            return Err(anyhow::Error::new(error).context(
+                                "authenticated public pixel gateway path did not become interactive",
+                            ));
+                        }
+                        tokio::time::sleep(PIXEL_PROBE_RETRY_BACKOFF).await;
+                    }
+                }
+            };
             Ok::<_, anyhow::Error>((handle, private_rfb_addr, frame))
         }
         .await;
