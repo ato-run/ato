@@ -2561,6 +2561,8 @@ async fn download_github_repository_at_ref_uses_github_token_for_public_archive_
             .await
             .expect("public repo archive should download");
         assert!(checkout.checkout_dir.join("index.js").exists());
+        assert!(checkout.source_archive_hash.starts_with("sha256:"));
+        assert!(checkout.materialized_tree_hash.starts_with("sha256:"));
 
         server.abort();
     }

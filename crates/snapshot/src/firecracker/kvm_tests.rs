@@ -46,6 +46,7 @@ fn build_input<'a>(
         store,
         capsule_manifest_hash: "blake3:fc-kvm-test".to_string(),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs,
             runtime: None,
@@ -58,6 +59,7 @@ fn build_input<'a>(
             ports: vec![8080],
             healthcheck: Some("/health".to_string()),
             expected_ready_ms: Some(3000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: markers,
@@ -1373,6 +1375,7 @@ fn fc_kvm_binding_lease_live_e2e() {
         store: &store,
         capsule_manifest_hash: "blake3:fc-kvm-test".to_string(),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs,
             runtime: None,
@@ -1385,6 +1388,7 @@ fn fc_kvm_binding_lease_live_e2e() {
             ports: vec![8080],
             healthcheck: Some("/ready".to_string()),
             expected_ready_ms: Some(5000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
@@ -1548,6 +1552,7 @@ fn fc_kvm_supervisor_full_e2e() {
         store: &store,
         capsule_manifest_hash: "blake3:fc-kvm-supervisor".to_string(),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs,
             runtime: None,
@@ -1560,6 +1565,7 @@ fn fc_kvm_supervisor_full_e2e() {
             ports: vec![8080],
             healthcheck: Some("/health".to_string()),
             expected_ready_ms: Some(5000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
@@ -1748,6 +1754,7 @@ fn fc_kvm_binding_negative_paths() {
         store: &store,
         capsule_manifest_hash: "blake3:fc-kvm-test".to_string(),
         runner_class: None,
+        surface_requirement: None,
         layers: BuildLayers {
             rootfs,
             runtime: None,
@@ -1760,6 +1767,7 @@ fn fc_kvm_binding_negative_paths() {
             ports: vec![8080],
             healthcheck: Some("/ready".to_string()),
             expected_ready_ms: Some(5000),
+            ..Default::default()
         },
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],

@@ -13,6 +13,8 @@ struct V03PackageSurface {
     #[serde(default)]
     runtime: Option<String>,
     #[serde(default)]
+    surface: Option<SessionSurfaceRequirement>,
+    #[serde(default)]
     build: Option<String>,
     #[serde(default)]
     outputs: Vec<String>,
@@ -428,6 +430,7 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
     let V03PackageSurface {
         package_type,
         runtime,
+        surface,
         build,
         outputs,
         build_env,
@@ -446,6 +449,13 @@ fn normalize_v03_target_table(package_name: &str, table: &Table) -> Result<Table
         public,
     } = parse_v03_package_surface(package_name, table)?;
     let mut target_table = Table::new();
+
+    if let Some(surface) = surface {
+        target_table.insert(
+            "surface".to_string(),
+            toml::Value::try_from(surface).expect("session surface requirement serializes to TOML"),
+        );
+    }
 
     if let Some(package_type) = package_type.as_deref() {
         target_table.insert(
