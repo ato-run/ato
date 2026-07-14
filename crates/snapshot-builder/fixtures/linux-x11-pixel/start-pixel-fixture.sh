@@ -2,8 +2,10 @@
 set -euo pipefail
 
 export DISPLAY=:99
-export HOME=/home/ato
-export XDG_RUNTIME_DIR=/run/user/1000
+# The restored guest rootfs is read-only; /tmp is the writable tmpfs. HOME and
+# XDG_RUNTIME_DIR must live there or the mkdir below dies on the RO rootfs.
+export HOME=/tmp/ato-home
+export XDG_RUNTIME_DIR=/tmp/ato-xdg
 
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
 chmod 0700 "$XDG_RUNTIME_DIR"
