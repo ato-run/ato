@@ -181,6 +181,13 @@ pub struct DockerImportOptions {
     /// opted-in build intentionally gets a NEW identity (its init differs).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub host_bind_relay: bool,
+    /// Pixel Stream v1: the guest-private RFB port this import seals a
+    /// `pixel_rfb` restore endpoint for (`ato.pixel-stream.v1`). Skipped when
+    /// absent so every pre-existing (Web-only) import keeps a byte-identical
+    /// descriptor envelope (same identity digest); a pixel build intentionally
+    /// gets a NEW identity (its sealed restore contract differs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_rfb_port: Option<u16>,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -595,6 +602,10 @@ pub struct DockerfileImportRequest<'a> {
     pub ephemeral_mounts: Vec<rootfs::EphemeralMountSpec>,
     /// ato#1026: start the localhost→guest-IP relay (default off).
     pub host_bind_relay: bool,
+    /// Pixel Stream v1: guest-private RFB port to seal a `pixel_rfb` restore
+    /// endpoint for. Must differ from the derived public app port (validated
+    /// fail-closed after plan derivation). `None` = Web-only import.
+    pub pixel_rfb_port: Option<u16>,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -661,6 +672,17 @@ pub fn run_dockerfile_import(
         req.ephemeral_mounts.clone(),
         req.host_bind_relay,
     )?;
+    // Pixel Stream v1: the sealed pixel_rfb endpoint is guest-private while the
+    // app port is the public readiness/proxy port — the same port cannot serve
+    // both contracts. Fail closed before any packing work.
+    if let Some(rfb_port) = req.pixel_rfb_port
+        && rfb_port == plan.port
+    {
+        return Err(format!(
+            "pixel_rfb_port {rfb_port} collides with the derived public app port {} (the guest-private RFB endpoint must be a different port)",
+            plan.port
+        ));
+    }
     // Stage the mounts' recipe-owned seed files from the build context (the
     // recipe root) — resolve each source without escaping the root, secret-scan
     // the content, and fill every `source_digest`, fail-closed. The digest-filled
@@ -688,6 +710,7 @@ pub fn run_dockerfile_import(
         // identity/receipt record.
         ephemeral_mounts: plan.ephemeral_mounts.clone(),
         host_bind_relay: req.host_bind_relay,
+        pixel_rfb_port: req.pixel_rfb_port,
     };
     let receipt = assemble_receipt(
         &probe,
@@ -926,6 +949,9 @@ pub fn run_oci_image_import(
         // `files`).
         ephemeral_mounts: plan.ephemeral_mounts.clone(),
         host_bind_relay: req.host_bind_relay,
+        // The OCI job shape has no pixel opt-in; None keeps every OCI import's
+        // options envelope byte-identical (the field is skipped when absent).
+        pixel_rfb_port: None,
     };
     let receipt = OciImageImportReceipt {
         importer_version: DOCKER_IMPORTER_VERSION.to_string(),
@@ -1238,6 +1264,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![],
         }
@@ -1536,6 +1563,38 @@ mod tests {
     }
 
     #[test]
+    fn pixel_rfb_port_is_skipped_when_absent_and_shifts_identity_when_set() {
+        // Pixel Stream v1: pixel_rfb_port=None is dropped from the serialized
+        // envelope (skip_serializing_if), so every pre-existing Web-only import
+        // keeps a byte-identical descriptor + identity digest; a set port is a
+        // new input => new identity (its sealed restore contract differs).
+        let base = sample_receipt(); // import_options.pixel_rfb_port defaults None
+        assert!(base.import_options.pixel_rfb_port.is_none());
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(
+            !json.contains("pixel_rfb_port"),
+            "None must be omitted: {json}"
+        );
+
+        let mut pixel = base.clone();
+        pixel.import_options.pixel_rfb_port = Some(5900);
+        let pixel_json = serde_json::to_string(&pixel.import_options).unwrap();
+        assert!(
+            pixel_json.contains("\"pixel_rfb_port\":5900"),
+            "set port must serialize: {pixel_json}"
+        );
+
+        assert_ne!(
+            import_descriptor_blake3(&pixel),
+            import_descriptor_blake3(&base)
+        );
+        assert_ne!(
+            import_identity_digest(&pixel),
+            import_identity_digest(&base)
+        );
+    }
+
+    #[test]
     fn ephemeral_mounts_skipped_when_empty_and_shift_identity_when_present() {
         // Phase 1: an empty mount list is dropped from the serialized envelope
         // (skip_serializing_if Vec::is_empty), so a pre-existing (no-mount)
@@ -1776,6 +1835,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
@@ -1853,6 +1913,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![],
         }

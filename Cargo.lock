@@ -6532,6 +6532,7 @@ dependencies = [
  "blake3",
  "capsule",
  "capsulefs",
+ "protocol",
  "serde",
  "serde_json",
  "snapshot",
