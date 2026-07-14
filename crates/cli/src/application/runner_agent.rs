@@ -225,6 +225,8 @@ pub fn load_runner_credentials() -> Result<RunnerCredentials> {
 // Capabilities
 // ─────────────────────────────────────────────
 
+const SESSION_HORIZON_EXTENSION_CAPABILITY: &str = "session-horizon-extension-v1";
+
 pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -247,6 +249,7 @@ pub fn collect_capabilities() -> Vec<String> {
         caps.push("python".to_string());
     }
     caps.push("source-sandbox".to_string());
+    caps.push(SESSION_HORIZON_EXTENSION_CAPABILITY.to_string());
     caps
 }
 
@@ -2510,11 +2513,41 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const STOP_KILL_GRACE: Duration = Duration::from_secs(3);
 /// Window to confirm the proxy task actually terminated after abort.
 const STOP_PROXY_GRACE: Duration = Duration::from_secs(3);
+/// Runner-local defense in depth. The control plane owns the normal product cap,
+/// but no control response may keep one preview workload alive beyond 24 hours.
+const MAX_SESSION_HORIZON_DURATION_SECS: u64 = 24 * 60 * 60;
+/// A continuation may temporarily suppress Pixel input-idle expiry while the
+/// user is in an external auth/checkout tab, but never for more than 5 minutes.
+const MAX_SESSION_HORIZON_IDLE_GRACE_SECS: u64 = 5 * 60;
+const HORIZON_APPLIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct SessionHorizon {
+    generation: u64,
+    max_duration_secs: u64,
+    #[serde(default)]
+    idle_grace_secs: u64,
+}
+
+fn deserialize_session_horizon<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<SessionHorizon>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw.and_then(|value| serde_json::from_value(value).ok()))
+}
 
 #[derive(Debug, Deserialize)]
 struct LeaseControl {
     #[serde(default)]
     stop_requested: bool,
+    /// Monotonic total preview duration measured from the immutable serving-start
+    /// instant. A malformed/partial value is ignored without hiding a concurrent
+    /// stop request from this same response.
+    #[serde(default, deserialize_with = "deserialize_session_horizon")]
+    session_horizon: Option<SessionHorizon>,
     /// The owner's consent decision for a needs_consent lease (P4-A). null until
     /// the owner decides; the runner verifies consent_ref before acting on it.
     #[serde(default)]
@@ -2557,7 +2590,7 @@ async fn poll_lease_control(
             // Lease gone or runner invalid/revoked: nothing left to watch.
             // Revocation teardown is the heartbeat loop's job; just stop here.
             ControlOutcome::Done => return,
-            ControlOutcome::Continue => {}
+            ControlOutcome::Continue { .. } => {}
         }
         tokio::time::sleep(Duration::from_secs(STOP_POLL_SECONDS)).await;
     }
@@ -2566,7 +2599,9 @@ async fn poll_lease_control(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlOutcome {
     /// No stop requested (or a transient error) — keep watching.
-    Continue,
+    Continue {
+        session_horizon: Option<SessionHorizon>,
+    },
     /// The owner requested a stop.
     Stop,
     /// The lease/runner is gone (404/401) — stop watching.
@@ -2582,19 +2617,52 @@ async fn poll_control_once(
 ) -> ControlOutcome {
     let response = match client.get(url).bearer_auth(runner_token).send().await {
         Ok(response) => response,
-        Err(_) => return ControlOutcome::Continue,
+        Err(_) => {
+            return ControlOutcome::Continue {
+                session_horizon: None,
+            };
+        }
     };
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::UNAUTHORIZED {
         return ControlOutcome::Done;
     }
     if !status.is_success() {
-        return ControlOutcome::Continue;
+        return ControlOutcome::Continue {
+            session_horizon: None,
+        };
     }
     match response.json::<LeaseControl>().await {
         Ok(control) if control.stop_requested => ControlOutcome::Stop,
-        _ => ControlOutcome::Continue,
+        Ok(control) => ControlOutcome::Continue {
+            session_horizon: control.session_horizon,
+        },
+        Err(_) => ControlOutcome::Continue {
+            session_horizon: None,
+        },
     }
+}
+
+async fn report_session_horizon_applied(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    horizon: SessionHorizon,
+) -> bool {
+    let url = format!(
+        "{}/v1/runner-leases/{}/horizon-applied",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    client
+        .post(url)
+        .bearer_auth(runner_token)
+        .timeout(HORIZON_APPLIED_REQUEST_TIMEOUT)
+        .json(&horizon)
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 // ── ExecutionPlan consent gate (P4-A) ──
@@ -3344,6 +3412,18 @@ fn pixel_surface_idle_expired(
         })
 }
 
+fn latest_pixel_activity(
+    observed_unix_millis: Option<u64>,
+    horizon_reset_unix_millis: Option<u64>,
+) -> Option<u64> {
+    match (observed_unix_millis, horizon_reset_unix_millis) {
+        (Some(observed), Some(reset)) => Some(observed.max(reset)),
+        (Some(observed), None) => Some(observed),
+        (None, Some(reset)) => Some(reset),
+        (None, None) => None,
+    }
+}
+
 /// Core of [`stop_proxy`] with an injectable confirmation window (tests use a
 /// short one to exercise the unconfirmed/timeout path deterministically).
 async fn stop_proxy_within(handle: Option<tokio::task::JoinHandle<()>>, grace: Duration) -> bool {
@@ -3975,6 +4055,62 @@ fn vmm_alive(_pid: i32) -> bool {
 /// How often the restore hold-loop polls `/control` for a stop + checks the VMM is alive.
 const RESTORE_HOLD_POLL_SECS: u64 = 2;
 
+#[derive(Debug, Clone, Copy)]
+struct PreviewSessionHorizon {
+    serving_started_at: std::time::Instant,
+    generation: u64,
+    max_duration_secs: u64,
+    deadline: std::time::Instant,
+}
+
+impl PreviewSessionHorizon {
+    fn new(serving_started_at: std::time::Instant, max_duration_secs: u64) -> Self {
+        let max_duration_secs = max_duration_secs.min(MAX_SESSION_HORIZON_DURATION_SECS);
+        let deadline = serving_started_at
+            .checked_add(Duration::from_secs(max_duration_secs))
+            .unwrap_or(serving_started_at);
+        Self {
+            serving_started_at,
+            generation: 0,
+            max_duration_secs,
+            deadline,
+        }
+    }
+
+    fn try_apply(&mut self, update: SessionHorizon, now: std::time::Instant) -> bool {
+        if update.generation <= self.generation
+            || update.max_duration_secs < self.max_duration_secs
+            || update.max_duration_secs > MAX_SESSION_HORIZON_DURATION_SECS
+            || update.idle_grace_secs > MAX_SESSION_HORIZON_IDLE_GRACE_SECS
+        {
+            return false;
+        }
+        let Some(deadline) = self
+            .serving_started_at
+            .checked_add(Duration::from_secs(update.max_duration_secs))
+        else {
+            return false;
+        };
+        // A continuation received after its own total horizon cannot resurrect a
+        // workload whose serving budget has already elapsed.
+        if deadline <= now {
+            return false;
+        }
+        self.generation = update.generation;
+        self.max_duration_secs = update.max_duration_secs;
+        self.deadline = deadline;
+        true
+    }
+
+    fn max_duration_secs(&self) -> u64 {
+        self.max_duration_secs
+    }
+
+    fn deadline(&self) -> std::time::Instant {
+        self.deadline
+    }
+}
+
 /// ato#1006 (UNIT C): decide whether the restore hold loop should break this tick,
 /// and with what reason. Pure so the preview max-duration deadline is unit-testable
 /// without a live VM.
@@ -3996,7 +4132,7 @@ fn restore_hold_break_reason(
     match control {
         ControlOutcome::Stop => return Some("user_requested"),
         ControlOutcome::Done => return Some("lease_gone"),
-        ControlOutcome::Continue => {}
+        ControlOutcome::Continue { .. } => {}
     }
     if let Some(deadline) = preview_deadline
         && now >= deadline
@@ -4768,12 +4904,13 @@ async fn handle_restore_snapshot_lease(
 
     // 7. Hold until the owner stops the run (/control) or the VMM exits.
     // ato#1006 (UNIT C): a preview lease additionally arms a HARD max-duration cap.
-    // The deadline is computed from serving-start (here, after ready) — the wall-clock
-    // budget a public preview gets. Pixel previews also apply the declared idle
+    // Every total duration, including later continuation updates, is computed from
+    // this one serving-start instant. Pixel previews also apply the declared idle
     // timeout to browser-to-RFB input activity observed by the authenticated gateway.
-    let preview_deadline = if cmd.is_preview {
+    let preview_serving_started_at = std::time::Instant::now();
+    let mut preview_horizon = if cmd.is_preview {
         cmd.max_duration_secs
-            .map(|secs| std::time::Instant::now() + Duration::from_secs(secs))
+            .map(|secs| PreviewSessionHorizon::new(preview_serving_started_at, secs))
     } else {
         None
     };
@@ -4784,8 +4921,10 @@ async fn handle_restore_snapshot_lease(
     };
     if cmd.is_preview {
         println!(
-            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, pixel_idle_timeout_secs={:?})",
-            cmd.max_duration_secs, pixel_idle_timeout_secs
+            "⏳ restore lease {lease_id}: preview lane (max_duration_secs={:?}, runner_cap_secs={}, pixel_idle_timeout_secs={:?})",
+            preview_horizon.map(|horizon| horizon.max_duration_secs()),
+            MAX_SESSION_HORIZON_DURATION_SECS,
+            pixel_idle_timeout_secs
         );
     }
     let control_url = format!(
@@ -4793,31 +4932,79 @@ async fn handle_restore_snapshot_lease(
         api_base.trim_end_matches('/'),
         &lease_id
     );
+    let mut pending_horizon_ack = None;
+    let mut pixel_idle_horizon_reset_unix_millis = None;
+    let mut pixel_idle_suppressed_until = None;
     let reason = loop {
         tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
         let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
         // Preserve the original short-circuit: only poll /control while the VM is up.
         let control = if vmm_exited {
-            ControlOutcome::Continue
+            ControlOutcome::Continue {
+                session_horizon: None,
+            }
         } else {
             poll_control_once(client, &control_url, runner_token).await
         };
+
+        // Stop/Done never carries an update, so terminal control wins. A valid
+        // continuation is applied before evaluating the old hard deadline, allowing
+        // an update observed on the boundary to keep this same VMM alive.
+        if !vmm_exited
+            && let ControlOutcome::Continue {
+                session_horizon: Some(update),
+            } = control
+        {
+            let applied_at = std::time::Instant::now();
+            if let Some(horizon) = preview_horizon.as_mut()
+                && horizon.try_apply(update, applied_at)
+            {
+                // Any applied generation restarts normal Pixel idle accounting.
+                // A begin-generation may additionally suppress idle expiry while
+                // the user is in an external auth/checkout tab.
+                pixel_idle_horizon_reset_unix_millis = Some(unix_time_millis());
+                let idle_grace_secs = update
+                    .idle_grace_secs
+                    .min(MAX_SESSION_HORIZON_IDLE_GRACE_SECS);
+                pixel_idle_suppressed_until =
+                    applied_at.checked_add(Duration::from_secs(idle_grace_secs));
+                pending_horizon_ack = Some(update);
+            }
+        }
         if let Some(reason) = restore_hold_break_reason(
             std::time::Instant::now(),
-            preview_deadline,
+            preview_horizon.map(|horizon| horizon.deadline()),
             vmm_exited,
             control,
         ) {
             break reason;
         }
-        if pixel_surface_idle_expired(
-            unix_time_millis(),
-            gateway_handle
-                .as_ref()
-                .and_then(RestoreGatewayHandle::last_input_activity_unix_millis),
-            pixel_idle_timeout_secs,
-        ) {
+        let pixel_idle_is_suppressed =
+            pixel_idle_suppressed_until.is_some_and(|until| std::time::Instant::now() < until);
+        let observed_pixel_activity = gateway_handle
+            .as_ref()
+            .and_then(RestoreGatewayHandle::last_input_activity_unix_millis);
+        if !pixel_idle_is_suppressed
+            && pixel_surface_idle_expired(
+                unix_time_millis(),
+                latest_pixel_activity(
+                    observed_pixel_activity,
+                    pixel_idle_horizon_reset_unix_millis,
+                ),
+                pixel_idle_timeout_secs,
+            )
+        {
             break "preview_idle_expired";
+        }
+        if let Some(applied) = pending_horizon_ack
+            && report_session_horizon_applied(client, api_base, runner_token, &lease_id, applied)
+                .await
+        {
+            println!(
+                "↗ restore lease {lease_id}: session horizon generation {} applied (max_duration_secs={}, idle_grace_secs={})",
+                applied.generation, applied.max_duration_secs, applied.idle_grace_secs
+            );
+            pending_horizon_ack = None;
         }
     };
     println!("🛑 restore lease {lease_id}: {reason}; tearing down");
@@ -5530,7 +5717,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_include_os_arch_and_source_sandbox() {
+    fn capabilities_include_runtime_features() {
         let caps = collect_capabilities();
         assert!(caps.contains(&std::env::consts::OS.to_string()));
         assert!(caps.contains(&std::env::consts::ARCH.to_string()));
@@ -5540,6 +5727,7 @@ mod tests {
             std::env::consts::ARCH
         )));
         assert!(caps.contains(&"source-sandbox".to_string()));
+        assert!(caps.contains(&SESSION_HORIZON_EXTENSION_CAPABILITY.to_string()));
     }
 
     #[test]
@@ -6011,14 +6199,17 @@ mod tests {
         let now = Instant::now();
         let future = now + Duration::from_secs(60);
         let past = now - Duration::from_secs(1);
+        let continue_control = ControlOutcome::Continue {
+            session_horizon: None,
+        };
 
         // Non-preview lease (deadline None): never breaks "preview_expired".
         assert_eq!(
-            restore_hold_break_reason(now, None, false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, None, false, continue_control),
             None
         );
         assert_eq!(
-            restore_hold_break_reason(now, None, true, ControlOutcome::Continue),
+            restore_hold_break_reason(now, None, true, continue_control),
             Some("workload_exited")
         );
         assert_eq!(
@@ -6032,24 +6223,24 @@ mod tests {
 
         // Preview lease, deadline not yet reached: keep holding.
         assert_eq!(
-            restore_hold_break_reason(now, Some(future), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(future), false, continue_control),
             None
         );
         // Preview lease, deadline passed: breaks "preview_expired".
         assert_eq!(
-            restore_hold_break_reason(now, Some(past), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(past), false, continue_control),
             Some("preview_expired")
         );
         // `now == deadline` counts as expired (>= boundary).
         assert_eq!(
-            restore_hold_break_reason(now, Some(now), false, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(now), false, continue_control),
             Some("preview_expired")
         );
 
         // Precedence: workload exit / owner stop / gone lease all win over the
         // preview deadline even when it has passed.
         assert_eq!(
-            restore_hold_break_reason(now, Some(past), true, ControlOutcome::Continue),
+            restore_hold_break_reason(now, Some(past), true, continue_control),
             Some("workload_exited")
         );
         assert_eq!(
@@ -6059,6 +6250,95 @@ mod tests {
         assert_eq!(
             restore_hold_break_reason(now, Some(past), false, ControlOutcome::Done),
             Some("lease_gone")
+        );
+    }
+
+    #[test]
+    fn preview_session_horizon_is_monotonic_from_fixed_serving_start() {
+        use std::time::{Duration, Instant};
+
+        let serving_started_at = Instant::now();
+        let mut horizon = PreviewSessionHorizon::new(serving_started_at, 600);
+        let initial_deadline = serving_started_at + Duration::from_secs(600);
+        assert_eq!(horizon.deadline(), initial_deadline);
+
+        let extension = SessionHorizon {
+            generation: 1,
+            max_duration_secs: 3_600,
+            idle_grace_secs: MAX_SESSION_HORIZON_IDLE_GRACE_SECS,
+        };
+        assert!(horizon.try_apply(extension, serving_started_at + Duration::from_secs(600)));
+        assert_eq!(
+            horizon.deadline(),
+            serving_started_at + Duration::from_secs(3_600),
+            "an extension is total time from serving start, not time added at receipt"
+        );
+
+        let extended_deadline = horizon.deadline();
+        for rejected in [
+            SessionHorizon {
+                generation: 1,
+                max_duration_secs: 7_200,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 0,
+                max_duration_secs: 7_200,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: 1_800,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: MAX_SESSION_HORIZON_DURATION_SECS + 1,
+                idle_grace_secs: 0,
+            },
+            SessionHorizon {
+                generation: 2,
+                max_duration_secs: 7_200,
+                idle_grace_secs: MAX_SESSION_HORIZON_IDLE_GRACE_SECS + 1,
+            },
+        ] {
+            assert!(!horizon.try_apply(rejected, serving_started_at));
+            assert_eq!(horizon.deadline(), extended_deadline);
+            assert_eq!(horizon.generation, 1);
+            assert_eq!(horizon.max_duration_secs(), 3_600);
+        }
+
+        let same_duration_new_generation = SessionHorizon {
+            generation: 2,
+            max_duration_secs: 3_600,
+            idle_grace_secs: 0,
+        };
+        assert!(horizon.try_apply(same_duration_new_generation, serving_started_at));
+        assert_eq!(horizon.generation, 2);
+
+        let late = SessionHorizon {
+            generation: 3,
+            max_duration_secs: 7_200,
+            idle_grace_secs: 0,
+        };
+        assert!(!horizon.try_apply(late, serving_started_at + Duration::from_secs(7_200)));
+        assert_eq!(horizon.generation, 2);
+    }
+
+    #[test]
+    fn preview_session_horizon_caps_initial_command_fail_closed() {
+        use std::time::{Duration, Instant};
+
+        let serving_started_at = Instant::now();
+        let horizon =
+            PreviewSessionHorizon::new(serving_started_at, MAX_SESSION_HORIZON_DURATION_SECS + 1);
+        assert_eq!(
+            horizon.deadline(),
+            serving_started_at + Duration::from_secs(MAX_SESSION_HORIZON_DURATION_SECS)
+        );
+        assert_eq!(
+            horizon.max_duration_secs(),
+            MAX_SESSION_HORIZON_DURATION_SECS
         );
     }
 
@@ -6119,6 +6399,20 @@ mod tests {
         assert!(!pixel_surface_idle_expired(10_000, Some(6_001), Some(4)));
         assert!(pixel_surface_idle_expired(10_000, Some(6_000), Some(4)));
         assert!(!pixel_surface_idle_expired(10, Some(20), Some(1)));
+
+        assert_eq!(latest_pixel_activity(None, None), None);
+        assert_eq!(latest_pixel_activity(Some(5_000), None), Some(5_000));
+        assert_eq!(latest_pixel_activity(None, Some(8_000)), Some(8_000));
+        assert_eq!(
+            latest_pixel_activity(Some(5_000), Some(8_000)),
+            Some(8_000),
+            "a newly applied horizon resets idle accounting even before new input"
+        );
+        assert_eq!(
+            latest_pixel_activity(Some(9_000), Some(8_000)),
+            Some(9_000),
+            "real input after the reset remains authoritative"
+        );
     }
 
     fn argv(args: Vec<std::ffi::OsString>) -> Vec<String> {
@@ -7473,8 +7767,26 @@ mod tests {
         )
         .expect("parse");
         assert!(stop.stop_requested);
+        let malformed_horizon_stop: LeaseControl = serde_json::from_str(
+            "{\"stop_requested\":true,\"session_horizon\":{\"generation\":2}}",
+        )
+        .expect("a malformed horizon must not hide stop_requested");
+        assert!(malformed_horizon_stop.stop_requested);
+        assert!(malformed_horizon_stop.session_horizon.is_none());
         let go: LeaseControl = serde_json::from_str("{\"stop_requested\":false}").expect("parse");
         assert!(!go.stop_requested);
+        let legacy_horizon: LeaseControl = serde_json::from_str(
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":1,\"max_duration_secs\":3600}}",
+        )
+        .expect("a pre-idle-grace horizon remains compatible");
+        assert_eq!(
+            legacy_horizon.session_horizon,
+            Some(SessionHorizon {
+                generation: 1,
+                max_duration_secs: 3_600,
+                idle_grace_secs: 0,
+            })
+        );
         // A missing field is "no stop requested", never a parse error.
         let empty: LeaseControl = serde_json::from_str("{}").expect("parse");
         assert!(!empty.stop_requested);
@@ -7487,7 +7799,7 @@ mod tests {
         // 200 + stop_requested true -> Stop, with runner-token bearer auth.
         let (base, server) = one_shot_http(
             "HTTP/1.1 200 OK",
-            "{\"lease_id\":\"01L\",\"stop_requested\":true,\"stop_requested_at\":\"t\"}",
+            "{\"lease_id\":\"01L\",\"stop_requested\":true,\"stop_requested_at\":\"t\",\"session_horizon\":{\"generation\":2,\"max_duration_secs\":3600}}",
         );
         let url = format!("{base}/v1/runner-leases/01L/control");
         let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
@@ -7507,12 +7819,69 @@ mod tests {
         let _ = server.join();
         assert!(matches!(outcome, ControlOutcome::Done));
 
-        // 200 + stop_requested false -> Continue.
-        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"stop_requested\":false}");
+        // 200 + stop_requested false carries a typed horizon update.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":2,\"max_duration_secs\":3600,\"idle_grace_secs\":300}}",
+        );
         let url = format!("{base}/v1/runner-leases/01L/control");
         let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
         let _ = server.join();
-        assert!(matches!(outcome, ControlOutcome::Continue));
+        assert!(matches!(
+            outcome,
+            ControlOutcome::Continue {
+                session_horizon: Some(SessionHorizon {
+                    generation: 2,
+                    max_duration_secs: 3_600,
+                    idle_grace_secs: 300,
+                })
+            }
+        ));
+
+        // A partial horizon is ignored while the otherwise valid control response
+        // remains usable. The previous deadline is therefore preserved.
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 200 OK",
+            "{\"stop_requested\":false,\"session_horizon\":{\"generation\":3}}",
+        );
+        let url = format!("{base}/v1/runner-leases/01L/control");
+        let outcome = poll_control_once(&client, &url, "ato_rnr_t").await;
+        let _ = server.join();
+        assert!(matches!(
+            outcome,
+            ControlOutcome::Continue {
+                session_horizon: None
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn report_session_horizon_applied_posts_bearer_ack() {
+        let client = reqwest::Client::new();
+        let applied = SessionHorizon {
+            generation: 2,
+            max_duration_secs: 3_600,
+            idle_grace_secs: 300,
+        };
+        let (base, server) = one_shot_http("HTTP/1.1 200 OK", "{\"ok\":true}");
+        assert!(report_session_horizon_applied(&client, &base, "ato_rnr_t", "01L", applied).await);
+        let request = server.join().expect("server");
+        assert!(request.contains("POST /v1/runner-leases/01L/horizon-applied"));
+        assert!(
+            request
+                .to_lowercase()
+                .contains("authorization: bearer ato_rnr_t")
+        );
+        assert!(request.contains("\"generation\":2"));
+        assert!(request.contains("\"max_duration_secs\":3600"));
+        assert!(request.contains("\"idle_grace_secs\":300"));
+
+        let (base, server) = one_shot_http(
+            "HTTP/1.1 500 Internal Server Error",
+            "{\"error\":\"retry\"}",
+        );
+        assert!(!report_session_horizon_applied(&client, &base, "ato_rnr_t", "01L", applied).await);
+        let _ = server.join();
     }
 
     // ── ExecutionPlan consent gate (P4-A) ──
