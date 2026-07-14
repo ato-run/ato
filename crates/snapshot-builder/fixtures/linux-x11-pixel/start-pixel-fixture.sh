@@ -63,45 +63,39 @@ xwininfo -display "$DISPLAY" -id "$WINDOW_ID" \
 AFTER_HASH=$(xwd -display "$DISPLAY" -root -silent | sha256sum | cut -d ' ' -f 1)
 [ "$BEFORE_HASH" != "$AFTER_HASH" ]
 
-# The RFB listener is guest-private. It deliberately has no session password:
-# session authorization is generated only after restore and enforced by the
-# host gateway. Network policy must prevent direct public access to port 5900.
+# The RFB listener is guest-private. It deliberately has no session password
+# (-SecurityTypes None): session authorization is generated only after restore
+# and enforced by the host gateway. Network policy must prevent direct public
+# access to port 5900.
 #
-# x11vnc runs under a SERVICE-liveness watchdog, not a process-liveness one:
-# the Ready-State artifact is a MEMORY snapshot, and the resumed x11vnc can
-# come back WEDGED — the process still exists, so an exit-triggered supervisor
-# never fires, but its RFB listener is gone and the host gateway's connect is
-# refused. The watchdog therefore probes the actual service (a TCP connect to
-# the RFB port) once a second; on failure it kills whatever x11vnc is left and
-# starts a fresh one. At build the first pass starts x11vnc normally (the
-# health gate below still waits for the listener before the seal); after a
-# restore the resumed watchdog detects the dead listener within ~1s and
-# rebinds, inside the gateway readiness probe's retry window. Transitions are
-# logged to /dev/console for restore forensics.
+# The RFB server is TigerVNC's scraping server (X0tigervnc) — x11vnc came back
+# WEDGED from a memory-snapshot restore (process alive, RFB listener gone) —
+# and it runs under a SERVICE-liveness watchdog, not a process-liveness one:
+# the watchdog probes the actual service (a TCP connect to the RFB port) once
+# a second; on failure it kills whatever server is left and starts a fresh
+# one. At build the first pass starts the server normally (the health gate
+# below still waits for the listener before the seal); after a restore the
+# resumed watchdog detects a dead listener within ~1s and rebinds, inside the
+# gateway readiness probe's retry window. Transitions are logged to
+# /dev/console for restore forensics. Clipboard/file-transfer/audio stay
+# disabled at the client and gateway (the ato.pixel-stream.v1 capability set).
 rfb_listener_up() {
   (exec 3<>/dev/tcp/127.0.0.1/5900) 2>/dev/null || return 1
   exec 3>&- 3<&-
   return 0
 }
-watch_x11vnc() {
+watch_rfb_server() {
   while kill -0 "$XVFB_PID" 2>/dev/null; do
     if ! rfb_listener_up; then
-      echo "[ato-pixel-fixture] rfb listener down; (re)starting x11vnc" >/dev/console 2>/dev/null || true
-      pkill -x x11vnc 2>/dev/null || true
+      echo "[ato-pixel-fixture] rfb listener down; (re)starting X0tigervnc" >/dev/console 2>/dev/null || true
+      pkill -x X0tigervnc 2>/dev/null || true
       sleep 0.2
-      pkill -9 -x x11vnc 2>/dev/null || true
-      x11vnc \
+      pkill -9 -x X0tigervnc 2>/dev/null || true
+      X0tigervnc \
         -display "$DISPLAY" \
-        -listen 0.0.0.0 \
         -rfbport 5900 \
-        -nopw \
-        -forever \
-        -shared \
-        -noclipboard \
-        -nosetclipboard \
-        -wait 33 \
-        -defer 33 \
-        -quiet &
+        -SecurityTypes None \
+        -AlwaysShared &
       attempt=0
       until rfb_listener_up; do
         attempt=$((attempt + 1))
@@ -113,7 +107,7 @@ watch_x11vnc() {
     sleep 1
   done
 }
-watch_x11vnc &
+watch_rfb_server &
 VNC_PID=$!
 
 ATO_PIXEL_APP_PID="$APP_PID" \
@@ -121,6 +115,6 @@ ATO_PIXEL_WINDOW_ID="$WINDOW_ID" \
   /opt/ato-pixel-fixture/health.py &
 HEALTH_PID=$!
 
-# x11vnc is deliberately NOT in the fatal wait set — its supervisor loop owns
+# The RFB server is deliberately NOT in the fatal wait set — its watchdog owns
 # its lifecycle so a single post-restore blip never tears the fixture down.
 wait -n "$XVFB_PID" "$WM_PID" "$APP_PID" "$HEALTH_PID"

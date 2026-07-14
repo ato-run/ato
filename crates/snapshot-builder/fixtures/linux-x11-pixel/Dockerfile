@@ -9,7 +9,7 @@ RUN apt-get update \
         x11-apps \
         x11-utils \
         x11-xkb-utils \
-        x11vnc \
+        tigervnc-scraping-server \
         xdotool \
         xterm \
         xvfb \
