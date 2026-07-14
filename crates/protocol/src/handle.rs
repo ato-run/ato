@@ -1,6 +1,8 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, WireError};
 
@@ -189,6 +191,8 @@ pub enum ResolvedSnapshot {
         commit_sha: String,
         default_branch: Option<String>,
         fetched_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        materialized_source: Option<MaterializedSourceIdentity>,
     },
     RegistryRelease {
         version: String,
@@ -200,6 +204,136 @@ pub enum ResolvedSnapshot {
         resolved_path: String,
         fetched_at: String,
     },
+}
+
+/// Immutable identity of the bytes that a Git-backed launch will actually see.
+///
+/// `commit_oid` is provenance. The archive and tree hashes are Ato-managed
+/// content identities. Observation metadata such as `fetched_at` deliberately
+/// does not belong in this type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializedSourceIdentity {
+    pub commit_oid: String,
+    pub source_archive_hash: String,
+    pub materialized_tree_hash: String,
+}
+
+impl MaterializedSourceIdentity {
+    pub fn stable_hash(&self) -> String {
+        stable_identity_hash(
+            "github_source",
+            [
+                ("commit_oid", self.commit_oid.as_str()),
+                ("source_archive_hash", self.source_archive_hash.as_str()),
+                (
+                    "materialized_tree_hash",
+                    self.materialized_tree_hash.as_str(),
+                ),
+            ],
+        )
+    }
+}
+
+/// Stable, metadata-free projection of a resolved snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SnapshotIdentity {
+    GithubSource {
+        source: MaterializedSourceIdentity,
+    },
+    RegistryRelease {
+        version: String,
+        release_id: Option<String>,
+        content_hash: String,
+    },
+}
+
+impl SnapshotIdentity {
+    pub fn stable_hash(&self) -> String {
+        match self {
+            Self::GithubSource { source } => source.stable_hash(),
+            Self::RegistryRelease {
+                version,
+                release_id,
+                content_hash,
+            } => stable_identity_hash(
+                "registry_release",
+                [
+                    ("version", version.as_str()),
+                    ("release_id", release_id.as_deref().unwrap_or("")),
+                    ("content_hash", content_hash.as_str()),
+                ],
+            ),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SnapshotIdentityProjectionError {
+    #[error("materialized source commit does not match the resolved GitHub commit")]
+    CommitMismatch,
+}
+
+impl ResolvedSnapshot {
+    /// Project cache/provenance-bearing resolution data into immutable identity.
+    ///
+    /// `None` means the source has not been materialized (or a registry response
+    /// did not include a content hash), so claiming a full content identity
+    /// would be incorrect.
+    pub fn stable_identity(
+        &self,
+    ) -> std::result::Result<Option<SnapshotIdentity>, SnapshotIdentityProjectionError> {
+        match self {
+            Self::GithubRepo {
+                commit_sha,
+                materialized_source: Some(source),
+                ..
+            } => {
+                if source.commit_oid != *commit_sha {
+                    return Err(SnapshotIdentityProjectionError::CommitMismatch);
+                }
+                Ok(Some(SnapshotIdentity::GithubSource {
+                    source: source.clone(),
+                }))
+            }
+            Self::GithubRepo { .. } | Self::LocalPath { .. } => Ok(None),
+            Self::RegistryRelease {
+                version,
+                release_id,
+                content_hash: Some(content_hash),
+                ..
+            } => Ok(Some(SnapshotIdentity::RegistryRelease {
+                version: version.clone(),
+                release_id: release_id.clone(),
+                content_hash: content_hash.clone(),
+            })),
+            Self::RegistryRelease { .. } => Ok(None),
+        }
+    }
+}
+
+fn stable_identity_hash<'a>(
+    kind: &str,
+    fields: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ato-snapshot-identity-v1\0");
+    update_identity_field(&mut hasher, "kind", kind);
+    for (name, value) in fields {
+        update_identity_field(&mut hasher, name, value);
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("sha256:{hex}")
+}
+
+fn update_identity_field(hasher: &mut Sha256, name: &str, value: &str) {
+    hasher.update((name.len() as u64).to_be_bytes());
+    hasher.update(name.as_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -767,5 +901,75 @@ mod tests {
             }
             other => panic!("expected WebUrl, got {other:?}"),
         }
+    }
+
+    fn github_snapshot(fetched_at: &str) -> ResolvedSnapshot {
+        ResolvedSnapshot::GithubRepo {
+            commit_sha: "1111111111111111111111111111111111111111".to_string(),
+            default_branch: Some("main".to_string()),
+            fetched_at: fetched_at.to_string(),
+            materialized_source: Some(MaterializedSourceIdentity {
+                commit_oid: "1111111111111111111111111111111111111111".to_string(),
+                source_archive_hash: format!("sha256:{}", "2".repeat(64)),
+                materialized_tree_hash: format!("sha256:{}", "3".repeat(64)),
+            }),
+        }
+    }
+
+    #[test]
+    fn snapshot_identity_hash_excludes_fetched_at() {
+        let first = github_snapshot("2026-07-14T00:00:00Z")
+            .stable_identity()
+            .expect("identity projection")
+            .expect("materialized identity");
+        let later = github_snapshot("2030-01-01T00:00:00Z")
+            .stable_identity()
+            .expect("identity projection")
+            .expect("materialized identity");
+
+        assert_eq!(first, later);
+        assert_eq!(first.stable_hash(), later.stable_hash());
+    }
+
+    #[test]
+    fn materialized_source_identity_hash_tracks_every_content_facet() {
+        let base = match github_snapshot("2026-07-14T00:00:00Z")
+            .stable_identity()
+            .expect("identity projection")
+            .expect("materialized identity")
+        {
+            SnapshotIdentity::GithubSource { source } => source,
+            other => panic!("unexpected identity: {other:?}"),
+        };
+        let base_hash = base.stable_hash();
+
+        for changed in [
+            MaterializedSourceIdentity {
+                commit_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                ..base.clone()
+            },
+            MaterializedSourceIdentity {
+                source_archive_hash: format!("sha256:{}", "b".repeat(64)),
+                ..base.clone()
+            },
+            MaterializedSourceIdentity {
+                materialized_tree_hash: format!("sha256:{}", "c".repeat(64)),
+                ..base.clone()
+            },
+        ] {
+            assert_ne!(base_hash, changed.stable_hash());
+        }
+    }
+
+    #[test]
+    fn snapshot_identity_rejects_commit_mismatch() {
+        let mut snapshot = github_snapshot("2026-07-14T00:00:00Z");
+        if let ResolvedSnapshot::GithubRepo { commit_sha, .. } = &mut snapshot {
+            *commit_sha = "ffffffffffffffffffffffffffffffffffffffff".to_string();
+        }
+        assert_eq!(
+            snapshot.stable_identity(),
+            Err(SnapshotIdentityProjectionError::CommitMismatch)
+        );
     }
 }

@@ -16,6 +16,7 @@ use super::command_spec::CommandSpec;
 // (`error.rs`, `manifest_tests.rs`, the CLI diagnostics tests) keep
 // compiling unchanged.
 pub use protocol::config::{ConfigField, ConfigKind};
+pub use protocol::session_surface::SessionSurfaceRequirement;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -1718,6 +1719,11 @@ pub struct NamedTarget {
     /// Runtime kind for this target (`source`, `web`, `wasm`, `oci`).
     #[serde(default)]
     pub runtime: String,
+
+    /// Presentation surface required by this target. This is a declarative
+    /// requirement only; client/runner negotiation selects a concrete descriptor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SessionSurfaceRequirement>,
 
     /// Runtime driver (`static`, `deno`, `node`, `python`, `wasmtime`, `native`).
     ///
