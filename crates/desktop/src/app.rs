@@ -611,9 +611,6 @@ pub fn run(skip_onboarding: bool) {
         cx.set_global(crate::window::capsule_panel::CapsuleSettingsWindowSlot::default());
         // Slot tracking the control bar info popup.
         cx.set_global(crate::window::control_bar::InfoPopupWindowSlot::default());
-        // Slot tracking the in-Desktop OAuth login window.
-        cx.set_global(crate::window::auth_login_window::AuthLoginWindowSlot::default());
-
         // Scope the shell shortcuts so guest webviews do not inherit host commands.
         cx.bind_keys([
             KeyBinding::new("cmd-k", FocusCommandBar, Some("AtoDesktopShell")),
