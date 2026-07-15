@@ -562,6 +562,25 @@ pub(crate) async fn bridge_authenticate_ephemeral(
     }
 }
 
+/// Release gate for the Desktop external-browser login path (ato#1077,
+/// Auth Phase 1c).
+///
+/// This path routes Desktop login through the OS default browser instead of
+/// the app-isolated embedded WebView it replaces. ato#1077 and RFC
+/// ato-api#261 rev.3 §6 both state this MUST NOT ship ahead of ato-api#275
+/// (Phase 1b: auth_bridge explicit-confirmation + exchange-time device
+/// credential mint) actually landing on ato-api's `main` and being deployed
+/// to production. Until then, the live `auth_bridge.ts` auto-approves
+/// `GET /activate` for any already-signed-in browser and returns the
+/// browser's own better-auth session token verbatim as the device
+/// credential — widening exposure the moment a real OS browser (far more
+/// likely than an app-scoped WebView to already hold a live session) is put
+/// in front of it.
+///
+/// Flip to `true` only once ato-api#275 has merged AND deployed; that's a
+/// one-line follow-up commit, not a reason to relax this check speculatively.
+const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
+
 /// Login flow for `ato login --desktop`.
 ///
 /// Used when ato-desktop spawns the CLI as a child process (no TTY, no
@@ -574,11 +593,28 @@ pub(crate) async fn bridge_authenticate_ephemeral(
 /// - Emits NDJSON events on stdout so a caller without a TTY can watch the
 ///   flow to completion:
 ///   `{"type":"desktop_login_started", "login_url":"...", "user_code":"...", "expires_in":N, "poll_interval_sec":N}`
+///   `{"type":"desktop_browser_launch_failed", "login_url":"...", "message":"..."}` (non-terminal)
 ///   `{"type":"desktop_login_completed", "publisher_handle":"...", "storage":"age_file"}`
 ///   `{"type":"desktop_login_failed", "message":"..."}`
 /// - Exits with a non-zero code on failure.
+///
+/// Fails closed (see `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED`) until the
+/// bridge-hardening dependency has actually landed.
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow_desktop() -> Result<()> {
+    if !EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED {
+        let msg = "Desktop external-browser login is disabled pending ato-api#275 \
+            (auth_bridge explicit-confirmation + exchange-time device credential \
+            hardening — required by ato#1077). This is a release-ordering gate, \
+            not a bug: it will be lifted once that hardening has landed on \
+            ato-api's main and been deployed.";
+        println!(
+            "{}",
+            serde_json::json!({"type": "desktop_login_failed", "message": msg})
+        );
+        anyhow::bail!("{}", msg);
+    }
+
     use crate::application::credential::AgeFileBackend;
     use capsule::common::paths::nacelle_home_dir;
 
@@ -664,11 +700,19 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
     // Open the OS default browser at `login_url`, exactly like the plain
     // interactive `ato login` flow does. Non-fatal: the poll loop below
     // continues regardless, and the user can open the URL manually if the
-    // automatic launch fails.
+    // automatic launch fails. Emitted as a structured NDJSON event (not just
+    // an eprintln!) so a non-TTY caller (ato-desktop) can actually surface
+    // `login_url` to the user instead of silently discarding the failure.
     if let Err(error) = try_open_browser(&login_url) {
-        eprintln!(
-            "[ato-desktop] could not open browser automatically: {}",
-            error
+        let msg = format!("Could not open your browser automatically: {}", error);
+        eprintln!("[ato-desktop] {}", msg);
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "desktop_browser_launch_failed",
+                "login_url": login_url,
+                "message": msg,
+            })
         );
     }
 
