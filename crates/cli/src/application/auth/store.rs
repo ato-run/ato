@@ -562,12 +562,17 @@ pub(crate) async fn bridge_authenticate_ephemeral(
     }
 }
 
-/// Login flow for `ato login --desktop-webview`.
+/// Login flow for `ato login --desktop`.
 ///
-/// Unlike the normal interactive flow, this:
-/// - Does not prompt the user interactively (no TTY required).
+/// Used when ato-desktop spawns the CLI as a child process (no TTY, no
+/// interactive stdin). Unlike the normal interactive flow, this:
+/// - Does not prompt the user interactively.
 /// - Auto-creates a passphrase-free age identity if none exists.
-/// - Emits NDJSON events on stdout:
+/// - Opens the OS default browser at `login_url` via `try_open_browser` —
+///   the same helper the plain interactive flow uses (RFC 8252: OAuth for
+///   native apps must use the system browser, not an app-embedded WebView).
+/// - Emits NDJSON events on stdout so a caller without a TTY can watch the
+///   flow to completion:
 ///   `{"type":"desktop_login_started", "login_url":"...", "user_code":"...", "expires_in":N, "poll_interval_sec":N}`
 ///   `{"type":"desktop_login_completed", "publisher_handle":"...", "storage":"age_file"}`
 ///   `{"type":"desktop_login_failed", "message":"..."}`
@@ -642,7 +647,9 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
         urlencoding::encode(&activate_url)
     );
 
-    // Emit the started event so the Desktop can open the WebView.
+    // Emit the started event first, so a caller tailing stdout can observe
+    // login_url / user_code even if the automatic browser launch below
+    // fails for some reason.
     println!(
         "{}",
         serde_json::json!({
@@ -653,6 +660,17 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
             "poll_interval_sec": start.poll_interval_sec.unwrap_or(2),
         })
     );
+
+    // Open the OS default browser at `login_url`, exactly like the plain
+    // interactive `ato login` flow does. Non-fatal: the poll loop below
+    // continues regardless, and the user can open the URL manually if the
+    // automatic launch fails.
+    if let Err(error) = try_open_browser(&login_url) {
+        eprintln!(
+            "[ato-desktop] could not open browser automatically: {}",
+            error
+        );
+    }
 
     let poll_timeout_secs = start.expires_in.min(300);
     let mut poll_interval_secs = start.poll_interval_sec.unwrap_or(2).max(1);
@@ -803,7 +821,7 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 let mut creds = manager.load()?.unwrap_or_default();
                 creds.publisher_handle = exchange.handle.clone();
 
-                // Publisher onboarding is best-effort in desktop-webview mode.
+                // Publisher onboarding is best-effort in non-interactive (desktop) mode.
                 // The session token is already persisted above, so `ato whoami`
                 // returns authenticated regardless.  Any onboarding failure must
                 // not block the `desktop_login_completed` event.
