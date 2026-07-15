@@ -6,7 +6,10 @@ use tempfile::TempDir;
 use super::publisher::PublisherMeResponse;
 use super::shared_env_lock as env_lock;
 use super::storage::TokenStorageLocation;
-use super::store::{hydrate_publisher_identity_with, is_local_store_api_base_url};
+use super::store::{
+    hydrate_publisher_identity_with, is_local_store_api_base_url,
+    login_with_store_device_flow_desktop,
+};
 use super::{
     AuthManager, Credentials, ENV_ATO_TOKEN, current_session_token, require_session_token,
 };
@@ -481,5 +484,25 @@ async fn persist_session_token_interactive_writes_to_age_when_identity_loaded() 
             .age_home
             .join("credentials/auth/session.age")
             .exists()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn desktop_device_flow_fails_closed_pending_bridge_hardening() {
+    // ato#1077's explicit ordering constraint: the external-browser Desktop
+    // login path must not proceed until ato-api#275 (Phase 1b auth_bridge
+    // hardening) has actually landed and been deployed. The gate must trip
+    // before any network/filesystem work — this test asserts that with no
+    // env setup, no age identity, and no reachable Store API, the call still
+    // fails fast with the expected reason (rather than hanging on a network
+    // call or silently proceeding).
+    let result = login_with_store_device_flow_desktop().await;
+    let err = result.expect_err(
+        "desktop external-browser login must fail closed while the bridge-hardening gate is shut",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("ato-api#275"),
+        "error should name the blocking dependency (ato-api#275), got: {message}"
     );
 }
