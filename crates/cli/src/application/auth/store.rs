@@ -577,6 +577,25 @@ pub(crate) async fn bridge_authenticate_ephemeral(
 /// likely than an app-scoped WebView to already hold a live session) is put
 /// in front of it.
 ///
+/// Round-3 review note (ato#1077): plain `ato login`'s existing non-headless
+/// branch (`bridge_authenticate_ephemeral` below, reached from
+/// `login_with_store_device_flow`) *already* opens a real OS browser against
+/// these same `/v1/auth/bridge/*` endpoints today on `main` — it carries the
+/// identical residual exposure described above, right down to "a real OS
+/// browser is far more likely to already hold a live session." That is a
+/// pre-existing, already-shipped gap, not one newly introduced or newly
+/// accepted by this gate. Gating the plain-CLI path too is deliberately out
+/// of scope here: ato#1077 is the Desktop entry point only, and widening this
+/// PR to also change `login_with_store_device_flow`'s shipping behavior would
+/// blow past that scope. This constant exists solely to stop *this PR* from
+/// widening the exposure to the separate (larger, less technical) Desktop
+/// app population before ato-api#275 lands — CLI and Desktop share the same
+/// underlying bug and will both close it together the moment #275 deploys.
+/// Concretely: the fallback copy in `desktop_login_gate_messages()` below
+/// must never be read as a claim that the terminal path is *safe* — it is
+/// simply the one login path that currently still functions, with a known,
+/// separately-tracked gap of its own.
+///
 /// Flip to `true` only once ato-api#275 has merged AND deployed; that's a
 /// one-line follow-up commit, not a reason to relax this check speculatively.
 const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
@@ -593,6 +612,17 @@ const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
 /// review finding for ato#1077 — so the two are kept deliberately separate
 /// here rather than reusing one string for both.
 ///
+/// Round-3 review finding for ato#1077 (Major): the round-2 wording ("...to
+/// sign in **instead**") read as though the terminal fallback were a safe
+/// substitute for the very thing this gate blocks. It is not — see the
+/// round-3 note on `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED` above; plain
+/// `ato login` already puts a real OS browser in front of the same
+/// unhardened endpoint. The wording below deliberately avoids "instead" (or
+/// any other framing that implies equivalence-in-safety) — it still names
+/// `ato login` because that is the only login path that currently works and
+/// withholding it would leave the user with no next step at all, but it
+/// makes no claim about that path being risk-free.
+///
 /// Split out as a pure function (no I/O) so the "no jargon in the
 /// user-facing half" contract can be unit-tested directly instead of
 /// requiring a stdout-capturing integration test.
@@ -602,8 +632,8 @@ pub(super) fn desktop_login_gate_messages() -> (&'static str, &'static str) {
          + exchange-time device credential hardening, required by ato#1077); flip \
          EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED once that has merged AND deployed \
          to ato-api's production",
-        "Sign-in from Ato Desktop isn't available in this version yet. Run `ato login` \
-         in a terminal to sign in instead, or check for an app update.",
+        "Sign-in from Ato Desktop isn't available in this version yet. Check for an \
+         app update, or run `ato login` from a terminal in the meantime.",
     )
 }
 

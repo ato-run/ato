@@ -535,3 +535,29 @@ fn desktop_login_gate_user_message_has_no_internal_jargon() {
         "user-facing message should point at the still-working terminal fallback, got: {user_message}"
     );
 }
+
+#[test]
+fn desktop_login_gate_user_message_does_not_imply_terminal_fallback_is_safe() {
+    // Round-3 review finding (Major): the round-2 wording ("...to sign in
+    // instead") read as if `ato login` in a terminal were a safe substitute
+    // for the very OS-browser exposure this gate exists to block. It is not:
+    // plain `ato login`'s existing non-headless branch
+    // (`bridge_authenticate_ephemeral`, reached from
+    // `login_with_store_device_flow`) already opens a real OS browser
+    // against the same unhardened `/v1/auth/bridge/*` endpoints today on
+    // `main` — identical residual exposure to what this gate blocks for
+    // Desktop. The message must keep pointing at the one login path that
+    // still works (round-2 requirement, re-checked above) without framing it
+    // as an equally-safe replacement.
+    let (_, user_message) = desktop_login_gate_messages();
+
+    assert!(
+        !user_message.to_lowercase().contains("instead"),
+        "user-facing message must not frame the terminal fallback as a safe substitute \
+         (avoid \"...instead\" phrasing), got: {user_message}"
+    );
+    assert!(
+        user_message.contains("ato login"),
+        "user-facing message must still name the one login path that currently works, got: {user_message}"
+    );
+}
