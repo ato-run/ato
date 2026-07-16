@@ -495,10 +495,10 @@ impl FirecrackerBackend {
         }
     }
 
-    fn net_up(&self, guest_port: u16) -> Result<(), SnapshotError> {
+    fn net_up(&self, guest_ports: &[u16]) -> Result<(), SnapshotError> {
         match self.config.netns.clone() {
             None => self.net_up_root(),
-            Some(ns) => self.net_up_netns(&ns, guest_port),
+            Some(ns) => self.net_up_netns(&ns, guest_ports),
         }
     }
 
@@ -523,7 +523,7 @@ impl FirecrackerBackend {
     /// at `ingress_ip` via a veth `/30` + in-ns DNAT to the guest. All addresses
     /// are integer-derived and passed as argv (no shell). Idempotent: a stale
     /// namespace from a crashed prior run is torn down first.
-    fn net_up_netns(&self, ns: &str, guest_port: u16) -> Result<(), SnapshotError> {
+    fn net_up_netns(&self, ns: &str, guest_ports: &[u16]) -> Result<(), SnapshotError> {
         let tap = &self.config.tap_dev;
         let host_ip = &self.config.host_ip;
         let guest_ip = &self.config.guest_ip;
@@ -547,8 +547,6 @@ impl FirecrackerBackend {
             .ingress_ip
             .as_deref()
             .ok_or_else(|| self.backend_err("netns config missing ingress_ip"))?;
-        let port = guest_port.to_string();
-        let dnat = format!("{guest_ip}:{port}");
         let veth_root_cidr = format!("{veth_root_ip}/30");
         let ingress_cidr = format!("{ingress_ip}/30");
         let host_cidr = format!("{host_ip}/24");
@@ -574,26 +572,30 @@ impl FirecrackerBackend {
         // the guest replies to a same-subnet source. All rules stay inside `ns`
         // (root namespace is left untouched → teardown is just `ip netns del`).
         self.run_in_netns(ns, &["sysctl", "-q", "-w", "net.ipv4.ip_forward=1"])?;
-        self.run_in_netns(
-            ns,
-            &[
-                "iptables",
-                "-t",
-                "nat",
-                "-A",
-                "PREROUTING",
-                "-d",
-                ingress_ip,
-                "-p",
-                "tcp",
-                "--dport",
-                &port,
-                "-j",
-                "DNAT",
-                "--to-destination",
-                &dnat,
-            ],
-        )?;
+        for guest_port in guest_ports {
+            let port = guest_port.to_string();
+            let dnat = format!("{guest_ip}:{port}");
+            self.run_in_netns(
+                ns,
+                &[
+                    "iptables",
+                    "-t",
+                    "nat",
+                    "-A",
+                    "PREROUTING",
+                    "-d",
+                    ingress_ip,
+                    "-p",
+                    "tcp",
+                    "--dport",
+                    &port,
+                    "-j",
+                    "DNAT",
+                    "--to-destination",
+                    &dnat,
+                ],
+            )?;
+        }
         self.run_in_netns(
             ns,
             &[
@@ -1065,6 +1067,24 @@ impl FirecrackerBackend {
 fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
     c.ports.first().copied().unwrap_or(fallback)
 }
+
+fn network_ports(c: &RestoreContract, health_port: u16) -> Result<Vec<u16>, String> {
+    let mut ports = vec![health_port];
+    if c.endpoints.is_empty() {
+        ports.extend(c.ports.iter().copied());
+    } else {
+        for endpoint in &c.endpoints {
+            ports.push(
+                u16::try_from(endpoint.port)
+                    .map_err(|_| format!("endpoint port {} is outside u16", endpoint.port))?,
+            );
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
+}
+
 fn hc_path(c: &RestoreContract, fallback: &str) -> String {
     c.healthcheck
         .clone()
@@ -1574,7 +1594,9 @@ impl SnapshotBackend for FirecrackerBackend {
         }
 
         // Build always runs in the root namespace (default config, netns=None).
-        self.net_up(port)?;
+        let network_ports = network_ports(&input.restore_contract, port)
+            .map_err(|error| self.backend_err(error))?;
+        self.net_up(&network_ports)?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
             let fc = bench::time("build.start_fc", || {
                 self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
@@ -2056,8 +2078,12 @@ impl SnapshotBackend for FirecrackerBackend {
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
             let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
 
-            // Per-slot DNAT targets this guest port (see net_up_netns).
-            self.net_up(port)?;
+            // Per-slot DNAT targets every declared endpoint, not only the HTTP
+            // health port. Pixel RFB and other guest-private surfaces share the
+            // same namespace ingress and must remain reachable after restore.
+            let network_ports = network_ports(&input.manifest.restore_contract, port)
+                .map_err(|error| self.backend_err(error))?;
+            self.net_up(&network_ports)?;
 
             // U1 (#854)/U2 (#855): when ATO_FC_UFFD is set, start the local page-server
             // on a UDS BEFORE LoadSnapshot (Firecracker connects to it during load) and
@@ -2541,6 +2567,74 @@ mod tests {
             FirecrackerBackend::with_config(s1).reachable_host(),
             s1_ingress
         );
+    }
+
+    #[test]
+    fn network_ports_include_every_declared_endpoint() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+        };
+
+        let contract = RestoreContract {
+            ports: vec![3000],
+            endpoints: vec![
+                EndpointContract {
+                    role: EndpointRole::AppHttp,
+                    protocol: EndpointProtocol::Http,
+                    exposure: EndpointExposure::HostInternal,
+                    port: 3000,
+                    readiness: EndpointReadiness::HttpGet {
+                        path: "/healthz".to_string(),
+                    },
+                },
+                EndpointContract {
+                    role: EndpointRole::PixelRfb,
+                    protocol: EndpointProtocol::Tcp,
+                    exposure: EndpointExposure::GuestPrivate,
+                    port: 5901,
+                    readiness: EndpointReadiness::FirstFrame,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            network_ports(&contract, 3000).expect("valid endpoint ports"),
+            vec![3000, 5901]
+        );
+    }
+
+    #[test]
+    fn network_ports_preserve_legacy_port_projection() {
+        let contract = RestoreContract {
+            ports: vec![8080, 9090, 8080],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            network_ports(&contract, 8080).expect("valid legacy ports"),
+            vec![8080, 9090]
+        );
+    }
+
+    #[test]
+    fn network_ports_fail_closed_on_out_of_range_endpoint() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+        };
+
+        let contract = RestoreContract {
+            endpoints: vec![EndpointContract {
+                role: EndpointRole::PixelRfb,
+                protocol: EndpointProtocol::Tcp,
+                exposure: EndpointExposure::GuestPrivate,
+                port: 70_000,
+                readiness: EndpointReadiness::FirstFrame,
+            }],
+            ..Default::default()
+        };
+
+        assert!(network_ports(&contract, 3000).is_err());
     }
 
     // ── v1.4 (ato#970): per-slot vsock UDS isolation ──
