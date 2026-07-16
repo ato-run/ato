@@ -495,10 +495,15 @@ function Toast({ toast, onDismiss }) {
     danger: "border-red-300 bg-red-50 text-red-800",
   };
   // Toasts that carry a URL the user actually needs to act on (e.g. the
-  // automatic browser launch failed) stay on screen until dismissed
-  // instead of vanishing after ~3s — a plain-text URL in a bubble that
-  // auto-dismisses gives the user no real chance to read or copy it.
-  const persistent = Boolean(toast.url);
+  // automatic browser launch failed), or that report a login failure (the
+  // fail-closed gate's explanation, a bridge timeout, a rejected sign-in,
+  // etc.), stay on screen until dismissed instead of vanishing after
+  // ~2.8s. Round-4 review finding (Major, ui-copy-clarity): the fail-closed
+  // gate's user-facing message is the only thing a Desktop user sees when
+  // sign-in is blocked, and it deliberately points the user at a next step
+  // (`ato login` from a terminal) — that instruction is useless if it's
+  // gone before the user finishes reading it.
+  const persistent = Boolean(toast.url) || Boolean(toast.persistent);
   return (
     <div className="dock-toast-enter fixed bottom-5 left-5 z-50 max-w-sm">
       <div className={cn("rounded-lg border px-4 py-2.5 text-sm font-medium shadow-[0_8px_30px_rgba(0,0,0,0.12)]", toneMap[toast.type] ?? toneMap.info)}>
@@ -1038,7 +1043,13 @@ function MyCapsulesPage() {
       if (!message) return;
       const kind = typeof event.kind === "string" ? event.kind : "";
       const url = typeof event.login_url === "string" ? event.login_url : undefined;
-      setToast({ type: kind.includes("failed") ? "warning" : "info", message, url });
+      // `desktop_login_failed` covers the fail-closed gate's explanation as
+      // well as ordinary bridge failures (timeout/cancelled/rejected/etc.);
+      // all of them are real failures the user should actually read and
+      // acknowledge, not transient status noise, so none of them should be
+      // able to vanish before the user notices (round-4 review finding).
+      const persistent = kind === "desktop_login_failed";
+      setToast({ type: kind.includes("failed") ? "warning" : "info", message, url, persistent });
 
       // Keep the "Sign in" button's in-flight state in sync with what the
       // Rust side actually did, not just what the click handler assumed:
@@ -1054,9 +1065,12 @@ function MyCapsulesPage() {
 
   useEffect(() => {
     // Toasts carrying a URL the user needs to read and act on (e.g. the
-    // automatic browser launch failed) stay open until the user dismisses
-    // them explicitly instead of auto-vanishing in under 3 seconds.
-    if (!toast || toast.url) return undefined;
+    // automatic browser launch failed), or explicitly flagged `persistent`
+    // (login-failure toasts — round-4 review finding: these used to
+    // auto-vanish in ~2.8s, too fast to read a multi-sentence explanation
+    // or its pointed-to next step), stay open until the user dismisses
+    // them explicitly instead of auto-vanishing.
+    if (!toast || toast.url || toast.persistent) return undefined;
     const timeout = window.setTimeout(() => setToast(null), 2800);
     return () => window.clearTimeout(timeout);
   }, [toast]);
