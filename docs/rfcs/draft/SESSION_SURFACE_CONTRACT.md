@@ -178,8 +178,9 @@ writer は常に canonical `surface` を書く。移行期間中、Web に限り
 
 ## 7. Gateway authentication boundary
 
-authenticated MVP（5A）は SPEC-G を待たずに実装する。guest 発行（5G）は別 gate であり、
-`principal.kind=guest` は wire reservation のみとする。
+authenticated MVP（5A）に加え、2026-07-16 の SPEC-G D1–D5 承認により guest 発行（5G）を
+有効化する。gateway は `principal.kind=user | guest` を同じ session/surface scope で検証し、
+未知の principal kind は引き続き fail-closed で拒否する。
 
 - gateway assertion header: `X-Ato-Surface-Assertion`
 - audience: `ato.runner.surface-gateway`
@@ -238,7 +239,7 @@ probe または gateway cleanup が失敗した session は `ready` にしては
 4. runner が実機 capability で再 negotiation
 5. authenticated gateway と PWA viewer を有効化
 6. Web dual-write を維持したまま telemetry で legacy reader を確認
-7. SPEC-G 承認後にのみ guest issuance を追加
+7. SPEC-G D1–D5 承認後、guest issuance と gateway acceptance を有効化
 
 最低受入条件:
 

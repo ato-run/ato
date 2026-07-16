@@ -150,8 +150,9 @@ pub enum SurfaceKeyringError {
     WeakKey(String),
 }
 
-/// Authenticated-phase assertion verifier. Guest claims remain a reserved
-/// protocol shape and are deliberately rejected until SPEC-G is approved.
+/// Assertion verifier for authenticated user and approved SPEC-G guest
+/// principals. Both principal kinds remain scoped to the exact session and
+/// surface carried by the lease.
 pub struct HmacSurfaceAccessAuthorizer {
     keyring: Arc<SurfaceAssertionKeyring>,
     now: Arc<dyn Fn() -> u64 + Send + Sync>,
@@ -224,10 +225,7 @@ impl HmacSurfaceAccessAuthorizer {
             .checked_sub(now)
             .filter(|ttl| *ttl > 0 && *ttl <= MAX_ASSERTION_REMAINING_TTL_SECS)
             .ok_or(SurfaceAuthorizationError)?;
-        if claims.session_id != scope.session_id
-            || claims.surface_id != scope.surface_id
-            || claims.principal.kind != SurfacePrincipalKind::User
-        {
+        if claims.session_id != scope.session_id || claims.surface_id != scope.surface_id {
             return Err(SurfaceAuthorizationError);
         }
 
@@ -314,6 +312,21 @@ mod tests {
     }
 
     #[test]
+    fn accepts_valid_guest_assertion() {
+        let mut guest = claims();
+        guest.principal.kind = SurfacePrincipalKind::Guest;
+        guest.principal.id = "g_01kxn45v8fqq9tve4zndcdwqfr".to_string();
+        let assertion = sign(&guest, KEY.as_bytes());
+
+        let access = authorizer()
+            .authorize(&assertion, &scope())
+            .expect("guest assertion should authorize");
+
+        assert_eq!(access.principal, "g_01kxn45v8fqq9tve4zndcdwqfr");
+        assert_eq!(access.grant_id, "grant-1");
+    }
+
+    #[test]
     fn readiness_assertion_uses_the_normal_hmac_scope_and_is_not_debuggable() {
         let keyring = keyring();
         let assertion = keyring
@@ -337,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_signature_scope_expiry_and_guest_claims() {
+    fn rejects_signature_scope_and_expiry_failures() {
         let mut cases = Vec::new();
 
         let mut wrong_scope = claims();
@@ -351,10 +364,6 @@ mod tests {
         let mut excessive_ttl = claims();
         excessive_ttl.exp = NOW + MAX_ASSERTION_REMAINING_TTL_SECS + 1;
         cases.push(sign(&excessive_ttl, KEY.as_bytes()));
-
-        let mut guest = claims();
-        guest.principal.kind = SurfacePrincipalKind::Guest;
-        cases.push(sign(&guest, KEY.as_bytes()));
 
         cases.push(sign(&claims(), b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
 
