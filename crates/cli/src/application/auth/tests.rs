@@ -7,7 +7,7 @@ use super::publisher::PublisherMeResponse;
 use super::shared_env_lock as env_lock;
 use super::storage::TokenStorageLocation;
 use super::store::{
-    hydrate_publisher_identity_with, is_local_store_api_base_url,
+    desktop_login_gate_messages, hydrate_publisher_identity_with, is_local_store_api_base_url,
     login_with_store_device_flow_desktop,
 };
 use super::{
@@ -504,5 +504,34 @@ async fn desktop_device_flow_fails_closed_pending_bridge_hardening() {
     assert!(
         message.contains("ato-api#275"),
         "error should name the blocking dependency (ato-api#275), got: {message}"
+    );
+}
+
+#[test]
+fn desktop_login_gate_user_message_has_no_internal_jargon() {
+    // Round-2 review finding (Blocker): the fail-closed gate's message was
+    // being forwarded verbatim into the Dock's user-facing toast, exposing a
+    // multi-sentence internal paragraph naming GitHub issue numbers to real
+    // end users with no next step. The developer-facing half may still name
+    // internal tracking issues (that's what reaches stderr/logs), but the
+    // user-facing half must read like a product message and must point at
+    // the one login path that actually still works (`ato login` from a
+    // terminal, which is not gated by this constant).
+    let (dev_detail, user_message) = desktop_login_gate_messages();
+
+    assert!(
+        dev_detail.contains("ato-api#275"),
+        "developer detail should still name the blocking dependency for logs/tests"
+    );
+
+    for jargon in ["ato-api#275", "ato#1077", "RFC", "release-ordering"] {
+        assert!(
+            !user_message.contains(jargon),
+            "user-facing message must not leak internal jargon ({jargon:?}), got: {user_message}"
+        );
+    }
+    assert!(
+        user_message.contains("ato login"),
+        "user-facing message should point at the still-working terminal fallback, got: {user_message}"
     );
 }

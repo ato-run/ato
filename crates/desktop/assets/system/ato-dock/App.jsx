@@ -486,7 +486,7 @@ function SubmitModal({ capsule, missingItems, onClose, onSubmit }) {
   );
 }
 
-function Toast({ toast }) {
+function Toast({ toast, onDismiss }) {
   if (!toast) return null;
   const toneMap = {
     info: "border-blue-300 bg-blue-50 text-blue-800",
@@ -494,11 +494,63 @@ function Toast({ toast }) {
     warning: "border-amber-300 bg-amber-50 text-amber-800",
     danger: "border-red-300 bg-red-50 text-red-800",
   };
+  // Toasts that carry a URL the user actually needs to act on (e.g. the
+  // automatic browser launch failed) stay on screen until dismissed
+  // instead of vanishing after ~3s — a plain-text URL in a bubble that
+  // auto-dismisses gives the user no real chance to read or copy it.
+  const persistent = Boolean(toast.url);
   return (
     <div className="dock-toast-enter fixed bottom-5 left-5 z-50 max-w-sm">
       <div className={cn("rounded-lg border px-4 py-2.5 text-sm font-medium shadow-[0_8px_30px_rgba(0,0,0,0.12)]", toneMap[toast.type] ?? toneMap.info)}>
-        {toast.message}
+        <div className="flex items-start gap-2">
+          <p className="flex-1">{toast.message}</p>
+          {persistent && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100"
+              aria-label="Dismiss"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+        {toast.url && <ToastLink url={toast.url} />}
       </div>
+    </div>
+  );
+}
+
+function ToastLink({ url }) {
+  const [copied, setCopied] = useState(false);
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.warn(error);
+    }
+  };
+  return (
+    <div className="mt-2 flex items-center gap-2 border-t border-black/10 pt-2">
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="flex min-w-0 flex-1 items-center gap-1 truncate text-xs font-semibold underline underline-offset-2"
+      >
+        <ExternalLink className="h-3 w-3 shrink-0" />
+        <span className="truncate">{url}</span>
+      </a>
+      <button
+        type="button"
+        onClick={copyLink}
+        className="inline-flex shrink-0 items-center gap-1 rounded-md bg-black/5 px-2 py-1 text-xs font-semibold hover:bg-black/10"
+      >
+        <Copy className="h-3 w-3" />
+        {copied ? "Copied" : "Copy"}
+      </button>
     </div>
   );
 }
@@ -852,7 +904,7 @@ function ActionsPanel({ capsule, copied, onCopy, onEdit, onSubmit, onSubmitLabel
   );
 }
 
-function DockHeader({ search, onSearchChange, onImport, onNew, profileOpen, onToggleProfile, onLogin }) {
+function DockHeader({ search, onSearchChange, onImport, onNew, profileOpen, onToggleProfile, onLogin, signingIn }) {
   return (
     <header className="relative flex h-14 shrink-0 items-center justify-between border-b border-gray-200 bg-white px-5">
       <div className="flex items-center gap-3">
@@ -891,8 +943,17 @@ function DockHeader({ search, onSearchChange, onImport, onNew, profileOpen, onTo
                 <div className="mt-0.5 text-xs text-gray-500">{CURRENT_USER_EMAIL}</div>
                 <div className="mt-0.5 text-xs text-gray-500">@{CURRENT_USER_HANDLE}</div>
               </div>
-              <button type="button" onClick={onLogin} className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50">
-                <UserRound className="h-4 w-4 text-gray-400" />Sign in with Ato
+              <button
+                type="button"
+                onClick={onLogin}
+                disabled={signingIn}
+                className={cn(
+                  "flex w-full items-center gap-2 px-3 py-2 text-sm transition-colors",
+                  signingIn ? "cursor-not-allowed text-gray-400" : "text-gray-700 hover:bg-gray-50",
+                )}
+              >
+                <UserRound className="h-4 w-4 text-gray-400" />
+                {signingIn ? "Signing in…" : "Sign in with Ato"}
               </button>
             </div>
           )}
@@ -908,6 +969,7 @@ function MyCapsulesPage() {
   const [selectedCapsuleId, setSelectedCapsuleId] = useState(() => initialSelectedId());
   const [profileOpen, setProfileOpen] = useState(false);
   const [toast, setToast] = useState(null);
+  const [signingIn, setSigningIn] = useState(false);
   const [modal, setModal] = useState(null);
   const [copied, setCopied] = useState(false);
   const [view, setView] = useState("grid");
@@ -974,14 +1036,27 @@ function MyCapsulesPage() {
       if (!event || typeof event !== "object") return;
       const message = typeof event.message === "string" ? event.message : typeof event.kind === "string" ? event.kind : null;
       if (!message) return;
-      setToast({ type: typeof event.kind === "string" && event.kind.includes("failed") ? "warning" : "info", message });
+      const kind = typeof event.kind === "string" ? event.kind : "";
+      const url = typeof event.login_url === "string" ? event.login_url : undefined;
+      setToast({ type: kind.includes("failed") ? "warning" : "info", message, url });
+
+      // Keep the "Sign in" button's in-flight state in sync with what the
+      // Rust side actually did, not just what the click handler assumed:
+      // a real terminal failure always clears it, and the (rare) case
+      // where a second click raced in anyway re-arms it instead of
+      // leaving the button looking clickable while a login is in flight.
+      if (kind === "desktop_login_failed") setSigningIn(false);
+      else if (kind === "desktop_login_in_progress") setSigningIn(true);
     };
     window.__ATO_DOCK_EVENT__ = handler;
     return () => { if (window.__ATO_DOCK_EVENT__ === handler) delete window.__ATO_DOCK_EVENT__; };
   }, []);
 
   useEffect(() => {
-    if (!toast) return undefined;
+    // Toasts carrying a URL the user needs to read and act on (e.g. the
+    // automatic browser launch failed) stay open until the user dismisses
+    // them explicitly instead of auto-vanishing in under 3 seconds.
+    if (!toast || toast.url) return undefined;
     const timeout = window.setTimeout(() => setToast(null), 2800);
     return () => window.clearTimeout(timeout);
   }, [toast]);
@@ -1051,7 +1126,16 @@ function MyCapsulesPage() {
   };
 
   const handleLogin = () => {
+    // Client-side half of the single-flight guard (the Rust side also
+    // guards `trigger_login` against a second concurrent spawn): ignore
+    // a repeat click while one sign-in attempt is still in flight instead
+    // of firing a second `ato login --desktop` child process.
+    if (signingIn) return;
+    setSigningIn(true);
     if (!postDockCommand({ kind: "login", request_id: createRequestId("login") })) {
+      // Bridge is unavailable — no process was spawned, so no completion
+      // event will ever arrive to clear this; reset immediately.
+      setSigningIn(false);
       setToast({ type: "warning", message: "Sign-in bridge is unavailable" });
     } else {
       setToast({ type: "info", message: "Opening Ato sign-in" });
@@ -1120,6 +1204,7 @@ function MyCapsulesPage() {
         profileOpen={profileOpen}
         onToggleProfile={() => setProfileOpen((v) => !v)}
         onLogin={handleLogin}
+        signingIn={signingIn}
       />
 
       <div className="flex min-h-0 flex-1">
@@ -1204,7 +1289,7 @@ function MyCapsulesPage() {
         )}
       </div>
 
-      <Toast toast={toast} />
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
 
       {modal?.kind === "editor" && (
         <CapsuleEditorModal
