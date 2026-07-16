@@ -106,6 +106,13 @@ fn semver_prefers_highest_stable_release() {
 }
 
 #[test]
+fn cli_startup_installs_a_rustls_crypto_provider() {
+    install_default_rustls_crypto_provider();
+
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
+#[test]
 fn select_capsule_file_is_deterministic() {
     let tmp = tempfile::tempdir().unwrap();
     let version_dir = tmp.path().join("1.0.0");
