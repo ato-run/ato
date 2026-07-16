@@ -4402,6 +4402,13 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    let surface_ready_timeout_ms = proxy_ready_timeout_ms().max(
+        manifest
+            .restore_contract
+            .expected_ready_ms
+            .map(u64::from)
+            .unwrap_or(0),
+    );
     // Binding names from the SEALED MANIFEST only (the single source of truth) —
     // captured now because `manifest` is moved into the restore below.
     let supervisor_names: Option<Vec<String>> = match &artifact_class {
@@ -4709,11 +4716,12 @@ async fn handle_restore_snapshot_lease(
             let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
             let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
             private_rfb_addr.set_port(rfb_port);
-            let timeout = Duration::from_millis(proxy_ready_timeout_ms());
+            let timeout = Duration::from_millis(surface_ready_timeout_ms);
             let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
                 netd::pixel_gateway::PixelGatewayConfig {
                     listen_addr,
                     private_rfb_addr,
+                    private_rfb_connect_timeout: timeout,
                     scope,
                     allowed_origins: runtime.allowed_origins.clone(),
                 },

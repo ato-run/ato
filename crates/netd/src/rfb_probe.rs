@@ -514,6 +514,7 @@ mod tests {
         PixelGatewayConfig {
             listen_addr,
             private_rfb_addr,
+            private_rfb_connect_timeout: Duration::from_secs(2),
             scope: crate::pixel_gateway::PixelGatewayScope {
                 session_id: "session-1".to_string(),
                 surface_id: "surface-1".to_string(),
