@@ -581,6 +581,32 @@ pub(crate) async fn bridge_authenticate_ephemeral(
 /// one-line follow-up commit, not a reason to relax this check speculatively.
 const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
 
+/// Message pair for the fail-closed gate above.
+///
+/// `.0` (developer detail) is safe for stderr / the process's exit error —
+/// it may name internal tracking issues and is never seen by an end user.
+/// `.1` (user-facing message) is what actually reaches a real person: it is
+/// put verbatim into the `desktop_login_failed` NDJSON event's `message`
+/// field, which `ato_dock::classify_ndjson_line` (ato-desktop) forwards
+/// as-is into a Dock toast. A raw "disabled pending ato-api#275" paragraph
+/// means nothing to that person and gives them no next step — round-2
+/// review finding for ato#1077 — so the two are kept deliberately separate
+/// here rather than reusing one string for both.
+///
+/// Split out as a pure function (no I/O) so the "no jargon in the
+/// user-facing half" contract can be unit-tested directly instead of
+/// requiring a stdout-capturing integration test.
+pub(super) fn desktop_login_gate_messages() -> (&'static str, &'static str) {
+    (
+        "desktop login disabled pending ato-api#275 (auth_bridge explicit-confirmation \
+         + exchange-time device credential hardening, required by ato#1077); flip \
+         EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED once that has merged AND deployed \
+         to ato-api's production",
+        "Sign-in from Ato Desktop isn't available in this version yet. Run `ato login` \
+         in a terminal to sign in instead, or check for an app update.",
+    )
+}
+
 /// Login flow for `ato login --desktop`.
 ///
 /// Used when ato-desktop spawns the CLI as a child process (no TTY, no
@@ -603,16 +629,13 @@ const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow_desktop() -> Result<()> {
     if !EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED {
-        let msg = "Desktop external-browser login is disabled pending ato-api#275 \
-            (auth_bridge explicit-confirmation + exchange-time device credential \
-            hardening — required by ato#1077). This is a release-ordering gate, \
-            not a bug: it will be lifted once that hardening has landed on \
-            ato-api's main and been deployed.";
+        let (dev_detail, user_message) = desktop_login_gate_messages();
+        eprintln!("[ato-desktop] {dev_detail}");
         println!(
             "{}",
-            serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            serde_json::json!({"type": "desktop_login_failed", "message": user_message})
         );
-        anyhow::bail!("{}", msg);
+        anyhow::bail!("{}", dev_detail);
     }
 
     use crate::application::credential::AgeFileBackend;
