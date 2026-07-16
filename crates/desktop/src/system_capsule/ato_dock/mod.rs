@@ -69,6 +69,15 @@ struct DesktopLoginEvent {
     /// the user something actionable instead of failing silently.
     #[serde(default)]
     login_url: Option<String>,
+    /// Present on some `desktop_login_failed` events sourced from a live
+    /// ato-api response (see `sanitize_bridge_failure` in `ato-cli`'s
+    /// `store.rs`): the raw HTTP status + response body text. Round-4
+    /// review finding (Major, information-disclosure-ux) — this must be
+    /// logged via `tracing::warn!` for debugging only and must NEVER be
+    /// forwarded into the Dock's user-facing toast; `message` is the only
+    /// field safe to show a user.
+    #[serde(default)]
+    detail: Option<String>,
 }
 
 // ── Single-flight guard ───────────────────────────────────────────────────────
@@ -210,7 +219,15 @@ fn trigger_login_inner(cx: &mut App) -> Result<()> {
 #[derive(Debug, PartialEq, Eq)]
 enum LoginCompletion {
     Success { publisher_handle: Option<String> },
-    Failure { message: String },
+    /// `detail` (when present) is the raw ato-api diagnostic behind this
+    /// failure (HTTP status + response body) — logged via `tracing::warn!`
+    /// only. `message` is the sole field ever forwarded into the Dock's
+    /// user-facing toast (round-4 review finding, Major,
+    /// information-disclosure-ux).
+    Failure {
+        message: String,
+        detail: Option<String>,
+    },
 }
 
 /// Result of classifying a single NDJSON line from the child's stdout.
@@ -240,6 +257,7 @@ fn classify_ndjson_line(line: &str) -> ParsedLoginLine {
         }),
         "desktop_login_failed" => ParsedLoginLine::Terminal(LoginCompletion::Failure {
             message: event.message.unwrap_or_else(|| "login failed".to_string()),
+            detail: event.detail,
         }),
         "desktop_browser_launch_failed" => {
             let message = event
@@ -300,9 +318,11 @@ fn watch_login_completion(
         },
         Ok(s) => LoginCompletion::Failure {
             message: format!("ato login exited with status {}", s),
+            detail: None,
         },
         Err(e) => LoginCompletion::Failure {
             message: format!("waiting for ato login failed: {}", e),
+            detail: None,
         },
     }
 }
@@ -322,8 +342,19 @@ fn on_login_completion(cx: &mut App, result: LoginCompletion) {
             );
             crate::window::dock::notify_login_success(cx);
         }
-        LoginCompletion::Failure { message } => {
-            tracing::warn!(message, "Desktop login failed or was cancelled");
+        LoginCompletion::Failure { message, detail } => {
+            // `detail` (when present) carries the raw ato-api diagnostic
+            // behind this failure — logged here for debugging only. It
+            // must never be added to the JSON pushed below: that queue
+            // feeds directly into the Dock's user-facing toast, and
+            // `message` is the only field `sanitize_bridge_failure`
+            // (ato-cli's store.rs) guarantees is safe to show a user
+            // (round-4 review finding, Major, information-disclosure-ux).
+            tracing::warn!(
+                message = %message,
+                detail = detail.as_deref().unwrap_or(""),
+                "Desktop login failed or was cancelled"
+            );
             // Surface the failure as a toast in the Dock (App.jsx renders any
             // event whose `kind` contains "failed" as a warning toast), so a
             // denied/cancelled/timed-out/errored login isn't silently
@@ -376,6 +407,7 @@ mod tests {
             classify_ndjson_line(line),
             ParsedLoginLine::Terminal(LoginCompletion::Failure {
                 message: "Authentication timed out after 300 seconds".to_string(),
+                detail: None,
             })
         );
     }
@@ -387,6 +419,24 @@ mod tests {
             classify_ndjson_line(line),
             ParsedLoginLine::Terminal(LoginCompletion::Failure {
                 message: "login failed".to_string(),
+                detail: None,
+            })
+        );
+    }
+
+    #[test]
+    fn classifies_failed_event_carries_detail_separately_from_message() {
+        // Round-4 review finding (Major, information-disclosure-ux):
+        // `detail` (the raw ato-api diagnostic) must be threaded through
+        // classification distinctly from `message` (the sanitized,
+        // user-facing text) so `on_login_completion` can log the former
+        // without ever forwarding it into the Dock's toast queue.
+        let line = r#"{"type":"desktop_login_failed","message":"Sign-in failed to complete. Run `ato login` from a terminal for more detail.","detail":"Bridge auth exchange failed (500): internal error xyz"}"#;
+        assert_eq!(
+            classify_ndjson_line(line),
+            ParsedLoginLine::Terminal(LoginCompletion::Failure {
+                message: "Sign-in failed to complete. Run `ato login` from a terminal for more detail.".to_string(),
+                detail: Some("Bridge auth exchange failed (500): internal error xyz".to_string()),
             })
         );
     }
