@@ -12,6 +12,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -70,14 +71,87 @@ struct DesktopLoginEvent {
     login_url: Option<String>,
 }
 
+// ── Single-flight guard ───────────────────────────────────────────────────────
+
+/// Single-flight guard against overlapping `Login` invocations.
+///
+/// The embedded-WebView flow this replaced (`auth_login_window.rs`, removed
+/// by ato#1077) tracked an `AuthLoginWindowSlot` global and re-activated the
+/// existing window instead of spawning a second child process for a second
+/// click. `trigger_login` needs the same guarantee even though it no longer
+/// opens any window of its own: without it, two rapid Login clicks would
+/// spawn two independent `ato login --desktop` child processes racing on
+/// the same on-disk age identity and opening two bridge sessions (round-2
+/// review finding).
+///
+/// `SeqCst` is stronger than strictly necessary — GPUI dispatch of Dock
+/// commands always runs on the foreground thread, so plain access would
+/// likely suffice — but the cost is negligible and it removes any doubt if
+/// that assumption ever changes.
+static LOGIN_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+
+/// Attempts to acquire the single-flight login guard. Returns `true` if
+/// acquired (the caller should proceed), or `false` if a login is already
+/// in flight (the caller must not start a second one). Kept free of any
+/// GPUI/process dependency so it can be unit-tested directly.
+fn try_begin_login() -> bool {
+    !LOGIN_IN_FLIGHT.swap(true, Ordering::SeqCst)
+}
+
+/// Releases the single-flight login guard. Must be called exactly once for
+/// every `try_begin_login()` call that returned `true`, on *every* exit
+/// path — including an early error before the child process is even
+/// spawned — or a single transient failure would permanently wedge the
+/// Dock's Login command until the app restarts.
+fn end_login() {
+    LOGIN_IN_FLIGHT.store(false, Ordering::SeqCst);
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
+
+/// Guarded entry point for `DockCommand::Login`. Rejects a second
+/// invocation while one is already in flight, then delegates to
+/// `trigger_login_inner`. Any error from the inner call — including one
+/// that happens before a child process/watcher is ever spawned — releases
+/// the guard and pushes a `desktop_login_failed` toast, so a Login button
+/// disabled while "signing in" on the JS side never gets stuck forever
+/// with no explanation.
+fn trigger_login(cx: &mut App) -> Result<()> {
+    if !try_begin_login() {
+        tracing::info!("ato_dock: login already in flight; ignoring duplicate Login command");
+        if let Ok(queue) = dock_event_queue(cx)
+            && let Ok(mut events) = queue.lock()
+        {
+            events.push(json!({
+                "kind": "desktop_login_in_progress",
+                "message": "A sign-in is already in progress.",
+            }));
+        }
+        return Ok(());
+    }
+
+    if let Err(error) = trigger_login_inner(cx) {
+        end_login();
+        if let Ok(queue) = dock_event_queue(cx)
+            && let Ok(mut events) = queue.lock()
+        {
+            events.push(json!({
+                "kind": "desktop_login_failed",
+                "message": format!("Could not start sign-in: {error}"),
+            }));
+        }
+        return Err(error);
+    }
+
+    Ok(())
+}
 
 /// Spawn `ato login --desktop` and watch its NDJSON stdout for completion.
 /// The CLI process opens the system browser itself and polls the
 /// auth_bridge on its own; this function does not open any window — it
 /// forwards any user-facing progress/failure events into the Dock's toast
 /// channel and notices when the child is done to refresh the Dock.
-fn trigger_login(cx: &mut App) -> Result<()> {
+fn trigger_login_inner(cx: &mut App) -> Result<()> {
     let ato_bin = resolve_ato_binary().context("ato binary not found")?;
     tracing::info!(ato_bin = %ato_bin.display(), "ato_dock: spawning ato login --desktop");
 
@@ -171,14 +245,21 @@ fn classify_ndjson_line(line: &str) -> ParsedLoginLine {
             let message = event
                 .message
                 .unwrap_or_else(|| "Could not open your browser automatically.".to_string());
-            let toast_message = match &event.login_url {
-                Some(url) => format!("{message} Open this link to continue: {url}"),
-                None => message,
-            };
-            ParsedLoginLine::Forward(json!({
+            // Keep `login_url` as its own JSON field rather than baking it
+            // into `message` text: App.jsx renders it as a clickable
+            // link + a "Copy link" button and keeps the toast open until
+            // the user dismisses it, instead of a plain-text URL inside a
+            // toast bubble that auto-dismisses in under 3 seconds — round-2
+            // review finding (the URL is unusable if the user can't act on
+            // it before it vanishes).
+            let mut event_json = json!({
                 "kind": "desktop_browser_launch_failed",
-                "message": toast_message,
-            }))
+                "message": message,
+            });
+            if let Some(url) = &event.login_url {
+                event_json["login_url"] = json!(url);
+            }
+            ParsedLoginLine::Forward(event_json)
         }
         _ => ParsedLoginLine::Ignore,
     }
@@ -226,8 +307,13 @@ fn watch_login_completion(
     }
 }
 
-/// Called on the GPUI thread after the child process finishes.
+/// Called on the GPUI thread after the child process finishes. Always
+/// releases the single-flight login guard first — this is the only path
+/// that reaches a terminal outcome for a login that made it past
+/// `trigger_login_inner`'s early `?`s, so it is the single place that must
+/// clear `LOGIN_IN_FLIGHT` for that case.
 fn on_login_completion(cx: &mut App, result: LoginCompletion) {
+    end_login();
     match result {
         LoginCompletion::Success { publisher_handle } => {
             tracing::info!(
@@ -306,17 +392,39 @@ mod tests {
     }
 
     #[test]
-    fn forwards_browser_launch_failure_with_url_in_the_message() {
+    fn forwards_browser_launch_failure_with_login_url_as_a_separate_field() {
+        // Round-2 review finding: baking the URL into the message string
+        // left the Dock UI with no way to render it as anything other than
+        // plain text. `login_url` must travel as its own field so App.jsx
+        // can render a clickable link + copy button instead.
         let line = r#"{"type":"desktop_browser_launch_failed","login_url":"https://ato.run/auth?next=abc","message":"Could not open your browser automatically: no handler"}"#;
         match classify_ndjson_line(line) {
             ParsedLoginLine::Forward(event) => {
                 let message = event.get("message").and_then(Value::as_str).unwrap();
-                assert!(message.contains("https://ato.run/auth?next=abc"));
                 assert!(message.contains("no handler"));
+                assert!(
+                    !message.contains("https://ato.run/auth?next=abc"),
+                    "the URL must not be baked into the message text, got: {message}"
+                );
+                assert_eq!(
+                    event.get("login_url").and_then(Value::as_str),
+                    Some("https://ato.run/auth?next=abc")
+                );
                 assert_eq!(
                     event.get("kind").and_then(Value::as_str),
                     Some("desktop_browser_launch_failed")
                 );
+            }
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn forwards_browser_launch_failure_without_login_url_omits_the_field() {
+        let line = r#"{"type":"desktop_browser_launch_failed","message":"Could not open your browser automatically: no handler"}"#;
+        match classify_ndjson_line(line) {
+            ParsedLoginLine::Forward(event) => {
+                assert!(event.get("login_url").is_none());
             }
             other => panic!("expected Forward, got {other:?}"),
         }
@@ -335,5 +443,32 @@ mod tests {
             ParsedLoginLine::Ignore
         );
         assert_eq!(classify_ndjson_line(""), ParsedLoginLine::Ignore);
+    }
+
+    #[test]
+    fn login_guard_rejects_concurrent_acquire_until_released() {
+        // Regression guard for the round-2 review finding: a second `Login`
+        // dispatch while one is already in flight must not be allowed to
+        // spawn a second `ato login --desktop` child process. `LOGIN_IN_FLIGHT`
+        // is a module-level static, so start and end on a known-clean state
+        // to stay independent of other tests' execution order.
+        end_login();
+
+        assert!(try_begin_login(), "first acquire must succeed");
+        assert!(
+            !try_begin_login(),
+            "a second concurrent acquire must be rejected"
+        );
+        assert!(
+            !try_begin_login(),
+            "must still be rejected while still held"
+        );
+
+        end_login();
+        assert!(
+            try_begin_login(),
+            "acquire must succeed again once released"
+        );
+        end_login();
     }
 }
