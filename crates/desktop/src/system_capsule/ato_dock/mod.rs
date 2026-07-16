@@ -218,7 +218,9 @@ fn trigger_login_inner(cx: &mut App) -> Result<()> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum LoginCompletion {
-    Success { publisher_handle: Option<String> },
+    Success {
+        publisher_handle: Option<String>,
+    },
     /// `detail` (when present) is the raw ato-api diagnostic behind this
     /// failure (HTTP status + response body) — logged via `tracing::warn!`
     /// only. `message` is the sole field ever forwarded into the Dock's
@@ -435,7 +437,9 @@ mod tests {
         assert_eq!(
             classify_ndjson_line(line),
             ParsedLoginLine::Terminal(LoginCompletion::Failure {
-                message: "Sign-in failed to complete. Run `ato login` from a terminal for more detail.".to_string(),
+                message:
+                    "Sign-in failed to complete. Run `ato login` from a terminal for more detail."
+                        .to_string(),
                 detail: Some("Bridge auth exchange failed (500): internal error xyz".to_string()),
             })
         );

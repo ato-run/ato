@@ -624,8 +624,7 @@ fn browser_launch_failed_event_carries_login_url_and_sanitized_message() {
     // schema had never actually run under any test. It is now a pure,
     // directly-tested function.
     let error = anyhow::anyhow!("no handler registered");
-    let (message, event) =
-        browser_launch_failed_event("https://ato.run/auth?next=abc", &error);
+    let (message, event) = browser_launch_failed_event("https://ato.run/auth?next=abc", &error);
 
     assert!(
         message.contains("no handler registered"),
@@ -649,7 +648,10 @@ fn sanitize_bridge_failure_keeps_raw_detail_out_of_the_user_message() {
     let raw = "Bridge auth exchange failed (500): {\"secret_debug_token\":\"abc123\"}".to_string();
     let (message, detail) = sanitize_bridge_failure("Sign-in failed to complete.", raw.clone());
 
-    assert_eq!(detail, raw, "detail must preserve the full raw diagnostic for logs");
+    assert_eq!(
+        detail, raw,
+        "detail must preserve the full raw diagnostic for logs"
+    );
     assert!(
         !message.contains("secret_debug_token") && !message.contains("abc123"),
         "user-facing message must not contain any part of the raw response body, got: {message}"
