@@ -562,10 +562,10 @@ impl WebViewManager {
         self.sweep_expired_webview_retention();
 
         // Drain ato:// / capsule:// deep links seen by the WebView
-        // navigation handler so OAuth callbacks delivered through
-        // the in-app sign-in WebView reach handle_host_route. This
-        // is the same code path the macOS Launch Services route
-        // (open_url_bridge) uses for browser-delivered callbacks.
+        // navigation handler so host routes emitted by embedded Ato
+        // web surfaces reach handle_host_route. This is the same code
+        // path the macOS Launch Services route (open_url_bridge) uses
+        // for browser-delivered callbacks.
         let callback_urls: Vec<String> = {
             let mut q = self
                 .pending_callback_urls
@@ -1689,7 +1689,6 @@ impl WebViewManager {
                                 invoke_url: None,
                                 served_by: None,
                                 install_profile_key: None,
-                                auth_flow: false,
                                 bounds: active.bounds,
                             };
                             match self.build_webview(
@@ -2721,7 +2720,6 @@ impl WebViewManager {
             // page-load event fires).
             let intent_async_app = self.async_app.clone();
             let intent_window_handle = self.window_handle;
-            let auth_flow = pane.auth_flow;
             // The pane's canonical web origin (scheme + host + port). The P0
             // trust boundary keys off this full origin, NOT host alone.
             let pane_origin = pane_url.origin().ascii_serialization();
@@ -2739,14 +2737,12 @@ impl WebViewManager {
                 // cross-origin top-level navigation and hand the link to the
                 // system browser. This is the primary guarantee that a page on
                 // another origin can never run inside — and therefore speak for
-                // — the Home pane. Sign-in panes are exempt (they legitimately
-                // round-trip through external OAuth origins).
+                // — the Home pane.
                 if uri.starts_with("http://") || uri.starts_with("https://") {
                     let nav = crate::intent::classify_top_level_navigation(
                         &pane_origin,
                         &uri,
                         is_home_pane,
-                        auth_flow,
                     );
                     // A blocked navigation never leaves the Home origin, so it
                     // must NOT downgrade trust (otherwise one external-link click
@@ -2770,15 +2766,14 @@ impl WebViewManager {
                 // unknown/malformed verbs are rejected and logged, never acted
                 // on.
                 if uri.starts_with("ato://") || uri.starts_with("capsule://") {
-                    // Defense-in-depth: if a non-auth pane somehow navigated
+                    // Defense-in-depth: if the pane somehow navigated
                     // off-origin, treat it as untrusted regardless of its
                     // initial URL.
-                    let effective_origin =
-                        if !auth_flow && navigated_off_origin.load(Ordering::Relaxed) {
-                            ""
-                        } else {
-                            pane_origin.as_str()
-                        };
+                    let effective_origin = if navigated_off_origin.load(Ordering::Relaxed) {
+                        ""
+                    } else {
+                        pane_origin.as_str()
+                    };
                     match crate::intent::classify(effective_origin, &uri) {
                         crate::intent::IntentDecision::HostRoute(route) => {
                             if let Ok(mut q) = callback_queue.lock() {
@@ -2810,12 +2805,10 @@ impl WebViewManager {
                     }
                     return false;
                 }
-                // Sign-in panes deliberately allow Google / GitHub /
-                // Microsoft OAuth redirects to load in-WebView so
-                // the resulting auth cookies persist in the shared
-                // WebContext. Untrusted capsule WebViews still hand
-                // those URLs off to the system browser.
-                if auth_policy.classify(&uri) == AuthMode::BrowserRequired && !auth_flow {
+                // OAuth / first-party sign-in URLs never load inside an
+                // embedded WebView (ato#1077: sign-in happens in the OS
+                // system browser). Hand them off instead of navigating.
+                if auth_policy.classify(&uri) == AuthMode::BrowserRequired {
                     let pane_id = pane_binding.load(Ordering::Relaxed);
                     if let Ok(mut q) = signals.lock()
                         && !q.iter().any(|s: &AuthHandoffSignal| s.pane_id == pane_id)
@@ -5721,7 +5714,6 @@ mod tests {
             invoke_url: None,
             served_by: None,
             install_profile_key: None,
-            auth_flow: false,
             bounds: PaneBounds::empty(),
         }
     }

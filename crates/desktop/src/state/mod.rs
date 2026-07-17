@@ -424,7 +424,6 @@ pub struct DesktopAuthState {
 pub enum LauncherAction {
     OpenLocalRegistry,
     OpenCloudDock,
-    SignInToAtoRun,
 }
 
 #[derive(Clone, Debug)]
@@ -575,12 +574,6 @@ pub struct WebPane {
     pub route: GuestRoute,
     pub partition_id: String,
     pub session: WebSessionState,
-    /// Set when this WebView is hosting the ato.run sign-in flow.
-    /// Tells the navigation handler to allow third-party OAuth
-    /// provider redirects (Google/GitHub/Microsoft) to load
-    /// in-WebView so the resulting cookies land in the shared
-    /// WebContext instead of the system browser.
-    pub auth_flow: bool,
     pub capabilities: Vec<CapabilityGrant>,
     pub profile: String,
     pub source_label: Option<String>,
@@ -1003,7 +996,6 @@ pub struct ActiveWebPane {
     /// Stable install profile key (`ipk_<32hex>`) from the session record.
     /// `None` for transient, preview, or LocalManifest sessions.
     pub install_profile_key: Option<String>,
-    pub auth_flow: bool,
     pub bounds: PaneBounds,
 }
 
@@ -1252,7 +1244,6 @@ impl AppState {
                     invoke_url: None,
                     served_by: None,
                     install_profile_key: None,
-                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -1399,7 +1390,6 @@ impl AppState {
                     invoke_url: None,
                     served_by: None,
                     install_profile_key: None,
-                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -1448,7 +1438,6 @@ impl AppState {
                     invoke_url: None,
                     served_by: None,
                     install_profile_key: None,
-                    auth_flow: false,
                 }),
             }],
             split_ratio: 0.68,
@@ -1807,14 +1796,10 @@ impl AppState {
     }
 
     pub fn launcher_actions(&self) -> Vec<LauncherAction> {
-        let mut actions = vec![
+        vec![
             LauncherAction::OpenLocalRegistry,
             LauncherAction::OpenCloudDock,
-        ];
-        if self.desktop_auth.publisher_handle.is_none() {
-            actions.push(LauncherAction::SignInToAtoRun);
-        }
-        actions
+        ]
     }
 
     pub fn dismiss_transient(&mut self) {
@@ -2241,7 +2226,6 @@ impl AppState {
                 invoke_url: None,
                 served_by: None,
                 install_profile_key: None,
-                auth_flow: false,
             });
             navigated = Some(pane_id);
         }
@@ -2955,7 +2939,6 @@ impl AppState {
                 invoke_url: web.invoke_url.clone(),
                 served_by: web.served_by.clone(),
                 install_profile_key: web.install_profile_key.clone(),
-                auth_flow: web.auth_flow,
                 bounds: pane.bounds,
             }),
             PaneSurface::HostPanel(_)
@@ -2991,7 +2974,6 @@ impl AppState {
                 invoke_url: None,
                 served_by: None,
                 install_profile_key: None,
-                auth_flow: false,
                 bounds: pane.bounds,
             }),
         }

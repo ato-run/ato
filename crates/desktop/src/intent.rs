@@ -152,7 +152,6 @@ pub struct TopLevelNavOutcome {
 /// pane whose canonical origin is `pane_origin`.
 ///
 /// - `is_home_pane`: the pane is the embedded PWA Home (pinned to its origin).
-/// - `auth_flow`: a sign-in pane (exempt from pinning — OAuth round-trips).
 ///
 /// The Home pane blocks cross-origin top-level navigation (→ system browser).
 /// Crucially, a **blocked** navigation does NOT downgrade trust: the WebView
@@ -163,10 +162,9 @@ pub fn classify_top_level_navigation(
     pane_origin: &str,
     target_uri: &str,
     is_home_pane: bool,
-    auth_flow: bool,
 ) -> TopLevelNavOutcome {
     let cross = is_cross_origin_navigation(pane_origin, target_uri);
-    if cross && is_home_pane && !auth_flow {
+    if cross && is_home_pane {
         // Blocked → handed to the system browser; the WebView stays on-origin.
         TopLevelNavOutcome {
             block: true,
@@ -359,12 +357,8 @@ mod tests {
         // browser, and trust is NOT downgraded (the WebView stays on-origin),
         // so a subsequent ato:// intent from the still-loaded Home page is
         // still accepted.
-        let out = classify_top_level_navigation(
-            "https://app.ato.run",
-            "https://evil.example/",
-            true,
-            false,
-        );
+        let out =
+            classify_top_level_navigation("https://app.ato.run", "https://evil.example/", true);
         assert!(out.block);
         assert!(!out.navigated_off);
 
@@ -373,29 +367,14 @@ mod tests {
             "https://app.ato.run",
             "https://app.ato.run/#route=/runners",
             true,
-            false,
         );
         assert!(!out.block);
         assert!(!out.navigated_off);
 
         // A non-Home pane (e.g. the dock) is not pinned: cross-origin is allowed
         // to proceed and DOES record off-origin (defense-in-depth).
-        let out = classify_top_level_navigation(
-            "https://ato.run",
-            "https://evil.example/",
-            false,
-            false,
-        );
-        assert!(!out.block);
-        assert!(out.navigated_off);
-
-        // Sign-in pane OAuth round-trip: allowed, records off-origin.
-        let out = classify_top_level_navigation(
-            "https://app.ato.run",
-            "https://accounts.google.com/",
-            true,
-            true,
-        );
+        let out =
+            classify_top_level_navigation("https://ato.run", "https://evil.example/", false);
         assert!(!out.block);
         assert!(out.navigated_off);
     }
