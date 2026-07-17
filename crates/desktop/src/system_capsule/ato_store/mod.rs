@@ -97,10 +97,17 @@ pub fn dispatch(
         }
         StoreCommand::Login => {
             tracing::info!("ato_store: Login triggered — desktop auth flow");
-            // TODO: spawn `ato login --desktop` as a child process (see
-            // `ato_dock::trigger_login` for the pattern already used by the
-            // Dock's Login command), on completion inject auth token and
-            // dispatch a CustomEvent to the store WebView.
+            // Same single flow as the Dock's Login command (ato#1077: the
+            // CLI child opens the OS system browser and polls the
+            // auth_bridge; no embedded-WebView login). The shared
+            // single-flight guard inside `trigger_login` means a Store
+            // click while a Dock-initiated login is in flight is rejected
+            // instead of racing a second `ato login --desktop` child.
+            // Progress/failure toasts surface in the Dock, and completion
+            // refreshes the Dock identity via `notify_login_success`.
+            if let Err(err) = crate::system_capsule::ato_dock::trigger_login(cx) {
+                tracing::error!(error = %err, "ato_store: login trigger failed");
+            }
         }
         StoreCommand::BrowseUrl { url } => {
             if let Ok(parsed) = url::Url::parse(&url) {

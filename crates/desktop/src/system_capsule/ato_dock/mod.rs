@@ -125,7 +125,14 @@ fn end_login() {
 /// the guard and pushes a `desktop_login_failed` toast, so a Login button
 /// disabled while "signing in" on the JS side never gets stuck forever
 /// with no explanation.
-fn trigger_login(cx: &mut App) -> Result<()> {
+///
+/// `pub(crate)` because every Desktop sign-in entry point must funnel
+/// through this ONE flow (ato#1077: OS system browser + auth_bridge poll;
+/// no embedded-WebView login) — `ato_store`'s `StoreCommand::Login`
+/// delegates here instead of growing a parallel copy, and the module-level
+/// single-flight guard then also holds across entry points (a Dock click
+/// and a Store click can't race two `ato login --desktop` children).
+pub(crate) fn trigger_login(cx: &mut App) -> Result<()> {
     if !try_begin_login() {
         tracing::info!("ato_dock: login already in flight; ignoring duplicate Login command");
         if let Ok(queue) = dock_event_queue(cx)
