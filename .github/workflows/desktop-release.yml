@@ -286,6 +286,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Release gate (DESKTOP-LOGIN-GAP, #1078): this branch removed the embedded
+      # WebView login and gated the new external-browser login behind
+      # EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED, which is false until ato-api #275
+      # is deployed. Shipping a desktop release while it is false would leave NO
+      # working in-app login. Refuse to PUBLISH a release in that state — cut the
+      # release only once #275 is live and the flag is flipped true (in the same
+      # commit that records its evidence; see store.rs / tests.rs).
+      - name: Login-hardening release gate
+        run: |
+          set -euo pipefail
+          flag_file="crates/cli/src/application/auth/store.rs"
+          if grep -qE 'EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED:\s*bool\s*=\s*false' "$flag_file"; then
+            echo "::error::EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED is still false. The embedded WebView login was removed (#1078) but the external-browser login is gated off, so this release would ship with NO in-app login. Do NOT cut a desktop release until ato-api #275 is deployed to production AND the flag is flipped true (with recorded evidence) in the same commit."
+            exit 1
+          fi
+          echo "login-hardening flag enabled — in-app login present; proceeding with release."
+
       - name: Download all bundle artifacts
         uses: actions/download-artifact@v4
         with:

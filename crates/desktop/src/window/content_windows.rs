@@ -100,8 +100,6 @@ pub enum ContentWindowKind {
     /// `ato-import` review windows, including GitHub import and
     /// community recipe review.
     Import,
-    /// Embedded auth login WebView opened by `ato login --desktop-webview`.
-    Auth,
 }
 
 #[derive(Clone, Debug)]

@@ -268,6 +268,66 @@ pub(super) fn parse_store_error_text(body: &str) -> String {
     body.trim().to_string()
 }
 
+/// Shared poll-timing derivation for every bridge device-code flow variant
+/// (plain interactive `ato login` via `bridge_authenticate_ephemeral`, and
+/// the Desktop path in `login_with_store_device_flow_desktop`). Extracted
+/// into one pure, unit-tested function so the two call sites cannot
+/// silently diverge — two independent copies of this arithmetic, one of
+/// them unreachable while the fail-closed gate is shut, is exactly the
+/// kind of drift a later refactor could introduce without either call
+/// site's tests (or lack thereof) ever noticing (round-4 review finding,
+/// ato#1077: "confirmation that the poll loop is truly byte-for-byte
+/// unchanged").
+pub(super) fn compute_poll_timing(expires_in: u64, poll_interval_sec: Option<u64>) -> (u64, u64) {
+    let poll_timeout_secs = expires_in.min(300);
+    let poll_interval_secs = poll_interval_sec.unwrap_or(2).max(1);
+    (poll_timeout_secs, poll_interval_secs)
+}
+
+/// Pure construction of the `desktop_browser_launch_failed` NDJSON payload
+/// (user-facing message text + the JSON event), split out of the call site
+/// in `login_with_store_device_flow_desktop` so the exact schema can be
+/// unit-tested directly. Round-4 review finding (Major, test-coverage):
+/// while `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED` is `false` the call
+/// site itself never runs in any test — this function is the one piece of
+/// that new logic that can be, and now is, exercised without depending on
+/// the gate or on an actual OS browser launch.
+pub(super) fn browser_launch_failed_event(
+    login_url: &str,
+    error: &anyhow::Error,
+) -> (String, serde_json::Value) {
+    let message = format!("Could not open your browser automatically: {}", error);
+    let event = serde_json::json!({
+        "type": "desktop_browser_launch_failed",
+        "login_url": login_url,
+        "message": message,
+    });
+    (message, event)
+}
+
+/// Splits a raw bridge-auth failure — carrying the live HTTP status code
+/// and ato-api's raw response body — into a short, generic `message` meant
+/// for the Dock's user-facing toast, and a `detail` string that keeps the
+/// full raw text for `eprintln!`/logs only.
+///
+/// `on_login_completion` (ato-desktop `mod.rs`) forwards a
+/// `desktop_login_failed` event's `message` field verbatim into a Dock
+/// toast. Unlike the fail-closed gate above (`desktop_login_gate_messages`,
+/// which already keeps this split), the ordinary poll/exchange/init
+/// failure paths in `login_with_store_device_flow_desktop` used to put raw
+/// ato-api response text straight into that field — a new, unreviewed
+/// exposure surface the embedded-WebView flow this PR replaces never had
+/// (round-4 review finding, Major, information-disclosure-ux). Nothing
+/// proves today's ato-api error bodies are sensitive, but there was no
+/// sanitization boundary here to rely on that they never will be; `detail`
+/// is carried alongside `message` in the NDJSON event so ato-desktop can
+/// still log the full diagnostic via `tracing::warn!` without ever putting
+/// it in front of the user.
+pub(super) fn sanitize_bridge_failure(user_summary: &str, detail: String) -> (String, String) {
+    let user_message = format!("{user_summary} Run `ato login` from a terminal for more detail.");
+    (user_message, detail)
+}
+
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow(headless: bool) -> Result<()> {
     // Bootstrap the age identity before the browser flow. Without an identity
@@ -445,8 +505,8 @@ pub(crate) async fn bridge_authenticate_ephemeral(
         println!("⏳ Waiting for browser authentication...");
     }
 
-    let poll_timeout_secs = start.expires_in.min(300);
-    let mut poll_interval_secs = start.poll_interval_sec.unwrap_or(2).max(1);
+    let (poll_timeout_secs, mut poll_interval_secs) =
+        compute_poll_timing(start.expires_in, start.poll_interval_sec);
     let started_at = Instant::now();
 
     loop {
@@ -562,18 +622,158 @@ pub(crate) async fn bridge_authenticate_ephemeral(
     }
 }
 
-/// Login flow for `ato login --desktop-webview`.
+/// Release gate for the Desktop external-browser login path (ato#1077,
+/// Auth Phase 1c).
 ///
-/// Unlike the normal interactive flow, this:
-/// - Does not prompt the user interactively (no TTY required).
+/// This path routes Desktop login through the OS default browser instead of
+/// the app-isolated embedded WebView it replaces. ato#1077 and RFC
+/// ato-api#261 rev.3 §6 both state this MUST NOT ship ahead of ato-api#275
+/// (Phase 1b: auth_bridge explicit-confirmation + exchange-time device
+/// credential mint) actually landing on ato-api's `main` and being deployed
+/// to production. Until then, the live `auth_bridge.ts` auto-approves
+/// `GET /activate` for any already-signed-in browser and returns the
+/// browser's own better-auth session token verbatim as the device
+/// credential — widening exposure the moment a real OS browser (far more
+/// likely than an app-scoped WebView to already hold a live session) is put
+/// in front of it.
+///
+/// Round-3 review note (ato#1077): plain `ato login`'s existing non-headless
+/// branch (`bridge_authenticate_ephemeral` below, reached from
+/// `login_with_store_device_flow`) *already* opens a real OS browser against
+/// these same `/v1/auth/bridge/*` endpoints today on `main` — it carries the
+/// identical residual exposure described above, right down to "a real OS
+/// browser is far more likely to already hold a live session." That is a
+/// pre-existing, already-shipped gap, not one newly introduced or newly
+/// accepted by this gate. Gating the plain-CLI path too is deliberately out
+/// of scope here: ato#1077 is the Desktop entry point only, and widening this
+/// PR to also change `login_with_store_device_flow`'s shipping behavior would
+/// blow past that scope. This constant exists solely to stop *this PR* from
+/// widening the exposure to the separate (larger, less technical) Desktop
+/// app population before ato-api#275 lands — CLI and Desktop share the same
+/// underlying bug and will both close it together the moment #275 deploys.
+/// Concretely: the fallback copy in `desktop_login_gate_messages()` below
+/// must never be read as a claim that the terminal path is *safe* — it is
+/// simply the one login path that currently still functions, with a known,
+/// separately-tracked gap of its own.
+///
+/// RELEASE-SEQUENCING NOTE (round-4 review findings, Major, reported
+/// independently by two reviewers): this PR removes the embedded-WebView
+/// Desktop login window in the same change that introduces this
+/// permanently-`false` gate. Until ato-api#275 lands, deploys, AND this
+/// flag is flipped, Desktop has **no working in-app sign-in at all** — only
+/// the `ato login` terminal fallback named above, which the "separate,
+/// larger, less technical Desktop app population" this PR itself calls out
+/// is unlikely to know about or use. That is a deliberate, reasoned choice
+/// (shipping the unhardened WebView-free gap is still strictly safer than
+/// shipping the unhardened browser path), not a defect in this gate — but
+/// it is a real functional regression relative to today's `main`, and it
+/// must be an explicit, acknowledged release-sequencing decision (hold this
+/// branch at `nightly`/`dev` until ato-api#275 is ready, or coordinate a
+/// combined release with the follow-up flip commit) rather than something
+/// that merges to `main` quietly. Do not treat this code comment as that
+/// sign-off — it is a flag for whoever promotes this branch to get one.
+///
+/// Flip to `true` only once ato-api#275 has merged AND deployed; that's a
+/// one-line follow-up commit, not a reason to relax this check speculatively.
+///
+/// Round-4 review finding (Major, cross-repo-dependency): a bare boolean
+/// flip is a manual, unenforced obligation — nothing here or in CI stopped
+/// a future contributor from flipping this the moment ato-api's PR merges
+/// to *its* `main`, before that merge is actually deployed to ato-api
+/// production (the two are different events, and #1077 depends on both).
+/// `EXTERNAL_BROWSER_LOGIN_HARDENING_EVIDENCE` below is a second,
+/// independent piece of state that must be edited in the *same* commit as
+/// the flip, and `hardening_flag_requires_recorded_evidence_when_enabled`
+/// (tests.rs) fails the suite — and therefore CI — if the flag is ever
+/// `true` while the evidence string is still the `PENDING` sentinel. This
+/// turns "flip only once landed AND deployed" from a comment a reviewer
+/// has to trust into something CI actually checks.
+pub(super) const EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED: bool = false;
+
+/// Evidence backing the flag above: the merged ato-api commit/PR reference
+/// for #275 plus confirmation it is deployed to ato-api production (e.g. a
+/// deploy log timestamp, release tag, or incident-free-since note). Must
+/// be replaced with real, checkable evidence in the *same* commit that
+/// flips `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED` to `true` — see
+/// `hardening_flag_requires_recorded_evidence_when_enabled` in tests.rs,
+/// which fails CI if that commit forgets to.
+///
+/// Only read by that test today (there is no other runtime check of this
+/// value yet), so it is dead code outside `#[cfg(test)]` builds.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(super) const EXTERNAL_BROWSER_LOGIN_HARDENING_EVIDENCE: &str =
+    "PENDING: ato-api#275 not yet merged to ato-api's main and deployed to ato-api production";
+
+/// Message pair for the fail-closed gate above.
+///
+/// `.0` (developer detail) is safe for stderr / the process's exit error —
+/// it may name internal tracking issues and is never seen by an end user.
+/// `.1` (user-facing message) is what actually reaches a real person: it is
+/// put verbatim into the `desktop_login_failed` NDJSON event's `message`
+/// field, which `ato_dock::classify_ndjson_line` (ato-desktop) forwards
+/// as-is into a Dock toast. A raw "disabled pending ato-api#275" paragraph
+/// means nothing to that person and gives them no next step — round-2
+/// review finding for ato#1077 — so the two are kept deliberately separate
+/// here rather than reusing one string for both.
+///
+/// Round-3 review finding for ato#1077 (Major): the round-2 wording ("...to
+/// sign in **instead**") read as though the terminal fallback were a safe
+/// substitute for the very thing this gate blocks. It is not — see the
+/// round-3 note on `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED` above; plain
+/// `ato login` already puts a real OS browser in front of the same
+/// unhardened endpoint. The wording below deliberately avoids "instead" (or
+/// any other framing that implies equivalence-in-safety) — it still names
+/// `ato login` because that is the only login path that currently works and
+/// withholding it would leave the user with no next step at all, but it
+/// makes no claim about that path being risk-free.
+///
+/// Split out as a pure function (no I/O) so the "no jargon in the
+/// user-facing half" contract can be unit-tested directly instead of
+/// requiring a stdout-capturing integration test.
+pub(super) fn desktop_login_gate_messages() -> (&'static str, &'static str) {
+    (
+        "desktop login disabled pending ato-api#275 (auth_bridge explicit-confirmation \
+         + exchange-time device credential hardening, required by ato#1077); flip \
+         EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED once that has merged AND deployed \
+         to ato-api's production",
+        "Sign-in from Ato Desktop isn't available in this version yet. Check for an \
+         app update, or run `ato login` from a terminal in the meantime.",
+    )
+}
+
+/// Login flow for `ato login --desktop`.
+///
+/// Used when ato-desktop spawns the CLI as a child process (no TTY, no
+/// interactive stdin). Unlike the normal interactive flow, this:
+/// - Does not prompt the user interactively.
 /// - Auto-creates a passphrase-free age identity if none exists.
-/// - Emits NDJSON events on stdout:
+/// - Opens the OS default browser at `login_url` via `try_open_browser` —
+///   the same helper the plain interactive flow uses (RFC 8252: OAuth for
+///   native apps must use the system browser, not an app-embedded WebView).
+/// - Emits NDJSON events on stdout so a caller without a TTY can watch the
+///   flow to completion:
 ///   `{"type":"desktop_login_started", "login_url":"...", "user_code":"...", "expires_in":N, "poll_interval_sec":N}`
+///   `{"type":"desktop_browser_launch_failed", "login_url":"...", "message":"..."}` (non-terminal)
 ///   `{"type":"desktop_login_completed", "publisher_handle":"...", "storage":"age_file"}`
-///   `{"type":"desktop_login_failed", "message":"..."}`
+///   `{"type":"desktop_login_failed", "message":"...", "detail":"..."}` (`detail` only present
+///   for failures sourced from a live ato-api response; see `sanitize_bridge_failure` — `message`
+///   is always safe for a Dock toast, `detail` is for logs only and must never be shown to a user)
 /// - Exits with a non-zero code on failure.
+///
+/// Fails closed (see `EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED`) until the
+/// bridge-hardening dependency has actually landed.
 #[allow(clippy::needless_return)]
 pub async fn login_with_store_device_flow_desktop() -> Result<()> {
+    if !EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED {
+        let (dev_detail, user_message) = desktop_login_gate_messages();
+        eprintln!("[ato-desktop] {dev_detail}");
+        println!(
+            "{}",
+            serde_json::json!({"type": "desktop_login_failed", "message": user_message})
+        );
+        anyhow::bail!("{}", dev_detail);
+    }
+
     use crate::application::credential::AgeFileBackend;
     use capsule::common::paths::nacelle_home_dir;
 
@@ -618,12 +818,14 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
     if !start_response.status().is_success() {
         let status = start_response.status();
         let body = start_response.text().await.unwrap_or_default();
-        let msg = format!("Bridge auth init failed ({}): {}", status, body);
+        let raw = format!("Bridge auth init failed ({}): {}", status, body);
+        let (message, detail) = sanitize_bridge_failure("Could not start sign-in.", raw);
+        eprintln!("[ato-desktop] {}", detail);
         println!(
             "{}",
-            serde_json::json!({"type": "desktop_login_failed", "message": msg})
+            serde_json::json!({"type": "desktop_login_failed", "message": message, "detail": detail})
         );
-        anyhow::bail!("{}", msg);
+        anyhow::bail!("{}", detail);
     }
 
     let start: BridgeInitResponse = start_response
@@ -642,7 +844,9 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
         urlencoding::encode(&activate_url)
     );
 
-    // Emit the started event so the Desktop can open the WebView.
+    // Emit the started event first, so a caller tailing stdout can observe
+    // login_url / user_code even if the automatic browser launch below
+    // fails for some reason.
     println!(
         "{}",
         serde_json::json!({
@@ -654,8 +858,20 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
         })
     );
 
-    let poll_timeout_secs = start.expires_in.min(300);
-    let mut poll_interval_secs = start.poll_interval_sec.unwrap_or(2).max(1);
+    // Open the OS default browser at `login_url`, exactly like the plain
+    // interactive `ato login` flow does. Non-fatal: the poll loop below
+    // continues regardless, and the user can open the URL manually if the
+    // automatic launch fails. Emitted as a structured NDJSON event (not just
+    // an eprintln!) so a non-TTY caller (ato-desktop) can actually surface
+    // `login_url` to the user instead of silently discarding the failure.
+    if let Err(error) = try_open_browser(&login_url) {
+        let (msg, event) = browser_launch_failed_event(&login_url, &error);
+        eprintln!("[ato-desktop] {}", msg);
+        println!("{}", event);
+    }
+
+    let (poll_timeout_secs, mut poll_interval_secs) =
+        compute_poll_timing(start.expires_in, start.poll_interval_sec);
     let started_at = std::time::Instant::now();
 
     loop {
@@ -734,23 +950,28 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
 
         if poll_response.status() == StatusCode::BAD_REQUEST {
             let body = poll_response.text().await.unwrap_or_default();
-            let msg = format!("Authentication failed: {}", body);
+            let raw = format!("Authentication failed: {}", body);
+            let (message, detail) = sanitize_bridge_failure("Sign-in was rejected.", raw);
+            eprintln!("[ato-desktop] {}", detail);
             println!(
                 "{}",
-                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                serde_json::json!({"type": "desktop_login_failed", "message": message, "detail": detail})
             );
-            anyhow::bail!("{}", msg);
+            anyhow::bail!("{}", detail);
         }
 
         if !poll_response.status().is_success() {
             let status = poll_response.status();
             let body = poll_response.text().await.unwrap_or_default();
-            let msg = format!("Bridge auth poll failed ({}): {}", status, body);
+            let raw = format!("Bridge auth poll failed ({}): {}", status, body);
+            let (message, detail) =
+                sanitize_bridge_failure("Sign-in is temporarily unavailable.", raw);
+            eprintln!("[ato-desktop] {}", detail);
             println!(
                 "{}",
-                serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                serde_json::json!({"type": "desktop_login_failed", "message": message, "detail": detail})
             );
-            anyhow::bail!("{}", msg);
+            anyhow::bail!("{}", detail);
         }
 
         let poll: BridgePollResponse = poll_response
@@ -781,12 +1002,15 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 if !exchange_response.status().is_success() {
                     let status = exchange_response.status();
                     let body = exchange_response.text().await.unwrap_or_default();
-                    let msg = format!("Bridge auth exchange failed ({}): {}", status, body);
+                    let raw = format!("Bridge auth exchange failed ({}): {}", status, body);
+                    let (message, detail) =
+                        sanitize_bridge_failure("Sign-in failed to complete.", raw);
+                    eprintln!("[ato-desktop] {}", detail);
                     println!(
                         "{}",
-                        serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                        serde_json::json!({"type": "desktop_login_failed", "message": message, "detail": detail})
                     );
-                    anyhow::bail!("{}", msg);
+                    anyhow::bail!("{}", detail);
                 }
 
                 let exchange: BridgeExchangeResponse = exchange_response
@@ -803,7 +1027,7 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 let mut creds = manager.load()?.unwrap_or_default();
                 creds.publisher_handle = exchange.handle.clone();
 
-                // Publisher onboarding is best-effort in desktop-webview mode.
+                // Publisher onboarding is best-effort in non-interactive (desktop) mode.
                 // The session token is already persisted above, so `ato whoami`
                 // returns authenticated regardless.  Any onboarding failure must
                 // not block the `desktop_login_completed` event.
@@ -842,12 +1066,15 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
                 return Ok(());
             }
             other => {
-                let msg = format!("Unexpected authentication status: {}", other);
+                let raw = format!("Unexpected authentication status: {}", other);
+                let (message, detail) =
+                    sanitize_bridge_failure("Sign-in returned an unexpected response.", raw);
+                eprintln!("[ato-desktop] {}", detail);
                 println!(
                     "{}",
-                    serde_json::json!({"type": "desktop_login_failed", "message": msg})
+                    serde_json::json!({"type": "desktop_login_failed", "message": message, "detail": detail})
                 );
-                anyhow::bail!("{}", msg);
+                anyhow::bail!("{}", detail);
             }
         }
     }
