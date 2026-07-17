@@ -259,6 +259,11 @@ pub(crate) fn spawn_lease_renewal(
     namespace: String,
     names: Vec<String>,
     ttl_ms: u64,
+    // P3b AI-keyless: the session's pre-fetched AI grant values (binding name →
+    // value), layered over the store resolver on every tick so the well-known AI
+    // leases renew with the SAME per-run value instead of failing a store lookup
+    // (which would revoke them and scrub the guest). `None` = unchanged behavior.
+    ai_values: Option<std::collections::BTreeMap<String, String>>,
 ) -> tokio::task::JoinHandle<()> {
     let interval = std::time::Duration::from_millis((ttl_ms / 3).clamp(5_000, 300_000));
     tokio::spawn(async move {
@@ -268,7 +273,9 @@ pub(crate) fn spawn_lease_renewal(
             let uds = vsock_uds.clone();
             let ns = namespace.clone();
             let names = names.clone();
-            let tick = tokio::task::spawn_blocking(move || renewal_tick(&uds, &ns, &names, ttl_ms));
+            let ai = ai_values.clone();
+            let tick =
+                tokio::task::spawn_blocking(move || renewal_tick(&uds, &ns, &names, ttl_ms, ai));
             match tick.await {
                 Ok(Ok(renewed)) => {
                     tracing::debug!(target: "ato::ready_state", renewed, "binding lease renewal tick");
@@ -296,6 +303,7 @@ fn renewal_tick(
     _namespace: &str,
     _names: &[String],
     _ttl_ms: u64,
+    _ai_values: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<usize> {
     bail!("binding lease renewal is only supported on Unix hosts")
 }
@@ -306,8 +314,15 @@ fn renewal_tick(
     namespace: &str,
     names: &[String],
     ttl_ms: u64,
+    ai_values: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<usize> {
     let resolver = super::secret_resolver::select_resolver(namespace)?;
+    // P3b: layer the session's AI grant values over the store chain (same shape
+    // as the claim-time preflight) so AI leases renew with the per-run value.
+    let resolver: Box<dyn super::secret_resolver::SecretResolver> = match ai_values {
+        Some(values) => Box::new(super::ai_grant::AiGrantResolver::new(values, resolver)),
+        None => resolver,
+    };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)

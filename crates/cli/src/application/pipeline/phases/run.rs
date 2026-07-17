@@ -20,7 +20,9 @@ use capsule::lockfile::{
     CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
-use capsule::types::{CapsuleManifest, CapsuleType, ConfigField, ConfigKind, StateDurability};
+use capsule::types::{
+    CapsuleManifest, CapsuleType, ConfigField, ConfigKind, MANIFEST_SCHEMA_V03, StateDurability,
+};
 use serde_json::Value as JsonValue;
 use tracing::debug;
 
@@ -1980,7 +1982,8 @@ where
         );
         prepared.engine_override_declared = loaded_manifest.raw.get("engine").is_some();
         let manifest = loaded_manifest.model.clone();
-        if manifest.schema_version.trim() == "0.3" && manifest.capsule_type == CapsuleType::Library
+        if manifest.schema_version.trim() == MANIFEST_SCHEMA_V03
+            && manifest.capsule_type == CapsuleType::Library
         {
             anyhow::bail!(
                 "schema_version=0.3 type=library package cannot be started with `ato run`"
@@ -4150,6 +4153,9 @@ where
                             .expect("set when the binding gate is active"),
                         binding_names.clone(),
                         ready_state::flags::binding_ttl_ms(),
+                        // Local `ato run` resolves from the user's own store — no
+                        // ato-api AI grant on this path (P3b is runner-lease only).
+                        None,
                     )
                 });
                 let exit = crate::executors::source::wait_for_pid_exit(serving_pid as u32).await;
