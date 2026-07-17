@@ -1206,6 +1206,9 @@ fn produce_compose_import(
         execution_id,
         capsule_manifest_hash,
         surface_requirement: None,
+        // A compose import is a Web artifact — no sealed restore endpoints; the
+        // legacy `ports` projection stays authoritative (see ProducedBuild docs).
+        endpoints: Vec::new(),
         supervisor,
         supervisor_ack,
         manifest_source: "compose_import".to_string(),

@@ -1024,7 +1024,7 @@ mod tests {
                 content: b"x".to_vec(),
             }],
         }];
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024, None);
         // Pack-time staging (runs against $BUILD/rootfs, before mkfs+copy).
         assert!(
             script.contains("mkdir -p \"$BUILD/rootfs/downloads\""),
