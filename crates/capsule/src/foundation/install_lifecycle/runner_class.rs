@@ -20,8 +20,15 @@
 //! os/arch, kernel ABI class, CPU feature set, VMM presence/version, and cgroup
 //! version are probed from the host without needing `/dev/kvm`. The facets a real
 //! snapshot backend supplies — `snapshot_format`, `cpu_template`, `guest_kernel_id`,
-//! `rootfs_base_id` — are still sentinels (`"none"`/`None`/`"unset"`) until the
-//! backend lands on a KVM host; a true build-for class must override those.
+//! `rootfs_base_id` — are left as sentinels (`"none"`/`None`/`"unset"`) by this
+//! probe **by design**: a host probe cannot know ato-shipped artifacts. The
+//! Firecracker backend's `runner_facts()` resolver supplies the real
+//! `snapshot_format`, VMM version, and `guest_kernel_id` (plus `cpu_template` /
+//! `rootfs_base_id` when configured via `ATO_FC_CPU_TEMPLATE` /
+//! `ATO_FC_BASE_ROOTFS`). The snapshot-builder daemon, `runner serve`, and the
+//! CLI ready-state path all pass `None` for the runner class so the backend
+//! resolves its own; `from_host()` remains the launch-template / desktop-runner
+//! matching probe.
 //! [`RunnerClassId`] is wired as an *optional* fold input on
 //! [`LaunchTemplateKey`](super::launch_template::LaunchTemplateKey) and is
 //! intended to also become a declared `execution_id` facet — when `None`
