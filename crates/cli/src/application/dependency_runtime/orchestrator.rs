@@ -45,7 +45,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use capsule::dependency_contracts::{DependencyLock, LockedDependencyEntry};
-use capsule::types::{CapsuleManifest, ParamValue};
+use capsule::types::{CapsuleManifest, ContractSpec, ParamValue};
 use thiserror::Error;
 
 use super::endpoint::{EndpointAllocator, EndpointError};
@@ -101,6 +101,17 @@ pub struct OrchestratorInput<'a> {
     /// entry. `None` preserves the legacy "start every declared dep"
     /// behaviour for callers that haven't been migrated yet.
     pub selected_target: Option<String>,
+    /// App-schema migration sources, keyed by dependency alias. When a
+    /// dep's provider contract advertises the migration capability
+    /// (`[contracts."service@1".migrations] enabled = true`) **and** an
+    /// entry is present here, the orchestrator hands that directory of
+    /// `*.sql` files to the provider (via `ATO_MIGRATIONS_DIR`) so the
+    /// provider applies them before its readiness gate opens. Absent
+    /// entries (the common case) leave the provider untouched. The
+    /// directory is conventionally the consumer capsule's own
+    /// `migrations/` folder (phase2a RFC §1.2); no new `[dependencies.*]`
+    /// manifest grammar is introduced.
+    pub migration_sources: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -702,6 +713,24 @@ fn start_one(
             cmd.env(k, v);
         }
     }
+    // App-schema migration capability (ato#1071 §4; phase2a RFC §1.2).
+    // When the provider's contract advertises it *and* the plan supplies a
+    // migrations source for this dep, hand the provider the migrations dir
+    // + tracking-table name via env. The provider — not the CLI — owns the
+    // SQL: `ato-postgres` applies `*.sql` in lexical order against its own
+    // data dir (single-user mode, no psql/network client exists in that
+    // capsule), maintaining the `__ato_migrations` tracking table. It runs
+    // in the provider's pre-readiness window, so a migration failure exits
+    // the provider non-zero → `wait_for_ready` below fails → `start_one`
+    // returns `Err` → the dependent app never launches (fail-closed). No
+    // psql/postgres logic lives in the CLI. Providers without the
+    // capability get no extra env and are entirely unaffected.
+    let migration_source = input.migration_sources.get(alias).map(PathBuf::as_path);
+    if let Some(migration_env) = migration_provider_env(contract, migration_source) {
+        for (key, value) in migration_env {
+            cmd.env(key, value);
+        }
+    }
     let mut child = cmd.spawn().map_err(|err| OrchestratorError::SpawnFailed {
         alias: alias.to_string(),
         detail: format!("spawn {}: {}", argv[0], err),
@@ -770,6 +799,45 @@ fn start_one(
         credential_refs,
         warnings,
     })
+}
+
+/// Environment handed to a provider so it applies the consumer's SQL
+/// migrations, or `None` when migrations do not apply.
+///
+/// Returns `Some` only when **both** hold:
+/// * the provider's contract advertises the migration capability with
+///   `enabled = true` (a missing block or `enabled = false` opts out), and
+/// * the plan supplies a migrations source directory for this dep.
+///
+/// The returned env (`ATO_MIGRATIONS_DIR`, `ATO_MIGRATIONS_TRACKING_TABLE`,
+/// `ATO_MIGRATIONS_FORMAT`) is injected into the provider process before
+/// spawn. Keeping the gate here means providers without the capability are
+/// never handed migration env — no behaviour change for them. The CLI
+/// carries no SQL: it only names the source + tracking table; the provider
+/// owns application. `DATABASE_URL` is intentionally not forwarded — the
+/// `ato-postgres` provider applies migrations against its own data
+/// directory in single-user mode (the capsule ships no network SQL
+/// client), so a connection string would be unused.
+fn migration_provider_env(
+    contract: &ContractSpec,
+    migrations_source: Option<&Path>,
+) -> Option<Vec<(String, String)>> {
+    let spec = contract.migrations.as_ref().filter(|m| m.enabled)?;
+    let source = migrations_source?;
+    Some(vec![
+        (
+            "ATO_MIGRATIONS_DIR".to_string(),
+            source.display().to_string(),
+        ),
+        (
+            "ATO_MIGRATIONS_TRACKING_TABLE".to_string(),
+            spec.tracking_table.clone(),
+        ),
+        (
+            "ATO_MIGRATIONS_FORMAT".to_string(),
+            spec.format.as_str().to_string(),
+        ),
+    ])
 }
 
 fn derive_state_dir(
@@ -1298,6 +1366,83 @@ mod tests {
         assert!(shell_split(r#"echo "hello"#).is_err());
     }
 
+    fn contract_from_toml(body: &str) -> ContractSpec {
+        toml::from_str(body).expect("parse contract")
+    }
+
+    #[test]
+    fn migration_env_none_without_capability() {
+        // A provider whose contract carries no `[migrations]` block is
+        // completely unaffected: no migration env, even when a source is
+        // available.
+        let contract = contract_from_toml(
+            r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            "#,
+        );
+        assert!(migration_provider_env(&contract, Some(Path::new("/app/migrations"))).is_none());
+    }
+
+    #[test]
+    fn migration_env_none_when_disabled() {
+        // An explicit `enabled = false` is an opt-out, not a capability.
+        let contract = contract_from_toml(
+            r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            [migrations]
+            enabled = false
+            "#,
+        );
+        assert!(migration_provider_env(&contract, Some(Path::new("/app/migrations"))).is_none());
+    }
+
+    #[test]
+    fn migration_env_none_without_source() {
+        // Capability advertised, but the plan supplies no migrations
+        // source → still a no-op (nothing to apply).
+        let contract = contract_from_toml(
+            r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            [migrations]
+            enabled = true
+            "#,
+        );
+        assert!(migration_provider_env(&contract, None).is_none());
+    }
+
+    #[test]
+    fn migration_env_present_when_advertised_and_sourced() {
+        // Only when the capability is advertised AND a source is present is
+        // the migration step invoked (env injected).
+        let contract = contract_from_toml(
+            r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            [migrations]
+            enabled = true
+            tracking_table = "schema_history"
+            "#,
+        );
+        let env = migration_provider_env(&contract, Some(Path::new("/app/migrations")))
+            .expect("migration env injected when advertised + sourced");
+        let map: BTreeMap<_, _> = env.into_iter().collect();
+        assert_eq!(
+            map.get("ATO_MIGRATIONS_DIR").map(String::as_str),
+            Some("/app/migrations")
+        );
+        assert_eq!(
+            map.get("ATO_MIGRATIONS_TRACKING_TABLE").map(String::as_str),
+            Some("schema_history")
+        );
+        assert_eq!(
+            map.get("ATO_MIGRATIONS_FORMAT").map(String::as_str),
+            Some("sql")
+        );
+    }
+
     #[test]
     fn parse_duration_human_handles_common_forms() {
         assert_eq!(parse_duration_human("30s"), Some(Duration::from_secs(30)));
@@ -1477,6 +1622,7 @@ version = "1"
             default_ready_timeout: Duration::from_secs(5),
             ready_probe_interval: Duration::from_millis(20),
             selected_target: None,
+            migration_sources: BTreeMap::new(),
         };
 
         let graph = start_all(input).expect("start_all");
@@ -1590,6 +1736,7 @@ version = "1"
             default_ready_timeout: Duration::from_secs(2),
             ready_probe_interval: Duration::from_millis(20),
             selected_target: None,
+            migration_sources: BTreeMap::new(),
         };
 
         let err = start_all(input).expect_err("must abort on alive other session");
@@ -1730,6 +1877,7 @@ version = "1"
             default_ready_timeout: Duration::from_secs(120),
             ready_probe_interval: Duration::from_millis(500),
             selected_target: None,
+            migration_sources: BTreeMap::new(),
         };
 
         let graph = start_all(input).unwrap_or_else(|err| {
@@ -2037,6 +2185,7 @@ version = "1"
             default_ready_timeout: Duration::from_secs(60),
             ready_probe_interval: Duration::from_millis(20),
             selected_target: None,
+            migration_sources: BTreeMap::new(),
         };
         let err = start_all(input).expect_err("must reject missing host tool");
         let elapsed = started.elapsed();

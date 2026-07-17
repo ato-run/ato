@@ -37,10 +37,10 @@ use crate::orchestration::startup_order_from_dependencies;
 use crate::schema_registry::SchemaRegistry;
 
 pub use dependency_grammar::{
-    CapsuleUrl, ContractRef, ContractSpec, ContractStateSpec, CredentialSchema, DependencySpec,
-    DependencyStateOwnership, DependencyStateSpec, EndpointSpec, ParamSchema, ParamValue,
-    ReadyProbe, RuntimeExportSpec, RuntimeExportValue, TemplateExpr, TemplateSegment,
-    TemplatedString, ValueType,
+    CapsuleUrl, ContractMigrationSpec, ContractRef, ContractSpec, ContractStateSpec,
+    CredentialSchema, DependencySpec, DependencyStateOwnership, DependencyStateSpec, EndpointSpec,
+    MigrationFormat, ParamSchema, ParamValue, ReadyProbe, RuntimeExportSpec, RuntimeExportValue,
+    TemplateExpr, TemplateSegment, TemplatedString, ValueType,
 };
 use manifest_v03::*;
 pub use manifest_validation::ValidationError;

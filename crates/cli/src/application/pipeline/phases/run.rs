@@ -1027,6 +1027,24 @@ pub(crate) async fn start_dependency_contracts_for_run(
     .context("dependency-contract verification failed")?;
     let host_env = ProcessHostEnv;
     let redaction = Arc::new(RedactionRegistry::new());
+    // App-schema migration source (phase2a RFC §1.2): a capsule applies its
+    // own `migrations/*.sql` to its deployment DB. Convention over new
+    // grammar — the consumer's `<workspace_root>/migrations/` directory, if
+    // present, is offered to every declared dep. The orchestrator only
+    // actually forwards it to a provider whose contract advertises the
+    // migration capability, so mapping it for all aliases here is harmless
+    // for providers (e.g. Vite frontends) that never opt in.
+    let migration_sources = {
+        let dir = prepared.workspace_root.join("migrations");
+        if dir.is_dir() {
+            providers_for_run
+                .keys()
+                .map(|alias| (alias.clone(), dir.clone()))
+                .collect()
+        } else {
+            BTreeMap::new()
+        }
+    };
     let graph = start_dependency_graph(OrchestratorInput {
         lock: &dependency_lock,
         providers: providers_for_run,
@@ -1044,6 +1062,7 @@ pub(crate) async fn start_dependency_contracts_for_run(
         // postgres, which removes the orphan-postgres collision when
         // alternating between `--target web` and the default backend.
         selected_target: Some(plan.selected_target_label().to_string()),
+        migration_sources,
     })
     .map_err(|err| dependency_contract_start_error(plan.selected_target_label(), err))?;
 

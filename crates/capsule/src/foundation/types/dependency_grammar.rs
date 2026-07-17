@@ -298,6 +298,63 @@ pub struct ContractStateSpec {
     pub mount: Option<String>,
 }
 
+/// App-schema migration artifact format a provider consumes. Only plain
+/// SQL is defined today (`format = "sql"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MigrationFormat {
+    Sql,
+}
+
+impl MigrationFormat {
+    /// Stable lowercase token handed to the provider (e.g. via
+    /// `ATO_MIGRATIONS_FORMAT`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MigrationFormat::Sql => "sql",
+        }
+    }
+}
+
+fn default_migration_format() -> MigrationFormat {
+    MigrationFormat::Sql
+}
+
+fn default_migration_tracking_table() -> String {
+    "__ato_migrations".to_string()
+}
+
+/// Provider-advertised **app-schema** migration capability
+/// (ato#1071 §4 `state_migration_capability`; phase2a RFC §1.2).
+///
+/// A `service@1` provider that carries this block under its contract
+/// (`[contracts."service@1".migrations]`) tells the orchestrator it can
+/// apply a consumer's `migrations/*.sql` against the database it just
+/// provisioned, tracking applied migrations in [`Self::tracking_table`].
+/// The provider owns the SQL; the CLI only hands it the migrations source
+/// (see the orchestrator). This is app schema evolution — **not** provider
+/// state-format/engine migration, which stays deferred (ato#1071 §4,
+/// Invariant 5).
+///
+/// The whole block is optional (`ContractSpec::migrations: Option<_>`) and
+/// every field defaults, so existing manifests deserialize unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractMigrationSpec {
+    /// Whether the provider supports applying migrations. A block declared
+    /// with `enabled = false` is an explicit opt-out and the orchestrator
+    /// treats it as no capability.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Migration artifact format the provider consumes. Defaults to `sql`.
+    #[serde(default = "default_migration_format")]
+    pub format: MigrationFormat,
+    /// Name of the provider-managed tracking table recording applied
+    /// migrations (`migration_id`, `checksum`, timestamps, status).
+    /// Defaults to `__ato_migrations`.
+    #[serde(default = "default_migration_tracking_table")]
+    pub tracking_table: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RuntimeExportSpec {
@@ -427,11 +484,65 @@ pub struct ContractSpec {
     pub runtime_exports: BTreeMap<String, RuntimeExportSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<ContractStateSpec>,
+    /// Optional app-schema migration capability the provider advertises
+    /// (`[contracts."service@1".migrations]`). Absent (the default) means
+    /// the provider does not run migrations, so existing manifests parse
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrations: Option<ContractMigrationSpec>,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ContractRef, TemplateExpr, TemplateSegment, TemplatedString};
+    use super::{
+        ContractRef, ContractSpec, MigrationFormat, TemplateExpr, TemplateSegment, TemplatedString,
+    };
+
+    #[test]
+    fn contract_without_migrations_block_parses() {
+        // Existing manifests carry no `[contracts.*.migrations]`; the
+        // optional field must default to `None` so they deserialize
+        // unchanged.
+        let toml = r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+        "#;
+        let spec: ContractSpec = toml::from_str(toml).expect("parse contract without migrations");
+        assert!(spec.migrations.is_none());
+    }
+
+    #[test]
+    fn migration_capability_applies_field_defaults() {
+        // A bare `[migrations]` with only `enabled` must fill `format` and
+        // `tracking_table` from serde defaults.
+        let toml = r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            [migrations]
+            enabled = true
+        "#;
+        let spec: ContractSpec = toml::from_str(toml).expect("parse contract with migrations");
+        let migrations = spec.migrations.expect("migrations block present");
+        assert!(migrations.enabled);
+        assert_eq!(migrations.format, MigrationFormat::Sql);
+        assert_eq!(migrations.tracking_table, "__ato_migrations");
+    }
+
+    #[test]
+    fn migration_capability_honours_explicit_values() {
+        let toml = r#"
+            target = "server"
+            ready = { type = "tcp", target = "127.0.0.1:{{port}}" }
+            [migrations]
+            enabled = true
+            format = "sql"
+            tracking_table = "schema_history"
+        "#;
+        let spec: ContractSpec = toml::from_str(toml).expect("parse contract with migrations");
+        let migrations = spec.migrations.expect("migrations block present");
+        assert_eq!(migrations.format.as_str(), "sql");
+        assert_eq!(migrations.tracking_table, "schema_history");
+    }
 
     #[test]
     fn parses_contract_ref() {
