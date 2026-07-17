@@ -4,7 +4,7 @@ use capsule::execution_plan::error::AtoExecutionError;
 use capsule::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
-use capsule::types::{CapsuleManifest, ValidationMode};
+use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -875,7 +875,7 @@ fn run_v03_build_lifecycle_steps(
         .and_then(toml::Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
-    if schema_version != "0.3" {
+    if schema_version != MANIFEST_SCHEMA_V03 {
         return Ok(());
     }
 

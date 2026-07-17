@@ -945,6 +945,7 @@ fn build_managed_service_graph(
                 state_bindings: Vec::new(),
                 readiness_probe: None,
                 network: None,
+                run_once: false,
             },
         );
     }
