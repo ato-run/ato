@@ -871,6 +871,44 @@ impl FirecrackerBackend {
         Ok(())
     }
 
+    /// P1: resolve the operator's `ATO_RUNNER_UFFD_PREVIEW` opt-in into an
+    /// actual mode, or `None` to stay on the eager File path.
+    ///
+    /// This is the capability gate the preview flag promises. Without it,
+    /// opting in on a host that cannot serve page faults does NOT degrade to
+    /// File — every restore on that runner fails (the page-server bind or the
+    /// fault loop errors, and the lease dies). A canary whose blast radius is
+    /// "all restores on this box" is not a canary, so an unsupported host falls
+    /// back and says why.
+    ///
+    /// The capability decision is [`crate::uffd::evaluate`] via [`Self::probe`]
+    /// — the same arch/KVM/Firecracker-version/userfaultfd rule this backend
+    /// already reports as `supports_uffd_mem_backend`, so the flag can never
+    /// disagree with what the runner advertises. (U0 built that probe and noted
+    /// "no restore path uses it yet"; this is that path.)
+    fn uffd_preview_mode(&self, store: &CasStore) -> Option<UffdMode> {
+        let refuse = |reason: String| {
+            eprintln!(
+                "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this host cannot serve \
+                 demand-paged memory ({reason}); restoring via the eager File path instead."
+            );
+            None
+        };
+        let caps = self.probe();
+        if !caps.supports_uffd_mem_backend {
+            return refuse(
+                caps.uffd_reason
+                    .unwrap_or_else(|| "uffd mem_backend unsupported".to_string()),
+            );
+        }
+        // `PageSource::Cas` serves every guest fault straight out of the local
+        // CAS; if it cannot be opened the guest faults on memory nobody can supply.
+        match CasStore::open(store.root()) {
+            Ok(_) => Some(UffdMode::Cas),
+            Err(e) => refuse(format!("local CAS unavailable: {e}")),
+        }
+    }
+
     /// The root-reachable address of a guest port: the guest IP directly
     /// (legacy) or the per-slot ingress (netns mode) which DNATs into the ns.
     fn probe_addr(&self, port: u16) -> Result<std::net::SocketAddr, SnapshotError> {
@@ -1238,60 +1276,6 @@ fn uffd_mode() -> Option<UffdMode> {
     }
 }
 
-/// Whether THIS kernel can hand out a userfaultfd at all.
-///
-/// Firecracker is what actually creates the uffd and passes it to our
-/// page-server over `SCM_RIGHTS`, but it runs on this same kernel — so a
-/// successful `userfaultfd(2)` here is a faithful proxy. It also catches the
-/// hardened-host case (`vm.unprivileged_userfaultfd=0` without the required
-/// capability), which is otherwise indistinguishable from "not supported"
-/// until the guest is already booting on memory nobody can serve.
-#[cfg(target_os = "linux")]
-fn uffd_kernel_supported() -> bool {
-    // SAFETY: `userfaultfd(2)` takes only flags and returns a new fd or -1 —
-    // it touches no memory of ours. A successful fd is closed immediately.
-    unsafe {
-        let fd = libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC);
-        if fd < 0 {
-            return false;
-        }
-        libc::close(fd as libc::c_int);
-        true
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn uffd_kernel_supported() -> bool {
-    false // the page-server module is Linux-only (its non-Linux bind fails closed).
-}
-
-/// P1: resolve the operator's `ATO_RUNNER_UFFD_PREVIEW` opt-in into an actual
-/// mode, or `None` to stay on the eager File path.
-///
-/// This is the capability gate the preview flag promises. Without it, opting in
-/// on a host that cannot serve page faults does NOT degrade to File — every
-/// restore on that runner fails (the page-server bind or the fault loop errors,
-/// and the lease dies). A canary flag whose blast radius is "all restores on
-/// this box" is not a canary, so an unsupported host falls back and says so.
-fn uffd_preview_mode(store: &CasStore) -> Option<UffdMode> {
-    let refuse = |reason: &str| {
-        eprintln!(
-            "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this host cannot serve \
-             demand-paged memory ({reason}); restoring via the eager File path instead."
-        );
-        None
-    };
-    if !uffd_kernel_supported() {
-        return refuse("no userfaultfd support on this kernel");
-    }
-    // `PageSource::Cas` serves every guest fault straight out of the local CAS;
-    // if it cannot be opened the guest would fault on memory nobody can supply.
-    match CasStore::open(store.root()) {
-        Ok(_) => Some(UffdMode::Cas),
-        Err(e) => refuse(&format!("local CAS unavailable: {e}")),
-    }
-}
-
 /// L2 (#912): whether the host has an AF_VSOCK transport (`/dev/vhost-vsock`, i.e. the
 /// `vhost_vsock` module is loaded). Cheap + side-effect-free.
 fn host_vhost_vsock_present() -> bool {
@@ -1605,8 +1589,10 @@ impl SnapshotBackend for FirecrackerBackend {
         } else {
             None
         };
-        // U0: truthfully report whether this host could drive a `Uffd` mem_backend
-        // (probe only — no restore path uses it yet). See crate::uffd.
+        // U0: truthfully report whether this host could drive a `Uffd` mem_backend.
+        // P1 (#1082) consumes this as the gate for `uffd_preview`, so what the
+        // runner advertises and what the preview flag does cannot diverge.
+        // See crate::uffd.
         let (supports_uffd_mem_backend, uffd_reason) = crate::uffd::evaluate(
             std::env::consts::ARCH,
             kvm,
@@ -2201,7 +2187,7 @@ impl SnapshotBackend for FirecrackerBackend {
             // fell back to File would assert nothing. It takes effect only when the
             // product flag is off.
             let uffd = if input.uffd_preview {
-                uffd_preview_mode(input.store)
+                self.uffd_preview_mode(input.store)
             } else {
                 uffd_mode()
             };
