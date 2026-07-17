@@ -132,6 +132,10 @@ pub struct GeneratedBindingBuildSpec {
 pub struct ServiceBuildSpec {
     /// Stable service name (unique; keys per-service logs + diagnostics).
     pub name: String,
+    /// One-shot task (manifest `run_once = true`): runs to completion during
+    /// the BUILD boot (`run_at: ["seal_once"]`) before dependents start; a
+    /// restore resumes the sealed memory, so it never re-runs per preview.
+    pub run_once: bool,
     /// The workload argv (already wrapped `["/bin/sh", "-lc", <entrypoint>]`).
     pub cmd: Vec<String>,
     /// Working directory.
@@ -667,6 +671,14 @@ fn build_supervisor_json(
 ) -> serde_json::Value {
     match &sup.services {
         Some(services) => {
+            // Phase 6 (service DAG): which declared services are one-shot tasks —
+            // a dependent WAITS FOR EXIT 0 of a run_once dep (depends_on_success),
+            // and for READINESS of a long-running dep (legacy depends_on).
+            let run_once_names: std::collections::BTreeSet<&str> = services
+                .iter()
+                .filter(|s| s.run_once)
+                .map(|s| s.name.as_str())
+                .collect();
             let svc_json: Vec<serde_json::Value> = services
                 .iter()
                 .map(|s| {
@@ -677,15 +689,33 @@ fn build_supervisor_json(
                         "base_env": s.base_env,
                         "bindings_env": s.env_map,
                     });
+                    if s.run_once {
+                        // One-shot: runs during the BUILD boot before the
+                        // pre-seal snapshot; sealed memory carries its effects
+                        // into every restore.
+                        obj["kind"] = serde_json::json!("run_once");
+                        obj["run_at"] = serde_json::json!(["seal_once"]);
+                    }
                     if !s.depends_on.is_empty() {
-                        obj["depends_on"] = serde_json::json!(s.depends_on);
+                        let (success, ready): (Vec<&String>, Vec<&String>) = s
+                            .depends_on
+                            .iter()
+                            .partition(|d| run_once_names.contains(d.as_str()));
+                        if !ready.is_empty() {
+                            obj["depends_on"] = serde_json::json!(ready);
+                        }
+                        if !success.is_empty() {
+                            obj["depends_on_success"] = serde_json::json!(success);
+                        }
                     }
                     // Readiness (so a dependent can WAIT): emit when the service has a
                     // determinable PRIMARY port (public = the proxied target port;
                     // internal = its first resolved expose port or literal env.PORT).
                     // The guest probes 127.0.0.1:<port> (plus the HTTP path when
                     // declared). No port ⇒ "ready once started" (no readiness block).
-                    if let Some(rport) = s.port {
+                    if let Some(rport) = s.port
+                        && !s.run_once
+                    {
                         let mut r = serde_json::json!({ "port": rport });
                         if let Some(path) = &s.readiness_http_path {
                             r["http_path"] = serde_json::json!(path);
@@ -806,6 +836,7 @@ fn derive_supervisor_services(
     struct Resolved {
         name: String,
         cmd: Vec<String>,
+        run_once: bool,
         author_env: BTreeMap<String, String>,
         env_map: BTreeMap<String, String>,
         public: bool,
@@ -832,6 +863,20 @@ fn derive_supervisor_services(
         }
         if svc.entrypoint.trim().is_empty() {
             return Err(format!("service '{name}': `entrypoint` is empty"));
+        }
+        // Phase 6: a one-shot task is waited on for EXIT, not readiness, and can
+        // never be the public web service (it exits).
+        if svc.run_once {
+            if svc.readiness_probe.is_some() {
+                return Err(format!(
+                    "service '{name}': `run_once` and `readiness_probe` are contradictory                      (a one-shot task is waited on for exit 0, not readiness)"
+                ));
+            }
+            if svc.network.as_ref().is_some_and(|n| n.publish) {
+                return Err(format!(
+                    "service '{name}': a `run_once` task cannot be the public service                      (it exits; nothing would serve the proxied port)"
+                ));
+            }
         }
         // v1.6 (ato#983): derive this service's durable state volumes.
         // Defense-in-depth — the manifest validator (`manifest_validation.rs`)
@@ -1007,6 +1052,7 @@ fn derive_supervisor_services(
         collected.push(Resolved {
             name: (*name).clone(),
             cmd: vec!["/bin/sh".into(), "-lc".into(), svc.entrypoint.clone()],
+            run_once: svc.run_once,
             author_env: base_env,
             env_map,
             public,
@@ -1285,6 +1331,7 @@ fn derive_supervisor_services(
         }
         out.push(ServiceBuildSpec {
             name: r.name.clone(),
+            run_once: r.run_once,
             cmd: r.cmd.clone(),
             cwd: "/app".into(),
             base_env,
@@ -1432,6 +1479,52 @@ pub fn materialize_source(
     manifest_override: Option<&str>,
     dest: &Path,
 ) -> Result<PathBuf, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned(owner, repo, commit, dest)?;
+
+    let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
+    if let Some(toml) = manifest_override {
+        // The recipe manifest is authoritative for Store-recipe jobs: write it at the
+        // contained root (overwriting a repo capsule.toml if one exists) so every later
+        // stage — manifest parse, eligibility, rootfs COPY — sees exactly the approved
+        // recipe, never a divergent repo file.
+        std::fs::write(root.join("capsule.toml"), toml)
+            .map_err(|e| format!("write recipe manifest as capsule.toml: {e}"))?;
+    }
+    Ok(root)
+}
+
+/// SOURCE_MATERIALIZATION_SPEC step 1: shallow-checkout the pinned public commit and
+/// return the (optionally sub-directoried) source root **without** requiring or writing
+/// a `capsule.toml`. The `source_materialize` job freezes the repo tree exactly as it
+/// is (there is no recipe to apply and no manifest to resolve), so unlike
+/// [`materialize_source`] it neither demands the repo carry a `capsule.toml` nor writes
+/// one. Same identity validation, full-SHA pin, and lexical+canonical containment as the
+/// recipe lane — it reuses the same [`git_checkout_pinned`] + [`contained_source_root`]
+/// helpers, only passing `require_manifest = false`.
+pub fn checkout_source_tree(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+    dest: &Path,
+) -> Result<PathBuf, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned(owner, repo, commit, dest)?;
+    contained_source_root(dest, subdir, false)
+}
+
+/// Validate the server-resolved source identity as an input boundary: `owner`/`repo`
+/// as conservative GitHub identities and `commit` as a pinned 40-hex sha (never a
+/// branch/tag). Shared by [`materialize_source`] and [`checkout_source_tree`] so both
+/// lanes enforce the same fail-closed gate before any network use.
+fn validate_source_identity(owner: &str, repo: &str, commit: &str) -> Result<(), String> {
     if !valid_github_owner(owner) {
         return Err(format!("invalid github owner {owner:?}"));
     }
@@ -1443,9 +1536,14 @@ pub fn materialize_source(
             "refusing non-pinned commit {commit:?} (need a full 40-char sha)"
         ));
     }
-    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
-        validate_subdir(s)?;
-    }
+    Ok(())
+}
+
+/// Shallow-clone `owner/repo` and check out the pinned `commit` into `dest`. The pure
+/// git steps shared by [`materialize_source`] (recipe lane) and [`checkout_source_tree`]
+/// (source_materialize lane); callers validate the identity (`validate_source_identity`)
+/// and any subdir before calling, and resolve/contain the source root afterward.
+fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
         let mut c = Command::new("git");
@@ -1470,17 +1568,7 @@ pub fn materialize_source(
         Some(dest),
     )?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
-
-    let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
-    if let Some(toml) = manifest_override {
-        // The recipe manifest is authoritative for Store-recipe jobs: write it at the
-        // contained root (overwriting a repo capsule.toml if one exists) so every later
-        // stage — manifest parse, eligibility, rootfs COPY — sees exactly the approved
-        // recipe, never a divergent repo file.
-        std::fs::write(root.join("capsule.toml"), toml)
-            .map_err(|e| format!("write recipe manifest as capsule.toml: {e}"))?;
-    }
-    Ok(root)
+    Ok(())
 }
 
 /// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout.
@@ -2052,6 +2140,35 @@ readiness_probe = { http_get = "/health" }
             materialize_source("acme", "", &sha, None, None, dir.path())
                 .unwrap_err()
                 .contains("repo")
+        );
+    }
+
+    #[test]
+    fn checkout_source_tree_validates_identity_before_any_network() {
+        // The source_materialize lane shares the recipe lane's fail-closed identity
+        // gate: a non-pinned commit and path-like owner/repo are rejected before git
+        // ever runs, and (unlike materialize_source) no capsule.toml is required.
+        let dir = tempfile::tempdir().unwrap();
+        let sha = "a".repeat(40);
+        assert!(
+            checkout_source_tree("acme", "app", "main", None, dir.path())
+                .unwrap_err()
+                .contains("non-pinned")
+        );
+        assert!(
+            checkout_source_tree("../evil", "app", &sha, None, dir.path())
+                .unwrap_err()
+                .contains("owner")
+        );
+        assert!(
+            checkout_source_tree("acme", "a/b", &sha, None, dir.path())
+                .unwrap_err()
+                .contains("repo")
+        );
+        assert!(
+            checkout_source_tree("acme", "app", &sha, Some("../escape"), dir.path())
+                .unwrap_err()
+                .contains("..")
         );
     }
 
@@ -2751,6 +2868,69 @@ readiness_probe = { http_get = "/health" }
     }
 
     // ── Phase 7 (generated internal bindings) ──
+
+    #[test]
+    fn run_once_service_emits_dag_fields_and_dependents_wait_for_success() {
+        // A migration-style one-shot + a public web that depends on it and on a
+        // long-running db — the dependent's wait splits by dep kind.
+        let toml = format!(
+            "{}\n[services.web]\nentrypoint = \"python3 web.py\"\nsecrets = [\"api_key\"]\n\
+             depends_on = [\"migrate\", \"db\"]\n\
+             [services.web.network]\npublish = true\n\
+             [services.db]\nentrypoint = \"python3 db.py\"\n\
+             [services.db.expose]\n\
+             [services.migrate]\nentrypoint = \"python3 migrate.py\"\nrun_once = true\n\
+             [secrets.api_key]\nrequired = true\nenv = \"API_KEY\"\n",
+            base_toml()
+        );
+        // db needs an expose-able port to be waitable; reuse the simplest shape:
+        let toml = toml.replace("[services.db.expose]\n", "");
+        let spec = derive_supervisor_build_spec(&parse(&toml), &probe_python())
+            .expect("run_once manifest derives");
+        let sup = spec.supervisor.as_ref().unwrap();
+        let migrate = sup
+            .services
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|s| s.name == "migrate")
+            .unwrap();
+        assert!(migrate.run_once);
+        let json = build_supervisor_json(sup, spec.port, "");
+        let arr = json["services"].as_array().unwrap();
+        let m = arr.iter().find(|s| s["name"] == "migrate").unwrap();
+        assert_eq!(m["kind"], "run_once");
+        assert_eq!(m["run_at"], serde_json::json!(["seal_once"]));
+        assert!(
+            m.get("readiness").is_none(),
+            "one-shot has no readiness block"
+        );
+        let w = arr.iter().find(|s| s["name"] == "web").unwrap();
+        assert_eq!(w["depends_on_success"], serde_json::json!(["migrate"]));
+        assert_eq!(w["depends_on"], serde_json::json!(["db"]));
+    }
+
+    #[test]
+    fn run_once_contradictions_fail_closed_in_the_manifest() {
+        // readiness_probe on a run_once task.
+        let toml = format!(
+            "{}\n[services.app2]\nentrypoint = \"x\"\nsecrets = [\"api_key\"]\nrun_once = true\n\
+             readiness_probe = {{ http_get = \"/\" }}\n\
+             [secrets.api_key]\nrequired = true\nenv = \"API_KEY\"\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+        assert!(err.contains("contradictory"), "{err}");
+        // public run_once task.
+        let toml = format!(
+            "{}\n[services.app2]\nentrypoint = \"x\"\nsecrets = [\"api_key\"]\nrun_once = true\n\
+             [services.app2.network]\npublish = true\n\
+             [secrets.api_key]\nrequired = true\nenv = \"API_KEY\"\n",
+            base_toml()
+        );
+        let err = derive_supervisor_build_spec(&parse(&toml), &probe_python()).unwrap_err();
+        assert!(err.contains("cannot be the public service"), "{err}");
+    }
 
     fn generated_bindings_toml() -> String {
         // A public `api` + an internal `postgres`, both fed the SAME generated

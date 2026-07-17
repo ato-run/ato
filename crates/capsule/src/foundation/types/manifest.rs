@@ -398,6 +398,16 @@ pub struct ServiceSpec {
     /// Service-to-service network exposure controls.
     #[serde(default)]
     pub network: Option<ServiceNetworkSpec>,
+
+    /// One-shot lifecycle (Phase 6 service DAG): run this service to
+    /// completion during the BUILD boot (`run_at: ["seal_once"]`) before any
+    /// dependent starts. Exit 0 = success (dependents may start); non-zero
+    /// fails the build. A restore resumes the sealed memory, so the task never
+    /// re-runs per preview. `readiness_probe` must not be set together with
+    /// `run_once` (a one-shot task is waited on for EXIT, not readiness).
+    /// Typical uses: DB migrations, permission init, bootstrap seed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub run_once: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -998,18 +1008,37 @@ pub struct PolymorphismConfig {
     pub implements: Vec<String>,
 }
 
+/// The frozen v0.3 manifest schema tag.
+///
+/// v0.3-pinned code — `is_v03` detection, v0.3 normalization, the 0.2 → 0.3
+/// migration, v0.3 lifecycle/preflight gates — must reference THIS constant,
+/// never [`CURRENT_MANIFEST_SCHEMA_VERSION`], so a future schema bump cannot
+/// silently reroute newer manifests into v0.3 handling or turn the 0.2 → 0.3
+/// migration into a 0.2 → 0.4 one.
+pub const MANIFEST_SCHEMA_V03: &str = "0.3";
+
+/// The schema version stamped on newly created or defaulted manifests.
+///
+/// Bumping this must not change any v0.3-pinned code path (those pin
+/// [`MANIFEST_SCHEMA_V03`]) and requires adding the new version to
+/// [`SUPPORTED_MANIFEST_SCHEMA_VERSIONS`].
+pub const CURRENT_MANIFEST_SCHEMA_VERSION: &str = MANIFEST_SCHEMA_V03;
+
+/// Every schema version this build can parse and validate.
+pub const SUPPORTED_MANIFEST_SCHEMA_VERSIONS: &[&str] = &[MANIFEST_SCHEMA_V03];
+
 fn default_schema_version() -> String {
-    "0.3".to_string()
+    CURRENT_MANIFEST_SCHEMA_VERSION.to_string()
 }
 
 fn is_supported_schema_version(value: &str) -> bool {
-    matches!(value.trim(), "0.3")
+    SUPPORTED_MANIFEST_SCHEMA_VERSIONS.contains(&value.trim())
 }
 
 fn is_v03_schema(raw: &toml::Value) -> bool {
     raw.get("schema_version")
         .and_then(toml::Value::as_str)
-        .map(|value| value.trim() == "0.3")
+        .map(|value| value.trim() == MANIFEST_SCHEMA_V03)
         .unwrap_or(false)
 }
 
