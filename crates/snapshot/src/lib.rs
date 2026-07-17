@@ -72,7 +72,7 @@ pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,
     RestoreContract, SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
-    SupervisorBuildReceipt,
+    SupervisorBuildReceipt, WarmupRecipe,
 };
 pub use placement::{
     BackendRequirements, PlacementError, matches, ready_state_safe, select_ready_state_backend,
