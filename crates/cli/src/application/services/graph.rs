@@ -277,6 +277,7 @@ mod tests {
             secrets: None,
             readiness_probe: None,
             network: None,
+            run_once: false,
         }
     }
 

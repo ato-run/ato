@@ -86,6 +86,9 @@ pub struct ImportedService {
     pub mounts: Vec<ServiceMount>,
     /// `restart:` normalized to an Ato supervisor policy.
     pub restart: RestartPolicy,
+    /// Long-running service vs one-shot task (see [`ServiceKind`] for the
+    /// derivation rule). Filled by [`compose_to_graph`] after edges are known.
+    pub kind: ServiceKind,
 }
 
 /// A dependency edge `from` → `to`.
@@ -102,9 +105,26 @@ pub enum DependencyKind {
     /// Plain `depends_on` / `condition: service_started` — wait until the
     /// dependency's process is up.
     Ready,
-    /// `condition: service_healthy` / `service_completed_successfully` — wait
-    /// until the dependency reports success (healthy or completed).
-    Success,
+    /// `condition: service_healthy` — wait until the dependency's readiness
+    /// probe answers (the guest supervisor's readiness wait).
+    Healthy,
+    /// `condition: service_completed_successfully` — wait until the dependency
+    /// EXITS 0. The target is therefore a one-shot task, not a long-running
+    /// service: it is what derives [`ServiceKind::RunOnce`].
+    Completed,
+}
+
+/// Whether a graph node is a long-running service or a one-shot task.
+///
+/// Compose has no first-class one-shot marker; the v1 derivation rule is: a
+/// service some edge waits on with `service_completed_successfully` is a
+/// [`ServiceKind::RunOnce`] task (it must exit 0 — e.g. a Blinko migration
+/// container), everything else is a long-running [`ServiceKind::Service`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceKind {
+    #[default]
+    Service,
+    RunOnce,
 }
 
 /// Normalized `healthcheck:`. Durations are kept as their raw compose strings
@@ -169,6 +189,87 @@ const SUPPORTED_SERVICE_KEYS: &[&str] = &[
     "privileged",   // allowed only when false
     "network_mode", // allowed only for bridge/none/default
 ];
+
+/// Depth-first cycle detection over the dependency edges. Deterministic error
+/// (names sorted) so the same input always reports the same cycle member.
+fn detect_dependency_cycle(
+    services: &[ImportedService],
+    dependencies: &[ServiceDependency],
+) -> Result<(), String> {
+    use std::collections::BTreeMap;
+    let mut adj: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for d in dependencies {
+        adj.entry(d.from.as_str()).or_default().push(d.to.as_str());
+    }
+    // 0 = unvisited, 1 = on the current stack, 2 = done.
+    let mut state: BTreeMap<&str, u8> = services.iter().map(|s| (s.name.as_str(), 0u8)).collect();
+    fn visit<'a>(
+        node: &'a str,
+        adj: &BTreeMap<&'a str, Vec<&'a str>>,
+        state: &mut BTreeMap<&'a str, u8>,
+    ) -> Result<(), String> {
+        match state.get(node).copied() {
+            Some(1) => {
+                return Err(format!(
+                    "dependency cycle involving service '{node}' — a cycle can never start                      (fail-closed)"
+                ));
+            }
+            Some(2) | None => return Ok(()),
+            _ => {}
+        }
+        state.insert(node, 1);
+        if let Some(next) = adj.get(node) {
+            for n in next {
+                visit(n, adj, state)?;
+            }
+        }
+        state.insert(node, 2);
+        Ok(())
+    }
+    let names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
+    for n in names {
+        visit(n, &adj, &mut state)?;
+    }
+    Ok(())
+}
+
+impl ImportedServiceGraph {
+    /// Deterministic start order: dependencies before dependents, name as the
+    /// tie-break (stable across runs and input orders — the same order the
+    /// guest supervisor derives, so plan-time and boot-time agree).
+    pub fn start_order(&self) -> Vec<&str> {
+        use std::collections::BTreeMap;
+        let mut incoming: BTreeMap<&str, usize> =
+            self.services.iter().map(|s| (s.name.as_str(), 0)).collect();
+        let mut rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for d in &self.dependencies {
+            *incoming.entry(d.from.as_str()).or_default() += 1;
+            rev.entry(d.to.as_str()).or_default().push(d.from.as_str());
+        }
+        let mut order = Vec::with_capacity(self.services.len());
+        let mut ready: Vec<&str> = incoming
+            .iter()
+            .filter(|(_, n)| **n == 0)
+            .map(|(k, _)| *k)
+            .collect();
+        ready.sort_unstable();
+        while let Some(n) = ready.first().copied() {
+            ready.remove(0);
+            order.push(n);
+            if let Some(dependents) = rev.get(n) {
+                for dep in dependents {
+                    let cnt = incoming.get_mut(dep).unwrap();
+                    *cnt -= 1;
+                    if *cnt == 0 {
+                        let pos = ready.binary_search(dep).unwrap_or_else(|p| p);
+                        ready.insert(pos, dep);
+                    }
+                }
+            }
+        }
+        order
+    }
+}
 
 /// Convert a docker-compose document into Ato's normalized [`ImportedServiceGraph`].
 ///
@@ -263,6 +364,7 @@ pub fn compose_to_graph(yaml: &str) -> Result<ImportedServiceGraph, String> {
             healthcheck,
             mounts,
             restart,
+            kind: ServiceKind::Service,
         });
     }
 
@@ -286,6 +388,43 @@ pub fn compose_to_graph(yaml: &str) -> Result<ImportedServiceGraph, String> {
     // Canonical order → identity is independent of source key order.
     services.sort_by(|a, b| a.name.cmp(&b.name));
     dependencies.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+
+    // Derive service-vs-run_once: a service some edge waits on with
+    // `service_completed_successfully` must EXIT 0 — a one-shot task (e.g. a
+    // migration container), never a long-running service.
+    let run_once: std::collections::BTreeSet<&str> = dependencies
+        .iter()
+        .filter(|d| d.kind == DependencyKind::Completed)
+        .map(|d| d.to.as_str())
+        .collect();
+    // Fail closed on the contradiction: a one-shot task cannot also be the
+    // public web service or restart forever.
+    for svc in &mut services {
+        if run_once.contains(svc.name.as_str()) {
+            if svc.restart == RestartPolicy::Always {
+                return Err(format!(
+                    "service '{}' is waited on with service_completed_successfully (a one-shot                      task) but declares restart: always — contradictory (fail-closed)",
+                    svc.name
+                ));
+            }
+            svc.kind = ServiceKind::RunOnce;
+        }
+    }
+    let run_once_names: Vec<&str> = services
+        .iter()
+        .filter(|s| s.kind == ServiceKind::RunOnce)
+        .map(|s| s.name.as_str())
+        .collect();
+    if run_once_names.contains(&public_service.as_str()) {
+        return Err(format!(
+            "the public service '{public_service}' is waited on with              service_completed_successfully — a one-shot task cannot be the public web service"
+        ));
+    }
+
+    // Cycle detection over the dependency edges (fail-closed): a dependency
+    // cycle can never start, and the guest supervisor's own topological start
+    // would fail at boot — reject at plan time instead.
+    detect_dependency_cycle(&services, &dependencies)?;
 
     Ok(ImportedServiceGraph {
         services,
@@ -708,9 +847,8 @@ fn parse_depends_on(
                     .and_then(|e| e.get(Value::from("condition")))
                     .and_then(Value::as_str);
                 let kind = match condition {
-                    Some("service_healthy") | Some("service_completed_successfully") => {
-                        DependencyKind::Success
-                    }
+                    Some("service_healthy") => DependencyKind::Healthy,
+                    Some("service_completed_successfully") => DependencyKind::Completed,
                     _ => DependencyKind::Ready,
                 };
                 deps.push((to.to_string(), kind));
@@ -832,12 +970,12 @@ services:
         let g = compose_to_graph(yaml).unwrap();
         let db = g.dependencies.iter().find(|d| d.to == "db").unwrap();
         let cache = g.dependencies.iter().find(|d| d.to == "cache").unwrap();
-        assert_eq!(db.kind, DependencyKind::Success);
+        assert_eq!(db.kind, DependencyKind::Healthy);
         assert_eq!(cache.kind, DependencyKind::Ready);
     }
 
     #[test]
-    fn completed_successfully_is_success() {
+    fn completed_successfully_derives_a_run_once_task() {
         let yaml = r#"
 services:
   web:
@@ -850,7 +988,103 @@ services:
     image: migrator
 "#;
         let g = compose_to_graph(yaml).unwrap();
-        assert_eq!(g.dependencies[0].kind, DependencyKind::Success);
+        assert_eq!(g.dependencies[0].kind, DependencyKind::Completed);
+        // The Completed target becomes a one-shot task; the dependent stays a service.
+        let migrate = g.services.iter().find(|s| s.name == "migrate").unwrap();
+        let web = g.services.iter().find(|s| s.name == "web").unwrap();
+        assert_eq!(migrate.kind, ServiceKind::RunOnce);
+        assert_eq!(web.kind, ServiceKind::Service);
+    }
+
+    #[test]
+    fn run_once_contradictions_fail_closed() {
+        // restart: always on a completed-successfully target is contradictory.
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    ports: ["80:80"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  migrate:
+    image: migrator
+    restart: always
+"#;
+        let err = compose_to_graph(yaml).unwrap_err();
+        assert!(err.contains("restart: always"), "{err}");
+        // The PUBLIC service cannot be a one-shot task.
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    ports: ["80:80"]
+  seeder:
+    image: seed
+    depends_on:
+      web:
+        condition: service_completed_successfully
+"#;
+        let err = compose_to_graph(yaml).unwrap_err();
+        assert!(err.contains("cannot be the public web service"), "{err}");
+    }
+
+    #[test]
+    fn dependency_cycles_are_rejected() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    ports: ["80:80"]
+    depends_on: [db]
+  db:
+    image: postgres
+    expose: ["5432"]
+    depends_on: [cache]
+  cache:
+    image: redis
+    expose: ["6379"]
+    depends_on: [db]
+"#;
+        let err = compose_to_graph(yaml).unwrap_err();
+        assert!(err.contains("dependency cycle"), "{err}");
+    }
+
+    #[test]
+    fn start_order_is_dependency_first_and_stable() {
+        let yaml = r#"
+services:
+  web:
+    image: nginx
+    ports: ["80:80"]
+    depends_on: [db, cache]
+  db:
+    image: postgres
+    expose: ["5432"]
+  cache:
+    image: redis
+    expose: ["6379"]
+"#;
+        let g = compose_to_graph(yaml).unwrap();
+        assert_eq!(g.start_order(), vec!["cache", "db", "web"]);
+        // Same services declared in a different order ⇒ identical start order.
+        let yaml2 = r#"
+services:
+  cache:
+    image: redis
+    expose: ["6379"]
+  db:
+    image: postgres
+    expose: ["5432"]
+  web:
+    image: nginx
+    ports: ["80:80"]
+    depends_on: [db, cache]
+"#;
+        assert_eq!(
+            compose_to_graph(yaml2).unwrap().start_order(),
+            vec!["cache", "db", "web"]
+        );
     }
 
     #[test]

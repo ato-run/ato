@@ -40,6 +40,7 @@ use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
+use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsulefs::CasStore;
 use protocol::session_surface::{
@@ -56,8 +57,9 @@ use snapshot::docker_import::{
     validate_ephemeral_mounts, validate_image_ref,
 };
 use snapshot::rootfs_builder::{
-    RootfsBuildSpec, SourceProbe, build_rootfs, derive_build_spec, derive_supervisor_build_spec,
-    materialize_source, reject_control_chars, valid_github_owner, valid_github_repo,
+    RootfsBuildSpec, SourceProbe, build_rootfs, checkout_source_tree, derive_build_spec,
+    derive_supervisor_build_spec, materialize_source, reject_control_chars, valid_github_owner,
+    valid_github_repo,
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
@@ -171,7 +173,13 @@ struct ClaimedJob {
     /// silently substitutes the manifest default for a different requested target.
     target_label: String,
     profile: String,
-    source: ClaimedSource,
+    /// The server-resolved approved source. Present for the source-backed kinds
+    /// (recipe / dockerfile_import), and `None` for the self-contained kinds
+    /// whose whole input is `params` (compose_import; oci_image_import never reads
+    /// it either) — those pack from params, not a checkout. A recipe/dockerfile
+    /// job with no source fails closed at the `source` stage.
+    #[serde(default)]
+    source: Option<ClaimedSource>,
     /// #932: the APPROVED store recipe manifest (`capsule_source_recipes.recipe_toml`),
     /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
     /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
@@ -285,6 +293,14 @@ struct Artifact {
     /// byte-identical against the `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     oci_import_receipt: Option<serde_json::Value>,
+    /// ato#1049: non-secret compose-import provenance — the full
+    /// `ComposeImportReceipt` (importer version, per-service pinned digests +
+    /// kinds, public entrypoint, self-contained-env note). Present ONLY on a
+    /// `compose_import` artifact; omitted entirely for the other lanes
+    /// (`skip_serializing_if`), so those acks stay byte-identical against the
+    /// `.strict()` ack schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compose_import_receipt: Option<serde_json::Value>,
 }
 
 /// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
@@ -310,10 +326,13 @@ fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
-        // ato#1002: advertise both build lanes — the server hands a job ONLY if its
-        // kind is listed here (an older ato-api ignores the field and keeps handing
-        // recipe jobs exactly as before).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import"] }))
+        // ato#1002: advertise every lane this builder handles — the server hands a job
+        // ONLY if its kind is listed here (an older ato-api ignores the field and keeps
+        // handing recipe jobs exactly as before). `source_materialize`
+        // (SOURCE_MATERIALIZATION_SPEC) is a non-sealing lane on the SAME claim/ack lease
+        // machinery: it emits a frozen source archive + A1v2 identity, not a snapshot
+        // artifact (dispatched in `run_once`, not `produce_build`).
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import", "compose_import", "source_materialize"] }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -321,14 +340,22 @@ fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
 }
 
 fn ack_sealed(cfg: &Config, job_id: &str, artifact: &Artifact) -> Result<()> {
-    ureq::post(&format!(
+    let res = ureq::post(&format!(
         "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
         cfg.api_url
     ))
     .set("authorization", &format!("Bearer {}", cfg.token))
-    .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "sealed", "artifact": artifact }))
-    .map_err(|e| anyhow!("sealed ack: {e}"))?;
-    Ok(())
+    .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "sealed", "artifact": artifact }));
+    match res {
+        Ok(_) => Ok(()),
+        // Surface the server's rejection BODY (e.g. the zod validation issues), not
+        // just "status code 400" — a bare status is undebuggable for a schema skew.
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(anyhow!("sealed ack: status {code}: {body}"))
+        }
+        Err(e) => Err(anyhow!("sealed ack: {e}")),
+    }
 }
 
 fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<()> {
@@ -338,6 +365,111 @@ fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<(
         .set("authorization", &format!("Bearer {}", cfg.token))
         .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "failed", "failure_stage": stage, "failure_reason": reason }))
         .map_err(|e| anyhow!("failed ack: {e}"))?;
+    Ok(())
+}
+
+/// SOURCE_MATERIALIZATION_SPEC §4.1: the success ack for a `source_materialize` job —
+/// the frozen source's A1v2 identity, the archive byte identity, and the observed
+/// sizes/count. All non-secret build provenance.
+#[derive(Debug, Clone, Serialize)]
+struct SourceMaterializeOk {
+    materialized_source_tree_hash: String,
+    source_archive_hash: String,
+    file_count: u64,
+    uncompressed_bytes: u64,
+    compressed_bytes: u64,
+    /// TODO(ato-api follow-up): SOURCE_MATERIALIZATION_SPEC §3.3 step 6 uploads the
+    /// archive to R2 at `source-archives/v1/sha256/{source_archive_hash}.tar.zst` via
+    /// an API-mediated write (the builder holds no R2 credentials). That transport does
+    /// not exist yet, so this builder-side slice leaves the frozen archive on local disk
+    /// and reports its path here; the follow-up wires the API-mediated upload + records
+    /// the R2 object, then this field can be dropped.
+    archive_path: String,
+}
+
+/// SOURCE_MATERIALIZATION_SPEC §4.2: the failure ack for a `source_materialize` job —
+/// the terminal pipeline state plus a machine `error_code` and a human `error_detail`.
+/// `pipeline_state` is `blocked_repo` (admissibility / cap violation — terminal) or
+/// `failed_internal` (IO / checkout / contract skew — retryable, ato-api owns the
+/// max-3-retries policy).
+#[derive(Debug, Clone, Serialize)]
+struct SourceMaterializeFail {
+    pipeline_state: String,
+    error_code: String,
+    error_detail: String,
+}
+
+impl SourceMaterializeFail {
+    /// A `failed_internal` failure raised by the builder before/around the archive
+    /// step (missing server-resolved source, git checkout failure) — retryable.
+    fn internal(code: &str, detail: String) -> Self {
+        Self {
+            pipeline_state: "failed_internal".to_string(),
+            error_code: code.to_string(),
+            error_detail: detail.chars().take(1800).collect(),
+        }
+    }
+
+    /// Map a [`SourceMaterializeError`] from the archive step onto the ack: the
+    /// pipeline state and machine code come from the error itself (admissibility /
+    /// cap → `blocked_repo`; archive IO → `failed_internal`), the detail from Display.
+    fn from_materialize_error(err: &SourceMaterializeError) -> Self {
+        Self {
+            pipeline_state: err.pipeline_state().to_string(),
+            error_code: err.error_code().to_string(),
+            error_detail: err.to_string().chars().take(1800).collect(),
+        }
+    }
+}
+
+/// Ack a materialized source on the shared claim/ack lease lane.
+///
+/// TODO(ato-api follow-up): ato-api does not yet accept a `source_materialize` ack —
+/// the claim/dispatch/DB wiring and the API-mediated R2 upload are a separate follow-up
+/// (SOURCE_MATERIALIZATION_SPEC §3.1 puts this on the SAME lease/ack machinery as
+/// snapshot builds). This posts `status = "materialized"` + the `source_materialized`
+/// result to the existing ack endpoint; the follow-up adds the server-side handler that
+/// persists the hashes/caps on the candidate, uploads the archive to R2, and advances
+/// the candidate to `analyzing`.
+fn ack_source_materialized(cfg: &Config, job_id: &str, ok: &SourceMaterializeOk) -> Result<()> {
+    let res = ureq::post(&format!(
+        "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
+        cfg.api_url
+    ))
+    .set("authorization", &format!("Bearer {}", cfg.token))
+    .send_json(
+        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialized", "source_materialized": ok }),
+    );
+    match res {
+        Ok(_) => Ok(()),
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            Err(anyhow!("source_materialize ack: status {code}: {body}"))
+        }
+        Err(e) => Err(anyhow!("source_materialize ack: {e}")),
+    }
+}
+
+/// Ack a `source_materialize` failure (blocked / internal) on the shared lane.
+///
+/// TODO(ato-api follow-up): same missing server-side handler as
+/// [`ack_source_materialized`]. Posts `status = "materialize_failed"` +
+/// `{pipeline_state, error_code, error_detail}`; ato-api owns mapping `blocked_repo`
+/// (terminal) vs `failed_internal` (retry, max 3).
+fn ack_source_materialize_failed(
+    cfg: &Config,
+    job_id: &str,
+    fail: &SourceMaterializeFail,
+) -> Result<()> {
+    ureq::post(&format!(
+        "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
+        cfg.api_url
+    ))
+    .set("authorization", &format!("Bearer {}", cfg.token))
+    .send_json(
+        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialize_failed", "source_materialize_failure": fail }),
+    )
+    .map_err(|e| anyhow!("source_materialize failed-ack: {e}"))?;
     Ok(())
 }
 
@@ -478,11 +610,21 @@ struct ProducedBuild {
     normalized_guest_command: String,
     docker_import_receipt: Option<serde_json::Value>,
     oci_import_receipt: Option<serde_json::Value>,
+    /// ato#1049: the sealed `compose_import` receipt (multi-service resolution +
+    /// self-contained-env note), threaded into the ack like the other lanes.
+    compose_import_receipt: Option<serde_json::Value>,
+    /// Per-job readiness `boot_timeout` (seconds) applied to the shared
+    /// `build_ready_state` boot. Only `compose_import` sets it (heavy multi-image
+    /// stacks need a larger budget than the env default); other lanes leave it
+    /// `None` and inherit the backend env/default. Clamped in the backend.
+    boot_timeout_s: Option<u32>,
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
 /// is a server/daemon contract skew (the claim advertised `supported_kinds`) — fail
-/// the job closed at `claim_kind`, never guess a lane.
+/// the job closed at `claim_kind`, never guess a lane. `source_materialize` never
+/// reaches here: it is a non-sealing lane intercepted in `run_once` (it produces a
+/// source archive, not a `ProducedBuild`).
 fn produce_build(
     cfg: &Config,
     job: &ClaimedJob,
@@ -492,10 +634,11 @@ fn produce_build(
         "recipe" => produce_recipe_build(cfg, job, jobdir),
         "dockerfile_import" => produce_import_build(cfg, job, jobdir),
         "oci_image_import" => produce_oci_image_import(cfg, job, jobdir),
+        "compose_import" => produce_compose_import(cfg, job, jobdir),
         other => Err((
             "claim_kind".into(),
             format!(
-                "unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import, oci_image_import)"
+                "unsupported job kind {other:?} (this builder supports: recipe, dockerfile_import, oci_image_import, compose_import)"
             ),
         )),
     }
@@ -522,11 +665,17 @@ fn produce_recipe_build(
     } else {
         "repo_capsule_toml"
     };
+    let source = job.source.as_ref().ok_or_else(|| {
+        fail(
+            "source",
+            "recipe job carries no server-resolved source".into(),
+        )
+    })?;
     let src = materialize_source(
-        &job.source.github_owner,
-        &job.source.github_repo,
-        &job.source.commit_sha,
-        job.source.subdirectory.as_deref(),
+        &source.github_owner,
+        &source.github_repo,
+        &source.commit_sha,
+        source.subdirectory.as_deref(),
         job.recipe_toml.as_deref(),
         &jobdir.join("src"),
     )
@@ -586,10 +735,10 @@ fn produce_recipe_build(
     }
     let envelope = ReadyStateDeclaredEnvelope {
         source_identifier: store_source_identifier(
-            &job.source.github_owner,
-            &job.source.github_repo,
-            &job.source.commit_sha,
-            job.source.subdirectory.as_deref(),
+            &source.github_owner,
+            &source.github_repo,
+            &source.commit_sha,
+            source.subdirectory.as_deref(),
         ),
         // The REQUESTED target (gate-validated == manifest.default_target): the identity
         // is computed for the target actually being built, never a substituted one.
@@ -663,6 +812,8 @@ fn produce_recipe_build(
         normalized_guest_command: spec.start_cmd,
         docker_import_receipt: None,
         oci_import_receipt: None,
+        compose_import_receipt: None,
+        boot_timeout_s: None,
     })
 }
 
@@ -746,8 +897,13 @@ fn produce_import_build(
 
     // 2. Clone the SERVER-RESOLVED pinned commit (identity/subdir validated; no
     // capsule.toml requirement).
-    let src =
-        clone_pinned_source(&job.source, &jobdir.join("src")).map_err(|e| fail("source", e))?;
+    let source = job.source.as_ref().ok_or_else(|| {
+        fail(
+            "source",
+            "dockerfile_import job carries no server-resolved source".into(),
+        )
+    })?;
+    let src = clone_pinned_source(source, &jobdir.join("src")).map_err(|e| fail("source", e))?;
 
     // 3. Run the Dockerfile import: probe tool → digest-pinned build → service plan →
     // pack the imported image into a bootable supervisor ext4. DockerImportSpec::new
@@ -864,6 +1020,8 @@ fn produce_import_build(
         normalized_guest_command: argv_display,
         docker_import_receipt: Some(docker_import_receipt),
         oci_import_receipt: None,
+        compose_import_receipt: None,
+        boot_timeout_s: None,
     })
 }
 
@@ -967,6 +1125,100 @@ fn produce_oci_image_import(
         normalized_guest_command: argv_display,
         docker_import_receipt: None,
         oci_import_receipt: Some(oci_import_receipt),
+        compose_import_receipt: None,
+        boot_timeout_s: None,
+    })
+}
+
+/// ato#1049: produce a `compose_import` build — a self-contained Docker Compose
+/// file (image-only services) packed into ONE bootable supervisor rootfs. The
+/// guest runs every compose service under the `depends_on` DAG; the single
+/// public service is proxied. No capsule.toml, no source checkout — the compose
+/// file IS the plan (parsed into the canonical graph, each image pulled +
+/// digest-pinned, joined + packed via the v1.5 multi-image backend).
+fn produce_compose_import(
+    cfg: &Config,
+    job: &ClaimedJob,
+    jobdir: &Path,
+) -> std::result::Result<ProducedBuild, (String, String)> {
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+
+    // 1. Strict params validation BEFORE any network/pull work.
+    let params =
+        parse_compose_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+
+    // 2. Run the compose import: parse → per-service pull+pin → join → pack.
+    std::fs::create_dir_all(jobdir).map_err(|e| fail("rootfs_build", e.to_string()))?;
+    let ext4 = jobdir.join("rootfs.ext4");
+    let req = snapshot::docker_import::ComposeImportRequest {
+        compose_yaml: &params.compose_yaml,
+        public_readiness_http_path: params.readiness_http_path.clone(),
+        out_ext4: &ext4,
+        // An explicit per-job override wins (capped in the parser); otherwise the
+        // larger of the builder config default and the multi-service floor.
+        size_mib: params
+            .rootfs_size_mib
+            .map(u64::from)
+            .unwrap_or_else(|| cfg.rootfs_size_mib.max(COMPOSE_ROOTFS_FLOOR_MIB)),
+    };
+    let outcome = snapshot::docker_import::run_compose_import(&SystemImportCommandRunner, &req)
+        .map_err(|e| fail("rootfs_build", e))?;
+    let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+
+    // Import identity: execution_id = WHAT EXECUTES (the joined pinned service
+    // images + public entrypoint); capsule_manifest_hash = the blake3 descriptor
+    // over the SAME input envelope (a compose import has no capsule.toml).
+    let execution_id = snapshot::docker_import::compose_import_execution_id(&outcome.receipt);
+    let capsule_manifest_hash =
+        snapshot::docker_import::compose_import_descriptor_blake3(&outcome.receipt);
+    let compose_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
+        fail(
+            "artifact_metadata",
+            format!("serialize compose import receipt: {e}"),
+        )
+    })?;
+
+    // A compose import is a SUPERVISOR artifact end to end (guest-agent +
+    // supervisor drive every service). Self-contained ⇒ no external bindings.
+    let binding_names = outcome.binding_names.clone();
+    let supervisor = Some(SupervisorBindings {
+        binding_names: binding_names.clone(),
+        state_volumes: vec![],
+        state_owner_scope: None,
+    });
+    let supervisor_ack = Some(SupervisorAck { binding_names });
+
+    let public_svc_cmd = outcome
+        .receipt
+        .services
+        .iter()
+        .find(|s| s.name == outcome.receipt.public_service)
+        .map(|s| format!("{} ({})", s.name, s.resolved_digest))
+        .unwrap_or_default();
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: outcome.public_port,
+        healthcheck: outcome
+            .public_readiness_http_path
+            .clone()
+            .unwrap_or_else(|| "/".to_string()),
+        execution_id,
+        capsule_manifest_hash,
+        surface_requirement: None,
+        // A compose import is a Web artifact — no sealed restore endpoints; the
+        // legacy `ports` projection stays authoritative (see ProducedBuild docs).
+        endpoints: Vec::new(),
+        supervisor,
+        supervisor_ack,
+        manifest_source: "compose_import".to_string(),
+        synthesized_probe: outcome.synthesized_probe,
+        declared_command: public_svc_cmd.clone(),
+        normalized_guest_command: public_svc_cmd,
+        docker_import_receipt: None,
+        oci_import_receipt: None,
+        compose_import_receipt: Some(compose_import_receipt),
+        boot_timeout_s: params.boot_timeout_s,
     })
 }
 
@@ -1502,6 +1754,126 @@ fn parse_oci_import_params(
     })
 }
 
+/// ato#1049: validated `compose_import` job params. The compose file itself is
+/// the plan; the only tunables are the public service's readiness path and the
+/// per-job rootfs size (a multi-service stack needs more than the 1024 default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ComposeImportParams {
+    /// The raw Docker Compose YAML (image-only services). Bounded here — the
+    /// enqueue gate bounds it too; a skew fails closed.
+    compose_yaml: String,
+    /// Optional HTTP readiness path for the PUBLIC service (`None` = TCP-accept).
+    readiness_http_path: Option<String>,
+    /// Optional per-job ext4 rootfs size override (MiB, capped). `None` = the
+    /// COMPOSE_ROOTFS_FLOOR default. A large image (e.g. Stirling-PDF ~2–3 GiB
+    /// extracted) needs more than the 4096 floor or the pack fails ENOSPC.
+    rootfs_size_mib: Option<u32>,
+    /// Optional per-job readiness `boot_timeout` (seconds, capped). `None` = the
+    /// backend env/default. A heavy stack (Java/Spring — Stirling-PDF, or a big
+    /// JVM warmup) can take longer than the default to answer HTTP; a plain
+    /// 2-service app should not pay that budget. Clamped in the backend.
+    boot_timeout_s: Option<u32>,
+}
+
+/// The compose file's hard size ceiling (bytes). A compose file is small;
+/// anything past this is hostile/mistaken input, rejected before any pull.
+const MAX_COMPOSE_YAML_BYTES: usize = 128 * 1024;
+
+/// A compose stack packs MULTIPLE service images into one rootfs, so it needs
+/// more than the single-image 1024 default. Floor the ext4 at this (unless the
+/// builder config or an explicit `rootfs_size_mib` asks for more) so a 2–3
+/// service stack (e.g. Blinko: blinko + postgres) does not fail ENOSPC.
+const COMPOSE_ROOTFS_FLOOR_MIB: u64 = 4096;
+
+/// The maximum per-job rootfs override (MiB). A big image (Stirling-PDF, etc.)
+/// needs a larger ext4 than the floor, but an unbounded value would let one job
+/// exhaust the builder disk + blow up restore memory — so the override is capped
+/// fail-closed. `None`/absent keeps the floor default.
+const MAX_ROOTFS_SIZE_MIB: u32 = 8192;
+
+/// The maximum per-job readiness `boot_timeout` override (seconds). A heavy
+/// image legitimately needs longer than the env default, but an unbounded value
+/// would let one job pin the builder on a hung guest — so the override is capped
+/// fail-closed (the backend clamps to the same ceiling). Kept in lockstep with
+/// `firecracker::MAX_JOB_BOOT_TIMEOUT_S`. `None`/absent keeps the env/default.
+const MAX_BOOT_TIMEOUT_S: u32 = 600;
+
+/// Parse the optional `rootfs_size_mib` param: an integer in `1..=MAX`. Fail
+/// closed on 0, negative, fractional, non-numeric, or over the cap.
+fn parse_rootfs_size_mib(v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=MAX_ROOTFS_SIZE_MIB as u64).contains(n))
+        .ok_or_else(|| {
+            format!("params.rootfs_size_mib must be an integer in 1..={MAX_ROOTFS_SIZE_MIB}")
+        })?;
+    Ok(n as u32)
+}
+
+/// Parse the optional `boot_timeout_s` param: an integer in `1..=MAX`. Fail
+/// closed on 0, negative, fractional, non-numeric, or over the cap.
+fn parse_boot_timeout_s(v: &serde_json::Value) -> std::result::Result<u32, String> {
+    let n = v
+        .as_u64()
+        .filter(|n| (1..=MAX_BOOT_TIMEOUT_S as u64).contains(n))
+        .ok_or_else(|| {
+            format!("params.boot_timeout_s must be an integer in 1..={MAX_BOOT_TIMEOUT_S}")
+        })?;
+    Ok(n as u32)
+}
+
+/// Strict, fail-closed parse of `compose_import` params: `compose_yaml` required
+/// (non-empty, ≤128 KiB); `readiness_http_path` shares the import validator;
+/// `rootfs_size_mib` shares the 1..=8192 cap. Unknown keys / non-object / absent
+/// params reject.
+fn parse_compose_import_params(
+    params: Option<&serde_json::Value>,
+) -> std::result::Result<ComposeImportParams, String> {
+    let v = params
+        .filter(|v| !v.is_null())
+        .ok_or("compose_import params are required (must carry \"compose_yaml\")")?;
+    let obj = v
+        .as_object()
+        .ok_or("compose_import params must be a JSON object")?;
+    let mut compose_yaml: Option<String> = None;
+    let mut readiness_http_path = None;
+    let mut rootfs_size_mib = None;
+    let mut boot_timeout_s = None;
+    for (key, val) in obj {
+        match key.as_str() {
+            "compose_yaml" => {
+                let s = val.as_str().ok_or("params.compose_yaml must be a string")?;
+                if s.trim().is_empty() {
+                    return Err("params.compose_yaml must not be empty".into());
+                }
+                if s.len() > MAX_COMPOSE_YAML_BYTES {
+                    return Err(format!(
+                        "params.compose_yaml exceeds {MAX_COMPOSE_YAML_BYTES} bytes (fail-closed)"
+                    ));
+                }
+                compose_yaml = Some(s.to_string());
+            }
+            "readiness_http_path" => {
+                readiness_http_path = Some(parse_readiness_http_path_value(val)?)
+            }
+            "rootfs_size_mib" => rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
+            "boot_timeout_s" => boot_timeout_s = Some(parse_boot_timeout_s(val)?),
+            other => {
+                return Err(format!(
+                    "unknown compose_import param {other:?} (rejected fail-closed)"
+                ));
+            }
+        }
+    }
+    Ok(ComposeImportParams {
+        compose_yaml: compose_yaml
+            .ok_or("params.compose_yaml is required for a compose_import job")?,
+        readiness_http_path,
+        rootfs_size_mib,
+        boot_timeout_s,
+    })
+}
+
 /// ato#1002: shallow-clone the SERVER-RESOLVED pinned commit for a
 /// `dockerfile_import` job. Mirrors `materialize_source`'s identity validation +
 /// subdir containment (lexical + canonical) but deliberately WITHOUT its
@@ -1582,6 +1954,61 @@ fn clone_pinned_source(
 
 /// Build + seal + verify one claimed job. Returns the non-secret artifact metadata on
 /// success, or `(failure_stage, failure_reason)` — never a panic, never a secret.
+/// SOURCE_MATERIALIZATION_SPEC: process a `source_materialize` job. Unlike the build
+/// lanes this seals NO snapshot artifact and needs no KVM/backend — it checks out the
+/// pinned public source, freezes it into a deterministic content-addressed `.tar.zst`
+/// with its A1v2 identity, and reports the hashes on the same claim/ack lease lane.
+///
+/// Steps: (1) check out the SERVER-RESOLVED pinned commit, reusing
+/// [`checkout_source_tree`] (identity-validated, full-SHA pin, contained — but NO
+/// capsule.toml requirement, since a source freeze applies no recipe); (2) run
+/// [`materialize_source_archive`], which enforces A1v2 admissibility + the archive caps
+/// and produces the frozen `.tar.zst` + its identity.
+fn process_source_materialize_job(
+    cfg: &Config,
+    job: &ClaimedJob,
+) -> std::result::Result<SourceMaterializeOk, SourceMaterializeFail> {
+    let jobdir = cfg.work.join(&job.id);
+    let _ = std::fs::remove_dir_all(&jobdir);
+
+    // 1. Materialize the SERVER-RESOLVED pinned source (owner/repo/commit/subdir). A
+    //    source_materialize job carries no recipe manifest and requires no capsule.toml —
+    //    it freezes the repo tree as-is. A missing source is a server/daemon contract
+    //    skew (the kind was claimed but no identity provided): failed_internal.
+    let source = job.source.as_ref().ok_or_else(|| {
+        SourceMaterializeFail::internal(
+            "source_missing",
+            "source_materialize job carries no server-resolved source".to_string(),
+        )
+    })?;
+    let checkout = checkout_source_tree(
+        &source.github_owner,
+        &source.github_repo,
+        &source.commit_sha,
+        source.subdirectory.as_deref(),
+        &jobdir.join("src"),
+    )
+    .map_err(|e| SourceMaterializeFail::internal("checkout", e))?;
+
+    // 2. Freeze the checkout into a deterministic content-addressed archive. An
+    //    inadmissible tree / cap violation maps to blocked_repo; an archive IO error to
+    //    failed_internal — both via SourceMaterializeError::pipeline_state.
+    let out = jobdir.join("source.tar.zst");
+    let ms = materialize_source_archive(&checkout, &out)
+        .map_err(|e| SourceMaterializeFail::from_materialize_error(&e))?;
+
+    Ok(SourceMaterializeOk {
+        materialized_source_tree_hash: ms.materialized_source_tree_hash,
+        source_archive_hash: ms.source_archive_hash,
+        file_count: ms.file_count,
+        uncompressed_bytes: ms.uncompressed_bytes,
+        compressed_bytes: ms.compressed_bytes,
+        // TODO(ato-api follow-up): left on local disk until the API-mediated R2 upload
+        // exists (see `ack_source_materialized`).
+        archive_path: out.display().to_string(),
+    })
+}
+
 fn process_job(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -1605,7 +2032,11 @@ fn process_job(
     // ato#1001) and the artifact seals per the no-binding contract.
     let store =
         CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
-    let receipt = backend
+    // A per-job readiness boot_timeout (compose_import heavy stacks — Java/Spring)
+    // overrides the backend env/default for THIS build only; other lanes pass
+    // None and inherit unchanged. Clamped fail-closed inside `with_boot_timeout`.
+    let job_backend = backend.with_boot_timeout(produced.boot_timeout_s.map(u64::from));
+    let receipt = job_backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
@@ -1803,6 +2234,7 @@ fn process_job(
         supervisor_build: produced.supervisor_ack,
         docker_import_receipt: produced.docker_import_receipt,
         oci_import_receipt: produced.oci_import_receipt,
+        compose_import_receipt: produced.compose_import_receipt,
     })
 }
 
@@ -1810,6 +2242,30 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
     let jobs = claim(cfg)?;
     for job in &jobs {
         eprintln!("[builder] claimed {} (capsule {})", job.id, job.capsule_id);
+        // SOURCE_MATERIALIZATION_SPEC: source_materialize is a non-sealing lane on the
+        // same claim/ack machinery — it emits a frozen source archive + A1v2 identity,
+        // not a snapshot artifact, so it never enters produce_build/seal and has its own
+        // ack shape. Unknown kinds still fall through to process_job → produce_build,
+        // which fails them closed at `claim_kind`.
+        if job.kind == "source_materialize" {
+            match process_source_materialize_job(cfg, job) {
+                Ok(ok) => {
+                    eprintln!(
+                        "[builder] materialized source {} (archive {})",
+                        job.id, ok.source_archive_hash
+                    );
+                    ack_source_materialized(cfg, &job.id, &ok)?;
+                }
+                Err(fail) => {
+                    eprintln!(
+                        "[builder] source_materialize {} -> {}/{}: {}",
+                        job.id, fail.pipeline_state, fail.error_code, fail.error_detail
+                    );
+                    ack_source_materialize_failed(cfg, &job.id, &fail)?;
+                }
+            }
+            continue;
+        }
         match process_job(cfg, backend, job) {
             Ok(artifact) => {
                 eprintln!(
@@ -1928,9 +2384,13 @@ targets = ["web"]
         });
         let resp: ClaimResponse = serde_json::from_value(body).unwrap();
         assert_eq!(resp.jobs.len(), 1);
-        assert_eq!(resp.jobs[0].source.github_owner, "acme");
-        assert_eq!(resp.jobs[0].source.commit_sha.len(), 40);
-        assert!(resp.jobs[0].source.subdirectory.is_none());
+        let src0 = resp.jobs[0]
+            .source
+            .as_ref()
+            .expect("recipe claim carries a source");
+        assert_eq!(src0.github_owner, "acme");
+        assert_eq!(src0.commit_sha.len(), 40);
+        assert!(src0.subdirectory.is_none());
         // target_label/profile are REQUIRED claim fields (target/profile-scoped registry).
         assert_eq!(resp.jobs[0].target_label, "web");
         assert_eq!(resp.jobs[0].profile, "default");
@@ -1961,6 +2421,75 @@ targets = ["web"]
         assert_eq!(params.dockerfile_path, "docker/prod.Dockerfile");
         assert_eq!(params.port_override, Some(8080));
         assert!(params.readiness_http_path.is_none());
+    }
+
+    #[test]
+    fn parse_compose_import_params_requires_compose_yaml_and_rejects_unknown() {
+        // compose_yaml required + non-empty.
+        assert!(parse_compose_import_params(None).is_err());
+        assert!(parse_compose_import_params(Some(&serde_json::json!({}))).is_err());
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({ "compose_yaml": "  " })))
+                .is_err()
+        );
+        // Happy path: compose_yaml + optional readiness path.
+        let ok = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "readiness_http_path": "/health",
+        })))
+        .unwrap();
+        assert!(ok.compose_yaml.contains("image: x:1"));
+        assert_eq!(ok.readiness_http_path.as_deref(), Some("/health"));
+        assert!(ok.rootfs_size_mib.is_none()); // absent ⇒ the COMPOSE_ROOTFS_FLOOR default
+        assert!(ok.boot_timeout_s.is_none()); // absent ⇒ the backend env/default
+        // rootfs_size_mib accepted within 1..=8192; over-cap / zero rejected.
+        let sized = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "rootfs_size_mib": 8192,
+        })))
+        .unwrap();
+        assert_eq!(sized.rootfs_size_mib, Some(8192));
+        for bad in [8193, 0] {
+            assert!(
+                parse_compose_import_params(Some(&serde_json::json!({
+                    "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+                    "rootfs_size_mib": bad,
+                })))
+                .is_err(),
+                "rootfs_size_mib={bad} must reject"
+            );
+        }
+        // boot_timeout_s accepted within 1..=600; over-cap / zero rejected.
+        let timed = parse_compose_import_params(Some(&serde_json::json!({
+            "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+            "boot_timeout_s": 300,
+        })))
+        .unwrap();
+        assert_eq!(timed.boot_timeout_s, Some(300));
+        for bad in [601, 0] {
+            assert!(
+                parse_compose_import_params(Some(&serde_json::json!({
+                    "compose_yaml": "services:\n  web:\n    image: x:1\n    ports: ['80:80']\n",
+                    "boot_timeout_s": bad,
+                })))
+                .is_err(),
+                "boot_timeout_s={bad} must reject"
+            );
+        }
+        // Unknown key rejected fail-closed.
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({
+                "compose_yaml": "services: {}",
+                "surprise": true
+            })))
+            .is_err()
+        );
+        // Over-size compose rejected.
+        let huge = "x".repeat(MAX_COMPOSE_YAML_BYTES + 1);
+        assert!(
+            parse_compose_import_params(Some(&serde_json::json!({ "compose_yaml": huge })))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2230,12 +2759,12 @@ targets = ["web"]
             capsule_id: "cap_x".into(),
             target_label: "app".into(),
             profile: "default".into(),
-            source: ClaimedSource {
+            source: Some(ClaimedSource {
                 github_owner: "acme".into(),
                 github_repo: "app".into(),
                 commit_sha: "a".repeat(40),
                 subdirectory: None,
-            },
+            }),
             recipe_toml: None,
             kind: kind.into(),
             params,
@@ -2976,6 +3505,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
@@ -3048,6 +3578,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
 
         let value = serde_json::to_value(artifact).expect("serialize artifact ack");
@@ -3095,6 +3626,7 @@ targets = ["web"]
                 "resolved_base_images": [{ "original_ref": "node:20", "resolved_digest": "docker.io/library/node@sha256:ab" }],
             })),
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "dockerfile_import");
@@ -3150,6 +3682,7 @@ targets = ["web"]
                 "pull_tool": "podman",
                 "image": { "original_ref": "ghcr.io/alexta69/metube:latest", "resolved_digest": "ghcr.io/alexta69/metube@sha256:ab", "platform": "linux/amd64" },
             })),
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "oci_image_import");
@@ -3194,6 +3727,7 @@ targets = ["web"]
             }),
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(
@@ -3240,6 +3774,7 @@ targets = ["web"]
             supervisor_build: None,
             docker_import_receipt: None,
             oci_import_receipt: None,
+            compose_import_receipt: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["snapshot_format_id"], "asf.fc-memsnap-v1");
@@ -3266,5 +3801,101 @@ targets = ["web"]
             "asc.",
             v["snapshot_codec_id"].as_str().unwrap()
         ));
+    }
+
+    // ── SOURCE_MATERIALIZATION_SPEC: source_materialize ack payloads ─────────
+
+    #[test]
+    fn source_materialized_ack_carries_exactly_the_result_fields() {
+        // SOURCE_MATERIALIZATION_SPEC §4.1: success ack = the A1v2 identity, the
+        // archive byte identity, and the observed sizes/count (+ the local archive
+        // path until the R2 upload follow-up lands).
+        let ok = SourceMaterializeOk {
+            materialized_source_tree_hash: "sha256:aa".into(),
+            source_archive_hash: "sha256:bb".into(),
+            file_count: 42,
+            uncompressed_bytes: 4096,
+            compressed_bytes: 1024,
+            archive_path: "/work/job_x/source.tar.zst".into(),
+        };
+        let v = serde_json::to_value(&ok).unwrap();
+        assert_eq!(v["materialized_source_tree_hash"], "sha256:aa");
+        assert_eq!(v["source_archive_hash"], "sha256:bb");
+        assert_eq!(v["file_count"], 42);
+        assert_eq!(v["uncompressed_bytes"], 4096);
+        assert_eq!(v["compressed_bytes"], 1024);
+        assert_eq!(v["archive_path"], "/work/job_x/source.tar.zst");
+        // No stray fields leak into the ack.
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 6, "unexpected ack fields: {v}");
+    }
+
+    #[test]
+    fn admissibility_failure_maps_to_terminal_blocked_repo() {
+        // An A1v2 admissibility violation (here: a symlink) is a terminal blocked_repo
+        // with a stable machine code; the ack carries pipeline_state/error_code/detail.
+        let err = SourceMaterializeError::Inadmissible(
+            capsule::foundation::blob::SourceAdmissibilityError::Symlink {
+                path: std::path::PathBuf::from("link"),
+            },
+        );
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "blocked_repo");
+        assert_eq!(fail.error_code, "inadmissible_source_tree");
+        assert!(
+            fail.error_detail.contains("symlink"),
+            "{}",
+            fail.error_detail
+        );
+
+        let v = serde_json::to_value(&fail).unwrap();
+        assert_eq!(v["pipeline_state"], "blocked_repo");
+        assert_eq!(v["error_code"], "inadmissible_source_tree");
+        assert!(v.get("error_detail").is_some());
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            3,
+            "unexpected fail fields: {v}"
+        );
+    }
+
+    #[test]
+    fn archive_cap_failure_maps_to_blocked_repo() {
+        // An archive-level cap violation is also terminal blocked_repo, with its own
+        // machine code so the pipeline need not string-match the detail.
+        let err = SourceMaterializeError::CompressedTooLarge {
+            bytes: 200 * 1024 * 1024,
+            limit: 100 * 1024 * 1024,
+        };
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "blocked_repo");
+        assert_eq!(fail.error_code, "compressed_cap_exceeded");
+    }
+
+    #[test]
+    fn archive_io_failure_is_retryable_failed_internal() {
+        // An archive-side IO error is transient — failed_internal (ato-api retries it,
+        // max 3), never a block.
+        let err = SourceMaterializeError::Io {
+            context: "write archive".into(),
+            source: std::io::Error::other("disk full"),
+        };
+        let fail = SourceMaterializeFail::from_materialize_error(&err);
+        assert_eq!(fail.pipeline_state, "failed_internal");
+        assert_eq!(fail.error_code, "io_error");
+    }
+
+    #[test]
+    fn builder_side_contract_skew_is_failed_internal() {
+        // A source_materialize job with no server-resolved source (or a checkout
+        // failure) is a builder/daemon contract skew — failed_internal, retryable.
+        let fail = SourceMaterializeFail::internal(
+            "source_missing",
+            "source_materialize job carries no server-resolved source".into(),
+        );
+        assert_eq!(fail.pipeline_state, "failed_internal");
+        assert_eq!(fail.error_code, "source_missing");
+        let v = serde_json::to_value(&fail).unwrap();
+        assert_eq!(v["pipeline_state"], "failed_internal");
     }
 }

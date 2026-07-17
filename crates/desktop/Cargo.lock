@@ -1860,7 +1860,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.7.4"
+version = "0.7.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
