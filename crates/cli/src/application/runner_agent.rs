@@ -4559,13 +4559,20 @@ async fn handle_restore_snapshot_lease(
         .join(&lease_id);
     // Drain any stale spans so `spans=` below carries THIS restore only.
     let _ = snapshot::bench::drain();
+    // P1 Ready-State optimization: the snapshot backend's UFFD demand-paging
+    // path skips the ~512MB eager rehydrate on the restore critical path. The
+    // operator opts in per-runner (`ATO_RUNNER_UFFD_PREVIEW=1`); the backend
+    // gates the request on host capability (userfaultfd + local CAS) and
+    // degrades to the eager File path — logging why — on a host that cannot
+    // serve page faults, so a flag set on a wrong box costs latency, not leases.
+    let uffd_preview = crate::application::ready_state::flags::runner_uffd_preview_enabled();
     let receipt = match restore_and_expose(
         backend.as_ref(),
         &store,
         manifest,
         overlay_root,
         None,
-        false,
+        uffd_preview,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -4587,6 +4594,17 @@ async fn handle_restore_snapshot_lease(
         .into_iter()
         .map(|s| format!("{}={}ms", s.name, s.micros / 1000))
         .collect();
+    // P3 content-ready: how long after resume the user's first screen could
+    // actually be served (P0/P2 point this wait at `content_ready_path`, not
+    // just `/health`). Read from the receipt, which measures it on every
+    // restore — the `spans=` above only exist under ATO_READY_STATE_BENCH=1,
+    // which no product runner sets. `ungated` = no HTTP probe gated readiness
+    // (a supervisor artifact: its workload only re-launches after binding
+    // delivery, so the agent probe, not a GET, is the ready signal).
+    let content_ready_ms: String = receipt
+        .content_ready_ms
+        .map(|ms| ms.to_string())
+        .unwrap_or_else(|| "ungated".to_string());
     let session = receipt.session;
 
     let Some(guest_port) = session.guest_port else {
@@ -4924,10 +4942,18 @@ async fn handle_restore_snapshot_lease(
     }
     prof_mark!("ready_ack_ms");
     // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
+    // P3 adds `content_ready_ms`: the restore's own measurement of how long
+    // until the user's first screen is serveable (so the PWA progress UI can
+    // interpolate p50 from real numbers, not just `proxy_ready_wait_ms`).
+    // Present on every restore — unlike `spans=`, it does not need
+    // ATO_READY_STATE_BENCH. "ungated" marks a supervisor artifact, where the
+    // workload only starts at bind time and no HTTP probe gates ready.
     println!(
-        "RESTORE_PROF lease={lease_id} snapshot={} {} total_ms={} spans=\"{}\"",
+        "RESTORE_PROF lease={lease_id} snapshot={} {} content_ready_ms={} total_ms={} \
+         spans=\"{}\"",
         cmd.snapshot_id,
         prof_parts.join(" "),
+        content_ready_ms,
         prof_total.elapsed().as_millis(),
         prof_spans.join(";"),
     );

@@ -13,12 +13,12 @@ use anyhow::{Context, Result};
 use capsule::types::CapsuleManifest;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
-    SanitizerLayer, SanitizerStep, SnapshotBackend, ensure_gpu_not_in_snapshot,
+    SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe, ensure_gpu_not_in_snapshot,
 };
 
 use super::store;
 
-/// Derive the restore contract (ports / healthcheck / SLO) from the manifest.
+/// Derive the restore contract (ports / healthcheck / SLO / warmup) from the manifest.
 pub(crate) fn restore_contract_from_manifest(m: &CapsuleManifest) -> RestoreContract {
     let mut ports: Vec<u16> = Vec::new();
     if let Some(targets) = m.targets.as_ref() {
@@ -41,15 +41,23 @@ pub(crate) fn restore_contract_from_manifest(m: &CapsuleManifest) -> RestoreCont
             .find_map(|nt| nt.readiness_probe.as_ref().and_then(|p| p.http_get.clone()))
     });
 
-    let expected_ready_ms = m
-        .snapshot_config()
+    let snapshot_cfg = m.snapshot_config();
+    let expected_ready_ms = snapshot_cfg
         .max_restore_seconds
         .map(|s| s.saturating_mul(1000));
+    // The author's first-screen warmup recipe rides the sealed artifact. Paths
+    // are enforced by the backend's warmup gate (one enforcement point, shared
+    // with the builder lanes), so this stays a pure copy.
+    let warmup = WarmupRecipe::from_snapshot_config(&snapshot_cfg);
 
     RestoreContract {
         expected_ready_ms,
         ports,
         healthcheck,
+        warmup_paths: warmup.warmup_paths,
+        stable_successes: warmup.stable_successes,
+        stable_interval_ms: warmup.stable_interval_ms,
+        content_ready_path: warmup.content_ready_path,
         ..Default::default()
     }
 }
@@ -185,6 +193,28 @@ path = "/health"
         ));
         assert!(c.ports.contains(&8080));
         assert_eq!(c.expected_ready_ms, Some(8000));
+        // Defaults: no warmup, no content_ready_path ⇒ v1 healthcheck-only seal.
+        assert!(c.warmup_paths.is_empty());
+        assert_eq!(c.stable_successes, None);
+        assert_eq!(c.stable_interval_ms, None);
+        assert_eq!(c.content_ready_path, None);
+    }
+
+    #[test]
+    fn restore_contract_copies_warmup_fields() {
+        let c = restore_contract_from_manifest(&parse(
+            "\
+[snapshot]\n\
+mode=\"warm\"\n\
+warmup_paths=[\"/\",\"/api/health\"]\n\
+stable_successes=3\n\
+stable_interval_ms=200\n\
+content_ready_path=\"/\"\n",
+        ));
+        assert_eq!(c.warmup_paths, vec!["/", "/api/health"]);
+        assert_eq!(c.stable_successes, Some(3));
+        assert_eq!(c.stable_interval_ms, Some(200));
+        assert_eq!(c.content_ready_path.as_deref(), Some("/"));
     }
 
     #[test]
