@@ -305,6 +305,30 @@ pub(super) fn browser_launch_failed_event(
     (message, event)
 }
 
+/// Pure construction of the terminal `desktop_login_completed` NDJSON payload
+/// emitted once the bridge exchange succeeds.
+///
+/// Extracted from the call site in `login_with_store_device_flow_desktop` so
+/// its exact shape is unit-testable, and — the reason it is worth a dedicated
+/// function and test — to pin the invariant that the one success signal
+/// crossing the CLI→Desktop boundary carries only the publisher *handle* and
+/// the storage *location label*, never the session/device credential itself.
+/// The exchanged access token is persisted to the age/credentials store and
+/// must never travel over stdout into the Dock (which forwards these events
+/// into user-facing toasts and `tracing` logs). A future edit that "helpfully"
+/// added the token to this event would be caught by
+/// `desktop_login_completed_event_never_carries_a_token` in tests.rs.
+pub(super) fn desktop_login_completed_event(
+    publisher_handle: Option<&str>,
+    storage: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "desktop_login_completed",
+        "publisher_handle": publisher_handle,
+        "storage": storage,
+    })
+}
+
 /// Splits a raw bridge-auth failure — carrying the live HTTP status code
 /// and ato-api's raw response body — into a short, generic `message` meant
 /// for the Dock's user-facing toast, and a `detail` string that keeps the
@@ -1057,11 +1081,10 @@ pub async fn login_with_store_device_flow_desktop() -> Result<()> {
 
                 println!(
                     "{}",
-                    serde_json::json!({
-                        "type": "desktop_login_completed",
-                        "publisher_handle": creds.publisher_handle,
-                        "storage": storage.display(),
-                    })
+                    desktop_login_completed_event(
+                        creds.publisher_handle.as_deref(),
+                        storage.display(),
+                    )
                 );
                 return Ok(());
             }
