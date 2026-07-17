@@ -112,6 +112,23 @@ pub(crate) fn runner_preview_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// P1 Ready-State optimization: operator opt-in for the UFFD (lazy page-server)
+/// memory backend on this Connected Runner. Restoring via UFFD skips the eager
+/// rehydration of the full ~512MB memory image (only faulted pages are streamed
+/// from CAS on demand), taking the dominant I/O off the restore critical path.
+///
+/// The backend gates the request on host capability (`userfaultfd(2)` usable +
+/// local CAS openable) and DEGRADES to the eager File path — printing why — on a
+/// host that cannot serve page faults. Setting this on a wrong box therefore
+/// costs latency, not leases. Off by default → the existing eager-File restore
+/// is byte-identical for every lease.
+pub(crate) fn runner_uffd_preview_enabled() -> bool {
+    std::env::var("ATO_RUNNER_UFFD_PREVIEW")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(false)
+}
+
 /// v1.2 PR 2 (L8): the binding-lease TTL, `ATO_READY_STATE_BINDING_TTL_MS`
 /// (default 1h). The foreground serving loop renews well inside this window;
 /// an un-renewed lease expiry-scrubs in the guest (lazy) and traffic gates.

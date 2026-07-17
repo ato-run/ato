@@ -56,6 +56,10 @@ mode = "warm"
     assert!(snap.sanitize_after_restore);
     assert_eq!(snap.runner_class, None);
     assert_eq!(snap.max_restore_seconds, None);
+    assert!(snap.warmup_paths.is_empty());
+    assert_eq!(snap.stable_successes, 1);
+    assert_eq!(snap.stable_interval_ms, 250);
+    assert_eq!(snap.content_ready_path, None);
     assert!(m.is_ready_state_eligible());
 }
 
@@ -69,6 +73,10 @@ boot_until = "first_request"
 sanitize_after_restore = false
 runner_class = "managed/linux-aarch64"
 max_restore_seconds = 8
+warmup_paths = ["/", "/api/health"]
+stable_successes = 3
+stable_interval_ms = 200
+content_ready_path = "/"
 "#,
     );
     let snap = m.snapshot.clone().unwrap();
@@ -77,6 +85,10 @@ max_restore_seconds = 8
     assert!(!snap.sanitize_after_restore);
     assert_eq!(snap.runner_class.as_deref(), Some("managed/linux-aarch64"));
     assert_eq!(snap.max_restore_seconds, Some(8));
+    assert_eq!(snap.warmup_paths, vec!["/", "/api/health"]);
+    assert_eq!(snap.stable_successes, 3);
+    assert_eq!(snap.stable_interval_ms, 200);
+    assert_eq!(snap.content_ready_path.as_deref(), Some("/"));
 }
 
 #[test]
@@ -701,4 +713,36 @@ fn v12_unknown_binding_mode_is_rejected() {
     let bad = "[bindings.input]\nkind = \"user_files\"\nmode = \"rw\"\n";
     assert!(CapsuleManifest::from_toml(&format!("{BASE}\n{good}")).is_ok());
     assert!(CapsuleManifest::from_toml(&format!("{BASE}\n{bad}")).is_err());
+}
+
+// ── probe-path validation (shared by the builder lanes + snapshot backend) ──
+
+#[test]
+fn probe_paths_accept_origin_form_and_reject_request_line_breakers() {
+    use super::{is_valid_probe_path, validate_probe_paths};
+
+    for ok in ["/", "/api/health", "/app?tab=1", "/a%20b", "/x#frag"] {
+        assert!(
+            is_valid_probe_path(ok),
+            "{ok:?} should be a valid probe path"
+        );
+    }
+    // Not origin-form: the probe sends `GET {p} HTTP/1.0` — a relative path or a
+    // full URL is what an authoring typo actually looks like.
+    for bad in ["health", "", "http://x/y", " /health"] {
+        assert!(!is_valid_probe_path(bad), "{bad:?} should be rejected");
+    }
+    // A space shifts the HTTP-version token; CR/LF splits the request line
+    // outright (header injection into the guest probe).
+    for bad in ["/a b", "/a\r\nX-Injected: 1", "/a\nb", "/a\tb"] {
+        assert!(!is_valid_probe_path(bad), "{bad:?} should be rejected");
+    }
+
+    // The aggregate validator names which field carried the offender.
+    assert!(validate_probe_paths(&["/".to_string()], Some("/")).is_ok());
+    assert!(validate_probe_paths(&[], None).is_ok());
+    let e = validate_probe_paths(&["health".to_string()], None).unwrap_err();
+    assert!(e.contains("warmup_paths") && e.contains("health"), "{e}");
+    let e = validate_probe_paths(&[], Some("health")).unwrap_err();
+    assert!(e.contains("content_ready_path"), "{e}");
 }

@@ -258,6 +258,8 @@ impl SnapshotBackend for FakeSnapshotBackend {
         Ok(RestoreReceipt {
             session,
             ready_state_manifest_id: manifest_id,
+            // Fake never boots a guest, so nothing HTTP-probes a content-ready path.
+            content_ready_ms: None,
         })
     }
 

@@ -42,6 +42,9 @@ use capsule::engine::execution_graph::{
 };
 use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
+use capsule::foundation::types::ready_state::{
+    DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES,
+};
 use capsulefs::CasStore;
 use protocol::session_surface::{
     EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
@@ -64,7 +67,7 @@ use snapshot::rootfs_builder::{
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SanitizerContract, SnapshotBackend, SupervisorBindings, no_secret_scan,
+    SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe, no_secret_scan,
 };
 
 mod upload;
@@ -321,6 +324,57 @@ fn live_secret_canaries(cfg: &Config) -> Vec<&[u8]> {
         v.push(cfg.token.as_bytes());
     }
     v
+}
+
+/// P0 Ready-State warmup for the RECIPE lane: the author's `[snapshot]` table.
+/// Validated here so an authoring typo fails the build with a pointed error
+/// instead of an opaque warmup-timeout later.
+fn warmup_from_manifest(m: &CapsuleManifest) -> std::result::Result<WarmupRecipe, String> {
+    let w = WarmupRecipe::from_snapshot_config(&m.snapshot_config());
+    w.validate()?;
+    Ok(w)
+}
+
+/// P0 Ready-State warmup for the IMPORT lanes (no capsule.toml, so the operator
+/// opts in via per-builder env). Empty by default — an import capsule is
+/// unchanged unless an operator opts in. An invalid path is a build error, not a
+/// silent skip: a typo'd `ATO_SNAPSHOT_BUILDER_*` that quietly produced a
+/// NON-warmed artifact is exactly the confusion this flight exists to remove.
+fn warmup_from_env() -> std::result::Result<WarmupRecipe, String> {
+    let paths: Vec<String> = std::env::var("ATO_SNAPSHOT_BUILDER_WARMUP_PATHS")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let content_ready = std::env::var("ATO_SNAPSHOT_BUILDER_CONTENT_READY_PATH")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let num = |k: &str| -> std::result::Result<Option<u64>, String> {
+        match std::env::var(k) {
+            Ok(v) => v
+                .trim()
+                .parse::<u64>()
+                .map(Some)
+                .map_err(|e| format!("{k}: not a number ({e})")),
+            Err(_) => Ok(None),
+        }
+    };
+    let w = WarmupRecipe::new(
+        paths,
+        num("ATO_SNAPSHOT_BUILDER_STABLE_SUCCESSES")?
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(DEFAULT_STABLE_SUCCESSES),
+        num("ATO_SNAPSHOT_BUILDER_STABLE_INTERVAL_MS")?.unwrap_or(DEFAULT_STABLE_INTERVAL_MS),
+        content_ready,
+    );
+    w.validate()?;
+    Ok(w)
 }
 
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
@@ -604,6 +658,16 @@ struct ProducedBuild {
     supervisor: Option<SupervisorBindings>,
     // ── sealed-ack facts (Artifact provenance) ──
     supervisor_ack: Option<SupervisorAck>,
+    /// First-screen warmup recipe (`[snapshot].warmup_paths`/`content_ready_path`
+    /// in the recipe lane) or operator env (`ATO_SNAPSHOT_BUILDER_*` in the
+    /// import lanes). Fed into the sealed artifact's `RestoreContract` so the
+    /// runner restores it together with the bytes — the ack payload itself
+    /// (`Artifact`) does NOT carry it, because the ato-api ack schema is
+    /// `.strict()` and the sealed manifest is already the authoritative copy.
+    warmup_paths: Vec<String>,
+    stable_successes: Option<u32>,
+    stable_interval_ms: Option<u64>,
+    content_ready_path: Option<String>,
     manifest_source: String,
     synthesized_probe: bool,
     declared_command: String,
@@ -694,6 +758,9 @@ fn produce_recipe_build(
         &job.profile,
         manifest.default_target.trim(),
     )?;
+    // P0: the author's `[snapshot]` first-screen warmup recipe. Validated before
+    // any rootfs work so a bad path fails fast with a pointed error.
+    let warmup = warmup_from_manifest(&manifest).map_err(|e| fail("warmup", e))?;
     // v1.2 PR 3d-2: secret capsules dispatch to the supervisor derivation when this
     // builder is opted in (each prerequisite fail-closed with an actionable reason);
     // no-secret capsules keep the v1 derivation untouched.
@@ -814,6 +881,14 @@ fn produce_recipe_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        // P0 Ready-State warmup — the author's `[snapshot]` recipe rides the
+        // sealed artifact. An empty `warmup_paths` (the default when no
+        // `[snapshot]` table is present) leaves `stable_*` as `None`, so the
+        // snapshot backend applies its v1 fallback (1 success / 250ms).
+        warmup_paths: warmup.warmup_paths,
+        stable_successes: warmup.stable_successes,
+        stable_interval_ms: warmup.stable_interval_ms,
+        content_ready_path: warmup.content_ready_path,
     })
 }
 
@@ -942,6 +1017,9 @@ fn produce_import_build(
     let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+    // Operator opt-in for first-screen warmup at seal time — see
+    // `warmup_from_env` (import lanes have no capsule.toml).
+    let warmup = warmup_from_env().map_err(|e| fail("warmup", e))?;
 
     // Import identity (ato#1002 review D3): execution_id = the import EXECUTION
     // identity — what executes (the derived service argv/cwd/env/port/readiness +
@@ -1022,6 +1100,12 @@ fn produce_import_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        // Import lane has no capsule.toml: operator opts into first-screen
+        // warmup via env (empty by default ⇒ the v1 healthcheck-only seal).
+        warmup_paths: warmup.warmup_paths,
+        stable_successes: warmup.stable_successes,
+        stable_interval_ms: warmup.stable_interval_ms,
+        content_ready_path: warmup.content_ready_path,
     })
 }
 
@@ -1064,6 +1148,9 @@ fn produce_oci_image_import(
     let outcome = run_oci_image_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
+    // Operator opt-in for first-screen warmup at seal time — see
+    // `warmup_from_env` (import lanes have no capsule.toml).
+    let warmup = warmup_from_env().map_err(|e| fail("warmup", e))?;
 
     // Import identity (ato#1002 review D3, ato#1028): execution_id = the import
     // EXECUTION identity (derived service + platform + final image digest),
@@ -1127,6 +1214,10 @@ fn produce_oci_image_import(
         oci_import_receipt: Some(oci_import_receipt),
         compose_import_receipt: None,
         boot_timeout_s: None,
+        warmup_paths: warmup.warmup_paths,
+        stable_successes: warmup.stable_successes,
+        stable_interval_ms: warmup.stable_interval_ms,
+        content_ready_path: warmup.content_ready_path,
     })
 }
 
@@ -1146,6 +1237,9 @@ fn produce_compose_import(
     // 1. Strict params validation BEFORE any network/pull work.
     let params =
         parse_compose_import_params(job.params.as_ref()).map_err(|e| fail("eligibility", e))?;
+    // Operator opt-in for first-screen warmup at seal time — see
+    // `warmup_from_env` (import lanes have no capsule.toml).
+    let warmup = warmup_from_env().map_err(|e| fail("warmup", e))?;
 
     // 2. Run the compose import: parse → per-service pull+pin → join → pack.
     std::fs::create_dir_all(jobdir).map_err(|e| fail("rootfs_build", e.to_string()))?;
@@ -1219,6 +1313,12 @@ fn produce_compose_import(
         oci_import_receipt: None,
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
+        // ato#1049 compose lane (added on nightly after this flight was cut):
+        // an import lane like the others — operator env opt-in, empty default.
+        warmup_paths: warmup.warmup_paths,
+        stable_successes: warmup.stable_successes,
+        stable_interval_ms: warmup.stable_interval_ms,
+        content_ready_path: warmup.content_ready_path,
     })
 }
 
@@ -2054,6 +2154,15 @@ fn process_job(
                 ports: vec![produced.port],
                 healthcheck: Some(produced.healthcheck.clone()),
                 expected_ready_ms: Some(8000),
+                // P0: copy the author's first-screen warmup recipe into the
+                // sealed manifest so the runner restores it together with the
+                // artifact (`None` for stable_* ⇒ the snapshot crate's v1
+                // fallback applies — this stays byte-identical for a manifest
+                // sealed before warmup-flight, since `warmup_paths` is empty).
+                warmup_paths: produced.warmup_paths.clone(),
+                stable_successes: produced.stable_successes,
+                stable_interval_ms: produced.stable_interval_ms,
+                content_ready_path: produced.content_ready_path.clone(),
                 // Pixel Stream v1: the explicit app_http + pixel_rfb endpoint
                 // pair (empty for Web artifacts — the legacy `ports` projection
                 // stays authoritative there, and absent endpoints keep every

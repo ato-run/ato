@@ -61,6 +61,93 @@ pub struct SnapshotConfig {
     /// cannot meet it. `None` means unspecified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_restore_seconds: Option<u32>,
+
+    /// User-facing paths the build must warm up before sealing the snapshot —
+    /// each path receives an HTTP GET (after the healthcheck answers) so the
+    /// sealed memory already contains the user's first-screen work (template
+    /// generation, JIT, DB init, First Frame prep). Empty ⇒ unchanged v1
+    /// behavior (healthcheck-only seal point). Each path must start with `/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmup_paths: Vec<String>,
+
+    /// Consecutive stable successes required across `warmup_paths` (plus the
+    /// healthcheck) before the Pause+Snapshot. `1` reuses the v1 behavior: the
+    /// first 2xx/3xx of every path is enough. Higher values reduce the chance
+    /// the snapshot captures a half-started state (a server that answers /
+    /// once then reloads routes, for instance) at the cost of build time.
+    #[serde(
+        default = "default_stable_successes",
+        skip_serializing_if = "is_default_stable_successes"
+    )]
+    pub stable_successes: u32,
+
+    /// Polling interval between stability checks, in milliseconds. Default 250.
+    #[serde(
+        default = "default_stable_interval_ms",
+        skip_serializing_if = "is_default_stable_interval_ms"
+    )]
+    pub stable_interval_ms: u64,
+
+    /// The path the runner hits to judge RESTORE readiness — i.e. the path the
+    /// browser actually loads first. Defaults to `healthcheck`, then `/` when
+    /// neither is set. Without this, runners report "ready" after only `/health`
+    /// answers, while the user's first request to `/` still hits template/DB
+    /// init that was NOT in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ready_path: Option<String>,
+}
+
+/// v1 warmup stability: the first 2xx/3xx of every path is enough.
+pub const DEFAULT_STABLE_SUCCESSES: u32 = 1;
+/// v1 warmup poll interval between stability rounds.
+pub const DEFAULT_STABLE_INTERVAL_MS: u64 = 250;
+
+fn default_stable_successes() -> u32 {
+    DEFAULT_STABLE_SUCCESSES
+}
+fn default_stable_interval_ms() -> u64 {
+    DEFAULT_STABLE_INTERVAL_MS
+}
+fn is_default_stable_successes(v: &u32) -> bool {
+    *v == DEFAULT_STABLE_SUCCESSES
+}
+fn is_default_stable_interval_ms(v: &u64) -> bool {
+    *v == DEFAULT_STABLE_INTERVAL_MS
+}
+
+/// Is `p` usable as the request-target of the HTTP/1.0 probe the build (warmup)
+/// and the runner (content-ready) send into the guest?
+///
+/// The probe formats `GET {p} HTTP/1.0\r\nHost: …`, so `p` must be origin-form
+/// (leading `/`) and free of any character that would break out of the request
+/// line — a space would shift the version token, a CR/LF would split the request
+/// into two. Rejecting here keeps an authoring typo from surfacing as an opaque
+/// "never stabilized" build failure or a full boot-timeout restore hang.
+pub fn is_valid_probe_path(p: &str) -> bool {
+    p.starts_with('/') && !p.chars().any(|c| c == ' ' || c.is_control())
+}
+
+/// Validate every author-supplied probe path, naming the offender. Shared by the
+/// builder lanes and the snapshot backend so both reject the same inputs.
+pub fn validate_probe_paths(
+    warmup_paths: &[String],
+    content_ready_path: Option<&str>,
+) -> Result<(), String> {
+    for p in warmup_paths {
+        if !is_valid_probe_path(p) {
+            return Err(format!(
+                "warmup_paths: {p:?} is not a valid probe path \
+                 (must start with `/` and contain no spaces or control characters)"
+            ));
+        }
+    }
+    match content_ready_path {
+        Some(p) if !is_valid_probe_path(p) => Err(format!(
+            "content_ready_path: {p:?} is not a valid probe path \
+             (must start with `/` and contain no spaces or control characters)"
+        )),
+        _ => Ok(()),
+    }
 }
 
 impl Default for SnapshotConfig {
@@ -71,6 +158,10 @@ impl Default for SnapshotConfig {
             sanitize_after_restore: true,
             runner_class: None,
             max_restore_seconds: None,
+            warmup_paths: Vec::new(),
+            stable_successes: default_stable_successes(),
+            stable_interval_ms: default_stable_interval_ms(),
+            content_ready_path: None,
         }
     }
 }
