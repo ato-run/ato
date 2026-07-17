@@ -354,6 +354,17 @@ pub struct RestoreReceipt {
     pub session: RestoredSession,
     /// Id of the artifact that was restored.
     pub ready_state_manifest_id: String,
+    /// P3: time from resume to the first ready answer on the artifact's
+    /// content-ready path — i.e. how long until the first screen the user
+    /// actually loads is serveable. This is the restore's own measurement, NOT
+    /// a `bench` span: `bench` is opt-in (`ATO_READY_STATE_BENCH=1`) and off on
+    /// every product runner, so a metric sourced from it would always be absent
+    /// exactly where it is needed.
+    ///
+    /// `None` when no HTTP probe gates readiness — a supervisor artifact
+    /// (readiness is the guest-agent probe; the workload only relaunches at
+    /// bind time) or the zero-page UFFD smoke.
+    pub content_ready_ms: Option<u128>,
 }
 
 /// Result of a successful teardown.

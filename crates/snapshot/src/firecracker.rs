@@ -825,6 +825,80 @@ impl FirecrackerBackend {
         self.wait_health_until(port, path, || None)
     }
 
+    /// Warm `warmup_paths` into guest memory BEFORE the Pause+Snapshot, so the
+    /// sealed memory image already carries the user's first-screen work
+    /// (template generation, JIT, DB init, First Frame prep). All paths are
+    /// hit on each round; the round succeeds only when every path answers
+    /// ready. `stable_successes` consecutive stable rounds are required, polled
+    /// `stable_interval_ms` apart — settle any in-guest retry that reloads
+    /// routes / recompiles on the first hit before freezing the state.
+    /// Idempotent: empty `warmup_paths` ⇒ no work.
+    ///
+    /// `boot_timeout` is the ONLY bound: the whole point of warmup is to absorb
+    /// slow post-health first-screen work (the measured ~3s of template/JIT/DB
+    /// init), so a shorter private budget here would fail exactly the builds
+    /// this is meant to speed up. A genuinely broken path still fails the build
+    /// closed — it just takes the full boot budget to prove it.
+    fn warmup_paths(&self, port: u16, contract: &RestoreContract) -> Result<(), SnapshotError> {
+        if contract.warmup_paths.is_empty() {
+            return Ok(());
+        }
+        contract
+            .validate_probe_paths()
+            .map_err(|e| self.backend_err(format!("warmup: {e}")))?;
+        let addr = self.probe_addr(port)?;
+        let successes = contract.effective_stable_successes();
+        let interval = contract.effective_stable_interval();
+        let started = Instant::now();
+        let timeout = self.config.boot_timeout;
+        let mut streak = 0u32;
+        while streak < successes {
+            if started.elapsed() >= timeout {
+                return Err(self.backend_err(format!(
+                    "warmup timeout: needed {successes} stable round(s) of {:?} within {:?}",
+                    contract.warmup_paths, timeout
+                )));
+            }
+            let all_ok = contract
+                .warmup_paths
+                .iter()
+                .all(|p| self.probe_ready(addr, p));
+            streak = if all_ok { streak + 1 } else { 0 };
+            if streak < successes {
+                std::thread::sleep(interval);
+            }
+        }
+        Ok(())
+    }
+
+    /// The root-reachable address of a guest port: the guest IP directly
+    /// (legacy) or the per-slot ingress (netns mode) which DNATs into the ns.
+    fn probe_addr(&self, port: u16) -> Result<std::net::SocketAddr, SnapshotError> {
+        let reachable = self.reachable_host();
+        format!("{reachable}:{port}")
+            .parse()
+            .map_err(|e| self.backend_err(format!("bad guest addr: {e}")))
+    }
+
+    /// One HTTP/1.0 GET against the guest; true when the app answered ready
+    /// (2xx/3xx, see [`Self::http_status_ready`]). This is the single probe
+    /// shared by the warmup rounds and the health/content-ready wait, so a path
+    /// that warms at build cannot be judged by a different rule at restore.
+    fn probe_ready(&self, addr: std::net::SocketAddr, path: &str) -> bool {
+        let io = Duration::from_millis(500);
+        let Ok(mut s) = TcpStream::connect_timeout(&addr, io) else {
+            return false;
+        };
+        let _ = s.set_read_timeout(Some(io));
+        let req = format!(
+            "GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n",
+            self.config.guest_ip
+        );
+        let mut buf = [0u8; 32];
+        s.write_all(req.as_bytes()).is_ok()
+            && matches!(s.read(&mut buf), Ok(n) if n > 0 && Self::http_status_ready(&buf[..n]))
+    }
+
     /// `wait_health` with a fail-fast `abort` check polled each iteration (U5
     /// #858): when it returns `Some(reason)` the wait stops with an error instead of
     /// burning the full `boot_timeout` — used so a UFFD page-server failure (CAS
@@ -835,31 +909,14 @@ impl FirecrackerBackend {
         path: &str,
         abort: impl Fn() -> Option<String>,
     ) -> Result<u128, SnapshotError> {
-        // Dial the ROOT-reachable address: the guest IP directly (legacy), or
-        // the per-slot ingress (netns mode) which DNATs into the namespace.
-        let reachable = self.reachable_host();
-        let addr: std::net::SocketAddr = format!("{reachable}:{port}")
-            .parse()
-            .map_err(|e| self.backend_err(format!("bad guest addr: {e}")))?;
+        let addr = self.probe_addr(port)?;
         let start = Instant::now();
         while start.elapsed() < self.config.boot_timeout {
             if let Some(reason) = abort() {
                 return Err(self.backend_err(format!("restore failed closed: {reason}")));
             }
-            if let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) {
-                let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
-                let req = format!(
-                    "GET {path} HTTP/1.0\r\nHost: {}\r\n\r\n",
-                    self.config.guest_ip
-                );
-                let mut buf = [0u8; 32];
-                if s.write_all(req.as_bytes()).is_ok()
-                    && let Ok(n) = s.read(&mut buf)
-                    && n > 0
-                    && Self::http_status_ready(&buf[..n])
-                {
-                    return Ok(start.elapsed().as_millis());
-                }
+            if self.probe_ready(addr, path) {
+                return Ok(start.elapsed().as_millis());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1124,6 +1181,13 @@ fn hc_path(c: &RestoreContract, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Effective path used to judge RESTORE readiness — the user's first-screen, not
+/// only a health endpoint. `content_ready_path` wins; otherwise the healthcheck;
+/// otherwise the fallback (e.g. `/`).
+fn content_ready_path(c: &RestoreContract, fallback: &str) -> String {
+    c.content_ready_path_or(fallback)
+}
+
 fn blake3_file(path: &Path) -> Option<String> {
     Some(format!(
         "blake3:{}",
@@ -1171,6 +1235,60 @@ fn uffd_mode() -> Option<UffdMode> {
         Some("mem") => Some(UffdMode::Mem),
         Some("cas") | Some("1") => Some(UffdMode::Cas),
         _ => None,
+    }
+}
+
+/// Whether THIS kernel can hand out a userfaultfd at all.
+///
+/// Firecracker is what actually creates the uffd and passes it to our
+/// page-server over `SCM_RIGHTS`, but it runs on this same kernel — so a
+/// successful `userfaultfd(2)` here is a faithful proxy. It also catches the
+/// hardened-host case (`vm.unprivileged_userfaultfd=0` without the required
+/// capability), which is otherwise indistinguishable from "not supported"
+/// until the guest is already booting on memory nobody can serve.
+#[cfg(target_os = "linux")]
+fn uffd_kernel_supported() -> bool {
+    // SAFETY: `userfaultfd(2)` takes only flags and returns a new fd or -1 —
+    // it touches no memory of ours. A successful fd is closed immediately.
+    unsafe {
+        let fd = libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC);
+        if fd < 0 {
+            return false;
+        }
+        libc::close(fd as libc::c_int);
+        true
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn uffd_kernel_supported() -> bool {
+    false // the page-server module is Linux-only (its non-Linux bind fails closed).
+}
+
+/// P1: resolve the operator's `ATO_RUNNER_UFFD_PREVIEW` opt-in into an actual
+/// mode, or `None` to stay on the eager File path.
+///
+/// This is the capability gate the preview flag promises. Without it, opting in
+/// on a host that cannot serve page faults does NOT degrade to File — every
+/// restore on that runner fails (the page-server bind or the fault loop errors,
+/// and the lease dies). A canary flag whose blast radius is "all restores on
+/// this box" is not a canary, so an unsupported host falls back and says so.
+fn uffd_preview_mode(store: &CasStore) -> Option<UffdMode> {
+    let refuse = |reason: &str| {
+        eprintln!(
+            "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this host cannot serve \
+             demand-paged memory ({reason}); restoring via the eager File path instead."
+        );
+        None
+    };
+    if !uffd_kernel_supported() {
+        return refuse("no userfaultfd support on this kernel");
+    }
+    // `PageSource::Cas` serves every guest fault straight out of the local CAS;
+    // if it cannot be opened the guest would fault on memory nobody can supply.
+    match CasStore::open(store.root()) {
+        Ok(_) => Some(UffdMode::Cas),
+        Err(e) => refuse(&format!("local CAS unavailable: {e}")),
     }
 }
 
@@ -1713,6 +1831,21 @@ impl SnapshotBackend for FirecrackerBackend {
                     self.supervisor_deliver_placeholders(uds, drive)?;
                 }
                 self.wait_health(port, &path)?; // secret-free seal point (placeholder-only for supervisor builds)
+                // Warm the user-facing first-screen paths into guest memory BEFORE
+                // the Pause+Snapshot, so the sealed image already carries template
+                // rendering / JIT / DB-init / First-Frame-prep — the user's first
+                // request then hits warm pages instead of redoing that work after
+                // resume. Skipped for the required-binding supervisor carve-out:
+                // its workload is stopped + revoked before the seal (below) and the
+                // equivalent first-screen work is driven via the guest-agent
+                // bound-ready transition at restore time, so warming here would be
+                // wasted I/O against a workload about to be torn down.
+                let warmup_cap = !supervisor_drive
+                    .as_ref()
+                    .is_some_and(|d| d.has_placeholders());
+                if warmup_cap {
+                    self.warmup_paths(port, &input.restore_contract)?;
+                }
                 // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
                 // pause/snapshot, so the seal carries no running workload and no
                 // binding material in guest tmpfs (contract order: stop, then revoke).
@@ -2040,7 +2173,7 @@ impl SnapshotBackend for FirecrackerBackend {
         }
 
         // From here, on any error we must release the lock + net before returning.
-        let result = (|| -> Result<(RestoredSession, Child, Option<crate::uffd_page_server::PageServerHandle>), SnapshotError> {
+        let result = (|| -> Result<(RestoredSession, Child, Option<crate::uffd_page_server::PageServerHandle>, Option<u128>), SnapshotError> {
             std::fs::create_dir_all(&input.overlay_root).map_err(|e| self.backend_err(e.to_string()))?;
             // restored_bytes = the logical bytes the session is restored from
             // (independent of whether a cached layer was reused on disk).
@@ -2061,9 +2194,17 @@ impl SnapshotBackend for FirecrackerBackend {
             let rootfs_path = self.cache_path("rootfs", rootfs, "ext4");
             let rw_rootfs = !self.config.rootfs_read_only;
             // U11 (#878): the product preview drives UFFD local-CAS demand via the
-            // input flag; the env gate (uffd_mode) remains for the test-only KVM
-            // smokes and takes effect only when the input flag is off.
-            let uffd = if input.uffd_preview { Some(UffdMode::Cas) } else { uffd_mode() };
+            // input flag, behind a host-capability gate that degrades to the eager
+            // File path (P1 — an operator opt-in must never take a runner's leases
+            // down with it). The env gate (uffd_mode) remains for the test-only KVM
+            // smokes: it stays UNGATED and hard-fails, because a smoke that silently
+            // fell back to File would assert nothing. It takes effect only when the
+            // product flag is off.
+            let uffd = if input.uffd_preview {
+                uffd_preview_mode(input.store)
+            } else {
+                uffd_mode()
+            };
 
             if uffd == Some(UffdMode::Cas) {
                 // U2 (#855): memory is served lazily from local CAS by the page-server
@@ -2119,7 +2260,10 @@ impl SnapshotBackend for FirecrackerBackend {
             }
 
             let port = hc_port(&input.manifest.restore_contract, self.config.healthcheck_port);
-            let path = hc_path(&input.manifest.restore_contract, &self.config.healthcheck_path);
+            let path = content_ready_path(
+                &input.manifest.restore_contract,
+                &self.config.healthcheck_path,
+            );
 
             // Per-slot DNAT targets every declared endpoint, not only the HTTP
             // health port. Pixel RFB and other guest-private surfaces share the
@@ -2267,7 +2411,8 @@ impl SnapshotBackend for FirecrackerBackend {
             // ZERO-binding supervisor artifact (dockerfile import) sealed RUNNING
             // and wakes vacuously bound-ready — it health-waits like a no-binding
             // artifact (see `restore_uses_agent_probe`).
-            let time_to_health_ms: Option<u128> = if restore_uses_agent_probe(input.manifest.supervisor_build.as_ref()) {
+            let agent_probe = restore_uses_agent_probe(input.manifest.supervisor_build.as_ref());
+            let time_to_health_ms: Option<u128> = if agent_probe {
                 let uds = vsock_uds.as_ref().ok_or_else(|| {
                     self.backend_err(
                         "supervisor artifact restored without a vsock uds \
@@ -2296,6 +2441,11 @@ impl SnapshotBackend for FirecrackerBackend {
                     _ => Some(bench::time("restore.wait_health", || self.wait_health(port, &path))?),
                 }
             };
+            // P3: the wait above IS the content-ready wait — `path` is the
+            // artifact's content_ready_path (the first screen the browser loads),
+            // not just `/health`. The supervisor's agent probe is not an HTTP
+            // probe of that path, so it reports no content-ready time.
+            let content_ready_ms = if agent_probe { None } else { time_to_health_ms };
 
             // U1: snapshot a receipt + (U3) the per-restore fault trace for the smoke.
             if let Some(h) = &page_handle {
@@ -2371,11 +2521,11 @@ impl SnapshotBackend for FirecrackerBackend {
                 // Any fronting proxy dials this exact address.
                 workload_addr: Some(format!("{}:{}", self.reachable_host(), port)),
             };
-            Ok((session, child, page_handle))
+            Ok((session, child, page_handle, content_ready_ms))
         })();
 
         match result {
-            Ok((session, child, page_handle)) => {
+            Ok((session, child, page_handle, content_ready_ms)) => {
                 self.sessions
                     .lock()
                     .unwrap()
@@ -2390,6 +2540,7 @@ impl SnapshotBackend for FirecrackerBackend {
                 Ok(RestoreReceipt {
                     ready_state_manifest_id: input.manifest.id(),
                     session,
+                    content_ready_ms,
                 })
             }
             Err(e) => {
@@ -2566,6 +2717,141 @@ mod tests {
     use super::*;
 
     // ── readiness status classification: 2xx/3xx = the app answered ──
+
+    // ── P0 warmup loop: seal only after the first screen is stably serveable ──
+
+    /// A guest stand-in: answers `status_for(path)` per request and counts hits.
+    /// Returns (port, hits) — the listener thread lives for the test.
+    fn spawn_probe_server(
+        status_for: impl Fn(&str) -> &'static str + Send + 'static,
+    ) -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{BufRead, BufReader};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t_hits = std::sync::Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for conn in l.incoming() {
+                let Ok(mut s) = conn else { break };
+                let mut line = String::new();
+                if BufReader::new(s.try_clone().unwrap())
+                    .read_line(&mut line)
+                    .is_err()
+                {
+                    continue;
+                }
+                // "GET /path HTTP/1.0"
+                let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                t_hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = s.write_all(status_for(&path).as_bytes());
+            }
+        });
+        (port, hits)
+    }
+
+    fn warmup_backend(boot_timeout: Duration) -> FirecrackerBackend {
+        FirecrackerBackend::with_config(FirecrackerConfig {
+            guest_ip: "127.0.0.1".to_string(),
+            boot_timeout,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn warmup_is_skipped_when_no_paths_are_declared() {
+        // v1 default: an artifact with no [snapshot].warmup_paths seals exactly as
+        // before — the loop must not dial the guest at all.
+        let (port, hits) = spawn_probe_server(|_| "HTTP/1.1 200 OK\r\n\r\n");
+        let b = warmup_backend(Duration::from_secs(5));
+        b.warmup_paths(port, &RestoreContract::default())
+            .expect("empty warmup is a no-op");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn warmup_requires_consecutive_stable_rounds_and_accepts_redirects() {
+        // Every declared path is hit each round, and a 302 (`/` → login) counts as
+        // the app answering — the same rule the restore-side wait applies.
+        let (port, hits) = spawn_probe_server(|p| match p {
+            "/" => "HTTP/1.1 302 Found\r\nLocation: /app\r\n\r\n",
+            _ => "HTTP/1.1 200 OK\r\n\r\n",
+        });
+        let b = warmup_backend(Duration::from_secs(5));
+        let contract = RestoreContract {
+            warmup_paths: vec!["/".to_string(), "/api/health".to_string()],
+            stable_successes: Some(3),
+            stable_interval_ms: Some(1),
+            ..Default::default()
+        };
+        b.warmup_paths(port, &contract)
+            .expect("warmup should settle");
+        // 3 stable rounds x 2 paths — proves the streak is counted, not just one hit.
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 6);
+    }
+
+    #[test]
+    fn warmup_keeps_retrying_a_slow_path_until_the_boot_timeout() {
+        // The regression this guards: a private round cap (10 rounds x 250ms ≈ 2.75s)
+        // would fail the build on exactly the ~3s post-health first-screen work this
+        // feature exists to absorb. `boot_timeout` is the only budget, and an
+        // intervening failure must not poison a later success.
+        let flips = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t_flips = std::sync::Arc::clone(&flips);
+        let (port, _hits) = spawn_probe_server(move |_| {
+            // 404 for the first 20 rounds — well past any 10-round cap — then ready.
+            if t_flips.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 20 {
+                "HTTP/1.1 404 Not Found\r\n\r\n"
+            } else {
+                "HTTP/1.1 200 OK\r\n\r\n"
+            }
+        });
+        let b = warmup_backend(Duration::from_secs(10));
+        let contract = RestoreContract {
+            warmup_paths: vec!["/".to_string()],
+            stable_successes: Some(2),
+            stable_interval_ms: Some(1),
+            ..Default::default()
+        };
+        b.warmup_paths(port, &contract)
+            .expect("a slow first screen must warm, not fail the build");
+    }
+
+    #[test]
+    fn warmup_fails_the_build_when_a_path_never_becomes_ready() {
+        // Fail closed: a genuinely broken path must not seal a cold first screen.
+        let (port, _hits) = spawn_probe_server(|_| "HTTP/1.1 500 Internal Server Error\r\n\r\n");
+        let b = warmup_backend(Duration::from_millis(300));
+        let contract = RestoreContract {
+            warmup_paths: vec!["/broken".to_string()],
+            stable_interval_ms: Some(1),
+            ..Default::default()
+        };
+        let err = b
+            .warmup_paths(port, &contract)
+            .expect_err("a never-ready path must fail the build");
+        assert!(format!("{err}").contains("warmup timeout"), "{err}");
+    }
+
+    #[test]
+    fn warmup_rejects_a_path_that_would_break_the_probe_request_line() {
+        // An authoring typo fails with a pointed error instead of an opaque
+        // timeout, and a CR/LF can never be smuggled into the guest request.
+        let (port, hits) = spawn_probe_server(|_| "HTTP/1.1 200 OK\r\n\r\n");
+        let b = warmup_backend(Duration::from_secs(5));
+        for bad in ["health", "/a\r\nX-Injected: 1"] {
+            let contract = RestoreContract {
+                warmup_paths: vec![bad.to_string()],
+                ..Default::default()
+            };
+            let err = b.warmup_paths(port, &contract).expect_err("must reject");
+            assert!(format!("{err}").contains("not a valid probe path"), "{err}");
+        }
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an invalid path must be rejected before any guest dial"
+        );
+    }
 
     #[test]
     fn http_status_ready_accepts_2xx_and_3xx_rejects_errors_and_garbage() {
