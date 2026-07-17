@@ -6,10 +6,11 @@ use tempfile::TempDir;
 use super::publisher::PublisherMeResponse;
 use super::shared_env_lock as env_lock;
 use super::storage::TokenStorageLocation;
+use super::prompt::{BrowserOpenOs, browser_open_command};
 use super::store::{
     EXTERNAL_BROWSER_LOGIN_HARDENING_EVIDENCE, EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED,
-    browser_launch_failed_event, compute_poll_timing, desktop_login_gate_messages,
-    hydrate_publisher_identity_with, is_local_store_api_base_url,
+    browser_launch_failed_event, compute_poll_timing, desktop_login_completed_event,
+    desktop_login_gate_messages, hydrate_publisher_identity_with, is_local_store_api_base_url,
     login_with_store_device_flow_desktop, sanitize_bridge_failure,
 };
 use super::{
@@ -660,5 +661,126 @@ fn sanitize_bridge_failure_keeps_raw_detail_out_of_the_user_message() {
     assert!(
         message.contains("ato login"),
         "user-facing message should point the user at a working fallback, got: {message}"
+    );
+}
+
+#[test]
+fn browser_open_command_macos_uses_open_with_url_as_a_single_arg() {
+    let url = "https://ato.run/auth?next=a&b=c";
+    let (program, args) = browser_open_command(BrowserOpenOs::MacOs, url);
+    assert_eq!(program, "open");
+    assert_eq!(args, vec![url.to_string()]);
+}
+
+#[test]
+fn browser_open_command_linux_uses_xdg_open_with_url_as_a_single_arg() {
+    let url = "https://ato.run/auth?next=a&b=c";
+    let (program, args) = browser_open_command(BrowserOpenOs::Linux, url);
+    assert_eq!(program, "xdg-open");
+    assert_eq!(args, vec![url.to_string()]);
+}
+
+#[test]
+fn browser_open_command_windows_uses_cmd_start_with_empty_title_and_url_as_a_single_arg() {
+    let url = "https://ato.run/auth?next=a&b=c";
+    let (program, args) = browser_open_command(BrowserOpenOs::Windows, url);
+    assert_eq!(program, "cmd");
+    // `start` treats its first quoted operand as the new window's title; the
+    // empty "" fills that slot so the URL lands in the target slot instead of
+    // being consumed as a title, and the URL stays a single argument.
+    assert_eq!(
+        args,
+        vec![
+            "/C".to_string(),
+            "start".to_string(),
+            String::new(),
+            url.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn browser_open_command_keeps_a_url_with_shell_metacharacters_as_one_argument() {
+    // RFC 8252 native-app login (ato#1077): the login URL carries a
+    // server-chosen `next` parameter and must reach the browser as one
+    // discrete argument on every OS — never spliced into a shell string where
+    // `&`, `?`, spaces, or quotes could change how it parses or inject a
+    // second command.
+    let hostile = r#"https://ato.run/auth?next=x" & calc & q='v'"#;
+    for os in [
+        BrowserOpenOs::MacOs,
+        BrowserOpenOs::Linux,
+        BrowserOpenOs::Windows,
+    ] {
+        let (_program, args) = browser_open_command(os, hostile);
+        assert_eq!(
+            args.iter().filter(|a| a.contains("ato.run")).count(),
+            1,
+            "the URL must appear as exactly one argument for {os:?}, got: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == hostile),
+            "the URL must be passed verbatim as one argument for {os:?}, got: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn desktop_login_completed_event_has_expected_shape() {
+    let event = desktop_login_completed_event(Some("koh"), "age_file");
+    assert_eq!(event["type"], "desktop_login_completed");
+    assert_eq!(event["publisher_handle"], "koh");
+    assert_eq!(event["storage"], "age_file");
+}
+
+#[test]
+fn desktop_login_completed_event_allows_absent_handle() {
+    let event = desktop_login_completed_event(None, "memory");
+    assert_eq!(event["type"], "desktop_login_completed");
+    assert!(
+        event["publisher_handle"].is_null(),
+        "absent handle must serialize as null, got: {event}"
+    );
+    assert_eq!(event["storage"], "memory");
+}
+
+#[test]
+fn desktop_login_completed_event_never_carries_a_token() {
+    // Hard invariant of ato#1077: the desktop's session/device credential is
+    // persisted to the credential store and must NEVER be written to stdout —
+    // the Dock forwards these NDJSON events into user-facing toasts and
+    // `tracing` logs. Guard against a future edit adding the token "for
+    // convenience": the completion event may carry only a publisher handle and
+    // a storage-location label.
+    let event = desktop_login_completed_event(Some("koh"), "age_file");
+    let object = event.as_object().expect("completion event is a JSON object");
+    assert_eq!(
+        object.len(),
+        3,
+        "completion event must expose exactly 3 fields, got: {:?}",
+        object.keys().collect::<Vec<_>>()
+    );
+    for expected in ["type", "publisher_handle", "storage"] {
+        assert!(
+            object.contains_key(expected),
+            "completion event is missing its `{expected}` field"
+        );
+    }
+    for forbidden in [
+        "token",
+        "access_token",
+        "session_token",
+        "credential",
+        "secret",
+    ] {
+        assert!(
+            !object.contains_key(forbidden),
+            "completion event must not contain a `{forbidden}` field"
+        );
+    }
+    let serialized = event.to_string();
+    assert!(
+        !serialized.contains("access_token") && !serialized.contains("session_token"),
+        "serialized completion event must not mention a token field, got: {serialized}"
     );
 }
