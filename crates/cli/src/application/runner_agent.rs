@@ -4482,6 +4482,28 @@ async fn handle_restore_snapshot_lease(
         .await;
         return;
     }
+    // P3b AI-keyless (approach B): when the sealed names include the well-known
+    // AI binding, ask ato-api for THIS run's grant before resolving. The server
+    // authorizes only a launch that opted in (`ai_keyless`) — anything else is a
+    // clean None and resolution falls through to the runner-host store (BYOK).
+    // The minted key is per-run + budget-capped + gateway-only; held in memory
+    // for lease issuance/renewal and dropped with the session.
+    let ai_grant_values: Option<std::collections::BTreeMap<String, String>> =
+        match (&supervisor_names, cmd.run_id.as_deref()) {
+            (Some(names), Some(run_id))
+                if crate::application::ready_state::ai_grant::wants_ai_grant(names) =>
+            {
+                crate::application::ready_state::ai_grant::fetch_ai_grant(
+                    client,
+                    api_base,
+                    runner_token,
+                    run_id,
+                )
+                .await
+            }
+            _ => None,
+        };
+
     // v1.2 PR 3e (supervisor only): resolve EVERY binding from the RUNNER host's
     // own secret store BEFORE the restore — all names are required (3e MVP has no
     // optional-secret semantics), and a missing grant must not boot a VM at all.
@@ -4492,6 +4514,20 @@ async fn handle_restore_snapshot_lease(
                 let step = || -> Result<Vec<(String, protocol::binding_lease::SecretValue)>> {
                     let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
                     let resolver = select_resolver(&namespace)?;
+                    // Layer the fetched AI grant (if any) over the normal chain:
+                    // the well-known AI names resolve from the grant; everything
+                    // else keeps the store semantics unchanged.
+                    let resolver: Box<
+                        dyn crate::application::ready_state::secret_resolver::SecretResolver,
+                    > = match &ai_grant_values {
+                        Some(values) => Box::new(
+                            crate::application::ready_state::ai_grant::AiGrantResolver::new(
+                                values.clone(),
+                                resolver,
+                            ),
+                        ),
+                        None => resolver,
+                    };
                     preflight_resolve_names(resolver.as_ref(), names, &namespace)
                 };
                 match step() {
@@ -4907,6 +4943,9 @@ async fn handle_restore_snapshot_lease(
             namespace.clone(),
             supervisor_names.clone().unwrap_or_default(),
             binding_ttl_ms(),
+            // P3b: renew the AI leases with the session's per-run grant value
+            // (a store re-lookup would miss → revoke → guest scrub).
+            ai_grant_values.clone(),
         )
     });
 

@@ -344,6 +344,17 @@ pub enum SecretEnvPolicy {
 /// `$VAR`, `<value>`) downgrade a sensitive key to [`EnvSecretClass::SecretPlaceholder`].
 pub fn classify_dockerfile_env(key: &str, value: &str) -> EnvSecretClass {
     let key_upper = key.to_ascii_uppercase();
+    // Public-key-material allowlist: the official language base images (python,
+    // php, ruby, node, …) set `GPG_KEY`/`GPG_KEYS` to PGP FINGERPRINTS — the
+    // public key IDs their entrypoints use to VERIFY release signatures, never
+    // private key material. The "KEY" marker would otherwise reject every import
+    // built FROM those images (the metube / yt-dlp-web-ui blocker). Scoped hard:
+    // ONLY the exact `GPG_KEY(S)` names AND only when the value is a set of
+    // fingerprint-shaped hex tokens — a real secret (an armored block or an
+    // `sk-…` token) is not fingerprint-shaped and still rejects.
+    if matches!(key_upper.as_str(), "GPG_KEY" | "GPG_KEYS") && is_pgp_fingerprint_set(value) {
+        return EnvSecretClass::Plain;
+    }
     let sensitive_key = SENSITIVE_ENV_MARKERS.iter().any(|m| key_upper.contains(m));
     if sensitive_key {
         return if is_placeholder_value(value) {
@@ -376,6 +387,31 @@ fn is_placeholder_value(value: &str) -> bool {
         return !rest.is_empty() && valid_env_var_name(rest);
     }
     v.starts_with('<') && v.ends_with('>')
+}
+
+/// True when `value` is one or more PGP key fingerprints — hex tokens of 40
+/// (v4 full fingerprint), 16 (long key id), or 8 (short key id) chars, separated
+/// by whitespace or commas (official base images list several: e.g. php sets
+/// two space-separated fingerprints). A fingerprint is a PUBLIC key identifier;
+/// this is the ONLY value shape the `GPG_KEY(S)` allowlist accepts, so an
+/// attacker who stuffed real key material into `GPG_KEY` still fails closed
+/// (armored blocks, provider tokens, and arbitrary strings are not hex-only).
+fn is_pgp_fingerprint_set(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return false;
+    }
+    let mut any = false;
+    for tok in v.split(|c: char| c.is_whitespace() || c == ',') {
+        if tok.is_empty() {
+            continue;
+        }
+        any = true;
+        if !matches!(tok.len(), 8 | 16 | 40) || !tok.chars().all(|c| c.is_ascii_hexdigit()) {
+            return false;
+        }
+    }
+    any
 }
 
 /// A value shaped like a real provider credential: a known prefix starting the token
@@ -876,6 +912,59 @@ pub fn oci_import_descriptor_blake3(receipt: &OciImageImportReceipt) -> String {
     )
 }
 
+/// The canonical identity envelope for a compose import: JCS over the PINNED
+/// inputs — importer version, platform, the public entrypoint (service + port +
+/// readiness), and the sorted per-service `(name, resolved_digest, kind, port)`.
+/// The services arrive graph-sorted by name (canonical), and every image is
+/// pinned to its resolved manifest digest, so the same compose file resolving to
+/// the same images yields the same envelope regardless of tag drift or input
+/// order. Deliberately excludes OUTPUTS (`exported_rootfs_digest`,
+/// `final_image_digest`) so it is a stable INPUT identity.
+fn compose_import_canonical_json(receipt: &ComposeImportReceipt) -> String {
+    let services: Vec<serde_json::Value> = receipt
+        .services
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "name": s.name,
+                "resolved_digest": s.resolved_digest,
+                "kind": s.kind,
+                "port": s.port,
+            })
+        })
+        .collect();
+    let inputs = serde_json::json!({
+        "importer_version": receipt.importer_version,
+        "platform": receipt.platform,
+        "public_service": receipt.public_service,
+        "public_port": receipt.public_port,
+        "public_readiness_http_path": receipt.public_readiness_http_path,
+        "services": services,
+    });
+    serde_jcs::to_string(&inputs).unwrap_or_else(|_| inputs.to_string())
+}
+
+/// The compose-import EXECUTION identity — WHAT EXECUTES (the joined set of
+/// pinned service images + the public entrypoint): `sha256:<hex>` over
+/// [`compose_import_canonical_json`]. Host-independent, never a job id.
+pub fn compose_import_execution_id(receipt: &ComposeImportReceipt) -> String {
+    format!(
+        "sha256:{}",
+        build::sha256_hex(compose_import_canonical_json(receipt).as_bytes())
+    )
+}
+
+/// The compose-import DESCRIPTOR hash: `blake3:<hex>` over the SAME envelope as
+/// [`compose_import_execution_id`] — a multi-service import has no capsule.toml,
+/// so the registry's `capsule_manifest_hash` column carries this descriptor
+/// hash. Shared envelope construction so the two digests cannot drift.
+pub fn compose_import_descriptor_blake3(receipt: &ComposeImportReceipt) -> String {
+    format!(
+        "blake3:{}",
+        blake3::hash(compose_import_canonical_json(receipt).as_bytes()).to_hex()
+    )
+}
+
 /// The JCS-canonicalized input-only registry-import descriptor both digests hash.
 /// Keys on `resolved_digest`, NOT `original_ref` — the identity is the pinned
 /// image, so the same digest reached via different tags is one artifact.
@@ -978,6 +1067,279 @@ pub fn run_oci_image_import(
     })
 }
 
+// ============================================================================
+// compose_import — a self-contained Docker Compose file → ONE bootable snapshot
+// (ato#1049). Unlike the single-image lanes this packs MULTIPLE services joined
+// by the compose `depends_on` DAG; unlike the recipe lane there is no
+// capsule.toml — the compose file IS the plan.
+// ============================================================================
+
+/// A `compose_import` request: image-only compose services packed into one
+/// bootable supervisor rootfs.
+pub struct ComposeImportRequest<'a> {
+    /// Raw compose YAML (size-bounded by the caller/enqueue gate).
+    pub compose_yaml: &'a str,
+    /// Optional HTTP readiness path for the PUBLIC service (`None` = TCP-accept).
+    pub public_readiness_http_path: Option<String>,
+    pub out_ext4: &'a std::path::Path,
+    pub size_mib: u64,
+}
+
+/// One service's resolved identity in a compose import receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ComposeServiceResolution {
+    pub name: String,
+    /// Verbatim `image:` ref from the compose file (tag or digest).
+    pub image_ref: String,
+    /// Registry-resolved manifest digest (`registry/repo@sha256:…`) — the pinned
+    /// identity the artifact keys on.
+    pub resolved_digest: String,
+    /// Local content id (`sha256:…`) of the exact image bytes packed.
+    pub final_image_digest: String,
+    /// `"service"` (long-running) or `"run_once"` (a one-shot task the DAG waits
+    /// on with `service_completed_successfully`).
+    pub kind: String,
+    /// The service's effective listen port (long-running services only).
+    pub port: Option<u16>,
+}
+
+/// The receipt a `compose_import` seals.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ComposeImportReceipt {
+    pub importer_version: String,
+    pub platform: String,
+    pub pull_tool: BuildTool,
+    pub pull_tool_version: String,
+    /// The single public web service.
+    pub public_service: String,
+    pub public_port: u16,
+    pub public_readiness_http_path: Option<String>,
+    /// Every service, sorted by name (canonical) — pinned digests for identity.
+    pub services: Vec<ComposeServiceResolution>,
+    /// sha256 of the packed ext4 (`sha256:…`).
+    pub exported_rootfs_digest: String,
+    /// TRANSPARENCY (ato#1049): compose_import treats each service's compose
+    /// `environment:` as the app's self-contained default configuration and does
+    /// NOT apply the single-image secret-reject gate. In a self-contained
+    /// multi-service compose a "secret" (e.g. the bundled postgres password
+    /// shared by the db + the web app) never leaves the ephemeral guest and
+    /// protects only throwaway preview state — so the compose defaults are baked
+    /// verbatim, recorded here, and the artifact is ephemeral-preview-only. This
+    /// is a deliberate policy DIFFERENCE from single-image import, where a baked
+    /// secret would leak a real external credential.
+    pub self_contained_env: bool,
+}
+
+/// The builder-facing outcome: receipt + the ack facts (public port, readiness,
+/// supervisor binding names — empty for a self-contained compose).
+pub struct ComposeImportOutcome {
+    pub receipt: ComposeImportReceipt,
+    pub public_port: u16,
+    pub public_readiness_http_path: Option<String>,
+    pub binding_names: Vec<String>,
+    pub synthesized_probe: bool,
+}
+
+/// Derive one service's [`multi_image::ServiceBuildFacts`] from its graph node
+/// and pulled image config. Pure (no I/O) so the compose-specific glue — env
+/// merge (compose wins over image), ENTRYPOINT++CMD concat, WORKDIR default,
+/// single-EXPOSE fallback port — is unit-testable without a container tool.
+/// Self-contained: no secret gate, `bindings_env` always empty (see
+/// [`ComposeImportReceipt::self_contained_env`]).
+fn compose_service_build_facts(
+    svc: &crate::compose_plan::ImportedService,
+    cfg: &build::DockerImageConfig,
+    resolved_digest: &str,
+) -> multi_image::ServiceBuildFacts {
+    let mut base_env = cfg.env.clone();
+    for (k, v) in &svc.env {
+        base_env.insert(k.clone(), v.clone());
+    }
+    let mut image_cmd = cfg.entrypoint.clone();
+    image_cmd.extend(cfg.cmd.clone());
+    multi_image::ServiceBuildFacts {
+        // Pack from the PINNED digest ref (not the mutable tag).
+        image_tag: resolved_digest.to_string(),
+        image_cmd,
+        cwd: cfg.working_dir.clone().unwrap_or_else(|| "/".to_string()),
+        base_env,
+        bindings_env: std::collections::BTreeMap::new(),
+        exposed_port: cfg.exposed_tcp_ports.first().copied(),
+    }
+}
+
+/// Run a `compose_import`: parse the compose file into the canonical service
+/// graph, pull+inspect each pinned image, join into a validated
+/// [`multi_image::MultiImagePackPlan`], and pack ALL services into one bootable
+/// supervisor rootfs (the guest runs every service under the compose
+/// `depends_on` DAG). Public-registry images only (v1, same as the OCI lane).
+pub fn run_compose_import(
+    runner: &dyn build::ImportCommandRunner,
+    req: &ComposeImportRequest<'_>,
+) -> Result<ComposeImportOutcome, String> {
+    use multi_image::{MultiImagePackPlan, ServiceBuildFacts, pack_multi_image_rootfs};
+
+    // 1. Parse the compose file into the canonical graph — fail-closed: rejects
+    // build-only services, cycles, zero/many public services, host binds.
+    let graph = crate::compose_plan::compose_to_graph(req.compose_yaml)?;
+
+    // 2. Probe the build tool once.
+    let probe = build::probe_build_tool(runner)?;
+
+    // 3. Per-service: pull + inspect the pinned image → build facts. The compose
+    // `environment:` MERGES OVER the image env (compose wins) and is kept
+    // verbatim — see `ComposeImportReceipt::self_contained_env` for the security
+    // scoping. No secret gate, no external bindings (self-contained preview).
+    let mut facts: std::collections::BTreeMap<String, ServiceBuildFacts> =
+        std::collections::BTreeMap::new();
+    let mut resolutions: Vec<ComposeServiceResolution> = Vec::new();
+    for svc in &graph.services {
+        let pulled = build::pull_and_inspect_image(runner, probe.tool, &svc.image_ref)?;
+        facts.insert(
+            svc.name.clone(),
+            compose_service_build_facts(svc, &pulled.image_config, &pulled.resolved_digest),
+        );
+        resolutions.push(ComposeServiceResolution {
+            name: svc.name.clone(),
+            image_ref: svc.image_ref.clone(),
+            resolved_digest: pulled.resolved_digest,
+            final_image_digest: pulled.final_image_digest,
+            kind: match svc.kind {
+                crate::compose_plan::ServiceKind::RunOnce => "run_once",
+                crate::compose_plan::ServiceKind::Service => "service",
+            }
+            .to_string(),
+            port: svc.port,
+        });
+    }
+
+    // 4. Join graph + facts into the validated pack plan (the single gate).
+    let plan = MultiImagePackPlan::new(&graph, facts, req.public_readiness_http_path.clone())?;
+
+    // 5. Pack every service into one bootable ext4.
+    pack_multi_image_rootfs(probe.tool, &plan, req.out_ext4, req.size_mib)?;
+    let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
+
+    let public_port = plan.port(&graph.public_service).ok_or_else(|| {
+        format!(
+            "public service '{}' has no resolved listen port (fail-closed)",
+            graph.public_service
+        )
+    })?;
+
+    let receipt = ComposeImportReceipt {
+        importer_version: DOCKER_IMPORTER_VERSION.to_string(),
+        platform: DOCKER_IMPORT_PLATFORM.to_string(),
+        pull_tool: probe.tool,
+        pull_tool_version: probe.version.clone(),
+        public_service: graph.public_service.clone(),
+        public_port,
+        public_readiness_http_path: req.public_readiness_http_path.clone(),
+        services: resolutions,
+        exported_rootfs_digest,
+        self_contained_env: true,
+    };
+
+    Ok(ComposeImportOutcome {
+        public_port,
+        public_readiness_http_path: req.public_readiness_http_path.clone(),
+        binding_names: plan.binding_names(),
+        synthesized_probe: req.public_readiness_http_path.is_none(),
+        receipt,
+    })
+}
+
+#[cfg(test)]
+mod compose_import_tests {
+    use super::*;
+    use crate::compose_plan::{ImportedService, ServiceKind};
+
+    fn svc(name: &str, image: &str, env: &[(&str, &str)], port: Option<u16>) -> ImportedService {
+        ImportedService {
+            name: name.to_string(),
+            image_ref: image.to_string(),
+            resolved_digest: String::new(),
+            command: vec![],
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            port,
+            healthcheck: None,
+            mounts: vec![],
+            restart: crate::compose_plan::RestartPolicy::Always,
+            kind: ServiceKind::Service,
+        }
+    }
+
+    fn img_cfg(
+        entrypoint: &[&str],
+        cmd: &[&str],
+        env: &[(&str, &str)],
+        expose: &[u16],
+        workdir: Option<&str>,
+    ) -> build::DockerImageConfig {
+        build::DockerImageConfig {
+            entrypoint: entrypoint.iter().map(|s| s.to_string()).collect(),
+            cmd: cmd.iter().map(|s| s.to_string()).collect(),
+            working_dir: workdir.map(|s| s.to_string()),
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            exposed_tcp_ports: expose.to_vec(),
+            user: None,
+            has_healthcheck: false,
+            volumes: vec![],
+        }
+    }
+
+    #[test]
+    fn compose_env_wins_over_image_env_and_facts_are_self_contained() {
+        // Image ships NODE_ENV=development + a DB default; compose overrides
+        // NODE_ENV and adds NEXTAUTH_SECRET — compose must win on the clash,
+        // image-only keys survive, and there are NEVER any external bindings.
+        let s = svc(
+            "web",
+            "blinkospace/blinko:latest",
+            &[
+                ("NODE_ENV", "production"),
+                ("NEXTAUTH_SECRET", "my_ultra_secure_nextauth_secret"),
+            ],
+            Some(1111),
+        );
+        let cfg = img_cfg(
+            &["node"],
+            &["server.js"],
+            &[("NODE_ENV", "development"), ("PATH", "/usr/bin")],
+            &[3000],
+            Some("/app"),
+        );
+        let f = compose_service_build_facts(&s, &cfg, "reg/blinko@sha256:abc");
+        assert_eq!(f.image_tag, "reg/blinko@sha256:abc"); // pinned digest, not tag
+        assert_eq!(f.base_env.get("NODE_ENV").unwrap(), "production"); // compose wins
+        assert_eq!(f.base_env.get("PATH").unwrap(), "/usr/bin"); // image-only survives
+        assert_eq!(
+            f.base_env.get("NEXTAUTH_SECRET").unwrap(),
+            "my_ultra_secure_nextauth_secret" // secret literal kept verbatim (self-contained)
+        );
+        assert!(f.bindings_env.is_empty()); // never an external binding
+        assert_eq!(f.image_cmd, vec!["node", "server.js"]); // ENTRYPOINT ++ CMD
+        assert_eq!(f.cwd, "/app");
+        assert_eq!(f.exposed_port, Some(3000)); // single EXPOSE fallback
+    }
+
+    #[test]
+    fn compose_facts_default_workdir_and_no_expose() {
+        let s = svc("db", "postgres:14", &[("POSTGRES_PASSWORD", "x")], None);
+        let cfg = img_cfg(&["docker-entrypoint.sh"], &["postgres"], &[], &[], None);
+        let f = compose_service_build_facts(&s, &cfg, "reg/postgres@sha256:def");
+        assert_eq!(f.cwd, "/"); // WORKDIR default
+        assert_eq!(f.exposed_port, None);
+        assert_eq!(f.image_cmd, vec!["docker-entrypoint.sh", "postgres"]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1075,6 +1437,58 @@ mod tests {
                 "{k}"
             );
         }
+    }
+
+    #[test]
+    fn gpg_key_fingerprints_are_public_and_pass() {
+        // The exact values python/php/ruby official images ship (public PGP
+        // fingerprints used to VERIFY release signatures).
+        for (k, v) in [
+            ("GPG_KEY", "7169605F62C751356D054A26A821E680E5FA6305"), // python
+            ("GPG_KEY", "A035C8C19219BA821ECEA86B64E628F8D684696D"), // python (other)
+            (
+                "GPG_KEYS",
+                "1729F83938DA44E27BA0F4D3DBDB397470D12172 BFDDD28642824F8118EF77909B67A5C12229118F",
+            ), // php: two
+            ("gpg_key", "0123456789ABCDEF"), // 16-hex long id, case-insensitive name
+            ("GPG_KEY", "A821E680"),         // 8-hex short id
+        ] {
+            assert_eq!(
+                classify_dockerfile_env(k, v),
+                EnvSecretClass::Plain,
+                "{k}={v}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpg_key_with_real_secret_material_still_rejects() {
+        // The allowlist is value-shape-gated: anything that is NOT a set of
+        // fingerprint-shaped hex tokens falls through to the "KEY" marker and
+        // rejects. An attacker cannot smuggle a credential through GPG_KEY.
+        for v in [
+            "sk-abcdefghijklmnopqrstuvwxyz012345",   // provider token
+            "-----BEGIN PGP PRIVATE KEY BLOCK-----", // armored block
+            "7169605F62C751356D054A26A821E680E5FA6305extra", // 40-hex + junk
+            "not-hex-at-all-but-long-enough-value-here", // non-hex
+            "7169605F",                              // 8-hex OK shape but paired w/ junk below
+        ] {
+            // (the last is actually valid short-id; keep the clearly-bad ones)
+            if v == "7169605F" {
+                continue;
+            }
+            assert_eq!(
+                classify_dockerfile_env("GPG_KEY", v),
+                EnvSecretClass::SecretLiteral,
+                "{v}"
+            );
+        }
+        // A fingerprint value under a DIFFERENT sensitive key is NOT allowlisted
+        // (only GPG_KEY(S) verify public release signatures).
+        assert_eq!(
+            classify_dockerfile_env("API_KEY", "7169605F62C751356D054A26A821E680E5FA6305"),
+            EnvSecretClass::SecretLiteral
+        );
     }
 
     #[test]

@@ -1840,25 +1840,38 @@ async fn finalize_lockfile_from_draft(
 fn surface_requirements_from_manifest(
     manifest_text: &str,
 ) -> Result<HashMap<String, SessionSurfaceRequirement>> {
-    let manifest = CapsuleManifest::from_toml(manifest_text).map_err(|error| {
+    // Lock generation also accepts compatibility-bridge manifests that have
+    // already been validated and may still carry internal legacy target fields
+    // (for example `entrypoint`). Re-parsing the entire manifest through the
+    // public schema here would reject those otherwise valid build inputs. Parse
+    // only the declared surface subtrees: this preserves strict, fail-closed
+    // validation for the new contract without introducing a second whole-
+    // manifest validation boundary.
+    let manifest: toml::Value = toml::from_str(manifest_text).map_err(|error| {
         CapsuleError::Pack(format!(
             "session-surface lock propagation could not parse the manifest: {error}"
         ))
     })?;
-    let Some(targets) = manifest.targets.as_ref() else {
+    let Some(targets) = manifest.get("targets").and_then(toml::Value::as_table) else {
         return Ok(HashMap::new());
     };
     let mut requirements = HashMap::new();
-    for (label, target) in targets.named_targets() {
-        let Some(requirement) = target.surface.as_ref() else {
+    for (label, target) in targets {
+        let Some(surface) = target.get("surface") else {
             continue;
         };
+        let requirement: SessionSurfaceRequirement =
+            surface.clone().try_into().map_err(|error| {
+                CapsuleError::Pack(format!(
+                    "target {label:?} has malformed surface requirement: {error}"
+                ))
+            })?;
         requirement.validate().map_err(|error| {
             CapsuleError::Pack(format!(
                 "target {label:?} has invalid surface requirement: {error}"
             ))
         })?;
-        requirements.insert(label.clone(), requirement.clone());
+        requirements.insert(label.clone(), requirement);
     }
     Ok(requirements)
 }
