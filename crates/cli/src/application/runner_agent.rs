@@ -4562,9 +4562,12 @@ async fn handle_restore_snapshot_lease(
     // P1 Ready-State optimization: the snapshot backend's UFFD demand-paging
     // path skips the ~512MB eager rehydrate on the restore critical path. The
     // operator opts in per-runner (`ATO_RUNNER_UFFD_PREVIEW=1`); the backend
-    // gates the request on host capability (userfaultfd + local CAS) and
-    // degrades to the eager File path — logging why — on a host that cannot
-    // serve page faults, so a flag set on a wrong box costs latency, not leases.
+    // applies two fail-to-File gates: host capability (userfaultfd + local CAS)
+    // AND locality — UFFD is used only for a memory image that is NOT already
+    // local, because a local image restores faster on File (measured; File's
+    // cached read beats UFFD's per-page fault). So enabling the flag never
+    // pessimizes a local restore, and a flag set on a wrong box costs latency,
+    // not leases.
     let uffd_preview = crate::application::ready_state::flags::runner_uffd_preview_enabled();
     let receipt = match restore_and_expose(
         backend.as_ref(),

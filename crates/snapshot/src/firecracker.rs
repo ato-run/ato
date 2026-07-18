@@ -874,19 +874,34 @@ impl FirecrackerBackend {
     /// P1: resolve the operator's `ATO_RUNNER_UFFD_PREVIEW` opt-in into an
     /// actual mode, or `None` to stay on the eager File path.
     ///
-    /// This is the capability gate the preview flag promises. Without it,
-    /// opting in on a host that cannot serve page faults does NOT degrade to
-    /// File — every restore on that runner fails (the page-server bind or the
-    /// fault loop errors, and the lease dies). A canary whose blast radius is
-    /// "all restores on this box" is not a canary, so an unsupported host falls
-    /// back and says why.
+    /// Two gates, both fail toward File:
     ///
-    /// The capability decision is [`crate::uffd::evaluate`] via [`Self::probe`]
-    /// — the same arch/KVM/Firecracker-version/userfaultfd rule this backend
-    /// already reports as `supports_uffd_mem_backend`, so the flag can never
-    /// disagree with what the runner advertises. (U0 built that probe and noted
-    /// "no restore path uses it yet"; this is that path.)
-    fn uffd_preview_mode(&self, store: &CasStore) -> Option<UffdMode> {
+    /// 1. **Host capability** — the same arch/KVM/Firecracker-version/userfaultfd
+    ///    rule the backend already reports as `supports_uffd_mem_backend`
+    ///    ([`crate::uffd::evaluate`] via [`Self::probe`]), so the flag can never
+    ///    disagree with what the runner advertises. Without it, opting in on a
+    ///    host that cannot serve page faults would fail EVERY restore (the
+    ///    page-server bind / fault loop errors and the lease dies) — a canary
+    ///    whose blast radius is "all restores on this box" is not a canary.
+    ///
+    /// 2. **Locality** — UFFD only pays off when the memory image would otherwise
+    ///    be fetched WHOLE from a remote store. When the image is already local
+    ///    (every chunk resident in this host's CAS), File's cached sequential
+    ///    read beats UFFD's per-page userfaultfd + CAS-read overhead. Measured on
+    ///    a warm-cache staging host (2026-07-18): File `backend_restore_ms` ~240
+    ///    vs UFFD ~300–1380, with the content-ready probe faulting pages in one
+    ///    by one (blinko: 78 → 1083 ms). So a local image stays on File; UFFD is
+    ///    reserved for a non-local (remote-fetched) image. Today the runner
+    ///    fetches the artifact whole before restore, so the image is always
+    ///    local ⇒ this keeps the preview flag from ever pessimizing a local
+    ///    restore; the remote branch activates when demand-paging from the remote
+    ///    object store is wired (skip the eager memory fetch — the deferred
+    ///    R2-direct paging work).
+    fn uffd_preview_mode(
+        &self,
+        store: &CasStore,
+        memory: &capsulefs::BlobManifest,
+    ) -> Option<UffdMode> {
         let refuse = |reason: String| {
             eprintln!(
                 "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this host cannot serve \
@@ -900,6 +915,12 @@ impl FirecrackerBackend {
                 caps.uffd_reason
                     .unwrap_or_else(|| "uffd mem_backend unsupported".to_string()),
             );
+        }
+        // Locality heuristic: a fully-local memory image restores faster on File
+        // (measured). No `refuse` log — this is the common, correct path, not a
+        // misconfiguration; it just isn't where UFFD helps.
+        if memory_is_local(store, memory) {
+            return None;
         }
         // `PageSource::Cas` serves every guest fault straight out of the local
         // CAS; if it cannot be opened the guest faults on memory nobody can supply.
@@ -1267,6 +1288,19 @@ enum UffdMode {
     Mem,
     Cas,
 }
+
+/// Whether every chunk of the memory image is already resident in this host's
+/// CAS — i.e. the image is local and does not need fetching from a remote store.
+/// The UFFD locality heuristic uses this: local ⇒ File (measured faster), remote
+/// ⇒ UFFD (stream only faulted pages instead of fetching the whole image).
+///
+/// `all` short-circuits on the first missing chunk, so a remote image (nothing
+/// local yet) costs one `has_chunk` stat, and a local image costs one stat per
+/// chunk — cheap next to the restore's own I/O.
+fn memory_is_local(store: &CasStore, memory: &capsulefs::BlobManifest) -> bool {
+    memory.chunks.iter().all(|c| store.has_chunk(&c.hash))
+}
+
 fn uffd_mode() -> Option<UffdMode> {
     match std::env::var("ATO_FC_UFFD").ok().as_deref() {
         Some("zero") => Some(UffdMode::Zero),
@@ -2187,7 +2221,7 @@ impl SnapshotBackend for FirecrackerBackend {
             // fell back to File would assert nothing. It takes effect only when the
             // product flag is off.
             let uffd = if input.uffd_preview {
-                self.uffd_preview_mode(input.store)
+                self.uffd_preview_mode(input.store, memory)
             } else {
                 uffd_mode()
             };
@@ -2701,6 +2735,44 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── UFFD locality heuristic: local image ⇒ File, remote ⇒ UFFD ──
+
+    #[test]
+    fn memory_is_local_is_true_only_when_every_chunk_is_resident() {
+        use capsulefs::{ChunkingKind, LayerKind};
+        let dir = tempfile::tempdir().unwrap();
+        // Two independent CAS roots: one holds the memory image, one is empty
+        // (stands in for a runner that would have to fetch the image remotely).
+        let local = CasStore::open(dir.path().join("local")).unwrap();
+        let remote_only = CasStore::open(dir.path().join("empty")).unwrap();
+
+        // A multi-chunk memory image so the `all()` predicate is non-trivial.
+        let payload: Vec<u8> = (0..(512 * 1024u32)).map(|i| (i % 251) as u8).collect();
+        let memory = capsulefs::store_blob(
+            &local,
+            LayerKind::Memory,
+            &payload,
+            ChunkingKind::PageAligned { page_size: 4096 },
+        )
+        .unwrap();
+        assert!(memory.chunks.len() > 1, "need a multi-chunk blob");
+
+        // Every chunk resident locally ⇒ local ⇒ File.
+        assert!(memory_is_local(&local, &memory));
+        // None resident ⇒ remote ⇒ UFFD-eligible.
+        assert!(!memory_is_local(&remote_only, &memory));
+
+        // A single missing chunk is enough to make it non-local: File cannot
+        // rehydrate a partial image, so this must route to the remote (UFFD) lane.
+        let one_missing = CasStore::open(dir.path().join("partial")).unwrap();
+        for c in memory.chunks.iter().skip(1) {
+            one_missing
+                .put_chunk(&local.get_chunk(&c.hash).unwrap())
+                .unwrap();
+        }
+        assert!(!memory_is_local(&one_missing, &memory));
+    }
 
     // ── readiness status classification: 2xx/3xx = the app answered ──
 
