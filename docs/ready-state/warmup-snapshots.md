@@ -99,11 +99,32 @@ there means no HTTP probe gated readiness (a supervisor artifact).
 
 `ATO_RUNNER_UFFD_PREVIEW=1` on a Connected Runner opts its `restore_snapshot`
 leases into UFFD demand-paging (the ~512 MB eager rehydrate moves off the restore
-critical path). It is gated on host capability via `FirecrackerBackend::probe()`
-(`crate::uffd::evaluate`: x86_64 + `/dev/kvm` + Firecracker ≥ 1.0 + kernel
-userfaultfd) and **degrades to the eager File path, logging why**, on an
-unsupported host — a wrong box costs latency, not leases. The env gate
-`ATO_FC_UFFD` (test smokes) stays ungated and hard-fails by contrast.
+critical path). Two **fail-to-File** gates:
+
+1. **Host capability** via `FirecrackerBackend::probe()` (`crate::uffd::evaluate`:
+   x86_64 + `/dev/kvm` + Firecracker ≥ 1.0 + kernel userfaultfd) — an unsupported
+   host **degrades to the eager File path, logging why**. The env gate
+   `ATO_FC_UFFD` (test smokes) stays ungated and hard-fails by contrast.
+2. **Locality** (`memory_is_local`) — UFFD is used only when the memory image is
+   **not** already local (every chunk resident in this host's CAS). A local image
+   restores faster on File.
+
+> **Measured (2026-07-18, warm-cache staging host, deployed 512 MB snapshots):**
+> UFFD is *slower* than File when the image is local — File's cached sequential
+> read of the materialized `.mem` beats UFFD's per-page `userfaultfd` + CAS-read
+> overhead, and the content-ready probe faults pages in one at a time.
+>
+> | capsule | File `backend_restore_ms` | UFFD `backend_restore_ms` | content_ready File→UFFD |
+> |---|---|---|---|
+> | tobu | 212 | 297 | 47 → 128 |
+> | blinko | 299 | **1383** | 78 → **1083** |
+>
+> So UFFD only pays off for an image that would otherwise be fetched **whole from
+> a remote store**. Today the runner fetches the artifact whole before restore
+> (`ensure_artifact_local`), so the image is always local ⇒ the locality gate
+> keeps the flag from ever pessimizing a local restore. The remote→UFFD branch
+> activates once demand-paging streams memory from the remote object store instead
+> of the full fetch — the deferred **R2-direct paging** work.
 
 ## Source of truth
 
