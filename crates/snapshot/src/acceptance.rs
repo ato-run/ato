@@ -126,6 +126,32 @@ pub trait DisposableAcceptanceLifecycle {
 
 pub struct RunningSnapshotAcceptance;
 
+/// Accept a running candidate using a trusted platform validator that performs
+/// a disposable restore, readiness verification, and teardown as one operation.
+/// This is the compatibility bridge for deployed Ready-State manifests that do
+/// not carry a Capsule-authored `seal_at.command`; Capsule-v1 authoring uses
+/// [`RunningSnapshotAcceptance`] and exact argv instead.
+pub fn accept_platform_verified_candidate(
+    candidate: CandidateSnapshot,
+    validate_disposable_restore: impl FnOnce() -> Result<(), String>,
+) -> Result<SnapshotCatalogRecord, AcceptanceError> {
+    candidate
+        .manifest
+        .validate()
+        .map_err(|_| AcceptanceError::Lifecycle {
+            phase: "candidate-validation",
+        })?;
+    if candidate.manifest.capture_policy != CapturePolicy::Running {
+        return Err(AcceptanceError::Lifecycle {
+            phase: "capture-policy",
+        });
+    }
+    validate_disposable_restore().map_err(|_| AcceptanceError::Lifecycle {
+        phase: "platform-disposable-restore-validation",
+    })?;
+    Ok(SnapshotCatalogRecord::accepted(candidate.manifest))
+}
+
 impl RunningSnapshotAcceptance {
     pub fn accept(
         lifecycle: &mut impl DisposableAcceptanceLifecycle,
@@ -562,6 +588,23 @@ mod tests {
             panic!("expected exhausted receipt");
         };
         assert_eq!(receipt.attempts[0].outcome, "deadline-exceeded");
+    }
+
+    #[test]
+    fn platform_validator_failure_never_accepts_candidate() {
+        let lifecycle = MockLifecycle::new(Vec::new());
+        let candidate = CandidateSnapshot {
+            manifest: lifecycle.manifest(),
+        };
+        let error =
+            accept_platform_verified_candidate(candidate, || Err("restore failed".to_string()))
+                .unwrap_err();
+        assert_eq!(
+            error,
+            AcceptanceError::Lifecycle {
+                phase: "platform-disposable-restore-validation"
+            }
+        );
     }
 
     #[test]

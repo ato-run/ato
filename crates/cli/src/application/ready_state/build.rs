@@ -16,7 +16,8 @@ use capsule::types::CapsuleManifest;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
     SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
-    ensure_external_state_layers_excluded, ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
+    accept_platform_verified_candidate, ensure_external_state_layers_excluded,
+    ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
 };
 
 use super::store;
@@ -179,20 +180,29 @@ pub(crate) fn seal(
 
         // Acceptance is a real disposable restore, not successful serialization.
         // The v1 manifest is persisted only after restore and teardown both pass.
-        let restored = backend
-            .restore(snapshot::RestoreReadyStateInput {
-                store: &store,
-                manifest: receipt.manifest.clone(),
-                overlay_root: store::artifact_dir(state_root, &capsule_manifest_hash)
-                    .join("acceptance-overlay"),
-                host_runner_class: None,
-                uffd_preview: false,
-            })
-            .context("Snapshot v1 disposable acceptance restore failed")?;
-        backend
-            .stop(restored.session)
-            .context("Snapshot v1 disposable acceptance cleanup failed")?;
-        store::save_v1_manifest(state_root, &capsule_manifest_hash, &v1_manifest)?;
+        let accepted = accept_platform_verified_candidate(
+            snapshot::CandidateSnapshot {
+                manifest: v1_manifest,
+            },
+            || {
+                let restored = backend
+                    .restore(snapshot::RestoreReadyStateInput {
+                        store: &store,
+                        manifest: receipt.manifest.clone(),
+                        overlay_root: store::artifact_dir(state_root, &capsule_manifest_hash)
+                            .join("acceptance-overlay"),
+                        host_runner_class: None,
+                        uffd_preview: false,
+                    })
+                    .map_err(|error| error.to_string())?;
+                backend
+                    .stop(restored.session)
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            },
+        )
+        .context("Snapshot v1 disposable acceptance failed")?;
+        store::save_v1_manifest(state_root, &capsule_manifest_hash, &accepted.manifest)?;
     }
 
     store::save_manifest(state_root, &receipt.manifest)?;

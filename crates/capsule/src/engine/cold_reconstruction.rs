@@ -82,14 +82,19 @@ impl VerifiedColdLaunch {
 pub struct ColdReconstruction;
 
 impl ColdReconstruction {
+    pub fn ensure_policy(policy: ColdReconstructionPolicy) -> Result<(), ColdReconstructionError> {
+        if policy == ColdReconstructionPolicy::Forbid {
+            return Err(ColdReconstructionError::ForbiddenByPolicy);
+        }
+        Ok(())
+    }
+
     pub fn reconstruct_and_verify(
         lock: &AtoLock,
         policy: ColdReconstructionPolicy,
         executor: &mut impl ColdReconstructionExecutor,
     ) -> Result<VerifiedColdLaunch, ColdReconstructionError> {
-        if policy == ColdReconstructionPolicy::Forbid {
-            return Err(ColdReconstructionError::ForbiddenByPolicy);
-        }
+        Self::ensure_policy(policy)?;
         ato_lock::validate_persisted_strict(lock)
             .map_err(|_| ColdReconstructionError::InvalidLock)?;
         let expected = lock
@@ -322,5 +327,14 @@ mod tests {
             ColdReconstructionError::ForbiddenByPolicy
         );
         assert_eq!(executor.reconstructs, 0);
+    }
+
+    #[test]
+    fn policy_gate_is_available_before_executor_construction() {
+        assert_eq!(
+            ColdReconstruction::ensure_policy(ColdReconstructionPolicy::Forbid).unwrap_err(),
+            ColdReconstructionError::ForbiddenByPolicy
+        );
+        ColdReconstruction::ensure_policy(ColdReconstructionPolicy::Allow).unwrap();
     }
 }
