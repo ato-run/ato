@@ -1635,6 +1635,22 @@ impl SnapshotBackend for FirecrackerBackend {
         }
     }
 
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<crate::snapshot_manifest::SnapshotCompatibilityContract, SnapshotError> {
+        self.ensure_available()?;
+        let facts = self.runner_facts();
+        Ok(crate::snapshot_manifest::SnapshotCompatibilityContract {
+            backend: FIRECRACKER_BACKEND_ID.to_string(),
+            format: facts.snapshot_format.clone(),
+            vmm_version: facts.vmm_version.clone(),
+            kernel_digest: facts.guest_kernel_id.clone(),
+            cpu_template: facts.cpu_template.clone(),
+            codec: "raw".to_string(),
+            runner_contract: facts.id().to_string(),
+        })
+    }
+
     fn build_ready_state(
         &self,
         input: BuildReadyStateInput<'_>,

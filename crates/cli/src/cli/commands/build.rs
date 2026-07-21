@@ -378,6 +378,7 @@ pub fn execute_pack_command_with_injected_manifest(
         });
     }
 
+    let ready_state_workspace_root = decision.plan.workspace_root.clone();
     let result = match decision.kind {
         capsule::router::RuntimeKind::Source => {
             let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
@@ -612,7 +613,12 @@ pub fn execute_pack_command_with_injected_manifest(
     // Ready-State seal branch (additive; legacy build is byte-for-byte unchanged
     // when ATO_READY_STATE_ENABLED is off). Side-channel only — never mutates the
     // BuildResult, so the legacy JSON output schema is identical.
-    seal_ready_state_if_enabled(&raw_manifest, result.artifact.as_deref(), reporter.as_ref())?;
+    seal_ready_state_if_enabled(
+        &raw_manifest,
+        result.artifact.as_deref(),
+        &ready_state_workspace_root,
+        reporter.as_ref(),
+    )?;
 
     record_timing(&mut timing_entries, "build.total", total_started.elapsed());
     emit_timings(reporter.clone(), timings, &timing_entries)?;
@@ -627,6 +633,7 @@ pub fn execute_pack_command_with_injected_manifest(
 fn seal_ready_state_if_enabled(
     raw_manifest: &toml::Value,
     artifact: Option<&std::path::Path>,
+    workspace_root: &std::path::Path,
     reporter: &reporters::CliReporter,
 ) -> anyhow::Result<()> {
     use crate::application::ready_state;
@@ -654,12 +661,14 @@ fn seal_ready_state_if_enabled(
     let hash = ready_state::capsule_manifest_hash(raw_manifest)?;
     let state_root = ready_state::state_root();
     let layers = ready_state::assemble_build_layers(backend.id(), artifact)?;
+    let v1_execution_id = load_v1_seal_execution_id(workspace_root)?;
     let receipt = ready_state::build::seal(
         &state_root,
         hash.clone(),
         &manifest,
         layers,
         backend.as_ref(),
+        v1_execution_id,
     )?;
     futures::executor::block_on(reporter.notify(format!(
         "READY-STATE: sealed {hash} backend={} no_secret_clean={} sealed_bytes={} -> {}",
@@ -669,6 +678,37 @@ fn seal_ready_state_if_enabled(
         ready_state::store::artifact_dir(&state_root, &hash).display(),
     )))?;
     Ok(())
+}
+
+fn load_v1_seal_execution_id(
+    workspace_root: &std::path::Path,
+) -> anyhow::Result<Option<capsule::execution_contract::ExecutionId>> {
+    let lock_path = workspace_root.join(capsule::input_resolver::ATO_LOCK_FILE_NAME);
+    if !lock_path.exists() {
+        return Ok(None);
+    }
+    let lock = capsule::ato_lock::load_verified_from_path(&lock_path).with_context(|| {
+        format!(
+            "Ready-State seal refused invalid authoritative lock {}",
+            lock_path.display()
+        )
+    })?;
+    match (&lock.execution_contract, &lock.execution_id) {
+        (None, None) => Ok(None),
+        (Some(contract), Some(execution_id)) => {
+            if !contract.external_state.is_empty() {
+                anyhow::bail!(
+                    "Snapshot v1 running capture refused: the resolved execution contract requires \
+                     External State; use workload_idle capture after its backend lifecycle is available"
+                );
+            }
+            Ok(Some(execution_id.clone()))
+        }
+        _ => anyhow::bail!(
+            "Ready-State seal refused incomplete execution_contract/execution_id pair in {}",
+            lock_path.display()
+        ),
+    }
 }
 
 fn record_timing(entries: &mut Vec<(String, Duration)>, label: &str, elapsed: Duration) {

@@ -3761,7 +3761,16 @@ where
         let rs_manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(&rs_raw)?)?;
         let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
-        if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+        let expected_v1_execution_id = prepared
+            .authoritative_lock
+            .as_ref()
+            .and_then(|lock| lock.execution_id.as_ref());
+        if let Some(plan) = ready_state::decide_ready_state_run(
+            &rs_manifest,
+            &rs_hash,
+            &rs_root,
+            expected_v1_execution_id,
+        )? {
             // Phase 8a-RunGate (#912): the binding-preview decision (names only, never
             // values). D2 routes a binding-required capsule through the post-restore
             // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
@@ -3952,6 +3961,7 @@ where
                 backend.as_ref(),
                 &store,
                 plan.manifest,
+                plan.v1_manifest,
                 overlay,
                 plan.host_runner_class,
                 uffd_preview,

@@ -4570,6 +4570,7 @@ async fn handle_restore_snapshot_lease(
         backend.as_ref(),
         &store,
         manifest,
+        None,
         overlay_root,
         None,
         uffd_preview,
