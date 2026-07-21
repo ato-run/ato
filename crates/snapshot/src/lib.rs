@@ -46,6 +46,7 @@ pub mod rootfs_builder;
 mod scan_cache;
 mod scanner;
 mod seal;
+mod snapshot_manifest;
 pub mod state_volume;
 pub mod state_volume_persistence;
 mod uffd;
@@ -81,6 +82,12 @@ pub use qemu::{QEMU_BACKEND_ID, QemuBackend};
 pub use scanner::{
     FindingKind, POLICY_VERSION, SCANNER_VERSION, ScanReport, SecretFinding, policy_fingerprint,
     scan_build_layers,
+};
+pub use snapshot_manifest::{
+    CapturePolicy, CaptureProvenance, SNAPSHOT_MANIFEST_V1_SCHEMA, SanitizationAttestation,
+    SecretScanAttestation, SnapshotCatalogRecord, SnapshotCatalogStatus,
+    SnapshotCompatibilityContract, SnapshotLayerRefs, SnapshotManifestError, SnapshotManifestV1,
+    SnapshotRestoreCapabilities, migrate_legacy_manifest, select_compatible_snapshot,
 };
 
 #[cfg(test)]
