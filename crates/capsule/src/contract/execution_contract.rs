@@ -433,6 +433,18 @@ mod tests {
     }
 
     #[test]
+    fn external_state_contract_changes_execution_id() {
+        let first = sample_contract();
+        let mut second = first.clone();
+        second.external_state[0].schema = "2".to_string();
+
+        assert_ne!(
+            first.compute_execution_id().unwrap(),
+            second.compute_execution_id().unwrap()
+        );
+    }
+
+    #[test]
     fn unknown_identity_field_fails_closed() {
         let mut value = serde_json::to_value(sample_contract()).unwrap();
         value

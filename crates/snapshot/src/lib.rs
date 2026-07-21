@@ -35,6 +35,7 @@ mod backend;
 pub mod bench;
 pub mod compose_plan;
 pub mod docker_import;
+mod external_state;
 mod fake;
 mod firecracker;
 mod kata;
@@ -72,6 +73,11 @@ pub use backend::{
 pub use compose_plan::{
     DependencyKind, Healthcheck, ImportedService, ImportedServiceGraph, MountKind, RestartPolicy,
     ServiceDependency, ServiceMount, compose_to_graph,
+};
+pub use external_state::{
+    ExternalStateAttachRequest, ExternalStateAttachmentPlan, ExternalStateBoundaryError,
+    ExternalStateInstance, OpaqueStateGeneration, OpaqueStateRef, SessionExternalStateReceipt,
+    ensure_external_state_layers_excluded, plan_external_state_attach,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
