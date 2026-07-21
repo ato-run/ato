@@ -11,7 +11,7 @@ ssot:                  # anchor code paths this pipeline extends (code is author
 related:
   - "A1_SOURCE_TREE_PROFILE.md"
   - "SOURCE_MATERIALIZATION_SPEC.md"
-  - "EXECUTION_IDENTITY_SPEC.md"
+  - "CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
   - "ADR-011-source-materialization-placement.md"
   - "ADR-012-capsule-lifecycle-column.md"
   - "ADR-013-manifest-validator-wasm-split.md"
@@ -20,6 +20,12 @@ related:
 ---
 
 # GitHub Capsule Request Pipeline
+
+> **Execution Identity migration:** The post-seal/Snapshot-derived identity
+> sections in this draft predate #1086 and are superseded by
+> [Capsule v1 Execution Identity and Snapshot Model](CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
+> Until this pipeline is fully reconciled, the Capsule v1 specification governs
+> identity and Snapshot boundaries.
 
 ## Status
 
@@ -36,7 +42,7 @@ This document is the map. Read it first, then descend into:
 | 1. Source-tree hash profile | [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) | SPEC |
 | 2. Where materialization runs (decision) | [ADR-011](ADR-011-source-materialization-placement.md) | ADR |
 | 2. Materialization contract | [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) | SPEC |
-| 3. Execution identity | [EXECUTION_IDENTITY_SPEC.md](EXECUTION_IDENTITY_SPEC.md) | SPEC |
+| 3. Execution identity | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) | SPEC |
 | 4. Capsule + revision lifecycle | [ADR-012](ADR-012-capsule-lifecycle-column.md) | ADR |
 | 5. Manifest validator WASM split | [ADR-013](ADR-013-manifest-validator-wasm-split.md) | ADR |
 | 6. Request model + state machine | this document (§4–§7) | SPEC |
@@ -92,7 +98,7 @@ The pipeline spans three execution surfaces that already exist in the platform:
   concern from the SPDX *source* license gate in §6.4).
 - The RunnerClass sentinel resolution that supplies `rootfs_base_id` /
   `guest_kernel_id` — a prerequisite tracked separately (see
-  [EXECUTION_IDENTITY_SPEC.md](EXECUTION_IDENTITY_SPEC.md) §3).
+  [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) §4).
 
 ## 3. Actors and data flow
 
@@ -138,7 +144,7 @@ The three hashes that thread the whole pipeline together:
 |------|-------|-----------|
 | `materialized_source_tree_hash` | A1v2 digest (`sha256`) of the canonical checkout | [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) |
 | `source_archive_hash` | `sha256` of the exact `tar.zst` bytes | [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) |
-| `execution_id` | `blake3` over the **post-seal** execution-identity facets (sealed layer CAS IDs + launch spec) | [EXECUTION_IDENTITY_SPEC.md](EXECUTION_IDENTITY_SPEC.md) |
+| `execution_id` | `blake3` over the resolved target launch contract; Snapshot layer IDs are excluded | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) |
 
 Hash-role split (consistent with [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md)):
 **`sha256` is identity (the A1 family); `blake3` is CapsuleFS CAS transport plus
@@ -409,7 +415,8 @@ regardless of which revision is current.
 - **Sealed-execution identity**: `execution_id` is computed over the **post-seal**
   sealed layer CAS IDs plus the launch spec, so a published capsule's runtime
   identity is exactly what was verified — even though Lane B builds are not
-  input-deterministic (see [EXECUTION_IDENTITY_SPEC.md](EXECUTION_IDENTITY_SPEC.md)).
+  input-deterministic (historical context is retained in the
+  [archived Snapshot-derived spec](../archived/EXECUTION_IDENTITY_SPEC.md)).
 - **No secret capture**: QA boots reuse the ReadyStateManifest no-secret
   invariant — the sealed artifact carries no secret and is reusable across hosts
   of the same `runner_class_id`.
@@ -465,7 +472,8 @@ Carried forward as explicit open questions (see also §12 of
 
 - [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) — source-tree hash profile.
 - [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) — materialize job contract.
-- [EXECUTION_IDENTITY_SPEC.md](EXECUTION_IDENTITY_SPEC.md) — `execution_id` facets.
+- [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) —
+  Capsule v1 `execution_id` and Snapshot boundary.
 - [ADR-011-source-materialization-placement.md](ADR-011-source-materialization-placement.md) — placement decision.
 - [ADR-012-capsule-lifecycle-column.md](ADR-012-capsule-lifecycle-column.md) — capsule + revision lifecycle.
 - [ADR-013-manifest-validator-wasm-split.md](ADR-013-manifest-validator-wasm-split.md) — validator WASM split.
