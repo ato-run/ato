@@ -24,6 +24,7 @@ use protocol::session_surface::SessionSurfaceRequirement;
 use serde::{Deserialize, Serialize};
 
 use crate::manifest::{NoSecretProof, ReadyStateManifest, RestoreContract, SanitizerContract};
+use crate::snapshot_manifest::SnapshotCompatibilityContract;
 
 /// What kind of state a backend captures (plan §4 / requirements §0.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -476,6 +477,13 @@ pub trait SnapshotBackend: Send + Sync {
 
     /// What this backend can do on this host right now.
     fn probe(&self) -> BackendCapabilities;
+
+    /// Exact Snapshot-v1 compatibility facts for this backend on this host.
+    /// These facts are deliberately separate from Execution Identity and are
+    /// used for candidate selection before any restore is attempted.
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContract, SnapshotError>;
 
     /// Boot-capture-seal: chunk the layers into CapsuleFS, scan for secrets,
     /// and produce a [`ReadyStateManifest`] + receipt. The caller guarantees the

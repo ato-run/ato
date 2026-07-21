@@ -279,6 +279,18 @@ impl SnapshotCompatibilityContract {
 }
 
 impl SnapshotRestoreCapabilities {
+    pub fn exact(contract: &SnapshotCompatibilityContract) -> Self {
+        Self {
+            backend: Some(contract.backend.clone()),
+            formats: vec![contract.format.clone()],
+            vmm_versions: vec![contract.vmm_version.clone()],
+            kernel_digests: vec![contract.kernel_digest.clone()],
+            cpu_templates: contract.cpu_template.iter().cloned().collect(),
+            codecs: vec![contract.codec.clone()],
+            runner_contracts: vec![contract.runner_contract.clone()],
+        }
+    }
+
     fn validate(&self) -> Result<(), SnapshotManifestError> {
         if self
             .backend

@@ -18,6 +18,7 @@ use crate::backend::{
     TeardownReceipt,
 };
 use crate::manifest::ReadyStateManifest;
+use crate::snapshot_manifest::SnapshotCompatibilityContract;
 
 /// Backend id reported by [`KataBackend`].
 pub const KATA_BACKEND_ID: &str = "kata";
@@ -73,6 +74,12 @@ impl SnapshotBackend for KataBackend {
             uffd_reason: Some("kata is not a Firecracker UFFD mem-backend".to_string()),
             binding: Default::default(),
         }
+    }
+
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContract, SnapshotError> {
+        Err(self.unsupported())
     }
 
     fn build_ready_state(

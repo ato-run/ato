@@ -20,6 +20,7 @@ use crate::backend::{
 };
 use crate::manifest::{NoSecretProof, READY_STATE_SCHEMA, ReadyStateManifest, SnapshotBackendInfo};
 use crate::scanner;
+use crate::snapshot_manifest::SnapshotCompatibilityContract;
 
 /// Backend id reported by [`FakeSnapshotBackend`].
 pub const FAKE_BACKEND_ID: &str = "fake";
@@ -65,6 +66,20 @@ impl SnapshotBackend for FakeSnapshotBackend {
             uffd_reason: Some("fake backend has no Firecracker UFFD mem-backend".to_string()),
             binding: Default::default(),
         }
+    }
+
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContract, SnapshotError> {
+        Ok(SnapshotCompatibilityContract {
+            backend: FAKE_BACKEND_ID.to_string(),
+            format: "fake-v1".to_string(),
+            vmm_version: "fake-0.1.0".to_string(),
+            kernel_digest: "none:fake-backend".to_string(),
+            cpu_template: None,
+            codec: "raw".to_string(),
+            runner_contract: format!("ato-fake-runner/{}/v1", std::env::consts::ARCH),
+        })
     }
 
     fn build_ready_state(
