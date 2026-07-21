@@ -4197,6 +4197,25 @@ where
         }
     }
 
+    // A Capsule-v1 lock may cold-launch only after reconstructing and comparing
+    // every identity-bearing output. The current launch adapters cannot yet
+    // produce that evidence, so never silently route a v1 execution through the
+    // legacy unverified cold path. This is the deployment-policy "forbid" case;
+    // an accepted exact Snapshot above remains fully runnable.
+    if prepared
+        .authoritative_lock
+        .as_ref()
+        .is_some_and(|lock| lock.execution_contract.is_some())
+    {
+        capsule::cold_reconstruction::ColdReconstruction::ensure_policy(
+            capsule::cold_reconstruction::ColdReconstructionPolicy::Forbid,
+        )
+        .context(
+            "no exact compatible Snapshot was selected and verified cold reconstruction is not \
+             available for this executor; refusing to launch under the stored Execution Identity",
+        )?;
+    }
+
     let run_command_uses_specialized_executor = decision
         .plan
         .execution_driver()

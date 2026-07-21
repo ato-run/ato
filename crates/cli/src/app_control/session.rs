@@ -3822,6 +3822,22 @@ mod tests {
     }
 
     #[test]
+    fn invalid_authoritative_lock_fails_closed_before_session_preparation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join(ATO_LOCK_FILE_NAME),
+            r#"{"schema_version":1,"lock_id":"blake3:0000000000000000000000000000000000000000000000000000000000000000"}"#,
+        )
+        .expect("write invalid lock");
+
+        let error = try_load_authoritative_lock(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("refusing to start session with invalid authoritative lock")
+        );
+    }
+
+    #[test]
     fn session_info_from_stored_status_is_honest_about_readiness() {
         let base = serde_json::json!({
             "session_id": "runtime-session-1",

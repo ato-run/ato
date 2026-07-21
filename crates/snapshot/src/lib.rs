@@ -63,6 +63,7 @@ pub use acceptance::{
     AcceptanceAttemptReceipt, AcceptanceCancellation, AcceptanceConfig, AcceptanceError,
     AcceptanceReceipt, AcceptanceResult, CandidateSnapshot, DisposableAcceptanceLifecycle,
     DisposableSessionHandle, RunningSnapshotAcceptance, SnapshotEligibility, VerificationOutcome,
+    accept_platform_verified_candidate,
 };
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
