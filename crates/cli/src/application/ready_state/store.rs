@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use capsulefs::CasStore;
-use snapshot::ReadyStateManifest;
+use snapshot::{ReadyStateManifest, SnapshotManifestV1};
 
 /// Sanitize a `blake3:<hex>`-style id into one safe path component (hex/dash
 /// only); anything else collapses to `_`.
@@ -43,6 +43,10 @@ fn manifest_path(root: &Path, capsule_manifest_hash: &str) -> PathBuf {
     artifact_dir(root, capsule_manifest_hash).join("manifest.json")
 }
 
+fn v1_manifest_path(root: &Path, capsule_manifest_hash: &str) -> PathBuf {
+    artifact_dir(root, capsule_manifest_hash).join("snapshot-manifest-v1.json")
+}
+
 /// Persist a sealed manifest as JSON next to its CAS store.
 pub(crate) fn save_manifest(root: &Path, manifest: &ReadyStateManifest) -> Result<PathBuf> {
     let path = manifest_path(root, &manifest.capsule_manifest_hash);
@@ -66,6 +70,40 @@ pub(crate) fn load_manifest(
     let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
     let manifest =
         serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    Ok(Some(manifest))
+}
+
+/// Persist the Capsule-v1 identity/compatibility manifest beside the legacy
+/// Ready-State manifest. The two files reference the same immutable CAS layers;
+/// legacy readers remain byte-compatible and v1 readers never reinterpret the
+/// old wire schema.
+pub(crate) fn save_v1_manifest(
+    root: &Path,
+    capsule_manifest_hash: &str,
+    manifest: &SnapshotManifestV1,
+) -> Result<PathBuf> {
+    manifest.validate().map_err(anyhow::Error::new)?;
+    let path = v1_manifest_path(root, capsule_manifest_hash);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_vec_pretty(manifest)?;
+    std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn load_v1_manifest(
+    root: &Path,
+    capsule_manifest_hash: &str,
+) -> Result<Option<SnapshotManifestV1>> {
+    let path = v1_manifest_path(root, capsule_manifest_hash);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let manifest: SnapshotManifestV1 =
+        serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+    manifest.validate().map_err(anyhow::Error::new)?;
     Ok(Some(manifest))
 }
 

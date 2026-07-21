@@ -20,6 +20,7 @@ use crate::backend::{
     TeardownReceipt,
 };
 use crate::manifest::ReadyStateManifest;
+use crate::snapshot_manifest::SnapshotCompatibilityContract;
 
 /// Backend id reported by [`QemuBackend`].
 pub const QEMU_BACKEND_ID: &str = "qemu";
@@ -81,6 +82,12 @@ impl SnapshotBackend for QemuBackend {
             uffd_reason: Some("qemu is not a Firecracker UFFD mem-backend".to_string()),
             binding: Default::default(),
         }
+    }
+
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContract, SnapshotError> {
+        Err(self.unsupported())
     }
 
     fn build_ready_state(

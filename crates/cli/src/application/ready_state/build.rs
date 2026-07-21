@@ -7,13 +7,16 @@
 //! `build_ready_state` (whose no-secret gate fails the build closed). On success
 //! it persists the sealed [`ReadyStateManifest`] next to its CAS store.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use capsule::execution_contract::ExecutionId;
 use capsule::types::CapsuleManifest;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
-    SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe, ensure_gpu_not_in_snapshot,
+    SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
+    ensure_external_state_layers_excluded, ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
 };
 
 use super::store;
@@ -121,6 +124,7 @@ pub(crate) fn seal(
     manifest: &CapsuleManifest,
     layers: BuildLayers,
     backend: &dyn SnapshotBackend,
+    v1_execution_id: Option<ExecutionId>,
 ) -> Result<BuildReadyStateReceipt> {
     // C guard: never seal an in-VM GPU into the snapshot.
     ensure_gpu_not_in_snapshot(manifest.gpu_mode())
@@ -146,17 +150,50 @@ pub(crate) fn seal(
     let receipt = backend
         .build_ready_state(BuildReadyStateInput {
             store: &store,
-            capsule_manifest_hash,
+            capsule_manifest_hash: capsule_manifest_hash.clone(),
             runner_class,
             surface_requirement,
             layers,
             restore_contract: restore_contract_from_manifest(manifest),
             sanitizer_contract: sanitizer_contract_from_manifest(manifest),
             declared_secret_markers: declared_secret_markers(manifest),
-            execution_id: None,
+            execution_id: v1_execution_id
+                .as_ref()
+                .map(|execution_id| execution_id.to_string()),
             supervisor: None,
         })
         .context("snapshot backend build_ready_state failed")?;
+
+    if let Some(execution_id) = v1_execution_id {
+        let compatibility = backend
+            .snapshot_compatibility_contract()
+            .context("resolve Snapshot v1 backend compatibility")?;
+        let v1_manifest = migrate_legacy_manifest(&receipt.manifest, execution_id, compatibility)
+            .context("create Snapshot v1 manifest")?;
+
+        // A v1 seal context is admitted by the caller only when the resolved
+        // execution contract has no live External State. Keep the layer gate at
+        // the final immutable manifest boundary as defence in depth.
+        ensure_external_state_layers_excluded(&v1_manifest, &BTreeSet::new())
+            .context("verify External State exclusion")?;
+
+        // Acceptance is a real disposable restore, not successful serialization.
+        // The v1 manifest is persisted only after restore and teardown both pass.
+        let restored = backend
+            .restore(snapshot::RestoreReadyStateInput {
+                store: &store,
+                manifest: receipt.manifest.clone(),
+                overlay_root: store::artifact_dir(state_root, &capsule_manifest_hash)
+                    .join("acceptance-overlay"),
+                host_runner_class: None,
+                uffd_preview: false,
+            })
+            .context("Snapshot v1 disposable acceptance restore failed")?;
+        backend
+            .stop(restored.session)
+            .context("Snapshot v1 disposable acceptance cleanup failed")?;
+        store::save_v1_manifest(state_root, &capsule_manifest_hash, &v1_manifest)?;
+    }
 
     store::save_manifest(state_root, &receipt.manifest)?;
     Ok(receipt)
@@ -255,6 +292,7 @@ content_ready_path=\"/\"\n",
             &m,
             layers,
             &backend,
+            None,
         )
         .unwrap();
         assert!(receipt.no_secret_proof.is_clean());
@@ -278,7 +316,15 @@ content_ready_path=\"/\"\n",
             vmstate: vec![0u8; 16],
             memory: vec![0u8; 16],
         };
-        let err = seal(dir.path(), "blake3:gpu".to_string(), &m, layers, &backend).unwrap_err();
+        let err = seal(
+            dir.path(),
+            "blake3:gpu".to_string(),
+            &m,
+            layers,
+            &backend,
+            None,
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("GPU"));
     }
 
@@ -297,6 +343,11 @@ content_ready_path=\"/\"\n",
         }
         fn probe(&self) -> snapshot::BackendCapabilities {
             self.inner.probe()
+        }
+        fn snapshot_compatibility_contract(
+            &self,
+        ) -> Result<snapshot::SnapshotCompatibilityContract, snapshot::SnapshotError> {
+            self.inner.snapshot_compatibility_contract()
         }
         fn build_ready_state(
             &self,
@@ -342,7 +393,15 @@ content_ready_path=\"/\"\n",
             vmstate: vec![0u8; 64],
             memory: vec![0u8; 4096],
         };
-        let receipt = seal(dir.path(), "blake3:rc".to_string(), &m, layers, &backend).unwrap();
+        let receipt = seal(
+            dir.path(),
+            "blake3:rc".to_string(),
+            &m,
+            layers,
+            &backend,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             *backend.seen_runner_class.lock().unwrap(),
             Some(None),
@@ -351,6 +410,46 @@ content_ready_path=\"/\"\n",
         assert!(
             receipt.manifest.runner_class_id.is_none(),
             "Fake echoes the input verbatim: an unpinned seal proves the CLI delegated"
+        );
+    }
+
+    #[test]
+    fn v1_seal_requires_disposable_restore_before_persisting_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = snapshot::FakeSnapshotBackend::new();
+        let m = parse("[snapshot]\nmode=\"warm\"\n");
+        let layers = BuildLayers {
+            rootfs: b"rootfs".to_vec(),
+            runtime: None,
+            dependency: None,
+            app: Some(b"app".to_vec()),
+            vmstate: vec![0u8; 64],
+            memory: vec![1u8; 4096],
+        };
+        let execution_id = ExecutionId::new(format!("blake3:{}", "a".repeat(64))).unwrap();
+
+        let receipt = seal(
+            dir.path(),
+            "blake3:v1".to_string(),
+            &m,
+            layers,
+            &backend,
+            Some(execution_id.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            receipt.manifest.execution_id.as_deref(),
+            Some(execution_id.as_str())
+        );
+        let v1 = store::load_v1_manifest(dir.path(), "blake3:v1")
+            .unwrap()
+            .expect("accepted v1 sidecar");
+        assert_eq!(v1.execution_id, execution_id);
+        assert!(
+            !store::artifact_dir(dir.path(), "blake3:v1")
+                .join("acceptance-overlay")
+                .exists()
         );
     }
 }

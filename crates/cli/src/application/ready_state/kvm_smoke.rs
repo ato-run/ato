@@ -92,8 +92,15 @@ fn fc_engine_smoke_build_restore_stop() {
     };
 
     // BUILD (Boot/Snapshot/Seal) through the engine.
-    let receipt = build::seal(state_root, hash.clone(), &manifest, layers, be.as_ref())
-        .expect("engine seal failed");
+    let receipt = build::seal(
+        state_root,
+        hash.clone(),
+        &manifest,
+        layers,
+        be.as_ref(),
+        None,
+    )
+    .expect("engine seal failed");
     assert!(
         receipt.no_secret_proof.is_clean(),
         "no-secret gate must pass on a clean rootfs"
@@ -113,9 +120,16 @@ fn fc_engine_smoke_build_restore_stop() {
         .unwrap()
         .expect("sealed manifest present");
     let overlay = dir.path().join("ov");
-    let restored =
-        restore::restore_and_expose(be.as_ref(), &cas, sealed, overlay.clone(), None, false)
-            .expect("engine restore failed");
+    let restored = restore::restore_and_expose(
+        be.as_ref(),
+        &cas,
+        sealed,
+        None,
+        overlay.clone(),
+        None,
+        false,
+    )
+    .expect("engine restore failed");
     assert_eq!(
         restored.session.guest_port,
         Some(8080),
