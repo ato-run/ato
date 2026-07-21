@@ -33,6 +33,7 @@ pub struct ExternalStateAttachmentPlan {
     pub name: String,
     pub target: String,
     pub access: ExternalStateAccess,
+    pub schema: String,
     pub state_ref: OpaqueStateRef,
     pub generation: OpaqueStateGeneration,
 }
@@ -116,10 +117,10 @@ impl From<OpaqueStateGeneration> for String {
 }
 
 impl ExternalStateAttachmentPlan {
-    pub fn receipt(&self, schema: impl Into<String>) -> SessionExternalStateReceipt {
+    pub fn receipt(&self) -> SessionExternalStateReceipt {
         SessionExternalStateReceipt {
             name: self.name.clone(),
-            schema: schema.into(),
+            schema: self.schema.clone(),
             state_ref: self.state_ref.clone(),
             state_generation: self.generation.clone(),
             access: self.access,
@@ -144,6 +145,7 @@ pub fn plan_external_state_attach(
         name: request.contract.name,
         target: request.contract.target,
         access: request.contract.access,
+        schema: request.contract.schema,
         state_ref: request.instance.state_ref,
         generation: request.instance.generation,
     })
@@ -222,7 +224,7 @@ mod tests {
     #[test]
     fn receipt_contains_only_opaque_compatibility_evidence() {
         let plan = plan_external_state_attach(request("1")).unwrap();
-        let json = serde_json::to_string(&plan.receipt("1")).unwrap();
+        let json = serde_json::to_string(&plan.receipt()).unwrap();
         assert!(json.contains("state:opaque/data"));
         assert!(json.contains("gen_456"));
         for forbidden in ["secret", "token", "content", "owner_id", "volume_id"] {
