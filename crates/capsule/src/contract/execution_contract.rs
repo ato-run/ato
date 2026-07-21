@@ -15,7 +15,11 @@ impl ExecutionId {
         let Some(hex) = value.strip_prefix("blake3:") else {
             return Err(ExecutionContractError::InvalidExecutionId);
         };
-        if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
             return Err(ExecutionContractError::InvalidExecutionId);
         }
         Ok(Self(value))
@@ -54,7 +58,7 @@ pub enum ExecutionContractError {
     UnresolvedField(&'static str),
     #[error("execution contract list '{0}' must be sorted and contain no duplicates")]
     NonCanonicalList(&'static str),
-    #[error("execution_id must be blake3:<64 lowercase-or-uppercase hex characters>")]
+    #[error("execution_id must be blake3:<64 lowercase hex characters>")]
     InvalidExecutionId,
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
@@ -458,6 +462,43 @@ mod tests {
     #[test]
     fn malformed_execution_id_fails_deserialization() {
         assert!(serde_json::from_str::<ExecutionId>("\"blake3:not-a-digest\"").is_err());
+    }
+
+    #[test]
+    fn uppercase_execution_id_is_rejected_as_noncanonical() {
+        assert!(ExecutionId::new(format!("blake3:{}", "A".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn execution_contract_and_id_are_authenticated_by_lock_id() {
+        let contract = sample_contract();
+        let execution_id = contract.compute_execution_id().unwrap();
+        let lock = crate::ato_lock::AtoLock {
+            execution_contract: Some(contract),
+            execution_id: Some(execution_id),
+            ..crate::ato_lock::AtoLock::default()
+        };
+        let baseline = crate::ato_lock::compute_lock_id(&lock).unwrap();
+
+        let mut contract_mutated = lock.clone();
+        contract_mutated
+            .execution_contract
+            .as_mut()
+            .unwrap()
+            .target
+            .architecture = "aarch64".to_string();
+        assert_ne!(
+            baseline,
+            crate::ato_lock::compute_lock_id(&contract_mutated).unwrap()
+        );
+
+        let mut id_mutated = lock;
+        id_mutated.execution_id =
+            Some(ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap());
+        assert_ne!(
+            baseline,
+            crate::ato_lock::compute_lock_id(&id_mutated).unwrap()
+        );
     }
 
     #[test]
