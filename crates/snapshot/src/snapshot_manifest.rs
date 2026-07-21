@@ -351,10 +351,11 @@ pub fn migrate_legacy_manifest(
         &legacy.layers.runtime,
         &legacy.layers.dependency,
         &legacy.layers.app,
-    ] {
-        if let Some(layer) = layer {
-            disk_layers.push(layer.clone());
-        }
+    ]
+    .into_iter()
+    .flatten()
+    {
+        disk_layers.push(layer.clone());
     }
     SnapshotManifestV1::new(
         verified_execution_id,
