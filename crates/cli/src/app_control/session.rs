@@ -2380,7 +2380,7 @@ fn try_load_authoritative_lock(
     if !lock_path.exists() {
         return (None, None);
     }
-    match ato_lock::load_unvalidated_from_path(&lock_path) {
+    match ato_lock::load_verified_from_path(&lock_path) {
         Ok(lock) => (Some(lock), Some(lock_path)),
         Err(err) => {
             tracing::warn!(

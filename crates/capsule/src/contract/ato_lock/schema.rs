@@ -6,6 +6,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::contract::execution_contract::{ExecutionContractV1, ExecutionId};
+
 pub const ATO_LOCK_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,6 +17,10 @@ pub struct AtoLock {
     pub lock_id: Option<LockId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_contract: Option<ExecutionContractV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<ExecutionId>,
     #[serde(default)]
     pub features: LockFeatures,
     #[serde(default)]
@@ -37,6 +43,8 @@ impl Default for AtoLock {
             schema_version: ATO_LOCK_SCHEMA_VERSION,
             lock_id: None,
             generated_at: None,
+            execution_contract: None,
+            execution_id: None,
             features: LockFeatures::default(),
             resolution: ResolutionSection::default(),
             contract: ContractSection::default(),

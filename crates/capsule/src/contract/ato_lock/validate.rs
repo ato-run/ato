@@ -27,6 +27,12 @@ pub enum AtoLockValidationError {
     MalformedLockId(String),
     #[error("lock_id mismatch: expected {expected}, got {actual}")]
     LockIdMismatch { expected: String, actual: String },
+    #[error("execution_contract and execution_id must either both be present or both be absent")]
+    IncompleteExecutionIdentity,
+    #[error("invalid execution_contract: {0}")]
+    InvalidExecutionContract(String),
+    #[error("execution_id mismatch: expected {expected}, got {actual}")]
+    ExecutionIdMismatch { expected: String, actual: String },
     #[error("declared feature '{0}' is unknown")]
     UnknownDeclaredFeature(String),
     #[error("declared feature '{0}' is recognized by schema but not implemented by this runtime")]
@@ -74,6 +80,23 @@ pub fn validate_structural(
         errors.push(AtoLockValidationError::InvalidGeneratedAt(
             generated_at.clone(),
         ));
+    }
+
+    match (&lock.execution_contract, &lock.execution_id) {
+        (Some(contract), Some(execution_id)) => match contract.compute_execution_id() {
+            Ok(expected) if &expected != execution_id => {
+                errors.push(AtoLockValidationError::ExecutionIdMismatch {
+                    expected: expected.to_string(),
+                    actual: execution_id.to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) => errors.push(AtoLockValidationError::InvalidExecutionContract(
+                error.to_string(),
+            )),
+        },
+        (None, None) => {}
+        _ => errors.push(AtoLockValidationError::IncompleteExecutionIdentity),
     }
 
     validate_declared_features(&lock.features.declared, mode, &mut errors);
