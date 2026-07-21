@@ -167,27 +167,16 @@ declared allowlist**: they fail with no-route by construction. That is
 contract, not a bug — the fixture suite asserts the failure, and the UI/receipt
 must attribute it to the client shape, not to the policy.
 
-### D4. Identity: `snapshot_artifact_id` / `launch_execution_id` split
+### D4. Identity migration: one Execution Identity and subordinate Snapshot
 
-- `snapshot_artifact_id` **already exists** as
-  `ReadyStateManifest::id()` (blake3 over JCS) — adopt the name, no new
-  mechanism.
-- `launch_execution_id` is a **new digest** over: `snapshot_artifact_id` +
-  secret **refs** (names + secret_ref ids, never values) + state binding
-  (instance id + state_contract hash) + file grant ids + network policy hash +
-  launch args + profile id. This aligns with `LaunchTemplateKey` in the
-  resource-namespace RFC (commits to binding_set_hash / network_policy_hash /
-  state_contract_hash; must not contain secret values or session facts) and
-  with ADR-009's `artifact_build_id ≠ execution_id`. The existing launch
-  digest (`ato-launch-digest-v2`) commits to command/args/cwd/port/probe only —
-  v1.2 extends it (v3) rather than inventing a parallel scheme.
-- The grant/instance identities in the digest are **stable, redacted
-  capability identities** (grant id, state instance id, secret_ref id) —
-  **never transient session facts** (ports, pids, lease ids, timestamps,
-  raw host paths), matching `LaunchTemplateKey`'s exclusion rules. Two
-  launches with the same grants and policy hash to the same
-  `launch_execution_id`; re-granting the same files under a new grant id does
-  not.
+- `snapshot_id` is the structural ID of an `ato.snapshot-manifest/v1`; it is
+  never an input to `execution_id`.
+- `execution_id` is computed from `ato.lock.json.execution_contract` under the
+  `ato.execution-contract/v1` domain. It includes binding names, targets,
+  access, schemas, and exclusion contracts, but excludes concrete secret refs,
+  state instance IDs, generations, grants, and values.
+- The concrete bindings selected for a run are Session facts and are recorded
+  in a value-free Receipt. They do not create another public exact identity.
 
 ## 3. Scope
 
