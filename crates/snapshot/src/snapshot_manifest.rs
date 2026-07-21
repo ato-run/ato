@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::manifest::{ReadyStateManifest, RestoreContract};
 
 pub const SNAPSHOT_MANIFEST_V1_SCHEMA: &str = "ato.snapshot-manifest/v1";
+const SNAPSHOT_MANIFEST_ID_DOMAIN: &[u8] = b"ato.snapshot-manifest/v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,7 +176,10 @@ impl SnapshotManifestV1 {
         };
         let canonical = serde_jcs::to_vec(&projection)
             .map_err(|error| SnapshotManifestError::Canonicalization(error.to_string()))?;
-        Ok(format!("blake3:{}", blake3::hash(&canonical).to_hex()))
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(SNAPSHOT_MANIFEST_ID_DOMAIN);
+        hasher.update(&canonical);
+        Ok(format!("blake3:{}", hasher.finalize().to_hex()))
     }
 
     pub fn validate(&self) -> Result<(), SnapshotManifestError> {
@@ -324,7 +328,11 @@ pub fn select_compatible_snapshot<'a>(
             continue;
         }
         let candidate = &record.manifest;
-        candidate.validate()?;
+        // A corrupt catalog entry is local to that snapshot. It must never make
+        // later valid candidates unavailable, regardless of its execution id.
+        if candidate.validate().is_err() {
+            continue;
+        }
         if &candidate.execution_id != execution_id {
             continue;
         }
@@ -493,6 +501,33 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_id_is_domain_separated_from_plain_manifest_hash() {
+        let manifest = manifest(execution_id('1'), "fc-v1");
+        let projection = SnapshotIdentityProjection {
+            schema: &manifest.schema,
+            execution_id: &manifest.execution_id,
+            compatibility: &manifest.compatibility,
+            layers: &manifest.layers,
+            restore_contract: &manifest.restore_contract,
+            capture_policy: manifest.capture_policy,
+            capture_provenance: &manifest.capture_provenance,
+            sanitization_attestation: &manifest.sanitization_attestation,
+            secret_scan_attestation: &manifest.secret_scan_attestation,
+        };
+        let canonical = serde_jcs::to_vec(&projection).unwrap();
+        let plain_id = format!("blake3:{}", blake3::hash(&canonical).to_hex());
+
+        assert_ne!(manifest.snapshot_id, plain_id);
+        let mut expected = blake3::Hasher::new();
+        expected.update(b"ato.snapshot-manifest/v1\0");
+        expected.update(&canonical);
+        assert_eq!(
+            manifest.snapshot_id,
+            format!("blake3:{}", expected.finalize().to_hex())
+        );
+    }
+
+    #[test]
     fn selection_filters_exact_identity_before_compatibility() {
         let wanted = execution_id('c');
         let wrong = manifest(execution_id('d'), "fc-v1");
@@ -501,6 +536,23 @@ mod tests {
         let candidates = vec![
             SnapshotCatalogRecord::accepted(wrong),
             SnapshotCatalogRecord::accepted(incompatible),
+            SnapshotCatalogRecord::accepted(compatible.clone()),
+        ];
+
+        let selected = select_compatible_snapshot(&wanted, &capabilities(), &candidates)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.snapshot_id, compatible.snapshot_id);
+    }
+
+    #[test]
+    fn corrupt_catalog_record_does_not_block_later_valid_candidate() {
+        let wanted = execution_id('2');
+        let mut corrupt = manifest(execution_id('3'), "fc-v1");
+        corrupt.snapshot_id = "blake3:forged".to_string();
+        let compatible = manifest(wanted.clone(), "fc-v1");
+        let candidates = vec![
+            SnapshotCatalogRecord::accepted(corrupt),
             SnapshotCatalogRecord::accepted(compatible.clone()),
         ];
 
