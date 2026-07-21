@@ -53,11 +53,26 @@ pub fn load_unvalidated_from_str(raw: &str) -> Result<AtoLock> {
         .map_err(|err| CapsuleError::Config(format!("Failed to parse ato.lock.json: {err}")))
 }
 
+/// Loads a durable lock and verifies every persisted identity before use.
+pub fn load_verified_from_str(raw: &str) -> Result<AtoLock> {
+    let lock = load_unvalidated_from_str(raw)?;
+    validate_persisted_strict(&lock).map_err(validation_errors_to_capsule_error)?;
+    Ok(lock)
+}
+
 /// Reads ato.lock JSON from disk without applying any validation.
 pub fn load_unvalidated_from_path(path: &Path) -> Result<AtoLock> {
     let raw = fs::read_to_string(path)
         .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
     load_unvalidated_from_str(&raw)
+}
+
+/// Loads a durable lock from disk and verifies `lock_id` and, when present,
+/// the Capsule v1 `execution_id` before returning it to an execution path.
+pub fn load_verified_from_path(path: &Path) -> Result<AtoLock> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
+    load_verified_from_str(&raw)
 }
 
 /// Validates a persisted lock under strict mode.

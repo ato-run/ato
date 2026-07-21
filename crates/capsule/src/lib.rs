@@ -47,6 +47,7 @@ pub use foundation::types;
 // ── Layer 2: Contract ─────────────────────────────────────────────────────
 pub mod contract;
 pub use contract::ato_lock;
+pub use contract::execution_contract;
 pub use contract::lock_runtime;
 pub use contract::lockfile;
 pub use contract::manifest;
