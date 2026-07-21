@@ -29,6 +29,7 @@
 //! * **Fail-closed restore class** — `restore` rejects a host whose
 //!   `runner_class_id` differs from the one the snapshot was built for.
 
+mod acceptance;
 pub mod agent_channel;
 mod backend;
 pub mod bench;
@@ -56,6 +57,11 @@ mod uffd;
 #[allow(dead_code)]
 mod uffd_page_server;
 
+pub use acceptance::{
+    AcceptanceAttemptReceipt, AcceptanceCancellation, AcceptanceConfig, AcceptanceError,
+    AcceptanceReceipt, AcceptanceResult, CandidateSnapshot, DisposableAcceptanceLifecycle,
+    DisposableSessionHandle, RunningSnapshotAcceptance, SnapshotEligibility, VerificationOutcome,
+};
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
     BuildReadyStateReceipt, DeviceProfile, FilesystemModel, GpuMode, IsolationBoundary,
