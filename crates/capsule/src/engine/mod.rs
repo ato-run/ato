@@ -1,4 +1,5 @@
 //! Layer 4: Engine — execution orchestration, runtimes, and lifecycle.
+pub mod cold_reconstruction;
 pub mod engine_impl;
 pub mod execution_graph;
 pub mod execution_identity;
