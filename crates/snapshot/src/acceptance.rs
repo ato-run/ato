@@ -195,70 +195,68 @@ impl RunningSnapshotAcceptance {
                 }
             };
 
-            let restore_result = lifecycle.restore_candidate(&session, &candidate);
-            let verification = if restore_result.is_ok() {
-                lifecycle.execute_exact_argv(
-                    &session,
-                    &config.seal_at_argv,
-                    config.verification_timeout,
-                    cancellation,
-                )
-            } else {
-                Ok(VerificationOutcome::Exited(-1))
-            };
+            let (accepted, terminate_required) =
+                if lifecycle.restore_candidate(&session, &candidate).is_err() {
+                    attempt_receipt.outcome = "restore-failed".to_string();
+                    (false, false)
+                } else {
+                    match lifecycle.execute_exact_argv(
+                        &session,
+                        &config.seal_at_argv,
+                        config.verification_timeout,
+                        cancellation,
+                    ) {
+                        Ok(VerificationOutcome::Exited(_)) if cancellation.is_cancelled() => {
+                            attempt_receipt.outcome = "cancelled".to_string();
+                            (false, true)
+                        }
+                        Ok(VerificationOutcome::Exited(0))
+                            if started.elapsed() < config.total_deadline =>
+                        {
+                            attempt_receipt.outcome = "accepted".to_string();
+                            (true, false)
+                        }
+                        Ok(VerificationOutcome::Exited(0)) => {
+                            attempt_receipt.outcome = "deadline-exceeded".to_string();
+                            (false, false)
+                        }
+                        Ok(VerificationOutcome::Exited(_)) => {
+                            attempt_receipt.outcome = "nonzero-exit".to_string();
+                            (false, false)
+                        }
+                        Ok(VerificationOutcome::TimedOut) => {
+                            attempt_receipt.outcome = "timeout".to_string();
+                            (false, true)
+                        }
+                        Ok(VerificationOutcome::Cancelled) => {
+                            attempt_receipt.outcome = "cancelled".to_string();
+                            (false, true)
+                        }
+                        Err(_) => {
+                            attempt_receipt.outcome = "verification-error".to_string();
+                            (false, true)
+                        }
+                    }
+                };
 
-            let accepted = match verification {
-                Ok(VerificationOutcome::Exited(_)) if cancellation.is_cancelled() => {
-                    lifecycle
-                        .terminate_process_tree(&session)
-                        .map_err(|_| AcceptanceError::Cleanup)?;
-                    attempt_receipt.process_tree_terminated = true;
-                    attempt_receipt.outcome = "cancelled".to_string();
-                    false
+            // Destruction is unconditional after Session creation. In particular,
+            // a failed process-tree termination must not leak the disposable VM.
+            let mut cleanup_failed = false;
+            if terminate_required {
+                match lifecycle.terminate_process_tree(&session) {
+                    Ok(()) => attempt_receipt.process_tree_terminated = true,
+                    Err(_) => cleanup_failed = true,
                 }
-                Ok(VerificationOutcome::Exited(0)) if started.elapsed() < config.total_deadline => {
-                    attempt_receipt.outcome = "accepted".to_string();
-                    true
-                }
-                Ok(VerificationOutcome::Exited(_)) => {
-                    attempt_receipt.outcome = if restore_result.is_ok() {
-                        "nonzero-exit".to_string()
-                    } else {
-                        "restore-failed".to_string()
-                    };
-                    false
-                }
-                Ok(VerificationOutcome::TimedOut) => {
-                    lifecycle
-                        .terminate_process_tree(&session)
-                        .map_err(|_| AcceptanceError::Cleanup)?;
-                    attempt_receipt.process_tree_terminated = true;
-                    attempt_receipt.outcome = "timeout".to_string();
-                    false
-                }
-                Ok(VerificationOutcome::Cancelled) => {
-                    lifecycle
-                        .terminate_process_tree(&session)
-                        .map_err(|_| AcceptanceError::Cleanup)?;
-                    attempt_receipt.process_tree_terminated = true;
-                    attempt_receipt.outcome = "cancelled".to_string();
-                    false
-                }
-                Err(_) => {
-                    lifecycle
-                        .terminate_process_tree(&session)
-                        .map_err(|_| AcceptanceError::Cleanup)?;
-                    attempt_receipt.process_tree_terminated = true;
-                    attempt_receipt.outcome = "verification-error".to_string();
-                    false
-                }
-            };
-
-            lifecycle
-                .destroy_disposable_session(session)
-                .map_err(|_| AcceptanceError::Cleanup)?;
-            attempt_receipt.disposable_session_destroyed = true;
+            }
+            match lifecycle.destroy_disposable_session(session) {
+                Ok(()) => attempt_receipt.disposable_session_destroyed = true,
+                Err(_) => cleanup_failed = true,
+            }
             receipt.attempts.push(attempt_receipt);
+
+            if cleanup_failed {
+                return Err(AcceptanceError::Cleanup);
+            }
 
             if accepted {
                 receipt.accepted_snapshot_id = Some(candidate.manifest.snapshot_id.clone());
@@ -323,6 +321,9 @@ mod tests {
         destroys: u32,
         terminates: u32,
         executed_argv: Vec<Vec<String>>,
+        restore_fails: bool,
+        terminate_fails: bool,
+        execute_delay: Duration,
     }
 
     impl MockLifecycle {
@@ -333,6 +334,9 @@ mod tests {
                 destroys: 0,
                 terminates: 0,
                 executed_argv: Vec::new(),
+                restore_fails: false,
+                terminate_fails: false,
+                execute_delay: Duration::ZERO,
             }
         }
 
@@ -401,7 +405,11 @@ mod tests {
             _session: &DisposableSessionHandle,
             _candidate: &CandidateSnapshot,
         ) -> Result<(), String> {
-            Ok(())
+            if self.restore_fails {
+                Err("restore failed".to_string())
+            } else {
+                Ok(())
+            }
         }
 
         fn execute_exact_argv(
@@ -412,6 +420,7 @@ mod tests {
             _cancellation: &AcceptanceCancellation,
         ) -> Result<VerificationOutcome, String> {
             self.executed_argv.push(argv.to_vec());
+            std::thread::sleep(self.execute_delay);
             Ok(self.outcomes.remove(0))
         }
 
@@ -420,7 +429,11 @@ mod tests {
             _session: &DisposableSessionHandle,
         ) -> Result<(), String> {
             self.terminates += 1;
-            Ok(())
+            if self.terminate_fails {
+                Err("termination failed".to_string())
+            } else {
+                Ok(())
+            }
         }
 
         fn destroy_disposable_session(
@@ -483,6 +496,72 @@ mod tests {
         assert!(matches!(error, AcceptanceError::Exhausted { .. }));
         assert_eq!(lifecycle.terminates, 1);
         assert_eq!(lifecycle.destroys, 1);
+    }
+
+    #[test]
+    fn restore_failure_is_explicit_and_still_destroys_session() {
+        let mut lifecycle = MockLifecycle::new(Vec::new());
+        lifecycle.restore_fails = true;
+        let error = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            SnapshotEligibility {
+                external_state_required_by_live_workload: false,
+            },
+            &config(1),
+            &AcceptanceCancellation::default(),
+        )
+        .unwrap_err();
+
+        let AcceptanceError::Exhausted { receipt } = error else {
+            panic!("expected exhausted receipt");
+        };
+        assert_eq!(receipt.attempts[0].outcome, "restore-failed");
+        assert!(lifecycle.executed_argv.is_empty());
+        assert_eq!(lifecycle.destroys, 1);
+    }
+
+    #[test]
+    fn termination_failure_does_not_skip_disposable_session_destroy() {
+        let mut lifecycle = MockLifecycle::new(vec![VerificationOutcome::TimedOut]);
+        lifecycle.terminate_fails = true;
+        let error = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            SnapshotEligibility {
+                external_state_required_by_live_workload: false,
+            },
+            &config(1),
+            &AcceptanceCancellation::default(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, AcceptanceError::Cleanup);
+        assert_eq!(lifecycle.terminates, 1);
+        assert_eq!(lifecycle.destroys, 1);
+    }
+
+    #[test]
+    fn successful_verification_after_deadline_is_not_reported_as_nonzero_exit() {
+        let mut lifecycle = MockLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        lifecycle.execute_delay = Duration::from_millis(5);
+        let deadline_config = AcceptanceConfig {
+            verification_timeout: Duration::from_millis(1),
+            total_deadline: Duration::from_millis(1),
+            ..config(1)
+        };
+        let error = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            SnapshotEligibility {
+                external_state_required_by_live_workload: false,
+            },
+            &deadline_config,
+            &AcceptanceCancellation::default(),
+        )
+        .unwrap_err();
+
+        let AcceptanceError::Exhausted { receipt } = error else {
+            panic!("expected exhausted receipt");
+        };
+        assert_eq!(receipt.attempts[0].outcome, "deadline-exceeded");
     }
 
     #[test]
