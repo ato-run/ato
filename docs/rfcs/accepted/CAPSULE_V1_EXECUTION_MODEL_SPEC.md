@@ -1,18 +1,19 @@
 ---
 title: "Capsule v1 Execution Identity and Snapshot Model"
-status: draft
+status: accepted
 date: 2026-07-21
 author: "@egamikohsuke"
 ssot:
-  - "crates/capsule/src/contract/"
-  - "crates/capsule/src/engine/execution_graph/"
-  - "crates/snapshot/src/manifest.rs"
-  - "crates/snapshot/src/backend.rs"
-  - "crates/snapshot/src/state_volume_persistence.rs"
+  - "crates/capsule/src/contract/execution_contract.rs"
+  - "crates/capsule/src/engine/cold_reconstruction.rs"
+  - "crates/snapshot/src/snapshot_manifest.rs"
+  - "crates/snapshot/src/acceptance.rs"
+  - "crates/snapshot/src/external_state.rs"
+  - "crates/snapshot/src/workload_idle.rs"
 related:
-  - "CAPSULE_CORE_MODEL.md"
-  - "beyond-reproducible-build.md"
-  - "HASH_AND_PROVENANCE_POLICY.md"
+  - "../draft/CAPSULE_CORE_MODEL.md"
+  - "../draft/beyond-reproducible-build.md"
+  - "../draft/HASH_AND_PROVENANCE_POLICY.md"
   - "../archived/EXECUTION_IDENTITY_SPEC.md"
   - "../accepted/ADR-002-signature-format-jcs.md"
   - "../../execution-identity.md"
@@ -66,9 +67,11 @@ The governing sentence is:
 
 ## 2. Status and scope
 
-This document is a draft design authority for Capsule v1 discussion only.
-Until it is accepted and implemented, the accepted v0.3 Capsule specification
-and current Ready-State implementation remain authoritative.
+This document is the accepted design authority for the Capsule v1 execution
+model. The accepted v0.3 Capsule specification remains authoritative for the
+currently shipped `capsule.toml` parser until the v1 authoring schema is wired
+into the CLI. Legacy Ready-State artifacts remain governed by their existing
+wire contract and the migration rules in section 16.3.
 
 ### 2.1 In scope
 
@@ -969,21 +972,24 @@ Tests MUST prove that excluded mutations do not change `execution_id`:
 
 ## References
 
-- [Beyond Reproducible Builds](beyond-reproducible-build.md) — launch-envelope
+- [Beyond Reproducible Builds](../draft/beyond-reproducible-build.md) — launch-envelope
   definition and separation of dependency derivation from output identity.
-- [Capsule Core Model](CAPSULE_CORE_MODEL.md) — broader Capsule declaration,
+- [Capsule Core Model](../draft/CAPSULE_CORE_MODEL.md) — broader Capsule declaration,
   composition, placement, and install model under revision.
-- [Hash and Provenance Policy](HASH_AND_PROVENANCE_POLICY.md) — project hash
+- [Hash and Provenance Policy](../draft/HASH_AND_PROVENANCE_POLICY.md) — project hash
   domains and provenance separation.
-- [ADR-002: Signature Format JCS](../accepted/ADR-002-signature-format-jcs.md) —
+- [ADR-002: Signature Format JCS](ADR-002-signature-format-jcs.md) —
   canonical JSON precedent.
-- [Execution Identity](../../execution-identity.md) — current implementation
-  documentation and migration context.
-- [Snapshot](../../snapshot.md) — current Ready-State invariants.
-- [Snapshot v1 Compatibility](../../snapshot-v1-compatibility.md) — current
-  supported-surface contract.
-- `crates/snapshot/src/manifest.rs` — current `ReadyStateManifest` and
-  `execution_id` migration source.
-- `crates/snapshot/src/backend.rs` — current build and restore contracts.
-- `crates/snapshot/src/state_volume_persistence.rs` — current state schema and
-  revision compatibility gate.
+- [Execution Identity](../../execution-identity.md) — public identity guide.
+- [Snapshot](../../snapshot.md) — public Snapshot and lifecycle guide.
+- [Snapshot v1 Compatibility](../../snapshot-v1-compatibility.md) — deployed
+  Ready-State supported-surface contract and v1 migration context.
+- `crates/capsule/src/contract/execution_contract.rs` — canonical resolved
+  contract and `execution_id` implementation.
+- `crates/capsule/src/engine/cold_reconstruction.rs` — fail-closed cold path.
+- `crates/snapshot/src/snapshot_manifest.rs` — Capsule v1 manifest, migration,
+  selection, and quarantine.
+- `crates/snapshot/src/acceptance.rs` — disposable acceptance orchestration.
+- `crates/snapshot/src/external_state.rs` — state exclusion and schema gate.
+- `crates/snapshot/src/workload_idle.rs` — stopped-workload capture and restore
+  ordering.

@@ -6,7 +6,7 @@ author: "@egamikohsuke"
 ssot:
   - "crates/snapshot/src/manifest.rs"
 related:
-  - "../draft/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
+  - "../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
   - "../draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md"
   - "../draft/A1_SOURCE_TREE_PROFILE.md"
   - "../accepted/ADR-002-signature-format-jcs.md"
@@ -17,7 +17,7 @@ related:
 
 > **Superseded:** This Snapshot-derived post-seal identity model is retained for
 > design history only. The Capsule v1 model is
-> [`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../draft/CAPSULE_V1_EXECUTION_MODEL_SPEC.md),
+> [`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md),
 > where Execution Identity identifies the resolved launch contract and Snapshot
 > is a subordinate cache.
 

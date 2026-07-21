@@ -85,7 +85,8 @@ for each kind of software. The priority is not “what kind of thing is this?”
 story while still doing fairly heavy work under the hood: install, dependency
 materialization, verification, and receipt-aware execution.
 
-The same recipe run against the same source on two different machines may produce
-different `resolved_execution_id` values if the user environments differ. That is
+The same recipe run against the same source on two different resolved targets may produce
+different `execution_id` values if their OS, architecture, ABI, runtime artifact,
+dependency output, filesystem view, or policy differs. That is
 expected and correct: Execution Identity captures the resolved launch world, not
 just the declared intent.

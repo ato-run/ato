@@ -1,5 +1,12 @@
 # Snapshot v1 Compatibility Contract
 
+> This fixture document describes the deployed Ready-State application surface.
+> The normative identity and wire migration model is
+> [Capsule v1 Execution Identity and Snapshot Model](rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md):
+> every Snapshot is a cache subordinate to one exact `execution_id`; new
+> artifacts use `ato.snapshot-manifest/v1`; legacy `ato.ready-state/v1` is
+> inspection/migration-only for Capsule v1 selection.
+
 > **Snapshot v1 is a sealed ready-state path for no-binding, single-process web
 > apps. It is not a general VM hosting product.**
 
@@ -26,6 +33,10 @@ Runs restore the sealed artifact on a capable runner and proxy traffic to the
 restored guest.
 
 Everything below is stated per stage, in the order the pipeline enforces it.
+
+Artifact eligibility never substitutes Capsule name, target label, runner name,
+or recency for identity. The runtime first matches exact `execution_id`, then
+proves backend/VMM/kernel/CPU-template/codec/runner compatibility.
 
 ## 2. Eligibility requirements (build-time, fail-closed)
 
@@ -202,10 +213,11 @@ Everything in §§1–6 stays true for v1.0 capsules; v1.2 adds exactly four
   grant/preflight time under fixed constraints: max 200 chars, control
   characters (incl. newlines) collapse to spaces, plain text only — UIs render
   it as a text node, never as HTML.
-- **Identity:** `snapshot_artifact_id` = the sealed manifest content address;
-  `launch_execution_id` additionally commits to stable **redacted** capability
-  identities (secret_ref ids, grant ids, state instance id, network policy
-  hash) — never transient session facts.
+- **Identity:** `snapshot_id` is the sealed manifest content address and remains
+  subordinate to the resolved launch-contract `execution_id`. Concrete secret
+  refs, grant IDs, state instance IDs, generations, and values are Session
+  facts recorded only as value-free Receipt evidence; they do not create a
+  second execution identity.
 
 ### 7.3 v1.2 fixture matrix (enforcement surface, when it lands)
 

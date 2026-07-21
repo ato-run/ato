@@ -11,7 +11,7 @@ ssot:                  # anchor code paths this pipeline extends (code is author
 related:
   - "A1_SOURCE_TREE_PROFILE.md"
   - "SOURCE_MATERIALIZATION_SPEC.md"
-  - "CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
+  - "../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
   - "ADR-011-source-materialization-placement.md"
   - "ADR-012-capsule-lifecycle-column.md"
   - "ADR-013-manifest-validator-wasm-split.md"
@@ -23,7 +23,7 @@ related:
 
 > **Execution Identity migration:** The post-seal/Snapshot-derived identity
 > sections in this draft predate #1086 and are superseded by
-> [Capsule v1 Execution Identity and Snapshot Model](CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
+> [Capsule v1 Execution Identity and Snapshot Model](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
 > Until this pipeline is fully reconciled, the Capsule v1 specification governs
 > identity and Snapshot boundaries.
 
@@ -42,7 +42,7 @@ This document is the map. Read it first, then descend into:
 | 1. Source-tree hash profile | [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) | SPEC |
 | 2. Where materialization runs (decision) | [ADR-011](ADR-011-source-materialization-placement.md) | ADR |
 | 2. Materialization contract | [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) | SPEC |
-| 3. Execution identity | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) | SPEC |
+| 3. Execution identity | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) | SPEC |
 | 4. Capsule + revision lifecycle | [ADR-012](ADR-012-capsule-lifecycle-column.md) | ADR |
 | 5. Manifest validator WASM split | [ADR-013](ADR-013-manifest-validator-wasm-split.md) | ADR |
 | 6. Request model + state machine | this document (§4–§7) | SPEC |
@@ -67,8 +67,8 @@ The pipeline spans three execution surfaces that already exist in the platform:
   worker gains two new job kinds, `source_materialize` and `candidate_qa`, that
   do the CPU/IO-heavy work (checkout, canonicalize, hash, archive, QA boot).
 - **Capsule runtime (`crates/capsule`, `crates/snapshot`)** — the manifest
-  validator core (extracted to WASM) and the ReadyStateManifest execution-identity
-  fields.
+  validator core (extracted to WASM), resolved execution contract, and Capsule
+  v1 Snapshot manifest.
 
 ## 2. Scope
 
@@ -98,7 +98,7 @@ The pipeline spans three execution surfaces that already exist in the platform:
   concern from the SPDX *source* license gate in §6.4).
 - The RunnerClass sentinel resolution that supplies `rootfs_base_id` /
   `guest_kernel_id` — a prerequisite tracked separately (see
-  [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) §4).
+  [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) §4).
 
 ## 3. Actors and data flow
 
@@ -127,7 +127,7 @@ The pipeline spans three execution surfaces that already exist in the platform:
                  ▼
    candidate.pipeline_state: qa_queued → qa_running
                  │  builder job: candidate_qa (headless boot on runner_class)
-                 │  ReadyStateManifest w/ execution_id + teardown receipt
+                 │  SnapshotManifestV1 + teardown receipt
                  ▼
    candidate.pipeline_state: publish_ready → awaiting_admin_approval → published
                  │  capsule_revision: verifying → publish_ready
@@ -144,12 +144,13 @@ The three hashes that thread the whole pipeline together:
 |------|-------|-----------|
 | `materialized_source_tree_hash` | A1v2 digest (`sha256`) of the canonical checkout | [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) |
 | `source_archive_hash` | `sha256` of the exact `tar.zst` bytes | [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) |
-| `execution_id` | `blake3` over the resolved target launch contract; Snapshot layer IDs are excluded | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) |
+| `execution_id` | `blake3` over the resolved target launch contract; Snapshot layer IDs are excluded | [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) |
 
 Hash-role split (consistent with [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md)):
-**`sha256` is identity (the A1 family); `blake3` is CapsuleFS CAS transport plus
-the structural-id family that already backs `ReadyStateManifest::id()`**. The two
-never substitute for each other.
+**`sha256` is identity for the A1 source-tree family; domain-separated `blake3`
+identifies the resolved execution contract and Snapshot manifest, and remains
+the CapsuleFS CAS transport hash.** The profiles never substitute for each
+other.
 
 ## 4. Request model and state machine (topic 6)
 
@@ -293,8 +294,8 @@ The builder consumes two job kinds on the **existing** claim/ack lease lane
 
 - `source_materialize` — see [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md).
 - `candidate_qa` — headless boot of the candidate capsule on a target
-  `runner_class`, producing a `ReadyStateManifest` (with `execution_id`) and a
-  **teardown receipt** that publication requires.
+  `runner_class`, producing a `SnapshotManifestV1` subordinate to the resolved
+  `execution_id` and a **teardown receipt** that publication requires.
 
 QA job uniqueness key (prevents duplicate QA work for an identical candidate):
 
@@ -412,14 +413,16 @@ regardless of which revision is current.
   never enters the instruction channel.
 - **Public repos only**: materialization uses a GitHub App installation token
   scoped to public reads; no private content is ever fetched.
-- **Sealed-execution identity**: `execution_id` is computed over the **post-seal**
-  sealed layer CAS IDs plus the launch spec, so a published capsule's runtime
-  identity is exactly what was verified — even though Lane B builds are not
-  input-deterministic (historical context is retained in the
-  [archived Snapshot-derived spec](../archived/EXECUTION_IDENTITY_SPEC.md)).
-- **No secret capture**: QA boots reuse the ReadyStateManifest no-secret
-  invariant — the sealed artifact carries no secret and is reusable across hosts
-  of the same `runner_class_id`.
+- **Resolved launch identity**: `execution_id` is computed from the finalized
+  `ato.execution-contract/v1` after runtime, dependency, and application output
+  digests are observed. Snapshot IDs and sealed memory/VM-state layers are
+  excluded; the former post-seal proposal is retained only in the
+  [archived Snapshot-derived spec](../archived/EXECUTION_IDENTITY_SPEC.md).
+- **No secret capture**: QA boots use the Capsule v1 structural capture policy:
+  production secrets, user state, and user identity are never attached to the
+  build guest. Sanitization and secret-scan attestations are supporting
+  evidence, not proof. Compatibility, rather than a runner name alone,
+  determines where the Snapshot may be restored.
 - **Materialization resource caps**: bounded (100 MiB compressed / 250 MiB
   expanded / 50,000 files / 50 MiB single file) so a hostile repo cannot exhaust
   the builder.
@@ -472,7 +475,7 @@ Carried forward as explicit open questions (see also §12 of
 
 - [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) — source-tree hash profile.
 - [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md) — materialize job contract.
-- [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](CAPSULE_V1_EXECUTION_MODEL_SPEC.md) —
+- [CAPSULE_V1_EXECUTION_MODEL_SPEC.md](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md) —
   Capsule v1 `execution_id` and Snapshot boundary.
 - [ADR-011-source-materialization-placement.md](ADR-011-source-materialization-placement.md) — placement decision.
 - [ADR-012-capsule-lifecycle-column.md](ADR-012-capsule-lifecycle-column.md) — capsule + revision lifecycle.
@@ -480,4 +483,6 @@ Carried forward as explicit open questions (see also §12 of
 - [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md) — hash domains and Git provenance.
 - [../accepted/A1_BLOB_HASH.md](../accepted/A1_BLOB_HASH.md) — the frozen A1 base algorithm.
 - `crates/snapshot/src/rootfs_builder.rs:1474` — `materialize_source` (extended by the builder job).
-- `crates/snapshot/src/manifest.rs:19-63` — `ReadyStateManifest` (`ato.ready-state/v1`).
+- `crates/snapshot/src/snapshot_manifest.rs` — `SnapshotManifestV1`
+  (`ato.snapshot-manifest/v1`); `manifest.rs` retains legacy
+  `ReadyStateManifest` decoding for explicit migration.
