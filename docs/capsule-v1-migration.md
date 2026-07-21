@@ -49,7 +49,8 @@ v1 adds a typed top-level `execution_contract` and its stored `execution_id` to
 `ato.lock.json`. Both must be present together. The runtime rehashes the
 contract on durable lock reads.
 
-Only `execution_contract` is identity-bearing. Existing lock metadata,
+`execution_contract` and its derived `execution_id` are authenticated by the
+lock identity/signature projection. Existing lock metadata,
 provenance, diagnostics, evidence, timestamps, Snapshot references, runner
 names, and Session facts remain outside the hash.
 
