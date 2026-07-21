@@ -55,7 +55,7 @@
 - [Discussion Authority Schema Distribution](draft/DISCUSSION_AUTHORITY_SCHEMA_DISTRIBUTION.md)
 - [Draft ID](draft/DRAFT_ID.md)
 - [Engine and Workload Model](draft/ENGINE_AND_WORKLOAD_MODEL.md)
-- [Execution Identity Spec](draft/EXECUTION_IDENTITY_SPEC.md)
+- [Capsule v1 Execution Model](draft/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
 - [GitHub Capsule Request Pipeline](draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md)
 - [Hash and Provenance Policy](draft/HASH_AND_PROVENANCE_POLICY.md)
 - [Host Panel Routing](draft/HOST_PANEL_ROUTING.md)

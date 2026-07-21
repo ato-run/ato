@@ -13,6 +13,7 @@ related:
   - "CAPSULE_CORE_MODEL.md"
   - "beyond-reproducible-build.md"
   - "HASH_AND_PROVENANCE_POLICY.md"
+  - "../archived/EXECUTION_IDENTITY_SPEC.md"
   - "../accepted/ADR-002-signature-format-jcs.md"
   - "../../execution-identity.md"
   - "../../snapshot.md"
@@ -396,6 +397,10 @@ Session facts and are recorded in the Receipt.
 perform an HTTP request, an API workflow, browser automation, database
 initialization checks, or another application-specific verification.
 
+`seal_at.command` is evaluated against a disposable restore of an immutable
+candidate Snapshot. It determines whether that candidate may be accepted; it
+does not define the exact instant when the builder captures its first candidate.
+
 Ato interprets only its process result:
 
 - exit code 0 means the candidate passed
@@ -443,7 +448,7 @@ The conceptual v1 Snapshot Manifest contains:
 
 ```text
 SnapshotManifest
-  schema
+  schema = "ato.snapshot-manifest/v1"
   execution_id                  required
   compatibility_contract
   memory_layer_refs
@@ -574,6 +579,14 @@ ephemeral synthetic bindings that conform to the declared External State
 schema.
 
 This policy is an internal Snapshot restore contract, not a new public identity.
+
+The final v1 architecture defines both policies, but the first implementation
+slice supports `running` only. `workload_idle` is an independent lifecycle
+follow-up because it requires workload stop, placeholder revocation,
+restore-time binding delivery, restart ordering, and failure cleanup. Until that
+follow-up lands, a Snapshot build that requires External State for a live
+workload MUST fail closed as ineligible; it MUST NOT fall back to a
+secret-bearing running capture.
 
 ### 8.4 Validation environment
 
@@ -832,11 +845,12 @@ Receipt evidence. Neither receives another public exact execution ID.
 Internal graph projections MAY remain if useful, but only the resolved target
 contract produces the v1 public `execution_id`.
 
-### 16.2 Previous revision of this draft
+### 16.2 Superseded Snapshot-derived draft
 
-The previous revision of this file defined `execution_id` from post-seal
-Snapshot layer CAS IDs and runner-class facets. This specification supersedes
-that model:
+The archived
+[Execution Identity Spec](../archived/EXECUTION_IDENTITY_SPEC.md) defined
+`execution_id` from post-seal Snapshot layer CAS IDs and runner-class facets.
+This specification supersedes that model:
 
 - runtime, dependency, and application output digests remain identity-bearing
 - Snapshot memory/vmstate/disk layer IDs are excluded
@@ -845,16 +859,24 @@ that model:
 
 ### 16.3 Current Ready-State manifest
 
-The current `ReadyStateManifest` carries both `capsule_manifest_hash` and an
-optional `execution_id`. In the v1 migration:
+The current `ato.ready-state/v1` `ReadyStateManifest` carries both
+`capsule_manifest_hash` and an optional `execution_id`. Capsule v1 introduces a
+new `ato.snapshot-manifest/v1` wire schema rather than making a field required
+inside the legacy schema:
 
-- `execution_id` becomes required for every v1 Snapshot
+- legacy `ato.ready-state/v1` Snapshots remain deserializable for inspection and
+  explicit migration, including artifacts without `execution_id`
+- legacy Snapshots without `execution_id` are never eligible for v1 exact lookup
+- `execution_id` is required by the `ato.snapshot-manifest/v1` type and validator
 - `capsule_manifest_hash` is removed from compatibility selection and may remain
   only as capture provenance
 - `runner_class_id` is replaced or generalized by the compatibility contract
 - `no_secret_proof` is replaced by structural capture policy plus sanitization
   and secret-scan attestations
 - Registry lookup requires exact `execution_id` before compatibility ranking
+
+The runtime MUST NOT silently reinterpret a legacy manifest as a v1 manifest.
+Migration creates a new immutable manifest and therefore a new `snapshot_id`.
 
 ### 16.4 Deprecated external vocabulary
 
