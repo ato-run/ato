@@ -52,6 +52,7 @@ mod snapshot_manifest;
 pub mod state_volume;
 pub mod state_volume_persistence;
 mod uffd;
+mod workload_idle;
 // U1 (#854) spike: plumbing exercised only by #[ignore]d KVM-gated smokes
 // (ATO_FC_UFFD), not yet wired into the default restore path — see the
 // module doc for scope. Real, tested, deliberately unused until U2+.
@@ -100,6 +101,11 @@ pub use snapshot_manifest::{
     SecretScanAttestation, SnapshotCatalogRecord, SnapshotCatalogStatus,
     SnapshotCompatibilityContract, SnapshotLayerRefs, SnapshotManifestError, SnapshotManifestV1,
     SnapshotRestoreCapabilities, migrate_legacy_manifest, select_compatible_snapshot,
+};
+pub use workload_idle::{
+    ExposedWorkloadIdleSession, SyntheticBindingSpec, WorkloadIdleAcceptanceReceipt,
+    WorkloadIdleConfig, WorkloadIdleError, WorkloadIdleLifecycle, WorkloadIdleRunReceipt,
+    accept_workload_idle_snapshot, restore_workload_idle_session,
 };
 
 #[cfg(test)]
