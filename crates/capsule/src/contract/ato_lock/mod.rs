@@ -519,6 +519,8 @@ mod tests {
     #[test]
     fn canonical_identity_helpers_report_expected_sections() {
         assert!(is_canonical_identity_section("schema_version"));
+        assert!(is_canonical_identity_section("execution_contract"));
+        assert!(is_canonical_identity_section("execution_id"));
         assert!(is_canonical_identity_section("resolution"));
         assert!(is_canonical_identity_section("contract"));
         assert!(!is_canonical_identity_section("binding"));
