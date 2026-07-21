@@ -215,8 +215,11 @@ pub fn accept_workload_idle_snapshot(
         "detach_validation_state".to_string(),
         "destroy_disposable_session".to_string(),
     ]);
-    cleanup?;
-    result?;
+    match (result, cleanup) {
+        (Err(primary), _) => return Err(primary),
+        (Ok(()), Err(cleanup)) => return Err(cleanup),
+        (Ok(()), Ok(())) => {}
+    }
 
     let receipt = WorkloadIdleAcceptanceReceipt {
         snapshot_id: candidate.manifest.snapshot_id.clone(),
@@ -305,7 +308,9 @@ pub fn restore_workload_idle_session(
             session,
         }),
         Err(error) => {
-            cleanup_disposable(lifecycle, session)?;
+            // Cleanup remains best-effort, but it must not replace the causal
+            // lifecycle/validation error that triggered rollback.
+            let _cleanup_result = cleanup_disposable(lifecycle, session);
             Err(error)
         }
     }
@@ -369,6 +374,7 @@ mod tests {
         calls: Vec<&'static str>,
         revoke_attested: bool,
         fail_readiness: bool,
+        fail_cleanup: bool,
     }
 
     impl MockLifecycle {
@@ -517,7 +523,11 @@ mod tests {
         }
         fn destroy_session(&mut self, _: DisposableSessionHandle) -> Result<(), String> {
             self.calls.push("destroy");
-            Ok(())
+            if self.fail_cleanup {
+                Err("cleanup failed".to_string())
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -632,6 +642,40 @@ mod tests {
         assert_eq!(
             &lifecycle.calls[lifecycle.calls.len() - 4..],
             &["stop", "revoke", "detach", "destroy"]
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_does_not_mask_primary_readiness_failure() {
+        let mut lifecycle = MockLifecycle {
+            revoke_attested: true,
+            ..Default::default()
+        };
+        let (snapshot, _) = accept_workload_idle_snapshot(
+            &mut lifecycle,
+            &config(),
+            &AcceptanceCancellation::default(),
+        )
+        .unwrap();
+        lifecycle.calls.clear();
+        lifecycle.fail_readiness = true;
+        lifecycle.fail_cleanup = true;
+
+        assert_eq!(
+            restore_workload_idle_session(
+                &mut lifecycle,
+                &snapshot,
+                &[],
+                Duration::from_secs(1),
+                &AcceptanceCancellation::default(),
+            )
+            .unwrap_err(),
+            WorkloadIdleError::ValidationFailed
+        );
+        assert!(
+            lifecycle
+                .calls
+                .ends_with(&["stop", "revoke", "detach", "destroy"])
         );
     }
 }
