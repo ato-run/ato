@@ -2,219 +2,116 @@
 
 ## Overview
 
-Execution Identity is the launch-envelope identity Ato uses to answer “are these
-launch conditions the same?” It is not just a source hash; it also includes the
-runtime, environment, filesystem, policy, and launch shape. The current default
-receipt path emits schema v2 unless `ATO_RECEIPT_SCHEMA=v1` forces the older
-view.
+Execution Identity is Ato's sole exact identity for an execution. It identifies
+the platform-resolved launch contract: source, target, runtime, dependency and
+build outputs, launch command, normalized environment, filesystem view,
+policies, guest surface, and External State schema contracts.
 
-## How it works
+It is not a source hash, a Snapshot ID, a runner ID, or a Session ID.
 
-Execution identity is computed before launch. It covers the full launch
-condition, not only the source tree:
+The normative definition is the
+[Capsule v1 Execution Identity and Snapshot Model](rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md).
+Migration behavior is documented in
+[Capsule v0.3 to v1 migration](capsule-v1-migration.md).
 
-- recipe snapshot
-- source input snapshots
-- dependency outputs
-- runtime identity
-- environment closure
-- filesystem view
-- network policy
-- capability policy
-- entrypoint / argv / working directory
-- state bindings
+## Canonical form
 
-The receipt builder now composes this in one place:
-
-1. derive a launch spec
-2. observe source, dependencies, runtime, environment, filesystem, and policy
-3. derive launch identity and reproducibility
-4. canonicalize the projection with JCS
-5. hash it with `blake3-256`
-
-On the desktop side, receipt-aware launches keep `execution_id` in the surface
-metadata and map it to `~/.ato/executions/<execution_id>/receipt.json`.
-
-## Specification
-
-- `execution_id` MUST identify launch conditions, not just source content.
-- execution receipts MUST be addressable by `execution_id`.
-- the current identity header uses JCS canonicalization and `blake3-256`.
-- receipt schema selection defaults to v2 and supports v1 only as an opt-out.
-- runtime identity v2 MUST carry resolved runtime information and completeness
-  status, not only a declared version string.
-- secret values MUST NOT be recorded directly in receipts.
-
-References:
-
-- [`rfcs/draft/beyond-reproducible-build.ja.md`](rfcs/draft/beyond-reproducible-build.ja.md)
-- [`crates/desktop/src/orchestrator.rs`](https://github.com/ato-run/ato/blob/main/crates/desktop/src/orchestrator.rs)
-
-## Same source is not same execution
-
-The same source repository can produce different executions when the recipe
-changes.
-
-The same recipe can also produce different executions when source revisions,
-runtime resolution, environment, filesystem grants, network policy, capability
-policy, or state bindings change.
-
-Execution Identity identifies the resolved launch world — not merely the source
-repository and not merely the recipe. All of the following are distinct
-executions:
+`ato.lock.json` persists the resolved contract separately from metadata:
 
 ```text
-Same source + recipe A → execution X
-Same source + recipe B → execution Y
-
-Recipe A + source v1 → execution X
-Recipe A + source v2 → execution Z
-
-Recipe A + source v1 + network allowed  → execution P
-Recipe A + source v1 + network denied   → execution Q
+ato.lock.json
+  execution_contract   identity-bearing resolved launch contract
+  execution_id         stored canonical digest
+  provenance           non-identity metadata
+  diagnostics          non-identity metadata
+  evidence             non-identity metadata
+  generated_at         non-identity metadata
 ```
 
-## Desktop display
+The ID is computed only from `execution_contract`:
 
-Ato Desktop shows the execution identity for the current managed session so the
-user can see which resolved recipe execution is running.
+```text
+execution_id =
+  BLAKE3(
+    "ato.execution-contract/v1"
+    || NUL
+    || JCS(lock.execution_contract)
+  )
+```
 
-If the launch graph is unchanged and the previous session is still healthy,
-Desktop may reattach to it. If the recipe or any other part of the launch graph
-changes, Desktop must materialize a new session.
+A durable lock is rehashed when read. Missing pairs, malformed contracts, and
+digest mismatches fail closed.
 
-## Design Notes
+## Identity-bearing conditions
 
-“Same code” is not enough to describe reproducibility. What Ato wants to retain
-is not only artifact equality, but the shape of the world a launch was about to
-observe. The v2 receipt path pushes further in that direction by adding source
-provenance, local locator data, richer env / filesystem structure, and runtime
-completeness metadata.
+- immutable source reference and content digest
+- target OS, architecture, ABI/libc, and app-observable CPU/GPU features
+- resolved runtime reference and artifact digest
+- dependency derivation and actual output digests
+- application build-output digests
+- exact launch argv and cwd
+- normalized environment names and value digests; secret binding names only
+- filesystem view and layer identities
+- network, capability, and filesystem policies
+- guest protocol/surface requirements
+- External State name, target, access mode, schema, and Snapshot exclusion rule
 
-## Graph-based execution identity (v0.6.0)
+Every identity-bearing artifact digest is finalized before `execution_id` is
+issued. Linux x86_64 and Linux arm64 therefore have different IDs.
 
-The v0.6.0 core migration (ato-run/ato#74) introduces a typed `ExecutionGraph`
-in `capsule` (#97) and a canonical form over it (#98). The canonical form
-is the authoritative input to graph-derived execution IDs. This section is the
-single source of truth for canonicalization; the executable counterpart is
-`crates/capsule/src/engine/execution_graph/canonical.rs`. **If you change
-one, change the other in the same commit.**
+## Conditions outside Execution Identity
 
-### Three identity domains
+- Snapshot ID, format, backend, VMM restore constraints, or capture time
+- runner/provider/machine names
+- Session ID, dynamic ports, assigned IPs, and timestamps
+- diagnostics, logs, evidence URLs, and builder names
+- External State owner, instance reference, generation, or data
+- secret values and identity assertions
 
-The same logical execution has three identity views, each computed by hashing
-the graph's canonical form under a different domain tag:
+These values may be recorded in a redacted Session Receipt when needed, but do
+not create another exact execution identity.
 
-- `declared_execution_id = H(canonicalize(G_declared, Domain::Declared))` —
-  derived from the manifest, the lock, and policy only. It is host-independent
-  and stable across machines that resolve to different concrete artifacts. Two
-  developers with the same manifest + lock + policy MUST observe the same
-  declared id.
-- `resolved_execution_id = H(canonicalize(G_resolved, Domain::Resolved))` —
-  derived after host resolution: artifact selectors are replaced with their
-  concrete materializations (resolved tool capsule content hashes, runtime
-  store paths, platform tuples, etc.). It is host-bound by construction.
-- `observed_execution_id = H(canonicalize(G_observed, Domain::Observed))` —
-  derived after runtime observation of undeclared edges (e.g. an env var the
-  process actually read, an unannounced filesystem touch). Optional. Absent
-  by default in v0.6.0; the observed view is `None` on receipts unless
-  observation hooks are explicitly enabled. v0.6.0 does not implement those
-  hooks (Phase 4 in the umbrella tracker).
+## Relationship to Snapshot
 
-Domain separation is enforced inside canonicalization: each canonical form
-embeds its domain discriminant before any node/edge bytes, so the same graph
-in two different domains yields two different digests. A `Declared` digest
-cannot be confused with a `Resolved` digest at the byte level.
+A Snapshot is an immutable cache subordinate to exactly one Execution Identity.
+The selection gate is:
 
-### Canonicalization rules
+```text
+exact execution_id
+  -> proven Snapshot compatibility
+  -> ranking among eligible candidates
+```
 
-Given an `ExecutionGraph` and a domain, the canonical bytes are produced by:
+Snapshot format changes may change `snapshot_id`, but never `execution_id`.
+When no compatible Snapshot exists, policy may permit cold reconstruction of
+the same resolved contract. Every reconstructed identity-bearing condition is
+verified before External State is attached or a Session starts.
 
-1. **Header**: 16-byte magic (`ato-graph-canon\0`) || `CANONICAL_FORM_VERSION`
-   as little-endian u32 || domain discriminant as u8.
-2. **Nodes section**: tag `NODE` (4 bytes) || count as little-endian u32 ||
-   for each node: kind discriminant (u8) || node payload. Nodes are sorted by
-   `(kind_discriminant, identifier)`. Today every node carries only an
-   `identifier`; the payload is therefore a single length-prefixed UTF-8
-   string. Future per-variant fields MUST be appended after the identifier.
-3. **Edges section**: tag `EDGE` || count u32 || for each edge: source
-   (length-prefixed string) || target (length-prefixed string) || edge kind
-   discriminant (u8). Edges are sorted by
-   `(source, target, edge_kind_discriminant)`.
-4. **Labels section**: tag `LBLS` || count u32 || for each `(key, value)` in
-   key order: length-prefixed key || length-prefixed value. The graph stores
-   labels in a `BTreeMap<String, String>`, so iteration is already sorted by
-   key; the spec pins that contract.
-5. **Constraints section**: tag `CSTR` || count u32 || for each constraint:
-   length-prefixed kind || length-prefixed target. Constraints are sorted by
-   `(kind, target)`. The constraint vocabulary is still expanding (#98); when
-   it does, additional fields MUST be appended after `target` to keep the
-   section additive.
+## Receipts and internal graph data
 
-Length-prefixed strings use a 4-byte little-endian u32 length followed by the
-raw UTF-8 bytes. Length prefixing is what makes the framing unambiguous under
-concatenation: two adjacent strings cannot be confused with a single longer
-string because the boundary is encoded explicitly.
+ExecutionGraph, ExecutionPlan, Realization, Materialization, and the historical
+declared/resolved/observed graph facets remain useful internal planning and
+diagnostic structures. They are not competing public exact execution
+identities. Public APIs use `execution_id`; internal facet fields are legacy or
+diagnostic evidence and must not be used for Snapshot lookup.
 
-The digest is `SHA-256` over the full canonical bytes.
+Session Receipts record the selected Snapshot, runner, dynamic endpoints,
+attached opaque state references and generations, launch mode, and validation
+evidence without recording state contents, secret values, or identity
+assertions.
 
-### Secret redaction boundary
+## Same source is not the same execution
 
-Some node kinds may carry secret-bearing fields at runtime; canonicalization
-operates on a *redacted* projection. The current redaction list is:
+```text
+same source + runtime digest A  -> execution X
+same source + runtime digest B  -> execution Y
 
-- `Env { identifier }` — only the env var *identifier* (name) participates
-  in canonicalization. If the type is later extended with a `value` field,
-  that value MUST be omitted from the canonical bytes.
-- Any future field carrying a secret (capability tokens, credential blobs,
-  etc.) MUST be redacted before canonicalization. Adding such a field
-  without updating this list is a spec violation.
+same source + linux/x86_64      -> execution P
+same source + linux/aarch64     -> execution Q
 
-The redaction boundary lives in the canonicalizer, not in the type. This is
-deliberate: the in-memory graph still needs the raw values at runtime (e.g.
-to inject env into a child process); canonicalization is the choke point
-that ensures secrets never reach the digest input.
+same source + network denied    -> execution M
+same source + network allowed   -> execution N
+```
 
-### Declared graph keeps platform selectors
-
-`G_declared` records the platform *selector* it was authored against
-(e.g. `linux-x86_64-glibc-*`). `G_resolved` replaces that selector with the
-concrete materialization (e.g. the resolved tool capsule's content hash + a
-specific platform tuple).
-
-Two consequences fall out of this:
-
-- Reordering an artifact in a manifest does not change `declared_execution_id`,
-  because canonicalization sorts nodes and edges deterministically.
-- Selecting a different concrete artifact for the same selector *does* change
-  `resolved_execution_id`, because the resolved node identifiers carry the
-  concrete materialization.
-
-### Observed graph is optional and absent by default
-
-In v0.6.0 there is no observed-runtime computation: `observed_execution_id`
-is `None` on every receipt unless a future observation feature is explicitly
-enabled. The canonical form for the `Observed` domain is well-defined (it
-exists in `CanonicalGraphDomain`), but no production code path emits an
-observed graph yet.
-
-This issue (#98) deliberately stops at the canonical form. Receipt plumbing
-(`declared_execution_id` / `resolved_execution_id` fields on
-`ExecutionReceiptV2`) is Wave 3 (PR-5a). Observation hooks are Phase 4 in
-the umbrella tracker.
-
-### Forward compatibility
-
-- New node kinds and new edge kinds are additive. Adding a kind shifts no
-  existing discriminant, so digests for graphs that do not use the new kind
-  remain unchanged.
-- A new per-variant field on an existing node kind is additive only if it is
-  appended after the existing payload bytes and only emitted when present.
-  Anything else (changing the order of an existing payload, removing a
-  field) requires a `CANONICAL_FORM_VERSION` bump.
-- `CANONICAL_FORM_VERSION` is part of the framing, so any bump invalidates
-  every previously computed digest. That is the intended safety net: a
-  format change must produce a different identity, never a silent collision.
-- The classic JCS + blake3 receipt-identity path described above is
-  unaffected by this section. It coexists with the graph-derived ids until
-  the migration in Wave 3 is complete.
+Conversely, selecting a different compatible Snapshot or runner for the same
+resolved launch contract does not change Execution Identity.
