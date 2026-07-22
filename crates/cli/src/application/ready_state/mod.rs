@@ -112,14 +112,18 @@ pub(crate) fn assemble_build_layers(
 /// restore instead of cold-spawn. Present only when the flag is on, the capsule
 /// is Ready-State-eligible, and a sealed artifact exists — otherwise the run
 /// falls through to the legacy cold path.
-#[derive(Debug)]
 pub(crate) struct ReadyStateRunPlan {
     /// The sealed artifact to restore.
     pub(crate) manifest: snapshot::ReadyStateManifest,
     /// Capsule-v1 identity/compatibility sidecar for the same immutable layers.
     pub(crate) v1_manifest: Option<snapshot::SnapshotManifestV1>,
-    /// State root holding the `ready-state/<hash>/cas` store.
-    pub(crate) state_root: PathBuf,
+    /// Authenticated acceptance/sidecar envelope for a Capsule-v1 Snapshot.
+    pub(crate) v1_envelope: Option<snapshot::ArtifactEnvelopeV1>,
+    /// Directory containing this exact Snapshot's manifest files and CAS.
+    pub(crate) artifact_dir: PathBuf,
+    /// Backend used to prove v1 compatibility during candidate selection.
+    /// Legacy plans defer backend selection until the existing run gate.
+    pub(crate) selected_backend: Option<Box<dyn snapshot::SnapshotBackend>>,
     /// `blake3:<hex>` of the capsule manifest (the artifact key).
     pub(crate) capsule_manifest_hash: String,
     /// Whether to run the post-resume sanitizer before exposing. (The
@@ -151,36 +155,73 @@ pub(crate) fn decide_ready_state_run(
     if !manifest.is_ready_state_eligible() {
         return Ok(None);
     }
-    let Some(sealed) = store::load_manifest(state_root, capsule_manifest_hash)? else {
-        anyhow::bail!(
-            "Ready-State artifact not found for {capsule_manifest_hash}. Run `ato build` with \
-             ATO_READY_STATE_ENABLED=1 first, or unset ATO_READY_STATE_ENABLED to use the legacy \
-             cold path."
-        );
-    };
-    let v1_manifest = match expected_execution_id {
-        Some(expected) => {
-            let candidate = store::load_v1_manifest(state_root, capsule_manifest_hash)?
+    let (sealed, v1_manifest, v1_envelope, artifact_dir, selected_backend) =
+        match expected_execution_id {
+            Some(expected) => {
+                let backend = backend::select_backend()?;
+                let compatibility = backend
+                    .snapshot_compatibility_contract()
+                    .map_err(anyhow::Error::new)?;
+                let capabilities = snapshot::SnapshotRestoreCapabilities::exact(&compatibility);
+                let candidates = store::load_v1_snapshots(state_root, expected)?;
+                let catalog = candidates
+                    .iter()
+                    .map(|candidate| {
+                        snapshot::SnapshotCatalogRecord::accepted(
+                            candidate.snapshot_manifest.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let selected = snapshot::select_compatible_snapshot(
+                    expected,
+                    &capabilities,
+                    &catalog,
+                )?
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Snapshot v1 manifest not found for execution_id {expected}; rebuild the \
-                         artifact instead of reinterpreting the legacy Ready-State manifest"
+                        "no compatible Snapshot v1 artifact found for execution_id {expected}; \
+                     rebuild the artifact for backend {} instead of reinterpreting the legacy \
+                     Ready-State manifest",
+                        backend.id()
                     )
                 })?;
-            if &candidate.execution_id != expected {
-                anyhow::bail!(
-                    "Snapshot execution_id mismatch: expected {expected}, found {}",
-                    candidate.execution_id
-                );
+                let candidate = candidates
+                    .into_iter()
+                    .find(|candidate| {
+                        candidate.snapshot_manifest.snapshot_id == selected.snapshot_id
+                    })
+                    .expect("selected catalog record came from the loaded candidates");
+                (
+                    candidate.legacy_manifest,
+                    Some(candidate.snapshot_manifest),
+                    Some(candidate.envelope),
+                    candidate.artifact_dir,
+                    Some(backend),
+                )
             }
-            Some(candidate)
-        }
-        None => None,
-    };
+            None => {
+                let sealed = store::load_manifest(state_root, capsule_manifest_hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ready-State artifact not found for {capsule_manifest_hash}. Run `ato build` \
+                     with ATO_READY_STATE_ENABLED=1 first, or unset ATO_READY_STATE_ENABLED to use \
+                     the legacy cold path."
+                )
+            })?;
+                (
+                    sealed,
+                    None,
+                    None,
+                    store::artifact_dir(state_root, capsule_manifest_hash),
+                    None,
+                )
+            }
+        };
     Ok(Some(ReadyStateRunPlan {
         manifest: sealed,
         v1_manifest,
-        state_root: state_root.to_path_buf(),
+        v1_envelope,
+        artifact_dir,
+        selected_backend,
         capsule_manifest_hash: capsule_manifest_hash.to_string(),
         sanitize_after_restore: manifest.snapshot_config().sanitize_after_restore,
         // `None` delegates host-class resolution to the backend at restore
@@ -260,6 +301,26 @@ port = 8080
         .unwrap();
     }
 
+    fn seal_fake_v1_artifact(root: &Path, hash: &str, execution_id: ExecutionId) {
+        let backend = snapshot::FakeSnapshotBackend::new();
+        build::seal(
+            root,
+            hash.to_string(),
+            &eligible_manifest(),
+            snapshot::BuildLayers {
+                rootfs: b"rootfs-v1".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: Some(b"app-v1".to_vec()),
+                vmstate: vec![1; 128],
+                memory: vec![2; 2000],
+            },
+            &backend,
+            Some(execution_id),
+        )
+        .unwrap();
+    }
+
     // `ATO_READY_STATE_ENABLED` is process-global, so ALL flag-dependent `decide`
     // cases live in this one serial test (never split across parallel tests).
     #[test]
@@ -291,8 +352,9 @@ port = 8080
         );
 
         // flag ON, eligible, NO artifact → Err (fail closed, no silent cold run).
-        let err =
-            decide_ready_state_run(&eligible_manifest(), "blake3:missing", root, None).unwrap_err();
+        let err = decide_ready_state_run(&eligible_manifest(), "blake3:missing", root, None)
+            .err()
+            .expect("missing artifact must fail closed");
         assert!(
             err.to_string().contains("Ready-State artifact not found"),
             "{err}"
@@ -315,11 +377,43 @@ port = 8080
         // must rebuild so acceptance produces the authenticated v1 sidecar.
         let execution_id = ExecutionId::new(format!("blake3:{}", "a".repeat(64))).unwrap();
         let error = decide_ready_state_run(&eligible_manifest(), hash, root, Some(&execution_id))
-            .unwrap_err();
+            .err()
+            .expect("legacy artifact must not satisfy a v1 lookup");
         assert!(
             error.to_string().contains("rebuild the artifact"),
             "{error}"
         );
+
+        // Once rebuilt, every Snapshot remains stored under this execution ID,
+        // but candidate selection must skip an incompatible cache and choose the
+        // one whose backend evidence matches this host.
+        seal_fake_v1_artifact(root, hash, execution_id.clone());
+        let compatible = store::load_v1_snapshots(root, &execution_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let mut incompatible_manifest = compatible.snapshot_manifest.clone();
+        incompatible_manifest.compatibility.format = "future-incompatible".to_string();
+        incompatible_manifest.snapshot_id = incompatible_manifest.compute_snapshot_id().unwrap();
+        let incompatible_envelope = snapshot::ArtifactEnvelopeV1::accepted(
+            &compatible.legacy_manifest,
+            &incompatible_manifest,
+        )
+        .unwrap();
+        store::V1StagingArtifact::create(root, &execution_id)
+            .unwrap()
+            .commit(
+                root,
+                &compatible.legacy_manifest,
+                &incompatible_manifest,
+                &incompatible_envelope,
+            )
+            .unwrap();
+        let plan = decide_ready_state_run(&eligible_manifest(), hash, root, Some(&execution_id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.v1_manifest.unwrap().compatibility.format, "fake-v1");
+        assert_eq!(plan.selected_backend.as_ref().unwrap().id(), "fake");
 
         set(prev.as_deref());
     }

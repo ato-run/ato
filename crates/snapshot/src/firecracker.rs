@@ -2007,6 +2007,7 @@ impl SnapshotBackend for FirecrackerBackend {
             has_vsock: vsock_enabled(),
             runner_class_id,
             execution_id: input.execution_id.clone(),
+            execution_identity_schema: input.execution_identity_schema.clone(),
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
@@ -3216,6 +3217,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec!["PREFLIGHT_MARKER_XYZ".to_string()],
             execution_id: None,
+            execution_identity_schema: None,
             supervisor: None,
         };
         let err = FirecrackerBackend::new()
@@ -3362,6 +3364,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: None,
+            execution_identity_schema: None,
             supervisor: Some(SupervisorBindings {
                 binding_names: vec!["openai_api_key".into()],
                 ..Default::default()
@@ -3553,6 +3556,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: ReadyStateLayers::default(),
             hotset_profile: Default::default(),

@@ -64,6 +64,7 @@ fn build_input<'a>(
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: markers,
         execution_id: None,
+        execution_identity_schema: None,
         supervisor: None,
     }
 }
@@ -1393,6 +1394,7 @@ fn fc_kvm_binding_lease_live_e2e() {
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        execution_identity_schema: None,
         supervisor: None,
     };
     // SAFETY: KVM suite runs --test-threads=1; var removed before returning.
@@ -1570,6 +1572,7 @@ fn fc_kvm_supervisor_full_e2e() {
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        execution_identity_schema: None,
         supervisor: Some(crate::backend::SupervisorBindings {
             binding_names: vec!["openai_api_key".to_string()],
             ..Default::default()
@@ -1772,6 +1775,7 @@ fn fc_kvm_binding_negative_paths() {
         sanitizer_contract: SanitizerContract::default(),
         declared_secret_markers: vec![],
         execution_id: None,
+        execution_identity_schema: None,
         supervisor: None,
     };
     unsafe { std::env::set_var("ATO_FC_VSOCK", "1") };

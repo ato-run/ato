@@ -4192,8 +4192,8 @@ async fn handle_restore_snapshot_lease(
     };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
-        load_and_verify_manifest_with_surface_capabilities,
-        load_snapshot_manifest_v1_for_execution, parse_restore_snapshot_command,
+        load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
+        parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -4386,11 +4386,11 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
-    let restore_verification = match load_snapshot_manifest_v1_for_execution(
-        &paths.snapshot_manifest_v1_json,
-        &cmd.execution_id,
-    ) {
-        Ok(Some(candidate)) => RestoreVerification::V1(Box::new(candidate)),
+    let restore_verification = match load_verified_v1_artifact(&paths, &manifest, &cmd) {
+        Ok(Some(candidate)) => RestoreVerification::V1 {
+            manifest: Box::new(candidate.manifest),
+            envelope: Box::new(candidate.envelope),
+        },
         Ok(None) => RestoreVerification::RunnerLease {
             expected_execution_id: cmd.execution_id.clone(),
         },

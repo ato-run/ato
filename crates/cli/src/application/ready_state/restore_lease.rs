@@ -15,21 +15,26 @@
 //! ato#1002 (Snapshot Serving v1): `artifact_location` may now also be
 //! `r2://<bucket>/<job_id>/<hash>` — a remote object store. The bytes are fetched via
 //! the lease's short-lived presigned `artifact_fetch_url` into the SAME
-//! `<artifact_root>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}` layout
+//! `<artifact_root>/<job_id>/{manifest.json, snapshot-manifest-v1.json?,
+//! artifact-envelope-v1.json?, cas/}` layout
 //! ([`ensure_artifact_local`]),
-//! then verified by the SAME [`load_and_verify_manifest`] gate — the fetch adds no
-//! parallel verification, it only lands bytes where the existing gate inspects them.
+//! then verified by the legacy manifest gate and, for explicit Capsule v1,
+//! [`load_verified_v1_artifact`]. The fetch only lands bytes for those gates.
 
 use std::path::{Path, PathBuf};
 
-use capsule::execution_contract::ExecutionId;
+use capsule::execution_contract::{EXECUTION_CONTRACT_V1_SCHEMA, ExecutionId};
 use protocol::session_surface::{
     AcceptedSessionSurface, ClientSessionSurfaceCapabilities, PIXEL_STREAM_PROFILE,
     RunnerSessionSurfaceCapabilities, SESSION_SURFACE_CONTRACT_VERSION, SessionSurfaceDescriptor,
     SessionSurfaceKind, SessionSurfaceRequirement, SessionSurfaceTransport,
     SupportedSessionSurface, WEB_SURFACE_PROFILE, negotiate_session_surface,
 };
-use snapshot::{ReadyStateManifest, SNAPSHOT_MANIFEST_V1_FILENAME, SnapshotManifestV1};
+use snapshot::{
+    ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactEnvelopeV1,
+    ReadyStateManifest, SNAPSHOT_MANIFEST_V1_FILENAME, SNAPSHOT_MANIFEST_V1_SCHEMA,
+    SnapshotManifestV1,
+};
 
 /// Lease kind for restoring a sealed Ready-State snapshot (matches ato-api's
 /// `RESTORE_SNAPSHOT_LEASE_KIND`).
@@ -70,6 +75,11 @@ pub(crate) struct RestoreSnapshotCommand {
     pub artifact_manifest_hash: String,
     pub capsule_manifest_hash: String,
     pub execution_id: String,
+    pub execution_identity_schema: Option<String>,
+    pub snapshot_manifest_schema: Option<String>,
+    pub snapshot_manifest_id: Option<String>,
+    pub artifact_envelope_schema: Option<String>,
+    pub artifact_envelope_id: Option<String>,
     pub runner_class_id: String,
     pub snapshot_backend: String,
     pub healthcheck_url_path: Option<String>,
@@ -246,6 +256,48 @@ pub(crate) fn parse_restore_snapshot_command(
     if session_surface.is_some() && session_id.is_none() {
         return Err(err("explicit session_surface lease is missing session_id"));
     }
+    let optional_string = |field: &str| {
+        command
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let execution_identity_schema = optional_string("execution_identity_schema");
+    let snapshot_manifest_schema = optional_string("snapshot_manifest_schema");
+    let snapshot_manifest_id = optional_string("snapshot_manifest_id");
+    let artifact_envelope_schema = optional_string("artifact_envelope_schema");
+    let artifact_envelope_id = optional_string("artifact_envelope_id");
+    match execution_identity_schema.as_deref() {
+        None => {
+            if snapshot_manifest_schema.is_some()
+                || snapshot_manifest_id.is_some()
+                || artifact_envelope_schema.is_some()
+                || artifact_envelope_id.is_some()
+            {
+                return Err(err(
+                    "legacy restore lease must not carry partial Capsule v1 artifact metadata",
+                ));
+            }
+        }
+        Some(EXECUTION_CONTRACT_V1_SCHEMA) => {
+            if snapshot_manifest_schema.as_deref() != Some(SNAPSHOT_MANIFEST_V1_SCHEMA)
+                || artifact_envelope_schema.as_deref() != Some(ARTIFACT_ENVELOPE_V1_SCHEMA)
+                || snapshot_manifest_id.is_none()
+                || artifact_envelope_id.is_none()
+            {
+                return Err(err(
+                    "Capsule v1 restore lease requires snapshot manifest/envelope schemas and ids",
+                ));
+            }
+        }
+        Some(other) => {
+            return Err(err(&format!(
+                "unsupported execution_identity_schema {other:?}"
+            )));
+        }
+    }
     Ok(RestoreSnapshotCommand {
         snapshot_id: req("snapshot_id")?,
         capsule_id: req("capsule_id")?,
@@ -260,6 +312,11 @@ pub(crate) fn parse_restore_snapshot_command(
         artifact_manifest_hash: req("artifact_manifest_hash")?,
         capsule_manifest_hash: req("capsule_manifest_hash")?,
         execution_id: req("execution_id")?,
+        execution_identity_schema,
+        snapshot_manifest_schema,
+        snapshot_manifest_id,
+        artifact_envelope_schema,
+        artifact_envelope_id,
         runner_class_id: req("runner_class_id")?,
         snapshot_backend: req("snapshot_backend")?,
         healthcheck_url_path: command
@@ -382,6 +439,7 @@ fn verify_surface_negotiation(
 pub(crate) struct ArtifactPaths {
     pub manifest_json: PathBuf,
     pub snapshot_manifest_v1_json: PathBuf,
+    pub artifact_envelope_v1_json: PathBuf,
     pub cas_dir: PathBuf,
 }
 
@@ -439,6 +497,7 @@ pub(crate) fn locate_artifact(
     Ok(ArtifactPaths {
         manifest_json: dir.join("manifest.json"),
         snapshot_manifest_v1_json: dir.join(SNAPSHOT_MANIFEST_V1_FILENAME),
+        artifact_envelope_v1_json: dir.join(ARTIFACT_ENVELOPE_V1_FILENAME),
         cas_dir: dir.join("cas"),
     })
 }
@@ -455,8 +514,9 @@ pub(crate) fn locate_artifact(
 ///   filesystem), safe-extracted ([`safe_extract_artifact_tar_gz`]) into a temp dir,
 ///   then atomically renamed into place — the job dir only ever appears complete.
 ///
-/// Byte VERIFICATION stays entirely in [`load_and_verify_manifest`] (the
-/// `manifest.id()` recompute) — this function adds no parallel verification.
+/// Byte VERIFICATION stays in [`load_and_verify_manifest`] plus the explicit-v1
+/// [`load_verified_v1_artifact`] envelope gate — this function adds no parallel
+/// trust path.
 /// Error messages never include the URL: a presigned GET carries its authorization
 /// in the query string.
 pub(crate) async fn ensure_artifact_local(
@@ -583,7 +643,8 @@ async fn download_artifact_archive(
 /// ato#1002: extract a transport `artifact.tar.gz` into `dest_dir`, fail-closed.
 ///
 /// The archive must contain exactly the #928 layout at its root: `manifest.json`,
-/// optional `snapshot-manifest-v1.json`, and `cas/*`. Everything else is rejected — absolute paths, `..` traversal,
+/// optional `snapshot-manifest-v1.json` + `artifact-envelope-v1.json`, and
+/// `cas/*`. Everything else is rejected — absolute paths, `..` traversal,
 /// backslashed components, symlinks/hardlinks/devices/fifos, files outside the
 /// allowlist — and the summed entry sizes are capped by `max_total_bytes` (a tar
 /// entry cannot lie past its header size: the tar layer reads exactly that many
@@ -629,7 +690,9 @@ pub(crate) fn safe_extract_artifact_tar_gz(
                 let ok = (parts.len() == 1
                     && matches!(
                         parts[0].as_str(),
-                        "manifest.json" | SNAPSHOT_MANIFEST_V1_FILENAME
+                        "manifest.json"
+                            | SNAPSHOT_MANIFEST_V1_FILENAME
+                            | ARTIFACT_ENVELOPE_V1_FILENAME
                     ))
                     || (parts.len() >= 2 && parts[0] == "cas");
                 if !ok {
@@ -669,30 +732,88 @@ pub(crate) fn safe_extract_artifact_tar_gz(
     Ok(())
 }
 
-pub(crate) fn load_snapshot_manifest_v1_for_execution(
-    path: &Path,
-    execution_id: &str,
-) -> std::result::Result<Option<SnapshotManifestV1>, (String, String)> {
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedV1Artifact {
+    pub manifest: SnapshotManifestV1,
+    pub envelope: ArtifactEnvelopeV1,
+}
+
+pub(crate) fn load_verified_v1_artifact(
+    paths: &ArtifactPaths,
+    legacy: &ReadyStateManifest,
+    command: &RestoreSnapshotCommand,
+) -> std::result::Result<Option<VerifiedV1Artifact>, (String, String)> {
     let err = |message: String| ("artifact_verification_failed".to_string(), message);
-    if !execution_id.starts_with("blake3:") {
+    if command.execution_identity_schema.is_none() {
         return Ok(None);
     }
+    if legacy.execution_identity_schema != command.execution_identity_schema {
+        return Err(err(
+            "lease/legacy manifest execution identity schema mismatch".to_string(),
+        ));
+    }
     let expected =
-        ExecutionId::new(execution_id.to_string()).map_err(|error| err(error.to_string()))?;
-    let bytes =
-        std::fs::read(path).map_err(|error| err(format!("read {}: {error}", path.display())))?;
-    let manifest: SnapshotManifestV1 = serde_json::from_slice(&bytes)
-        .map_err(|error| err(format!("parse {}: {error}", path.display())))?;
-    manifest
-        .validate()
-        .map_err(|error| err(format!("validate {}: {error}", path.display())))?;
+        ExecutionId::new(command.execution_id.clone()).map_err(|error| err(error.to_string()))?;
+    if legacy.v1_execution_id().map_err(err)?.as_ref() != Some(&expected) {
+        return Err(err(
+            "lease/legacy manifest Capsule v1 execution_id mismatch".to_string(),
+        ));
+    }
+    let bytes = std::fs::read(&paths.snapshot_manifest_v1_json).map_err(|error| {
+        err(format!(
+            "read {}: {error}",
+            paths.snapshot_manifest_v1_json.display()
+        ))
+    })?;
+    let manifest: SnapshotManifestV1 = serde_json::from_slice(&bytes).map_err(|error| {
+        err(format!(
+            "parse {}: {error}",
+            paths.snapshot_manifest_v1_json.display()
+        ))
+    })?;
+    manifest.validate().map_err(|error| {
+        err(format!(
+            "validate {}: {error}",
+            paths.snapshot_manifest_v1_json.display()
+        ))
+    })?;
     if manifest.execution_id != expected {
         return Err(err(format!(
             "Snapshot v1 sidecar execution_id mismatch: expected {expected}, found {}",
             manifest.execution_id
         )));
     }
-    Ok(Some(manifest))
+    if command.snapshot_manifest_schema.as_deref() != Some(manifest.schema.as_str())
+        || command.snapshot_manifest_id.as_deref() != Some(manifest.snapshot_id.as_str())
+    {
+        return Err(err(
+            "lease/Snapshot v1 manifest schema or id mismatch".to_string()
+        ));
+    }
+    let envelope_bytes = std::fs::read(&paths.artifact_envelope_v1_json).map_err(|error| {
+        err(format!(
+            "read {}: {error}",
+            paths.artifact_envelope_v1_json.display()
+        ))
+    })?;
+    let envelope: ArtifactEnvelopeV1 =
+        serde_json::from_slice(&envelope_bytes).map_err(|error| {
+            err(format!(
+                "parse {}: {error}",
+                paths.artifact_envelope_v1_json.display()
+            ))
+        })?;
+    if command.artifact_envelope_schema.as_deref() != Some(envelope.schema.as_str())
+        || command.artifact_envelope_id.as_deref() != Some(envelope.envelope_id.as_str())
+    {
+        return Err(err(
+            "lease/Snapshot Artifact Envelope schema or id mismatch".to_string(),
+        ));
+    }
+    envelope
+        .verify(legacy, &manifest)
+        .map_err(|error| err(error.to_string()))?;
+    Ok(Some(VerifiedV1Artifact { manifest, envelope }))
 }
 
 /// Validate one archive entry path: relative, no `..`/root/prefix components, no
@@ -888,6 +1009,12 @@ pub(crate) fn load_and_verify_manifest_with_surface_capabilities(
                 cmd.execution_id, other
             )));
         }
+    }
+    if manifest.execution_identity_schema != cmd.execution_identity_schema {
+        return Err(err(format!(
+            "execution_identity_schema mismatch: lease {:?} != manifest {:?}",
+            cmd.execution_identity_schema, manifest.execution_identity_schema
+        )));
     }
     if manifest.snapshot_backend.kind != cmd.snapshot_backend {
         return Err(err(format!(
@@ -1495,26 +1622,124 @@ mod tests {
     }
 
     #[test]
-    fn v1_execution_requires_a_snapshot_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let error = load_snapshot_manifest_v1_for_execution(
-            &dir.path().join(SNAPSHOT_MANIFEST_V1_FILENAME),
-            &format!("blake3:{}", "a".repeat(64)),
-        )
+    fn explicit_v1_schema_requires_complete_snapshot_metadata() {
+        let error = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "execution_id": format!("blake3:{}", "a".repeat(64)),
+            "execution_identity_schema": EXECUTION_CONTRACT_V1_SCHEMA,
+        })))
         .unwrap_err();
 
-        assert_eq!(error.0, "artifact_verification_failed");
+        assert!(error.1.contains("requires snapshot manifest/envelope"));
     }
 
     #[test]
-    fn historical_execution_does_not_require_a_v1_sidecar() {
-        let result = load_snapshot_manifest_v1_for_execution(
-            Path::new("does-not-exist"),
-            "sha256:historical",
+    fn legacy_blake3_execution_id_does_not_imply_v1_schema() {
+        let command = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "execution_id": format!("blake3:{}", "b".repeat(64)),
+        })))
+        .unwrap();
+
+        assert!(command.execution_identity_schema.is_none());
+        assert!(command.snapshot_manifest_schema.is_none());
+    }
+
+    #[test]
+    fn authenticated_v1_envelope_rejects_a_recomputed_tampered_sidecar() {
+        use capsule::execution_contract::ExecutionId;
+        use capsulefs::CasStore;
+        use snapshot::{
+            ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, FakeSnapshotBackend,
+            RestoreContract, SanitizerContract, SnapshotBackend, migrate_legacy_manifest,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let execution_id = ExecutionId::new(format!("blake3:{}", "a".repeat(64))).unwrap();
+        let legacy = backend
+            .build_ready_state(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: format!("blake3:{}", "c".repeat(64)),
+                runner_class: Some(
+                    capsule::foundation::install_lifecycle::RunnerClassFacts::from_host().id(),
+                ),
+                surface_requirement: None,
+                layers: BuildLayers {
+                    rootfs: b"rootfs".to_vec(),
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: vec![1; 64],
+                    memory: vec![2; 4096],
+                },
+                restore_contract: RestoreContract::default(),
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(execution_id.to_string()),
+                execution_identity_schema: Some(EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+                supervisor: None,
+            })
+            .unwrap()
+            .manifest;
+        let sidecar = migrate_legacy_manifest(
+            &legacy,
+            execution_id.clone(),
+            backend.snapshot_compatibility_contract().unwrap(),
+        )
+        .unwrap();
+        let envelope = ArtifactEnvelopeV1::accepted(&legacy, &sidecar).unwrap();
+        let paths = ArtifactPaths {
+            manifest_json: dir.path().join("manifest.json"),
+            snapshot_manifest_v1_json: dir.path().join(SNAPSHOT_MANIFEST_V1_FILENAME),
+            artifact_envelope_v1_json: dir.path().join(ARTIFACT_ENVELOPE_V1_FILENAME),
+            cas_dir: dir.path().join("cas"),
+        };
+        std::fs::write(&paths.manifest_json, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        std::fs::write(
+            &paths.snapshot_manifest_v1_json,
+            serde_json::to_vec(&sidecar).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &paths.artifact_envelope_v1_json,
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        let command = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "snapshot_id": sidecar.snapshot_id,
+            "artifact_manifest_hash": legacy.id(),
+            "capsule_manifest_hash": legacy.capsule_manifest_hash,
+            "execution_id": execution_id,
+            "execution_identity_schema": EXECUTION_CONTRACT_V1_SCHEMA,
+            "snapshot_manifest_schema": SNAPSHOT_MANIFEST_V1_SCHEMA,
+            "snapshot_manifest_id": sidecar.snapshot_id,
+            "artifact_envelope_schema": ARTIFACT_ENVELOPE_V1_SCHEMA,
+            "artifact_envelope_id": envelope.envelope_id,
+            "runner_class_id": legacy.runner_class_id.as_ref().unwrap().to_string(),
+            "snapshot_backend": legacy.snapshot_backend.kind,
+        })))
+        .unwrap();
+
+        load_verified_v1_artifact(&paths, &legacy, &command)
+            .unwrap()
+            .expect("authenticated v1 artifact");
+
+        let mut tampered = sidecar;
+        tampered.sanitization_attestation.policy = "attacker-controlled".to_string();
+        tampered.snapshot_id = tampered.compute_snapshot_id().unwrap();
+        std::fs::write(
+            &paths.snapshot_manifest_v1_json,
+            serde_json::to_vec(&tampered).unwrap(),
         )
         .unwrap();
 
-        assert!(result.is_none());
+        let error = load_verified_v1_artifact(&paths, &legacy, &command).unwrap_err();
+        assert!(
+            error.1.contains("manifest schema or id mismatch")
+                || error.1.contains("does not authenticate"),
+            "{}",
+            error.1
+        );
     }
 
     #[test]
@@ -1552,6 +1777,7 @@ mod tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: Some("sha256:exec".into()),
+                execution_identity_schema: None,
                 supervisor: None,
             })
             .expect("build");
@@ -1570,6 +1796,11 @@ mod tests {
             artifact_manifest_hash: m.id(),
             capsule_manifest_hash: "blake3:cap".into(),
             execution_id: "sha256:exec".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_schema: None,
+            artifact_envelope_id: None,
             runner_class_id: rc.clone(),
             snapshot_backend: m.snapshot_backend.kind.clone(),
             healthcheck_url_path: Some("/health".into()),
@@ -1733,6 +1964,7 @@ mod tests {
                 &[
                     ("manifest.json", br#"{"k":1}"#),
                     ("snapshot-manifest-v1.json", br#"{"schema":"v1"}"#),
+                    ("artifact-envelope-v1.json", br#"{"schema":"v1"}"#),
                     ("cas/ab/cdef", b"blob"),
                 ],
                 &["cas/", "cas/ab/"],
@@ -1747,6 +1979,10 @@ mod tests {
         );
         assert_eq!(
             std::fs::read(dest.join("snapshot-manifest-v1.json")).unwrap(),
+            br#"{"schema":"v1"}"#
+        );
+        assert_eq!(
+            std::fs::read(dest.join("artifact-envelope-v1.json")).unwrap(),
             br#"{"schema":"v1"}"#
         );
         assert_eq!(

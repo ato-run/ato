@@ -132,6 +132,8 @@ pub enum SnapshotManifestError {
     Canonicalization(String),
     #[error("legacy execution_id does not match the verified Capsule v1 execution_id")]
     LegacyExecutionIdMismatch,
+    #[error("legacy manifest has no explicit Capsule v1 execution identity schema")]
+    MissingExecutionIdentitySchema,
 }
 
 impl SnapshotManifestV1 {
@@ -355,10 +357,13 @@ pub fn migrate_legacy_manifest(
     verified_execution_id: ExecutionId,
     compatibility: SnapshotCompatibilityContract,
 ) -> Result<SnapshotManifestV1, SnapshotManifestError> {
-    if legacy.execution_id.as_deref().is_some_and(|legacy_id| {
-        legacy_id.starts_with("blake3:") && legacy_id != verified_execution_id.as_str()
-    }) {
-        return Err(SnapshotManifestError::LegacyExecutionIdMismatch);
+    match legacy
+        .v1_execution_id()
+        .map_err(|_| SnapshotManifestError::MissingExecutionIdentitySchema)?
+    {
+        Some(legacy_id) if legacy_id == verified_execution_id => {}
+        Some(_) => return Err(SnapshotManifestError::LegacyExecutionIdMismatch),
+        None => return Err(SnapshotManifestError::MissingExecutionIdentitySchema),
     }
     let mut disk_layers = Vec::new();
     for layer in [
@@ -618,7 +623,10 @@ mod tests {
             capsule_manifest_hash: "blake3:legacy".to_string(),
             has_vsock: false,
             runner_class_id: None,
-            execution_id: None,
+            execution_id: Some(execution_id('9').to_string()),
+            execution_identity_schema: Some(
+                capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+            ),
             surface_requirement: None,
             layers: ReadyStateLayers {
                 memory: Some(memory),
