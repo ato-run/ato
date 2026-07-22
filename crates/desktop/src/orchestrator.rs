@@ -16,6 +16,15 @@ use capsule::state::session::{
     session_record_path, session_root as shared_session_root,
     validate_record_for_install_profile_key, validate_record_only,
 };
+// Session-start display leaf types are single-sourced in the capsule session
+// record: the CLI producer serializes exactly these. Desktop parses the CCP
+// `session start` envelope straight into the canonical types rather than
+// maintaining mirror copies. (The CCP envelope structs further down stay
+// desktop-local — they are the consumer's parse layer over `protocol::ccp`
+// schema-version tolerance, not domain types.)
+use capsule::state::session::record::{
+    GuestSessionDisplay, ServiceBackgroundDisplay, TerminalSessionDisplay, WebSessionDisplay,
+};
 use protocol::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     normalize_capsule_handle,
@@ -1013,31 +1022,11 @@ struct SessionStartInfo {
     execution_receipt_schema_version: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct GuestSessionDisplay {
-    adapter: String,
-    frontend_entry: String,
-    healthcheck_url: String,
-    invoke_url: String,
-    capabilities: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct WebSessionDisplay {
-    local_url: String,
-    healthcheck_url: String,
-    served_by: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct TerminalSessionDisplay {
-    log_path: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct ServiceBackgroundDisplay {
-    log_path: String,
-}
+// GuestSessionDisplay / WebSessionDisplay / TerminalSessionDisplay /
+// ServiceBackgroundDisplay are imported from capsule::state::session::record
+// (see the use at the top of this module) — the canonical types the CLI
+// producer serializes. The desktop mirror copies were deleted in Phase 1 Step 3
+// (capsule-domain reconciliation).
 
 #[derive(Debug, Deserialize)]
 struct SessionStopEnvelope {
@@ -3731,6 +3720,7 @@ mod tests {
             guest: Some(super::GuestSessionDisplay {
                 adapter: "tauri".to_string(),
                 frontend_entry: "dist/index.html".to_string(),
+                transport: "http".to_string(),
                 healthcheck_url: "http://127.0.0.1:9000/health".to_string(),
                 invoke_url: "http://127.0.0.1:9000/rpc".to_string(),
                 capabilities: vec!["read-file".to_string()],
