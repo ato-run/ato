@@ -317,6 +317,7 @@ fn import_and_seal(
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(identity.clone()),
+            execution_identity_schema: None,
             // A v0 import with ZERO bindings is an honest NO-BINDING artifact:
             // the backend's supervisor path requires ≥1 binding name (it exists
             // to gate on them), while the in-guest agent with an empty required

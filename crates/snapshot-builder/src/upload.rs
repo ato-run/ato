@@ -2,7 +2,8 @@
 //! S3-compatible object store (Cloudflare R2).
 //!
 //! Transport packaging is ONE file per job: `artifact.tar.gz` containing exactly
-//! `manifest.json`, optional `snapshot-manifest-v1.json`, and `cas/` at the archive root, uploaded to
+//! `manifest.json`, optional `snapshot-manifest-v1.json` plus
+//! `artifact-envelope-v1.json`, and `cas/` at the archive root, uploaded to
 //! `<endpoint>/<bucket>/<job_id>/<artifact_manifest_hash>/artifact.tar.gz` —
 //! the object key carries the immutable content identity, so a re-run of a
 //! job id can never silently overwrite different bytes — via shell-out `curl
@@ -16,7 +17,8 @@
 //! partial set is an operator error that stops the daemon at startup (never a
 //! per-job surprise), and a fully absent set keeps the daemon byte-identical to
 //! v1 (same-host `cas://` location, no packing, no upload). The local on-disk
-//! job layout stays `{manifest.json, snapshot-manifest-v1.json?, cas/}` either way — the tar.gz is a
+//! job layout stays `{manifest.json, snapshot-manifest-v1.json?,
+//! artifact-envelope-v1.json?, cas/}` either way — the tar.gz is a
 //! transport artifact, removed after the upload attempt succeeds or fails.
 //!
 //! Shell-outs go through the snapshot crate's [`ImportCommandRunner`] seam
@@ -27,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use snapshot::SNAPSHOT_MANIFEST_V1_FILENAME;
+use snapshot::{ARTIFACT_ENVELOPE_V1_FILENAME, SNAPSHOT_MANIFEST_V1_FILENAME};
 
 pub use snapshot::docker_import::build::{ImportCommandRunner, SystemImportCommandRunner};
 
@@ -180,7 +182,8 @@ impl ArtifactStore {
         let uploaded =
             self.upload_with_backoff(runner, &archive, job_id, artifact_manifest_hash, backoff);
         // The tar.gz is transport-only: remove it on success AND failure so the
-        // local job layout stays {manifest.json, snapshot-manifest-v1.json?, cas/} and a failed job never
+        // local job layout stays {manifest.json, snapshot-manifest-v1.json?,
+        // artifact-envelope-v1.json?, cas/} and a failed job never
         // leaves a stale archive to be confused for uploaded bytes.
         let _ = std::fs::remove_file(&archive);
         uploaded?;
@@ -254,6 +257,9 @@ pub fn pack_artifact(runner: &dyn ImportCommandRunner, jobdir: &Path) -> Result<
     ];
     if jobdir.join(SNAPSHOT_MANIFEST_V1_FILENAME).is_file() {
         args.push(SNAPSHOT_MANIFEST_V1_FILENAME);
+    }
+    if jobdir.join(ARTIFACT_ENVELOPE_V1_FILENAME).is_file() {
+        args.push(ARTIFACT_ENVELOPE_V1_FILENAME);
     }
     args.push("cas");
     let out = runner
@@ -444,13 +450,15 @@ mod tests {
     fn pack_includes_snapshot_v1_manifest_when_present() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(SNAPSHOT_MANIFEST_V1_FILENAME), b"{}").unwrap();
+        std::fs::write(dir.path().join(ARTIFACT_ENVELOPE_V1_FILENAME), b"{}").unwrap();
         let runner = FakeRunner::new(vec![ok()]);
 
         pack_artifact(&runner, dir.path()).unwrap();
 
         let command = runner.calls().into_iter().next().unwrap();
         assert!(
-            command.ends_with("manifest.json snapshot-manifest-v1.json cas"),
+            command
+                .ends_with("manifest.json snapshot-manifest-v1.json artifact-envelope-v1.json cas"),
             "{command}"
         );
     }

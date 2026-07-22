@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use capsule::execution_contract::ExecutionId;
 use capsule::types::CapsuleManifest;
 use snapshot::{
-    BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
-    SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
+    ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract,
+    SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
     accept_platform_verified_candidate, ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
 };
 
@@ -136,7 +136,14 @@ pub(crate) fn seal(
     // future path ever tries to seal a bound session.
     super::binding_host::ensure_pre_bind_before_seal(/* session_is_bound = */ false)?;
 
-    let store = store::open_store(state_root, &capsule_manifest_hash)?;
+    let mut v1_staging = v1_execution_id
+        .as_ref()
+        .map(|execution_id| store::V1StagingArtifact::create(state_root, execution_id))
+        .transpose()?;
+    let store = match &v1_staging {
+        Some(staging) => staging.open_store()?,
+        None => store::open_store(state_root, &capsule_manifest_hash)?,
+    };
     // Delegate runner-class resolution to the backend (same contract as the
     // snapshot-builder daemon and `runner serve`): `None` lets Firecracker pin
     // the seal to its real facts (snapshot format, VMM version, guest kernel
@@ -159,6 +166,9 @@ pub(crate) fn seal(
             execution_id: v1_execution_id
                 .as_ref()
                 .map(|execution_id| execution_id.to_string()),
+            execution_identity_schema: v1_execution_id
+                .as_ref()
+                .map(|_| capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
             supervisor: None,
         })
         .context("snapshot backend build_ready_state failed")?;
@@ -181,7 +191,10 @@ pub(crate) fn seal(
                     .restore(snapshot::RestoreReadyStateInput {
                         store: &store,
                         manifest: receipt.manifest.clone(),
-                        overlay_root: store::artifact_dir(state_root, &capsule_manifest_hash)
+                        overlay_root: v1_staging
+                            .as_ref()
+                            .expect("v1 staging exists while accepting a v1 Snapshot")
+                            .artifact_dir()
                             .join("acceptance-overlay"),
                         host_runner_class: None,
                         uffd_preview: false,
@@ -194,10 +207,15 @@ pub(crate) fn seal(
             },
         )
         .context("Snapshot v1 disposable acceptance failed")?;
-        store::save_v1_manifest(state_root, &capsule_manifest_hash, &accepted.manifest)?;
+        let envelope = ArtifactEnvelopeV1::accepted(&receipt.manifest, &accepted.manifest)
+            .context("create authenticated Snapshot Artifact Envelope")?;
+        v1_staging
+            .take()
+            .expect("v1 staging exists while publishing a v1 Snapshot")
+            .commit(state_root, &receipt.manifest, &accepted.manifest, &envelope)?;
+    } else {
+        store::save_manifest(state_root, &receipt.manifest)?;
     }
-
-    store::save_manifest(state_root, &receipt.manifest)?;
     Ok(receipt)
 }
 
@@ -444,14 +462,20 @@ content_ready_path=\"/\"\n",
             receipt.manifest.execution_id.as_deref(),
             Some(execution_id.as_str())
         );
-        let v1 = store::load_v1_manifest(dir.path(), "blake3:v1")
-            .unwrap()
-            .expect("accepted v1 sidecar");
-        assert_eq!(v1.execution_id, execution_id);
+        let snapshots = store::load_v1_snapshots(dir.path(), &execution_id).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].snapshot_manifest.execution_id, execution_id);
         assert!(
-            !store::artifact_dir(dir.path(), "blake3:v1")
+            !snapshots[0]
+                .artifact_dir
                 .join("acceptance-overlay")
                 .exists()
+        );
+        assert!(
+            store::load_manifest(dir.path(), "blake3:v1")
+                .unwrap()
+                .is_none(),
+            "v1 artifacts must not overwrite the legacy capsule-manifest keyed store"
         );
     }
 }

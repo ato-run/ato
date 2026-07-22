@@ -146,6 +146,7 @@ impl SnapshotBackend for FakeSnapshotBackend {
             has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
             execution_id: input.execution_id.clone(),
+            execution_identity_schema: input.execution_identity_schema.clone(),
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
@@ -327,6 +328,7 @@ mod tests {
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: secret_markers,
             execution_id: None,
+            execution_identity_schema: None,
             supervisor: None,
         }
     }
