@@ -10,16 +10,11 @@ use protocol::placement::{
     PlacementProviderId, PlacementProviderKind,
 };
 
-#[derive(Debug, Deserialize)]
-pub(super) struct LaunchSessionRequest {
-    pub install_profile_key: String,
-    /// Optional target label to pass as `--target` to `ato app session start`.
-    /// Corresponds to the target label in the capsule manifest (e.g. `"web"`,
-    /// `"worker"`). Named `target_label` to avoid confusion with install
-    /// profile IDs or launch profile IDs.
-    #[serde(default)]
-    pub target_label: Option<String>,
-}
+// LaunchSessionRequest is single-sourced in protocol, shared with the desktop
+// consumer. Re-exported at the original `pub(super)` visibility so this module's
+// handler and the serve tests keep resolving it unchanged. `target_label` maps
+// to `--target` for `ato app session start` (e.g. `"web"`, `"worker"`).
+pub(super) use protocol::runtime_control::LaunchSessionRequest;
 
 #[derive(Debug, Serialize)]
 pub(super) struct LaunchSessionResponse {

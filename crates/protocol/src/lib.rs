@@ -60,6 +60,7 @@ pub mod error;
 pub mod handle;
 pub mod net;
 pub mod placement;
+pub mod runtime_control;
 pub mod runtime_control_events;
 pub mod secret_bridge;
 pub mod session_surface;

@@ -11,7 +11,8 @@
 //! operations (launch / stop) that go through the Desktop IPC bridge.
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use protocol::runtime_control::LaunchSessionRequest;
+use serde::Deserialize;
 
 /// HTTP client for the `ato serve` Runtime Control API.
 pub(crate) struct RuntimeControlClient {
@@ -84,13 +85,10 @@ impl RuntimeControlClient {
     }
 }
 
-#[derive(Serialize)]
-struct LaunchSessionRequest {
-    install_profile_key: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    target_label: Option<String>,
-}
-
+/// The desktop consumer reads a deliberately-minimal view of the launch
+/// response (only the two fields it acts on); the CLI producer's full session
+/// descriptor is a separate, richer type. `LaunchSessionRequest` is shared from
+/// `protocol::runtime_control`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct LaunchSessionResponse {
     pub(crate) session_id: String,
@@ -115,24 +113,6 @@ mod tests {
         assert_ne!(c.base_url(), "http://127.0.0.1:8080");
     }
 
-    #[test]
-    fn launch_request_serialises_without_target_label() {
-        let req = LaunchSessionRequest {
-            install_profile_key: "github.com/foo/bar@default".to_string(),
-            target_label: None,
-        };
-        let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["install_profile_key"], "github.com/foo/bar@default");
-        assert!(v.get("target_label").is_none());
-    }
-
-    #[test]
-    fn launch_request_serialises_with_target_label() {
-        let req = LaunchSessionRequest {
-            install_profile_key: "github.com/foo/bar@default".to_string(),
-            target_label: Some("gpu".to_string()),
-        };
-        let v = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["target_label"], "gpu");
-    }
+    // LaunchSessionRequest serialisation is now covered in
+    // `protocol::runtime_control` where the type lives.
 }
