@@ -1,14 +1,17 @@
 use anyhow::{Context, Result};
 use capsule::CapsuleReporter;
 use capsule::execution_contract::{
-    ContentDigest, DigestAlgorithm, ExecutionContractV1, ExecutionId, ObservedExecutionContractV1,
-    observe_source_tree_digest,
+    ContentDigest, DigestAlgorithm, EnvironmentVariableContract, ExecutionContractV1, ExecutionId,
+    ExternalStateAccess, ExternalStateContract, GuestSurfaceContract, ObservedExecutionContractV1,
+    ResolvedArtifactContract, ResolvedBuildOutputContract, ResolvedDependencyContract,
+    ResolvedFilesystemContract, ResolvedLaunchContract, ResolvedPolicyContract,
+    ResolvedSourceContract, ResolvedTargetContract, SnapshotExclusion, observe_source_tree_digest,
 };
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
-use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
+use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, RunPlanRuntime, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -693,12 +696,9 @@ fn seal_ready_state_if_enabled(
 
 #[derive(Debug)]
 struct V1SealContext {
-    contract: ExecutionContractV1,
+    expected_contract: ExecutionContractV1,
+    observed_contract: ExecutionContractV1,
     expected_execution_id: ExecutionId,
-    source_digest: ContentDigest,
-    network_policy_digest: ContentDigest,
-    capability_policy_digest: ContentDigest,
-    filesystem_policy_digest: ContentDigest,
 }
 
 fn prepare_v1_seal_context(
@@ -753,13 +753,21 @@ fn prepare_v1_seal_context(
                 &["filesystem", "state"],
                 contract.policy.filesystem_digest.algorithm(),
             )?;
-            Ok(Some(V1SealContext {
-                contract: contract.clone(),
-                expected_execution_id: execution_id.clone(),
+            let observed_contract = derive_local_execution_contract(
+                plan,
+                &manifest,
+                contract,
                 source_digest,
-                network_policy_digest,
-                capability_policy_digest,
-                filesystem_policy_digest,
+                ResolvedPolicyContract {
+                    network_digest: network_policy_digest,
+                    capability_digest: capability_policy_digest,
+                    filesystem_digest: filesystem_policy_digest,
+                },
+            )?;
+            Ok(Some(V1SealContext {
+                expected_contract: contract.clone(),
+                observed_contract,
+                expected_execution_id: execution_id.clone(),
             }))
         }
         _ => anyhow::bail!(
@@ -769,52 +777,317 @@ fn prepare_v1_seal_context(
     }
 }
 
+fn derive_local_execution_contract(
+    plan: &capsule::router::ManifestData,
+    manifest: &CapsuleManifest,
+    expected: &ExecutionContractV1,
+    source_digest: ContentDigest,
+    policy: ResolvedPolicyContract,
+) -> anyhow::Result<ExecutionContractV1> {
+    let run_plan = manifest.to_run_plan()?;
+    let (argv, cwd, environment, writable_paths, guest_port, guest_protocol) =
+        observed_run_plan_facets(&run_plan.runtime, expected)?;
+
+    let source = ResolvedSourceContract {
+        kind: "tree".to_string(),
+        immutable_ref: source_digest.to_string(),
+        digest: source_digest,
+    };
+    let runtime_kind = plan
+        .execution_runtime()
+        .context("Snapshot v1 cannot derive the resolved runtime kind")?;
+    let runtime_ref = plan
+        .execution_image()
+        .or_else(|| plan.execution_runtime_version())
+        .unwrap_or_else(|| runtime_kind.clone());
+    let runtime_algorithm = expected.runtime.digest.algorithm();
+
+    let expected_dependencies = expected
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.name.as_str(), dependency))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = Vec::new();
+    for (name, declaration) in &manifest.dependencies {
+        let expected_dependency = expected_dependencies.get(name.as_str());
+        let derivation_algorithm = expected_dependency
+            .map(|dependency| dependency.derivation_digest.algorithm())
+            .unwrap_or(DigestAlgorithm::Blake3);
+        let output_algorithm = expected_dependency
+            .map(|dependency| dependency.output_digest.algorithm())
+            .unwrap_or(DigestAlgorithm::Blake3);
+        dependencies.push(ResolvedDependencyContract {
+            name: name.clone(),
+            derivation_digest: ContentDigest::hash(
+                derivation_algorithm,
+                &serde_jcs::to_vec(declaration)?,
+            ),
+            output_digest: ContentDigest::hash(output_algorithm, &[]),
+        });
+    }
+
+    let outputs = normalize_outputs(&plan.build_cache_outputs())?;
+    let expected_outputs = expected
+        .build_outputs
+        .iter()
+        .map(|output| (output.name.as_str(), output))
+        .collect::<BTreeMap<_, _>>();
+    let build_outputs = outputs
+        .iter()
+        .map(|output| output.relative_path.to_string_lossy().replace('\\', "/"))
+        .map(|name| {
+            let algorithm = expected_outputs
+                .get(name.as_str())
+                .map(|output| output.digest.algorithm())
+                .unwrap_or(DigestAlgorithm::Blake3);
+            ResolvedBuildOutputContract {
+                name,
+                digest: ContentDigest::hash(algorithm, &[]),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut secret_bindings = manifest.secrets.keys().cloned().collect::<Vec<_>>();
+    secret_bindings.extend(plan.execution_required_envs());
+    secret_bindings.sort();
+    secret_bindings.dedup();
+
+    let mut external_state = manifest
+        .storage
+        .volumes
+        .iter()
+        .map(|volume| ExternalStateContract {
+            name: volume.name.clone(),
+            target: volume.mount_path.clone(),
+            access: if volume.read_only {
+                ExternalStateAccess::ReadOnly
+            } else {
+                ExternalStateAccess::ReadWrite
+            },
+            schema: "capsule-storage/v0.3".to_string(),
+            snapshot: SnapshotExclusion::Exclude,
+        })
+        .collect::<Vec<_>>();
+    external_state.sort_by(|left, right| left.name.cmp(&right.name));
+    if !manifest.state.is_empty() {
+        anyhow::bail!(
+            "Snapshot v1 running capture cannot independently derive mount targets for manifest state; use workload_idle"
+        );
+    }
+
+    let readonly_layers = expected
+        .filesystem
+        .readonly_layers
+        .iter()
+        .map(|digest| ContentDigest::hash(digest.algorithm(), &[]))
+        .collect();
+    let mut observed = ExecutionContractV1 {
+        schema: capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+        source,
+        target: observed_target_contract(),
+        runtime: ResolvedArtifactContract {
+            kind: runtime_kind,
+            resolved_ref: runtime_ref,
+            digest: ContentDigest::hash(runtime_algorithm, &[]),
+        },
+        dependencies,
+        build_outputs,
+        launch: ResolvedLaunchContract {
+            argv,
+            cwd,
+            environment,
+            secret_bindings,
+        },
+        filesystem: ResolvedFilesystemContract {
+            view_digest: ContentDigest::hash(expected.filesystem.view_digest.algorithm(), &[]),
+            readonly_layers,
+            writable_paths,
+        },
+        policy,
+        guest_surface: GuestSurfaceContract {
+            bind_address: "0.0.0.0".to_string(),
+            protocol: guest_protocol,
+            port: guest_port,
+            features: Vec::new(),
+        },
+        external_state,
+    };
+    observed
+        .dependencies
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    observed
+        .build_outputs
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    observed.validate().map_err(anyhow::Error::new)?;
+    Ok(observed)
+}
+
+type ObservedRunPlanFacets = (
+    Vec<String>,
+    String,
+    Vec<EnvironmentVariableContract>,
+    Vec<String>,
+    Option<u16>,
+    String,
+);
+
+fn observed_run_plan_facets(
+    runtime: &RunPlanRuntime,
+    expected: &ExecutionContractV1,
+) -> anyhow::Result<ObservedRunPlanFacets> {
+    let expected_environment = expected
+        .launch
+        .environment
+        .iter()
+        .map(|variable| (variable.name.as_str(), variable.value_digest.algorithm()))
+        .collect::<BTreeMap<_, _>>();
+    let (argv, cwd, env, writable_paths, port, protocol) = match runtime {
+        RunPlanRuntime::Docker(runtime) => {
+            let argv = if runtime.command.is_empty() {
+                vec![runtime.image.clone()]
+            } else {
+                runtime.command.clone()
+            };
+            let writable = runtime
+                .mounts
+                .iter()
+                .filter(|mount| !mount.readonly)
+                .map(|mount| mount.target.clone())
+                .collect::<Vec<_>>();
+            let port = runtime
+                .ports
+                .first()
+                .and_then(|port| u16::try_from(port.container_port).ok());
+            let protocol = runtime
+                .ports
+                .first()
+                .and_then(|port| port.protocol.clone())
+                .unwrap_or_else(|| "tcp".to_string());
+            (
+                argv,
+                runtime
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| "/".to_string()),
+                &runtime.env,
+                writable,
+                port,
+                protocol,
+            )
+        }
+        RunPlanRuntime::Native(runtime) => (
+            std::iter::once(runtime.binary_path.clone())
+                .chain(runtime.args.iter().cloned())
+                .collect(),
+            runtime
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| ".".to_string()),
+            &runtime.env,
+            Vec::new(),
+            None,
+            "none".to_string(),
+        ),
+        RunPlanRuntime::Source(runtime) => {
+            let argv = if runtime.cmd.is_empty() {
+                shell_words::split(&runtime.entrypoint)
+                    .unwrap_or_else(|_| vec![runtime.entrypoint.clone()])
+            } else {
+                runtime.cmd.clone()
+            };
+            let port = runtime
+                .ports
+                .first()
+                .and_then(|port| u16::try_from(port.container_port).ok());
+            let protocol = runtime
+                .ports
+                .first()
+                .and_then(|port| port.protocol.clone())
+                .unwrap_or_else(|| "tcp".to_string());
+            (
+                argv,
+                runtime
+                    .working_dir
+                    .clone()
+                    .unwrap_or_else(|| ".".to_string()),
+                &runtime.env,
+                Vec::new(),
+                port,
+                protocol,
+            )
+        }
+    };
+    let mut environment = env
+        .iter()
+        .map(|(name, value)| {
+            let algorithm = expected_environment
+                .get(name.as_str())
+                .copied()
+                .unwrap_or(DigestAlgorithm::Blake3);
+            EnvironmentVariableContract {
+                name: name.clone(),
+                value_digest: ContentDigest::hash(algorithm, value.as_bytes()),
+            }
+        })
+        .collect::<Vec<_>>();
+    environment.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut writable_paths = writable_paths;
+    writable_paths.sort();
+    writable_paths.dedup();
+    Ok((argv, cwd, environment, writable_paths, port, protocol))
+}
+
+fn observed_target_contract() -> ResolvedTargetContract {
+    let os = std::env::consts::OS.to_string();
+    let abi = match std::env::consts::OS {
+        "linux" => "gnu",
+        "windows" => "msvc",
+        "macos" => "darwin",
+        other => other,
+    }
+    .to_string();
+    ResolvedTargetContract {
+        os,
+        architecture: std::env::consts::ARCH.to_string(),
+        abi,
+        libc: None,
+        observable_features: BTreeMap::new(),
+    }
+}
+
 fn finalize_v1_seal_context(
     context: V1SealContext,
     artifact: Option<&Path>,
     layers: &snapshot::BuildLayers,
 ) -> anyhow::Result<ExecutionId> {
-    let contract = &context.contract;
+    let mut observed_contract = context.observed_contract;
     let runtime_bytes = layers.runtime.as_deref().unwrap_or(&layers.rootfs);
     let dependency_bytes = layers.dependency.as_deref().unwrap_or(&layers.rootfs);
-    let output_bytes = match contract.build_outputs.len() {
+    let output_bytes = match observed_contract.build_outputs.len() {
         0 => None,
         1 => Some(std::fs::read(artifact.context(
-            "Snapshot v1 contract declares a build output, but the build produced no artifact",
+            "Snapshot v1 observed plan declares a build output, but the build produced no artifact",
         )?)?),
         _ => anyhow::bail!(
-            "Snapshot v1 seal cannot verify {} separately declared build outputs from one packed artifact",
-            contract.build_outputs.len()
+            "Snapshot v1 seal cannot verify {} separately observed build outputs from one packed artifact",
+            observed_contract.build_outputs.len()
         ),
     };
-    if contract.dependencies.len() > 1 {
+    if observed_contract.dependencies.len() > 1 {
         anyhow::bail!(
-            "Snapshot v1 seal cannot verify {} dependency outputs from one aggregate dependency layer",
-            contract.dependencies.len()
+            "Snapshot v1 seal cannot verify {} independently observed dependency outputs from one aggregate dependency layer",
+            observed_contract.dependencies.len()
         );
     }
 
-    let dependency_output_digests = contract
-        .dependencies
-        .iter()
-        .map(|dependency| {
-            (
-                dependency.name.clone(),
-                ContentDigest::hash(dependency.output_digest.algorithm(), dependency_bytes),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let build_output_digests = contract
-        .build_outputs
-        .iter()
-        .zip(output_bytes.iter())
-        .map(|(output, bytes)| {
-            (
-                output.name.clone(),
-                ContentDigest::hash(output.digest.algorithm(), bytes),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    for dependency in &mut observed_contract.dependencies {
+        dependency.output_digest =
+            ContentDigest::hash(dependency.output_digest.algorithm(), dependency_bytes);
+    }
+    if let Some(bytes) = output_bytes.as_ref() {
+        observed_contract.build_outputs[0].digest =
+            ContentDigest::hash(observed_contract.build_outputs[0].digest.algorithm(), bytes);
+    }
 
     let concrete_layers = [
         Some(layers.rootfs.as_slice()),
@@ -825,14 +1098,14 @@ fn finalize_v1_seal_context(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    if concrete_layers.len() != contract.filesystem.readonly_layers.len() {
+    if concrete_layers.len() != observed_contract.filesystem.readonly_layers.len() {
         anyhow::bail!(
-            "Snapshot v1 readonly layer count mismatch: contract={}, observed={}",
-            contract.filesystem.readonly_layers.len(),
+            "Snapshot v1 readonly layer count mismatch: observed plan={}, materialized={}",
+            observed_contract.filesystem.readonly_layers.len(),
             concrete_layers.len()
         );
     }
-    let mut readonly_layer_digests = contract
+    let mut readonly_layer_digests = observed_contract
         .filesystem
         .readonly_layers
         .iter()
@@ -841,22 +1114,18 @@ fn finalize_v1_seal_context(
         .collect::<Vec<_>>();
     readonly_layer_digests.sort();
 
+    observed_contract.runtime.digest =
+        ContentDigest::hash(observed_contract.runtime.digest.algorithm(), runtime_bytes);
+    observed_contract.filesystem.view_digest = ContentDigest::hash(
+        observed_contract.filesystem.view_digest.algorithm(),
+        &layers.rootfs,
+    );
+    observed_contract.filesystem.readonly_layers = readonly_layer_digests;
     let observed = ObservedExecutionContractV1 {
-        source_digest: context.source_digest,
-        runtime_digest: ContentDigest::hash(contract.runtime.digest.algorithm(), runtime_bytes),
-        dependency_output_digests,
-        build_output_digests,
-        filesystem_view_digest: ContentDigest::hash(
-            contract.filesystem.view_digest.algorithm(),
-            &layers.rootfs,
-        ),
-        readonly_layer_digests,
-        network_policy_digest: context.network_policy_digest,
-        capability_policy_digest: context.capability_policy_digest,
-        filesystem_policy_digest: context.filesystem_policy_digest,
+        contract: observed_contract,
     };
     let finalized = context
-        .contract
+        .expected_contract
         .finalize_observation(&observed)
         .context("Snapshot v1 seal refused stale execution contract")?;
     if finalized.execution_id() != &context.expected_execution_id {
@@ -1757,18 +2026,15 @@ mod tests {
             "launch": {"argv": ["/app"], "cwd": "/" , "environment": []},
             "filesystem": {"view_digest": rootfs_digest.to_string(), "readonly_layers": [rootfs_digest.to_string()], "writable_paths": []},
             "policy": {"network_digest": policy.to_string(), "capability_digest": policy.to_string(), "filesystem_digest": policy.to_string()},
-            "guest_surface": {"protocol": "ato-guest/v1", "features": []},
+            "guest_surface": {"bind_address": "0.0.0.0", "protocol": "ato-guest/v1", "port": 8080, "features": []},
             "external_state": []
         }))
         .expect("contract");
         let expected_execution_id = contract.compute_execution_id().expect("execution id");
         let context = V1SealContext {
-            contract,
+            expected_contract: contract.clone(),
+            observed_contract: contract,
             expected_execution_id,
-            source_digest: source,
-            network_policy_digest: policy,
-            capability_policy_digest: policy,
-            filesystem_policy_digest: policy,
         };
         let dir = tempfile::tempdir().expect("tempdir");
         let artifact = dir.path().join("app.capsule");
@@ -1787,6 +2053,80 @@ mod tests {
         )
         .expect_err("stale lock must fail closed");
         assert!(error.to_string().contains("stale execution contract"));
+    }
+
+    #[test]
+    fn unchanged_artifact_cannot_hide_launch_envelope_drift_at_seal() {
+        let rootfs = b"rootfs-v1";
+        let artifact_bytes = b"application-v1";
+        let source = ContentDigest::blake3(b"source");
+        let policy = ContentDigest::blake3(b"policy");
+        let rootfs_digest = ContentDigest::blake3(rootfs);
+        let contract: ExecutionContractV1 = serde_json::from_value(serde_json::json!({
+            "schema": "ato.execution-contract/v1",
+            "source": {"kind": "tree", "immutable_ref": "tree:1", "digest": source.to_string()},
+            "target": {"os": "linux", "architecture": "x86_64", "abi": "gnu"},
+            "runtime": {"kind": "rootfs", "resolved_ref": "rootfs:1", "digest": rootfs_digest.to_string()},
+            "dependencies": [],
+            "build_outputs": [{"name": "capsule", "digest": ContentDigest::blake3(artifact_bytes).to_string()}],
+            "launch": {"argv": ["/app"], "cwd": "/", "environment": []},
+            "filesystem": {"view_digest": rootfs_digest.to_string(), "readonly_layers": [rootfs_digest.to_string()], "writable_paths": []},
+            "policy": {"network_digest": policy.to_string(), "capability_digest": policy.to_string(), "filesystem_digest": policy.to_string()},
+            "guest_surface": {"bind_address": "0.0.0.0", "protocol": "ato-guest/v1", "port": 8080, "features": []},
+            "external_state": []
+        }))
+        .expect("contract");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("app.capsule");
+        std::fs::write(&artifact, artifact_bytes).expect("artifact");
+        let layers = snapshot::BuildLayers {
+            rootfs: rootfs.to_vec(),
+            runtime: None,
+            dependency: None,
+            app: None,
+            vmstate: vec![],
+            memory: vec![],
+        };
+
+        for observed_contract in [
+            {
+                let mut observed = contract.clone();
+                observed.launch.argv.push("--new".to_string());
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed.target.architecture = "aarch64".to_string();
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed.launch.environment.push(
+                    capsule::execution_contract::EnvironmentVariableContract {
+                        name: "MODE".to_string(),
+                        value_digest: ContentDigest::blake3(b"prod"),
+                    },
+                );
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed.guest_surface.port = Some(9090);
+                observed
+            },
+        ] {
+            let error = finalize_v1_seal_context(
+                V1SealContext {
+                    expected_contract: contract.clone(),
+                    observed_contract,
+                    expected_execution_id: contract.compute_execution_id().expect("execution id"),
+                },
+                Some(&artifact),
+                &layers,
+            )
+            .expect_err("launch envelope drift must fail closed before Snapshot capture");
+            assert!(error.to_string().contains("stale execution contract"));
+        }
     }
 
     struct EnvVarGuard {

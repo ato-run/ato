@@ -180,8 +180,8 @@ pub enum ExecutionContractError {
     InvalidExecutionId,
     #[error("content digest must use blake3 or sha256 with exactly 64 lowercase hex characters")]
     InvalidContentDigest,
-    #[error("observed build digest does not match execution contract field '{0}'")]
-    ObservedDigestMismatch(&'static str),
+    #[error("observed launch envelope does not exactly match the stored execution contract")]
+    ObservedContractMismatch,
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
     #[error("failed to observe execution source tree: {0}")]
@@ -354,7 +354,10 @@ pub struct ResolvedPolicyContract {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestSurfaceContract {
+    pub bind_address: String,
     pub protocol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     pub features: Vec<String>,
 }
 
@@ -368,22 +371,13 @@ pub struct ExternalStateContract {
     pub snapshot: SnapshotExclusion,
 }
 
-/// Digests observed from the concrete build that is about to be snapshotted.
-///
-/// This is deliberately a separate type from [`ExecutionContractV1`]: the
-/// contract is the resolved expectation, while this value is produced only
-/// after build outputs and the immutable filesystem have been materialized.
+/// Complete launch contract independently re-derived from the concrete plan,
+/// manifest, target, and materialization that are about to be snapshotted.
+/// Partial digest witnesses are intentionally not representable: acceptance
+/// requires equality across every identity-bearing facet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedExecutionContractV1 {
-    pub source_digest: ContentDigest,
-    pub runtime_digest: ContentDigest,
-    pub dependency_output_digests: BTreeMap<String, ContentDigest>,
-    pub build_output_digests: BTreeMap<String, ContentDigest>,
-    pub filesystem_view_digest: ContentDigest,
-    pub readonly_layer_digests: Vec<ContentDigest>,
-    pub network_policy_digest: ContentDigest,
-    pub capability_policy_digest: ContentDigest,
-    pub filesystem_policy_digest: ContentDigest,
+    pub contract: ExecutionContractV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -431,6 +425,10 @@ impl ExecutionContractV1 {
             ("runtime.resolved_ref", self.runtime.resolved_ref.as_str()),
             ("launch.cwd", self.launch.cwd.as_str()),
             (
+                "guest_surface.bind_address",
+                self.guest_surface.bind_address.as_str(),
+            ),
+            (
                 "guest_surface.protocol",
                 self.guest_surface.protocol.as_str(),
             ),
@@ -441,6 +439,24 @@ impl ExecutionContractV1 {
         }
         if self.launch.argv.is_empty() || self.launch.argv.iter().any(|value| value.is_empty()) {
             return Err(ExecutionContractError::UnresolvedField("launch.argv"));
+        }
+        if self
+            .target
+            .libc
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ExecutionContractError::UnresolvedField("target.libc"));
+        }
+        if self
+            .target
+            .observable_features
+            .iter()
+            .any(|(name, value)| name.trim().is_empty() || value.trim().is_empty())
+        {
+            return Err(ExecutionContractError::UnresolvedField(
+                "target.observable_features",
+            ));
         }
 
         validate_named_list(
@@ -503,8 +519,8 @@ impl ExecutionContractV1 {
         ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
     }
 
-    /// Verify that the resolved contract describes the bytes and policy
-    /// projections produced by this exact build.
+    /// Verify that the resolved contract exactly equals the contract re-derived
+    /// from this build's actual launch plan and materialized bytes.
     ///
     /// A mismatch is terminal: callers must not capture or publish a Snapshot
     /// under the stale execution identity.
@@ -513,60 +529,12 @@ impl ExecutionContractV1 {
         observed: &ObservedExecutionContractV1,
     ) -> Result<(), ExecutionContractError> {
         self.validate()?;
-        verify_digest("source.digest", self.source.digest, observed.source_digest)?;
-        verify_digest(
-            "runtime.digest",
-            self.runtime.digest,
-            observed.runtime_digest,
-        )?;
-
-        let expected_dependencies = self
-            .dependencies
-            .iter()
-            .map(|dependency| (dependency.name.clone(), dependency.output_digest))
-            .collect::<BTreeMap<_, _>>();
-        verify_digest_map(
-            "dependencies.output_digest",
-            &expected_dependencies,
-            &observed.dependency_output_digests,
-        )?;
-
-        let expected_outputs = self
-            .build_outputs
-            .iter()
-            .map(|output| (output.name.clone(), output.digest))
-            .collect::<BTreeMap<_, _>>();
-        verify_digest_map(
-            "build_outputs.digest",
-            &expected_outputs,
-            &observed.build_output_digests,
-        )?;
-
-        verify_digest(
-            "filesystem.view_digest",
-            self.filesystem.view_digest,
-            observed.filesystem_view_digest,
-        )?;
-        if self.filesystem.readonly_layers != observed.readonly_layer_digests {
-            return Err(ExecutionContractError::ObservedDigestMismatch(
-                "filesystem.readonly_layers",
-            ));
+        observed.contract.validate()?;
+        if self == &observed.contract {
+            Ok(())
+        } else {
+            Err(ExecutionContractError::ObservedContractMismatch)
         }
-        verify_digest(
-            "policy.network_digest",
-            self.policy.network_digest,
-            observed.network_policy_digest,
-        )?;
-        verify_digest(
-            "policy.capability_digest",
-            self.policy.capability_digest,
-            observed.capability_policy_digest,
-        )?;
-        verify_digest(
-            "policy.filesystem_digest",
-            self.policy.filesystem_digest,
-            observed.filesystem_policy_digest,
-        )
     }
 
     pub fn finalize_observation(
@@ -579,30 +547,6 @@ impl ExecutionContractV1 {
             contract: self,
             execution_id,
         })
-    }
-}
-
-fn verify_digest(
-    field: &'static str,
-    expected: ContentDigest,
-    observed: ContentDigest,
-) -> Result<(), ExecutionContractError> {
-    if expected == observed {
-        Ok(())
-    } else {
-        Err(ExecutionContractError::ObservedDigestMismatch(field))
-    }
-}
-
-fn verify_digest_map(
-    field: &'static str,
-    expected: &BTreeMap<String, ContentDigest>,
-    observed: &BTreeMap<String, ContentDigest>,
-) -> Result<(), ExecutionContractError> {
-    if expected == observed {
-        Ok(())
-    } else {
-        Err(ExecutionContractError::ObservedDigestMismatch(field))
     }
 }
 
@@ -712,7 +656,9 @@ mod tests {
                 filesystem_digest: digest(DigestAlgorithm::Blake3, 11),
             },
             guest_surface: GuestSurfaceContract {
+                bind_address: "0.0.0.0".to_string(),
                 protocol: "ato-guest/v1".to_string(),
+                port: Some(8080),
                 features: vec!["bindings".to_string(), "exec".to_string()],
             },
             external_state: vec![ExternalStateContract {
@@ -727,51 +673,64 @@ mod tests {
 
     fn matching_observation(contract: &ExecutionContractV1) -> ObservedExecutionContractV1 {
         ObservedExecutionContractV1 {
-            source_digest: contract.source.digest,
-            runtime_digest: contract.runtime.digest,
-            dependency_output_digests: contract
-                .dependencies
-                .iter()
-                .map(|dependency| (dependency.name.clone(), dependency.output_digest))
-                .collect(),
-            build_output_digests: contract
-                .build_outputs
-                .iter()
-                .map(|output| (output.name.clone(), output.digest))
-                .collect(),
-            filesystem_view_digest: contract.filesystem.view_digest,
-            readonly_layer_digests: contract.filesystem.readonly_layers.clone(),
-            network_policy_digest: contract.policy.network_digest,
-            capability_policy_digest: contract.policy.capability_digest,
-            filesystem_policy_digest: contract.policy.filesystem_digest,
+            contract: contract.clone(),
         }
     }
 
     #[test]
-    fn build_observation_must_match_every_identity_bearing_digest() {
+    fn build_observation_must_match_the_complete_launch_envelope() {
         let contract = sample_contract();
         contract
             .verify_observation(&matching_observation(&contract))
             .expect("matching build observation");
 
         let mut stale_output = matching_observation(&contract);
-        stale_output
-            .build_output_digests
-            .insert("app".to_string(), digest(DigestAlgorithm::Blake3, 0xff));
+        stale_output.contract.build_outputs[0].digest = digest(DigestAlgorithm::Blake3, 0xff);
         assert_eq!(
             contract.verify_observation(&stale_output),
-            Err(ExecutionContractError::ObservedDigestMismatch(
-                "build_outputs.digest"
-            ))
+            Err(ExecutionContractError::ObservedContractMismatch)
         );
 
-        let mut stale_policy = matching_observation(&contract);
-        stale_policy.network_policy_digest = digest(DigestAlgorithm::Blake3, 0xee);
+        for mutate in [
+            |observed: &mut ObservedExecutionContractV1| {
+                observed.contract.launch.argv.push("--new".to_string());
+            },
+            |observed: &mut ObservedExecutionContractV1| {
+                observed.contract.target.architecture = "aarch64".to_string();
+            },
+            |observed: &mut ObservedExecutionContractV1| {
+                observed.contract.launch.environment[0].value_digest =
+                    digest(DigestAlgorithm::Blake3, 0xee);
+            },
+            |observed: &mut ObservedExecutionContractV1| {
+                observed.contract.guest_surface.port = Some(9090);
+            },
+        ] {
+            let mut observed = matching_observation(&contract);
+            mutate(&mut observed);
+            assert_eq!(
+                contract.verify_observation(&observed),
+                Err(ExecutionContractError::ObservedContractMismatch)
+            );
+        }
+
+        let mut stale_derivation = matching_observation(&contract);
+        stale_derivation.contract.dependencies[0].derivation_digest =
+            digest(DigestAlgorithm::Blake3, 0xdd);
         assert_eq!(
-            contract.verify_observation(&stale_policy),
-            Err(ExecutionContractError::ObservedDigestMismatch(
-                "policy.network_digest"
-            ))
+            contract.verify_observation(&stale_derivation),
+            Err(ExecutionContractError::ObservedContractMismatch)
+        );
+
+        let mut stale_writable_path = matching_observation(&contract);
+        stale_writable_path
+            .contract
+            .filesystem
+            .writable_paths
+            .push("/var/tmp".to_string());
+        assert_eq!(
+            contract.verify_observation(&stale_writable_path),
+            Err(ExecutionContractError::ObservedContractMismatch)
         );
     }
 
@@ -787,6 +746,14 @@ mod tests {
             contract.compute_execution_id().expect("execution id"),
             ExecutionId::new(format!("blake3:{}", blake3::hash(&expected_input).to_hex()))
                 .expect("valid id")
+        );
+        assert_eq!(
+            contract.compute_execution_id().expect("execution id"),
+            ExecutionId::new(
+                "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f"
+                    .to_string()
+            )
+            .expect("shared Rust/TypeScript vector")
         );
     }
 

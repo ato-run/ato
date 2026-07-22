@@ -6,8 +6,10 @@
 //! target and every immutable cache independently. Identity components are
 //! sanitized so untrusted values cannot escape the root.
 
-use std::collections::BTreeMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -18,21 +20,30 @@ use snapshot::{
     SNAPSHOT_MANIFEST_V1_FILENAME, SnapshotManifestV1,
 };
 
-const ACCEPTANCE_CATALOG_SCHEMA: &str = "ato.snapshot-acceptance-catalog/v1";
-const ACCEPTANCE_CATALOG_FILENAME: &str = "acceptance-catalog-v1.json";
+const ACCEPTANCE_RECEIPT_SCHEMA: &str = "ato.snapshot-local-acceptance-receipt/v1";
+const ACCEPTANCE_RECEIPT_DOMAIN: &[u8] = b"ato.snapshot-local-acceptance-receipt/v1\0";
+const ACCEPTANCE_RECEIPT_DIR: &str = "acceptance";
+const ACCEPTANCE_MAC_KEY_ENV: &str = "ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY";
+static LOCAL_PUBLICATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AcceptanceCatalogV1 {
+struct LocalAcceptanceReceiptV1 {
     schema: String,
     execution_id: ExecutionId,
-    entries: BTreeMap<String, AcceptedCatalogEntry>,
+    snapshot_id: String,
+    envelope_id: String,
+    acceptance_receipt_id: String,
+    mac: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AcceptedCatalogEntry {
-    envelope_id: String,
+#[derive(serde::Serialize)]
+struct LocalAcceptanceReceiptProjection<'a> {
+    schema: &'a str,
+    execution_id: &'a ExecutionId,
+    snapshot_id: &'a str,
+    envelope_id: &'a str,
+    acceptance_receipt_id: &'a str,
 }
 
 /// Sanitize a `blake3:<hex>`-style id into one safe path component (hex/dash
@@ -112,8 +123,9 @@ impl V1StagingArtifact {
             .duration_since(UNIX_EPOCH)
             .context("system clock is before UNIX epoch")?
             .as_nanos();
+        let sequence = LOCAL_PUBLICATION_NONCE.fetch_add(1, Ordering::Relaxed);
         let dir = root.join("snapshots").join(".staging").join(format!(
-            "{}-{}-{nonce}",
+            "{}-{}-{nonce}-{sequence}",
             safe_component(execution_id.as_str()),
             std::process::id()
         ));
@@ -153,6 +165,7 @@ impl V1StagingArtifact {
                 &snapshot.execution_id,
                 &snapshot.snapshot_id,
                 &envelope.envelope_id,
+                &envelope.acceptance.receipt_id.to_string(),
             )?
             .ok_or_else(|| anyhow::anyhow!("existing Snapshot v1 directory is incomplete"))?;
             if existing.legacy_manifest != *legacy
@@ -205,11 +218,16 @@ pub(crate) fn load_v1_snapshot(
     execution_id: &ExecutionId,
     snapshot_id: &str,
 ) -> Result<Option<StoredSnapshotV1>> {
-    let catalog = load_acceptance_catalog(root, execution_id)?;
-    let Some(expected) = catalog.entries.get(snapshot_id) else {
+    let Some(receipt) = load_acceptance_receipt(root, execution_id, snapshot_id)? else {
         return Ok(None);
     };
-    load_v1_snapshot_with_expected_envelope(root, execution_id, snapshot_id, &expected.envelope_id)
+    load_v1_snapshot_with_expected_envelope(
+        root,
+        execution_id,
+        snapshot_id,
+        &receipt.envelope_id,
+        &receipt.acceptance_receipt_id,
+    )
 }
 
 fn load_v1_snapshot_with_expected_envelope(
@@ -217,6 +235,7 @@ fn load_v1_snapshot_with_expected_envelope(
     execution_id: &ExecutionId,
     snapshot_id: &str,
     expected_envelope_id: &str,
+    expected_acceptance_receipt_id: &str,
 ) -> Result<Option<StoredSnapshotV1>> {
     let dir = snapshot_dir(root, execution_id, snapshot_id);
     if !dir.is_dir() {
@@ -235,7 +254,12 @@ fn load_v1_snapshot_with_expected_envelope(
         .verify(&legacy_manifest, &snapshot_manifest)
         .map_err(anyhow::Error::new)?;
     if envelope.envelope_id != expected_envelope_id {
-        anyhow::bail!("Snapshot v1 envelope does not match the trusted acceptance catalog");
+        anyhow::bail!("Snapshot v1 envelope does not match its authenticated acceptance receipt");
+    }
+    if envelope.acceptance.receipt_id.to_string() != expected_acceptance_receipt_id {
+        anyhow::bail!(
+            "Snapshot v1 acceptance metadata does not match its authenticated acceptance receipt"
+        );
     }
     Ok(Some(StoredSnapshotV1 {
         artifact_dir: dir,
@@ -249,14 +273,32 @@ pub(crate) fn load_v1_snapshots(
     root: &Path,
     execution_id: &ExecutionId,
 ) -> Result<Vec<StoredSnapshotV1>> {
-    let catalog = load_acceptance_catalog(root, execution_id)?;
     let mut snapshots = Vec::new();
-    for (snapshot_id, expected) in catalog.entries {
+    let dir = acceptance_receipt_dir(root, execution_id);
+    if !dir.is_dir() {
+        return Ok(snapshots);
+    }
+    let mut paths = std::fs::read_dir(&dir)
+        .with_context(|| format!("read acceptance receipt directory {}", dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in paths {
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let receipt: LocalAcceptanceReceiptV1 = match read_json(&entry.path()) {
+            Ok(receipt) => receipt,
+            Err(_) => continue,
+        };
+        if verify_acceptance_receipt(&receipt, execution_id).is_err() {
+            continue;
+        }
         if let Ok(Some(snapshot)) = load_v1_snapshot_with_expected_envelope(
             root,
             execution_id,
-            &snapshot_id,
-            &expected.envelope_id,
+            &receipt.snapshot_id,
+            &receipt.envelope_id,
+            &receipt.acceptance_receipt_id,
         ) {
             snapshots.push(snapshot);
         }
@@ -264,26 +306,32 @@ pub(crate) fn load_v1_snapshots(
     Ok(snapshots)
 }
 
-fn acceptance_catalog_path(root: &Path, execution_id: &ExecutionId) -> PathBuf {
+fn acceptance_receipt_dir(root: &Path, execution_id: &ExecutionId) -> PathBuf {
     root.join("snapshots")
         .join(safe_component(execution_id.as_str()))
-        .join(ACCEPTANCE_CATALOG_FILENAME)
+        .join(ACCEPTANCE_RECEIPT_DIR)
 }
 
-fn load_acceptance_catalog(root: &Path, execution_id: &ExecutionId) -> Result<AcceptanceCatalogV1> {
-    let path = acceptance_catalog_path(root, execution_id);
+fn acceptance_receipt_path(root: &Path, execution_id: &ExecutionId, snapshot_id: &str) -> PathBuf {
+    acceptance_receipt_dir(root, execution_id).join(format!("{}.json", safe_component(snapshot_id)))
+}
+
+#[cfg(test)]
+fn load_acceptance_receipt(
+    root: &Path,
+    execution_id: &ExecutionId,
+    snapshot_id: &str,
+) -> Result<Option<LocalAcceptanceReceiptV1>> {
+    let path = acceptance_receipt_path(root, execution_id, snapshot_id);
     if !path.exists() {
-        return Ok(AcceptanceCatalogV1 {
-            schema: ACCEPTANCE_CATALOG_SCHEMA.to_string(),
-            execution_id: execution_id.clone(),
-            entries: BTreeMap::new(),
-        });
+        return Ok(None);
     }
-    let catalog: AcceptanceCatalogV1 = read_json(&path)?;
-    if catalog.schema != ACCEPTANCE_CATALOG_SCHEMA || &catalog.execution_id != execution_id {
-        anyhow::bail!("invalid Snapshot v1 acceptance catalog identity");
+    let receipt: LocalAcceptanceReceiptV1 = read_json(&path)?;
+    if receipt.snapshot_id != snapshot_id {
+        anyhow::bail!("Snapshot v1 acceptance receipt path identity mismatch");
     }
-    Ok(catalog)
+    verify_acceptance_receipt(&receipt, execution_id)?;
+    Ok(Some(receipt))
 }
 
 fn record_accepted_envelope(
@@ -291,21 +339,130 @@ fn record_accepted_envelope(
     snapshot: &SnapshotManifestV1,
     envelope: &ArtifactEnvelopeV1,
 ) -> Result<()> {
-    let mut catalog = load_acceptance_catalog(root, &snapshot.execution_id)?;
-    let entry = AcceptedCatalogEntry {
+    let acceptance_receipt_id = envelope.acceptance.receipt_id.to_string();
+    let mut receipt = LocalAcceptanceReceiptV1 {
+        schema: ACCEPTANCE_RECEIPT_SCHEMA.to_string(),
+        execution_id: snapshot.execution_id.clone(),
+        snapshot_id: snapshot.snapshot_id.clone(),
         envelope_id: envelope.envelope_id.clone(),
+        acceptance_receipt_id,
+        mac: String::new(),
     };
-    if let Some(existing) = catalog.entries.get(&snapshot.snapshot_id)
-        && existing != &entry
-    {
-        anyhow::bail!("trusted acceptance catalog already pins a different envelope");
+    receipt.mac = compute_acceptance_mac(&receipt)?;
+    let path = acceptance_receipt_path(root, &snapshot.execution_id, &snapshot.snapshot_id);
+    if path.exists() {
+        let existing: LocalAcceptanceReceiptV1 = read_json(&path)?;
+        verify_acceptance_receipt(&existing, &snapshot.execution_id)?;
+        if existing != receipt {
+            anyhow::bail!("immutable acceptance receipt already pins a different envelope");
+        }
+        return Ok(());
     }
-    catalog.entries.insert(snapshot.snapshot_id.clone(), entry);
-    let path = acceptance_catalog_path(root, &snapshot.execution_id);
-    let pending = path.with_extension(format!("pending-{}", std::process::id()));
-    write_json(&pending, &catalog)?;
-    std::fs::rename(&pending, &path)
-        .with_context(|| format!("publish trusted acceptance catalog {}", path.display()))
+    let parent = path.parent().context("acceptance receipt has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before UNIX epoch")?
+        .as_nanos();
+    let sequence = LOCAL_PUBLICATION_NONCE.fetch_add(1, Ordering::Relaxed);
+    let pending = parent.join(format!(
+        ".{}-{}-{nonce}-{sequence}.pending",
+        safe_component(&snapshot.snapshot_id),
+        std::process::id()
+    ));
+    let json = serde_json::to_vec_pretty(&receipt)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&pending)
+        .with_context(|| format!("create {}", pending.display()))?;
+    file.write_all(&json)?;
+    file.sync_all()?;
+    match std::fs::hard_link(&pending, &path) {
+        Ok(()) => {
+            std::fs::remove_file(&pending)?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(&pending)?;
+            let existing: LocalAcceptanceReceiptV1 = read_json(&path)?;
+            verify_acceptance_receipt(&existing, &snapshot.execution_id)?;
+            if existing == receipt {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "immutable acceptance receipt concurrently pinned a different envelope"
+                )
+            }
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&pending);
+            Err(error).with_context(|| format!("publish acceptance receipt {}", path.display()))
+        }
+    }
+}
+
+fn verify_acceptance_receipt(
+    receipt: &LocalAcceptanceReceiptV1,
+    expected_execution_id: &ExecutionId,
+) -> Result<()> {
+    if receipt.schema != ACCEPTANCE_RECEIPT_SCHEMA
+        || &receipt.execution_id != expected_execution_id
+        || receipt.mac != compute_acceptance_mac(receipt)?
+    {
+        anyhow::bail!("invalid Snapshot v1 authenticated acceptance receipt");
+    }
+    Ok(())
+}
+
+fn compute_acceptance_mac(receipt: &LocalAcceptanceReceiptV1) -> Result<String> {
+    let projection = LocalAcceptanceReceiptProjection {
+        schema: &receipt.schema,
+        execution_id: &receipt.execution_id,
+        snapshot_id: &receipt.snapshot_id,
+        envelope_id: &receipt.envelope_id,
+        acceptance_receipt_id: &receipt.acceptance_receipt_id,
+    };
+    let canonical = serde_jcs::to_vec(&projection)?;
+    let mut input = Vec::with_capacity(ACCEPTANCE_RECEIPT_DOMAIN.len() + canonical.len());
+    input.extend_from_slice(ACCEPTANCE_RECEIPT_DOMAIN);
+    input.extend_from_slice(&canonical);
+    Ok(format!(
+        "blake3:{}",
+        blake3::keyed_hash(&acceptance_mac_key()?, &input).to_hex()
+    ))
+}
+
+fn acceptance_mac_key() -> Result<[u8; 32]> {
+    match std::env::var(ACCEPTANCE_MAC_KEY_ENV) {
+        Ok(value) => {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                anyhow::bail!(
+                    "{ACCEPTANCE_MAC_KEY_ENV} must contain exactly 32 bytes as lowercase hex"
+                );
+            }
+            let decoded = hex::decode(value)?;
+            decoded
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid {ACCEPTANCE_MAC_KEY_ENV} length"))
+        }
+        Err(_) => {
+            #[cfg(test)]
+            {
+                Ok([0x5a; 32])
+            }
+            #[cfg(not(test))]
+            {
+                anyhow::bail!(
+                    "Capsule v1 local Snapshot acceptance requires {ACCEPTANCE_MAC_KEY_ENV} from an OS-protected credential source"
+                )
+            }
+        }
+    }
 }
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
@@ -451,11 +608,11 @@ mod tests {
     }
 
     #[test]
-    fn rehashed_acceptance_escalation_is_rejected_by_catalog_anchor() {
+    fn rehashed_envelope_and_receipt_are_rejected_without_the_external_mac_key() {
         use capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA;
         use snapshot::{
-            ArtifactAcceptanceStatus, BuildLayers, BuildReadyStateInput, FakeSnapshotBackend,
-            RestoreContract, SanitizerContract, SnapshotBackend, migrate_legacy_manifest,
+            BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
+            SanitizerContract, SnapshotBackend, migrate_legacy_manifest,
         };
 
         let root = tempfile::tempdir().unwrap();
@@ -497,27 +654,116 @@ mod tests {
             .commit(root.path(), &legacy, &snapshot, &accepted)
             .unwrap();
 
-        // Model a trusted catalog that recorded the pre-acceptance envelope.
-        // Replacing the artifact with a self-consistent accepted envelope and
-        // recomputing its id must not change that external expectation.
-        let mut quarantined = accepted.clone();
-        quarantined.acceptance.status = ArtifactAcceptanceStatus::Quarantined;
-        quarantined.envelope_id = quarantined.compute_envelope_id().unwrap();
-        let mut catalog = load_acceptance_catalog(root.path(), &execution_id).unwrap();
-        catalog.entries.insert(
-            snapshot.snapshot_id.clone(),
-            AcceptedCatalogEntry {
-                envelope_id: quarantined.envelope_id,
-            },
-        );
+        // An attacker that can rewrite the artifact root can create a new,
+        // self-consistent accepted envelope by changing legacy metadata and can
+        // also rewrite the receipt's public fields. The external keyed MAC is
+        // the trust anchor: without it the jointly rehashed files stay invalid.
+        let mut tampered_legacy = legacy.clone();
+        tampered_legacy.capsule_manifest_hash = format!("blake3:{}", "d".repeat(64));
+        let tampered_envelope = ArtifactEnvelopeV1::accepted(&tampered_legacy, &snapshot).unwrap();
+        let artifact = snapshot_dir(root.path(), &execution_id, &snapshot.snapshot_id);
+        write_json(&artifact.join("manifest.json"), &tampered_legacy).unwrap();
         write_json(
-            &acceptance_catalog_path(root.path(), &execution_id),
-            &catalog,
+            &artifact.join(ARTIFACT_ENVELOPE_V1_FILENAME),
+            &tampered_envelope,
         )
         .unwrap();
+        let receipt_path =
+            acceptance_receipt_path(root.path(), &execution_id, &snapshot.snapshot_id);
+        let mut tampered_receipt: LocalAcceptanceReceiptV1 = read_json(&receipt_path).unwrap();
+        tampered_receipt.envelope_id = tampered_envelope.envelope_id;
+        tampered_receipt.mac = format!("blake3:{}", "0".repeat(64));
+        write_json(&receipt_path, &tampered_receipt).unwrap();
 
         let error =
             load_v1_snapshot(root.path(), &execution_id, &snapshot.snapshot_id).unwrap_err();
-        assert!(error.to_string().contains("trusted acceptance catalog"));
+        assert!(
+            error
+                .to_string()
+                .contains("authenticated acceptance receipt")
+        );
+    }
+
+    #[test]
+    fn parallel_snapshot_acceptance_keeps_both_immutable_receipts() {
+        use capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA;
+        use snapshot::{
+            BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
+            SanitizerContract, SnapshotBackend, migrate_legacy_manifest,
+        };
+
+        fn candidate(
+            root: &Path,
+            execution_id: &ExecutionId,
+            marker: u8,
+        ) -> (
+            V1StagingArtifact,
+            ReadyStateManifest,
+            SnapshotManifestV1,
+            ArtifactEnvelopeV1,
+        ) {
+            let backend = FakeSnapshotBackend::new();
+            let staging = V1StagingArtifact::create(root, execution_id).unwrap();
+            let store = staging.open_store().unwrap();
+            let legacy = backend
+                .build_ready_state(BuildReadyStateInput {
+                    store: &store,
+                    capsule_manifest_hash: format!("blake3:{}", "c".repeat(64)),
+                    runner_class: None,
+                    surface_requirement: None,
+                    layers: BuildLayers {
+                        rootfs: vec![marker; 128],
+                        runtime: None,
+                        dependency: None,
+                        app: None,
+                        vmstate: vec![marker; 64],
+                        memory: vec![marker; 4096],
+                    },
+                    restore_contract: RestoreContract::default(),
+                    sanitizer_contract: SanitizerContract::default(),
+                    declared_secret_markers: Vec::new(),
+                    execution_id: Some(execution_id.to_string()),
+                    execution_identity_schema: Some(EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+                    supervisor: None,
+                })
+                .unwrap()
+                .manifest;
+            let snapshot = migrate_legacy_manifest(
+                &legacy,
+                execution_id.clone(),
+                backend.snapshot_compatibility_contract().unwrap(),
+            )
+            .unwrap();
+            let envelope = ArtifactEnvelopeV1::accepted(&legacy, &snapshot).unwrap();
+            (staging, legacy, snapshot, envelope)
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let execution_id = ExecutionId::new(format!("blake3:{}", "4".repeat(64))).unwrap();
+        let first = candidate(root.path(), &execution_id, 1);
+        let second = candidate(root.path(), &execution_id, 2);
+        let first_id = first.2.snapshot_id.clone();
+        let second_id = second.2.snapshot_id.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                first
+                    .0
+                    .commit(root.path(), &first.1, &first.2, &first.3)
+                    .unwrap();
+            });
+            scope.spawn(|| {
+                second
+                    .0
+                    .commit(root.path(), &second.1, &second.2, &second.3)
+                    .unwrap();
+            });
+        });
+
+        let loaded = load_v1_snapshots(root.path(), &execution_id).unwrap();
+        let ids = loaded
+            .into_iter()
+            .map(|snapshot| snapshot.snapshot_manifest.snapshot_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(ids, std::collections::BTreeSet::from([first_id, second_id]));
     }
 }
