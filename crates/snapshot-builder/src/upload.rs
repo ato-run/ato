@@ -2,7 +2,7 @@
 //! S3-compatible object store (Cloudflare R2).
 //!
 //! Transport packaging is ONE file per job: `artifact.tar.gz` containing exactly
-//! `manifest.json` and `cas/` at the archive root, uploaded to
+//! `manifest.json`, optional `snapshot-manifest-v1.json`, and `cas/` at the archive root, uploaded to
 //! `<endpoint>/<bucket>/<job_id>/<artifact_manifest_hash>/artifact.tar.gz` —
 //! the object key carries the immutable content identity, so a re-run of a
 //! job id can never silently overwrite different bytes — via shell-out `curl
@@ -16,7 +16,7 @@
 //! partial set is an operator error that stops the daemon at startup (never a
 //! per-job surprise), and a fully absent set keeps the daemon byte-identical to
 //! v1 (same-host `cas://` location, no packing, no upload). The local on-disk
-//! job layout stays `{manifest.json, cas/}` either way — the tar.gz is a
+//! job layout stays `{manifest.json, snapshot-manifest-v1.json?, cas/}` either way — the tar.gz is a
 //! transport artifact, removed after the upload attempt succeeds or fails.
 //!
 //! Shell-outs go through the snapshot crate's [`ImportCommandRunner`] seam
@@ -26,6 +26,8 @@
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use snapshot::SNAPSHOT_MANIFEST_V1_FILENAME;
 
 pub use snapshot::docker_import::build::{ImportCommandRunner, SystemImportCommandRunner};
 
@@ -43,7 +45,7 @@ pub const ARTIFACT_ARCHIVE_NAME: &str = "artifact.tar.gz";
 const UPLOAD_BACKOFF: &[Duration] = &[Duration::from_secs(2), Duration::from_secs(5)];
 
 /// The v1 same-host location, verbatim (`cas://<job_id>/<artifact_manifest_hash>`
-/// names `<work>/<job_id>/{manifest.json, cas/}` on the builder host itself).
+/// names `<work>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}` on the builder host itself).
 /// Kept as a named function (not inline in `process_job`) so the absent-config
 /// path is PINNED by a unit test — this string is registry data whose shape
 /// must never drift.
@@ -178,7 +180,7 @@ impl ArtifactStore {
         let uploaded =
             self.upload_with_backoff(runner, &archive, job_id, artifact_manifest_hash, backoff);
         // The tar.gz is transport-only: remove it on success AND failure so the
-        // local job layout stays {manifest.json, cas/} and a failed job never
+        // local job layout stays {manifest.json, snapshot-manifest-v1.json?, cas/} and a failed job never
         // leaves a stale archive to be confused for uploaded bytes.
         let _ = std::fs::remove_file(&archive);
         uploaded?;
@@ -235,7 +237,7 @@ impl ArtifactStore {
 }
 
 /// Package one job's sealed artifact as `<jobdir>/artifact.tar.gz` containing
-/// exactly `manifest.json` and `cas/` at the archive root. The member list is
+/// exactly `manifest.json`, an optional v1 sidecar, and `cas/` at the archive root. The member list is
 /// FIXED — never a glob, never the whole jobdir (which would swallow build
 /// scratch like `rootfs.ext4` / verify overlays into the transport artifact).
 /// argv-array exec (no shell), fail-closed on any nonzero tar exit.
@@ -243,18 +245,19 @@ pub fn pack_artifact(runner: &dyn ImportCommandRunner, jobdir: &Path) -> Result<
     let archive = jobdir.join(ARTIFACT_ARCHIVE_NAME);
     let jobdir_arg = jobdir.to_string_lossy();
     let archive_arg = archive.to_string_lossy();
+    let mut args = vec![
+        "-C",
+        jobdir_arg.as_ref(),
+        "-czf",
+        archive_arg.as_ref(),
+        "manifest.json",
+    ];
+    if jobdir.join(SNAPSHOT_MANIFEST_V1_FILENAME).is_file() {
+        args.push(SNAPSHOT_MANIFEST_V1_FILENAME);
+    }
+    args.push("cas");
     let out = runner
-        .run(
-            "tar",
-            &[
-                "-C",
-                jobdir_arg.as_ref(),
-                "-czf",
-                archive_arg.as_ref(),
-                "manifest.json",
-                "cas",
-            ],
-        )
+        .run("tar", &args)
         .map_err(|e| format!("spawn tar: {e}"))?;
     if out.status != 0 {
         return Err(format!(
@@ -433,6 +436,22 @@ mod tests {
         assert_eq!(
             r.calls(),
             vec!["tar -C /work/job_9 -czf /work/job_9/artifact.tar.gz manifest.json cas"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pack_includes_snapshot_v1_manifest_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(SNAPSHOT_MANIFEST_V1_FILENAME), b"{}").unwrap();
+        let runner = FakeRunner::new(vec![ok()]);
+
+        pack_artifact(&runner, dir.path()).unwrap();
+
+        let command = runner.calls().into_iter().next().unwrap();
+        assert!(
+            command.ends_with("manifest.json snapshot-manifest-v1.json cas"),
+            "{command}"
         );
     }
 

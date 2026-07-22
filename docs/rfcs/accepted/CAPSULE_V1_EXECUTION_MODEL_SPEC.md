@@ -880,6 +880,13 @@ inside the legacy schema:
 
 The runtime MUST NOT silently reinterpret a legacy manifest as a v1 manifest.
 Migration creates a new immutable manifest and therefore a new `snapshot_id`.
+Consequently, a v1 lock with only a legacy Ready-State artifact is not runnable
+until an explicit rebuild produces and accepts `ato.snapshot-manifest/v1`.
+Connected-Runner transport MUST carry `snapshot-manifest-v1.json` for v1
+`blake3:` execution IDs; its absence is an artifact-verification failure before
+restore. Historical `sha256:` execution IDs MAY use the legacy runner path only
+while that path independently verifies the lease execution ID, sealed backend
+facts, and exact runner contract.
 
 ### 16.4 Deprecated external vocabulary
 
