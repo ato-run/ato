@@ -1,0 +1,9 @@
+# Build output
+/target
+
+# Tauri-generated schemas/artifacts
+/gen
+
+# The embedded frontend is the ato-pwa Desktop build (`npm run build:desktop`),
+# copied/generated at build time — never committed here.
+/frontend

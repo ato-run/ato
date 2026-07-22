@@ -1,0 +1,36 @@
+# Ato Desktop — Tauri shell (migration from the GPUI+Wry shell in `crates/desktop`).
+# Kept OUT of the workspace (see the root Cargo.toml `exclude`) for the same
+# reason as `crates/desktop`: heavy platform deps that break `cargo package
+# --workspace`. Builds here with its own Cargo.lock.
+#
+# Standalone workspace marker (same rationale as `crates/desktop`): the parent
+# `apps/ato/Cargo.toml` exclude paths are relative to that manifest and do NOT
+# match under `.worktrees/<branch>/crates/desktop-tauri/`, so Cargo's upward
+# walk would otherwise bind this crate to the parent workspace. An empty
+# `[workspace]` here makes the crate its own workspace root wherever it lives.
+[workspace]
+
+[package]
+name = "ato-desktop-tauri"
+version = "0.1.0"
+edition = "2021"
+description = "Ato Desktop — Tauri shell hosting the ato-pwa Desktop build"
+publish = false
+
+# Mobile-ready crate types (Tauri v2 convention) — the shell is intended to
+# grow beyond desktop (see the abstracted `runner` crate: IoT / mobile / EV).
+[lib]
+name = "ato_desktop_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Enable a strict release profile later; kept minimal for the scaffold.
+default = []

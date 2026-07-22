@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ato",
+  "version": "0.1.0",
+  "identifier": "run.ato.desktop",
+  "build": {
+    "frontendDist": "./frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Ato",
+        "width": 1200,
+        "height": 800,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' https://api.ato.run https://staging.api.ato.run https://app.ato.run http://127.0.0.1:* http://localhost:* ; img-src 'self' data: https: ; style-src 'self' 'unsafe-inline' ; script-src 'self' ; frame-src 'self' https: ; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": ["app", "dmg"],
+    "icon": ["icons/icon.png"]
+  }
+}

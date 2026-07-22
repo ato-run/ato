@@ -25,6 +25,8 @@ exclude = [
     "crates/desktop/xtask",
     "crates/desktop/.tmp",
     "crates/desktop/vendor",
+    # Tauri migration shell — heavy platform deps, own Cargo.lock (like `desktop`).
+    "crates/desktop-tauri",
     "sidecars/ato-tsnetd",
 ]
 
