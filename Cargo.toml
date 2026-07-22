@@ -11,6 +11,7 @@ members = [
     "crates/cli/lock-draft-engine",
     "crates/nacelle",
     "crates/netd",
+    "crates/runner",
 ]
 
 # `desktop` (and its xtask) are kept OUT of the workspace because their
