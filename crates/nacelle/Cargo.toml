@@ -30,6 +30,8 @@ tokio = { version = "1", features = ["full"] }
 
 # Shared libraries
 # capsule-sync = { path = "../capsule-sync" }  # TODO: Migrated to sync-rs
+# Wire types shared with the host (NacelleEvent / TerminalCommand / spec-version).
+protocol = { path = "../protocol", version = "0.1.0" }
 
 # 既存の依存関係
 serde = { version = "1.0", features = ["derive"] }

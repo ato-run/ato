@@ -58,6 +58,7 @@ pub mod config;
 pub mod consent;
 pub mod error;
 pub mod handle;
+pub mod nacelle_ipc;
 pub mod net;
 pub mod placement;
 pub mod runtime_control;

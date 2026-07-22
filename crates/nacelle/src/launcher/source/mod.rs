@@ -9,6 +9,9 @@
 //! - macOS: sandbox-exec Seatbelt sandboxing
 //! - Windows: Windows Sandbox (Pro/Enterprise) or Sandboxie Plus (all editions)
 
+// Bring the `.emit()` extension into scope for the NacelleEvent emit sites below.
+use crate::internal_api::NacelleEventExt;
+
 pub mod toolchain;
 mod validator;
 // The platform-neutral visibility plan is consumed by the Linux (bwrap) and

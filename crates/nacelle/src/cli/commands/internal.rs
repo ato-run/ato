@@ -8,7 +8,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::{error, info};
 
 use nacelle::internal_api::{
-    CURRENT_SPEC_VERSION, NEXT_SPEC_VERSION, NacelleEvent, validate_spec_version,
+    CURRENT_SPEC_VERSION, NEXT_SPEC_VERSION, NacelleEvent, NacelleEventExt, validate_spec_version,
 };
 use nacelle::launcher::environment::{
     DerivedOutputMountSpec, EnvironmentPrepareRequest, EnvironmentWorkspace, OverlayMountSpec,

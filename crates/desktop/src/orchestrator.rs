@@ -4501,6 +4501,8 @@ pub fn spawn_terminal_session(
     cols: u16,
     rows: u16,
 ) -> Result<TerminalProcess> {
+    use protocol::nacelle_ipc::{NacelleEvent, TerminalCommand};
+
     // Locate nacelle binary: NACELLE_PATH → dev workspace target → PATH.
     let nacelle_bin = resolve_nacelle_binary().ok_or_else(|| {
         anyhow!(
@@ -4562,20 +4564,20 @@ pub fn spawn_terminal_session(
         let reader = BufReader::new(nacelle_stdout);
         for line in reader.lines() {
             let Ok(line) = line else { break };
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            // Typed against the shared `protocol::nacelle_ipc` schema; any line
+            // that is not a NacelleEvent (or an unknown variant) is skipped, as
+            // the previous untyped `value.get("event")` match did.
+            let Ok(event) = serde_json::from_str::<NacelleEvent>(&line) else {
                 continue;
             };
-            match value.get("event").and_then(|e| e.as_str()) {
-                Some("terminal_data") => {
-                    if let Some(b64) = value.get("data_b64").and_then(|d| d.as_str())
-                        && output_tx.send(b64.to_string()).is_err()
-                    {
+            match event {
+                NacelleEvent::TerminalData { data_b64, .. } => {
+                    if output_tx.send(data_b64).is_err() {
                         break;
                     }
                 }
-                Some("terminal_exited") => {
-                    let code = value.get("exit_code").and_then(|c| c.as_i64());
-                    info!(session_id = %sid_a, exit_code = ?code, "nacelle terminal session exited");
+                NacelleEvent::TerminalExited { exit_code, .. } => {
+                    info!(session_id = %sid_a, exit_code = ?exit_code, "nacelle terminal session exited");
                     break;
                 }
                 _ => {}
@@ -4596,11 +4598,11 @@ pub fn spawn_terminal_session(
             loop {
                 match input_rx.try_recv() {
                     Ok(data) => {
-                        let cmd = serde_json::json!({
-                            "type": "terminal_input",
-                            "session_id": sid_b,
-                            "data_b64": base64::engine::general_purpose::STANDARD.encode(&data)
-                        });
+                        let cmd = TerminalCommand::TerminalInput {
+                            session_id: sid_b.clone(),
+                            data_b64: base64::engine::general_purpose::STANDARD.encode(&data),
+                        };
+                        let cmd = serde_json::to_string(&cmd).unwrap_or_default();
                         if writeln!(nacelle_stdin, "{}", cmd).is_err() {
                             warn!(session_id = %sid_b, "nacelle stdin write failed, stopping input thread");
                             return;
@@ -4618,12 +4620,12 @@ pub fn spawn_terminal_session(
             loop {
                 match resize_rx.try_recv() {
                     Ok((c, r)) => {
-                        let cmd = serde_json::json!({
-                            "type": "terminal_resize",
-                            "session_id": sid_b,
-                            "cols": c,
-                            "rows": r
-                        });
+                        let cmd = TerminalCommand::TerminalResize {
+                            session_id: sid_b.clone(),
+                            cols: c,
+                            rows: r,
+                        };
+                        let cmd = serde_json::to_string(&cmd).unwrap_or_default();
                         if writeln!(nacelle_stdin, "{}", cmd).is_err() {
                             warn!(session_id = %sid_b, "nacelle stdin write failed (resize), stopping input thread");
                             return;
