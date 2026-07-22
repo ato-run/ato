@@ -1603,7 +1603,7 @@ version = "1"
 
     // ---------- P7: real-Postgres end-to-end (host-bound) ----------
     //
-    // Exercises the ato/example-db provider + minimal consumer fixture
+    // Exercises the ato/postgres provider + minimal consumer fixture
     // against the verified tool artifact resolver (#119/#120) — the
     // postgres binaries come from $ATO_HOME/store/tools/postgresql-...
     // not the host. The fixtures live in `crates/cli/tests/fixtures/p7/`.
@@ -1628,7 +1628,7 @@ version = "1"
             return None;
         }
         let root = p7_fixture_root();
-        let provider = root.join("example-db/capsule.toml");
+        let provider = root.join("ato-postgres/capsule.toml");
         let consumer = root.join("wasedap2p/capsule.toml");
         if provider.exists() && consumer.exists() {
             Some(())
@@ -1658,16 +1658,16 @@ version = "1"
         }
 
         let consumer = p7_parse_fixture("wasedap2p/capsule.toml");
-        let provider_manifest = p7_parse_fixture("example-db/capsule.toml");
-        let provider_root = p7_fixture_root().join("example-db");
+        let provider_manifest = p7_parse_fixture("ato-postgres/capsule.toml");
+        let provider_root = p7_fixture_root().join("ato-postgres");
 
         // Stage 1: real verifier produces the lock.
         let mut providers_for_lock = BTreeMap::new();
         providers_for_lock.insert(
             "db".to_string(),
             capsule::dependency_contracts::ResolvedProviderManifest {
-                requested: "capsule://ato/example-db@16".to_string(),
-                resolved: "capsule://ato/example-db@sha256:p7-fixture".to_string(),
+                requested: "capsule://ato/postgres@16".to_string(),
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
                 manifest: provider_manifest.clone(),
             },
         );
@@ -1714,7 +1714,7 @@ version = "1"
             OrchestratorProvider {
                 manifest: provider_manifest,
                 provider_root,
-                resolved: "capsule://ato/example-db@sha256:p7-fixture".to_string(),
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
             },
         );
 
@@ -1795,13 +1795,13 @@ version = "1"
             std::env::set_var("PG_PASSWORD", "p7-rotated-different-value");
         }
         let consumer2 = p7_parse_fixture("wasedap2p/capsule.toml");
-        let provider2 = p7_parse_fixture("example-db/capsule.toml");
+        let provider2 = p7_parse_fixture("ato-postgres/capsule.toml");
         let mut providers2 = BTreeMap::new();
         providers2.insert(
             "db".to_string(),
             capsule::dependency_contracts::ResolvedProviderManifest {
-                requested: "capsule://ato/example-db@16".to_string(),
-                resolved: "capsule://ato/example-db@sha256:p7-fixture".to_string(),
+                requested: "capsule://ato/postgres@16".to_string(),
+                resolved: "capsule://ato/postgres@sha256:p7-fixture".to_string(),
                 manifest: provider2,
             },
         );
@@ -1835,7 +1835,7 @@ type = "app"
 default_target = "app"
 
 [dependencies.db]
-capsule = "capsule://ato/example-db@16"
+capsule = "capsule://ato/postgres@16"
 contract = "service@1"
 
 [targets.app]

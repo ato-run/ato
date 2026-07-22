@@ -357,7 +357,7 @@ mod tests {
             session_pid: pid,
             provider_pid: None,
             started_at: "2026-05-04T12:00:00Z".to_string(),
-            resolved: "capsule://ato/example-db@sha256:dead".to_string(),
+            resolved: "capsule://ato/postgres@sha256:dead".to_string(),
         };
         write_session_sentinel(dir, &sentinel).expect("write");
         sentinel

@@ -5,7 +5,7 @@
 #   - DATABASE_URL no longer hardcoded; resolved from
 #     {{deps.db.runtime_exports.DATABASE_URL}} at run time.
 #   - host-side prerequisite "PostgreSQL 14+ reachable" is gone — the
-#     `[dependencies.db]` block + `ato/example-db@16` provider start it
+#     `[dependencies.db]` block + `ato/postgres@16` provider start it
 #     automatically.
 #   - PG_PASSWORD is in manifest top-level required_env (RFC §5.2 dep
 #     env scope) so {{env.PG_PASSWORD}} resolves to the host env value
@@ -32,7 +32,7 @@ description  = "Waseda P2P backend migrated to RFC dependency-contract grammar"
 author       = "ato"
 
 [dependencies.db]
-capsule  = "capsule://ato/example-db@16"
+capsule  = "capsule://ato/postgres@16"
 contract = "service@1"
 
 [dependencies.db.parameters]
