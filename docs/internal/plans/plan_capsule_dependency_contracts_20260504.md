@@ -45,7 +45,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 | **P4** | credential resolver + materialization channels (Rule M1–M5) | 1 | `ato-cli` |
 | **P5** | runtime orchestration (existing `managed_services` を deps graph 駆動に置換) | 1–2 | `ato-cli` |
 | **P6** | identity 畳み込み: receipt の `dependency_derivation_hash` に `(parameters, identity_exports)` を入れる | 1 | `ato-cli` |
-| **P7** | E2E: CI mock provider + manual `ato/example-db` / WasedaP2P path + invariant regression test | 1 | `crates/ato-cli/tests/`, registry |
+| **P7** | E2E: CI mock provider + manual `ato/postgres` / WasedaP2P path + invariant regression test | 1 | `crates/ato-cli/tests/`, registry |
 
 **Critical path**: P0 → P1 → P2 → P3 → P5 → P7。P4 (credential) は P5 と並行可だが P5 の orchestration が credential 経路を呼ぶため、P5 開始時には P4 の channel API が固まっていること。
 
@@ -224,7 +224,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 - direct dep の identity 畳み込み: parameter 変更 → hash 変化、credential 変更 → hash 不変
 - transitive dep は v1 では入れない (regression test として `nested provider` の hash 入力に transitive が出ない)
 
-### P7: E2E with Mock Provider + `ato/example-db` Provider
+### P7: E2E with Mock Provider + `ato/postgres` Provider
 
 **目的**: RFC §11 の worked example を実コードで動かす。
 
@@ -233,7 +233,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
   - `mock_service_provider.toml` (CI 用。real DB なしで `port = "auto"`, `ready`, `runtime_exports`, redaction, teardown を検証)
   - `mock_postgres_provider.toml` (manual E2E 用。実 Postgres バイナリは host 依存)
   - `wasedap2p_consumer.toml` (RFC §11.1 を踏襲)
-- 新規 (registry または開発 fixture) `ato/example-db@16` provider capsule
+- 新規 (registry または開発 fixture) `ato/postgres@16` provider capsule
   - 最小実装: `provision` で `initdb` を呼び、`{{credentials.password}}` を Rule M1 temp file channel で受け取る
 - WasedaP2P fork に PR: `capsule.toml` を新 grammar に移行
 
@@ -252,7 +252,7 @@ P0 + 7 phase、依存順。各 phase は単独でビルド可能・テスト可�
 | template grammar が P1 実装後に変わる | P0 で v1 subset / reserved token / undefined-key handling を閉じてから parser 実装に入る |
 | 既存 `managed_service` 内部名が leak する | P5 で grep + lint 規則 (`grep -r "managed_service" docs/ user-facing-strings/` が 0 件) を CI に追加 |
 | transitive dep の hash 入力に間違って含めてしまう regression | P6 で property test: provider が更に dep を持つ fixture を読ませて、parent receipt hash の入力 JCS に transitive が **絶対に出ない** ことを assert |
-| WasedaP2P provider 側で Postgres バイナリ取得方法が未決定 | P7 の CI は mock-service provider で完結させる。実 Postgres は homebrew/apt 前提の manual host-bound E2E として扱う。将来は `capsule://ato/example-db-bin@16` で binary capsule を作る (本 RFC 範囲外) |
+| WasedaP2P provider 側で Postgres バイナリ取得方法が未決定 | P7 の CI は mock-service provider で完結させる。実 Postgres は homebrew/apt 前提の manual host-bound E2E として扱う。将来は `capsule://ato/postgres-bin@16` で binary capsule を作る (本 RFC 範囲外) |
 | 実 Postgres の credential rotation を generic contract 保証と誤解する | v1 の CI は identity invariant のみを検証する。新 password 接続成功は credential rotation RFC または provider-specific fixture の範囲に限定する |
 
 ## 4. テスト戦略
@@ -271,7 +271,7 @@ CI gate と manual gate を分け、実 Postgres なしでも core invariant が
 - runtime_exports injection / redaction / teardown
 
 **Layer C2 — Manual host-bound E2E**: 実 binary を起動した integration scenario:
-- WasedaP2P + ato/example-db E2E
+- WasedaP2P + ato/postgres E2E
 - Postgres バイナリが host に存在する環境だけで実行
 - password rotation の接続成功は provider-specific 追加検証であり、v1 generic contract の必須 CI gate にはしない
 
@@ -289,7 +289,7 @@ CI gate: A + B + C1 が緑。C2 は手動 trigger。
 | 5a | `refactor(ato-cli): rename managed_service internals to dependency_graph` | — (独立) | 小 (rename only) |
 | 5b | `feat(ato-cli): runtime orchestration for service@1 contracts` | 3, 4, 5a | 大 |
 | 6 | `feat(ato-cli): include direct deps in dependency_derivation_hash` | 5b | 中 |
-| 7 | `test(ato-cli): mock dependency-contract E2E and manual ato/example-db path` | 6 | 中 |
+| 7 | `test(ato-cli): mock dependency-contract E2E and manual ato/postgres path` | 6 | 中 |
 
 5a を独立先行で出すと、5b の diff が読みやすくなる。
 

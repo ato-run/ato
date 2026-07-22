@@ -109,8 +109,8 @@ capsule://<authority>/<path>@<ref>
 
 | 形 | 意味 | 用途 |
 | --- | --- | --- |
-| `capsule://ato/example-db@16` | official registry, mutable major-version pin | 依存宣言の terse form |
-| `capsule://ato/example-db@sha256:abc...` | content-addressed, immutable | lock 解決後の `resolved` |
+| `capsule://ato/postgres@16` | official registry, mutable major-version pin | 依存宣言の terse form |
+| `capsule://ato/postgres@sha256:abc...` | content-addressed, immutable | lock 解決後の `resolved` |
 | `capsule://github.com/Koh0920/WasedaP2P@<sha>` | source authority つき immutable | 通常の app capsule |
 
 ### 4.3 Grammar
@@ -345,7 +345,7 @@ mount    = "PGDATA"           # provider プロセスから見える env var 名
 
 ### 7.3 Parameters (identity-bearing)
 
-provider は consumer から渡される **identity-bearing parameters** を `[contracts."service@1".parameters]` で宣言する。これは同一 provider capsule (例: `capsule://ato/example-db@16`) が複数 consumer に対して別々の **論理的な何か** (DB 名、スキーマ、protocol option 等) で機能するための grammar である。
+provider は consumer から渡される **identity-bearing parameters** を `[contracts."service@1".parameters]` で宣言する。これは同一 provider capsule (例: `capsule://ato/postgres@16`) が複数 consumer に対して別々の **論理的な何か** (DB 名、スキーマ、protocol option 等) で機能するための grammar である。
 
 - `type`: `string` / `int` / `bool` (v1 はこの 3 種のみ)
 - `required`: bool (default `false`)
@@ -726,7 +726,7 @@ capsule  = "capsule://ato/openapi-generator@7"
 contract = "tool@1"
 
 [dependencies.db]                                           # service dep: lock + needs 両方
-capsule  = "capsule://ato/example-db@16"
+capsule  = "capsule://ato/postgres@16"
 contract = "service@1"
 parameters = { database = "wasedap2p" }
 
@@ -782,7 +782,7 @@ lock 時には判定不能で、起動時に落ちるもの:
 ```toml
 # Before
 [dependencies.db]
-capsule = "capsule://ato/example-db@16"
+capsule = "capsule://ato/postgres@16"
 contract = "service@1"
 parameters = { database = "wasedap2p" }
 [dependencies.db.state]
@@ -790,7 +790,7 @@ name = "data"
 
 # After (alias rename only)
 [dependencies.database]
-capsule = "capsule://ato/example-db@16"
+capsule = "capsule://ato/postgres@16"
 contract = "service@1"
 parameters = { database = "wasedap2p" }
 [dependencies.database.state]
@@ -803,12 +803,12 @@ name = "data"
 
 ```toml
 [dependencies.db_a]
-capsule    = "capsule://ato/example-db@16"
+capsule    = "capsule://ato/postgres@16"
 contract   = "service@1"
 parameters = { database = "shared" }
 
 [dependencies.db_b]                              # 同じ capsule + 同じ parameters → 失敗
-capsule    = "capsule://ato/example-db@16"
+capsule    = "capsule://ato/postgres@16"
 contract   = "service@1"
 parameters = { database = "shared" }
 ```
@@ -822,8 +822,8 @@ parameters = { database = "shared" }
   "schema_version": "1",
   "dependencies": {
     "db": {
-      "requested": "capsule://ato/example-db@16",
-      "resolved":  "capsule://ato/example-db@sha256:abc123...",
+      "requested": "capsule://ato/postgres@16",
+      "resolved":  "capsule://ato/postgres@sha256:abc123...",
       "contract":  "service@1",
       "parameters": {
         "database": "wasedap2p",
@@ -964,7 +964,7 @@ Ato は service start 時に `<state.dir>/.ato-session` に owner Ato session pi
 
 provider の data-dir locking (Postgres `postmaster.pid` 等) が存在する想定で v1 は安全。data-dir locking を持たない provider が orphan で corruption を起こすリスクは provider 側の責任とする。
 
-## 11. Worked Example: WasedaP2P + ato/example-db
+## 11. Worked Example: WasedaP2P + ato/postgres
 
 ### 11.1 Consumer (`WasedaP2P/capsule.toml`)
 
@@ -977,7 +977,7 @@ version        = "0.1.0"
 required_env = ["SECRET_KEY", "PG_PASSWORD"]
 
 [dependencies.db]
-capsule  = "capsule://ato/example-db@16"
+capsule  = "capsule://ato/postgres@16"
 contract = "service@1"
 
 [dependencies.db.parameters]                     # identity-bearing
@@ -1020,7 +1020,7 @@ allow_env = ["SECRET_KEY"]
 - `[isolation].allow_env` には `PG_PASSWORD` を **含めない**。これが本仕様の重要な違いで、credential は target env を経由せず provider process まで届く (§7.3.2 Rule M1)。consumer target は password を直接見ず、`{{deps.db.runtime_exports.DATABASE_URL}}` 経由で接続文字列を受け取る。
 - `DATABASE_URL` の hardcode は消え、host 側で Postgres を立てておく必要も消える。
 
-### 11.2 Provider (`ato/example-db/capsule.toml`, 概念例)
+### 11.2 Provider (`ato/postgres/capsule.toml`, 概念例)
 
 ```toml
 schema_version = "0.3"
@@ -1108,8 +1108,8 @@ provision の credential 経路について (§7.3.2 適用結果):
   "schema_version": "1",
   "dependencies": {
     "db": {
-      "requested": "capsule://ato/example-db@16",
-      "resolved":  "capsule://ato/example-db@sha256:...",
+      "requested": "capsule://ato/postgres@16",
+      "resolved":  "capsule://ato/postgres@sha256:...",
       "contract":  "service@1",
       "parameters": {
         "database": "wasedap2p",
@@ -1137,7 +1137,7 @@ provision の credential 経路について (§7.3.2 適用結果):
 
 ### 11.4 起動シーケンスと state path
 
-- instance_hash 計算入力: `{"resolved": "capsule://ato/example-db@sha256:...", "contract": "service@1", "parameters": {"database": "wasedap2p", "encoding": "utf8"}}`。**`credentials.password` は入らない**。
+- instance_hash 計算入力: `{"resolved": "capsule://ato/postgres@sha256:...", "contract": "service@1", "parameters": {"database": "wasedap2p", "encoding": "utf8"}}`。**`credentials.password` は入らない**。
 - state.dir = `<ato-home>/state/<wasedap2p-backend pkg id>/<instance_hash>/16/db/`
 - credential resolution: `{{env.PG_PASSWORD}}` を host env から拾い (top-level `required_env` で宣言済)、メモリ上に保持
 - orphan check: `<state.dir>/.ato-session` が無い → 通常 start (§10.4)
@@ -1177,7 +1177,7 @@ provision の credential 経路について (§7.3.2 適用結果):
 
 本 RFC v1 を実装するまでに最低でも別 issue で詰める:
 
-- **Local override**: `capsule://ato/example-db@16` を local path に差し替える grammar (`--with-dep db=path:./local-postgres-capsule` か config か manifest field)。lock identity の整合性 (override は lock を invalidate するか、lock 内に override marker を入れるか)。
+- **Local override**: `capsule://ato/postgres@16` を local path に差し替える grammar (`--with-dep db=path:./local-postgres-capsule` か config か manifest field)。lock identity の整合性 (override は lock を invalidate するか、lock 内に override marker を入れるか)。
 - **`ready.timeout` の lock 出力**: timeout を lock 出力に書くか runtime のみか。書くと `dependency_derivation_hash` には含めない選択も含めて検討 (現状は runtime 値扱いで lock 入れない方針)。
 - **Endpoint allocation の race**: `port = "auto"` で TCP socket を Ato が掴んでから provider に渡す間の race 回避。OS-assigned port を provider 自身に取らせて `<state.dir>/.port` に書かせる方式 vs Ato が握る方式の決定。`unix_socket = "auto"` 実装時にも同じ判断が必要。
 - **Credential lifecycle in process memory**: resolved credential 値の保持期間 (resolve → 注入 → ゼロクリア) を Ato runtime が責任を持つか provider に任せるか。stdout/stderr 経由の漏洩防止 hook (`secret = true` の log filter) との整合。
@@ -1208,7 +1208,7 @@ provision の credential 経路について (§7.3.2 適用結果):
 10. v2 receipt の `dependency_derivation_hash` に `(parameters, identity_exports)` を畳み込む (§9.5)。**credentials は決して入れない**。
 11. teardown ordering と orphan **detection (warn-only)** を session lifecycle に組み込む (§10.4)。auto-kill / GC は別 RFC。
 12. `runtime_exports.<key>.secret = true` の redaction を log writer / receipt builder / explain output に通す。
-13. 検証 capsule として `ato/example-db` を 1 個書く。WasedaP2P を新 grammar に移行して E2E。
+13. 検証 capsule として `ato/postgres` を 1 個書く。WasedaP2P を新 grammar に移行して E2E。
 14. **Identity invariant test**: `PG_PASSWORD` を rotate して再 `ato run` した時に (a) lock が変わらない、(b) instance_hash が変わらない、(c) state.dir が同じ、(d) `dependency_derivation_hash` が変わらない、を検証する自動テストを 1 本入れる。これは v1.3 の最重要 invariant を守るレグレッション防止。
 
 実装は `capsule` parser / lock → `ato-cli` runtime + env model 改修 + credential resolution → 検証 capsule の 3 層を順番に通す。
