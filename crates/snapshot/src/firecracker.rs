@@ -1197,11 +1197,22 @@ fn hc_port(c: &RestoreContract, fallback: u16) -> u16 {
 }
 
 fn network_ports(c: &RestoreContract, health_port: u16) -> Result<Vec<u16>, String> {
+    use protocol::session_surface::EndpointProtocol;
     let mut ports = vec![health_port];
     if c.endpoints.is_empty() {
         ports.extend(c.ports.iter().copied());
     } else {
         for endpoint in &c.endpoints {
+            // Only TCP/HTTP endpoints ride the slot ingress DNAT. vsock
+            // endpoints (e.g. guest_control) never touch the TCP ingress, and
+            // their port space is u32 — a legitimate vsock port above u16
+            // must not fail the restore closed.
+            if !matches!(
+                endpoint.protocol,
+                EndpointProtocol::Tcp | EndpointProtocol::Http
+            ) {
+                continue;
+            }
             ports.push(
                 u16::try_from(endpoint.port)
                     .map_err(|_| format!("endpoint port {} is outside u16", endpoint.port))?,
@@ -2974,6 +2985,44 @@ mod tests {
         assert_eq!(
             network_ports(&contract, 3000).expect("valid endpoint ports"),
             vec![3000, 5901]
+        );
+    }
+
+    #[test]
+    fn network_ports_skip_vsock_endpoints_and_their_u32_port_space() {
+        use protocol::session_surface::{
+            EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
+        };
+
+        // guest_control rides vsock, never the TCP ingress: no DNAT rule for
+        // it, and its u32 port space (here above u16::MAX) must not fail the
+        // restore closed.
+        let contract = RestoreContract {
+            ports: vec![3000],
+            endpoints: vec![
+                EndpointContract {
+                    role: EndpointRole::AppHttp,
+                    protocol: EndpointProtocol::Http,
+                    exposure: EndpointExposure::HostInternal,
+                    port: 3000,
+                    readiness: EndpointReadiness::HttpGet {
+                        path: "/healthz".to_string(),
+                    },
+                },
+                EndpointContract {
+                    role: EndpointRole::GuestControl,
+                    protocol: EndpointProtocol::Vsock,
+                    exposure: EndpointExposure::GuestPrivate,
+                    port: 70_000,
+                    readiness: EndpointReadiness::VsockConnect,
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            network_ports(&contract, 3000).expect("vsock port must not fail the derivation"),
+            vec![3000]
         );
     }
 
