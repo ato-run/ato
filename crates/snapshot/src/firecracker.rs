@@ -1727,6 +1727,12 @@ impl SnapshotBackend for FirecrackerBackend {
         };
         let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
         let path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
+        // Store thumbnail automation: best-effort screenshot of the booted app,
+        // captured once the guest answers healthy (set inside the boot closure
+        // below). `None` on every path where capture isn't possible/safe — see
+        // `crate::screenshot::capture_best_effort` doc comment for the full list;
+        // this NEVER turns a successful build into a failed one.
+        let mut screenshot_png_base64: Option<String> = None;
 
         // v1.6 (ato#983) Slice 2: ensure + lock every durable state volume BEFORE
         // boot, so the backing file exists when Firecracker attaches it as a
@@ -1833,6 +1839,20 @@ impl SnapshotBackend for FirecrackerBackend {
                     self.supervisor_deliver_placeholders(uds, drive)?;
                 }
                 self.wait_health(port, &path)?; // secret-free seal point (placeholder-only for supervisor builds)
+                // Store thumbnail automation: the guest just proved live/healthy at
+                // this exact address, so this is the one moment build-time capture
+                // can reuse the SAME reachable address the health/warmup probes use
+                // (no separate address-resolution path). Best-effort only: neither
+                // `probe_addr` failing nor the capture itself failing may fail this
+                // build — `capture_best_effort` never returns an `Err`, and any
+                // `probe_addr` error is logged and treated the same as "no browser
+                // found" (`None`).
+                match self.probe_addr(port) {
+                    Ok(addr) => {
+                        screenshot_png_base64 = crate::screenshot::capture_best_effort(addr)
+                    }
+                    Err(e) => eprintln!("[screenshot] skip: could not resolve guest address: {e}"),
+                }
                 // Warm the user-facing first-screen paths into guest memory BEFORE
                 // the Pause+Snapshot, so the sealed image already carries template
                 // rendering / JIT / DB-init / First-Frame-prep — the user's first
@@ -2023,6 +2043,7 @@ impl SnapshotBackend for FirecrackerBackend {
             manifest,
             sealed_bytes,
             no_secret_proof,
+            screenshot_png_base64,
         })
     }
 

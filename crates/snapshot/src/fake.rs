@@ -181,6 +181,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
             manifest,
             sealed_bytes,
             no_secret_proof,
+            // The Fake backend boots nothing, so there is no live guest to
+            // screenshot — honestly `None`, same as the untested `supervisor_build`
+            // hygiene fields above.
+            screenshot_png_base64: None,
         })
     }
 

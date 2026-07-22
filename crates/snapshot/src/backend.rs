@@ -286,6 +286,17 @@ pub struct BuildReadyStateReceipt {
     pub sealed_bytes: u64,
     /// The no-secret scan proof (also embedded in the manifest).
     pub no_secret_proof: NoSecretProof,
+    /// Best-effort build-time screenshot of the booted app's root page
+    /// (base64-encoded PNG, ~500KB raw cap), captured during warmup — see
+    /// `crate::screenshot` / `FirecrackerBackend::build_ready_state`. `None`
+    /// when no headless browser was available, the guest didn't respond, the
+    /// capture timed out, or the output was oversized/garbled — capture is
+    /// ALWAYS best-effort and never fails the build itself. Threaded into the
+    /// snapshot-builder ack body as `screenshot_png_base64`; the ato-api ack
+    /// handler decodes + stores it as the capsule's store thumbnail, but only
+    /// when the capsule has none yet, and never in a way that can fail the
+    /// ack.
+    pub screenshot_png_base64: Option<String>,
 }
 
 /// Inputs to [`SnapshotBackend::restore`].
