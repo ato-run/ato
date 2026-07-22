@@ -47,21 +47,11 @@ pub enum LaunchVia {
     Cli,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum OciImportKind {
-    Compose,
-    DockerRunScript,
-    ExplicitOci,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OciSessionStatus {
-    Running,
-    Stopped,
-    StopFailed,
-}
+// OCI session lifecycle domain types (`OciImportKind`, `OciSessionStatus`,
+// `OciSessionSnapshot`) are single-sourced in `protocol::oci_session` so the
+// host-agnostic `runner` supervisor and the Desktop shell share one definition.
+// Re-exported here to keep the `crate::state::session::…` reference paths stable.
+pub use protocol::oci_session::{OciImportKind, OciSessionSnapshot, OciSessionStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -81,18 +71,6 @@ impl DesktopSessionKind {
     fn is_oci(&self) -> bool {
         matches!(self, Self::Oci { .. })
     }
-}
-
-/// Safe OCI session fields read from the CLI `ato ps --json` boundary.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OciSessionSnapshot {
-    pub id: String,
-    pub import_kind: OciImportKind,
-    pub status: OciSessionStatus,
-    pub endpoint_url: Option<String>,
-    pub service_count: usize,
-    pub source_path: Option<String>,
-    pub source_hash: Option<String>,
 }
 
 /// The canonical lifecycle state of a capsule *process*.

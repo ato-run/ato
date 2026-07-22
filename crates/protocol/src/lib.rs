@@ -60,6 +60,7 @@ pub mod error;
 pub mod handle;
 pub mod nacelle_ipc;
 pub mod net;
+pub mod oci_session;
 pub mod placement;
 pub mod runtime_control;
 pub mod runtime_control_events;
