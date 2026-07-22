@@ -6538,6 +6538,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snapshot",
+ "toml 0.8.23",
  "ureq",
 ]
 
