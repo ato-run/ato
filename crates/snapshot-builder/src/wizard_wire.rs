@@ -629,9 +629,24 @@ pub struct CandidateReportRequest {
 }
 
 impl CandidateReportRequest {
+    /// String length bounds are measured in **UTF-16 code units**
+    /// (`encode_utf16().count()`), matching the api's zod
+    /// (`execution_id`/`snapshot_id` `z.string().min(1).max(200)`,
+    /// `artifact_location` `z.string().min(1).max(500)`) — an astral scalar
+    /// counts as 2, so a green report on one side is green on the other (seam:
+    /// one verdict on both sides).
     pub fn validate(&self) -> Result<(), String> {
         if self.capture_epoch == 0 {
             return Err("candidate report requires capture_epoch >= 1".into());
+        }
+        for (name, value, max) in [
+            ("execution_id", &self.execution_id, 200usize),
+            ("snapshot_id", &self.snapshot_id, 200),
+            ("artifact_location", &self.artifact_location, 500),
+        ] {
+            if value.is_empty() || value.encode_utf16().count() > max {
+                return Err(format!("{name} must be 1..{max} UTF-16 code units"));
+            }
         }
         Ok(())
     }
@@ -789,7 +804,13 @@ pub struct WizardTerminalAck {
 
 impl WizardTerminalAck {
     /// The §3.8 bounds (the reason enum itself is enforced by the type).
+    /// `agent_id` is 1..120 **UTF-16 code units** (`encode_utf16().count()`),
+    /// matching the api's `builderLocalIdSchema`
+    /// (`z.string().min(1).max(120)`) — one verdict on both sides.
     pub fn validate(&self) -> Result<(), String> {
+        if self.agent_id.is_empty() || self.agent_id.encode_utf16().count() > 120 {
+            return Err("agent_id must be 1..120 UTF-16 code units".into());
+        }
         validate_failure_reason_bound(self.failure_reason.as_deref())
     }
 }
@@ -827,7 +848,18 @@ pub struct VerifySession {
 /// capture for that epoch (the attempt returns to `holding` per ADR-007; a
 /// later epoch may retry), and sends `unquiesce`. The system NEVER
 /// force-captures under live traffic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Strictness (seam):** the api's three `quiesce`/`quiesced`/`unquiesce`
+/// zod schemas are each `.strict()`, so an unknown key on any shape (e.g.
+/// `inflight` on `unquiesce`, or a stray field beside a valid message) is a
+/// 400 there. An internally-tagged serde enum cannot carry
+/// `deny_unknown_fields` (the tag is buffered into the variant), so it would
+/// silently *ignore* those keys — two verdicts on the §5 seam. `QuiesceMessage`
+/// therefore hand-discriminates on `type` (custom `Deserialize` below) and
+/// parses the remainder with one of three `deny_unknown_fields` body structs,
+/// rejecting unknown keys exactly as the api does. `Serialize` still emits the
+/// internally-tagged `{ "type": …, … }` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum QuiesceMessage {
     /// api → proxy: stop admitting new requests to the held session's upstream
@@ -857,6 +889,71 @@ impl QuiesceMessage {
             return Err("quiesce messages require epoch >= 1".into());
         }
         Ok(())
+    }
+}
+
+/// One `deny_unknown_fields` body per §5 shape — the strict mirror of the api's
+/// three `.strict()` zod schemas. The `type` discriminant is stripped by
+/// [`QuiesceMessage`]'s custom `Deserialize` before the remainder is parsed
+/// here, so an unknown key (e.g. `inflight` on [`UnquiesceBody`]) is rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuiesceBody {
+    epoch: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct QuiescedBody {
+    epoch: u64,
+    inflight: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UnquiesceBody {
+    epoch: u64,
+}
+
+impl<'de> Deserialize<'de> for QuiesceMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        // Buffer the object, lift out the `type` discriminant, then parse the
+        // remaining fields with the matching strict body struct — the tag is
+        // gone, so `deny_unknown_fields` sees only the shape's own fields and
+        // rejects anything extra, exactly as the api's per-schema `.strict()`.
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object_mut()
+            .ok_or_else(|| D::Error::custom("quiesce message must be a JSON object"))?;
+        let tag = match obj.remove("type") {
+            Some(serde_json::Value::String(s)) => s,
+            Some(_) => return Err(D::Error::custom("quiesce message `type` must be a string")),
+            None => return Err(D::Error::missing_field("type")),
+        };
+        let rest = serde_json::Value::Object(std::mem::take(obj));
+        match tag.as_str() {
+            "quiesce" => {
+                let body = QuiesceBody::deserialize(rest).map_err(D::Error::custom)?;
+                Ok(QuiesceMessage::Quiesce { epoch: body.epoch })
+            }
+            "quiesced" => {
+                let body = QuiescedBody::deserialize(rest).map_err(D::Error::custom)?;
+                Ok(QuiesceMessage::Quiesced {
+                    epoch: body.epoch,
+                    inflight: body.inflight,
+                })
+            }
+            "unquiesce" => {
+                let body = UnquiesceBody::deserialize(rest).map_err(D::Error::custom)?;
+                Ok(QuiesceMessage::Unquiesce { epoch: body.epoch })
+            }
+            other => Err(D::Error::unknown_variant(
+                other,
+                &["quiesce", "quiesced", "unquiesce"],
+            )),
+        }
     }
 }
 
@@ -2068,6 +2165,61 @@ mod tests {
         assert!(QuiesceMessage::Quiesce { epoch: 0 }.validate().is_err());
     }
 
+    #[test]
+    fn quiesce_messages_reject_unknown_keys_per_shape() {
+        // The api's three §5 schemas are each `.strict()`; the Rust mirror must
+        // reject unknown keys per shape too (one verdict on both sides).
+        // Previously the internally-tagged enum silently ignored them.
+
+        // `unquiesce` carries no `inflight` — the api rejects this exact shape.
+        assert!(
+            serde_json::from_value::<QuiesceMessage>(json!({
+                "type": "unquiesce", "epoch": 3, "inflight": 0
+            }))
+            .is_err()
+        );
+        // A stray key beside an otherwise-valid `quiesce` is rejected.
+        assert!(
+            serde_json::from_value::<QuiesceMessage>(json!({
+                "type": "quiesce", "epoch": 3, "extra": "x"
+            }))
+            .is_err()
+        );
+        // `quiesced` likewise rejects an extra key.
+        assert!(
+            serde_json::from_value::<QuiesceMessage>(json!({
+                "type": "quiesced", "epoch": 3, "inflight": 0, "extra": 1
+            }))
+            .is_err()
+        );
+        // An unknown discriminant is still rejected.
+        assert!(
+            serde_json::from_value::<QuiesceMessage>(json!({ "type": "pause", "epoch": 3 }))
+                .is_err()
+        );
+        // Sanity: the three canonical shapes still parse round-trip.
+        assert_eq!(
+            serde_json::from_value::<QuiesceMessage>(json!({ "type": "quiesce", "epoch": 3 }))
+                .unwrap(),
+            QuiesceMessage::Quiesce { epoch: 3 }
+        );
+        assert_eq!(
+            serde_json::from_value::<QuiesceMessage>(
+                json!({ "type": "quiesced", "epoch": 3, "inflight": 0 })
+            )
+            .unwrap(),
+            QuiesceMessage::Quiesced {
+                epoch: 3,
+                inflight: 0
+            }
+        );
+        assert_eq!(
+            serde_json::from_value::<QuiesceMessage>(json!({ "type": "unquiesce", "epoch": 3 }))
+                .unwrap(),
+            QuiesceMessage::Unquiesce { epoch: 3 }
+        );
+    }
+
     // ── §7 capsule.toml declarations (D1: guest-absolute paths) ─────────────
 
     /// The §7 valid example, verbatim from the spec (= design doc §1.2).
@@ -2417,5 +2569,94 @@ schema = "sqlite"
             "[cache.bmp]\npath = \"{bmp_path}\"\ncapture = \"include\"\n"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn candidate_report_string_bounds_count_utf16_code_units() {
+        // execution_id/snapshot_id ≤ 200, artifact_location ≤ 500 UTF-16 code
+        // units (the api's zod). An astral scalar is 1 `char` but 2 code units,
+        // so counting `chars().count()` would admit a body the api 400s.
+        let base = CandidateReportRequest {
+            submission_attempt_id: "subatt_01J1XY".into(),
+            worker_claim_id: "claim_01J1XZ".into(),
+            capture_epoch: 3,
+            candidate_id: "cand_01J1Z0".into(),
+            execution_id: "exec_01J1Z1".into(),
+            snapshot_id: "snap_01J1Z2".into(),
+            artifact_location: "r2://snapshots/cand_01J1Z0/seal".into(),
+            source_lost: false,
+        };
+        base.validate().unwrap();
+
+        // execution_id: "e" + 100 astral scalars = 201 code units → REJECTED
+        // (would be ACCEPTED at chars().count() == 101 <= 200).
+        let astral_exec = format!("e{}", "\u{1F600}".repeat(100));
+        assert_eq!(astral_exec.chars().count(), 101);
+        assert_eq!(astral_exec.encode_utf16().count(), 201);
+        assert!(
+            CandidateReportRequest {
+                execution_id: astral_exec,
+                ..base.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        // artifact_location: "a" + 250 astral scalars = 501 code units → REJECTED.
+        let astral_loc = format!("a{}", "\u{1F600}".repeat(250));
+        assert_eq!(astral_loc.encode_utf16().count(), 501);
+        assert!(
+            CandidateReportRequest {
+                artifact_location: astral_loc,
+                ..base.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        // Empty execution_id (min 1) → REJECTED.
+        assert!(
+            CandidateReportRequest {
+                execution_id: String::new(),
+                ..base.clone()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_ack_agent_id_bound_counts_utf16_code_units() {
+        // agent_id is 1..120 UTF-16 code units (the api's builderLocalIdSchema).
+        let base = WizardTerminalAck {
+            agent_id: "builder-sugamo-1".into(),
+            submission_attempt_id: "subatt_01J1XY".into(),
+            worker_claim_id: "claim_01J1XZ".into(),
+            reason: TerminalAckReason::AttemptEnded,
+            failure_stage: None,
+            failure_reason: None,
+        };
+        base.validate().unwrap();
+
+        // "a" + 60 astral scalars = 121 code units → REJECTED (would be ACCEPTED
+        // at chars().count() == 61 <= 120).
+        let astral_agent = format!("a{}", "\u{1F600}".repeat(60));
+        assert_eq!(astral_agent.chars().count(), 61);
+        assert_eq!(astral_agent.encode_utf16().count(), 121);
+        assert!(
+            WizardTerminalAck {
+                agent_id: astral_agent,
+                ..base.clone()
+            }
+            .validate()
+            .is_err()
+        );
+        // Empty agent_id (min 1) → REJECTED.
+        assert!(
+            WizardTerminalAck {
+                agent_id: String::new(),
+                ..base.clone()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }
