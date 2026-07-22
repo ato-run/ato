@@ -465,7 +465,7 @@ mod tests {
                     alias: "db".to_string(),
                     pid: 5252,
                     state_dir: PathBuf::from("/tmp/db"),
-                    resolved: "capsule://github.com/Koh0920/ato-postgres@main".to_string(),
+                    resolved: "capsule://github.com/example/example-db@main".to_string(),
                     allocated_port: Some(5432),
                     log_path: Some(PathBuf::from("/tmp/db.log")),
                     runtime_export_keys: vec!["DATABASE_URL".to_string()],

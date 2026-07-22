@@ -3715,7 +3715,7 @@ default_target = "app"
 runtime = "source/node"
 run = "node index.js"
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 [dependencies.db.credentials]
 password = "{{env.PG_PASSWORD}}"

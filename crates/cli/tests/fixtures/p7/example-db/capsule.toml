@@ -1,30 +1,30 @@
-# `ato/postgres@16` — provider capsule for RFC CAPSULE_DEPENDENCY_CONTRACTS.md
+# `ato/example-db@16` — provider capsule for RFC CAPSULE_DEPENDENCY_CONTRACTS.md
 #
 # Implements `service@1` contract. Consumers declare:
 #
 #   [dependencies.db]
-#   capsule  = "capsule://ato/postgres@16"
+#   capsule  = "capsule://ato/example-db@16"
 #   contract = "service@1"
 #   parameters.database = "myapp"
 #   credentials.password = "{{env.PG_PASSWORD}}"
 #   [dependencies.db.state]
 #   name = "data"
 #
-# This is the P7 fixture form: a local directory exercising the new RFC
-# grammar against the real postgres binary. Binaries come from the ato
-# tool artifact resolver (#119/#120) — no host package manager
-# dependency. The canonical capsule lives at github.com/Koh0920/ato-postgres
-# and must stay synchronized with this fixture.
+# This is the P7 fixture form: a self-contained local directory exercising
+# the new RFC grammar. It is implemented on a real Postgres binary — the
+# binary comes from the ato tool artifact resolver (#119/#120), so there is
+# no host package-manager dependency. The dependency-runtime tests parse
+# this fixture directly; it is not backed by any external repository.
 
 schema_version = "0.3"
-name           = "postgres"
+name           = "example-db"
 version        = "16.0.0"
 type           = "app"
 default_target = "server"
 
 [metadata]
-display_name = "PostgreSQL (capsule provider)"
-description  = "Postgres 16 exposed as an Ato service@1 provider"
+display_name = "Example DB (Postgres-backed service@1 provider)"
+description  = "An example service@1 provider, implemented on Postgres 16"
 author       = "ato"
 
 [targets.server]
