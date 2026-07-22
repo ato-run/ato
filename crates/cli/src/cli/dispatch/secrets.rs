@@ -3,13 +3,14 @@ use capsule::common::paths::nacelle_home_dir;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 
 use age::secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::application::credential::backend::age_file::load_identity_bytes;
 use crate::application::secrets::store::{SecretEntry, SecretScope};
 use crate::application::secrets::{AgeFileBackend, SecretStore};
 use crate::cli::secrets::SecretsCommands;
+// Bridge wire types single-sourced in protocol, shared with the desktop consumer.
+use protocol::secret_bridge::{BridgeRequest, BridgeResponse};
 
 pub(crate) fn execute_secrets_command(command: SecretsCommands) -> Result<()> {
     match command {
@@ -292,72 +293,9 @@ fn print_secrets_table(entries: &[SecretEntry]) {
 
 // ── Bridge types ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op")]
-enum BridgeRequest {
-    #[serde(rename = "status")]
-    Status,
-    #[serde(rename = "list")]
-    List,
-    #[serde(rename = "set")]
-    Set {
-        key: String,
-        value: String,
-        #[serde(default)]
-        namespace: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(default)]
-        allow: Option<Vec<String>>,
-        #[serde(default)]
-        deny: Option<Vec<String>>,
-    },
-    #[serde(rename = "delete")]
-    Delete {
-        key: String,
-        #[serde(default)]
-        namespace: Option<String>,
-    },
-    #[serde(rename = "update_acl")]
-    UpdateAcl {
-        key: String,
-        #[serde(default)]
-        allow: Option<Vec<String>>,
-        #[serde(default)]
-        deny: Option<Vec<String>>,
-        #[serde(default)]
-        namespace: Option<String>,
-    },
-    #[serde(rename = "resolve_for_capsule")]
-    ResolveForCapsule { capsule_handle: String },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "status")]
-enum BridgeResponse {
-    #[serde(rename = "ok")]
-    Ok {
-        #[serde(default)]
-        data: Value,
-    },
-    #[serde(rename = "error")]
-    Error { code: String, message: String },
-}
-
-impl BridgeResponse {
-    fn ok_data(data: impl Serialize) -> Self {
-        Self::Ok {
-            data: serde_json::to_value(data).unwrap_or(Value::Null),
-        }
-    }
-
-    fn error(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::Error {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-}
+// `BridgeRequest` / `BridgeResponse` (and the `ok_data` / `error` constructors)
+// now live in `protocol::secret_bridge`, single-sourced with the desktop
+// consumer. Imported at the top of this module.
 
 // ── Bridge handler ────────────────────────────────────────────────────────────
 

@@ -3,11 +3,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use crate::proc_util::CommandNoWindowExt;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use protocol::secret_bridge::{BridgeRequest, BridgeResponse, ResolvedSecret, SecretEntryView};
 
 /// Typed error from the CLI bridge, preserving the machine-readable code
 /// so the UI can branch on `identity_not_loaded` etc.
+///
+/// This is a local transport artifact — its codes describe how the *desktop*
+/// failed to reach the bridge (`binary_not_found`, `spawn_failed`,
+/// `malformed_response`), not a wire type — so it stays desktop-side while the
+/// request/response types live in `protocol::secret_bridge`.
 #[derive(Debug)]
 pub(crate) struct BridgeError {
     pub code: String,
@@ -24,57 +28,11 @@ impl fmt::Display for BridgeError {
 
 impl std::error::Error for BridgeError {}
 
-/// JSON bridge request sent to `ato secrets bridge --json`.
-#[derive(Debug, Serialize)]
-#[serde(tag = "op")]
-enum BridgeRequest {
-    #[serde(rename = "status")]
-    Status,
-    #[serde(rename = "list")]
-    List,
-    #[serde(rename = "set")]
-    Set {
-        key: String,
-        value: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        description: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        allow: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        deny: Option<Vec<String>>,
-    },
-    #[serde(rename = "delete")]
-    Delete {
-        key: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-    },
-    #[serde(rename = "update_acl")]
-    UpdateAcl {
-        key: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        allow: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        deny: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        namespace: Option<String>,
-    },
-    #[serde(rename = "resolve_for_capsule")]
-    ResolveForCapsule { capsule_handle: String },
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "status")]
-enum BridgeResponse {
-    #[serde(rename = "ok")]
-    Ok { data: Value },
-    #[serde(rename = "error")]
-    Error { code: String, message: String },
-}
-
 /// Thin client that calls the CLI's `ato secrets bridge --json`.
+///
+/// The wire types (`BridgeRequest` / `BridgeResponse` / `SecretEntryView` /
+/// `ResolvedSecret`) are single-sourced in `protocol::secret_bridge`, shared
+/// with the CLI producer (`cli::cli::dispatch::secrets`).
 pub(crate) struct CliSecretBridge;
 
 /// Internal result alias for bridge communication.
@@ -221,25 +179,4 @@ impl CliSecretBridge {
             namespace: None,
         })?)
     }
-}
-
-/// View model returned by `list` (metadata only, no values).
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct SecretEntryView {
-    pub key: String,
-    #[serde(default)]
-    pub scope: String,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub allow: Option<Vec<String>>,
-    #[serde(default)]
-    pub deny: Option<Vec<String>>,
-}
-
-/// Resolved secret (key + value) returned by `resolve_for_capsule`.
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ResolvedSecret {
-    pub key: String,
-    pub value: String,
 }
