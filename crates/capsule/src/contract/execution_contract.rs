@@ -6,6 +6,105 @@ use thiserror::Error;
 
 pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DigestAlgorithm {
+    Blake3,
+    Sha256,
+}
+
+impl DigestAlgorithm {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Blake3 => "blake3",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ContentDigest {
+    algorithm: DigestAlgorithm,
+    bytes: [u8; 32],
+}
+
+impl ContentDigest {
+    pub fn new(algorithm: DigestAlgorithm, bytes: [u8; 32]) -> Self {
+        Self { algorithm, bytes }
+    }
+
+    pub fn algorithm(self) -> DigestAlgorithm {
+        self.algorithm
+    }
+
+    pub fn bytes(self) -> [u8; 32] {
+        self.bytes
+    }
+}
+
+impl fmt::Display for ContentDigest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}:{}",
+            self.algorithm.as_str(),
+            hex::encode(self.bytes)
+        )
+    }
+}
+
+impl TryFrom<String> for ContentDigest {
+    type Error = ExecutionContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        let (algorithm, encoded) = value
+            .split_once(':')
+            .ok_or(ExecutionContractError::InvalidContentDigest)?;
+        let algorithm = match algorithm {
+            "blake3" => DigestAlgorithm::Blake3,
+            "sha256" => DigestAlgorithm::Sha256,
+            _ => return Err(ExecutionContractError::InvalidContentDigest),
+        };
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ExecutionContractError::InvalidContentDigest);
+        }
+        let decoded =
+            hex::decode(encoded).map_err(|_| ExecutionContractError::InvalidContentDigest)?;
+        let bytes = decoded
+            .try_into()
+            .map_err(|_| ExecutionContractError::InvalidContentDigest)?;
+        Ok(Self { algorithm, bytes })
+    }
+}
+
+impl From<ContentDigest> for String {
+    fn from(value: ContentDigest) -> Self {
+        value.to_string()
+    }
+}
+
+impl Serialize for ContentDigest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ContentDigest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ExecutionId(String);
@@ -60,6 +159,8 @@ pub enum ExecutionContractError {
     NonCanonicalList(&'static str),
     #[error("execution_id must be blake3:<64 lowercase hex characters>")]
     InvalidExecutionId,
+    #[error("content digest must use blake3 or sha256 with exactly 64 lowercase hex characters")]
+    InvalidContentDigest,
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
 }
@@ -85,7 +186,7 @@ pub struct ExecutionContractV1 {
 pub struct ResolvedSourceContract {
     pub kind: String,
     pub immutable_ref: String,
-    pub digest: String,
+    pub digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,22 +206,22 @@ pub struct ResolvedTargetContract {
 pub struct ResolvedArtifactContract {
     pub kind: String,
     pub resolved_ref: String,
-    pub digest: String,
+    pub digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedDependencyContract {
     pub name: String,
-    pub derivation_digest: String,
-    pub output_digest: String,
+    pub derivation_digest: ContentDigest,
+    pub output_digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedBuildOutputContract {
     pub name: String,
-    pub digest: String,
+    pub digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,23 +238,23 @@ pub struct ResolvedLaunchContract {
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentVariableContract {
     pub name: String,
-    pub value_digest: String,
+    pub value_digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedFilesystemContract {
-    pub view_digest: String,
-    pub readonly_layers: Vec<String>,
+    pub view_digest: ContentDigest,
+    pub readonly_layers: Vec<ContentDigest>,
     pub writable_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedPolicyContract {
-    pub network_digest: String,
-    pub capability_digest: String,
-    pub filesystem_digest: String,
+    pub network_digest: ContentDigest,
+    pub capability_digest: ContentDigest,
+    pub filesystem_digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,27 +296,12 @@ impl ExecutionContractV1 {
         for (field, value) in [
             ("source.kind", self.source.kind.as_str()),
             ("source.immutable_ref", self.source.immutable_ref.as_str()),
-            ("source.digest", self.source.digest.as_str()),
             ("target.os", self.target.os.as_str()),
             ("target.architecture", self.target.architecture.as_str()),
             ("target.abi", self.target.abi.as_str()),
             ("runtime.kind", self.runtime.kind.as_str()),
             ("runtime.resolved_ref", self.runtime.resolved_ref.as_str()),
-            ("runtime.digest", self.runtime.digest.as_str()),
             ("launch.cwd", self.launch.cwd.as_str()),
-            (
-                "filesystem.view_digest",
-                self.filesystem.view_digest.as_str(),
-            ),
-            ("policy.network_digest", self.policy.network_digest.as_str()),
-            (
-                "policy.capability_digest",
-                self.policy.capability_digest.as_str(),
-            ),
-            (
-                "policy.filesystem_digest",
-                self.policy.filesystem_digest.as_str(),
-            ),
             (
                 "guest_surface.protocol",
                 self.guest_surface.protocol.as_str(),
@@ -245,7 +331,7 @@ impl ExecutionContractV1 {
                 .map(|item| item.name.as_str()),
         )?;
         validate_sorted_strings("launch.secret_bindings", &self.launch.secret_bindings)?;
-        validate_sorted_strings(
+        validate_sorted_digests(
             "filesystem.readonly_layers",
             &self.filesystem.readonly_layers,
         )?;
@@ -257,23 +343,13 @@ impl ExecutionContractV1 {
         )?;
 
         for dependency in &self.dependencies {
-            ensure_values(
-                "dependencies",
-                [
-                    &dependency.name,
-                    &dependency.derivation_digest,
-                    &dependency.output_digest,
-                ],
-            )?;
+            ensure_values("dependencies", [&dependency.name])?;
         }
         for output in &self.build_outputs {
-            ensure_values("build_outputs", [&output.name, &output.digest])?;
+            ensure_values("build_outputs", [&output.name])?;
         }
         for variable in &self.launch.environment {
-            ensure_values(
-                "launch.environment",
-                [&variable.name, &variable.value_digest],
-            )?;
+            ensure_values("launch.environment", [&variable.name])?;
         }
         for state in &self.external_state {
             ensure_values(
@@ -298,6 +374,16 @@ impl ExecutionContractV1 {
         hasher.update(&canonical);
         ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
     }
+}
+
+fn validate_sorted_digests(
+    field: &'static str,
+    values: &[ContentDigest],
+) -> Result<(), ExecutionContractError> {
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(ExecutionContractError::NonCanonicalList(field));
+    }
+    Ok(())
 }
 
 fn validate_named_list<'a>(
@@ -343,13 +429,17 @@ mod tests {
 
     use super::*;
 
+    fn digest(algorithm: DigestAlgorithm, byte: u8) -> ContentDigest {
+        ContentDigest::new(algorithm, [byte; 32])
+    }
+
     fn sample_contract() -> ExecutionContractV1 {
         ExecutionContractV1 {
             schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
             source: ResolvedSourceContract {
                 kind: "git".to_string(),
                 immutable_ref: "https://example.invalid/repo@012345".to_string(),
-                digest: "sha256:source".to_string(),
+                digest: digest(DigestAlgorithm::Sha256, 1),
             },
             target: ResolvedTargetContract {
                 os: "linux".to_string(),
@@ -361,35 +451,35 @@ mod tests {
             runtime: ResolvedArtifactContract {
                 kind: "node".to_string(),
                 resolved_ref: "node@22.14.0".to_string(),
-                digest: "sha256:runtime".to_string(),
+                digest: digest(DigestAlgorithm::Sha256, 2),
             },
             dependencies: vec![ResolvedDependencyContract {
                 name: "npm".to_string(),
-                derivation_digest: "blake3:derivation".to_string(),
-                output_digest: "blake3:dependencies".to_string(),
+                derivation_digest: digest(DigestAlgorithm::Blake3, 3),
+                output_digest: digest(DigestAlgorithm::Blake3, 4),
             }],
             build_outputs: vec![ResolvedBuildOutputContract {
                 name: "app".to_string(),
-                digest: "blake3:app".to_string(),
+                digest: digest(DigestAlgorithm::Blake3, 5),
             }],
             launch: ResolvedLaunchContract {
                 argv: vec!["node".to_string(), "dist/server.js".to_string()],
                 cwd: "/workspace".to_string(),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
-                    value_digest: "blake3:production".to_string(),
+                    value_digest: digest(DigestAlgorithm::Blake3, 6),
                 }],
                 secret_bindings: vec!["API_TOKEN".to_string()],
             },
             filesystem: ResolvedFilesystemContract {
-                view_digest: "blake3:filesystem".to_string(),
-                readonly_layers: vec!["blake3:runtime-layer".to_string()],
+                view_digest: digest(DigestAlgorithm::Blake3, 7),
+                readonly_layers: vec![digest(DigestAlgorithm::Blake3, 8)],
                 writable_paths: vec!["/tmp".to_string()],
             },
             policy: ResolvedPolicyContract {
-                network_digest: "blake3:network".to_string(),
-                capability_digest: "blake3:capability".to_string(),
-                filesystem_digest: "blake3:filesystem-policy".to_string(),
+                network_digest: digest(DigestAlgorithm::Blake3, 9),
+                capability_digest: digest(DigestAlgorithm::Blake3, 10),
+                filesystem_digest: digest(DigestAlgorithm::Blake3, 11),
             },
             guest_surface: GuestSurfaceContract {
                 protocol: "ato-guest/v1".to_string(),
@@ -418,9 +508,32 @@ mod tests {
             ExecutionId::new(format!("blake3:{}", blake3::hash(&expected_input).to_hex()))
                 .expect("valid id")
         );
+    }
+
+    #[test]
+    fn content_digest_rejects_placeholders_wrong_lengths_and_uppercase_hex() {
+        for invalid in [
+            "latest",
+            "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:unknown",
+            "sha256:aa",
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ] {
+            assert!(
+                ContentDigest::try_from(invalid.to_string()).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn content_digest_round_trips_as_a_canonical_string() {
+        let expected = digest(DigestAlgorithm::Sha256, 0xab);
+        let json = serde_json::to_string(&expected).unwrap();
+        assert_eq!(json, format!("\"sha256:{}\"", "ab".repeat(32)));
         assert_eq!(
-            contract.compute_execution_id().unwrap().as_str(),
-            "blake3:d5d92e94a7b68986961ab8509c2f029835270ffb8b05382e9bf8da9a7a1db09c"
+            serde_json::from_str::<ContentDigest>(&json).unwrap(),
+            expected
         );
     }
 
@@ -503,9 +616,9 @@ mod tests {
 
     #[test]
     fn unresolved_or_empty_identity_fields_fail_closed() {
-        let mut contract = sample_contract();
-        contract.runtime.digest.clear();
-        assert!(contract.validate().is_err());
+        let mut value = serde_json::to_value(sample_contract()).unwrap();
+        value["runtime"]["digest"] = serde_json::json!("unknown");
+        assert!(serde_json::from_value::<ExecutionContractV1>(value).is_err());
     }
 
     #[test]
