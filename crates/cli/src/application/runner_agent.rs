@@ -4757,10 +4757,6 @@ async fn handle_restore_snapshot_lease(
                 session_id: session_id.clone(),
                 surface_id: surface_id.to_string(),
             };
-            let readiness_assertion = runtime
-                .assertion_keyring
-                .issue_readiness_assertion(&scope)
-                .context("issue one-time pixel gateway readiness assertion")?;
             let probe_origin = runtime
                 .allowed_origins
                 .iter()
@@ -4770,25 +4766,57 @@ async fn handle_restore_snapshot_lease(
             let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
             let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
             private_rfb_addr.set_port(rfb_port);
+            // The surface budget is a TOTAL budget, not a single attempt (same
+            // discipline as the web path's proxy readiness probe). The gateway
+            // already retries a refused private-RFB dial internally, but a
+            // probe that fails PAST the dial — wss handshake, authentication,
+            // first-frame wait while the in-guest watchdog rebinds the RFB
+            // server — has consumed its one-use readiness assertion, so each
+            // attempt mints a FRESH assertion. `start_ready_pixel_gateway`
+            // stops the listener on probe failure, so a retry restarts it and
+            // callers can never report ready unproved. The gateway's own
+            // private-RFB connect timeout stays the FULL budget: it is the
+            // long-lived config real viewers dial through after readiness.
             let timeout = Duration::from_millis(surface_ready_timeout_ms);
-            let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
-                netd::pixel_gateway::PixelGatewayConfig {
-                    listen_addr,
-                    private_rfb_addr,
-                    private_rfb_connect_timeout: timeout,
-                    scope,
-                    allowed_origins: runtime.allowed_origins.clone(),
-                },
-                Arc::clone(&runtime.authorizer),
-                netd::rfb_probe::PixelGatewayProbeRequest::new(
-                    public_ready_url,
-                    probe_origin,
-                    readiness_assertion.as_str(),
-                ),
-                timeout,
-            )
-            .await
-            .context("authenticated public pixel gateway path did not become interactive")?;
+            let deadline = std::time::Instant::now() + timeout;
+            const PIXEL_PROBE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+            let (handle, frame) = loop {
+                let readiness_assertion = runtime
+                    .assertion_keyring
+                    .issue_readiness_assertion(&scope)
+                    .context("issue one-time pixel gateway readiness assertion")?;
+                let attempt_budget = deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(250));
+                let attempt = netd::rfb_probe::start_ready_pixel_gateway(
+                    netd::pixel_gateway::PixelGatewayConfig {
+                        listen_addr,
+                        private_rfb_addr,
+                        private_rfb_connect_timeout: timeout,
+                        scope: scope.clone(),
+                        allowed_origins: runtime.allowed_origins.clone(),
+                    },
+                    Arc::clone(&runtime.authorizer),
+                    netd::rfb_probe::PixelGatewayProbeRequest::new(
+                        public_ready_url,
+                        probe_origin,
+                        readiness_assertion.as_str(),
+                    ),
+                    attempt_budget,
+                )
+                .await;
+                match attempt {
+                    Ok(ready) => break ready,
+                    Err(error) => {
+                        if std::time::Instant::now() + PIXEL_PROBE_RETRY_BACKOFF >= deadline {
+                            return Err(anyhow::Error::new(error).context(
+                                "authenticated public pixel gateway path did not become interactive",
+                            ));
+                        }
+                        tokio::time::sleep(PIXEL_PROBE_RETRY_BACKOFF).await;
+                    }
+                }
+            };
             Ok::<_, anyhow::Error>((handle, private_rfb_addr, frame))
         }
         .await;
