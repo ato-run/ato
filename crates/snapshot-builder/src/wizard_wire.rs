@@ -31,6 +31,14 @@ use serde::{Deserialize, Serialize};
 /// NEW job kind for wizard jobs. Defined but NOT wired in PR-0: never added to
 /// the daemon's advertised `supported_kinds` (an unknown kind keeps failing the
 /// job closed at stage `claim_kind`, never guessed), and no enqueue accepts it.
+///
+/// This constant belongs to the *enqueue* kind vocabulary (the api mirror is
+/// `WIZARD_WIRE_JOB_KINDS` in `wire.ts`). That vocabulary is NOT the union of
+/// the kinds a builder advertises in `supported_kinds`: live builders also
+/// advertise `"source_materialize"`, which is not an enqueue kind and must
+/// never be rejected when PR-1 validates a claimed kind. Do NOT fold
+/// `source_materialize` into the wire-kind vocabulary. (There is no
+/// full-vocabulary job-kind enum on this side — only this new constant.)
 pub const JOB_KIND_INTERACTIVE_CAPTURE: &str = "interactive_capture";
 
 /// NEW job status for a wizard job whose app is up and held for the submitter.
@@ -356,14 +364,19 @@ pub struct HoldReadyRequest {
 }
 
 impl HoldReadyRequest {
+    /// Length bounds are measured in **UTF-16 code units**
+    /// (`encode_utf16().count()`), matching the api's `builderLocalIdSchema`
+    /// (`z.string().min(1).max(120)`, whose zod `.max()` counts `String.length`
+    /// = UTF-16 code units) — never `chars().count()` — so a string holding an
+    /// astral scalar (2 code units) gets one verdict on both sides of the seam.
     pub fn validate(&self) -> Result<(), String> {
         for (name, value) in [
             ("builder_id", &self.builder_id),
             ("slot_id", &self.slot_id),
             ("session_id", &self.session_id),
         ] {
-            if value.is_empty() || value.chars().count() > 120 {
-                return Err(format!("{name} must be 1..120 chars"));
+            if value.is_empty() || value.encode_utf16().count() > 120 {
+                return Err(format!("{name} must be 1..120 UTF-16 code units"));
             }
         }
         if self.guest_port == 0 {
@@ -474,10 +487,14 @@ impl WizardAck {
                 }
             }
         }
+        // Length in **UTF-16 code units** (`encode_utf16().count()`), matching
+        // the api's `z.string().max(2000)` (zod counts `String.length` = UTF-16
+        // code units) — an astral scalar counts as 2, so a green failure_reason
+        // on one side is green on the other (seam: one verdict on both sides).
         if let Some(reason) = &self.failure_reason
-            && reason.chars().count() > 2000
+            && reason.encode_utf16().count() > 2000
         {
-            return Err("failure_reason must be <= 2000 chars".into());
+            return Err("failure_reason must be <= 2000 UTF-16 code units".into());
         }
         Ok(())
     }
@@ -643,8 +660,12 @@ pub enum RefusalDomain {
 /// §7 declaration `<name>`: `[a-z0-9_-]{1,40}`, unique across cache ∪ state
 /// (uniqueness is checked in [`CaptureDeclarations::validate`]).
 fn validate_declaration_name(name: &str) -> Result<(), String> {
-    if name.is_empty() || name.chars().count() > 40 {
-        return Err(format!("declaration name {name:?} must be 1..40 chars"));
+    // Length in UTF-16 code units to match the api's `.max()` (moot given the
+    // ASCII-only charset below, but kept uniform with the other mirrored bounds).
+    if name.is_empty() || name.encode_utf16().count() > 40 {
+        return Err(format!(
+            "declaration name {name:?} must be 1..40 UTF-16 code units"
+        ));
     }
     if !name
         .chars()
@@ -668,12 +689,18 @@ fn validate_declaration_name(name: &str) -> Result<(), String> {
 /// (`snapshot::docker_import::validate_dockerfile_path`) gates `..`/prefix
 /// components but not backslashes or the 200-char cap, so the contract gets
 /// its own validator here rather than a near-miss reuse.
+///
+/// The 200-length cap is measured in **UTF-16 code units**
+/// (`encode_utf16().count()`), matching the api's `z.string().max(200)`. A path
+/// may hold astral scalars (charset is unrestricted apart from the segment
+/// rules), each of which is 2 UTF-16 code units, so counting scalars here would
+/// diverge from the api — this is the load-bearing length bound of the seam.
 fn validate_declared_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("path must be non-empty".into());
     }
-    if path.chars().count() > 200 {
-        return Err("path must be <= 200 chars".into());
+    if path.encode_utf16().count() > 200 {
+        return Err("path must be <= 200 UTF-16 code units".into());
     }
     if path.contains('\\') {
         return Err("path must not contain backslashes".into());
@@ -692,8 +719,10 @@ fn validate_declared_path(path: &str) -> Result<(), String> {
 
 /// §7 `schema`: free-form id, 1..60 chars, `[a-z0-9_.-]`.
 fn validate_state_schema(schema: &str) -> Result<(), String> {
-    if schema.is_empty() || schema.chars().count() > 60 {
-        return Err(format!("schema {schema:?} must be 1..60 chars"));
+    // Length in UTF-16 code units to match the api's `.max()` (moot given the
+    // ASCII-only charset below, but kept uniform with the other mirrored bounds).
+    if schema.is_empty() || schema.encode_utf16().count() > 60 {
+        return Err(format!("schema {schema:?} must be 1..60 UTF-16 code units"));
     }
     if !schema
         .chars()
@@ -776,6 +805,17 @@ impl CaptureDeclarations {
 /// rejected (mirrors the api's `.strict()`); invalid literal values
 /// (`capture = "sometimes"`, `snapshot = "include"`, a missing `schema`) fail
 /// at parse by construction.
+///
+/// **§7 envelope asymmetry is intentional (division of labor).** This Rust
+/// parser reads the *whole capsule.toml* and, by construction
+/// ([`CaptureDeclarations`] carries only `cache`/`state`), ignores every other
+/// top-level manifest table. The api's `captureDeclarationsSchema` is
+/// `.strict()` and rejects unknown top-level keys — but it never sees the whole
+/// manifest: the JSON projection it validates contains ONLY the `cache`/`state`
+/// keys, produced by extracting those two tables from the manifest, never by
+/// serializing the whole manifest. So both sides agree on the declaration set
+/// even though one tolerates a full manifest and the other forbids extra
+/// top-level keys.
 pub fn parse_capture_declarations(toml_text: &str) -> Result<DeclaredPaths, String> {
     let decls: CaptureDeclarations =
         toml::from_str(toml_text).map_err(|e| format!("capsule.toml capture declarations: {e}"))?;
@@ -1557,6 +1597,61 @@ schema = "sqlite"
         parse_capture_declarations(
             "[cache.data]\npath = \"data\"\ncapture = \"include\"\n\n[state.other]\npath = \"database\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
         )
+        .unwrap();
+    }
+
+    // ── seam finding 1: length bounds are UTF-16 code units ─────────────────
+
+    #[test]
+    fn string_length_bounds_count_utf16_code_units_not_scalars() {
+        // The api's zod `.min()/.max()` count UTF-16 code units (`String.length`);
+        // this side must agree or a string legal on one side is illegal on the
+        // other. An astral scalar is 1 `char` but 2 UTF-16 code units.
+
+        // failure_reason: max 2000. 1200 astral emoji = 1200 scalars = 2400
+        // UTF-16 code units → REJECTED (it was ACCEPTED when this counted
+        // chars().count() == 1200 ≤ 2000).
+        let astral_reason = "\u{1F600}".repeat(1200);
+        assert_eq!(astral_reason.chars().count(), 1200);
+        assert_eq!(astral_reason.encode_utf16().count(), 2400);
+        let over_bound = WizardAck {
+            agent_id: "b".into(),
+            fencing: FencingTuple {
+                capture_epoch: 3,
+                ..fencing()
+            },
+            status: WizardAckStatus::Failed,
+            accepted_candidate_id: None,
+            acceptance_receipt: None,
+            failure_stage: Some(WizardFailureStage::CaptureSeal),
+            failure_reason: Some(astral_reason),
+        };
+        assert!(over_bound.validate().is_err());
+        // A just-at-bound BMP string (each scalar = 1 UTF-16 code unit) passes.
+        let at_bound = WizardAck {
+            failure_reason: Some("x".repeat(2000)),
+            ..over_bound.clone()
+        };
+        assert!(at_bound.validate().is_ok());
+
+        // Declared path: max 200. A path may hold astral scalars (charset is
+        // unrestricted apart from the segment rules), so this bound is the most
+        // load-bearing. 150 astral scalars = 300 UTF-16 code units → REJECTED.
+        let astral_path = "\u{1F600}".repeat(150);
+        assert_eq!(astral_path.chars().count(), 150);
+        assert_eq!(astral_path.encode_utf16().count(), 300);
+        assert!(
+            parse_capture_declarations(&format!(
+                "[cache.emoji]\npath = \"{astral_path}\"\ncapture = \"include\"\n"
+            ))
+            .is_err()
+        );
+        // 200 BMP chars = 200 UTF-16 code units = at bound → accepted.
+        let bmp_path = "a".repeat(200);
+        assert_eq!(bmp_path.encode_utf16().count(), 200);
+        parse_capture_declarations(&format!(
+            "[cache.bmp]\npath = \"{bmp_path}\"\ncapture = \"include\"\n"
+        ))
         .unwrap();
     }
 }
