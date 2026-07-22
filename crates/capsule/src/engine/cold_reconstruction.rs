@@ -155,12 +155,16 @@ mod tests {
     use super::*;
     use crate::ato_lock;
     use crate::execution_contract::{
-        EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentVariableContract, ExternalStateAccess,
-        ExternalStateContract, GuestSurfaceContract, ResolvedArtifactContract,
+        ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentVariableContract,
+        ExternalStateAccess, ExternalStateContract, GuestSurfaceContract, ResolvedArtifactContract,
         ResolvedBuildOutputContract, ResolvedDependencyContract, ResolvedFilesystemContract,
         ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract,
         ResolvedTargetContract, SnapshotExclusion,
     };
+
+    fn digest(algorithm: DigestAlgorithm, byte: u8) -> ContentDigest {
+        ContentDigest::new(algorithm, [byte; 32])
+    }
 
     fn contract() -> ExecutionContractV1 {
         ExecutionContractV1 {
@@ -168,7 +172,7 @@ mod tests {
             source: ResolvedSourceContract {
                 kind: "git".to_string(),
                 immutable_ref: "repo@commit".to_string(),
-                digest: "sha256:source".to_string(),
+                digest: digest(DigestAlgorithm::Sha256, 1),
             },
             target: ResolvedTargetContract {
                 os: "linux".to_string(),
@@ -180,35 +184,35 @@ mod tests {
             runtime: ResolvedArtifactContract {
                 kind: "node".to_string(),
                 resolved_ref: "node@22".to_string(),
-                digest: "sha256:runtime".to_string(),
+                digest: digest(DigestAlgorithm::Sha256, 2),
             },
             dependencies: vec![ResolvedDependencyContract {
                 name: "npm".to_string(),
-                derivation_digest: "blake3:derive".to_string(),
-                output_digest: "blake3:deps".to_string(),
+                derivation_digest: digest(DigestAlgorithm::Blake3, 3),
+                output_digest: digest(DigestAlgorithm::Blake3, 4),
             }],
             build_outputs: vec![ResolvedBuildOutputContract {
                 name: "app".to_string(),
-                digest: "blake3:app".to_string(),
+                digest: digest(DigestAlgorithm::Blake3, 5),
             }],
             launch: ResolvedLaunchContract {
                 argv: vec!["node".to_string(), "app.js".to_string()],
                 cwd: "/workspace".to_string(),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
-                    value_digest: "blake3:production".to_string(),
+                    value_digest: digest(DigestAlgorithm::Blake3, 6),
                 }],
                 secret_bindings: vec!["TOKEN".to_string()],
             },
             filesystem: ResolvedFilesystemContract {
-                view_digest: "blake3:fs".to_string(),
+                view_digest: digest(DigestAlgorithm::Blake3, 7),
                 readonly_layers: Vec::new(),
                 writable_paths: vec!["/tmp".to_string()],
             },
             policy: ResolvedPolicyContract {
-                network_digest: "blake3:network".to_string(),
-                capability_digest: "blake3:capabilities".to_string(),
-                filesystem_digest: "blake3:fs-policy".to_string(),
+                network_digest: digest(DigestAlgorithm::Blake3, 8),
+                capability_digest: digest(DigestAlgorithm::Blake3, 9),
+                filesystem_digest: digest(DigestAlgorithm::Blake3, 10),
             },
             guest_surface: GuestSurfaceContract {
                 protocol: "guest/v1".to_string(),
@@ -290,7 +294,7 @@ mod tests {
         let lock = lock();
         let original = lock.clone();
         let mut reconstructed = contract();
-        reconstructed.runtime.digest = "sha256:different".to_string();
+        reconstructed.runtime.digest = digest(DigestAlgorithm::Sha256, 0xff);
         let mut executor = Executor {
             reconstructed,
             reconstructs: 0,
