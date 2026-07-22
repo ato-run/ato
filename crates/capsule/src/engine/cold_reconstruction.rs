@@ -215,7 +215,9 @@ mod tests {
                 filesystem_digest: digest(DigestAlgorithm::Blake3, 10),
             },
             guest_surface: GuestSurfaceContract {
+                bind_address: "0.0.0.0".to_string(),
                 protocol: "guest/v1".to_string(),
+                port: Some(8080),
                 features: vec!["exec".to_string()],
             },
             external_state: vec![ExternalStateContract {

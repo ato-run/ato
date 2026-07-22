@@ -41,14 +41,18 @@ use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
 use capsule::execution_contract::{
-    ContentDigest, ExecutionContractV1, ExecutionId, ObservedExecutionContractV1,
-    observe_source_tree_digest,
+    ContentDigest, DigestAlgorithm, EnvironmentVariableContract, ExecutionContractV1, ExecutionId,
+    ExternalStateAccess, ExternalStateContract, GuestSurfaceContract, ObservedExecutionContractV1,
+    ResolvedArtifactContract, ResolvedBuildOutputContract, ResolvedDependencyContract,
+    ResolvedFilesystemContract, ResolvedLaunchContract, ResolvedPolicyContract,
+    ResolvedSourceContract, ResolvedTargetContract, SnapshotExclusion, observe_source_tree_digest,
 };
 use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsule::foundation::types::ready_state::{
     DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES,
 };
+use capsule::foundation::types::runplan::RunPlanRuntime;
 use capsulefs::CasStore;
 use protocol::session_surface::{
     EndpointContract, EndpointExposure, EndpointProtocol, EndpointReadiness, EndpointRole,
@@ -721,10 +725,7 @@ struct ProducedBuild {
     execution_id: String,
     execution_identity_schema: Option<String>,
     execution_contract: Option<ExecutionContractV1>,
-    observed_source_digest: Option<ContentDigest>,
-    observed_network_policy_digest: Option<ContentDigest>,
-    observed_capability_policy_digest: Option<ContentDigest>,
-    observed_filesystem_policy_digest: Option<ContentDigest>,
+    observed_execution_contract: Option<ExecutionContractV1>,
     capsule_manifest_hash: String,
     surface_requirement: Option<SessionSurfaceRequirement>,
     /// Explicit restore endpoints sealed into the manifest's restore contract.
@@ -773,88 +774,56 @@ fn finalize_produced_execution_identity(
         ));
     };
     let fail = |message: String| ("artifact_metadata".to_string(), message);
-    let source_digest = produced.observed_source_digest.ok_or_else(|| {
-        fail("v1 build did not produce observed source digest evidence".to_string())
-    })?;
-    let network_policy_digest = produced.observed_network_policy_digest.ok_or_else(|| {
-        fail("v1 build did not produce observed network policy evidence".to_string())
-    })?;
-    let capability_policy_digest = produced.observed_capability_policy_digest.ok_or_else(|| {
-        fail("v1 build did not produce observed capability policy evidence".to_string())
-    })?;
-    let filesystem_policy_digest = produced.observed_filesystem_policy_digest.ok_or_else(|| {
-        fail("v1 build did not produce observed filesystem policy evidence".to_string())
-    })?;
+    let observed_contract = produced
+        .observed_execution_contract
+        .clone()
+        .ok_or_else(|| {
+            fail("v1 build did not produce a complete observed launch contract".to_string())
+        })?;
     finalize_remote_execution_contract(
         contract,
+        observed_contract,
         &produced.execution_id,
         &produced.rootfs,
-        source_digest,
-        network_policy_digest,
-        capability_policy_digest,
-        filesystem_policy_digest,
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn finalize_remote_execution_contract(
     contract: ExecutionContractV1,
+    mut observed_contract: ExecutionContractV1,
     claimed_execution_id: &str,
     rootfs: &[u8],
-    source_digest: ContentDigest,
-    network_policy_digest: ContentDigest,
-    capability_policy_digest: ContentDigest,
-    filesystem_policy_digest: ContentDigest,
 ) -> std::result::Result<(String, Option<String>), (String, String)> {
     let fail = |message: String| ("artifact_metadata".to_string(), message);
-    if contract.dependencies.len() > 1 || contract.build_outputs.len() > 1 {
+    if observed_contract.dependencies.len() > 1 || observed_contract.build_outputs.len() > 1 {
         return Err(fail(
             "v1 remote builder currently requires at most one aggregate dependency output and one rootfs build output"
                 .to_string(),
         ));
     }
-    let dependency_output_digests = contract
-        .dependencies
-        .iter()
-        .map(|dependency| {
-            (
-                dependency.name.clone(),
-                ContentDigest::hash(dependency.output_digest.algorithm(), rootfs),
-            )
-        })
-        .collect();
-    let build_output_digests = contract
-        .build_outputs
-        .iter()
-        .map(|output| {
-            (
-                output.name.clone(),
-                ContentDigest::hash(output.digest.algorithm(), rootfs),
-            )
-        })
-        .collect();
-    if contract.filesystem.readonly_layers.len() != 1 {
+    for dependency in &mut observed_contract.dependencies {
+        dependency.output_digest =
+            ContentDigest::hash(dependency.output_digest.algorithm(), rootfs);
+    }
+    for output in &mut observed_contract.build_outputs {
+        output.digest = ContentDigest::hash(output.digest.algorithm(), rootfs);
+    }
+    if observed_contract.filesystem.readonly_layers.len() != 1 {
         return Err(fail(format!(
-            "v1 remote builder produced one immutable rootfs layer, but contract declares {} layers",
-            contract.filesystem.readonly_layers.len()
+            "v1 remote builder produced one immutable rootfs layer, but observed plan declares {} layers",
+            observed_contract.filesystem.readonly_layers.len()
         )));
     }
+    observed_contract.runtime.digest =
+        ContentDigest::hash(observed_contract.runtime.digest.algorithm(), rootfs);
+    observed_contract.filesystem.view_digest =
+        ContentDigest::hash(observed_contract.filesystem.view_digest.algorithm(), rootfs);
+    observed_contract.filesystem.readonly_layers = vec![ContentDigest::hash(
+        observed_contract.filesystem.readonly_layers[0].algorithm(),
+        rootfs,
+    )];
     let observed = ObservedExecutionContractV1 {
-        source_digest,
-        runtime_digest: ContentDigest::hash(contract.runtime.digest.algorithm(), rootfs),
-        dependency_output_digests,
-        build_output_digests,
-        filesystem_view_digest: ContentDigest::hash(
-            contract.filesystem.view_digest.algorithm(),
-            rootfs,
-        ),
-        readonly_layer_digests: vec![ContentDigest::hash(
-            contract.filesystem.readonly_layers[0].algorithm(),
-            rootfs,
-        )],
-        network_policy_digest,
-        capability_policy_digest,
-        filesystem_policy_digest,
+        contract: observed_contract,
     };
     let finalized = contract
         .finalize_observation(&observed)
@@ -882,6 +851,200 @@ fn observed_policy_digest(
     let bytes = serde_jcs::to_vec(&projection)
         .map_err(|error| ("artifact_metadata".to_string(), error.to_string()))?;
     Ok(ContentDigest::hash(algorithm, &bytes))
+}
+
+fn derive_remote_execution_contract(
+    manifest: &CapsuleManifest,
+    spec: &RootfsBuildSpec,
+    expected: &ExecutionContractV1,
+    source_identifier: &str,
+    source_digest: ContentDigest,
+    policy: ResolvedPolicyContract,
+) -> std::result::Result<ExecutionContractV1, (String, String)> {
+    let fail = |message: String| ("artifact_metadata".to_string(), message);
+    if !manifest.state.is_empty() {
+        return Err(fail(
+            "v1 running capture cannot independently derive mount targets for manifest state"
+                .to_string(),
+        ));
+    }
+    let run_plan = manifest
+        .to_run_plan()
+        .map_err(|error| fail(error.to_string()))?;
+    let (environment_values, cwd, mut writable_paths) = match &run_plan.runtime {
+        RunPlanRuntime::Docker(runtime) => (
+            &runtime.env,
+            runtime
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| "/".to_string()),
+            runtime
+                .mounts
+                .iter()
+                .filter(|mount| !mount.readonly)
+                .map(|mount| mount.target.clone())
+                .collect::<Vec<_>>(),
+        ),
+        RunPlanRuntime::Native(runtime) => (
+            &runtime.env,
+            runtime
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| ".".to_string()),
+            Vec::new(),
+        ),
+        RunPlanRuntime::Source(runtime) => (
+            &runtime.env,
+            runtime
+                .working_dir
+                .clone()
+                .unwrap_or_else(|| ".".to_string()),
+            Vec::new(),
+        ),
+    };
+    writable_paths.sort();
+    writable_paths.dedup();
+
+    let expected_environment = expected
+        .launch
+        .environment
+        .iter()
+        .map(|variable| (variable.name.as_str(), variable.value_digest.algorithm()))
+        .collect::<BTreeMap<_, _>>();
+    let mut environment = environment_values
+        .iter()
+        .map(|(name, value)| EnvironmentVariableContract {
+            name: name.clone(),
+            value_digest: ContentDigest::hash(
+                expected_environment
+                    .get(name.as_str())
+                    .copied()
+                    .unwrap_or(DigestAlgorithm::Blake3),
+                value.as_bytes(),
+            ),
+        })
+        .collect::<Vec<_>>();
+    environment.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let expected_dependencies = expected
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.name.as_str(), dependency))
+        .collect::<BTreeMap<_, _>>();
+    let mut dependencies = manifest
+        .dependencies
+        .iter()
+        .map(|(name, declaration)| {
+            let expected_dependency = expected_dependencies.get(name.as_str());
+            let derivation_algorithm = expected_dependency
+                .map(|dependency| dependency.derivation_digest.algorithm())
+                .unwrap_or(DigestAlgorithm::Blake3);
+            let output_algorithm = expected_dependency
+                .map(|dependency| dependency.output_digest.algorithm())
+                .unwrap_or(DigestAlgorithm::Blake3);
+            serde_jcs::to_vec(declaration)
+                .map(|canonical| ResolvedDependencyContract {
+                    name: name.clone(),
+                    derivation_digest: ContentDigest::hash(derivation_algorithm, &canonical),
+                    output_digest: ContentDigest::hash(output_algorithm, &[]),
+                })
+                .map_err(|error| fail(error.to_string()))
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    dependencies.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let output_algorithm = expected
+        .build_outputs
+        .iter()
+        .find(|output| output.name == "rootfs")
+        .map(|output| output.digest.algorithm())
+        .unwrap_or(DigestAlgorithm::Blake3);
+    let runtime_kind = serde_json::to_value(spec.runtime)
+        .map_err(|error| fail(error.to_string()))?
+        .as_str()
+        .ok_or_else(|| fail("resolved runtime kind is not a string".to_string()))?
+        .to_string();
+    let mut secret_bindings = manifest.secrets.keys().cloned().collect::<Vec<_>>();
+    secret_bindings.sort();
+    let mut external_state = manifest
+        .storage
+        .volumes
+        .iter()
+        .map(|volume| ExternalStateContract {
+            name: volume.name.clone(),
+            target: volume.mount_path.clone(),
+            access: if volume.read_only {
+                ExternalStateAccess::ReadOnly
+            } else {
+                ExternalStateAccess::ReadWrite
+            },
+            schema: "capsule-storage/v0.3".to_string(),
+            snapshot: SnapshotExclusion::Exclude,
+        })
+        .collect::<Vec<_>>();
+    external_state.sort_by(|left, right| left.name.cmp(&right.name));
+    let features = if spec.supervisor.is_some() {
+        vec!["bindings".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    let observed = ExecutionContractV1 {
+        schema: capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+        source: ResolvedSourceContract {
+            kind: "github".to_string(),
+            immutable_ref: source_identifier.to_string(),
+            digest: source_digest,
+        },
+        target: ResolvedTargetContract {
+            os: "linux".to_string(),
+            architecture: std::env::consts::ARCH.to_string(),
+            abi: "gnu".to_string(),
+            libc: None,
+            observable_features: BTreeMap::new(),
+        },
+        runtime: ResolvedArtifactContract {
+            kind: runtime_kind,
+            resolved_ref: spec.base_image.clone(),
+            digest: ContentDigest::hash(expected.runtime.digest.algorithm(), &[]),
+        },
+        dependencies,
+        build_outputs: vec![ResolvedBuildOutputContract {
+            name: "rootfs".to_string(),
+            digest: ContentDigest::hash(output_algorithm, &[]),
+        }],
+        launch: ResolvedLaunchContract {
+            argv: vec!["sh".to_string(), "-lc".to_string(), spec.start_cmd.clone()],
+            cwd,
+            environment,
+            secret_bindings,
+        },
+        filesystem: ResolvedFilesystemContract {
+            view_digest: ContentDigest::hash(expected.filesystem.view_digest.algorithm(), &[]),
+            readonly_layers: vec![ContentDigest::hash(
+                expected
+                    .filesystem
+                    .readonly_layers
+                    .first()
+                    .map(|digest| digest.algorithm())
+                    .unwrap_or(DigestAlgorithm::Blake3),
+                &[],
+            )],
+            writable_paths,
+        },
+        policy,
+        guest_surface: GuestSurfaceContract {
+            bind_address: "0.0.0.0".to_string(),
+            protocol: "tcp".to_string(),
+            port: Some(spec.port),
+            features,
+        },
+        external_state,
+    };
+    observed
+        .validate()
+        .map_err(|error| fail(error.to_string()))?;
+    Ok(observed)
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -1000,13 +1163,14 @@ fn produce_recipe_build(
             ));
         }
     }
+    let source_identifier = store_source_identifier(
+        &source.github_owner,
+        &source.github_repo,
+        &source.commit_sha,
+        source.subdirectory.as_deref(),
+    );
     let envelope = ReadyStateDeclaredEnvelope {
-        source_identifier: store_source_identifier(
-            &source.github_owner,
-            &source.github_repo,
-            &source.commit_sha,
-            source.subdirectory.as_deref(),
-        ),
+        source_identifier: source_identifier.clone(),
         // The REQUESTED target (gate-validated == manifest.default_target): the identity
         // is computed for the target actually being built, never a substituted one.
         target_label: job.target_label.clone(),
@@ -1023,35 +1187,37 @@ fn produce_recipe_build(
 
     let parsed_manifest: toml::Value =
         toml::from_str(&toml_text).map_err(|error| fail("manifest", error.to_string()))?;
-    let (
-        observed_source_digest,
-        observed_network_policy_digest,
-        observed_capability_policy_digest,
-        observed_filesystem_policy_digest,
-    ) = if let Some(contract) = execution_contract.as_ref() {
+    let observed_execution_contract = if let Some(contract) = execution_contract.as_ref() {
         let source_digest =
             observe_source_tree_digest(&src, &[], contract.source.digest.algorithm())
                 .map_err(|error| fail("artifact_metadata", error.to_string()))?;
-        (
-            Some(source_digest),
-            Some(observed_policy_digest(
+        let policy = ResolvedPolicyContract {
+            network_digest: observed_policy_digest(
                 &parsed_manifest,
                 &["network"],
                 contract.policy.network_digest.algorithm(),
-            )?),
-            Some(observed_policy_digest(
+            )?,
+            capability_digest: observed_policy_digest(
                 &parsed_manifest,
                 &["permissions", "capabilities", "gpu"],
                 contract.policy.capability_digest.algorithm(),
-            )?),
-            Some(observed_policy_digest(
+            )?,
+            filesystem_digest: observed_policy_digest(
                 &parsed_manifest,
                 &["filesystem", "state"],
                 contract.policy.filesystem_digest.algorithm(),
-            )?),
-        )
+            )?,
+        };
+        Some(derive_remote_execution_contract(
+            &manifest,
+            &spec,
+            contract,
+            &source_identifier,
+            source_digest,
+            policy,
+        )?)
     } else {
-        (None, None, None, None)
+        None
     };
 
     // 3. Build the bootable rootfs (Docker→ext4; commands run only in Docker/guest).
@@ -1105,10 +1271,7 @@ fn produce_recipe_build(
         execution_id,
         execution_identity_schema,
         execution_contract,
-        observed_source_digest,
-        observed_network_policy_digest,
-        observed_capability_policy_digest,
-        observed_filesystem_policy_digest,
+        observed_execution_contract,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
         surface_requirement: target.surface.clone(),
         endpoints: Vec::new(),
@@ -1339,10 +1502,7 @@ fn produce_import_build(
         execution_id,
         execution_identity_schema,
         execution_contract: None,
-        observed_source_digest: None,
-        observed_network_policy_digest: None,
-        observed_capability_policy_digest: None,
-        observed_filesystem_policy_digest: None,
+        observed_execution_contract: None,
         capsule_manifest_hash,
         surface_requirement,
         endpoints,
@@ -1468,10 +1628,7 @@ fn produce_oci_image_import(
         execution_id,
         execution_identity_schema,
         execution_contract: None,
-        observed_source_digest: None,
-        observed_network_policy_digest: None,
-        observed_capability_policy_digest: None,
-        observed_filesystem_policy_digest: None,
+        observed_execution_contract: None,
         capsule_manifest_hash,
         surface_requirement: None,
         endpoints: Vec::new(),
@@ -1581,10 +1738,7 @@ fn produce_compose_import(
         execution_id,
         execution_identity_schema,
         execution_contract: None,
-        observed_source_digest: None,
-        observed_network_policy_digest: None,
-        observed_capability_policy_digest: None,
-        observed_filesystem_policy_digest: None,
+        observed_execution_contract: None,
         capsule_manifest_hash,
         surface_requirement: None,
         // A compose import is a Web artifact — no sealed restore endpoints; the
@@ -2803,33 +2957,65 @@ mod tests {
             "launch": {"argv": ["/app"], "cwd": "/", "environment": []},
             "filesystem": {"view_digest": rootfs.to_string(), "readonly_layers": [rootfs.to_string()], "writable_paths": []},
             "policy": {"network_digest": policy.to_string(), "capability_digest": policy.to_string(), "filesystem_digest": policy.to_string()},
-            "guest_surface": {"protocol": "ato-guest/v1", "features": []},
+            "guest_surface": {"bind_address": "0.0.0.0", "protocol": "ato-guest/v1", "port": 8080, "features": []},
             "external_state": []
         }))
         .expect("contract");
         let execution_id = contract.compute_execution_id().expect("execution id");
         finalize_remote_execution_contract(
             contract.clone(),
+            contract.clone(),
             execution_id.as_str(),
             expected_rootfs,
-            source,
-            policy,
-            policy,
-            policy,
         )
         .expect("matching observed build");
         let error = finalize_remote_execution_contract(
-            contract,
+            contract.clone(),
+            contract.clone(),
             execution_id.as_str(),
             b"different-rootfs",
-            source,
-            policy,
-            policy,
-            policy,
         )
         .expect_err("stale contract must fail closed");
         assert_eq!(error.0, "artifact_metadata");
         assert!(error.1.contains("observation mismatch"), "{}", error.1);
+
+        for observed in [
+            {
+                let mut observed = contract.clone();
+                observed.launch.argv.push("--new".to_string());
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed.target.architecture = "aarch64".to_string();
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed
+                    .launch
+                    .environment
+                    .push(EnvironmentVariableContract {
+                        name: "MODE".to_string(),
+                        value_digest: ContentDigest::blake3(b"prod"),
+                    });
+                observed
+            },
+            {
+                let mut observed = contract.clone();
+                observed.guest_surface.port = Some(9090);
+                observed
+            },
+        ] {
+            let error = finalize_remote_execution_contract(
+                contract.clone(),
+                observed,
+                execution_id.as_str(),
+                expected_rootfs,
+            )
+            .expect_err("launch-envelope drift must fail closed");
+            assert!(error.1.contains("observation mismatch"), "{}", error.1);
+        }
     }
 
     /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a

@@ -319,13 +319,18 @@ resolve declared inputs
 Snapshot layer IDs are not folded into `execution_id`. A different Snapshot of
 the same launch contract remains subordinate to the same Execution Identity.
 
-The finalization gate MUST recompute every available identity-bearing digest
-from the concrete build that is about to be captured. At minimum this includes
-the materialized source projection, runtime/rootfs bytes, dependency output,
-application output, immutable filesystem view/layers, and effective network,
-capability, and filesystem policy projections. Copying an expected digest from
-the lock into an “observation” is not verification. A missing observation or
-any mismatch is terminal and occurs before Snapshot capture.
+The finalization gate MUST independently re-derive the complete
+`ExecutionContractV1` from the concrete manifest, resolved run plan, target,
+and materialization that are about to be captured. It compares the resulting
+structure to the stored contract for exact equality and recomputes its
+`execution_id`. This covers launch argv/cwd, environment, target, guest
+surface, filesystem topology, dependency derivations, and External State
+schema in addition to content digests. The materialized source projection,
+runtime/rootfs bytes, dependency output, application output, immutable
+filesystem view/layers, and effective policy projections MUST be recomputed
+from their concrete inputs. Copying any expected field from the lock into an
+“observation” is not verification. A missing observation or any mismatch is
+terminal and occurs before Snapshot capture.
 
 Remote builders receive the complete `execution_contract` together with its
 explicit schema and `execution_id`; a bare ID is insufficient. They recompute
@@ -604,10 +609,17 @@ overwritten with different bytes. The legacy
 path and is never used to publish Capsule v1 artifacts.
 
 Acceptance is catalog metadata outside the immutable artifact directory. The
-catalog pins each accepted `snapshot_id` to an expected `envelope_id`; a loader
-MUST resolve that expected ID first and reject an artifact whose self-declared,
-recomputed Envelope ID differs. Rehashing an artifact after changing
-`quarantined` to `accepted` therefore cannot promote it into the catalog.
+catalog pins each accepted `snapshot_id` to an expected `envelope_id` and
+acceptance receipt ID; a loader MUST resolve those expected IDs first and
+reject an artifact whose self-declared, recomputed Envelope differs.
+
+Local acceptance entries are immutable per-Snapshot receipts authenticated by
+a keyed MAC whose key comes from an OS-protected credential source outside the
+Snapshot state root. The key MUST NOT be stored beside the artifact or receipt.
+Concurrent publication creates independent receipt files atomically instead of
+updating one shared read-modify-write catalog. Rehashing both an artifact and
+its public receipt fields, including changing `quarantined` to `accepted`,
+cannot produce a valid MAC and therefore cannot promote it into the catalog.
 
 ## 8. Snapshot capture and acceptance
 

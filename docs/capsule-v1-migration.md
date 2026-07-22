@@ -87,6 +87,14 @@ Local v1 publication uses
 the same Capsule manifest for a new resolved target therefore retains the old
 Execution Identity and Snapshot instead of overwriting its sidecar.
 
+Local acceptance uses one immutable receipt per Snapshot under the Execution
+Identity directory. Each receipt authenticates the Snapshot, Envelope, and
+disposable-restore acceptance receipt IDs with a keyed MAC. The key is supplied
+from an OS-protected credential source outside the Snapshot state root (the CLI
+boundary receives it as `ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY`) and is never written
+beside local artifacts. Missing or invalid key material fails publication and
+selection closed.
+
 ## Fail-closed compatibility errors
 
 - `execution_contract` / `execution_id` pair incomplete
