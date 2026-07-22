@@ -13,16 +13,21 @@ use anyhow::{Context, Result};
 use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsulefs::CasStore;
 use snapshot::{
-    ReadyStateManifest, RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend,
-    SnapshotCatalogRecord, SnapshotCompatibilityContract, SnapshotManifestV1,
-    SnapshotRestoreCapabilities, TeardownReceipt, migrate_legacy_manifest,
+    ArtifactEnvelopeV1, ReadyStateManifest, RestoreReadyStateInput, RestoreReceipt,
+    RestoredSession, SnapshotBackend, SnapshotCatalogRecord, SnapshotCompatibilityContract,
+    SnapshotManifestV1, SnapshotRestoreCapabilities, TeardownReceipt, migrate_legacy_manifest,
     select_compatible_snapshot,
 };
 
 pub(crate) enum RestoreVerification {
     LegacyLocal,
-    RunnerLease { expected_execution_id: String },
-    V1(Box<SnapshotManifestV1>),
+    RunnerLease {
+        expected_execution_id: String,
+    },
+    V1 {
+        manifest: Box<SnapshotManifestV1>,
+        envelope: Box<ArtifactEnvelopeV1>,
+    },
 }
 
 /// Restore a sealed artifact and prepare its session for exposure.
@@ -45,8 +50,11 @@ pub(crate) fn restore_and_expose(
                 .context("resolve runner restore Snapshot compatibility")?;
             verify_runner_lease_candidate(&manifest, expected_execution_id, &compatibility)?;
         }
-        RestoreVerification::V1(v1_manifest) => {
-            verify_v1_candidate(backend, &manifest, v1_manifest)?;
+        RestoreVerification::V1 {
+            manifest: v1_manifest,
+            envelope,
+        } => {
+            verify_v1_candidate(backend, &manifest, v1_manifest, envelope)?;
         }
     }
     let receipt = backend
@@ -65,7 +73,11 @@ fn verify_v1_candidate(
     backend: &dyn SnapshotBackend,
     legacy: &ReadyStateManifest,
     candidate: &SnapshotManifestV1,
+    envelope: &ArtifactEnvelopeV1,
 ) -> Result<()> {
+    envelope
+        .verify(legacy, candidate)
+        .context("verify Snapshot Artifact Envelope")?;
     if legacy.execution_id.as_deref() != Some(candidate.execution_id.as_str()) {
         anyhow::bail!("legacy/v1 Snapshot execution_id mismatch");
     }
@@ -168,6 +180,7 @@ mod tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: Vec::new(),
                 execution_id: Some("sha256:legacy-execution".to_string()),
+                execution_identity_schema: None,
                 supervisor: None,
             })
             .unwrap()
@@ -227,6 +240,9 @@ mod tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: Some(execution_id.to_string()),
+                execution_identity_schema: Some(
+                    capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+                ),
                 supervisor: None,
             })
             .unwrap()
@@ -237,13 +253,17 @@ mod tests {
             backend.snapshot_compatibility_contract().unwrap(),
         )
         .unwrap();
+        let envelope = snapshot::ArtifactEnvelopeV1::accepted(&manifest, &v1_manifest).unwrap();
 
         let overlay = dir.path().join("ov");
         let receipt = restore_and_expose(
             &backend,
             &store,
             manifest,
-            RestoreVerification::V1(Box::new(v1_manifest)),
+            RestoreVerification::V1 {
+                manifest: Box::new(v1_manifest),
+                envelope: Box::new(envelope),
+            },
             overlay.clone(),
             None,
             false,

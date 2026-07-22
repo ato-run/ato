@@ -269,6 +269,8 @@ pub struct BuildReadyStateInput<'a> {
     /// execution identity). `None` ⇒ the sealed manifest carries no execution id and a
     /// registry builder fails closed at `artifact_metadata`.
     pub execution_id: Option<String>,
+    /// Explicit schema for `execution_id`; never inferred from its hash prefix.
+    pub execution_identity_schema: Option<String>,
     /// v1.2 PR 3d: `Some` ⇒ this rootfs is a supervisor build (agent-as-init) and
     /// the backend drives placeholder-deliver → health → StopWorkload → Revoke
     /// before the snapshot. `None` = the unchanged no-binding path.

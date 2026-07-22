@@ -304,6 +304,7 @@ fn build_capsule(
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(format!("sha256:durable-state-smoke-{name}")),
+            execution_identity_schema: None,
             supervisor: Some(SupervisorBindings {
                 binding_names: sup.binding_names.clone(),
                 state_volumes,

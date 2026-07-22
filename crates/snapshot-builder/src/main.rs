@@ -67,9 +67,10 @@ use snapshot::rootfs_builder::{
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
-    BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SNAPSHOT_MANIFEST_V1_FILENAME, SanitizerContract, SnapshotBackend, SupervisorBindings,
-    WarmupRecipe, migrate_legacy_manifest, no_secret_scan,
+    ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactEnvelopeV1, BuildLayers,
+    BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
+    SNAPSHOT_MANIFEST_V1_FILENAME, SNAPSHOT_MANIFEST_V1_SCHEMA, SanitizerContract, SnapshotBackend,
+    SupervisorBindings, WarmupRecipe, migrate_legacy_manifest, no_secret_scan,
 };
 
 mod upload;
@@ -205,10 +206,44 @@ struct ClaimedJob {
     /// any use ([`parse_import_params`]).
     #[serde(default)]
     params: Option<serde_json::Value>,
+    /// Explicit identity schema and id supplied by a Capsule-v1 resolver. Both
+    /// must be present together; a hash prefix is never used as a substitute.
+    #[serde(default)]
+    execution_identity_schema: Option<String>,
+    #[serde(default)]
+    execution_id: Option<String>,
 }
 
 fn default_job_kind() -> String {
     "recipe".into()
+}
+
+fn resolve_job_execution_identity(
+    job: &ClaimedJob,
+    legacy_execution_id: String,
+) -> std::result::Result<(String, Option<String>), (String, String)> {
+    match (
+        job.execution_identity_schema.as_deref(),
+        job.execution_id.as_deref(),
+    ) {
+        (None, None) => Ok((legacy_execution_id, None)),
+        (Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA), Some(id)) => {
+            let id = ExecutionId::new(id.to_string())
+                .map_err(|error| ("artifact_metadata".to_string(), error.to_string()))?;
+            Ok((
+                id.to_string(),
+                Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+            ))
+        }
+        (Some(other), _) => Err((
+            "artifact_metadata".to_string(),
+            format!("unsupported execution identity schema {other:?}"),
+        )),
+        _ => Err((
+            "artifact_metadata".to_string(),
+            "execution_identity_schema and execution_id must be supplied together".to_string(),
+        )),
+    }
 }
 
 /// The narrow v1 target/profile gate: a job may only build when it requests the
@@ -243,6 +278,16 @@ struct Artifact {
     capsule_manifest_hash: String,
     execution_id: String,
     artifact_manifest_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_identity_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_manifest_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_envelope_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_manifest_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_envelope_id: Option<String>,
     runner_class_id: String,
     snapshot_backend: String,
     artifact_location: String,
@@ -648,6 +693,7 @@ struct ProducedBuild {
     /// execution envelope — ato#1002 review D3). Always the Ato EXECUTION identity
     /// (what executes), never a rebuild-inputs / job identity.
     execution_id: String,
+    execution_identity_schema: Option<String>,
     capsule_manifest_hash: String,
     surface_requirement: Option<SessionSurfaceRequirement>,
     /// Explicit restore endpoints sealed into the manifest's restore contract.
@@ -820,6 +866,8 @@ fn produce_recipe_build(
         capability_policy_hash: None,
     };
     let declared_execution_id = envelope.declared_execution_id();
+    let (execution_id, execution_identity_schema) =
+        resolve_job_execution_identity(job, declared_execution_id)?;
 
     // 3. Build the bootable rootfs (Docker→ext4; commands run only in Docker/guest).
     let ext4 = jobdir.join("rootfs.ext4");
@@ -869,7 +917,8 @@ fn produce_recipe_build(
         rootfs,
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
-        execution_id: declared_execution_id,
+        execution_id,
+        execution_identity_schema,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
         surface_requirement: target.surface.clone(),
         endpoints: Vec::new(),
@@ -1032,7 +1081,9 @@ fn produce_import_build(
     // import descriptor lane. capsule_manifest_hash = the blake3 import
     // DESCRIPTOR hash over that input-only envelope (an import has no
     // capsule.toml — a descriptor hash, not a manifest hash).
-    let execution_id = import_execution_id(&outcome.plan, &outcome.receipt);
+    let legacy_execution_id = import_execution_id(&outcome.plan, &outcome.receipt);
+    let (execution_id, execution_identity_schema) =
+        resolve_job_execution_identity(job, legacy_execution_id)?;
     let capsule_manifest_hash = import_descriptor_blake3(&outcome.receipt);
     let docker_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
         fail(
@@ -1089,6 +1140,7 @@ fn produce_import_build(
         port: outcome.plan.port,
         healthcheck,
         execution_id,
+        execution_identity_schema,
         capsule_manifest_hash,
         surface_requirement,
         endpoints,
@@ -1160,7 +1212,9 @@ fn produce_oci_image_import(
     // DESCRIPTOR hash over the input-only envelope keyed on the RESOLVED image
     // digest (a registry import has no capsule.toml — a descriptor hash, not a
     // manifest hash; two tags of the same image share it).
-    let execution_id = oci_import_execution_id(&outcome.plan, &outcome.receipt);
+    let legacy_execution_id = oci_import_execution_id(&outcome.plan, &outcome.receipt);
+    let (execution_id, execution_identity_schema) =
+        resolve_job_execution_identity(job, legacy_execution_id)?;
     let capsule_manifest_hash = oci_import_descriptor_blake3(&outcome.receipt);
     let oci_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
         fail(
@@ -1203,6 +1257,7 @@ fn produce_oci_image_import(
             .clone()
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
+        execution_identity_schema,
         capsule_manifest_hash,
         surface_requirement: None,
         endpoints: Vec::new(),
@@ -1264,7 +1319,10 @@ fn produce_compose_import(
     // Import identity: execution_id = WHAT EXECUTES (the joined pinned service
     // images + public entrypoint); capsule_manifest_hash = the blake3 descriptor
     // over the SAME input envelope (a compose import has no capsule.toml).
-    let execution_id = snapshot::docker_import::compose_import_execution_id(&outcome.receipt);
+    let legacy_execution_id =
+        snapshot::docker_import::compose_import_execution_id(&outcome.receipt);
+    let (execution_id, execution_identity_schema) =
+        resolve_job_execution_identity(job, legacy_execution_id)?;
     let capsule_manifest_hash =
         snapshot::docker_import::compose_import_descriptor_blake3(&outcome.receipt);
     let compose_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
@@ -1300,6 +1358,7 @@ fn produce_compose_import(
             .clone()
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
+        execution_identity_schema,
         capsule_manifest_hash,
         surface_requirement: None,
         // A compose import is a Web artifact — no sealed restore endpoints; the
@@ -2174,6 +2233,7 @@ fn process_job(
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
             execution_id: Some(produced.execution_id),
+            execution_identity_schema: produced.execution_identity_schema,
             supervisor: produced.supervisor,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
@@ -2264,31 +2324,42 @@ fn process_job(
         manifest_out.execution_id.as_deref(),
         manifest_out.runner_class_id.as_ref().map(|c| c.to_string()),
     )?;
-    let artifact_location = upload::cas_location(&job.id, &artifact_manifest_hash);
-
-    let snapshot_manifest_v1_json = if execution_id.starts_with("blake3:") {
-        let execution_id = ExecutionId::new(execution_id.clone())
-            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+    let v1_bundle = if let Some(execution_id) = manifest_out
+        .v1_execution_id()
+        .map_err(|error| fail("artifact_metadata", error))?
+    {
         let compatibility = backend
             .snapshot_compatibility_contract()
             .map_err(|error| fail("artifact_metadata", error.to_string()))?;
         let snapshot_manifest = migrate_legacy_manifest(&manifest_out, execution_id, compatibility)
             .map_err(|error| fail("artifact_metadata", error.to_string()))?;
-        let json = serde_json::to_vec_pretty(&snapshot_manifest)
+        let envelope = ArtifactEnvelopeV1::accepted(&manifest_out, &snapshot_manifest)
             .map_err(|error| fail("artifact_metadata", error.to_string()))?;
-        if !no_secret_scan::blob_is_clean(&json, L4_CANARIES) {
+        let snapshot_json = serde_json::to_vec_pretty(&snapshot_manifest)
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        let envelope_json = serde_json::to_vec_pretty(&envelope)
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        if !no_secret_scan::blob_is_clean(&snapshot_json, L4_CANARIES)
+            || !no_secret_scan::blob_is_clean(&envelope_json, L4_CANARIES)
+        {
             return Err(fail(
                 "no_secret_scan",
-                "Snapshot v1 manifest json failed the no-secret scan".into(),
+                "Snapshot v1 metadata failed the no-secret scan".into(),
             ));
         }
-        Some(json)
+        Some((snapshot_manifest, envelope, snapshot_json, envelope_json))
     } else {
         None
     };
+    let artifact_root_id = v1_bundle.as_ref().map_or_else(
+        || artifact_manifest_hash.clone(),
+        |(_, envelope, _, _)| envelope.envelope_id.clone(),
+    );
+    let artifact_location = upload::cas_location(&job.id, &artifact_root_id);
 
     // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
-    // names <work>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}, and a runner restores by loading
+    // names <work>/<job_id>/{manifest.json, snapshot-manifest-v1.json?,
+    // artifact-envelope-v1.json?, cas/}, and a runner restores by loading
     // manifest.json, verifying `manifest.id() == artifact_manifest_hash` (fail-closed),
     // then restoring from the co-located CAS. The manifest is derived entirely from
     // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
@@ -2307,13 +2378,23 @@ fn process_job(
     }
     std::fs::write(jobdir.join("manifest.json"), &manifest_json)
         .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
-    if let Some(json) = snapshot_manifest_v1_json {
-        std::fs::write(jobdir.join(SNAPSHOT_MANIFEST_V1_FILENAME), json).map_err(|error| {
-            fail(
-                "artifact_metadata",
-                format!("persist Snapshot v1 manifest: {error}"),
-            )
-        })?;
+    if let Some((_, _, snapshot_json, envelope_json)) = &v1_bundle {
+        std::fs::write(jobdir.join(SNAPSHOT_MANIFEST_V1_FILENAME), snapshot_json).map_err(
+            |error| {
+                fail(
+                    "artifact_metadata",
+                    format!("persist Snapshot v1 manifest: {error}"),
+                )
+            },
+        )?;
+        std::fs::write(jobdir.join(ARTIFACT_ENVELOPE_V1_FILENAME), envelope_json).map_err(
+            |error| {
+                fail(
+                    "artifact_metadata",
+                    format!("persist Snapshot Artifact Envelope: {error}"),
+                )
+            },
+        )?;
     }
 
     // 8. ato#1002 Snapshot Serving v1: with the artifact store configured (all
@@ -2331,7 +2412,7 @@ fn process_job(
                     &upload::SystemImportCommandRunner,
                     &jobdir,
                     &job.id,
-                    &artifact_manifest_hash,
+                    &artifact_root_id,
                 )
                 .map_err(|e| fail("artifact_upload", e))?,
             None => artifact_location,
@@ -2341,6 +2422,21 @@ fn process_job(
         capsule_manifest_hash: produced.capsule_manifest_hash,
         execution_id,
         artifact_manifest_hash,
+        execution_identity_schema: v1_bundle
+            .as_ref()
+            .map(|_| capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+        snapshot_manifest_schema: v1_bundle
+            .as_ref()
+            .map(|_| SNAPSHOT_MANIFEST_V1_SCHEMA.to_string()),
+        artifact_envelope_schema: v1_bundle
+            .as_ref()
+            .map(|_| ARTIFACT_ENVELOPE_V1_SCHEMA.to_string()),
+        snapshot_manifest_id: v1_bundle
+            .as_ref()
+            .map(|(snapshot, _, _, _)| snapshot.snapshot_id.clone()),
+        artifact_envelope_id: v1_bundle
+            .as_ref()
+            .map(|(_, envelope, _, _)| envelope.envelope_id.clone()),
         runner_class_id,
         snapshot_backend: manifest_out.snapshot_backend.kind.clone(),
         artifact_location,
@@ -2910,6 +3006,8 @@ targets = ["web"]
             recipe_toml: None,
             kind: kind.into(),
             params,
+            execution_identity_schema: None,
+            execution_id: None,
         }
     }
 
@@ -3629,6 +3727,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
@@ -3688,6 +3791,33 @@ targets = ["web"]
         for k in ["execution_id", "runner_class_id", "artifact_location"] {
             assert_ne!(obj[k].as_str().unwrap(), "unknown");
         }
+
+        let mut v1 = a;
+        v1.execution_identity_schema =
+            Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string());
+        v1.snapshot_manifest_schema = Some(SNAPSHOT_MANIFEST_V1_SCHEMA.to_string());
+        v1.snapshot_manifest_id = Some(format!("blake3:{}", "1".repeat(64)));
+        v1.artifact_envelope_schema = Some(ARTIFACT_ENVELOPE_V1_SCHEMA.to_string());
+        v1.artifact_envelope_id = Some(format!("blake3:{}", "2".repeat(64)));
+        let v1 = serde_json::to_value(v1).unwrap();
+        assert_eq!(
+            v1["execution_identity_schema"],
+            capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA
+        );
+        assert_eq!(v1["snapshot_manifest_schema"], SNAPSHOT_MANIFEST_V1_SCHEMA);
+        assert_eq!(v1["artifact_envelope_schema"], ARTIFACT_ENVELOPE_V1_SCHEMA);
+        assert!(
+            v1["snapshot_manifest_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("blake3:")
+        );
+        assert!(
+            v1["artifact_envelope_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("blake3:")
+        );
     }
 
     #[test]
@@ -3702,6 +3832,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
@@ -3744,6 +3879,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:d".into(),
             execution_id: "sha256:i".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
@@ -3800,6 +3940,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:d".into(),
             execution_id: "sha256:i".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
@@ -3849,6 +3994,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),
@@ -3898,6 +4048,11 @@ targets = ["web"]
             capsule_manifest_hash: "blake3:c".into(),
             execution_id: "exec-1".into(),
             artifact_manifest_hash: "blake3:a".into(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            artifact_envelope_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_id: None,
             runner_class_id: "rc".into(),
             snapshot_backend: "firecracker".into(),
             artifact_location: "cas://job/blake3:a".into(),

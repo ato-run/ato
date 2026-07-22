@@ -31,6 +31,7 @@
 
 mod acceptance;
 pub mod agent_channel;
+mod artifact_envelope;
 mod backend;
 pub mod bench;
 pub mod compose_plan;
@@ -64,6 +65,10 @@ pub use acceptance::{
     AcceptanceReceipt, AcceptanceResult, CandidateSnapshot, DisposableAcceptanceLifecycle,
     DisposableSessionHandle, RunningSnapshotAcceptance, SnapshotEligibility, VerificationOutcome,
     accept_platform_verified_candidate,
+};
+pub use artifact_envelope::{
+    ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactAcceptance,
+    ArtifactAcceptanceStatus, ArtifactEnvelopeError, ArtifactEnvelopeV1,
 };
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
@@ -166,6 +171,7 @@ mod e2e_tests {
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: vec![],
                 execution_id: None,
+                execution_identity_schema: None,
                 supervisor: None,
             })
             .expect("build");

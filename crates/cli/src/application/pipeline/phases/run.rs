@@ -3765,7 +3765,7 @@ where
             .authoritative_lock
             .as_ref()
             .and_then(|lock| lock.execution_id.as_ref());
-        if let Some(plan) = ready_state::decide_ready_state_run(
+        if let Some(mut plan) = ready_state::decide_ready_state_run(
             &rs_manifest,
             &rs_hash,
             &rs_root,
@@ -3834,7 +3834,10 @@ where
                     ready_state::bindings::BindingGuardMode::VerifyOnly,
                 )?;
             }
-            let backend = ready_state::backend::select_backend()?;
+            let backend = match plan.selected_backend.take() {
+                Some(backend) => backend,
+                None => ready_state::backend::select_backend()?,
+            };
             // L2 (#912): placement capability gate. A binding-required preview must
             // fail closed BEFORE restore if this backend/host cannot deliver bindings
             // (no vsock / not firecracker / not x86_64) — never silently fall back.
@@ -3855,8 +3858,7 @@ where
             // reaped/quarantined by the canonical startup sweep
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
             // separate sweep is wired here.
-            let store =
-                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            let store = ready_state::store::open_store_at_artifact_dir(&plan.artifact_dir)?;
             // U10 (#877): opt-in mem_backend selection diagnostics — record what a
             // selector WOULD choose, then restore via File EXACTLY as before. Pure
             // observation; no behavior change.
@@ -3957,10 +3959,14 @@ where
             } else {
                 false
             };
-            let verification = plan.v1_manifest.map_or(
-                ready_state::restore::RestoreVerification::LegacyLocal,
-                |manifest| ready_state::restore::RestoreVerification::V1(Box::new(manifest)),
-            );
+            let verification = match (plan.v1_manifest, plan.v1_envelope) {
+                (Some(manifest), Some(envelope)) => ready_state::restore::RestoreVerification::V1 {
+                    manifest: Box::new(manifest),
+                    envelope: Box::new(envelope),
+                },
+                (None, None) => ready_state::restore::RestoreVerification::LegacyLocal,
+                _ => anyhow::bail!("incomplete Snapshot v1 verification metadata"),
+            };
             let receipt = ready_state::restore::restore_and_expose(
                 backend.as_ref(),
                 &store,
