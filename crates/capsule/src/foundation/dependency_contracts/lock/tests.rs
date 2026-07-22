@@ -27,7 +27,7 @@ run = "main.py"
 needs = ["db"]
 
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
 [dependencies.db.parameters]
@@ -86,8 +86,8 @@ fn parse(text: &str) -> CapsuleManifest {
 
 fn provider(text: &str) -> ResolvedProviderManifest {
     ResolvedProviderManifest {
-        requested: "capsule://ato/postgres@16".to_string(),
-        resolved: "capsule://ato/postgres@sha256:abc123def".to_string(),
+        requested: "capsule://ato/example-db@16".to_string(),
+        resolved: "capsule://ato/example-db@sha256:abc123def".to_string(),
         manifest: parse(text),
     }
 }
@@ -107,8 +107,8 @@ fn happy_path_emits_lock_with_all_invariants() {
     let lock = verify_and_lock(happy_input(&consumer)).expect("verify");
 
     let entry = lock.entries.get("db").expect("db entry");
-    assert_eq!(entry.requested, "capsule://ato/postgres@16");
-    assert_eq!(entry.resolved, "capsule://ato/postgres@sha256:abc123def");
+    assert_eq!(entry.requested, "capsule://ato/example-db@16");
+    assert_eq!(entry.resolved, "capsule://ato/example-db@sha256:abc123def");
     assert_eq!(entry.contract, "service@1");
 
     // §7.3.1 invariant 3: credentials in template form only.
@@ -330,7 +330,7 @@ fn rule_11_major_version_conflict() {
         r#"{}
 
 [dependencies.db_old]
-capsule = "capsule://ato/postgres@15"
+capsule = "capsule://ato/example-db@15"
 contract = "service@1"
 
 [dependencies.db_old.parameters]
@@ -350,8 +350,8 @@ name = "old"
     providers.insert(
         "db_old".to_string(),
         ResolvedProviderManifest {
-            requested: "capsule://ato/postgres@15".to_string(),
-            resolved: "capsule://ato/postgres@sha256:old".to_string(),
+            requested: "capsule://ato/example-db@15".to_string(),
+            resolved: "capsule://ato/example-db@sha256:old".to_string(),
             manifest: parse(HAPPY_PROVIDER),
         },
     );
@@ -374,7 +374,7 @@ fn rule_12_instance_uniqueness_violation() {
         r#"{}
 
 [dependencies.db2]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
 [dependencies.db2.parameters]
@@ -515,7 +515,7 @@ fn consumer_only_rejects_major_version_conflict() {
         r#"{}
 
 [dependencies.db_old]
-capsule = "capsule://ato/postgres@15"
+capsule = "capsule://ato/example-db@15"
 contract = "service@1"
 
 [dependencies.db_old.parameters]

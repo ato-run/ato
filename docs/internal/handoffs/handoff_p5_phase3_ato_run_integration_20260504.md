@@ -220,7 +220,7 @@ B: **Integration test** end-to-end with a mock provider:
 - Assert: consumer launches with `runtime_exports.MODE = "test"` in its env
 - Assert: on consumer exit, `teardown` runs and sentinel is swept
 
-C: **Real Postgres E2E** (= phase 7, separate session): WasedaP2P + `ato/postgres` provider capsule. Don't include in phase 3 PR.
+C: **Real Postgres E2E** (= phase 7, separate session): WasedaP2P + `ato/example-db` provider capsule. Don't include in phase 3 PR.
 
 ## 6. Recommended PR structure
 
