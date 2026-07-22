@@ -319,6 +319,19 @@ resolve declared inputs
 Snapshot layer IDs are not folded into `execution_id`. A different Snapshot of
 the same launch contract remains subordinate to the same Execution Identity.
 
+The finalization gate MUST recompute every available identity-bearing digest
+from the concrete build that is about to be captured. At minimum this includes
+the materialized source projection, runtime/rootfs bytes, dependency output,
+application output, immutable filesystem view/layers, and effective network,
+capability, and filesystem policy projections. Copying an expected digest from
+the lock into an “observation” is not verification. A missing observation or
+any mismatch is terminal and occurs before Snapshot capture.
+
+Remote builders receive the complete `execution_contract` together with its
+explicit schema and `execution_id`; a bare ID is insufficient. They recompute
+the contract ID, observe their own output bytes, and run the same finalization
+gate before returning sealed metadata.
+
 ## 5. `ato.lock.json`
 
 `ato.lock.json` is not a sixth domain concept and is not hashed as an opaque
@@ -589,6 +602,12 @@ staging directory and atomic rename. An existing identity directory MUST NOT be
 overwritten with different bytes. The legacy
 `ready-state/<capsule_manifest_hash>/` layout remains a legacy-only read/write
 path and is never used to publish Capsule v1 artifacts.
+
+Acceptance is catalog metadata outside the immutable artifact directory. The
+catalog pins each accepted `snapshot_id` to an expected `envelope_id`; a loader
+MUST resolve that expected ID first and reject an artifact whose self-declared,
+recomputed Envelope ID differs. Rehashing an artifact after changing
+`quarantined` to `accepted` therefore cannot promote it into the catalog.
 
 ## 8. Snapshot capture and acceptance
 

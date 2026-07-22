@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
@@ -38,6 +40,23 @@ impl ContentDigest {
 
     pub fn bytes(self) -> [u8; 32] {
         self.bytes
+    }
+
+    pub fn blake3(bytes: &[u8]) -> Self {
+        Self::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())
+    }
+
+    /// Hash concrete materialization bytes with the algorithm selected by the
+    /// resolved contract. Callers must not compare an algorithm-tagged string
+    /// without recomputing the bytes through this function.
+    pub fn hash(algorithm: DigestAlgorithm, bytes: &[u8]) -> Self {
+        match algorithm {
+            DigestAlgorithm::Blake3 => Self::blake3(bytes),
+            DigestAlgorithm::Sha256 => {
+                let digest: [u8; 32] = Sha256::digest(bytes).into();
+                Self::new(DigestAlgorithm::Sha256, digest)
+            }
+        }
     }
 }
 
@@ -161,8 +180,83 @@ pub enum ExecutionContractError {
     InvalidExecutionId,
     #[error("content digest must use blake3 or sha256 with exactly 64 lowercase hex characters")]
     InvalidContentDigest,
+    #[error("observed build digest does not match execution contract field '{0}'")]
+    ObservedDigestMismatch(&'static str),
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
+    #[error("failed to observe execution source tree: {0}")]
+    Observation(String),
+}
+
+const SOURCE_OBSERVATION_IGNORED_DIRS: &[&str] = &[
+    ".git",
+    ".tmp",
+    "node_modules",
+    ".venv",
+    "target",
+    "__pycache__",
+    ".ato",
+];
+
+/// Hash the concrete source files consumed by a build using one canonical
+/// projection shared by the local CLI and Connected Snapshot Builder.
+pub fn observe_source_tree_digest(
+    root: &Path,
+    excluded_roots: &[PathBuf],
+    algorithm: DigestAlgorithm,
+) -> Result<ContentDigest, ExecutionContractError> {
+    let mut paths = Vec::new();
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            let Ok(relative) = entry.path().strip_prefix(root) else {
+                return false;
+            };
+            if relative.as_os_str().is_empty() {
+                return true;
+            }
+            if excluded_roots
+                .iter()
+                .any(|excluded| relative.starts_with(excluded))
+            {
+                return false;
+            }
+            !(entry.file_type().is_dir()
+                && relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| SOURCE_OBSERVATION_IGNORED_DIRS.contains(&name)))
+        });
+    for entry in walker {
+        let entry =
+            entry.map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let relative = entry
+            .path()
+            .strip_prefix(root)
+            .map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
+        if relative == Path::new(crate::input_resolver::ATO_LOCK_FILE_NAME) {
+            continue;
+        }
+        paths.push(relative.to_path_buf());
+    }
+    paths.sort();
+
+    let mut canonical = Vec::new();
+    canonical.extend_from_slice(b"ato.execution-source-observation/v1\0");
+    for relative in paths {
+        let name = relative.to_string_lossy();
+        canonical.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        canonical.extend_from_slice(name.as_bytes());
+        let bytes = std::fs::read(root.join(&relative))
+            .map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
+        canonical.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        canonical.extend_from_slice(&bytes);
+    }
+    Ok(ContentDigest::hash(algorithm, &canonical))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +368,40 @@ pub struct ExternalStateContract {
     pub snapshot: SnapshotExclusion,
 }
 
+/// Digests observed from the concrete build that is about to be snapshotted.
+///
+/// This is deliberately a separate type from [`ExecutionContractV1`]: the
+/// contract is the resolved expectation, while this value is produced only
+/// after build outputs and the immutable filesystem have been materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedExecutionContractV1 {
+    pub source_digest: ContentDigest,
+    pub runtime_digest: ContentDigest,
+    pub dependency_output_digests: BTreeMap<String, ContentDigest>,
+    pub build_output_digests: BTreeMap<String, ContentDigest>,
+    pub filesystem_view_digest: ContentDigest,
+    pub readonly_layer_digests: Vec<ContentDigest>,
+    pub network_policy_digest: ContentDigest,
+    pub capability_policy_digest: ContentDigest,
+    pub filesystem_policy_digest: ContentDigest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedExecutionContractV1 {
+    contract: ExecutionContractV1,
+    execution_id: ExecutionId,
+}
+
+impl FinalizedExecutionContractV1 {
+    pub fn contract(&self) -> &ExecutionContractV1 {
+        &self.contract
+    }
+
+    pub fn execution_id(&self) -> &ExecutionId {
+        &self.execution_id
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExternalStateAccess {
@@ -373,6 +501,108 @@ impl ExecutionContractV1 {
         hasher.update(&[0]);
         hasher.update(&canonical);
         ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
+    }
+
+    /// Verify that the resolved contract describes the bytes and policy
+    /// projections produced by this exact build.
+    ///
+    /// A mismatch is terminal: callers must not capture or publish a Snapshot
+    /// under the stale execution identity.
+    pub fn verify_observation(
+        &self,
+        observed: &ObservedExecutionContractV1,
+    ) -> Result<(), ExecutionContractError> {
+        self.validate()?;
+        verify_digest("source.digest", self.source.digest, observed.source_digest)?;
+        verify_digest(
+            "runtime.digest",
+            self.runtime.digest,
+            observed.runtime_digest,
+        )?;
+
+        let expected_dependencies = self
+            .dependencies
+            .iter()
+            .map(|dependency| (dependency.name.clone(), dependency.output_digest))
+            .collect::<BTreeMap<_, _>>();
+        verify_digest_map(
+            "dependencies.output_digest",
+            &expected_dependencies,
+            &observed.dependency_output_digests,
+        )?;
+
+        let expected_outputs = self
+            .build_outputs
+            .iter()
+            .map(|output| (output.name.clone(), output.digest))
+            .collect::<BTreeMap<_, _>>();
+        verify_digest_map(
+            "build_outputs.digest",
+            &expected_outputs,
+            &observed.build_output_digests,
+        )?;
+
+        verify_digest(
+            "filesystem.view_digest",
+            self.filesystem.view_digest,
+            observed.filesystem_view_digest,
+        )?;
+        if self.filesystem.readonly_layers != observed.readonly_layer_digests {
+            return Err(ExecutionContractError::ObservedDigestMismatch(
+                "filesystem.readonly_layers",
+            ));
+        }
+        verify_digest(
+            "policy.network_digest",
+            self.policy.network_digest,
+            observed.network_policy_digest,
+        )?;
+        verify_digest(
+            "policy.capability_digest",
+            self.policy.capability_digest,
+            observed.capability_policy_digest,
+        )?;
+        verify_digest(
+            "policy.filesystem_digest",
+            self.policy.filesystem_digest,
+            observed.filesystem_policy_digest,
+        )
+    }
+
+    pub fn finalize_observation(
+        self,
+        observed: &ObservedExecutionContractV1,
+    ) -> Result<FinalizedExecutionContractV1, ExecutionContractError> {
+        self.verify_observation(observed)?;
+        let execution_id = self.compute_execution_id()?;
+        Ok(FinalizedExecutionContractV1 {
+            contract: self,
+            execution_id,
+        })
+    }
+}
+
+fn verify_digest(
+    field: &'static str,
+    expected: ContentDigest,
+    observed: ContentDigest,
+) -> Result<(), ExecutionContractError> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(ExecutionContractError::ObservedDigestMismatch(field))
+    }
+}
+
+fn verify_digest_map(
+    field: &'static str,
+    expected: &BTreeMap<String, ContentDigest>,
+    observed: &BTreeMap<String, ContentDigest>,
+) -> Result<(), ExecutionContractError> {
+    if expected == observed {
+        Ok(())
+    } else {
+        Err(ExecutionContractError::ObservedDigestMismatch(field))
     }
 }
 
@@ -495,6 +725,56 @@ mod tests {
         }
     }
 
+    fn matching_observation(contract: &ExecutionContractV1) -> ObservedExecutionContractV1 {
+        ObservedExecutionContractV1 {
+            source_digest: contract.source.digest,
+            runtime_digest: contract.runtime.digest,
+            dependency_output_digests: contract
+                .dependencies
+                .iter()
+                .map(|dependency| (dependency.name.clone(), dependency.output_digest))
+                .collect(),
+            build_output_digests: contract
+                .build_outputs
+                .iter()
+                .map(|output| (output.name.clone(), output.digest))
+                .collect(),
+            filesystem_view_digest: contract.filesystem.view_digest,
+            readonly_layer_digests: contract.filesystem.readonly_layers.clone(),
+            network_policy_digest: contract.policy.network_digest,
+            capability_policy_digest: contract.policy.capability_digest,
+            filesystem_policy_digest: contract.policy.filesystem_digest,
+        }
+    }
+
+    #[test]
+    fn build_observation_must_match_every_identity_bearing_digest() {
+        let contract = sample_contract();
+        contract
+            .verify_observation(&matching_observation(&contract))
+            .expect("matching build observation");
+
+        let mut stale_output = matching_observation(&contract);
+        stale_output
+            .build_output_digests
+            .insert("app".to_string(), digest(DigestAlgorithm::Blake3, 0xff));
+        assert_eq!(
+            contract.verify_observation(&stale_output),
+            Err(ExecutionContractError::ObservedDigestMismatch(
+                "build_outputs.digest"
+            ))
+        );
+
+        let mut stale_policy = matching_observation(&contract);
+        stale_policy.network_policy_digest = digest(DigestAlgorithm::Blake3, 0xee);
+        assert_eq!(
+            contract.verify_observation(&stale_policy),
+            Err(ExecutionContractError::ObservedDigestMismatch(
+                "policy.network_digest"
+            ))
+        );
+    }
+
     #[test]
     fn execution_id_is_domain_separated_jcs_blake3() {
         let contract = sample_contract();
@@ -534,6 +814,28 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ContentDigest>(&json).unwrap(),
             expected
+        );
+    }
+
+    #[test]
+    fn source_observation_is_stable_across_lock_and_excluded_output_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("app.rs"), b"fn main() {}").unwrap();
+        std::fs::write(dir.path().join("ato.lock.json"), b"first").unwrap();
+        std::fs::create_dir(dir.path().join("dist")).unwrap();
+        std::fs::write(dir.path().join("dist/app"), b"first-build").unwrap();
+        let excluded = vec![PathBuf::from("dist")];
+        let first =
+            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap();
+        std::fs::write(dir.path().join("ato.lock.json"), b"second").unwrap();
+        std::fs::write(dir.path().join("dist/app"), b"second-build").unwrap();
+        let second =
+            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap();
+        assert_eq!(first, second);
+        std::fs::write(dir.path().join("app.rs"), b"fn main() { println!(\"x\"); }").unwrap();
+        assert_ne!(
+            first,
+            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap()
         );
     }
 

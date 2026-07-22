@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use capsule::CapsuleReporter;
+use capsule::execution_contract::{
+    ContentDigest, DigestAlgorithm, ExecutionContractV1, ExecutionId, ObservedExecutionContractV1,
+    observe_source_tree_digest,
+};
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
@@ -7,6 +11,7 @@ use capsule::router::{
 use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -311,6 +316,11 @@ pub fn execute_pack_command_with_injected_manifest(
     for diagnostic in ipc_diagnostics {
         futures::executor::block_on(reporter.warn(diagnostic.to_string()))?;
     }
+    // Snapshot v1 must bind the pre-build source and policy projections before
+    // lifecycle commands are allowed to mutate the workspace. The resulting
+    // context is finalized only after the concrete artifact/rootfs exists.
+    let v1_seal_context =
+        prepare_v1_seal_context(&decision.plan, &raw_manifest, &decision.plan.workspace_root)?;
     // Source/GitHub builds never enforce --frozen-lockfile: lockfiles may come from a different
     // platform and would fail checksum validation. Only user-injected manifests (explicit
     // capsule.toml) could benefit from strict enforcement, and even then it's not required.
@@ -378,7 +388,6 @@ pub fn execute_pack_command_with_injected_manifest(
         });
     }
 
-    let ready_state_workspace_root = decision.plan.workspace_root.clone();
     let result = match decision.kind {
         capsule::router::RuntimeKind::Source => {
             let compat_input = if let Some(authoritative_input) = authoritative_input.as_ref() {
@@ -616,8 +625,8 @@ pub fn execute_pack_command_with_injected_manifest(
     seal_ready_state_if_enabled(
         &raw_manifest,
         result.artifact.as_deref(),
-        &ready_state_workspace_root,
         reporter.as_ref(),
+        v1_seal_context,
     )?;
 
     record_timing(&mut timing_entries, "build.total", total_started.elapsed());
@@ -633,8 +642,8 @@ pub fn execute_pack_command_with_injected_manifest(
 fn seal_ready_state_if_enabled(
     raw_manifest: &toml::Value,
     artifact: Option<&std::path::Path>,
-    workspace_root: &std::path::Path,
     reporter: &reporters::CliReporter,
+    v1_context: Option<V1SealContext>,
 ) -> anyhow::Result<()> {
     use crate::application::ready_state;
     if !ready_state::flags::ready_state_enabled() {
@@ -661,7 +670,9 @@ fn seal_ready_state_if_enabled(
     let hash = ready_state::capsule_manifest_hash(raw_manifest)?;
     let state_root = ready_state::state_root();
     let layers = ready_state::assemble_build_layers(backend.id(), artifact)?;
-    let v1_execution_id = load_v1_seal_execution_id(workspace_root)?;
+    let v1_execution_id = v1_context
+        .map(|context| finalize_v1_seal_context(context, artifact, &layers))
+        .transpose()?;
     let receipt = ready_state::build::seal(
         &state_root,
         hash.clone(),
@@ -680,9 +691,28 @@ fn seal_ready_state_if_enabled(
     Ok(())
 }
 
-fn load_v1_seal_execution_id(
+#[derive(Debug)]
+struct V1SealContext {
+    contract: ExecutionContractV1,
+    expected_execution_id: ExecutionId,
+    source_digest: ContentDigest,
+    network_policy_digest: ContentDigest,
+    capability_policy_digest: ContentDigest,
+    filesystem_policy_digest: ContentDigest,
+}
+
+fn prepare_v1_seal_context(
+    plan: &capsule::router::ManifestData,
+    raw_manifest: &toml::Value,
     workspace_root: &std::path::Path,
-) -> anyhow::Result<Option<capsule::execution_contract::ExecutionId>> {
+) -> anyhow::Result<Option<V1SealContext>> {
+    if !crate::application::ready_state::flags::ready_state_enabled() {
+        return Ok(None);
+    }
+    let manifest = CapsuleManifest::from_toml(&toml::to_string(raw_manifest)?)?;
+    if !manifest.is_ready_state_eligible() {
+        return Ok(None);
+    }
     let lock_path = workspace_root.join(capsule::input_resolver::ATO_LOCK_FILE_NAME);
     if !lock_path.exists() {
         return Ok(None);
@@ -702,13 +732,164 @@ fn load_v1_seal_execution_id(
                      External State; use workload_idle capture after its backend lifecycle is available"
                 );
             }
-            Ok(Some(execution_id.clone()))
+            let outputs = normalize_outputs(&plan.build_cache_outputs())?;
+            let source_digest = digest_source_projection(
+                &plan.execution_working_directory(),
+                &outputs,
+                contract.source.digest.algorithm(),
+            )?;
+            let network_policy_digest = digest_manifest_projection(
+                raw_manifest,
+                &["network"],
+                contract.policy.network_digest.algorithm(),
+            )?;
+            let capability_policy_digest = digest_manifest_projection(
+                raw_manifest,
+                &["permissions", "capabilities", "gpu"],
+                contract.policy.capability_digest.algorithm(),
+            )?;
+            let filesystem_policy_digest = digest_manifest_projection(
+                raw_manifest,
+                &["filesystem", "state"],
+                contract.policy.filesystem_digest.algorithm(),
+            )?;
+            Ok(Some(V1SealContext {
+                contract: contract.clone(),
+                expected_execution_id: execution_id.clone(),
+                source_digest,
+                network_policy_digest,
+                capability_policy_digest,
+                filesystem_policy_digest,
+            }))
         }
         _ => anyhow::bail!(
             "Ready-State seal refused incomplete execution_contract/execution_id pair in {}",
             lock_path.display()
         ),
     }
+}
+
+fn finalize_v1_seal_context(
+    context: V1SealContext,
+    artifact: Option<&Path>,
+    layers: &snapshot::BuildLayers,
+) -> anyhow::Result<ExecutionId> {
+    let contract = &context.contract;
+    let runtime_bytes = layers.runtime.as_deref().unwrap_or(&layers.rootfs);
+    let dependency_bytes = layers.dependency.as_deref().unwrap_or(&layers.rootfs);
+    let output_bytes = match contract.build_outputs.len() {
+        0 => None,
+        1 => Some(std::fs::read(artifact.context(
+            "Snapshot v1 contract declares a build output, but the build produced no artifact",
+        )?)?),
+        _ => anyhow::bail!(
+            "Snapshot v1 seal cannot verify {} separately declared build outputs from one packed artifact",
+            contract.build_outputs.len()
+        ),
+    };
+    if contract.dependencies.len() > 1 {
+        anyhow::bail!(
+            "Snapshot v1 seal cannot verify {} dependency outputs from one aggregate dependency layer",
+            contract.dependencies.len()
+        );
+    }
+
+    let dependency_output_digests = contract
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.name.clone(),
+                ContentDigest::hash(dependency.output_digest.algorithm(), dependency_bytes),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let build_output_digests = contract
+        .build_outputs
+        .iter()
+        .zip(output_bytes.iter())
+        .map(|(output, bytes)| {
+            (
+                output.name.clone(),
+                ContentDigest::hash(output.digest.algorithm(), bytes),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let concrete_layers = [
+        Some(layers.rootfs.as_slice()),
+        layers.runtime.as_deref(),
+        layers.dependency.as_deref(),
+        layers.app.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if concrete_layers.len() != contract.filesystem.readonly_layers.len() {
+        anyhow::bail!(
+            "Snapshot v1 readonly layer count mismatch: contract={}, observed={}",
+            contract.filesystem.readonly_layers.len(),
+            concrete_layers.len()
+        );
+    }
+    let mut readonly_layer_digests = contract
+        .filesystem
+        .readonly_layers
+        .iter()
+        .zip(concrete_layers)
+        .map(|(expected, bytes)| ContentDigest::hash(expected.algorithm(), bytes))
+        .collect::<Vec<_>>();
+    readonly_layer_digests.sort();
+
+    let observed = ObservedExecutionContractV1 {
+        source_digest: context.source_digest,
+        runtime_digest: ContentDigest::hash(contract.runtime.digest.algorithm(), runtime_bytes),
+        dependency_output_digests,
+        build_output_digests,
+        filesystem_view_digest: ContentDigest::hash(
+            contract.filesystem.view_digest.algorithm(),
+            &layers.rootfs,
+        ),
+        readonly_layer_digests,
+        network_policy_digest: context.network_policy_digest,
+        capability_policy_digest: context.capability_policy_digest,
+        filesystem_policy_digest: context.filesystem_policy_digest,
+    };
+    let finalized = context
+        .contract
+        .finalize_observation(&observed)
+        .context("Snapshot v1 seal refused stale execution contract")?;
+    if finalized.execution_id() != &context.expected_execution_id {
+        anyhow::bail!(
+            "Snapshot v1 seal execution_id mismatch after observed contract finalization"
+        );
+    }
+    Ok(finalized.execution_id().clone())
+}
+
+fn digest_source_projection(
+    working_dir: &Path,
+    outputs: &[OutputSpec],
+    algorithm: DigestAlgorithm,
+) -> Result<ContentDigest> {
+    let excluded = outputs
+        .iter()
+        .map(|output| output.relative_path.clone())
+        .collect::<Vec<_>>();
+    observe_source_tree_digest(working_dir, &excluded, algorithm).map_err(anyhow::Error::new)
+}
+
+fn digest_manifest_projection(
+    manifest: &toml::Value,
+    keys: &[&str],
+    algorithm: DigestAlgorithm,
+) -> Result<ContentDigest> {
+    let projection = keys
+        .iter()
+        .map(|key| ((*key).to_string(), manifest.get(*key).cloned()))
+        .collect::<BTreeMap<_, _>>();
+    let canonical = serde_jcs::to_vec(&projection)?;
+    Ok(ContentDigest::hash(algorithm, &canonical))
 }
 
 fn record_timing(entries: &mut Vec<(String, Duration)>, label: &str, elapsed: Duration) {
@@ -1539,10 +1720,11 @@ fn sign_if_requested(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_decision_from_manifest_text, execute_pack_command,
-        execute_pack_command_with_injected_manifest, plan_v03_build_provision_command,
-        run_v03_build_lifecycle_steps,
+        V1SealContext, build_decision_from_manifest_text, execute_pack_command,
+        execute_pack_command_with_injected_manifest, finalize_v1_seal_context,
+        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
     };
+    use capsule::execution_contract::{ContentDigest, ExecutionContractV1};
     use capsule::router::{ExecutionProfile, ManifestData};
     use capsule::types::ValidationMode;
     use std::ffi::OsString;
@@ -1557,6 +1739,55 @@ mod tests {
         "x86_64-pc-windows-msvc",
         "aarch64-pc-windows-msvc",
     ];
+
+    #[test]
+    fn stale_lock_build_output_refuses_snapshot_seal() {
+        let rootfs = b"rootfs-v1";
+        let expected_artifact = b"expected-artifact";
+        let source = ContentDigest::blake3(b"source");
+        let policy = ContentDigest::blake3(b"policy");
+        let rootfs_digest = ContentDigest::blake3(rootfs);
+        let contract: ExecutionContractV1 = serde_json::from_value(serde_json::json!({
+            "schema": "ato.execution-contract/v1",
+            "source": {"kind": "tree", "immutable_ref": "tree:1", "digest": source.to_string()},
+            "target": {"os": "linux", "architecture": "x86_64", "abi": "gnu"},
+            "runtime": {"kind": "rootfs", "resolved_ref": "rootfs:1", "digest": rootfs_digest.to_string()},
+            "dependencies": [],
+            "build_outputs": [{"name": "capsule", "digest": ContentDigest::blake3(expected_artifact).to_string()}],
+            "launch": {"argv": ["/app"], "cwd": "/" , "environment": []},
+            "filesystem": {"view_digest": rootfs_digest.to_string(), "readonly_layers": [rootfs_digest.to_string()], "writable_paths": []},
+            "policy": {"network_digest": policy.to_string(), "capability_digest": policy.to_string(), "filesystem_digest": policy.to_string()},
+            "guest_surface": {"protocol": "ato-guest/v1", "features": []},
+            "external_state": []
+        }))
+        .expect("contract");
+        let expected_execution_id = contract.compute_execution_id().expect("execution id");
+        let context = V1SealContext {
+            contract,
+            expected_execution_id,
+            source_digest: source,
+            network_policy_digest: policy,
+            capability_policy_digest: policy,
+            filesystem_policy_digest: policy,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact = dir.path().join("app.capsule");
+        std::fs::write(&artifact, b"different-build-output").expect("artifact");
+        let error = finalize_v1_seal_context(
+            context,
+            Some(&artifact),
+            &snapshot::BuildLayers {
+                rootfs: rootfs.to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: vec![],
+                memory: vec![],
+            },
+        )
+        .expect_err("stale lock must fail closed");
+        assert!(error.to_string().contains("stale execution contract"));
+    }
 
     struct EnvVarGuard {
         key: &'static str,
