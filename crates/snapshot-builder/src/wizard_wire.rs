@@ -1,9 +1,11 @@
 //! Submission Wizard **PR-0 wire contract** — types + validation only, 機能未配線.
 //!
 //! Serde mirrors of the interactive-capture submission-wizard wire messages
-//! defined in the PR-0 contract spec (`wizard-pr0-wire-contract.md`), plus the
-//! `[cache.*]` / `[state.*]` capsule.toml declaration schema (§7). The ato-api
-//! side carries the same shapes as zod schemas in
+//! defined in the SSOT contract spec at
+//! `docs/contracts/SUBMISSION_WIZARD_WIRE_V1.md` (wire contract version
+//! [`WIRE_CONTRACT_VERSION`]; any copy outside the repo is non-normative), plus
+//! the `[cache.*]` / `[state.*]` capsule.toml declaration schema (§7). The
+//! ato-api side carries the same shapes as zod schemas in
 //! `src/services/submission_wizard/wire.ts`; both sides test against the exact
 //! snake_case wire names in the spec's §9 seam checklist.
 //!
@@ -25,8 +27,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants (spec §0 / §2)
+// Constants (spec §0 / §2 / wire contract version)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// The wire-contract version literal, pinned on BOTH sides (the api mirror is
+/// `WIRE_CONTRACT_VERSION` in `wire.ts`). The claim response extension (§3.1)
+/// carries it as a **required literal field** ([`WireContractVersion`]): a
+/// value other than this exact string is a schema rejection on both sides, so
+/// a version mismatch **fails closed at parse time**, before any semantics run.
+pub const WIRE_CONTRACT_VERSION: &str = "ato.submission-wizard-wire/v1";
 
 /// NEW job kind for wizard jobs. Defined but NOT wired in PR-0: never added to
 /// the daemon's advertised `supported_kinds` (an unknown kind keeps failing the
@@ -46,14 +55,24 @@ pub const JOB_KIND_INTERACTIVE_CAPTURE: &str = "interactive_capture";
 /// so this value cannot yet be persisted (migration is PR-1+).
 pub const JOB_STATUS_HOLDING: &str = "holding";
 
-/// Header carrying the `lease_token` on the one GET (control poll, §3.3) —
-/// never a query param, keeping the secret out of URLs/access logs.
-pub const LEASE_TOKEN_HEADER: &str = "x-ato-lease-token";
+/// Header carrying the `lease_token` on **ALL** builder endpoints after claim,
+/// GET and POST alike (§1.1, D2). Canonical spelling per the spec
+/// (case-insensitive per HTTP; HTTP/2 lowercases on the wire). The token is
+/// never a query param and never a body field — this keeps the secret out of
+/// URLs, access logs, and body-logging/tracing pipelines. Strict bodies REJECT
+/// a `lease_token` key (tested below); the only JSON appearance of the token
+/// is the claim response that mints it (§3.1).
+pub const LEASE_TOKEN_HEADER: &str = "X-Ato-Lease-Token";
 
 /// `error` code of the `409 { "error": "fenced", "message": ... }` envelope
-/// rejecting any FENCING-5 violation (spec §1). A fenced request has NO side
-/// effects server-side.
+/// rejecting any FENCING-4 or per-endpoint epoch-rule violation (spec §1). A
+/// fenced request has NO side effects server-side.
 pub const ERROR_CODE_FENCED: &str = "fenced";
+
+/// Required literal for `acceptance_receipt.receipt_schema` (§3.7, D3): the
+/// receipt is a **versioned envelope**, not a pinned field list. See
+/// [`AcceptanceReceipt`].
+pub const ACCEPTANCE_RECEIPT_SCHEMA: &str = "ato.snapshot-acceptance/v1";
 
 /// ID prefixes (spec §0): `<prefix><ULID>`. The prefix is a debugging/log
 /// affordance ONLY — receivers must treat all of these as opaque strings and
@@ -65,6 +84,56 @@ pub const WORKER_CLAIM_ID_PREFIX: &str = "claim_";
 pub const CANDIDATE_ID_PREFIX: &str = "cand_";
 /// See [`SUBMISSION_ATTEMPT_ID_PREFIX`].
 pub const VERIFY_SESSION_ID_PREFIX: &str = "vsess_";
+
+/// Required-literal field type for `wire_contract_version` (§3.1). Serializes
+/// to exactly [`WIRE_CONTRACT_VERSION`]; deserializing ANY other value fails —
+/// the fail-closed version gate lives in the type, mirroring the api's
+/// `z.literal(WIRE_CONTRACT_VERSION)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WireContractVersion;
+
+impl Serialize for WireContractVersion {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(WIRE_CONTRACT_VERSION)
+    }
+}
+
+impl<'de> Deserialize<'de> for WireContractVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == WIRE_CONTRACT_VERSION {
+            Ok(WireContractVersion)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "wire_contract_version mismatch: expected {WIRE_CONTRACT_VERSION:?}, got {value:?} (fail-closed version gate)"
+            )))
+        }
+    }
+}
+
+/// Required-literal field type for `receipt_schema` (§3.7, D3). Serializes to
+/// exactly [`ACCEPTANCE_RECEIPT_SCHEMA`]; any other value fails at parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AcceptanceReceiptSchema;
+
+impl Serialize for AcceptanceReceiptSchema {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(ACCEPTANCE_RECEIPT_SCHEMA)
+    }
+}
+
+impl<'de> Deserialize<'de> for AcceptanceReceiptSchema {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == ACCEPTANCE_RECEIPT_SCHEMA {
+            Ok(AcceptanceReceiptSchema)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "receipt_schema mismatch: expected {ACCEPTANCE_RECEIPT_SCHEMA:?}, got {value:?}"
+            )))
+        }
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enums (spec §2 — exact wire strings)
@@ -87,10 +156,11 @@ pub enum WizardStage {
     Accepting,
 }
 
-/// `failure_stage` on the wizard ack (§2, §3.7): any coarse stage value plus
-/// the two failure-only discriminators — `capture_seal` (failure while sealing
-/// the captured filesystem/snapshot) vs `acceptance` (server-side rejection of
-/// an otherwise-sealed candidate).
+/// `failure_stage` on the wizard terminal ack (§2, §3.8): any coarse stage
+/// value plus the two failure-only discriminators — `capture_seal` (failure
+/// while sealing the captured filesystem/snapshot) vs `acceptance`
+/// (acceptance-time failure). On the wizard terminal ack this is an OPTIONAL
+/// diagnostic refinement of `reason`, never a substitute for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WizardFailureStage {
@@ -130,9 +200,10 @@ impl From<WizardStage> for WizardFailureStage {
 pub enum ControlDirective {
     /// Keep the session alive and keep polling.
     Hold,
-    /// Perform capture for the response's `capture_epoch`.
+    /// Perform capture for the response's `server_capture_epoch`.
     Capture,
-    /// Tear down without capturing; the attempt is over for this claim.
+    /// Tear down without capturing; the attempt is over for this claim
+    /// (terminal ack `reason: "discarded"`, §3.8).
     Discard,
 }
 
@@ -159,32 +230,65 @@ pub enum VerifySessionStatus {
     Expired,
 }
 
-/// Ack `status` (§3.7) — the existing enum, unchanged. `sealed` for a wizard
-/// job means "a candidate was accepted".
+/// Acceptance outcome (§2, §3.7 body + response) — the outcome of one
+/// candidate's acceptance run, NOT a job-terminal status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WizardAckStatus {
-    Sealed,
-    Failed,
+pub enum AcceptanceStatus {
+    Accepted,
+    Rejected,
+}
+
+/// Wizard terminal-ack `reason` (§2, §3.8) — the ONLY legal job-terminal
+/// reasons for an `interactive_capture` job. The legacy `status: "sealed"`
+/// terminal ack is **not used** by wizard jobs (candidate acceptance is §3.7's
+/// per-candidate endpoint and does not end the job); the api side enforces
+/// that with a refinement on the shared ack schema, this side by construction
+/// ([`WizardTerminalAck`] has no `status` member — a `"sealed"` payload fails
+/// its strict body, tested below).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalAckReason {
+    /// Server directed `discard` on the control channel.
+    Discarded,
+    /// The builder observed its own lease death and is reporting teardown.
+    LeaseExpired,
+    /// Build/boot never reached `holding`.
+    BuildFailed,
+    /// ADR-012 terminal branch: source lost AND the acceptance run failed.
+    AcceptanceFailedSourceLost,
+    /// Orderly end of the interactive attempt (publisher done / session
+    /// ended).
+    AttemptEnded,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// FENCING-5 (spec §1)
+// FENCING-4 + per-endpoint epoch rules (spec §1)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// **FENCING-5**: the 5-tuple every builder-originated request after claim —
-/// control poll, lease renew, progress, hold-ready, candidate report, ack —
-/// MUST carry. The server compares all five against its authoritative row; any
-/// mismatch, or an expired lease, rejects with `409 { "error": "fenced" }` and
-/// the request has NO side effects.
+/// **FENCING-4** (§1.1): the 4-tuple every builder-originated request after
+/// claim — control poll, lease renew, progress, hold-ready, candidate report,
+/// candidate acceptance, terminal ack — MUST carry. The server compares all
+/// four against its authoritative row with exact equality; any mismatch, or an
+/// expired lease, rejects with `409 { "error": "fenced" }` and the request has
+/// NO side effects.
 ///
-/// Transport: on POST bodies the five fields appear top-level (this struct is
-/// `#[serde(flatten)]`-embedded); on the control GET, `job_id` is in the path,
-/// `submission_attempt_id`/`worker_claim_id`/`capture_epoch` are query params
-/// ([`ControlQuery`]), and `lease_token` rides the [`LEASE_TOKEN_HEADER`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FencingTuple {
-    /// `job_` — issued at enqueue (existing convention).
+/// `capture_epoch` is **NOT** part of claim fencing (B1): it is a
+/// message-specific command cursor — see [`control_poll_epoch_rule`] and
+/// [`candidate_epoch_rule`].
+///
+/// This struct is deliberately **not serializable**: the tuple never appears
+/// whole in any one wire position. Its transport is split (§1.1, uniform
+/// across ALL endpoints, GET and POST):
+///
+/// - `job_id`: always in the URL path (`/jobs/:job_id/...`), never repeated in
+///   a body;
+/// - `lease_token`: always in the [`LEASE_TOKEN_HEADER`] request header, never
+///   a query param and never a body field (strict bodies reject the key);
+/// - `submission_attempt_id` + `worker_claim_id`: top-level body fields on
+///   POSTs, query params on the control-poll GET.
+pub struct Fencing4 {
+    /// `job_` — issued at enqueue (existing convention). Path-only.
     pub job_id: String,
     /// `subatt_` — issued at enqueue of the wizard job; 1:1 with the enqueue,
     /// stable for the attempt's lifetime (retries WITHIN the claim included).
@@ -200,17 +304,50 @@ pub struct FencingTuple {
     pub worker_claim_id: String,
     /// Opaque secret string, no format promise (server mints ≥ 32 bytes of
     /// entropy, base64url), minted per claim generation alongside
-    /// `worker_claim_id`. **Server storage is hash-only** — the server persists
-    /// a hash, never the token (PR-1 concern; PR-0 documents it here). Builders
-    /// must never log it and never put it in URLs.
+    /// `worker_claim_id`. **Server storage is hash-only** — the server
+    /// persists a hash, never the token (PR-1 concern; PR-0 documents it
+    /// here). Builders must never log it, never put it in URLs or request
+    /// bodies — it travels ONLY in the [`LEASE_TOKEN_HEADER`] header, and its
+    /// only JSON appearance is the claim response that mints it (§3.1).
     pub lease_token: String,
-    /// Monotonically increasing capture **command counter** — an integer ≥ 0,
-    /// NOT an id and NOT a boolean. `0` ⇔ no capture has ever been requested on
-    /// this claim's job. In the tuple it is the highest epoch the builder has
-    /// observed; reporting a stale epoch after the server advanced it is fenced
-    /// — this is what makes a superseded claim/capture unable to write
-    /// anything.
-    pub capture_epoch: u64,
+}
+
+/// §1.2 SERVER rule for the control poll (route enforcement is PR-1; PR-0 pins
+/// the rule here so tests §1.3 (a)/(b) name it): the builder's
+/// `observed_capture_epoch` is **ACCEPTED when `observed <= server_epoch`** —
+/// a stale observer is *behind*, not impostored, and is served the current
+/// authoritative state so it can catch up — and **REJECTED (`409 fenced`) only
+/// when `observed > server_epoch`** (a builder cannot have observed the
+/// future; treat as corrupt/forged state).
+pub fn control_poll_epoch_rule(
+    observed_capture_epoch: u64,
+    server_capture_epoch: u64,
+) -> Result<(), String> {
+    if observed_capture_epoch > server_capture_epoch {
+        return Err(format!(
+            "fenced: observed_capture_epoch {observed_capture_epoch} is ahead of the server epoch {server_capture_epoch}"
+        ));
+    }
+    Ok(())
+}
+
+/// §1.2 SERVER rule for candidate report (§3.6) and candidate acceptance
+/// (§3.7) (route enforcement is PR-1; PR-0 pins the rule here so tests §1.3
+/// (c)/(d) name it): the message's `capture_epoch` must **exactly equal** the
+/// epoch of the candidate named by `candidate_id` (epoch ↔ candidate is 1:1).
+/// A report/acceptance for a superseded epoch is rejected `409 fenced`.
+/// `capture_epoch` here is NOT a fencing-tuple member — it is cross-checked
+/// against the candidate, in addition to FENCING-4 on the claim.
+pub fn candidate_epoch_rule(
+    message_capture_epoch: u64,
+    candidate_capture_epoch: u64,
+) -> Result<(), String> {
+    if message_capture_epoch != candidate_capture_epoch {
+        return Err(format!(
+            "fenced: capture_epoch {message_capture_epoch} does not match the candidate's epoch {candidate_capture_epoch}"
+        ));
+    }
+    Ok(())
 }
 
 /// The standard error envelope, e.g. the §1 fencing rejection
@@ -219,6 +356,21 @@ pub struct FencingTuple {
 pub struct ErrorEnvelope {
     pub error: String,
     pub message: String,
+}
+
+/// Shared bound: `failure_reason` ≤ 2000 **UTF-16 code units**
+/// (`encode_utf16().count()`), matching the api's `z.string().max(2000)` (zod
+/// counts `String.length` = UTF-16 code units) — an astral scalar counts as 2,
+/// so a green `failure_reason` on one side is green on the other (seam: one
+/// verdict on both sides). The builder truncates at 1800, as the existing
+/// failed ack does.
+fn validate_failure_reason_bound(failure_reason: Option<&str>) -> Result<(), String> {
+    if let Some(reason) = failure_reason
+        && reason.encode_utf16().count() > 2000
+    {
+        return Err("failure_reason must be <= 2000 UTF-16 code units".into());
+    }
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -230,21 +382,35 @@ pub struct ErrorEnvelope {
 /// these onto the live `ClaimedJob` as `#[serde(default)]` optionals so
 /// builders that never advertise the kind are untouched; PR-0 keeps the live
 /// claim parser byte-identical and carries the extension here only.
+///
+/// This claim response is the ONLY message in which the `lease_token` appears
+/// in a JSON payload — every subsequent request carries it in the
+/// [`LEASE_TOKEN_HEADER`] header instead (§1.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractiveCaptureClaimExt {
-    /// Fixed at enqueue; echoed in FENCING-5.
+    /// Required literal [`WIRE_CONTRACT_VERSION`]; any other value is a schema
+    /// reject (fail-closed version gate on both sides).
+    pub wire_contract_version: WireContractVersion,
+    /// Fixed at enqueue; echoed in FENCING-4.
     pub submission_attempt_id: String,
-    /// Fresh per claim generation; echoed in FENCING-5.
+    /// Fresh per claim generation; echoed in FENCING-4.
     pub worker_claim_id: String,
-    /// Opaque secret; echoed in FENCING-5 (see [`FencingTuple::lease_token`]).
+    /// Opaque secret (see [`Fencing4::lease_token`]).
     pub lease_token: String,
     /// ISO-8601 UTC lease deadline; the builder must renew before this.
     pub lease_expires_at: String,
 }
 
 /// §3.2 request — `POST /v1/capsule-snapshots/jobs/:job_id/lease/renew`.
-/// The body is exactly the FENCING-5 fields, nothing else.
-pub type LeaseRenewRequest = FencingTuple;
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4 (`job_id` in the path).
+/// Epoch: none (§1.2). The body is exactly these two fields; the strict body
+/// rejects a `lease_token` or `job_id` key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRenewRequest {
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
+}
 
 /// §3.2 response. The `lease_token` is **stable within a claim generation** —
 /// renew extends expiry, it does not rotate the token; a new token comes only
@@ -262,13 +428,17 @@ pub struct LeaseRenewResponse {
 /// §3.3 / §1 — query params of the control poll GET
 /// (`GET /v1/capsule-snapshots/jobs/:job_id/control?...`). `job_id` rides the
 /// path and `lease_token` rides the [`LEASE_TOKEN_HEADER`] header, completing
-/// FENCING-5 for the one GET.
+/// FENCING-4. Strict, so neither the token nor `job_id` can ride the query
+/// string.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlQuery {
     pub submission_attempt_id: String,
     pub worker_claim_id: String,
-    /// Highest epoch the builder has observed (0 if none).
-    pub capture_epoch: u64,
+    /// Highest epoch the builder has observed (`0` if none). NOT a fencing
+    /// field (B1): server rule is [`control_poll_epoch_rule`] — accepted when
+    /// `<=` the server epoch, fenced only when ahead of it.
+    pub observed_capture_epoch: u64,
 }
 
 /// §3.3 — control poll response.
@@ -277,11 +447,13 @@ pub struct ControlResponse {
     pub directive: ControlDirective,
     /// Current authoritative epoch. With `directive: "capture"` it is ≥ 1 and
     /// names the command; the builder adopts it as its observed epoch. `0` ⇔ no
-    /// capture ever requested.
-    pub capture_epoch: u64,
+    /// capture ever requested. MAY exceed the request's
+    /// `observed_capture_epoch` — that is how a stale observer catches up
+    /// (§1.3 test (a)).
+    pub server_capture_epoch: u64,
     /// Present only when `directive: "capture"`: the pre-minted candidate for
     /// this epoch (epoch ↔ candidate is 1:1); the builder echoes it back in the
-    /// candidate report.
+    /// candidate report and in the acceptance path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_id: Option<String>,
     /// ISO-8601 UTC; required when `directive: "hold"` — the server-side hold
@@ -302,8 +474,8 @@ impl ControlResponse {
     pub fn validate(&self) -> Result<(), String> {
         match self.directive {
             ControlDirective::Capture => {
-                if self.capture_epoch == 0 {
-                    return Err("directive \"capture\" requires capture_epoch >= 1".into());
+                if self.server_capture_epoch == 0 {
+                    return Err("directive \"capture\" requires server_capture_epoch >= 1".into());
                 }
                 if self.candidate_id.is_none() {
                     return Err("directive \"capture\" requires candidate_id".into());
@@ -327,11 +499,14 @@ impl ControlResponse {
     }
 }
 
-/// §3.4 — `POST /v1/capsule-snapshots/jobs/:job_id/progress`. Response `200 {}`.
+/// §3.4 — `POST /v1/capsule-snapshots/jobs/:job_id/progress`.
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4. Epoch: none (§1.2).
+/// Response `200 {}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgressRequest {
-    #[serde(flatten)]
-    pub fencing: FencingTuple,
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
     /// Coarse progress only — the type ([`WizardStage`], 9 values) excludes the
     /// failure discriminators by construction. Monotonic advance is NOT
     /// enforced on the wire (retries/restarts within a claim may repeat a
@@ -340,18 +515,21 @@ pub struct ProgressRequest {
 }
 
 /// §3.5 — `POST /v1/capsule-snapshots/jobs/:job_id/hold-ready`, sent once when
-/// the app is up and the builder enters `holding`. Response `200 {}`.
+/// the app is up and the builder enters `holding`.
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4. Epoch: none (§1.2).
+/// Response `200 {}`.
 ///
 /// **Deliberately absent (ADR-004, SSRF)**: there is NO self-reported upstream
 /// URL/host/address field, and the api rejects unknown fields here
-/// (`.strict()` server-side). The api derives the proxy upstream itself from
-/// `(builder_id, slot_id, session_id, guest_port)` against its own registry of
-/// builder ingress addresses — a builder can never point the proxy at an
-/// arbitrary URL.
+/// (`.strict()` server-side, `deny_unknown_fields` here). The api derives the
+/// proxy upstream itself from `(builder_id, slot_id, session_id, guest_port)`
+/// against its own registry of builder ingress addresses — a builder can never
+/// point the proxy at an arbitrary URL.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HoldReadyRequest {
-    #[serde(flatten)]
-    pub fencing: FencingTuple,
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
     /// Stable builder identity, 1..120 chars (same charset/limits as
     /// `agent_id`).
     pub builder_id: String,
@@ -387,14 +565,24 @@ impl HoldReadyRequest {
 }
 
 /// §3.6 — `POST /v1/capsule-snapshots/jobs/:job_id/candidates`: reports a
-/// **sealed** candidate after a `capture` directive completes. Seal-time
-/// failures go through the ack (§3.7, `failure_stage: "capture_seal"`), never
-/// through this message. The tuple's `capture_epoch` doubles as the epoch being
-/// reported (≥ 1); a report for a superseded epoch is fenced.
+/// **sealed** candidate after a `capture` directive completes at seal.
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4.
+/// Epoch rule (§1.2): body `capture_epoch` must exactly equal the epoch of the
+/// candidate named by `candidate_id` ([`candidate_epoch_rule`], tests §1.3
+/// (c)/(d)).
+///
+/// A capture that fails before seal produces NO candidate report — with the
+/// source VM alive the attempt simply returns to `holding` and resumes
+/// polling; only a terminal condition goes through the ack (§3.8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CandidateReportRequest {
-    #[serde(flatten)]
-    pub fencing: FencingTuple,
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
+    /// The epoch being reported, ≥ 1. NOT a fencing-tuple member (B1) — the
+    /// server exact-matches it against the candidate's epoch; a report for a
+    /// superseded epoch is rejected `409 fenced`.
+    pub capture_epoch: u64,
     /// Must equal the id the control channel delivered for this epoch (the
     /// server cross-checks the epoch ↔ candidate 1:1 mapping).
     pub candidate_id: String,
@@ -405,15 +593,16 @@ pub struct CandidateReportRequest {
     pub snapshot_id: String,
     /// Same semantics as the existing sealed-ack `artifact_location`.
     pub artifact_location: String,
-    /// `true` ⇒ the live session died/was destroyed during or after capture;
-    /// the candidate is still reportable but no further captures can come from
-    /// this claim without a fresh launch.
+    /// `true` ⇒ the live session died/was destroyed during or after capture
+    /// (ADR-012 `accepting_source_lost`); the candidate is still reportable
+    /// but no further captures can come from this claim without a fresh
+    /// launch.
     pub source_lost: bool,
 }
 
 impl CandidateReportRequest {
     pub fn validate(&self) -> Result<(), String> {
-        if self.fencing.capture_epoch == 0 {
+        if self.capture_epoch == 0 {
             return Err("candidate report requires capture_epoch >= 1".into());
         }
         Ok(())
@@ -427,76 +616,125 @@ pub struct CandidateReportResponse {
     pub status: CandidateStatus,
 }
 
-/// §3.7 — the wizard extension of the existing
-/// `POST /v1/capsule-snapshots/jobs/:job_id/ack`. For
-/// [`JOB_KIND_INTERACTIVE_CAPTURE`] jobs the existing ack body (`agent_id`,
-/// `status`, `failure_stage?`, `failure_reason?`, sealed-receipt shape)
-/// additionally carries FENCING-5 and the acceptance result. Existing
-/// non-wizard acks are untouched: on the shared server schema these fields are
-/// optional, required-by-refinement for wizard jobs ([`Self::validate`];
-/// route-enforced in PR-1).
+/// §3.7, D3 — the acceptance receipt is a **versioned envelope**, NOT a pinned
+/// field list. `receipt` is a required opaque JSON **object** whose payload
+/// schema is defined as a shared type in ato#1088 (post-Gate-0); until then
+/// BOTH sides validate ONLY the envelope (literal + "is an object"), never
+/// individual payload keys. The earlier 9-key required core from the seam
+/// round is superseded and its pinning tests are removed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WizardAck {
-    /// Existing field, unchanged.
-    pub agent_id: String,
-    #[serde(flatten)]
-    pub fencing: FencingTuple,
-    pub status: WizardAckStatus,
-    /// Required when `status: "sealed"` — which candidate the acceptance
-    /// applies to.
+pub struct AcceptanceReceipt {
+    /// Required literal [`ACCEPTANCE_RECEIPT_SCHEMA`].
+    pub receipt_schema: AcceptanceReceiptSchema,
+    /// Opaque payload object — the `Map` type enforces "is an object" at
+    /// parse; no payload key is validated in PR-0.
+    pub receipt: serde_json::Map<String, serde_json::Value>,
+}
+
+/// §3.7 (B2) — NEW endpoint
+/// `POST /v1/capsule-snapshots/jobs/:job_id/candidates/:candidate_id/acceptance`.
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4.
+/// Epoch rule (§1.2): body `capture_epoch` must exactly equal the epoch of the
+/// path `candidate_id` ([`candidate_epoch_rule`]).
+///
+/// Reports the outcome of the acceptance run (disposable-restore validation,
+/// ato#1088) for one candidate. **This is NOT a job-terminal ack.** With the
+/// source VM available, the attempt returns to `holding` after acceptance —
+/// whether accepted (publisher may retake) or rejected (candidate discarded,
+/// re-capture possible) — per the design doc §5 state machine and ADR-012.
+/// Only the `accepting_source_lost` + acceptance-failure branch ends the
+/// attempt, and that goes through the terminal ack (§3.8,
+/// `acceptance_failed_source_lost`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateAcceptanceRequest {
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
+    /// ≥ 1; exact-match against the candidate's epoch (§1.2).
+    pub capture_epoch: u64,
+    /// Outcome of the acceptance run.
+    pub status: AcceptanceStatus,
+    /// Required when `status: "accepted"`; absent when `"rejected"`
+    /// ([`Self::validate`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accepted_candidate_id: Option<String>,
-    /// Required when `status: "sealed"`. The existing sealed-receipt shape —
-    /// required core keys exactly as the api's `acceptanceReceiptSchema` /
-    /// live `artifactSchema` require them: `capsule_manifest_hash`,
-    /// `execution_id`, `artifact_manifest_hash`, `runner_class_id`,
-    /// `snapshot_backend`, `artifact_location`, `no_secret_scan_clean`,
-    /// `snapshot_format_id`, `snapshot_codec_id` — plus optional passthrough
-    /// fields (`hardware_contract_id`, `manifest_source`, ...) — i.e. what the
-    /// builder serializes from its `Artifact` struct. Kept opaque here in
-    /// PR-0: the vocabulary is reused, not redefined, and `manifest_source`
-    /// gains no new value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acceptance_receipt: Option<serde_json::Value>,
-    /// Required when `status: "failed"` — discriminates seal-time
-    /// (`capture_seal`) vs acceptance-time (`acceptance`) failure, or any
-    /// coarse stage.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failure_stage: Option<WizardFailureStage>,
-    /// Optional, ≤ 2000 chars server-side (the builder truncates at 1800, as
-    /// the existing failed ack does).
+    pub acceptance_receipt: Option<AcceptanceReceipt>,
+    /// Optional, only with `status: "rejected"`; ≤ 2000 UTF-16 code units
+    /// (builder truncates at 1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
 }
 
-impl WizardAck {
-    /// The §3.7 required-by-refinement rules for a wizard ack.
+impl CandidateAcceptanceRequest {
+    /// The §3.7 required-by-refinement rules (mirrored in the api's zod
+    /// refinements).
     pub fn validate(&self) -> Result<(), String> {
+        if self.capture_epoch == 0 {
+            return Err("candidate acceptance requires capture_epoch >= 1".into());
+        }
         match self.status {
-            WizardAckStatus::Sealed => {
-                if self.accepted_candidate_id.is_none() {
-                    return Err("status \"sealed\" requires accepted_candidate_id".into());
-                }
+            AcceptanceStatus::Accepted => {
                 if self.acceptance_receipt.is_none() {
-                    return Err("status \"sealed\" requires acceptance_receipt".into());
+                    return Err("status \"accepted\" requires acceptance_receipt".into());
+                }
+                if self.failure_reason.is_some() {
+                    return Err("failure_reason is only legal with status \"rejected\"".into());
                 }
             }
-            WizardAckStatus::Failed => {
-                if self.failure_stage.is_none() {
-                    return Err("status \"failed\" requires failure_stage".into());
+            AcceptanceStatus::Rejected => {
+                if self.acceptance_receipt.is_some() {
+                    return Err("acceptance_receipt is absent when status is \"rejected\"".into());
                 }
             }
         }
-        // Length in **UTF-16 code units** (`encode_utf16().count()`), matching
-        // the api's `z.string().max(2000)` (zod counts `String.length` = UTF-16
-        // code units) — an astral scalar counts as 2, so a green failure_reason
-        // on one side is green on the other (seam: one verdict on both sides).
-        if let Some(reason) = &self.failure_reason
-            && reason.encode_utf16().count() > 2000
-        {
-            return Err("failure_reason must be <= 2000 UTF-16 code units".into());
-        }
-        Ok(())
+        validate_failure_reason_bound(self.failure_reason.as_deref())
+    }
+}
+
+/// §3.7 — candidate acceptance response (acceptance status enum; the
+/// candidate's own status moves to `accepted`/`rejected` per §2's candidate
+/// status enum).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateAcceptanceResponse {
+    pub candidate_id: String,
+    pub status: AcceptanceStatus,
+}
+
+/// §3.8 — the wizard **terminal-ack payload** for the existing
+/// `POST /v1/capsule-snapshots/jobs/:job_id/ack`, used by (and only by)
+/// [`JOB_KIND_INTERACTIVE_CAPTURE`] jobs (discriminated by job kind; existing
+/// non-wizard acks are untouched).
+/// Header: [`LEASE_TOKEN_HEADER`]. Fencing: FENCING-4. Epoch: none (§1.2).
+///
+/// **The legacy `status: "sealed"` terminal ack is NOT used by wizard jobs**
+/// (§2 note): there is no `status`, no `accepted_candidate_id`, and no receipt
+/// here — candidate acceptance is §3.7's per-candidate endpoint and is not
+/// job-terminal. The api side refines `"sealed"` invalid for this kind on the
+/// shared ack schema; this side enforces the absence by construction (the
+/// strict body rejects those keys, tested below).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WizardTerminalAck {
+    /// Existing field, unchanged (existing bounds).
+    pub agent_id: String,
+    pub submission_attempt_id: String,
+    pub worker_claim_id: String,
+    /// The ONLY legal job-terminal reasons for a wizard job
+    /// ([`TerminalAckReason`]).
+    pub reason: TerminalAckReason,
+    /// Optional diagnostic refinement of a failure `reason` — never a
+    /// substitute for it (§2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_stage: Option<WizardFailureStage>,
+    /// Optional, ≤ 2000 UTF-16 code units server-side (the builder truncates
+    /// at 1800, as the existing failed ack does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+impl WizardTerminalAck {
+    /// The §3.8 bounds (the reason enum itself is enforced by the type).
+    pub fn validate(&self) -> Result<(), String> {
+        validate_failure_reason_bound(self.failure_reason.as_deref())
     }
 }
 
@@ -529,8 +767,9 @@ pub struct VerifySession {
 /// exact wire encoding the causality in §3.3 `pause_permitted` depends on.
 ///
 /// **Drain timeout is fail-closed**: if the proxy cannot reach `inflight: 0`
-/// within the drain window, the api never sets `pause_permitted`, marks the
-/// capture attempt failed, and sends `unquiesce`. The system NEVER
+/// within the drain window, the api never sets `pause_permitted`, aborts the
+/// capture for that epoch (the attempt returns to `holding` per ADR-007; a
+/// later epoch may retry), and sends `unquiesce`. The system NEVER
 /// force-captures under live traffic.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -608,7 +847,7 @@ pub enum StateSnapshotMode {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheDeclaration {
-    /// Relative path (see [`validate_declared_path`]).
+    /// Guest-absolute path (see [`validate_declared_path`]).
     pub path: String,
     pub capture: CaptureMode,
 }
@@ -618,11 +857,11 @@ pub struct CacheDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StateDeclaration {
-    /// Relative path (see [`validate_declared_path`]).
+    /// Guest-absolute path (see [`validate_declared_path`]).
     pub path: String,
     pub snapshot: StateSnapshotMode,
     /// Free-form schema id, 1..60 chars, `[a-z0-9_.-]` (e.g. `"sqlite"`,
-    /// `"kv-dir"`).
+    /// `"kv-dir"`, `"1"`).
     pub schema: String,
 }
 
@@ -678,23 +917,26 @@ fn validate_declaration_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// §7 `path`: relative, non-empty, no leading `/`, no `..` segments, no
-/// backslashes, no empty segments (no trailing `/`, no `//`) — the same
-/// constraints as ato-api's `mountRelativePath` helper
-/// (`snapshot_registry.ts`: min 1 / max 200 / relative / no `..` component),
-/// plus the spec's explicit backslash and empty-segment rejections. Rejecting
-/// empty segments closes the trailing-slash input class, so the
-/// [`path_is_nested_inside`] verdict cannot diverge from the api side (spec
-/// §7: one verdict on both sides). The workspace's closest existing helper
-/// (`snapshot::docker_import::validate_dockerfile_path`) gates `..`/prefix
-/// components but not backslashes or the 200-char cap, so the contract gets
-/// its own validator here rather than a near-miss reuse.
+/// §7 `path` (D1) — **GUEST-ABSOLUTE**, identical validator on BOTH sides (the
+/// api mirror lives in `wire.ts`; design doc §1.2 examples are
+/// `/var/cache/example-model` and `/data` — the declarations name guest
+/// filesystem surfaces, and there is no defined base to resolve a relative
+/// path against). The rules, in check order:
 ///
-/// The 200-length cap is measured in **UTF-16 code units**
-/// (`encode_utf16().count()`), matching the api's `z.string().max(200)`. A path
-/// may hold astral scalars (charset is unrestricted apart from the segment
-/// rules), each of which is 2 UTF-16 code units, so counting scalars here would
-/// diverge from the api — this is the load-bearing length bound of the seam.
+/// - non-empty, ≤ 200 **UTF-16 code units** (`encode_utf16().count()`,
+///   matching the api's `z.string().max(200)` — a path may hold astral
+///   scalars, each 2 code units, so counting scalars would diverge from the
+///   api; this is the load-bearing length bound of the seam);
+/// - no backslashes anywhere;
+/// - no scheme prefix: any `:` before the first `/` is rejected (e.g.
+///   `r2://x`; `file:///models` also fails the leading-`/` rule);
+/// - MUST start with a **single** `/` (relative paths and a leading `//` are
+///   both rejected);
+/// - bare `"/"` is rejected (the path must name a surface below the root);
+/// - no empty segments (no `//` anywhere, no trailing `/`) and no `.` or `..`
+///   segments — so every input that would need normalizing is rejected, and
+///   the collision/nesting checks can run on the absolute paths exactly as
+///   declared.
 fn validate_declared_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("path must be non-empty".into());
@@ -705,14 +947,28 @@ fn validate_declared_path(path: &str) -> Result<(), String> {
     if path.contains('\\') {
         return Err("path must not contain backslashes".into());
     }
-    if path.starts_with('/') {
-        return Err("path must be relative (no leading '/')".into());
+    if let Some(colon) = path.find(':')
+        && path.find('/').is_none_or(|slash| colon < slash)
+    {
+        return Err("path must not carry a scheme prefix (':' before the first '/')".into());
     }
-    if path.split('/').any(|seg| seg == "..") {
-        return Err("path must not contain a '..' component".into());
+    if !path.starts_with('/') {
+        return Err("path must be guest-absolute (start with a single '/')".into());
     }
-    if path.split('/').any(str::is_empty) {
-        return Err("path must not contain an empty segment (no trailing '/' or '//')".into());
+    if path.starts_with("//") {
+        return Err("path must start with a SINGLE '/' (leading '//' is rejected)".into());
+    }
+    let rest = &path[1..];
+    if rest.is_empty() {
+        return Err("bare '/' is rejected (the path must name a surface below the root)".into());
+    }
+    for segment in rest.split('/') {
+        if segment.is_empty() {
+            return Err("path must not contain an empty segment (no '//' or trailing '/')".into());
+        }
+        if segment == "." || segment == ".." {
+            return Err("path must not contain '.' or '..' segments".into());
+        }
     }
     Ok(())
 }
@@ -734,12 +990,13 @@ fn validate_state_schema(schema: &str) -> Result<(), String> {
 }
 
 /// True when `inner` is strictly nested inside `outer` (segment-boundary
-/// aware: `data/app.db` is inside `data`, but `database` is not).
+/// aware: `/data/app.db` is inside `/data`, but `/database` is not).
 ///
 /// Inputs are pre-validated by [`validate_declared_path`], which rejects
-/// trailing slashes / empty segments — so this helper is the exact logical
-/// twin of the api's `pathNestedInside` (`wire.ts`): no trailing-slash
-/// normalization on either side (spec §7: one verdict on both sides).
+/// every normalizable input (`//`, `.`/`..`, trailing `/`) — so this helper
+/// runs on the **absolute paths exactly as declared** and is the exact logical
+/// twin of the api's `pathNestedInside` (`wire.ts`): no normalization pass on
+/// either side (spec §7: one verdict on both sides).
 fn path_is_nested_inside(inner: &str, outer: &str) -> bool {
     inner.len() > outer.len()
         && inner.starts_with(outer)
@@ -750,7 +1007,9 @@ impl CaptureDeclarations {
     /// The §7 validation rules, producing the PR-0 output ([`DeclaredPaths`]):
     /// name charset + cross-section uniqueness, per-path constraints, no two
     /// identical paths, and no cross-section nesting (a state path inside a
-    /// cache path or vice versa).
+    /// cache path or vice versa). Collision + nesting are computed on the
+    /// absolute paths as declared (no normalization — see
+    /// [`validate_declared_path`]).
     pub fn validate(&self) -> Result<DeclaredPaths, String> {
         let mut seen_names: BTreeSet<&str> = BTreeSet::new();
         // (section, name, path) over cache ∪ state, for the cross-checks.
@@ -827,20 +1086,85 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn fencing() -> FencingTuple {
-        FencingTuple {
-            job_id: "job_01J1XY".into(),
-            submission_attempt_id: "subatt_01J1XY".into(),
-            worker_claim_id: "claim_01J1XZ".into(),
-            lease_token: "b64u-opaque-token".into(),
-            capture_epoch: 0,
-        }
-    }
-
     fn sorted_keys(v: &Value) -> Vec<String> {
         let mut keys: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
         keys.sort();
         keys
+    }
+
+    // ── spec-example request bodies (§3), used as strict-mode baselines ─────
+
+    fn renew_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ"
+        })
+    }
+
+    fn control_query_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "observed_capture_epoch": 2
+        })
+    }
+
+    fn progress_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "stage": "deps"
+        })
+    }
+
+    fn hold_ready_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "builder_id": "builder-sugamo-1",
+            "slot_id": "slot-3",
+            "session_id": "sess_01J1Y9",
+            "guest_port": 8000
+        })
+    }
+
+    fn candidate_report_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "capture_epoch": 3,
+            "candidate_id": "cand_01J1Z0",
+            "execution_id": "exec_01J1Z1",
+            "snapshot_id": "snap_01J1Z2",
+            "artifact_location": "r2://snapshots/cand_01J1Z0/seal",
+            "source_lost": false
+        })
+    }
+
+    fn acceptance_json() -> Value {
+        json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "capture_epoch": 3,
+            "status": "accepted",
+            "acceptance_receipt": {
+                "receipt_schema": "ato.snapshot-acceptance/v1",
+                "receipt": { "any": "opaque payload" }
+            }
+        })
+    }
+
+    fn terminal_ack_json() -> Value {
+        // The §3.8 spec example, nulls included (explicit nulls parse into the
+        // Options; serialization then omits them).
+        json!({
+            "agent_id": "builder-sugamo-1",
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "reason": "attempt_ended",
+            "failure_stage": null,
+            "failure_reason": null
+        })
     }
 
     // ── §2 enum wire strings ────────────────────────────────────────────────
@@ -884,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn directive_candidate_verify_and_ack_enums_use_exact_wire_strings() {
+    fn directive_candidate_verify_acceptance_and_reason_enums_use_exact_wire_strings() {
         for (v, wire) in [
             (ControlDirective::Hold, "hold"),
             (ControlDirective::Capture, "capture"),
@@ -910,34 +1234,94 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(v).unwrap(), json!(wire));
         }
+        // NEW (§2): acceptance status.
         for (v, wire) in [
-            (WizardAckStatus::Sealed, "sealed"),
-            (WizardAckStatus::Failed, "failed"),
+            (AcceptanceStatus::Accepted, "accepted"),
+            (AcceptanceStatus::Rejected, "rejected"),
         ] {
             assert_eq!(serde_json::to_value(v).unwrap(), json!(wire));
         }
+        // NEW (§2): the five wizard terminal-ack reasons.
+        for (v, wire) in [
+            (TerminalAckReason::Discarded, "discarded"),
+            (TerminalAckReason::LeaseExpired, "lease_expired"),
+            (TerminalAckReason::BuildFailed, "build_failed"),
+            (
+                TerminalAckReason::AcceptanceFailedSourceLost,
+                "acceptance_failed_source_lost",
+            ),
+            (TerminalAckReason::AttemptEnded, "attempt_ended"),
+        ] {
+            assert_eq!(serde_json::to_value(v).unwrap(), json!(wire));
+        }
+        // "sealed" is not a member of the wizard terminal-ack reason enum.
+        assert!(serde_json::from_value::<TerminalAckReason>(json!("sealed")).is_err());
         assert_eq!(JOB_KIND_INTERACTIVE_CAPTURE, "interactive_capture");
         assert_eq!(JOB_STATUS_HOLDING, "holding");
     }
 
-    // ── §1 fencing tuple ────────────────────────────────────────────────────
+    // ── §1 fencing transport ────────────────────────────────────────────────
 
     #[test]
-    fn fencing_tuple_carries_exactly_the_five_fields_top_level() {
-        let v = serde_json::to_value(fencing()).unwrap();
-        assert_eq!(
-            sorted_keys(&v),
-            vec![
-                "capture_epoch",
-                "job_id",
-                "lease_token",
-                "submission_attempt_id",
-                "worker_claim_id",
-            ]
-        );
-        assert_eq!(v["capture_epoch"], json!(0));
-        let back: FencingTuple = serde_json::from_value(v).unwrap();
-        assert_eq!(back, fencing());
+    fn lease_token_header_has_the_canonical_spec_spelling() {
+        // §1.1/D2: the token rides X-Ato-Lease-Token on ALL endpoints, GET and
+        // POST (case-insensitive per HTTP).
+        assert_eq!(LEASE_TOKEN_HEADER, "X-Ato-Lease-Token");
+        assert!(LEASE_TOKEN_HEADER.eq_ignore_ascii_case("x-ato-lease-token"));
+    }
+
+    #[test]
+    fn strict_bodies_reject_lease_token_and_job_id_keys() {
+        // §1.1/D2 mandatory test: `lease_token` travels ONLY in the
+        // X-Ato-Lease-Token header (its one JSON appearance is the claim
+        // response that mints it), and `job_id` is path-only. A body (or the
+        // control query) carrying either key fails strict-mode parsing on
+        // EVERY builder message.
+        fn with_key(mut v: Value, key: &str) -> Value {
+            v[key] = json!("smuggled");
+            v
+        }
+        for key in ["lease_token", "job_id"] {
+            assert!(
+                serde_json::from_value::<LeaseRenewRequest>(with_key(renew_json(), key)).is_err(),
+                "renew body must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<ControlQuery>(with_key(control_query_json(), key))
+                    .is_err(),
+                "control query must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<ProgressRequest>(with_key(progress_json(), key)).is_err(),
+                "progress body must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<HoldReadyRequest>(with_key(hold_ready_json(), key))
+                    .is_err(),
+                "hold-ready body must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<CandidateReportRequest>(with_key(
+                    candidate_report_json(),
+                    key
+                ))
+                .is_err(),
+                "candidate report body must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<CandidateAcceptanceRequest>(with_key(
+                    acceptance_json(),
+                    key
+                ))
+                .is_err(),
+                "acceptance body must reject {key}"
+            );
+            assert!(
+                serde_json::from_value::<WizardTerminalAck>(with_key(terminal_ack_json(), key))
+                    .is_err(),
+                "terminal ack body must reject {key}"
+            );
+        }
     }
 
     #[test]
@@ -945,6 +1329,87 @@ mod tests {
         let e: ErrorEnvelope =
             serde_json::from_value(json!({ "error": "fenced", "message": "stale epoch" })).unwrap();
         assert_eq!(e.error, ERROR_CODE_FENCED);
+    }
+
+    // ── §1.3 mandatory epoch contract tests (B1) ────────────────────────────
+
+    /// §1.3 (a) — SERVER RULE (§1.2 control poll): ACCEPT
+    /// `observed <= server_epoch`. Server epoch advanced 0→1 while the builder
+    /// still observes 0: the poll is served (not fenced), and the response
+    /// schema MUST allow `server_capture_epoch` to differ from the request's
+    /// `observed_capture_epoch` — that is how a stale observer catches up.
+    #[test]
+    fn epoch_test_a_stale_observer_is_served_the_new_capture_epoch() {
+        let query: ControlQuery = serde_json::from_value(json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "observed_capture_epoch": 0
+        }))
+        .unwrap();
+        control_poll_epoch_rule(query.observed_capture_epoch, 1).unwrap();
+
+        let resp: ControlResponse = serde_json::from_value(json!({
+            "directive": "capture",
+            "server_capture_epoch": 1,
+            "candidate_id": "cand_01J1Z0",
+            "pause_permitted": true
+        }))
+        .unwrap();
+        resp.validate().unwrap();
+        assert_ne!(resp.server_capture_epoch, query.observed_capture_epoch);
+    }
+
+    /// §1.3 (b) — SERVER RULE (§1.2 control poll): REJECT `409 fenced` only
+    /// when `observed > server_epoch` — a builder cannot have observed the
+    /// future (treat as corrupt/forged state).
+    #[test]
+    fn epoch_test_b_observer_ahead_of_the_server_is_fenced() {
+        assert!(control_poll_epoch_rule(2, 1).is_err());
+        // The boundary stays accepted: observing exactly the server epoch is
+        // fine.
+        control_poll_epoch_rule(1, 1).unwrap();
+    }
+
+    /// §1.3 (c) — SERVER RULE (§1.2 report/acceptance): a report with
+    /// `capture_epoch: 0` against a candidate whose epoch is 1 is fenced
+    /// (exact-match rule); additionally 0 is below the ≥ 1 schema floor on
+    /// both the report and the acceptance body.
+    #[test]
+    fn epoch_test_c_report_epoch_zero_against_candidate_epoch_one_is_rejected() {
+        assert!(candidate_epoch_rule(0, 1).is_err());
+        let mut report: CandidateReportRequest =
+            serde_json::from_value(candidate_report_json()).unwrap();
+        report.capture_epoch = 0;
+        assert!(report.validate().is_err());
+        let mut acceptance: CandidateAcceptanceRequest =
+            serde_json::from_value(acceptance_json()).unwrap();
+        acceptance.capture_epoch = 0;
+        assert!(acceptance.validate().is_err());
+    }
+
+    /// §1.3 (d) — SERVER RULE (§1.2 report/acceptance): a report with
+    /// `capture_epoch: 1` against a candidate whose epoch is 1 is accepted
+    /// (exact match).
+    #[test]
+    fn epoch_test_d_exact_epoch_match_is_accepted() {
+        candidate_epoch_rule(1, 1).unwrap();
+        let mut report: CandidateReportRequest =
+            serde_json::from_value(candidate_report_json()).unwrap();
+        report.capture_epoch = 1;
+        report.validate().unwrap();
+        // ...and a superseded (non-matching) epoch stays fenced.
+        assert!(candidate_epoch_rule(1, 2).is_err());
+    }
+
+    // ── wire contract version ───────────────────────────────────────────────
+
+    #[test]
+    fn wire_contract_version_constant_is_pinned() {
+        assert_eq!(WIRE_CONTRACT_VERSION, "ato.submission-wizard-wire/v1");
+        assert_eq!(
+            serde_json::to_value(WireContractVersion).unwrap(),
+            json!("ato.submission-wizard-wire/v1")
+        );
     }
 
     // ── §3.1 claim response extension ───────────────────────────────────────
@@ -957,6 +1422,7 @@ mod tests {
             "kind": "interactive_capture",
             "target_label": "web",
             "profile": "default",
+            "wire_contract_version": "ato.submission-wizard-wire/v1",
             "submission_attempt_id": "subatt_01J1XY",
             "worker_claim_id": "claim_01J1XZ",
             "lease_token": "b64u-opaque-token",
@@ -967,10 +1433,41 @@ mod tests {
     #[test]
     fn claim_extension_parses_the_spec_example() {
         let ext: InteractiveCaptureClaimExt = serde_json::from_value(claim_job_example()).unwrap();
+        assert_eq!(ext.wire_contract_version, WireContractVersion);
         assert_eq!(ext.submission_attempt_id, "subatt_01J1XY");
         assert_eq!(ext.worker_claim_id, "claim_01J1XZ");
         assert_eq!(ext.lease_token, "b64u-opaque-token");
         assert_eq!(ext.lease_expires_at, "2026-07-22T09:15:00.000Z");
+        // Serialization carries exactly the five §3.1 extension fields, with
+        // the version literal.
+        let v = serde_json::to_value(&ext).unwrap();
+        assert_eq!(
+            sorted_keys(&v),
+            vec![
+                "lease_expires_at",
+                "lease_token",
+                "submission_attempt_id",
+                "wire_contract_version",
+                "worker_claim_id",
+            ]
+        );
+        assert_eq!(v["wire_contract_version"], json!(WIRE_CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn wire_contract_version_mismatch_fails_closed_at_parse() {
+        // §3.1: `wire_contract_version` is a REQUIRED literal — any other
+        // value (or its absence) is a schema reject BEFORE any semantics run.
+        let mut wrong_version = claim_job_example();
+        wrong_version["wire_contract_version"] = json!("ato.submission-wizard-wire/v2");
+        assert!(serde_json::from_value::<InteractiveCaptureClaimExt>(wrong_version).is_err());
+
+        let mut missing = claim_job_example();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("wire_contract_version");
+        assert!(serde_json::from_value::<InteractiveCaptureClaimExt>(missing).is_err());
     }
 
     #[test]
@@ -988,9 +1485,21 @@ mod tests {
     // ── §3.2 lease renew ────────────────────────────────────────────────────
 
     #[test]
-    fn lease_renew_request_is_exactly_the_fencing_five() {
-        let v = serde_json::to_value::<LeaseRenewRequest>(fencing()).unwrap();
-        assert_eq!(v.as_object().unwrap().len(), 5);
+    fn lease_renew_body_is_exactly_the_two_fencing_body_fields() {
+        // FENCING-4 transport on renew: job_id in the path, token in the
+        // header, and a strict body of exactly these two fields — the epoch
+        // plays no role on renew (§1.2).
+        let req: LeaseRenewRequest = serde_json::from_value(renew_json()).unwrap();
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            sorted_keys(&v),
+            vec!["submission_attempt_id", "worker_claim_id"]
+        );
+        // capture_epoch is not a renew field at all (B1).
+        let mut with_epoch = renew_json();
+        with_epoch["capture_epoch"] = json!(1);
+        assert!(serde_json::from_value::<LeaseRenewRequest>(with_epoch).is_err());
+
         let resp: LeaseRenewResponse =
             serde_json::from_value(json!({ "lease_expires_at": "2026-07-22T09:20:00.000Z" }))
                 .unwrap();
@@ -1003,14 +1512,14 @@ mod tests {
     fn control_response_parses_the_spec_capture_example() {
         let resp: ControlResponse = serde_json::from_value(json!({
             "directive": "capture",
-            "capture_epoch": 3,
+            "server_capture_epoch": 3,
             "candidate_id": "cand_01J1Z0",
             "hold_expires_at": "2026-07-22T09:45:00.000Z",
             "pause_permitted": true
         }))
         .unwrap();
         assert_eq!(resp.directive, ControlDirective::Capture);
-        assert_eq!(resp.capture_epoch, 3);
+        assert_eq!(resp.server_capture_epoch, 3);
         assert_eq!(resp.candidate_id.as_deref(), Some("cand_01J1Z0"));
         assert!(resp.pause_permitted);
         resp.validate().unwrap();
@@ -1021,7 +1530,7 @@ mod tests {
         // capture without a candidate id
         let no_candidate = ControlResponse {
             directive: ControlDirective::Capture,
-            capture_epoch: 3,
+            server_capture_epoch: 3,
             candidate_id: None,
             hold_expires_at: None,
             pause_permitted: true,
@@ -1029,7 +1538,7 @@ mod tests {
         assert!(no_candidate.validate().is_err());
         // capture at epoch 0 (epoch 0 ⇔ "no capture ever requested")
         let epoch_zero = ControlResponse {
-            capture_epoch: 0,
+            server_capture_epoch: 0,
             candidate_id: Some("cand_x".into()),
             ..no_candidate.clone()
         };
@@ -1037,7 +1546,7 @@ mod tests {
         // hold without a hold deadline
         let hold_no_deadline = ControlResponse {
             directive: ControlDirective::Hold,
-            capture_epoch: 0,
+            server_capture_epoch: 0,
             candidate_id: None,
             hold_expires_at: None,
             pause_permitted: false,
@@ -1058,7 +1567,7 @@ mod tests {
         hold.validate().unwrap();
         let discard = ControlResponse {
             directive: ControlDirective::Discard,
-            capture_epoch: 3,
+            server_capture_epoch: 3,
             candidate_id: None,
             hold_expires_at: None,
             pause_permitted: false,
@@ -1068,40 +1577,29 @@ mod tests {
 
     #[test]
     fn control_query_carries_the_three_query_params() {
-        let q = ControlQuery {
-            submission_attempt_id: "subatt_01J1XY".into(),
-            worker_claim_id: "claim_01J1XZ".into(),
-            capture_epoch: 2,
-        };
+        let q: ControlQuery = serde_json::from_value(control_query_json()).unwrap();
+        assert_eq!(q.observed_capture_epoch, 2);
         assert_eq!(
             sorted_keys(&serde_json::to_value(&q).unwrap()),
-            vec!["capture_epoch", "submission_attempt_id", "worker_claim_id"]
+            vec![
+                "observed_capture_epoch",
+                "submission_attempt_id",
+                "worker_claim_id"
+            ]
         );
-        // The token never rides the query string — it is a header (§1).
-        assert_eq!(LEASE_TOKEN_HEADER, "x-ato-lease-token");
     }
 
     // ── §3.4 progress ───────────────────────────────────────────────────────
 
     #[test]
-    fn progress_request_flattens_fencing_plus_stage() {
-        let req = ProgressRequest {
-            fencing: fencing(),
-            stage: WizardStage::Deps,
-        };
+    fn progress_body_carries_the_fencing_body_fields_plus_stage() {
+        let req: ProgressRequest = serde_json::from_value(progress_json()).unwrap();
+        assert_eq!(req.stage, WizardStage::Deps);
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(
             sorted_keys(&v),
-            vec![
-                "capture_epoch",
-                "job_id",
-                "lease_token",
-                "stage",
-                "submission_attempt_id",
-                "worker_claim_id",
-            ]
+            vec!["stage", "submission_attempt_id", "worker_claim_id"]
         );
-        assert_eq!(v["stage"], json!("deps"));
         let back: ProgressRequest = serde_json::from_value(v).unwrap();
         assert_eq!(back, req);
     }
@@ -1109,28 +1607,20 @@ mod tests {
     // ── §3.5 hold-ready ─────────────────────────────────────────────────────
 
     fn hold_ready() -> HoldReadyRequest {
-        HoldReadyRequest {
-            fencing: fencing(),
-            builder_id: "builder-sugamo-1".into(),
-            slot_id: "slot-3".into(),
-            session_id: "sess_01J1Y9".into(),
-            guest_port: 8000,
-        }
+        serde_json::from_value(hold_ready_json()).unwrap()
     }
 
     #[test]
     fn hold_ready_carries_identity_tuple_and_no_upstream_url() {
         let v = serde_json::to_value(hold_ready()).unwrap();
         // ADR-004: the exact key set — no self-reported upstream URL/host/
-        // address field exists to smuggle an SSRF target through.
+        // address field exists to smuggle an SSRF target through, no token,
+        // no job_id, no epoch.
         assert_eq!(
             sorted_keys(&v),
             vec![
                 "builder_id",
-                "capture_epoch",
                 "guest_port",
-                "job_id",
-                "lease_token",
                 "session_id",
                 "slot_id",
                 "submission_attempt_id",
@@ -1138,6 +1628,10 @@ mod tests {
             ]
         );
         hold_ready().validate().unwrap();
+        // The strict body rejects a self-reported upstream outright.
+        let mut with_upstream = hold_ready_json();
+        with_upstream["upstream_url"] = json!("http://attacker.example");
+        assert!(serde_json::from_value::<HoldReadyRequest>(with_upstream).is_err());
     }
 
     #[test]
@@ -1146,7 +1640,7 @@ mod tests {
         bad_port.guest_port = 0;
         assert!(bad_port.validate().is_err());
         // > 65535 is unrepresentable: u16 rejects it at parse.
-        let mut v = serde_json::to_value(hold_ready()).unwrap();
+        let mut v = hold_ready_json();
         v["guest_port"] = json!(70000);
         assert!(serde_json::from_value::<HoldReadyRequest>(v).is_err());
 
@@ -1162,33 +1656,22 @@ mod tests {
 
     #[test]
     fn candidate_report_matches_the_spec_example() {
-        let v = json!({
-            "job_id": "job_01J1XY",
-            "submission_attempt_id": "subatt_01J1XY",
-            "worker_claim_id": "claim_01J1XZ",
-            "lease_token": "b64u-opaque-token",
-            "capture_epoch": 3,
-            "candidate_id": "cand_01J1Z0",
-            "execution_id": "exec_01J1Z1",
-            "snapshot_id": "snap_01J1Z2",
-            "artifact_location": "r2://snapshots/cand_01J1Z0/seal",
-            "source_lost": false
-        });
+        let v = candidate_report_json();
         let req: CandidateReportRequest = serde_json::from_value(v.clone()).unwrap();
-        assert_eq!(req.fencing.capture_epoch, 3);
+        assert_eq!(req.capture_epoch, 3);
         assert_eq!(req.candidate_id, "cand_01J1Z0");
         assert!(!req.source_lost);
         req.validate().unwrap();
-        // Round-trip preserves the exact key set (fencing five + five fields).
-        assert_eq!(sorted_keys(&serde_json::to_value(&req).unwrap()), {
-            let mut k = sorted_keys(&v);
-            k.sort();
-            k
-        });
+        // Round-trip preserves the exact key set (fencing body fields + epoch
+        // + five payload fields).
+        assert_eq!(
+            sorted_keys(&serde_json::to_value(&req).unwrap()),
+            sorted_keys(&v)
+        );
 
-        // Epoch 0 can never name a capture command.
+        // Epoch 0 can never name a capture command (schema floor is >= 1).
         let mut epoch_zero = req.clone();
-        epoch_zero.fencing.capture_epoch = 0;
+        epoch_zero.capture_epoch = 0;
         assert!(epoch_zero.validate().is_err());
 
         let resp: CandidateReportResponse =
@@ -1197,124 +1680,173 @@ mod tests {
         assert_eq!(resp.status, CandidateStatus::Reported);
     }
 
-    // ── §3.7 ack extension ──────────────────────────────────────────────────
+    // ── §3.7 candidate acceptance (B2 — not a job-terminal ack) ─────────────
 
     #[test]
-    fn sealed_wizard_ack_matches_the_spec_example_and_refinement() {
-        let ack: WizardAck = serde_json::from_value(json!({
-            "agent_id": "builder-sugamo-1",
-            "job_id": "job_01J1XY",
-            "submission_attempt_id": "subatt_01J1XY",
-            "worker_claim_id": "claim_01J1XZ",
-            "lease_token": "b64u-opaque-token",
-            "capture_epoch": 3,
-            "status": "sealed",
-            "accepted_candidate_id": "cand_01J1Z0",
-            "acceptance_receipt": {
-                "capsule_manifest_hash": "blake3:aa",
-                "execution_id": "exec_01J1Z1",
-                "artifact_manifest_hash": "blake3:bb",
-                "runner_class_id": "rc.kvm.x86_64",
-                "snapshot_backend": "firecracker",
-                "artifact_location": "r2://snapshots/cand_01J1Z0/seal",
-                "no_secret_scan_clean": true,
-                "snapshot_format_id": "asf.fc-memsnap-v1",
-                "snapshot_codec_id": "asc.raw-v1.v1",
-                "manifest_source": "recipe_toml"
-            }
+    fn candidate_acceptance_matches_the_spec_example() {
+        let v = acceptance_json();
+        let req: CandidateAcceptanceRequest = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(req.capture_epoch, 3);
+        assert_eq!(req.status, AcceptanceStatus::Accepted);
+        req.validate().unwrap();
+        // Round-trip preserves the exact key set.
+        assert_eq!(
+            sorted_keys(&serde_json::to_value(&req).unwrap()),
+            sorted_keys(&v)
+        );
+
+        let resp: CandidateAcceptanceResponse =
+            serde_json::from_value(json!({ "candidate_id": "cand_01J1Z0", "status": "accepted" }))
+                .unwrap();
+        assert_eq!(resp.status, AcceptanceStatus::Accepted);
+    }
+
+    #[test]
+    fn acceptance_receipt_is_a_versioned_envelope_not_a_pinned_field_list() {
+        // D3: BOTH sides validate ONLY the envelope — the literal plus "is an
+        // object". No payload key is pinned (the 9-key pre-Gate-0 core is
+        // superseded; its pinning tests are removed): an EMPTY payload object
+        // is green.
+        let empty_payload: AcceptanceReceipt = serde_json::from_value(json!({
+            "receipt_schema": "ato.snapshot-acceptance/v1",
+            "receipt": {}
         }))
         .unwrap();
-        assert_eq!(ack.status, WizardAckStatus::Sealed);
-        assert_eq!(ack.fencing.capture_epoch, 3);
-        ack.validate().unwrap();
+        assert!(empty_payload.receipt.is_empty());
+        assert_eq!(
+            serde_json::to_value(&empty_payload).unwrap()["receipt_schema"],
+            json!(ACCEPTANCE_RECEIPT_SCHEMA)
+        );
 
-        // Pin the seam: the receipt is opaque to this side (serde_json::Value),
-        // so assert the example carries every key the api's
-        // `acceptanceReceiptSchema` (mirroring the live `artifactSchema`)
-        // REQUIRES — a green example here must be green on the other side too.
-        let receipt = ack.acceptance_receipt.as_ref().unwrap();
-        for required_key in [
-            "capsule_manifest_hash",
-            "execution_id",
-            "artifact_manifest_hash",
-            "runner_class_id",
-            "snapshot_backend",
-            "artifact_location",
-            "no_secret_scan_clean",
-            "snapshot_format_id",
-            "snapshot_codec_id",
-        ] {
+        // Wrong version literal → schema reject (fail-closed).
+        assert!(
+            serde_json::from_value::<AcceptanceReceipt>(json!({
+                "receipt_schema": "ato.snapshot-acceptance/v2",
+                "receipt": {}
+            }))
+            .is_err()
+        );
+        // The payload must be an OBJECT — the envelope's one structural rule.
+        for not_an_object in [json!("evidence"), json!([1, 2]), json!(7), json!(null)] {
             assert!(
-                receipt.get(required_key).is_some(),
-                "acceptance_receipt example is missing api-required key {required_key:?}"
+                serde_json::from_value::<AcceptanceReceipt>(json!({
+                    "receipt_schema": "ato.snapshot-acceptance/v1",
+                    "receipt": not_an_object
+                }))
+                .is_err()
             );
         }
-
-        let mut missing_candidate = ack.clone();
-        missing_candidate.accepted_candidate_id = None;
-        assert!(missing_candidate.validate().is_err());
-        let mut missing_receipt = ack.clone();
-        missing_receipt.acceptance_receipt = None;
-        assert!(missing_receipt.validate().is_err());
+        // The envelope itself is required alongside `status: "accepted"`.
+        let mut missing_envelope = acceptance_json();
+        missing_envelope
+            .as_object_mut()
+            .unwrap()
+            .remove("acceptance_receipt");
+        let req: CandidateAcceptanceRequest = serde_json::from_value(missing_envelope).unwrap();
+        assert!(req.validate().is_err());
     }
 
     #[test]
-    fn failed_wizard_ack_discriminates_capture_seal_vs_acceptance() {
-        let mut ack = WizardAck {
-            agent_id: "builder-sugamo-1".into(),
-            fencing: FencingTuple {
-                capture_epoch: 3,
-                ..fencing()
-            },
-            status: WizardAckStatus::Failed,
-            accepted_candidate_id: None,
-            acceptance_receipt: None,
-            failure_stage: Some(WizardFailureStage::CaptureSeal),
-            failure_reason: Some("seal aborted".into()),
-        };
-        ack.validate().unwrap();
-        assert_eq!(
-            serde_json::to_value(&ack).unwrap()["failure_stage"],
-            json!("capture_seal")
-        );
-        ack.failure_stage = Some(WizardFailureStage::Acceptance);
-        ack.validate().unwrap();
+    fn acceptance_refinements_split_accepted_and_rejected() {
+        // Rejected: receipt must be ABSENT; failure_reason is optional.
+        let rejected: CandidateAcceptanceRequest = serde_json::from_value(json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "capture_epoch": 3,
+            "status": "rejected",
+            "failure_reason": "acceptance run failed readiness"
+        }))
+        .unwrap();
+        rejected.validate().unwrap();
 
-        ack.failure_stage = None;
-        assert!(ack.validate().is_err());
+        let mut rejected_with_receipt = rejected.clone();
+        rejected_with_receipt.acceptance_receipt = Some(AcceptanceReceipt {
+            receipt_schema: AcceptanceReceiptSchema,
+            receipt: serde_json::Map::new(),
+        });
+        assert!(rejected_with_receipt.validate().is_err());
 
-        ack.failure_stage = Some(WizardFailureStage::Quiescing);
-        ack.failure_reason = Some("x".repeat(2001));
-        assert!(ack.validate().is_err());
+        // Accepted: failure_reason is only legal with "rejected".
+        let mut accepted: CandidateAcceptanceRequest =
+            serde_json::from_value(acceptance_json()).unwrap();
+        accepted.failure_reason = Some("but also failed?".into());
+        assert!(accepted.validate().is_err());
     }
 
+    // ── §3.8 wizard terminal ack (restricted) ───────────────────────────────
+
     #[test]
-    fn wizard_ack_omits_absent_optionals_on_the_wire() {
-        // A failed wizard ack serializes WITHOUT the sealed-only fields, so the
-        // shared server-side schema sees no nulls to trip on.
-        let ack = WizardAck {
-            agent_id: "b".into(),
-            fencing: fencing(),
-            status: WizardAckStatus::Failed,
-            accepted_candidate_id: None,
-            acceptance_receipt: None,
-            failure_stage: Some(WizardFailureStage::Launch),
-            failure_reason: None,
-        };
-        let v = serde_json::to_value(&ack).unwrap();
+    fn wizard_terminal_ack_round_trips_the_spec_example() {
+        let ack: WizardTerminalAck = serde_json::from_value(terminal_ack_json()).unwrap();
+        assert_eq!(ack.agent_id, "builder-sugamo-1");
+        assert_eq!(ack.reason, TerminalAckReason::AttemptEnded);
+        assert_eq!(ack.failure_stage, None);
+        assert_eq!(ack.failure_reason, None);
+        ack.validate().unwrap();
+        // Absent optionals are OMITTED on the wire (the spec example's
+        // explicit nulls parse fine, but this side never emits nulls).
         assert_eq!(
-            sorted_keys(&v),
+            sorted_keys(&serde_json::to_value(&ack).unwrap()),
             vec![
                 "agent_id",
-                "capture_epoch",
-                "failure_stage",
-                "job_id",
-                "lease_token",
-                "status",
+                "reason",
                 "submission_attempt_id",
                 "worker_claim_id",
             ]
         );
+    }
+
+    #[test]
+    fn wizard_terminal_ack_rejects_the_legacy_sealed_ack_shape() {
+        // §2/§3.8 (B2): `status: "sealed"` is NOT used by interactive_capture
+        // jobs, and the terminal ack carries no accepted_candidate_id, no
+        // receipt, and no epoch — candidate acceptance is §3.7's endpoint and
+        // is not job-terminal. The strict body enforces the absence of every
+        // legacy sealed-ack key.
+        for (key, value) in [
+            ("status", json!("sealed")),
+            ("accepted_candidate_id", json!("cand_01J1Z0")),
+            (
+                "acceptance_receipt",
+                json!({ "receipt_schema": ACCEPTANCE_RECEIPT_SCHEMA, "receipt": {} }),
+            ),
+            ("capture_epoch", json!(3)),
+        ] {
+            let mut v = terminal_ack_json();
+            v[key] = value;
+            assert!(
+                serde_json::from_value::<WizardTerminalAck>(v).is_err(),
+                "terminal ack must reject legacy key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn wizard_terminal_ack_failure_diagnostics_are_optional_refinements() {
+        // failure_stage discriminates capture_seal vs acceptance as a
+        // DIAGNOSTIC refinement of `reason` — optional, never required.
+        let mut ack: WizardTerminalAck = serde_json::from_value(json!({
+            "agent_id": "builder-sugamo-1",
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "reason": "acceptance_failed_source_lost",
+            "failure_stage": "acceptance",
+            "failure_reason": "acceptance run failed after source loss"
+        }))
+        .unwrap();
+        ack.validate().unwrap();
+        assert_eq!(ack.failure_stage, Some(WizardFailureStage::Acceptance));
+
+        ack.failure_stage = Some(WizardFailureStage::CaptureSeal);
+        assert_eq!(
+            serde_json::to_value(&ack).unwrap()["failure_stage"],
+            json!("capture_seal")
+        );
+        // A build failure without diagnostics is a legal terminal ack.
+        ack.reason = TerminalAckReason::BuildFailed;
+        ack.failure_stage = None;
+        ack.failure_reason = None;
+        ack.validate().unwrap();
     }
 
     // ── §4 verify session ───────────────────────────────────────────────────
@@ -1372,19 +1904,25 @@ mod tests {
         assert!(QuiesceMessage::Quiesce { epoch: 0 }.validate().is_err());
     }
 
-    // ── §7 capsule.toml declarations ────────────────────────────────────────
+    // ── §7 capsule.toml declarations (D1: guest-absolute paths) ─────────────
 
+    /// The §7 valid example, verbatim from the spec (= design doc §1.2).
     const VALID_DECLS: &str = r#"
-[cache.pip]
-path = ".venv"
+[cache.model]
+path = "/var/cache/example-model"
 capture = "include"
 
-[cache.models]
-path = "models"
+[cache.pip]
+path = "/root/.venv"
 capture = "exclude"
 
+[state.data]
+path = "/data"
+snapshot = "exclude"
+schema = "1"
+
 [state.db]
-path = "data/app.db"
+path = "/var/lib/app/data/app.db"
 snapshot = "exclude"
 schema = "sqlite"
 "#;
@@ -1395,9 +1933,10 @@ schema = "sqlite"
         assert_eq!(
             declared.paths,
             BTreeSet::from([
-                ".venv".to_string(),
-                "models".to_string(),
-                "data/app.db".to_string()
+                "/var/cache/example-model".to_string(),
+                "/root/.venv".to_string(),
+                "/data".to_string(),
+                "/var/lib/app/data/app.db".to_string(),
             ])
         );
         assert_eq!(declared.refusal_domain, RefusalDomain::ComplementOfDeclared);
@@ -1418,62 +1957,111 @@ schema = "sqlite"
         // validate GREEN on one side of the seam only.
         assert!(
             parse_capture_declarations(
-                "[cache.pip]\npath = \".venv\"\ncapture = \"include\"\nextra = true\n",
+                "[cache.pip]\npath = \"/root/.venv\"\ncapture = \"include\"\nextra = true\n",
             )
             .is_err()
         );
         assert!(
             parse_capture_declarations(
-                "[state.db]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\nextra = true\n",
+                "[state.db]\npath = \"/data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\nextra = true\n",
             )
             .is_err()
         );
     }
 
     #[test]
-    fn absolute_path_is_rejected() {
-        let err = parse_capture_declarations(
-            "[cache.pip]\npath = \"/root/.venv\"\ncapture = \"include\"\n",
-        )
-        .unwrap_err();
-        assert!(err.contains("relative"), "{err}");
+    fn relative_path_is_rejected() {
+        // D1: declared surfaces are guest-absolute; the pre-review draft had
+        // this backwards.
+        let err =
+            parse_capture_declarations("[cache.rel]\npath = \".venv\"\ncapture = \"include\"\n")
+                .unwrap_err();
+        assert!(err.contains("guest-absolute"), "{err}");
+        assert!(
+            parse_capture_declarations("[cache.rel]\npath = \"models\"\ncapture = \"include\"\n")
+                .is_err()
+        );
     }
 
     #[test]
-    fn dotdot_segment_is_rejected() {
+    fn leading_double_slash_is_rejected() {
+        let err = parse_capture_declarations(
+            "[cache.doubleslash]\npath = \"//var/cache\"\ncapture = \"include\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("SINGLE '/'"), "{err}");
+    }
+
+    #[test]
+    fn scheme_prefix_is_rejected() {
+        // "file:///models" carries a ':' before the first '/' (and would also
+        // fail the leading-'/' rule).
+        assert!(
+            parse_capture_declarations(
+                "[cache.scheme]\npath = \"file:///models\"\ncapture = \"include\"\n",
+            )
+            .is_err()
+        );
         let err =
-            parse_capture_declarations("[cache.up]\npath = \"../shared\"\ncapture = \"include\"\n")
+            parse_capture_declarations("[cache.r2]\npath = \"r2://x\"\ncapture = \"include\"\n")
                 .unwrap_err();
-        assert!(err.contains(".."), "{err}");
+        assert!(err.contains("scheme"), "{err}");
+        // A ':' AFTER the first '/' is just a path character, not a scheme.
+        parse_capture_declarations("[cache.colon]\npath = \"/data:v1\"\ncapture = \"include\"\n")
+            .unwrap();
+    }
+
+    #[test]
+    fn dot_and_dotdot_segments_are_rejected() {
+        let err = parse_capture_declarations(
+            "[cache.up]\npath = \"/var/../etc\"\ncapture = \"include\"\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("'.' or '..'"), "{err}");
+        assert!(
+            parse_capture_declarations(
+                "[cache.dot]\npath = \"/var/./cache\"\ncapture = \"include\"\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn trailing_slash_and_empty_segment_paths_are_rejected() {
-        // A trailing '/' previously slipped past the path validator and made
-        // the cross-section nesting verdict diverge from the api side (spec
-        // §7: the same declaration must get ONE verdict on both sides).
+        // No normalization pass exists on either side: every input that would
+        // need normalizing is rejected, so the collision/nesting verdicts run
+        // on the absolute paths exactly as declared (one verdict on both
+        // sides).
         let err =
-            parse_capture_declarations("[cache.a]\npath = \"data/\"\ncapture = \"include\"\n")
+            parse_capture_declarations("[cache.a]\npath = \"/data/\"\ncapture = \"include\"\n")
                 .unwrap_err();
         assert!(err.contains("empty segment"), "{err}");
         assert!(
-            parse_capture_declarations("[cache.a]\npath = \"data//x\"\ncapture = \"include\"\n")
+            parse_capture_declarations("[cache.a]\npath = \"/data//x\"\ncapture = \"include\"\n")
                 .is_err()
         );
-        // The seam finding's repro: { cache "data/", state "data/app.db" }
-        // must be INVALID here for the same reason it is invalid on the api.
+        // The seam finding's repro, now on absolute paths: { cache "/data/",
+        // state "/data/app.db" } must be INVALID here for the same reason it
+        // is invalid on the api.
         assert!(
             parse_capture_declarations(
-                "[cache.a]\npath = \"data/\"\ncapture = \"include\"\n\n[state.b]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
+                "[cache.a]\npath = \"/data/\"\ncapture = \"include\"\n\n[state.b]\npath = \"/data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn bare_root_path_is_rejected() {
+        let err = parse_capture_declarations("[cache.root]\npath = \"/\"\ncapture = \"include\"\n")
+            .unwrap_err();
+        assert!(err.contains("bare '/'"), "{err}");
     }
 
     #[test]
     fn backslash_path_is_rejected() {
         let err = parse_capture_declarations(
-            "[cache.win]\npath = \"data\\\\cache\"\ncapture = \"include\"\n",
+            "[cache.backslash]\npath = \"/var\\\\cache\"\ncapture = \"include\"\n",
         )
         .unwrap_err();
         assert!(err.contains("backslash"), "{err}");
@@ -1483,7 +2071,7 @@ schema = "sqlite"
     fn capture_value_outside_include_exclude_fails_at_parse() {
         assert!(
             parse_capture_declarations(
-                "[cache.maybe]\npath = \".cache\"\ncapture = \"sometimes\"\n",
+                "[cache.maybe]\npath = \"/var/cache\"\ncapture = \"sometimes\"\n",
             )
             .is_err()
         );
@@ -1493,7 +2081,7 @@ schema = "sqlite"
     fn state_is_never_snapshot_included() {
         assert!(
             parse_capture_declarations(
-                "[state.db]\npath = \"data/app.db\"\nsnapshot = \"include\"\nschema = \"sqlite\"\n",
+                "[state.data2]\npath = \"/data2\"\nsnapshot = \"include\"\nschema = \"sqlite\"\n",
             )
             .is_err()
         );
@@ -1502,37 +2090,42 @@ schema = "sqlite"
     #[test]
     fn state_requires_a_schema() {
         assert!(
-            parse_capture_declarations("[state.nodecl]\npath = \"data\"\nsnapshot = \"exclude\"\n")
-                .is_err()
+            parse_capture_declarations(
+                "[state.nodecl]\npath = \"/srv/data\"\nsnapshot = \"exclude\"\n"
+            )
+            .is_err()
         );
     }
 
     #[test]
     fn identical_paths_across_sections_are_rejected() {
+        // The spec's `[cache.dup]` case: "/data" is already [state.data]'s
+        // path in the valid example.
         let toml_text =
-            format!("{VALID_DECLS}\n[cache.dup]\npath = \"data/app.db\"\ncapture = \"include\"\n");
+            format!("{VALID_DECLS}\n[cache.dup]\npath = \"/data\"\ncapture = \"include\"\n");
         let err = parse_capture_declarations(&toml_text).unwrap_err();
         assert!(err.contains("identical path"), "{err}");
     }
 
     #[test]
     fn cross_section_nesting_is_rejected_but_same_section_nesting_is_not() {
-        // state path inside a cache path
+        // The spec's `[cache.nest]` case: a cache path nested under the state
+        // path "/data".
         let err = parse_capture_declarations(
-            "[cache.data]\npath = \"data\"\ncapture = \"include\"\n\n[state.db]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
+            "[state.data]\npath = \"/data\"\nsnapshot = \"exclude\"\nschema = \"1\"\n\n[cache.nest]\npath = \"/data/cache\"\ncapture = \"include\"\n",
         )
         .unwrap_err();
         assert!(err.contains("nest across sections"), "{err}");
-        // cache path inside a state path
+        // cache path containing a state path
         assert!(
             parse_capture_declarations(
-                "[state.store]\npath = \"var\"\nsnapshot = \"exclude\"\nschema = \"kv-dir\"\n\n[cache.sub]\npath = \"var/cache\"\ncapture = \"include\"\n",
+                "[cache.data]\npath = \"/data\"\ncapture = \"include\"\n\n[state.db]\npath = \"/data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
             )
             .is_err()
         );
         // nesting WITHIN a section is not a §7 error (only across sections is)
         parse_capture_declarations(
-            "[cache.outer]\npath = \"vendor\"\ncapture = \"include\"\n\n[cache.inner]\npath = \"vendor/bin\"\ncapture = \"exclude\"\n",
+            "[cache.outer]\npath = \"/vendor\"\ncapture = \"include\"\n\n[cache.inner]\npath = \"/vendor/bin\"\ncapture = \"exclude\"\n",
         )
         .unwrap();
     }
@@ -1540,7 +2133,7 @@ schema = "sqlite"
     #[test]
     fn declaration_names_are_unique_across_cache_and_state() {
         let err = parse_capture_declarations(
-            "[cache.db]\npath = \"cachedir\"\ncapture = \"include\"\n\n[state.db]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
+            "[cache.db]\npath = \"/var/cache\"\ncapture = \"include\"\n\n[state.db]\npath = \"/data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
         )
         .unwrap_err();
         assert!(err.contains("unique"), "{err}");
@@ -1549,13 +2142,13 @@ schema = "sqlite"
     #[test]
     fn declaration_name_charset_and_length_are_enforced() {
         assert!(
-            parse_capture_declarations("[cache.\"UPPER\"]\npath = \"x\"\ncapture = \"include\"\n")
+            parse_capture_declarations("[cache.\"UPPER\"]\npath = \"/x\"\ncapture = \"include\"\n")
                 .is_err()
         );
         let long_name = "a".repeat(41);
         assert!(
             parse_capture_declarations(&format!(
-                "[cache.{long_name}]\npath = \"x\"\ncapture = \"include\"\n"
+                "[cache.{long_name}]\npath = \"/x\"\ncapture = \"include\"\n"
             ))
             .is_err()
         );
@@ -1565,20 +2158,20 @@ schema = "sqlite"
     fn state_schema_charset_and_length_are_enforced() {
         assert!(
             parse_capture_declarations(
-                "[state.db]\npath = \"d\"\nsnapshot = \"exclude\"\nschema = \"NOT VALID\"\n",
+                "[state.db]\npath = \"/d\"\nsnapshot = \"exclude\"\nschema = \"NOT VALID\"\n",
             )
             .is_err()
         );
         let long_schema = "s".repeat(61);
         assert!(
             parse_capture_declarations(&format!(
-                "[state.db]\npath = \"d\"\nsnapshot = \"exclude\"\nschema = \"{long_schema}\"\n"
+                "[state.db]\npath = \"/d\"\nsnapshot = \"exclude\"\nschema = \"{long_schema}\"\n"
             ))
             .is_err()
         );
         // spec example ids stay valid
         parse_capture_declarations(
-            "[state.kv]\npath = \"d\"\nsnapshot = \"exclude\"\nschema = \"kv-dir\"\n",
+            "[state.kv]\npath = \"/d\"\nsnapshot = \"exclude\"\nschema = \"kv-dir\"\n",
         )
         .unwrap();
     }
@@ -1592,10 +2185,10 @@ schema = "sqlite"
 
     #[test]
     fn nesting_check_is_segment_boundary_aware() {
-        // "database" is NOT inside "data" — no false positive on a shared
+        // "/database" is NOT inside "/data" — no false positive on a shared
         // string prefix.
         parse_capture_declarations(
-            "[cache.data]\npath = \"data\"\ncapture = \"include\"\n\n[state.other]\npath = \"database\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
+            "[cache.data]\npath = \"/data\"\ncapture = \"include\"\n\n[state.other]\npath = \"/database\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
         )
         .unwrap();
     }
@@ -1609,45 +2202,52 @@ schema = "sqlite"
         // other. An astral scalar is 1 `char` but 2 UTF-16 code units.
 
         // failure_reason: max 2000. 1200 astral emoji = 1200 scalars = 2400
-        // UTF-16 code units → REJECTED (it was ACCEPTED when this counted
-        // chars().count() == 1200 ≤ 2000).
+        // UTF-16 code units → REJECTED (it would be ACCEPTED if this counted
+        // chars().count() == 1200 <= 2000).
         let astral_reason = "\u{1F600}".repeat(1200);
         assert_eq!(astral_reason.chars().count(), 1200);
         assert_eq!(astral_reason.encode_utf16().count(), 2400);
-        let over_bound = WizardAck {
+        let over_bound = WizardTerminalAck {
             agent_id: "b".into(),
-            fencing: FencingTuple {
-                capture_epoch: 3,
-                ..fencing()
-            },
-            status: WizardAckStatus::Failed,
-            accepted_candidate_id: None,
-            acceptance_receipt: None,
+            submission_attempt_id: "subatt_01J1XY".into(),
+            worker_claim_id: "claim_01J1XZ".into(),
+            reason: TerminalAckReason::BuildFailed,
             failure_stage: Some(WizardFailureStage::CaptureSeal),
-            failure_reason: Some(astral_reason),
+            failure_reason: Some(astral_reason.clone()),
         };
         assert!(over_bound.validate().is_err());
         // A just-at-bound BMP string (each scalar = 1 UTF-16 code unit) passes.
-        let at_bound = WizardAck {
+        let at_bound = WizardTerminalAck {
             failure_reason: Some("x".repeat(2000)),
             ..over_bound.clone()
         };
         assert!(at_bound.validate().is_ok());
+        // The same shared bound applies to the acceptance failure_reason.
+        let acceptance_over_bound = CandidateAcceptanceRequest {
+            submission_attempt_id: "subatt_01J1XY".into(),
+            worker_claim_id: "claim_01J1XZ".into(),
+            capture_epoch: 3,
+            status: AcceptanceStatus::Rejected,
+            acceptance_receipt: None,
+            failure_reason: Some(astral_reason),
+        };
+        assert!(acceptance_over_bound.validate().is_err());
 
-        // Declared path: max 200. A path may hold astral scalars (charset is
-        // unrestricted apart from the segment rules), so this bound is the most
-        // load-bearing. 150 astral scalars = 300 UTF-16 code units → REJECTED.
-        let astral_path = "\u{1F600}".repeat(150);
-        assert_eq!(astral_path.chars().count(), 150);
-        assert_eq!(astral_path.encode_utf16().count(), 300);
+        // Declared path: max 200, guest-absolute. A path may hold astral
+        // scalars (charset is unrestricted apart from the segment rules), so
+        // this bound is the most load-bearing. "/" + 150 astral scalars = 301
+        // UTF-16 code units → REJECTED.
+        let astral_path = format!("/{}", "\u{1F600}".repeat(150));
+        assert_eq!(astral_path.chars().count(), 151);
+        assert_eq!(astral_path.encode_utf16().count(), 301);
         assert!(
             parse_capture_declarations(&format!(
                 "[cache.emoji]\npath = \"{astral_path}\"\ncapture = \"include\"\n"
             ))
             .is_err()
         );
-        // 200 BMP chars = 200 UTF-16 code units = at bound → accepted.
-        let bmp_path = "a".repeat(200);
+        // "/" + 199 BMP chars = 200 UTF-16 code units = at bound → accepted.
+        let bmp_path = format!("/{}", "a".repeat(199));
         assert_eq!(bmp_path.encode_utf16().count(), 200);
         parse_capture_declarations(&format!(
             "[cache.bmp]\npath = \"{bmp_path}\"\ncapture = \"include\"\n"
