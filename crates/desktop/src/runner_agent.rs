@@ -218,26 +218,9 @@ pub fn start() -> RunnerStatus {
 /// guarantee ("the runner does not linger after the Desktop exits") would not
 /// hold on Windows.
 fn kill_process_tree(pid: u32) {
-    if pid <= 1 {
-        return;
-    }
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(2) with a negative pid signals the whole process group
-        // led by `pid`. SIGKILL is uncatchable — a hard teardown.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        use crate::proc_util::CommandNoWindowExt;
-        // /T = terminate the tree (process + children), /F = force.
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .no_console_window()
-            .status();
-    }
+    // Single-sourced OS-module teardown: unix negative-pid SIGKILL reaps the
+    // `ato runner serve` process group; Windows `taskkill /T /F` walks the tree.
+    let _ = runner::terminate_process_group(pid);
 }
 
 /// Stop the runner agent: terminate the whole `serve` process tree (reaping any

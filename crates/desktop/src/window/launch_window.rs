@@ -1427,20 +1427,9 @@ impl Drop for InflightLaunchGuard {
 /// (the group persists while the runtime is in it), so an aborted / timed-out /
 /// stopped relaunch never leaves a process listening on the resolved port.
 pub(crate) fn kill_installed_launch_process_group(wrapper_pid: u32) {
-    #[cfg(unix)]
-    {
-        if wrapper_pid > 1 {
-            // Negative pid → the whole process group led by `wrapper_pid`.
-            unsafe {
-                libc::kill(-(wrapper_pid as libc::pid_t), libc::SIGKILL);
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        // Best-effort elsewhere: the caller still kills the wrapper child handle.
-        let _ = wrapper_pid;
-    }
+    // Delegates to the single-sourced OS-module teardown (unix negative-pid
+    // SIGKILL / Windows `taskkill /T /F`), which guards pid <= 1 itself.
+    let _ = runner::terminate_process_group(wrapper_pid);
 }
 
 /// Abort every in-flight installed relaunch, returning how many were signalled.

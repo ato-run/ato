@@ -15,6 +15,10 @@
 //! - [`ProcessSupervisor`] — generic over `RunnerHost`; consolidates the spawn +
 //!   process-group-kill + reap logic that is currently triplicated across the
 //!   desktop shell, `cli::runner_agent`, and `desktop_run_agent`.
+//! - [`os`] — the `(d)` OS receptacle: [`NativeHost`], the concrete
+//!   `RunnerHost` for a real operating system. Consolidates the process-group
+//!   spawn / whole-group teardown / console-window-suppression primitives that
+//!   were triplicated across the desktop shell.
 //! - [`session`] / [`control`] — session lifecycle (launch/stop/restart/list +
 //!   retention) and runner-control clients (loopback Runtime Control, netd
 //!   ingress). Module boundaries today; the concrete logic migrates in from the
@@ -25,9 +29,11 @@
 
 pub mod backend;
 pub mod control;
+pub mod os;
 pub mod session;
 pub mod supervisor;
 
 pub use backend::{ChildId, HostError, ManagedChild, OutputSink, RunnerHost, SpawnSpec};
+pub use os::{CommandNoWindowExt, NativeChild, NativeHost, resolve_on_path, terminate_process_group};
 pub use session::{SessionId, SessionState, SessionSupervisor};
 pub use supervisor::ProcessSupervisor;

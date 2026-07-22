@@ -14,36 +14,12 @@
 
 use std::process::Command;
 
-/// Extension trait adding [`no_console_window`](CommandNoWindowExt::no_console_window)
-/// to [`std::process::Command`].
-pub trait CommandNoWindowExt {
-    /// Spawn the child without allocating a console window on Windows.
-    /// No-op on other platforms. Insert directly into a builder chain:
-    ///
-    /// ```ignore
-    /// Command::new(bin).no_console_window().args(["..."]).output()
-    /// ```
-    fn no_console_window(&mut self) -> &mut Self;
-}
-
-impl CommandNoWindowExt for Command {
-    #[cfg(target_os = "windows")]
-    fn no_console_window(&mut self) -> &mut Self {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW (0x0800_0000): run the console child without a
-        // console window. The desktop has no console to inherit, so this is
-        // purely "do not pop a new one". Note that `creation_flags` replaces
-        // the whole creation-flag set, but no desktop spawn site sets other
-        // flags, so this is safe.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        self.creation_flags(CREATE_NO_WINDOW)
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    fn no_console_window(&mut self) -> &mut Self {
-        self
-    }
-}
+// `CommandNoWindowExt` (no-console-window spawn) is single-sourced in the
+// runner crate's OS module — it is an OS execution primitive every host's
+// process spawns want, not a desktop-shell concern. Re-exported here so the
+// desktop's existing `crate::proc_util::CommandNoWindowExt` call sites are
+// unchanged.
+pub use runner::os::CommandNoWindowExt;
 
 /// Reveal a local path (file or directory) in the OS file manager.
 ///

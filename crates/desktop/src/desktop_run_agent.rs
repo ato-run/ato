@@ -308,24 +308,10 @@ pub fn shutdown() {
 }
 
 fn kill_process_tree(pid: u32) {
-    #[cfg(unix)]
-    {
-        // SAFETY: kill(2) with a negative pid signals the whole process group
-        // led by `pid`. The run child is its own group leader (see
-        // `spawn_desktop_runner_run`), so this reaps the `ato run` wrapper and
-        // any container it spawned.
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-        }
-    }
-    #[cfg(windows)]
-    {
-        use crate::proc_util::CommandNoWindowExt;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .no_console_window()
-            .status();
-    }
+    // Single-sourced OS-module teardown: the `ato run` child is its own group
+    // leader (see `spawn_desktop_runner_run`), so the unix negative-pid SIGKILL
+    // reaps the wrapper and any container it spawned; Windows walks the tree.
+    let _ = runner::terminate_process_group(pid);
 }
 
 // ─── Desktop Runner run history ──────────────────────────────────────────
