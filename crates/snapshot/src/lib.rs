@@ -98,8 +98,8 @@ pub use scanner::{
     scan_build_layers,
 };
 pub use snapshot_manifest::{
-    CapturePolicy, CaptureProvenance, SNAPSHOT_MANIFEST_V1_SCHEMA, SanitizationAttestation,
-    SecretScanAttestation, SnapshotCatalogRecord, SnapshotCatalogStatus,
+    CapturePolicy, CaptureProvenance, SNAPSHOT_MANIFEST_V1_FILENAME, SNAPSHOT_MANIFEST_V1_SCHEMA,
+    SanitizationAttestation, SecretScanAttestation, SnapshotCatalogRecord, SnapshotCatalogStatus,
     SnapshotCompatibilityContract, SnapshotLayerRefs, SnapshotManifestError, SnapshotManifestV1,
     SnapshotRestoreCapabilities, migrate_legacy_manifest, select_compatible_snapshot,
 };

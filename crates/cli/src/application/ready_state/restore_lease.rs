@@ -15,19 +15,21 @@
 //! ato#1002 (Snapshot Serving v1): `artifact_location` may now also be
 //! `r2://<bucket>/<job_id>/<hash>` — a remote object store. The bytes are fetched via
 //! the lease's short-lived presigned `artifact_fetch_url` into the SAME
-//! `<artifact_root>/<job_id>/{manifest.json, cas/}` layout ([`ensure_artifact_local`]),
+//! `<artifact_root>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}` layout
+//! ([`ensure_artifact_local`]),
 //! then verified by the SAME [`load_and_verify_manifest`] gate — the fetch adds no
 //! parallel verification, it only lands bytes where the existing gate inspects them.
 
 use std::path::{Path, PathBuf};
 
+use capsule::execution_contract::ExecutionId;
 use protocol::session_surface::{
     AcceptedSessionSurface, ClientSessionSurfaceCapabilities, PIXEL_STREAM_PROFILE,
     RunnerSessionSurfaceCapabilities, SESSION_SURFACE_CONTRACT_VERSION, SessionSurfaceDescriptor,
     SessionSurfaceKind, SessionSurfaceRequirement, SessionSurfaceTransport,
     SupportedSessionSurface, WEB_SURFACE_PROFILE, negotiate_session_surface,
 };
-use snapshot::ReadyStateManifest;
+use snapshot::{ReadyStateManifest, SNAPSHOT_MANIFEST_V1_FILENAME, SnapshotManifestV1};
 
 /// Lease kind for restoring a sealed Ready-State snapshot (matches ato-api's
 /// `RESTORE_SNAPSHOT_LEASE_KIND`).
@@ -375,15 +377,17 @@ fn verify_surface_negotiation(
     Ok(())
 }
 
-/// The on-disk location of a fetched artifact: `manifest.json` beside a `cas/` dir.
+/// The on-disk location of a fetched artifact: both manifest generations beside a `cas/` dir.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ArtifactPaths {
     pub manifest_json: PathBuf,
+    pub snapshot_manifest_v1_json: PathBuf,
     pub cas_dir: PathBuf,
 }
 
 /// Resolve an artifact location to on-disk paths under `artifact_root`. Every host
-/// uses the SAME local layout `<artifact_root>/<job_id>/{manifest.json, cas/}`:
+/// uses the SAME local layout
+/// `<artifact_root>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}`:
 /// - `cas://<job_id>/<artifact_hash>` — v1 same-host: the builder already wrote it;
 /// - `r2://<bucket>/<job_id>/<artifact_hash>` — ato#1002 remote object store: the
 ///   bytes may still need fetching ([`ensure_artifact_local`] owns that; this
@@ -434,6 +438,7 @@ pub(crate) fn locate_artifact(
     let dir = artifact_root.join(job);
     Ok(ArtifactPaths {
         manifest_json: dir.join("manifest.json"),
+        snapshot_manifest_v1_json: dir.join(SNAPSHOT_MANIFEST_V1_FILENAME),
         cas_dir: dir.join("cas"),
     })
 }
@@ -577,8 +582,8 @@ async fn download_artifact_archive(
 
 /// ato#1002: extract a transport `artifact.tar.gz` into `dest_dir`, fail-closed.
 ///
-/// The archive must contain exactly the #928 layout at its root: `manifest.json`
-/// and `cas/*`. Everything else is rejected — absolute paths, `..` traversal,
+/// The archive must contain exactly the #928 layout at its root: `manifest.json`,
+/// optional `snapshot-manifest-v1.json`, and `cas/*`. Everything else is rejected — absolute paths, `..` traversal,
 /// backslashed components, symlinks/hardlinks/devices/fifos, files outside the
 /// allowlist — and the summed entry sizes are capped by `max_total_bytes` (a tar
 /// entry cannot lie past its header size: the tar layer reads exactly that many
@@ -621,11 +626,15 @@ pub(crate) fn safe_extract_artifact_tar_gz(
                     .map_err(|e| format!("create {}: {e}", dir.display()))?;
             }
             tar::EntryType::Regular => {
-                let ok = (parts.len() == 1 && parts[0] == "manifest.json")
+                let ok = (parts.len() == 1
+                    && matches!(
+                        parts[0].as_str(),
+                        "manifest.json" | SNAPSHOT_MANIFEST_V1_FILENAME
+                    ))
                     || (parts.len() >= 2 && parts[0] == "cas");
                 if !ok {
                     return Err(format!(
-                        "artifact archive entry {raw:?} is outside manifest.json|cas/"
+                        "artifact archive entry {raw:?} is outside the manifest/sidecar/CAS allowlist"
                     ));
                 }
                 total = total.saturating_add(entry.size());
@@ -658,6 +667,32 @@ pub(crate) fn safe_extract_artifact_tar_gz(
         return Err("artifact archive carries no manifest.json at its root".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn load_snapshot_manifest_v1_for_execution(
+    path: &Path,
+    execution_id: &str,
+) -> std::result::Result<Option<SnapshotManifestV1>, (String, String)> {
+    let err = |message: String| ("artifact_verification_failed".to_string(), message);
+    if !execution_id.starts_with("blake3:") {
+        return Ok(None);
+    }
+    let expected =
+        ExecutionId::new(execution_id.to_string()).map_err(|error| err(error.to_string()))?;
+    let bytes =
+        std::fs::read(path).map_err(|error| err(format!("read {}: {error}", path.display())))?;
+    let manifest: SnapshotManifestV1 = serde_json::from_slice(&bytes)
+        .map_err(|error| err(format!("parse {}: {error}", path.display())))?;
+    manifest
+        .validate()
+        .map_err(|error| err(format!("validate {}: {error}", path.display())))?;
+    if manifest.execution_id != expected {
+        return Err(err(format!(
+            "Snapshot v1 sidecar execution_id mismatch: expected {expected}, found {}",
+            manifest.execution_id
+        )));
+    }
+    Ok(Some(manifest))
 }
 
 /// Validate one archive entry path: relative, no `..`/root/prefix components, no
@@ -1399,6 +1434,10 @@ mod tests {
         let root = Path::new("/var/lib/ato/artifacts");
         let p = locate_artifact("cas://job-1/blake3:art", root).unwrap();
         assert_eq!(p.manifest_json, root.join("job-1").join("manifest.json"));
+        assert_eq!(
+            p.snapshot_manifest_v1_json,
+            root.join("job-1").join("snapshot-manifest-v1.json")
+        );
         assert_eq!(p.cas_dir, root.join("job-1").join("cas"));
         // Unsupported schemes (a bare https:// location stays rejected).
         assert!(
@@ -1432,6 +1471,10 @@ mod tests {
         let root = Path::new("/var/lib/ato/artifacts");
         let p = locate_artifact("r2://ato-artifacts/job-9/blake3:art", root).unwrap();
         assert_eq!(p.manifest_json, root.join("job-9").join("manifest.json"));
+        assert_eq!(
+            p.snapshot_manifest_v1_json,
+            root.join("job-9").join("snapshot-manifest-v1.json")
+        );
         assert_eq!(p.cas_dir, root.join("job-9").join("cas"));
         // Missing job / missing bucket / traversal / absolute job.
         assert!(locate_artifact("r2://bucket", root).is_err());
@@ -1449,6 +1492,29 @@ mod tests {
         assert!(locate_artifact("r2://bucket/./x", root).is_err());
         #[cfg(windows)]
         assert!(locate_artifact("r2://bucket/C:/x", root).is_err());
+    }
+
+    #[test]
+    fn v1_execution_requires_a_snapshot_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = load_snapshot_manifest_v1_for_execution(
+            &dir.path().join(SNAPSHOT_MANIFEST_V1_FILENAME),
+            &format!("blake3:{}", "a".repeat(64)),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.0, "artifact_verification_failed");
+    }
+
+    #[test]
+    fn historical_execution_does_not_require_a_v1_sidecar() {
+        let result = load_snapshot_manifest_v1_for_execution(
+            Path::new("does-not-exist"),
+            "sha256:historical",
+        )
+        .unwrap();
+
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1664,7 +1730,11 @@ mod tests {
         std::fs::write(
             &gz,
             artifact_targz(
-                &[("manifest.json", br#"{"k":1}"#), ("cas/ab/cdef", b"blob")],
+                &[
+                    ("manifest.json", br#"{"k":1}"#),
+                    ("snapshot-manifest-v1.json", br#"{"schema":"v1"}"#),
+                    ("cas/ab/cdef", b"blob"),
+                ],
                 &["cas/", "cas/ab/"],
             ),
         )
@@ -1674,6 +1744,10 @@ mod tests {
         assert_eq!(
             std::fs::read(dest.join("manifest.json")).unwrap(),
             br#"{"k":1}"#
+        );
+        assert_eq!(
+            std::fs::read(dest.join("snapshot-manifest-v1.json")).unwrap(),
+            br#"{"schema":"v1"}"#
         );
         assert_eq!(
             std::fs::read(dest.join("cas").join("ab").join("cdef")).unwrap(),
@@ -1702,12 +1776,15 @@ mod tests {
             hostile_targz(|b| append_raw(b, b"/abs/evil", tar::EntryType::Regular, b"boom")),
         );
         assert!(e.contains("unsafe entry path"), "{e}");
-        // Regular file outside the manifest.json|cas/ allowlist.
+        // Regular file outside the manifest/sidecar/CAS allowlist.
         let e = case(
             "root.tar.gz",
             artifact_targz(&[("manifest.json", b"{}"), ("evil.sh", b"#!")], &[]),
         );
-        assert!(e.contains("outside manifest.json|cas/"), "{e}");
+        assert!(
+            e.contains("outside the manifest/sidecar/CAS allowlist"),
+            "{e}"
+        );
         // Unexpected directory outside cas/.
         let e = case(
             "dir.tar.gz",

@@ -40,6 +40,7 @@ use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
+use capsule::execution_contract::ExecutionId;
 use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsule::foundation::types::ready_state::{
@@ -67,7 +68,8 @@ use snapshot::rootfs_builder::{
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe, no_secret_scan,
+    SNAPSHOT_MANIFEST_V1_FILENAME, SanitizerContract, SnapshotBackend, SupervisorBindings,
+    WarmupRecipe, migrate_legacy_manifest, no_secret_scan,
 };
 
 mod upload;
@@ -2192,7 +2194,9 @@ fn process_job(
             uffd_preview: false,
         })
         .map_err(|e| fail("restore_verify", e.to_string()))?;
-    let _ = backend.stop(restored.session);
+    backend
+        .stop(restored.session)
+        .map_err(|e| fail("restore_verify", format!("destroy disposable restore: {e}")))?;
 
     // 6. No-secret scan — two GATES + one ADVISORY, each failure says which tripped
     // (path-only, never content):
@@ -2262,8 +2266,29 @@ fn process_job(
     )?;
     let artifact_location = upload::cas_location(&job.id, &artifact_manifest_hash);
 
+    let snapshot_manifest_v1_json = if execution_id.starts_with("blake3:") {
+        let execution_id = ExecutionId::new(execution_id.clone())
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        let compatibility = backend
+            .snapshot_compatibility_contract()
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        let snapshot_manifest = migrate_legacy_manifest(&manifest_out, execution_id, compatibility)
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        let json = serde_json::to_vec_pretty(&snapshot_manifest)
+            .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        if !no_secret_scan::blob_is_clean(&json, L4_CANARIES) {
+            return Err(fail(
+                "no_secret_scan",
+                "Snapshot v1 manifest json failed the no-secret scan".into(),
+            ));
+        }
+        Some(json)
+    } else {
+        None
+    };
+
     // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
-    // names <work>/<job_id>/{manifest.json, cas/}, and a runner restores by loading
+    // names <work>/<job_id>/{manifest.json, snapshot-manifest-v1.json?, cas/}, and a runner restores by loading
     // manifest.json, verifying `manifest.id() == artifact_manifest_hash` (fail-closed),
     // then restoring from the co-located CAS. The manifest is derived entirely from
     // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
@@ -2282,10 +2307,18 @@ fn process_job(
     }
     std::fs::write(jobdir.join("manifest.json"), &manifest_json)
         .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
+    if let Some(json) = snapshot_manifest_v1_json {
+        std::fs::write(jobdir.join(SNAPSHOT_MANIFEST_V1_FILENAME), json).map_err(|error| {
+            fail(
+                "artifact_metadata",
+                format!("persist Snapshot v1 manifest: {error}"),
+            )
+        })?;
+    }
 
     // 8. ato#1002 Snapshot Serving v1: with the artifact store configured (all
     // four ATO_ARTIFACT_S3_* vars — validated all-or-nothing at startup),
-    // package {manifest.json, cas/} into one artifact.tar.gz and upload it
+    // package {manifest.json, snapshot-manifest-v1.json?, cas/} into one artifact.tar.gz and upload it
     // BEFORE the sealed ack; the registered location then names the remote
     // store ("r2://<bucket>/<job_id>/<artifact_manifest_hash>"). Upload failure
     // ⇒ failed ack at artifact_upload — never sealed-without-bytes. Absent

@@ -4187,10 +4187,13 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{
+        RestoreVerification, restore_and_expose, teardown,
+    };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
-        load_and_verify_manifest_with_surface_capabilities, parse_restore_snapshot_command,
+        load_and_verify_manifest_with_surface_capabilities,
+        load_snapshot_manifest_v1_for_execution, parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -4369,6 +4372,28 @@ async fn handle_restore_snapshot_lease(
         pixel_surface_enabled,
     ) {
         Ok(m) => m,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    let restore_verification = match load_snapshot_manifest_v1_for_execution(
+        &paths.snapshot_manifest_v1_json,
+        &cmd.execution_id,
+    ) {
+        Ok(Some(candidate)) => RestoreVerification::V1(Box::new(candidate)),
+        Ok(None) => RestoreVerification::RunnerLease {
+            expected_execution_id: cmd.execution_id.clone(),
+        },
         Err((code, message)) => {
             fail(
                 client,
@@ -4570,7 +4595,7 @@ async fn handle_restore_snapshot_lease(
         backend.as_ref(),
         &store,
         manifest,
-        None,
+        restore_verification,
         overlay_root,
         None,
         uffd_preview,

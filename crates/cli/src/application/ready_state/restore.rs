@@ -7,7 +7,6 @@
 //! the Fake backend they are no-ops, so the whole flow is exercised end-to-end
 //! without a VMM.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -15,22 +14,40 @@ use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsulefs::CasStore;
 use snapshot::{
     ReadyStateManifest, RestoreReadyStateInput, RestoreReceipt, RestoredSession, SnapshotBackend,
-    SnapshotCatalogRecord, SnapshotManifestV1, SnapshotRestoreCapabilities, TeardownReceipt,
+    SnapshotCatalogRecord, SnapshotCompatibilityContract, SnapshotManifestV1,
+    SnapshotRestoreCapabilities, TeardownReceipt, migrate_legacy_manifest,
     select_compatible_snapshot,
 };
+
+pub(crate) enum RestoreVerification {
+    LegacyLocal,
+    RunnerLease { expected_execution_id: String },
+    V1(Box<SnapshotManifestV1>),
+}
 
 /// Restore a sealed artifact and prepare its session for exposure.
 pub(crate) fn restore_and_expose(
     backend: &dyn SnapshotBackend,
     store: &CasStore,
     manifest: ReadyStateManifest,
-    v1_manifest: Option<SnapshotManifestV1>,
+    verification: RestoreVerification,
     overlay_root: PathBuf,
     host_runner_class: Option<RunnerClassId>,
     uffd_preview: bool,
 ) -> Result<RestoreReceipt> {
-    if let Some(v1_manifest) = v1_manifest.as_ref() {
-        verify_v1_candidate(backend, &manifest, v1_manifest)?;
+    match &verification {
+        RestoreVerification::LegacyLocal => {}
+        RestoreVerification::RunnerLease {
+            expected_execution_id,
+        } => {
+            let compatibility = backend
+                .snapshot_compatibility_contract()
+                .context("resolve runner restore Snapshot compatibility")?;
+            verify_runner_lease_candidate(&manifest, expected_execution_id, &compatibility)?;
+        }
+        RestoreVerification::V1(v1_manifest) => {
+            verify_v1_candidate(backend, &manifest, v1_manifest)?;
+        }
     }
     let receipt = backend
         .restore(RestoreReadyStateInput {
@@ -52,34 +69,17 @@ fn verify_v1_candidate(
     if legacy.execution_id.as_deref() != Some(candidate.execution_id.as_str()) {
         anyhow::bail!("legacy/v1 Snapshot execution_id mismatch");
     }
-    if legacy.restore_contract != candidate.restore_contract {
+    let migrated = migrate_legacy_manifest(
+        legacy,
+        candidate.execution_id.clone(),
+        candidate.compatibility.clone(),
+    )
+    .context("derive Snapshot v1 layer projection from legacy manifest")?;
+    if migrated.restore_contract != candidate.restore_contract {
         anyhow::bail!("legacy/v1 Snapshot restore contract mismatch");
     }
-    if legacy.layers.memory.as_ref().map(|layer| layer.id())
-        != candidate.layers.memory.as_ref().map(|layer| layer.id())
-        || legacy.layers.vmstate.as_ref().map(|layer| layer.id())
-            != candidate.layers.vmstate.as_ref().map(|layer| layer.id())
-    {
-        anyhow::bail!("legacy/v1 Snapshot memory or VM-state layer mismatch");
-    }
-    let legacy_disk_layers: BTreeSet<_> = [
-        &legacy.layers.rootfs,
-        &legacy.layers.runtime,
-        &legacy.layers.dependency,
-        &legacy.layers.app,
-    ]
-    .into_iter()
-    .flatten()
-    .map(|layer| layer.id())
-    .collect();
-    let v1_disk_layers: BTreeSet<_> = candidate
-        .layers
-        .disk_layers
-        .iter()
-        .map(|layer| layer.id())
-        .collect();
-    if legacy_disk_layers != v1_disk_layers {
-        anyhow::bail!("legacy/v1 Snapshot disk layer mismatch");
+    if migrated.layers != candidate.layers {
+        anyhow::bail!("legacy/v1 Snapshot layer mismatch");
     }
 
     let compatibility = backend
@@ -92,6 +92,30 @@ fn verify_v1_candidate(
         .is_none()
     {
         anyhow::bail!("no exact compatible Snapshot for the requested execution_id");
+    }
+    Ok(())
+}
+
+fn verify_runner_lease_candidate(
+    legacy: &ReadyStateManifest,
+    expected_execution_id: &str,
+    host: &SnapshotCompatibilityContract,
+) -> Result<()> {
+    if legacy.execution_id.as_deref() != Some(expected_execution_id) {
+        anyhow::bail!("runner lease/manifest execution_id mismatch");
+    }
+    let backend = &legacy.snapshot_backend;
+    if backend.kind != host.backend
+        || backend.version != host.vmm_version
+        || backend.snapshot_format_version != host.format
+        || backend.cpu_template != host.cpu_template
+    {
+        anyhow::bail!("runner lease Snapshot backend compatibility mismatch");
+    }
+    if legacy.runner_class_id.as_ref().map(RunnerClassId::as_str)
+        != Some(host.runner_contract.as_str())
+    {
+        anyhow::bail!("runner lease Snapshot runner contract mismatch");
     }
     Ok(())
 }
@@ -118,6 +142,63 @@ mod tests {
         BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract, SanitizerContract,
         migrate_legacy_manifest,
     };
+
+    fn runner_lease_manifest() -> (ReadyStateManifest, SnapshotCompatibilityContract) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let compatibility = backend.snapshot_compatibility_contract().unwrap();
+        let mut manifest = backend
+            .build_ready_state(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: "blake3:capsule".to_string(),
+                runner_class: Some(RunnerClassId::from_hash(
+                    compatibility.runner_contract.clone(),
+                )),
+                surface_requirement: None,
+                layers: BuildLayers {
+                    rootfs: b"rootfs".to_vec(),
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: vec![1; 16],
+                    memory: vec![2; 16],
+                },
+                restore_contract: RestoreContract::default(),
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some("sha256:legacy-execution".to_string()),
+                supervisor: None,
+            })
+            .unwrap()
+            .manifest;
+        manifest.snapshot_backend.kind = compatibility.backend.clone();
+        manifest.snapshot_backend.version = compatibility.vmm_version.clone();
+        manifest.snapshot_backend.snapshot_format_version = compatibility.format.clone();
+        manifest.snapshot_backend.cpu_template = compatibility.cpu_template.clone();
+        (manifest, compatibility)
+    }
+
+    #[test]
+    fn runner_lease_gate_accepts_exact_execution_and_compatibility() {
+        let (manifest, compatibility) = runner_lease_manifest();
+
+        verify_runner_lease_candidate(&manifest, "sha256:legacy-execution", &compatibility)
+            .unwrap();
+    }
+
+    #[test]
+    fn runner_lease_gate_rejects_host_compatibility_drift() {
+        let (manifest, mut compatibility) = runner_lease_manifest();
+        compatibility.kernel_digest = "sha256:different-kernel".to_string();
+        compatibility.runner_contract = "blake3:different-runner".to_string();
+
+        let error =
+            verify_runner_lease_candidate(&manifest, "sha256:legacy-execution", &compatibility)
+                .unwrap_err();
+
+        assert!(error.to_string().contains("runner contract"), "{error}");
+    }
 
     #[test]
     fn restore_then_teardown_destroys_overlay() {
@@ -162,7 +243,7 @@ mod tests {
             &backend,
             &store,
             manifest,
-            Some(v1_manifest),
+            RestoreVerification::V1(Box::new(v1_manifest)),
             overlay.clone(),
             None,
             false,

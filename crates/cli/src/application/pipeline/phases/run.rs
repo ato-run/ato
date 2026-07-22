@@ -3957,11 +3957,15 @@ where
             } else {
                 false
             };
+            let verification = plan.v1_manifest.map_or(
+                ready_state::restore::RestoreVerification::LegacyLocal,
+                |manifest| ready_state::restore::RestoreVerification::V1(Box::new(manifest)),
+            );
             let receipt = ready_state::restore::restore_and_expose(
                 backend.as_ref(),
                 &store,
                 plan.manifest,
-                plan.v1_manifest,
+                verification,
                 overlay,
                 plan.host_runner_class,
                 uffd_preview,

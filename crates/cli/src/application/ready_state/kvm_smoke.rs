@@ -124,7 +124,7 @@ fn fc_engine_smoke_build_restore_stop() {
         be.as_ref(),
         &cas,
         sealed,
-        None,
+        restore::RestoreVerification::LegacyLocal,
         overlay.clone(),
         None,
         false,

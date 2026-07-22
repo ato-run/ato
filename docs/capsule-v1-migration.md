@@ -68,6 +68,16 @@ application output digests before writing the v1 pair.
 
 Migration writes a new immutable manifest and a new `snapshot_id`. It never
 changes old bytes or treats the legacy Ready-State ID as the new Snapshot ID.
+A v1 lock paired with only a legacy Ready-State manifest fails closed at run
+time. Rebuilding is an intentional migration cost: `ato build` must perform the
+disposable restore acceptance and persist `snapshot-manifest-v1.json` before
+that artifact is eligible for local or Connected-Runner v1 restore.
+
+Connected Runners keep a separate, explicit compatibility path for historical
+`sha256:` execution IDs. That path verifies the lease ID, sealed backend facts,
+and exact runner contract before restore. An execution ID in the v1 `blake3:`
+namespace never uses this compatibility path and requires the authenticated v1
+Snapshot manifest.
 
 ## Fail-closed compatibility errors
 

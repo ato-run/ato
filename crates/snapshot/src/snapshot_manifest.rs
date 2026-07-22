@@ -6,6 +6,7 @@ use thiserror::Error;
 use crate::manifest::{ReadyStateManifest, RestoreContract};
 
 pub const SNAPSHOT_MANIFEST_V1_SCHEMA: &str = "ato.snapshot-manifest/v1";
+pub const SNAPSHOT_MANIFEST_V1_FILENAME: &str = "snapshot-manifest-v1.json";
 const SNAPSHOT_MANIFEST_ID_DOMAIN: &[u8] = b"ato.snapshot-manifest/v1\0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,25 +257,19 @@ impl SnapshotCompatibilityContract {
         Ok(())
     }
 
-    fn is_satisfied_by(
-        &self,
-        capabilities: &SnapshotRestoreCapabilities,
-    ) -> Result<bool, SnapshotManifestError> {
-        capabilities.validate()?;
-        Ok(
-            capabilities.backend.as_deref() == Some(self.backend.as_str())
-                && capabilities.formats.contains(&self.format)
-                && capabilities.vmm_versions.contains(&self.vmm_version)
-                && capabilities.kernel_digests.contains(&self.kernel_digest)
-                && self
-                    .cpu_template
-                    .as_ref()
-                    .is_none_or(|required| capabilities.cpu_templates.contains(required))
-                && capabilities.codecs.contains(&self.codec)
-                && capabilities
-                    .runner_contracts
-                    .contains(&self.runner_contract),
-        )
+    fn is_satisfied_by(&self, capabilities: &SnapshotRestoreCapabilities) -> bool {
+        capabilities.backend.as_deref() == Some(self.backend.as_str())
+            && capabilities.formats.contains(&self.format)
+            && capabilities.vmm_versions.contains(&self.vmm_version)
+            && capabilities.kernel_digests.contains(&self.kernel_digest)
+            && self
+                .cpu_template
+                .as_ref()
+                .is_none_or(|required| capabilities.cpu_templates.contains(required))
+            && capabilities.codecs.contains(&self.codec)
+            && capabilities
+                .runner_contracts
+                .contains(&self.runner_contract)
     }
 }
 
@@ -348,7 +343,7 @@ pub fn select_compatible_snapshot<'a>(
         if &candidate.execution_id != execution_id {
             continue;
         }
-        if candidate.compatibility.is_satisfied_by(capabilities)? {
+        if candidate.compatibility.is_satisfied_by(capabilities) {
             return Ok(Some(candidate));
         }
     }
