@@ -373,6 +373,24 @@ fn validate_failure_reason_bound(failure_reason: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
+/// §3 null policy — optional fields are encoded by **omission**: an absent
+/// optional is OMITTED from the JSON entirely, and an explicit `null` is a
+/// schema reject on BOTH sides. The api's zod `.optional()` admits only an
+/// absent key (`undefined`), never `null` — so this side must reject `null`
+/// too, or a body green here would be 400'd there (one verdict on the seam).
+/// A bare serde `Option` would parse `null` as `None`; this `deserialize_with`
+/// fn is reached only when the key IS present, where the inner type's own
+/// deserializer then rejects `null`. Absence still goes through
+/// `#[serde(default)]` → `None`, and serialization still omits the key
+/// (`skip_serializing_if`) — this side never emits `null`.
+fn reject_explicit_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder-lane messages (spec §3)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -453,12 +471,22 @@ pub struct ControlResponse {
     pub server_capture_epoch: u64,
     /// Present only when `directive: "capture"`: the pre-minted candidate for
     /// this epoch (epoch ↔ candidate is 1:1); the builder echoes it back in the
-    /// candidate report and in the acceptance path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// candidate report and in the acceptance path. Absent ⇒ omitted, never
+    /// `null` ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub candidate_id: Option<String>,
     /// ISO-8601 UTC; required when `directive: "hold"` — the server-side hold
-    /// deadline. After it, expect `discard`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// deadline. After it, expect `discard`. Absent ⇒ omitted, never `null`
+    /// ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hold_expires_at: Option<String>,
     /// **Causality carrier for the quiesce contract (§5)**: the API sets this
     /// `true` for a given epoch only after it has received the proxy's
@@ -622,7 +650,15 @@ pub struct CandidateReportResponse {
 /// BOTH sides validate ONLY the envelope (literal + "is an object"), never
 /// individual payload keys. The earlier 9-key required core from the seam
 /// round is superseded and its pinning tests are removed.
+///
+/// The envelope is **strict on both sides** (api `.strict()`,
+/// `deny_unknown_fields` here): payload keys live INSIDE `receipt`, never
+/// beside it. `deny_unknown_fields` on the outer
+/// [`CandidateAcceptanceRequest`] does NOT propagate to nested structs, so the
+/// envelope must pin its own strictness or an unknown key beside `receipt`
+/// would parse green here and be rejected by the api (tested below).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AcceptanceReceipt {
     /// Required literal [`ACCEPTANCE_RECEIPT_SCHEMA`].
     pub receipt_schema: AcceptanceReceiptSchema,
@@ -655,12 +691,22 @@ pub struct CandidateAcceptanceRequest {
     /// Outcome of the acceptance run.
     pub status: AcceptanceStatus,
     /// Required when `status: "accepted"`; absent when `"rejected"`
-    /// ([`Self::validate`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// ([`Self::validate`]). Absent ⇒ omitted, never `null`
+    /// ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub acceptance_receipt: Option<AcceptanceReceipt>,
     /// Optional, only with `status: "rejected"`; ≤ 2000 UTF-16 code units
-    /// (builder truncates at 1800).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// (builder truncates at 1800). Absent ⇒ omitted, never `null`
+    /// ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_reason: Option<String>,
 }
 
@@ -722,12 +768,22 @@ pub struct WizardTerminalAck {
     /// ([`TerminalAckReason`]).
     pub reason: TerminalAckReason,
     /// Optional diagnostic refinement of a failure `reason` — never a
-    /// substitute for it (§2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// substitute for it (§2). Absent ⇒ omitted, never `null`
+    /// ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_stage: Option<WizardFailureStage>,
     /// Optional, ≤ 2000 UTF-16 code units server-side (the builder truncates
-    /// at 1800, as the existing failed ack does).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// at 1800, as the existing failed ack does). Absent ⇒ omitted, never
+    /// `null` ([`reject_explicit_null`]).
+    #[serde(
+        default,
+        deserialize_with = "reject_explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_reason: Option<String>,
 }
 
@@ -1155,15 +1211,14 @@ mod tests {
     }
 
     fn terminal_ack_json() -> Value {
-        // The §3.8 spec example, nulls included (explicit nulls parse into the
-        // Options; serialization then omits them).
+        // The §3.8 spec example: the absent optionals (failure_stage /
+        // failure_reason) are OMITTED — explicit null is a schema reject on
+        // both sides (§3 null policy, tested below).
         json!({
             "agent_id": "builder-sugamo-1",
             "submission_attempt_id": "subatt_01J1XY",
             "worker_claim_id": "claim_01J1XZ",
-            "reason": "attempt_ended",
-            "failure_stage": null,
-            "failure_reason": null
+            "reason": "attempt_ended"
         })
     }
 
@@ -1322,6 +1377,86 @@ mod tests {
                 "terminal ack body must reject {key}"
             );
         }
+    }
+
+    #[test]
+    fn optional_fields_reject_explicit_null() {
+        // §3 null policy mandatory test (mirrors the strict-body lease_token
+        // one): absence is encoded by OMITTING the key. The api's zod
+        // `.optional()` admits only an absent key, never null — a payload
+        // carrying an explicit null for ANY optional field must fail parsing
+        // here too, or the same payload would get two verdicts on the seam.
+
+        // Terminal ack: failure_stage / failure_reason (the pre-fix §3.8
+        // example carried exactly these nulls).
+        for key in ["failure_stage", "failure_reason"] {
+            let mut v = terminal_ack_json();
+            v[key] = Value::Null;
+            assert!(
+                serde_json::from_value::<WizardTerminalAck>(v).is_err(),
+                "terminal ack must reject explicit null {key}"
+            );
+        }
+
+        // Candidate acceptance: acceptance_receipt / failure_reason.
+        let mut accepted_null_receipt = acceptance_json();
+        accepted_null_receipt["acceptance_receipt"] = Value::Null;
+        assert!(
+            serde_json::from_value::<CandidateAcceptanceRequest>(accepted_null_receipt).is_err(),
+            "acceptance body must reject explicit null acceptance_receipt"
+        );
+        assert!(
+            serde_json::from_value::<CandidateAcceptanceRequest>(json!({
+                "submission_attempt_id": "subatt_01J1XY",
+                "worker_claim_id": "claim_01J1XZ",
+                "capture_epoch": 3,
+                "status": "rejected",
+                "failure_reason": null
+            }))
+            .is_err(),
+            "acceptance body must reject explicit null failure_reason"
+        );
+
+        // Control response: candidate_id / hold_expires_at.
+        assert!(
+            serde_json::from_value::<ControlResponse>(json!({
+                "directive": "capture",
+                "server_capture_epoch": 3,
+                "candidate_id": "cand_01J1Z0",
+                "hold_expires_at": null,
+                "pause_permitted": true
+            }))
+            .is_err(),
+            "control response must reject explicit null hold_expires_at"
+        );
+        assert!(
+            serde_json::from_value::<ControlResponse>(json!({
+                "directive": "discard",
+                "server_capture_epoch": 3,
+                "candidate_id": null,
+                "pause_permitted": false
+            }))
+            .is_err(),
+            "control response must reject explicit null candidate_id"
+        );
+
+        // Omission stays green: the same shapes parse (and validate) with the
+        // optional keys absent.
+        let rejected_omitted: CandidateAcceptanceRequest = serde_json::from_value(json!({
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "capture_epoch": 3,
+            "status": "rejected"
+        }))
+        .unwrap();
+        rejected_omitted.validate().unwrap();
+        let discard_omitted: ControlResponse = serde_json::from_value(json!({
+            "directive": "discard",
+            "server_capture_epoch": 3,
+            "pause_permitted": false
+        }))
+        .unwrap();
+        discard_omitted.validate().unwrap();
     }
 
     #[test]
@@ -1747,6 +1882,34 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_receipt_envelope_rejects_unknown_keys() {
+        // The envelope is STRICT on both sides (api `.strict()`, tested there
+        // as "unknown envelope keys"; `deny_unknown_fields` here): payload
+        // keys live INSIDE `receipt`, never beside it. `deny_unknown_fields`
+        // on the outer CandidateAcceptanceRequest does NOT propagate to
+        // nested structs, so the envelope pins its own strictness — without
+        // it {receipt_schema, receipt, execution_id} parses GREEN here and
+        // RED on the api, a strict-body divergence inside a builder→api
+        // request body.
+        assert!(
+            serde_json::from_value::<AcceptanceReceipt>(json!({
+                "receipt_schema": "ato.snapshot-acceptance/v1",
+                "receipt": { "execution_id": "exec_01J1Z1" },
+                "execution_id": "exec_01J1Z1"
+            }))
+            .is_err(),
+            "envelope must reject an unknown key beside receipt_schema/receipt"
+        );
+        // ...and the same divergence through the full acceptance body.
+        let mut body = acceptance_json();
+        body["acceptance_receipt"]["execution_id"] = json!("exec_01J1Z1");
+        assert!(
+            serde_json::from_value::<CandidateAcceptanceRequest>(body).is_err(),
+            "acceptance body must reject an unknown envelope key"
+        );
+    }
+
+    #[test]
     fn acceptance_refinements_split_accepted_and_rejected() {
         // Rejected: receipt must be ABSENT; failure_reason is optional.
         let rejected: CandidateAcceptanceRequest = serde_json::from_value(json!({
@@ -1783,8 +1946,9 @@ mod tests {
         assert_eq!(ack.failure_stage, None);
         assert_eq!(ack.failure_reason, None);
         ack.validate().unwrap();
-        // Absent optionals are OMITTED on the wire (the spec example's
-        // explicit nulls parse fine, but this side never emits nulls).
+        // Absent optionals are OMITTED on the wire, matching the spec example
+        // (§3 null policy: this side never emits nulls, and an explicit null
+        // is a parse reject — see optional_fields_reject_explicit_null).
         assert_eq!(
             sorted_keys(&serde_json::to_value(&ack).unwrap()),
             vec![
