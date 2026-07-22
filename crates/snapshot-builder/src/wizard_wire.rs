@@ -179,11 +179,16 @@ pub struct FencingTuple {
     /// `job_` — issued at enqueue (existing convention).
     pub job_id: String,
     /// `subatt_` — issued at enqueue of the wizard job; 1:1 with the enqueue,
-    /// stable across claims/retries of the same attempt.
+    /// stable for the attempt's lifetime (retries WITHIN the claim included).
+    /// An interactive attempt is never re-claimed (ADR-008 v3.1): lease expiry
+    /// fails the attempt, and a subsequent claim serves a NEW attempt with a
+    /// new `subatt_`.
     pub submission_attempt_id: String,
-    /// `claim_` — a NEW id every time the job is (re)claimed (lease expiry +
-    /// re-claim ⇒ new `claim_...`). It is NOT a workspace-migration id: a
-    /// re-claim does not imply the workspace moved.
+    /// `claim_` — a generation that fences duplicate/stale workers WITHIN an
+    /// attempt. It is NOT a workspace-migration id, and an attempt is never
+    /// re-claimed: lease expiry on an interactive attempt fails the attempt
+    /// (ADR-008 v3.1), and the next claim carries a new `subatt_` + new
+    /// `claim_`.
     pub worker_claim_id: String,
     /// Opaque secret string, no format promise (server mints ≥ 32 bytes of
     /// entropy, base64url), minted per claim generation alongside
@@ -235,9 +240,11 @@ pub type LeaseRenewRequest = FencingTuple;
 
 /// §3.2 response. The `lease_token` is **stable within a claim generation** —
 /// renew extends expiry, it does not rotate the token; a new token comes only
-/// with a new `worker_claim_id` (re-claim). An expired lease cannot be renewed
-/// (`409 fenced`): the job returns to the claimable pool and the next claim
-/// mints a new `claim_`/token pair.
+/// with a new `worker_claim_id`. An expired lease cannot be renewed
+/// (`409 fenced`), and an interactive attempt is never re-claimed (ADR-008
+/// v3.1): lease expiry marks the attempt expired/failed, and a subsequent
+/// claim starts a NEW attempt from build, minting a new `subatt_` + new
+/// `claim_`/token pair.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRenewResponse {
     /// ISO-8601 UTC — the new lease deadline.
@@ -573,16 +580,23 @@ pub enum StateSnapshotMode {
 }
 
 /// §7 — `[cache.<name>]`: a path baked into the captured snapshot (declared
-/// cache surface).
+/// cache surface). Unknown keys INSIDE a declaration are rejected
+/// (`deny_unknown_fields`), mirroring the api's `.strict()` projection — only
+/// unknown tables elsewhere in the manifest are ignored
+/// ([`CaptureDeclarations`]); the same declaration must get one verdict on
+/// both sides.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CacheDeclaration {
     /// Relative path (see [`validate_declared_path`]).
     pub path: String,
     pub capture: CaptureMode,
 }
 
-/// §7 — `[state.<name>]`: never baked; runtime durable state.
+/// §7 — `[state.<name>]`: never baked; runtime durable state. Unknown keys
+/// INSIDE the declaration are rejected, same as [`CacheDeclaration`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateDeclaration {
     /// Relative path (see [`validate_declared_path`]).
     pub path: String,
@@ -744,8 +758,10 @@ impl CaptureDeclarations {
 
 /// Parse the `[cache.*]`/`[state.*]` tables out of a capsule.toml text and run
 /// the §7 validation. Unknown tables/keys elsewhere in the manifest are
-/// ignored; invalid literal values (`capture = "sometimes"`,
-/// `snapshot = "include"`, a missing `schema`) fail at parse by construction.
+/// ignored, but unknown keys INSIDE a `[cache.*]`/`[state.*]` declaration are
+/// rejected (mirrors the api's `.strict()`); invalid literal values
+/// (`capture = "sometimes"`, `snapshot = "include"`, a missing `schema`) fail
+/// at parse by construction.
 pub fn parse_capture_declarations(toml_text: &str) -> Result<DeclaredPaths, String> {
     let decls: CaptureDeclarations =
         toml::from_str(toml_text).map_err(|e| format!("capsule.toml capture declarations: {e}"))?;
@@ -1315,6 +1331,26 @@ schema = "sqlite"
         let declared = parse_capture_declarations("[app]\nname = \"x\"\n").unwrap();
         assert!(declared.paths.is_empty());
         assert_eq!(declared.refusal_domain, RefusalDomain::ComplementOfDeclared);
+    }
+
+    #[test]
+    fn unknown_key_inside_a_declaration_is_rejected() {
+        // Mirrors the api's `.strict()` projection test: `{path, capture,
+        // extra}` is invalid. Unknown TABLES elsewhere in the manifest stay
+        // ignored (test above); an unknown key INSIDE a declaration must not
+        // validate GREEN on one side of the seam only.
+        assert!(
+            parse_capture_declarations(
+                "[cache.pip]\npath = \".venv\"\ncapture = \"include\"\nextra = true\n",
+            )
+            .is_err()
+        );
+        assert!(
+            parse_capture_declarations(
+                "[state.db]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\nextra = true\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]
