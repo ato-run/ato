@@ -102,12 +102,22 @@ Latest **sealed** snapshot (404 if none).
   "runner_class_id": "blake3:…",
   "snapshot_backend": "firecracker",
   "execution_id": "blake3:…",
+  "execution_identity_schema": "ato.execution-contract/v1",
+  "snapshot_manifest_schema": "ato.snapshot-manifest/v1",
+  "snapshot_manifest_id": "blake3:…",
+  "artifact_envelope_schema": "ato.snapshot-artifact-envelope/v1",
+  "artifact_envelope_id": "blake3:…",
   "healthcheck": { "type": "http", "path": "/health", "port": 8080 },
   "no_binding_required": true,
   "public_run_eligible": true,
   "artifact_location": "cas://… | https://…"   // where a runner pulls it
 }
 ```
+
+The `snap_…` `snapshot_id` is the control-plane row ID. Capsule v1 leases also
+carry the immutable `snapshot_manifest_id` and `artifact_envelope_id` shown
+above; the runner verifies both before restore. Legacy rows omit all five
+schema/content-address fields together.
 
 ## 2.5 Auth / ownership
 
