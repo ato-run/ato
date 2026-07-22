@@ -1953,6 +1953,8 @@ fn run_build_lifecycle_shell_command(
         cmd.env("PORT", port.to_string());
     }
 
+    crate::common::host_shell::sanitize_untrusted_environment(&mut cmd);
+
     let status = cmd
         .status()
         .with_context(|| format!("Failed to execute {} command", phase))?;

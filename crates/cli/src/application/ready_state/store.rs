@@ -9,6 +9,8 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(not(test))]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,7 +25,10 @@ use snapshot::{
 const ACCEPTANCE_RECEIPT_SCHEMA: &str = "ato.snapshot-local-acceptance-receipt/v1";
 const ACCEPTANCE_RECEIPT_DOMAIN: &[u8] = b"ato.snapshot-local-acceptance-receipt/v1\0";
 const ACCEPTANCE_RECEIPT_DIR: &str = "acceptance";
-const ACCEPTANCE_MAC_KEY_ENV: &str = "ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY";
+#[cfg(not(test))]
+const ACCEPTANCE_SIGNER_HELPER_ENV: &str = "ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER";
+#[cfg(not(test))]
+const ACCEPTANCE_SIGNER_PROTOCOL: &str = "ato.snapshot-acceptance-signer/v1";
 static LOCAL_PUBLICATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -34,7 +39,8 @@ struct LocalAcceptanceReceiptV1 {
     snapshot_id: String,
     envelope_id: String,
     acceptance_receipt_id: String,
-    mac: String,
+    key_id: String,
+    authenticator: String,
 }
 
 #[derive(serde::Serialize)]
@@ -44,6 +50,44 @@ struct LocalAcceptanceReceiptProjection<'a> {
     snapshot_id: &'a str,
     envelope_id: &'a str,
     acceptance_receipt_id: &'a str,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AcceptanceSignerOperation {
+    Issue,
+    Verify,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, serde::Serialize)]
+struct AcceptanceSignerRequest<'a> {
+    schema: &'static str,
+    operation: AcceptanceSignerOperation,
+    payload_hex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authenticator: Option<&'a str>,
+}
+
+#[cfg(not(test))]
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptanceSignerResponse {
+    schema: String,
+    #[serde(default)]
+    key_id: Option<String>,
+    #[serde(default)]
+    authenticator: Option<String>,
+    #[serde(default)]
+    valid: Option<bool>,
+}
+
+struct IssuedAuthenticator {
+    key_id: String,
+    authenticator: String,
 }
 
 /// Sanitize a `blake3:<hex>`-style id into one safe path component (hex/dash
@@ -346,9 +390,12 @@ fn record_accepted_envelope(
         snapshot_id: snapshot.snapshot_id.clone(),
         envelope_id: envelope.envelope_id.clone(),
         acceptance_receipt_id,
-        mac: String::new(),
+        key_id: String::new(),
+        authenticator: String::new(),
     };
-    receipt.mac = compute_acceptance_mac(&receipt)?;
+    let issued = issue_acceptance_authenticator(&acceptance_payload(&receipt)?)?;
+    receipt.key_id = issued.key_id;
+    receipt.authenticator = issued.authenticator;
     let path = acceptance_receipt_path(root, &snapshot.execution_id, &snapshot.snapshot_id);
     if path.exists() {
         let existing: LocalAcceptanceReceiptV1 = read_json(&path)?;
@@ -408,14 +455,15 @@ fn verify_acceptance_receipt(
 ) -> Result<()> {
     if receipt.schema != ACCEPTANCE_RECEIPT_SCHEMA
         || &receipt.execution_id != expected_execution_id
-        || receipt.mac != compute_acceptance_mac(receipt)?
+        || !valid_key_id(&receipt.key_id)
+        || !verify_acceptance_authenticator(receipt, &acceptance_payload(receipt)?)?
     {
         anyhow::bail!("invalid Snapshot v1 authenticated acceptance receipt");
     }
     Ok(())
 }
 
-fn compute_acceptance_mac(receipt: &LocalAcceptanceReceiptV1) -> Result<String> {
+fn acceptance_payload(receipt: &LocalAcceptanceReceiptV1) -> Result<Vec<u8>> {
     let projection = LocalAcceptanceReceiptProjection {
         schema: &receipt.schema,
         execution_id: &receipt.execution_id,
@@ -427,42 +475,114 @@ fn compute_acceptance_mac(receipt: &LocalAcceptanceReceiptV1) -> Result<String> 
     let mut input = Vec::with_capacity(ACCEPTANCE_RECEIPT_DOMAIN.len() + canonical.len());
     input.extend_from_slice(ACCEPTANCE_RECEIPT_DOMAIN);
     input.extend_from_slice(&canonical);
-    Ok(format!(
-        "blake3:{}",
-        blake3::keyed_hash(&acceptance_mac_key()?, &input).to_hex()
-    ))
+    Ok(input)
 }
 
-fn acceptance_mac_key() -> Result<[u8; 32]> {
-    match std::env::var(ACCEPTANCE_MAC_KEY_ENV) {
-        Ok(value) => {
-            if value.len() != 64
-                || !value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            {
-                anyhow::bail!(
-                    "{ACCEPTANCE_MAC_KEY_ENV} must contain exactly 32 bytes as lowercase hex"
-                );
-            }
-            let decoded = hex::decode(value)?;
-            decoded
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("invalid {ACCEPTANCE_MAC_KEY_ENV} length"))
-        }
-        Err(_) => {
-            #[cfg(test)]
-            {
-                Ok([0x5a; 32])
-            }
-            #[cfg(not(test))]
-            {
-                anyhow::bail!(
-                    "Capsule v1 local Snapshot acceptance requires {ACCEPTANCE_MAC_KEY_ENV} from an OS-protected credential source"
-                )
-            }
-        }
+fn valid_key_id(key_id: &str) -> bool {
+    !key_id.is_empty()
+        && key_id.len() <= 128
+        && key_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
+}
+
+#[cfg(not(test))]
+fn issue_acceptance_authenticator(payload: &[u8]) -> Result<IssuedAuthenticator> {
+    let response = call_acceptance_signer(AcceptanceSignerRequest {
+        schema: ACCEPTANCE_SIGNER_PROTOCOL,
+        operation: AcceptanceSignerOperation::Issue,
+        payload_hex: hex::encode(payload),
+        key_id: None,
+        authenticator: None,
+    })?;
+    let key_id = response
+        .key_id
+        .filter(|value| valid_key_id(value))
+        .context("acceptance signer returned an invalid or missing key_id")?;
+    let authenticator = response
+        .authenticator
+        .filter(|value| !value.trim().is_empty())
+        .context("acceptance signer returned no authenticator")?;
+    Ok(IssuedAuthenticator {
+        key_id,
+        authenticator,
+    })
+}
+
+#[cfg(not(test))]
+fn verify_acceptance_authenticator(
+    receipt: &LocalAcceptanceReceiptV1,
+    payload: &[u8],
+) -> Result<bool> {
+    let response = call_acceptance_signer(AcceptanceSignerRequest {
+        schema: ACCEPTANCE_SIGNER_PROTOCOL,
+        operation: AcceptanceSignerOperation::Verify,
+        payload_hex: hex::encode(payload),
+        key_id: Some(&receipt.key_id),
+        authenticator: Some(&receipt.authenticator),
+    })?;
+    Ok(response.valid == Some(true))
+}
+
+#[cfg(not(test))]
+fn call_acceptance_signer(
+    request: AcceptanceSignerRequest<'_>,
+) -> Result<AcceptanceSignerResponse> {
+    let helper = std::env::var_os(ACCEPTANCE_SIGNER_HELPER_ENV).with_context(|| {
+        format!(
+            "Capsule v1 local Snapshot acceptance requires a caller-authenticating signing helper configured by {ACCEPTANCE_SIGNER_HELPER_ENV}"
+        )
+    })?;
+    let mut child = Command::new(helper)
+        .arg("--stdio-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY")
+        .spawn()
+        .context("start Snapshot acceptance signing helper")?;
+    let request_json = serde_json::to_vec(&request)?;
+    child
+        .stdin
+        .take()
+        .context("acceptance signer stdin unavailable")?
+        .write_all(&request_json)?;
+    let output = child
+        .wait_with_output()
+        .context("wait for Snapshot acceptance signing helper")?;
+    if !output.status.success() {
+        anyhow::bail!("Snapshot acceptance signing helper rejected the request");
     }
+    let response: AcceptanceSignerResponse = serde_json::from_slice(&output.stdout)
+        .context("parse Snapshot acceptance signing helper response")?;
+    if response.schema != ACCEPTANCE_SIGNER_PROTOCOL {
+        anyhow::bail!("Snapshot acceptance signing helper returned the wrong protocol schema");
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+fn issue_acceptance_authenticator(payload: &[u8]) -> Result<IssuedAuthenticator> {
+    Ok(IssuedAuthenticator {
+        key_id: "test-key-v1".to_string(),
+        authenticator: format!(
+            "blake3:{}",
+            blake3::keyed_hash(&[0x5a; 32], payload).to_hex()
+        ),
+    })
+}
+
+#[cfg(test)]
+fn verify_acceptance_authenticator(
+    receipt: &LocalAcceptanceReceiptV1,
+    payload: &[u8],
+) -> Result<bool> {
+    Ok(receipt.key_id == "test-key-v1"
+        && receipt.authenticator
+            == format!(
+                "blake3:{}",
+                blake3::keyed_hash(&[0x5a; 32], payload).to_hex()
+            ))
 }
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
@@ -608,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn rehashed_envelope_and_receipt_are_rejected_without_the_external_mac_key() {
+    fn rehashed_envelope_and_receipt_are_rejected_without_signer_authenticator() {
         use capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA;
         use snapshot::{
             BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
@@ -656,7 +776,7 @@ mod tests {
 
         // An attacker that can rewrite the artifact root can create a new,
         // self-consistent accepted envelope by changing legacy metadata and can
-        // also rewrite the receipt's public fields. The external keyed MAC is
+        // also rewrite the receipt's public fields. The external signer authenticator is
         // the trust anchor: without it the jointly rehashed files stay invalid.
         let mut tampered_legacy = legacy.clone();
         tampered_legacy.capsule_manifest_hash = format!("blake3:{}", "d".repeat(64));
@@ -672,7 +792,7 @@ mod tests {
             acceptance_receipt_path(root.path(), &execution_id, &snapshot.snapshot_id);
         let mut tampered_receipt: LocalAcceptanceReceiptV1 = read_json(&receipt_path).unwrap();
         tampered_receipt.envelope_id = tampered_envelope.envelope_id;
-        tampered_receipt.mac = format!("blake3:{}", "0".repeat(64));
+        tampered_receipt.authenticator = format!("blake3:{}", "0".repeat(64));
         write_json(&receipt_path, &tampered_receipt).unwrap();
 
         let error =
