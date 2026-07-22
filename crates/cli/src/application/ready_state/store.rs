@@ -6,6 +6,7 @@
 //! target and every immutable cache independently. Identity components are
 //! sanitized so untrusted values cannot escape the root.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,6 +17,23 @@ use snapshot::{
     ARTIFACT_ENVELOPE_V1_FILENAME, ArtifactEnvelopeV1, ReadyStateManifest,
     SNAPSHOT_MANIFEST_V1_FILENAME, SnapshotManifestV1,
 };
+
+const ACCEPTANCE_CATALOG_SCHEMA: &str = "ato.snapshot-acceptance-catalog/v1";
+const ACCEPTANCE_CATALOG_FILENAME: &str = "acceptance-catalog-v1.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptanceCatalogV1 {
+    schema: String,
+    execution_id: ExecutionId,
+    entries: BTreeMap<String, AcceptedCatalogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AcceptedCatalogEntry {
+    envelope_id: String,
+}
 
 /// Sanitize a `blake3:<hex>`-style id into one safe path component (hex/dash
 /// only); anything else collapses to `_`.
@@ -130,16 +148,20 @@ impl V1StagingArtifact {
         write_json(&self.dir.join(ARTIFACT_ENVELOPE_V1_FILENAME), envelope)?;
         let final_dir = snapshot_dir(root, &snapshot.execution_id, &snapshot.snapshot_id);
         if final_dir.exists() {
-            let existing = load_v1_snapshot(root, &snapshot.execution_id, &snapshot.snapshot_id)?
-                .ok_or_else(|| {
-                anyhow::anyhow!("existing Snapshot v1 directory is incomplete")
-            })?;
+            let existing = load_v1_snapshot_with_expected_envelope(
+                root,
+                &snapshot.execution_id,
+                &snapshot.snapshot_id,
+                &envelope.envelope_id,
+            )?
+            .ok_or_else(|| anyhow::anyhow!("existing Snapshot v1 directory is incomplete"))?;
             if existing.legacy_manifest != *legacy
                 || existing.snapshot_manifest != *snapshot
                 || existing.envelope != *envelope
             {
                 anyhow::bail!("immutable Snapshot v1 directory already contains different data");
             }
+            record_accepted_envelope(root, snapshot, envelope)?;
             return Ok(final_dir);
         }
         if let Some(parent) = final_dir.parent() {
@@ -153,6 +175,7 @@ impl V1StagingArtifact {
             )
         })?;
         self.committed = true;
+        record_accepted_envelope(root, snapshot, envelope)?;
         Ok(final_dir)
     }
 }
@@ -176,10 +199,24 @@ pub(crate) fn open_store_at_artifact_dir(artifact_dir: &Path) -> Result<CasStore
     CasStore::open(&dir).with_context(|| format!("open CapsuleFS store at {}", dir.display()))
 }
 
+#[cfg(test)]
 pub(crate) fn load_v1_snapshot(
     root: &Path,
     execution_id: &ExecutionId,
     snapshot_id: &str,
+) -> Result<Option<StoredSnapshotV1>> {
+    let catalog = load_acceptance_catalog(root, execution_id)?;
+    let Some(expected) = catalog.entries.get(snapshot_id) else {
+        return Ok(None);
+    };
+    load_v1_snapshot_with_expected_envelope(root, execution_id, snapshot_id, &expected.envelope_id)
+}
+
+fn load_v1_snapshot_with_expected_envelope(
+    root: &Path,
+    execution_id: &ExecutionId,
+    snapshot_id: &str,
+    expected_envelope_id: &str,
 ) -> Result<Option<StoredSnapshotV1>> {
     let dir = snapshot_dir(root, execution_id, snapshot_id);
     if !dir.is_dir() {
@@ -197,6 +234,9 @@ pub(crate) fn load_v1_snapshot(
     envelope
         .verify(&legacy_manifest, &snapshot_manifest)
         .map_err(anyhow::Error::new)?;
+    if envelope.envelope_id != expected_envelope_id {
+        anyhow::bail!("Snapshot v1 envelope does not match the trusted acceptance catalog");
+    }
     Ok(Some(StoredSnapshotV1 {
         artifact_dir: dir,
         legacy_manifest,
@@ -209,31 +249,63 @@ pub(crate) fn load_v1_snapshots(
     root: &Path,
     execution_id: &ExecutionId,
 ) -> Result<Vec<StoredSnapshotV1>> {
-    let execution_dir = root
-        .join("snapshots")
-        .join(safe_component(execution_id.as_str()));
-    if !execution_dir.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut ids = std::fs::read_dir(&execution_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .collect::<Vec<_>>();
-    ids.sort();
+    let catalog = load_acceptance_catalog(root, execution_id)?;
     let mut snapshots = Vec::new();
-    for id in ids {
-        let path = execution_dir.join(&id);
-        let snapshot_id =
-            match read_json::<SnapshotManifestV1>(&path.join(SNAPSHOT_MANIFEST_V1_FILENAME)) {
-                Ok(manifest) => manifest.snapshot_id,
-                Err(_) => continue,
-            };
-        if let Ok(Some(snapshot)) = load_v1_snapshot(root, execution_id, &snapshot_id) {
+    for (snapshot_id, expected) in catalog.entries {
+        if let Ok(Some(snapshot)) = load_v1_snapshot_with_expected_envelope(
+            root,
+            execution_id,
+            &snapshot_id,
+            &expected.envelope_id,
+        ) {
             snapshots.push(snapshot);
         }
     }
     Ok(snapshots)
+}
+
+fn acceptance_catalog_path(root: &Path, execution_id: &ExecutionId) -> PathBuf {
+    root.join("snapshots")
+        .join(safe_component(execution_id.as_str()))
+        .join(ACCEPTANCE_CATALOG_FILENAME)
+}
+
+fn load_acceptance_catalog(root: &Path, execution_id: &ExecutionId) -> Result<AcceptanceCatalogV1> {
+    let path = acceptance_catalog_path(root, execution_id);
+    if !path.exists() {
+        return Ok(AcceptanceCatalogV1 {
+            schema: ACCEPTANCE_CATALOG_SCHEMA.to_string(),
+            execution_id: execution_id.clone(),
+            entries: BTreeMap::new(),
+        });
+    }
+    let catalog: AcceptanceCatalogV1 = read_json(&path)?;
+    if catalog.schema != ACCEPTANCE_CATALOG_SCHEMA || &catalog.execution_id != execution_id {
+        anyhow::bail!("invalid Snapshot v1 acceptance catalog identity");
+    }
+    Ok(catalog)
+}
+
+fn record_accepted_envelope(
+    root: &Path,
+    snapshot: &SnapshotManifestV1,
+    envelope: &ArtifactEnvelopeV1,
+) -> Result<()> {
+    let mut catalog = load_acceptance_catalog(root, &snapshot.execution_id)?;
+    let entry = AcceptedCatalogEntry {
+        envelope_id: envelope.envelope_id.clone(),
+    };
+    if let Some(existing) = catalog.entries.get(&snapshot.snapshot_id)
+        && existing != &entry
+    {
+        anyhow::bail!("trusted acceptance catalog already pins a different envelope");
+    }
+    catalog.entries.insert(snapshot.snapshot_id.clone(), entry);
+    let path = acceptance_catalog_path(root, &snapshot.execution_id);
+    let pending = path.with_extension(format!("pending-{}", std::process::id()));
+    write_json(&pending, &catalog)?;
+    std::fs::rename(&pending, &path)
+        .with_context(|| format!("publish trusted acceptance catalog {}", path.display()))
 }
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
@@ -376,5 +448,76 @@ mod tests {
                 .is_none(),
             "Capsule v1 must not overwrite the legacy manifest-keyed store"
         );
+    }
+
+    #[test]
+    fn rehashed_acceptance_escalation_is_rejected_by_catalog_anchor() {
+        use capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA;
+        use snapshot::{
+            ArtifactAcceptanceStatus, BuildLayers, BuildReadyStateInput, FakeSnapshotBackend,
+            RestoreContract, SanitizerContract, SnapshotBackend, migrate_legacy_manifest,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let execution_id = ExecutionId::new(format!("blake3:{}", "3".repeat(64))).unwrap();
+        let backend = FakeSnapshotBackend::new();
+        let staging = V1StagingArtifact::create(root.path(), &execution_id).unwrap();
+        let cas = staging.open_store().unwrap();
+        let legacy = backend
+            .build_ready_state(BuildReadyStateInput {
+                store: &cas,
+                capsule_manifest_hash: format!("blake3:{}", "c".repeat(64)),
+                runner_class: None,
+                surface_requirement: None,
+                layers: BuildLayers {
+                    rootfs: b"rootfs".to_vec(),
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: vec![1; 64],
+                    memory: vec![2; 4096],
+                },
+                restore_contract: RestoreContract::default(),
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(execution_id.to_string()),
+                execution_identity_schema: Some(EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+                supervisor: None,
+            })
+            .unwrap()
+            .manifest;
+        let snapshot = migrate_legacy_manifest(
+            &legacy,
+            execution_id.clone(),
+            backend.snapshot_compatibility_contract().unwrap(),
+        )
+        .unwrap();
+        let accepted = ArtifactEnvelopeV1::accepted(&legacy, &snapshot).unwrap();
+        staging
+            .commit(root.path(), &legacy, &snapshot, &accepted)
+            .unwrap();
+
+        // Model a trusted catalog that recorded the pre-acceptance envelope.
+        // Replacing the artifact with a self-consistent accepted envelope and
+        // recomputing its id must not change that external expectation.
+        let mut quarantined = accepted.clone();
+        quarantined.acceptance.status = ArtifactAcceptanceStatus::Quarantined;
+        quarantined.envelope_id = quarantined.compute_envelope_id().unwrap();
+        let mut catalog = load_acceptance_catalog(root.path(), &execution_id).unwrap();
+        catalog.entries.insert(
+            snapshot.snapshot_id.clone(),
+            AcceptedCatalogEntry {
+                envelope_id: quarantined.envelope_id,
+            },
+        );
+        write_json(
+            &acceptance_catalog_path(root.path(), &execution_id),
+            &catalog,
+        )
+        .unwrap();
+
+        let error =
+            load_v1_snapshot(root.path(), &execution_id, &snapshot.snapshot_id).unwrap_err();
+        assert!(error.to_string().contains("trusted acceptance catalog"));
     }
 }
