@@ -437,7 +437,22 @@ impl ExecutionContractV1 {
                 return Err(ExecutionContractError::UnresolvedField(field));
             }
         }
-        if self.launch.argv.is_empty() || self.launch.argv.iter().any(|value| value.is_empty()) {
+        for (field, value) in [
+            ("source.kind", self.source.kind.as_str()),
+            ("target.os", self.target.os.as_str()),
+            ("target.architecture", self.target.architecture.as_str()),
+            ("target.abi", self.target.abi.as_str()),
+            ("runtime.kind", self.runtime.kind.as_str()),
+            (
+                "guest_surface.protocol",
+                self.guest_surface.protocol.as_str(),
+            ),
+        ] {
+            validate_ascii_identifier(field, value)?;
+        }
+        if self.launch.argv.is_empty()
+            || self.launch.argv.iter().any(|value| value.trim().is_empty())
+        {
             return Err(ExecutionContractError::UnresolvedField("launch.argv"));
         }
         if self
@@ -452,7 +467,7 @@ impl ExecutionContractV1 {
             .target
             .observable_features
             .iter()
-            .any(|(name, value)| name.trim().is_empty() || value.trim().is_empty())
+            .any(|(name, value)| !is_ascii_identifier(name) || value.trim().is_empty())
         {
             return Err(ExecutionContractError::UnresolvedField(
                 "target.observable_features",
@@ -474,13 +489,16 @@ impl ExecutionContractV1 {
                 .iter()
                 .map(|item| item.name.as_str()),
         )?;
-        validate_sorted_strings("launch.secret_bindings", &self.launch.secret_bindings)?;
+        validate_sorted_identifiers("launch.secret_bindings", &self.launch.secret_bindings)?;
         validate_sorted_digests(
             "filesystem.readonly_layers",
             &self.filesystem.readonly_layers,
         )?;
-        validate_sorted_strings("filesystem.writable_paths", &self.filesystem.writable_paths)?;
-        validate_sorted_strings("guest_surface.features", &self.guest_surface.features)?;
+        validate_sorted_ascii_strings(
+            "filesystem.writable_paths",
+            &self.filesystem.writable_paths,
+        )?;
+        validate_sorted_identifiers("guest_surface.features", &self.guest_surface.features)?;
         validate_named_list(
             "external_state",
             self.external_state.iter().map(|item| item.name.as_str()),
@@ -565,7 +583,7 @@ fn validate_named_list<'a>(
     values: impl Iterator<Item = &'a str>,
 ) -> Result<(), ExecutionContractError> {
     let values = values.collect::<Vec<_>>();
-    if values.iter().any(|value| value.is_empty())
+    if values.iter().any(|value| !is_ascii_identifier(value))
         || values.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(ExecutionContractError::NonCanonicalList(field));
@@ -573,18 +591,53 @@ fn validate_named_list<'a>(
     Ok(())
 }
 
-fn validate_sorted_strings(
+fn validate_sorted_identifiers(
     field: &'static str,
     values: &[String],
 ) -> Result<(), ExecutionContractError> {
     let unique = values.iter().collect::<BTreeSet<_>>();
     if unique.len() != values.len()
-        || values.iter().any(|value| value.is_empty())
+        || values.iter().any(|value| !is_ascii_identifier(value))
         || values.windows(2).any(|pair| pair[0] >= pair[1])
     {
         return Err(ExecutionContractError::NonCanonicalList(field));
     }
     Ok(())
+}
+
+fn validate_sorted_ascii_strings(
+    field: &'static str,
+    values: &[String],
+) -> Result<(), ExecutionContractError> {
+    if values.iter().any(|value| {
+        value.trim().is_empty()
+            || !value
+                .bytes()
+                .all(|byte| byte == b' ' || byte.is_ascii_graphic())
+    }) || values.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(ExecutionContractError::NonCanonicalList(field));
+    }
+    Ok(())
+}
+
+fn validate_ascii_identifier(
+    field: &'static str,
+    value: &str,
+) -> Result<(), ExecutionContractError> {
+    if !is_ascii_identifier(value) {
+        return Err(ExecutionContractError::UnresolvedField(field));
+    }
+    Ok(())
+}
+
+fn is_ascii_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric()
+                || byte == b'_'
+                || (index > 0 && b"._:/@+-".contains(&byte))
+        })
 }
 
 fn ensure_values<const N: usize>(
@@ -888,6 +941,25 @@ mod tests {
         let mut value = serde_json::to_value(sample_contract()).unwrap();
         value["runtime"]["digest"] = serde_json::json!("unknown");
         assert!(serde_json::from_value::<ExecutionContractV1>(value).is_err());
+    }
+
+    #[test]
+    fn canonical_validation_rejects_blank_and_non_ascii_sorted_identifiers() {
+        let mut blank = sample_contract();
+        blank.dependencies[0].name = " ".to_string();
+        assert!(matches!(
+            blank.validate(),
+            Err(ExecutionContractError::NonCanonicalList("dependencies"))
+        ));
+
+        let mut unicode = sample_contract();
+        unicode.launch.secret_bindings = vec!["TOKEN".to_string(), "é_TOKEN".to_string()];
+        assert!(matches!(
+            unicode.validate(),
+            Err(ExecutionContractError::NonCanonicalList(
+                "launch.secret_bindings"
+            ))
+        ));
     }
 
     #[test]
