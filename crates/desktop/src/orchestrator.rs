@@ -1965,11 +1965,7 @@ pub(crate) fn spawn_installed_launch(install_profile_key: &str) -> Result<Instal
     // this, killing only the wrapper PID orphans the runtime on its resolved
     // port (the AddrInUse-on-retry / leftover-listener failure mode). See
     // `crate::window::launch_window::kill_installed_launch_process_group`.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    runner::mark_process_group_leader(&mut cmd);
     let child = cmd
         .spawn()
         .with_context(|| format!("spawn `ato launch {install_profile_key} -y`"))?;
@@ -2071,11 +2067,7 @@ pub(crate) fn spawn_desktop_runner_run(
     // Own process-group leader so the Desktop can reap the run child (and any
     // container it spawned) with one group-directed signal — mirrors
     // `spawn_runner_command`.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    runner::mark_process_group_leader(&mut cmd);
     let child = cmd
         .spawn()
         .with_context(|| format!("spawn `ato run {source}` (Desktop Runner)"))?;
@@ -2140,11 +2132,7 @@ fn spawn_runner_command(args: &[&str], log_path: &Path, context: &str) -> Result
     // Own process-group leader so the Desktop can reap the whole agent (and any
     // sandboxed runs it spawns) with one group-directed signal — mirrors
     // `spawn_installed_launch`.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    runner::mark_process_group_leader(&mut cmd);
     let child = cmd.spawn().with_context(|| format!("spawn `{context}`"))?;
     Ok(RunnerChild {
         child,

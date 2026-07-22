@@ -98,6 +98,29 @@ pub fn terminate_process_group(pid: u32) -> Result<(), HostError> {
     }
 }
 
+/// Configure `cmd` so its spawned child becomes its own **process-group
+/// leader** (`pgid == its pid`). A child detached by that child inherits the
+/// group, so a single [`terminate_process_group`] on the child's pid later
+/// reaps the whole tree — the wrapper and anything it started — even after the
+/// wrapper itself has exited.
+///
+/// No-op on non-Unix: Windows has no process groups, and its teardown walks the
+/// process tree via `taskkill /T` instead. This is the spawn-side pair of
+/// [`terminate_process_group`]; [`NativeHost::spawn`] applies it for you, and it
+/// is exposed for callers that build their own `Command` yet want the same
+/// group-reap guarantee.
+pub fn mark_process_group_leader(cmd: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+    }
+}
+
 /// Resolve `name` against the `PATH` environment variable, honoring the
 /// platform executable extension search on Windows (`PATHEXT`). The default
 /// [`NativeHost`] resolver for hosts that ship ato binaries on `PATH`.
@@ -224,13 +247,9 @@ impl RunnerHost for NativeHost {
             cmd.env(key, value);
         }
         cmd.no_console_window();
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // Make the child its own process-group leader so terminate_group can
-            // reap the whole tree with one negative-pid signal.
-            cmd.process_group(0);
-        }
+        // Make the child its own process-group leader so terminate_group can
+        // reap the whole tree with one negative-pid signal.
+        mark_process_group_leader(&mut cmd);
         match &spec.output {
             OutputSink::LogFile(path) => {
                 // Redirect to a file, not a pipe: a long-running foreground

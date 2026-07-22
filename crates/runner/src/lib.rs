@@ -35,6 +35,9 @@ pub mod supervisor;
 pub mod surface_timing;
 
 pub use backend::{ChildId, HostError, ManagedChild, OutputSink, RunnerHost, SpawnSpec};
-pub use os::{CommandNoWindowExt, NativeChild, NativeHost, resolve_on_path, terminate_process_group};
+pub use os::{
+    CommandNoWindowExt, NativeChild, NativeHost, mark_process_group_leader, resolve_on_path,
+    terminate_process_group,
+};
 pub use session::{SessionId, SessionState, SessionSupervisor};
 pub use supervisor::ProcessSupervisor;
