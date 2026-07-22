@@ -200,6 +200,14 @@ zod on the api side, serde structs on the builder side. All requests carry
 `X-Ato-Lease-Token` (§1.1) — including the GET. All bodies are `.strict()` /
 `deny_unknown_fields` and reject a body-level `lease_token` key.
 
+**Null policy — optional fields are encoded by omission.** An absent optional
+field is OMITTED from the JSON entirely; explicit `null` is NOT a legal
+encoding of absence and is a schema reject on BOTH sides (the api's zod
+`.optional()` admits only an absent key, never `null`; the Rust `Option`
+fields reject `null` at parse). Emitters never serialize `null`. This is a
+mandatory test on both sides, mirroring the strict-body `lease_token` test
+(§1.1).
+
 ### 3.1 Claim response extension
 
 `POST /v1/capsule-snapshots/jobs/claim` — request body unchanged
@@ -420,6 +428,12 @@ NOT a pinned field list:
   ONLY the envelope (literal + "is an object"), never individual payload
   keys. Do NOT pin pre-Gate-0 field lists — the earlier 9-key required core
   from the seam round is superseded and its pinning tests are removed.
+- The envelope is **strict on BOTH sides** (api `.strict()`, Rust
+  `deny_unknown_fields`): payload keys live INSIDE `receipt`, never beside
+  it — an unknown key next to `receipt_schema`/`receipt` (e.g.
+  `execution_id`) is a schema reject. Strictness on the outer acceptance
+  body does not extend to nested objects by itself, so the envelope pins its
+  own strictness (mandatory test on both sides).
 
 Response `200 { "candidate_id": "cand_01J1Z0...", "status": "accepted" }`
 (acceptance status enum; the candidate's own status moves to
@@ -437,10 +451,11 @@ Header: `X-Ato-Lease-Token`. Fencing: FENCING-4. Epoch: none (§1.2).
 { "agent_id": "builder-sugamo-1",
   "submission_attempt_id": "subatt_01J1XY...",
   "worker_claim_id": "claim_01J1XZ...",
-  "reason": "attempt_ended",
-  "failure_stage": null,
-  "failure_reason": null }
+  "reason": "attempt_ended" }
 ```
+
+(The absent optionals `failure_stage`/`failure_reason` are omitted — never
+`null`; explicit `null` is a schema reject per the §3 null policy.)
 
 | Field | Type | Req | Semantics |
 |---|---|---|---|
@@ -690,6 +705,12 @@ is a seam failure.
 reject (tested). Control GET query params: `submission_attempt_id`,
 `worker_claim_id`, `observed_capture_epoch`.
 
+**Null policy** (§3): optional fields are OMITTED when absent. An explicit
+`null` on any optional — control response `candidate_id`/`hold_expires_at`,
+acceptance `acceptance_receipt`/`failure_reason`, terminal ack
+`failure_stage`/`failure_reason` — is a schema reject on BOTH sides
+(mandatory test, mirroring the `lease_token` strict-body test).
+
 **Epoch fields**: `observed_capture_epoch` (poll request, ≥ 0),
 `server_capture_epoch` (poll response, ≥ 0), `capture_epoch` (candidate
 report + acceptance bodies, ≥ 1, exact-match vs candidate). No epoch field on
@@ -716,7 +737,8 @@ Candidate report response: `candidate_id`, `status`.
 **Candidate acceptance** (`POST .../candidates/:candidate_id/acceptance`):
 `capture_epoch`, `status` (`"accepted"|"rejected"`), `acceptance_receipt`
 (envelope: `receipt_schema` literal `"ato.snapshot-acceptance/v1"` +
-`receipt` opaque object), `failure_reason`.
+`receipt` opaque object; the envelope is STRICT on both sides — an unknown
+key beside those two rejects), `failure_reason`.
 Acceptance response: `candidate_id`, `status`.
 
 **Wizard terminal ack**: `agent_id`, `reason`
@@ -818,3 +840,25 @@ D1–D3:
   `{ receipt_schema: "ato.snapshot-acceptance/v1", receipt: <opaque
   object> }`; the payload schema arrives as a shared type in ato#1088; both
   sides validate only the envelope, and the 9-key pinning tests are removed.
+
+Post-review seam fixes:
+
+- **[Seam fix] Explicit `null` is not absence.** The §3.8 example carried
+  `"failure_stage": null, "failure_reason": null` and got TWO verdicts on
+  the seam: the Rust side parsed the nulls into its `Option`s while the
+  api's zod `.optional()` rejects explicit `null` (it admits only an absent
+  key) — a builder conforming to the printed example would be 400'd.
+  Pinned: optionals are encoded by omission (§3 null policy), the example
+  drops the nulls, the Rust optionals (control response
+  `candidate_id`/`hold_expires_at`, acceptance
+  `acceptance_receipt`/`failure_reason`, terminal ack
+  `failure_stage`/`failure_reason`) now reject explicit `null` at parse,
+  and the mandatory explicit-null test exists on both sides.
+- **[Seam fix] Acceptance-receipt envelope is strict on both sides.**
+  `deny_unknown_fields` on the outer acceptance body does not propagate to
+  nested serde structs, so the Rust envelope accepted
+  `{receipt_schema, receipt, extra}` that the api's `.strict()` envelope
+  rejects — a strict-body divergence inside a builder→api request body
+  (§1.1/§3 mandate all bodies strict). The envelope now pins its own
+  strictness (`deny_unknown_fields`), with the unknown-envelope-key test
+  mirrored on the Rust side.
