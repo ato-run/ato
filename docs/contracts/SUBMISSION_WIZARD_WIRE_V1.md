@@ -45,9 +45,10 @@ Grounding conventions (from the live codebase, do not deviate):
   `s.encode_utf16().count()`, never `chars().count()`, so a string gets one
   verdict on both sides; an astral scalar counts as 2. This is behavioral for
   the charset-unrestricted bounds (hold-ready `builder_id`/`slot_id`/
-  `session_id` ≤ 120, `failure_reason` ≤ 2000, and the §7 declared `path`
-  ≤ 200); it is moot for the ASCII-only name/schema bounds but applied
-  uniformly.
+  `session_id` ≤ 120, terminal-ack `agent_id` ≤ 120, candidate-report
+  `execution_id`/`snapshot_id` ≤ 200 and `artifact_location` ≤ 500,
+  `failure_reason` ≤ 2000, and the §7 declared `path` ≤ 200); it is moot for
+  the ASCII-only name/schema bounds but applied uniformly.
 - Errors are `{ "error": "snake_code", "message": "..." }` (403/404/409/400).
 - Builder auth is the existing static Bearer `SNAPSHOT_BUILDER_AGENT_TOKEN`
   via `requireBuilder()` — unchanged; fencing is *in addition to* auth.
@@ -374,9 +375,9 @@ polling, and only a terminal condition goes through the ack §3.8).
 |---|---|---|---|
 | `candidate_id` | string `cand_` | yes | must equal the id the control channel delivered for this epoch (server cross-checks epoch↔candidate 1:1) |
 | `capture_epoch` | int ≥ 1 | yes | the epoch being reported; must exactly match the candidate's epoch (a report for a superseded epoch is rejected `409 fenced`) |
-| `execution_id` | string | yes | **the canonical identity** of the captured execution (see §6 naming rule) |
-| `snapshot_id` | string | yes | sealed snapshot produced for this candidate |
-| `artifact_location` | string | yes | same semantics as the existing sealed-ack `artifact_location` |
+| `execution_id` | string, 1..200 | yes | **the canonical identity** of the captured execution (see §6 naming rule) |
+| `snapshot_id` | string, 1..200 | yes | sealed snapshot produced for this candidate |
+| `artifact_location` | string, 1..500 | yes | same semantics as the existing sealed-ack `artifact_location` |
 | `source_lost` | boolean | yes | `true` ⇒ the live session died/was destroyed during or after capture (design doc ADR-012 `accepting_source_lost`); the candidate is still reportable but no further captures can come from this claim without a fresh launch |
 
 Response `200 { "candidate_id": "cand_01J1Z0...", "status": "reported" }`
@@ -459,7 +460,7 @@ Header: `X-Ato-Lease-Token`. Fencing: FENCING-4. Epoch: none (§1.2).
 
 | Field | Type | Req | Semantics |
 |---|---|---|---|
-| `agent_id` | string (existing bounds) | yes | as the existing ack |
+| `agent_id` | string 1..120 (existing bounds) | yes | as the existing ack |
 | `reason` | terminal ack reason enum (§2): `"discarded" \| "lease_expired" \| "build_failed" \| "acceptance_failed_source_lost" \| "attempt_ended"` | yes | the ONLY legal job-terminal reasons for a wizard job. `discarded` = server directed discard; `lease_expired` = builder observed its own lease death and is reporting teardown; `build_failed` = build/boot never reached holding; `acceptance_failed_source_lost` = ADR-012 terminal branch (source lost AND acceptance failed); `attempt_ended` = orderly end of the interactive attempt (publisher done / session ended) |
 | `failure_stage` | failure_stage enum (§2: stages + `"capture_seal"` + `"acceptance"`) | optional | diagnostic refinement of a failure reason |
 | `failure_reason` | string ≤ 2000 | optional | as existing (builder truncates at 1800) |
