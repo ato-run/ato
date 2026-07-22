@@ -40,7 +40,10 @@ use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
-use capsule::execution_contract::ExecutionId;
+use capsule::execution_contract::{
+    ContentDigest, ExecutionContractV1, ExecutionId, ObservedExecutionContractV1,
+    observe_source_tree_digest,
+};
 use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsule::foundation::types::ready_state::{
@@ -212,36 +215,59 @@ struct ClaimedJob {
     execution_identity_schema: Option<String>,
     #[serde(default)]
     execution_id: Option<String>,
+    /// The complete identity-bearing contract. v1 jobs are rejected unless
+    /// schema, id, and contract are all present and mutually consistent.
+    #[serde(default)]
+    execution_contract: Option<ExecutionContractV1>,
 }
 
 fn default_job_kind() -> String {
     "recipe".into()
 }
 
+type ResolvedJobExecutionIdentity = (String, Option<String>, Option<ExecutionContractV1>);
+type JobStageFailure = (String, String);
+
 fn resolve_job_execution_identity(
     job: &ClaimedJob,
     legacy_execution_id: String,
-) -> std::result::Result<(String, Option<String>), (String, String)> {
+) -> std::result::Result<ResolvedJobExecutionIdentity, JobStageFailure> {
     match (
         job.execution_identity_schema.as_deref(),
         job.execution_id.as_deref(),
+        job.execution_contract.as_ref(),
     ) {
-        (None, None) => Ok((legacy_execution_id, None)),
-        (Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA), Some(id)) => {
+        (None, None, None) => Ok((legacy_execution_id, None, None)),
+        (
+            Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA),
+            Some(id),
+            Some(contract),
+        ) => {
             let id = ExecutionId::new(id.to_string())
                 .map_err(|error| ("artifact_metadata".to_string(), error.to_string()))?;
+            let computed = contract
+                .compute_execution_id()
+                .map_err(|error| ("artifact_metadata".to_string(), error.to_string()))?;
+            if computed != id {
+                return Err((
+                    "artifact_metadata".to_string(),
+                    "claimed execution_id does not match execution_contract".to_string(),
+                ));
+            }
             Ok((
                 id.to_string(),
                 Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+                Some(contract.clone()),
             ))
         }
-        (Some(other), _) => Err((
+        (Some(other), _, _) => Err((
             "artifact_metadata".to_string(),
             format!("unsupported execution identity schema {other:?}"),
         )),
         _ => Err((
             "artifact_metadata".to_string(),
-            "execution_identity_schema and execution_id must be supplied together".to_string(),
+            "execution_identity_schema, execution_id, and execution_contract must be supplied together"
+                .to_string(),
         )),
     }
 }
@@ -694,6 +720,11 @@ struct ProducedBuild {
     /// (what executes), never a rebuild-inputs / job identity.
     execution_id: String,
     execution_identity_schema: Option<String>,
+    execution_contract: Option<ExecutionContractV1>,
+    observed_source_digest: Option<ContentDigest>,
+    observed_network_policy_digest: Option<ContentDigest>,
+    observed_capability_policy_digest: Option<ContentDigest>,
+    observed_filesystem_policy_digest: Option<ContentDigest>,
     capsule_manifest_hash: String,
     surface_requirement: Option<SessionSurfaceRequirement>,
     /// Explicit restore endpoints sealed into the manifest's restore contract.
@@ -730,6 +761,127 @@ struct ProducedBuild {
     /// stacks need a larger budget than the env default); other lanes leave it
     /// `None` and inherit the backend env/default. Clamped in the backend.
     boot_timeout_s: Option<u32>,
+}
+
+fn finalize_produced_execution_identity(
+    produced: &ProducedBuild,
+) -> std::result::Result<(String, Option<String>), (String, String)> {
+    let Some(contract) = produced.execution_contract.clone() else {
+        return Ok((
+            produced.execution_id.clone(),
+            produced.execution_identity_schema.clone(),
+        ));
+    };
+    let fail = |message: String| ("artifact_metadata".to_string(), message);
+    let source_digest = produced.observed_source_digest.ok_or_else(|| {
+        fail("v1 build did not produce observed source digest evidence".to_string())
+    })?;
+    let network_policy_digest = produced.observed_network_policy_digest.ok_or_else(|| {
+        fail("v1 build did not produce observed network policy evidence".to_string())
+    })?;
+    let capability_policy_digest = produced.observed_capability_policy_digest.ok_or_else(|| {
+        fail("v1 build did not produce observed capability policy evidence".to_string())
+    })?;
+    let filesystem_policy_digest = produced.observed_filesystem_policy_digest.ok_or_else(|| {
+        fail("v1 build did not produce observed filesystem policy evidence".to_string())
+    })?;
+    finalize_remote_execution_contract(
+        contract,
+        &produced.execution_id,
+        &produced.rootfs,
+        source_digest,
+        network_policy_digest,
+        capability_policy_digest,
+        filesystem_policy_digest,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_remote_execution_contract(
+    contract: ExecutionContractV1,
+    claimed_execution_id: &str,
+    rootfs: &[u8],
+    source_digest: ContentDigest,
+    network_policy_digest: ContentDigest,
+    capability_policy_digest: ContentDigest,
+    filesystem_policy_digest: ContentDigest,
+) -> std::result::Result<(String, Option<String>), (String, String)> {
+    let fail = |message: String| ("artifact_metadata".to_string(), message);
+    if contract.dependencies.len() > 1 || contract.build_outputs.len() > 1 {
+        return Err(fail(
+            "v1 remote builder currently requires at most one aggregate dependency output and one rootfs build output"
+                .to_string(),
+        ));
+    }
+    let dependency_output_digests = contract
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.name.clone(),
+                ContentDigest::hash(dependency.output_digest.algorithm(), rootfs),
+            )
+        })
+        .collect();
+    let build_output_digests = contract
+        .build_outputs
+        .iter()
+        .map(|output| {
+            (
+                output.name.clone(),
+                ContentDigest::hash(output.digest.algorithm(), rootfs),
+            )
+        })
+        .collect();
+    if contract.filesystem.readonly_layers.len() != 1 {
+        return Err(fail(format!(
+            "v1 remote builder produced one immutable rootfs layer, but contract declares {} layers",
+            contract.filesystem.readonly_layers.len()
+        )));
+    }
+    let observed = ObservedExecutionContractV1 {
+        source_digest,
+        runtime_digest: ContentDigest::hash(contract.runtime.digest.algorithm(), rootfs),
+        dependency_output_digests,
+        build_output_digests,
+        filesystem_view_digest: ContentDigest::hash(
+            contract.filesystem.view_digest.algorithm(),
+            rootfs,
+        ),
+        readonly_layer_digests: vec![ContentDigest::hash(
+            contract.filesystem.readonly_layers[0].algorithm(),
+            rootfs,
+        )],
+        network_policy_digest,
+        capability_policy_digest,
+        filesystem_policy_digest,
+    };
+    let finalized = contract
+        .finalize_observation(&observed)
+        .map_err(|error| fail(format!("v1 build observation mismatch: {error}")))?;
+    if finalized.execution_id().as_str() != claimed_execution_id {
+        return Err(fail(
+            "v1 finalized execution_id differs from claimed execution_id".to_string(),
+        ));
+    }
+    Ok((
+        finalized.execution_id().to_string(),
+        Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA.to_string()),
+    ))
+}
+
+fn observed_policy_digest(
+    manifest: &toml::Value,
+    keys: &[&str],
+    algorithm: capsule::execution_contract::DigestAlgorithm,
+) -> std::result::Result<ContentDigest, (String, String)> {
+    let projection = keys
+        .iter()
+        .map(|key| ((*key).to_string(), manifest.get(*key).cloned()))
+        .collect::<BTreeMap<_, _>>();
+    let bytes = serde_jcs::to_vec(&projection)
+        .map_err(|error| ("artifact_metadata".to_string(), error.to_string()))?;
+    Ok(ContentDigest::hash(algorithm, &bytes))
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -866,8 +1018,41 @@ fn produce_recipe_build(
         capability_policy_hash: None,
     };
     let declared_execution_id = envelope.declared_execution_id();
-    let (execution_id, execution_identity_schema) =
+    let (execution_id, execution_identity_schema, execution_contract) =
         resolve_job_execution_identity(job, declared_execution_id)?;
+
+    let parsed_manifest: toml::Value =
+        toml::from_str(&toml_text).map_err(|error| fail("manifest", error.to_string()))?;
+    let (
+        observed_source_digest,
+        observed_network_policy_digest,
+        observed_capability_policy_digest,
+        observed_filesystem_policy_digest,
+    ) = if let Some(contract) = execution_contract.as_ref() {
+        let source_digest =
+            observe_source_tree_digest(&src, &[], contract.source.digest.algorithm())
+                .map_err(|error| fail("artifact_metadata", error.to_string()))?;
+        (
+            Some(source_digest),
+            Some(observed_policy_digest(
+                &parsed_manifest,
+                &["network"],
+                contract.policy.network_digest.algorithm(),
+            )?),
+            Some(observed_policy_digest(
+                &parsed_manifest,
+                &["permissions", "capabilities", "gpu"],
+                contract.policy.capability_digest.algorithm(),
+            )?),
+            Some(observed_policy_digest(
+                &parsed_manifest,
+                &["filesystem", "state"],
+                contract.policy.filesystem_digest.algorithm(),
+            )?),
+        )
+    } else {
+        (None, None, None, None)
+    };
 
     // 3. Build the bootable rootfs (Docker→ext4; commands run only in Docker/guest).
     let ext4 = jobdir.join("rootfs.ext4");
@@ -919,6 +1104,11 @@ fn produce_recipe_build(
         healthcheck: spec.healthcheck.clone(),
         execution_id,
         execution_identity_schema,
+        execution_contract,
+        observed_source_digest,
+        observed_network_policy_digest,
+        observed_capability_policy_digest,
+        observed_filesystem_policy_digest,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
         surface_requirement: target.surface.clone(),
         endpoints: Vec::new(),
@@ -1082,8 +1272,15 @@ fn produce_import_build(
     // DESCRIPTOR hash over that input-only envelope (an import has no
     // capsule.toml — a descriptor hash, not a manifest hash).
     let legacy_execution_id = import_execution_id(&outcome.plan, &outcome.receipt);
-    let (execution_id, execution_identity_schema) =
+    let (execution_id, execution_identity_schema, execution_contract) =
         resolve_job_execution_identity(job, legacy_execution_id)?;
+    if execution_contract.is_some() {
+        return Err(fail(
+            "artifact_metadata",
+            "Capsule v1 execution contracts are currently finalized only by the recipe lane"
+                .to_string(),
+        ));
+    }
     let capsule_manifest_hash = import_descriptor_blake3(&outcome.receipt);
     let docker_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
         fail(
@@ -1141,6 +1338,11 @@ fn produce_import_build(
         healthcheck,
         execution_id,
         execution_identity_schema,
+        execution_contract: None,
+        observed_source_digest: None,
+        observed_network_policy_digest: None,
+        observed_capability_policy_digest: None,
+        observed_filesystem_policy_digest: None,
         capsule_manifest_hash,
         surface_requirement,
         endpoints,
@@ -1213,8 +1415,15 @@ fn produce_oci_image_import(
     // digest (a registry import has no capsule.toml — a descriptor hash, not a
     // manifest hash; two tags of the same image share it).
     let legacy_execution_id = oci_import_execution_id(&outcome.plan, &outcome.receipt);
-    let (execution_id, execution_identity_schema) =
+    let (execution_id, execution_identity_schema, execution_contract) =
         resolve_job_execution_identity(job, legacy_execution_id)?;
+    if execution_contract.is_some() {
+        return Err(fail(
+            "artifact_metadata",
+            "Capsule v1 execution contracts are currently finalized only by the recipe lane"
+                .to_string(),
+        ));
+    }
     let capsule_manifest_hash = oci_import_descriptor_blake3(&outcome.receipt);
     let oci_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
         fail(
@@ -1258,6 +1467,11 @@ fn produce_oci_image_import(
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
         execution_identity_schema,
+        execution_contract: None,
+        observed_source_digest: None,
+        observed_network_policy_digest: None,
+        observed_capability_policy_digest: None,
+        observed_filesystem_policy_digest: None,
         capsule_manifest_hash,
         surface_requirement: None,
         endpoints: Vec::new(),
@@ -1321,8 +1535,15 @@ fn produce_compose_import(
     // over the SAME input envelope (a compose import has no capsule.toml).
     let legacy_execution_id =
         snapshot::docker_import::compose_import_execution_id(&outcome.receipt);
-    let (execution_id, execution_identity_schema) =
+    let (execution_id, execution_identity_schema, execution_contract) =
         resolve_job_execution_identity(job, legacy_execution_id)?;
+    if execution_contract.is_some() {
+        return Err(fail(
+            "artifact_metadata",
+            "Capsule v1 execution contracts are currently finalized only by the recipe lane"
+                .to_string(),
+        ));
+    }
     let capsule_manifest_hash =
         snapshot::docker_import::compose_import_descriptor_blake3(&outcome.receipt);
     let compose_import_receipt = serde_json::to_value(&outcome.receipt).map_err(|e| {
@@ -1359,6 +1580,11 @@ fn produce_compose_import(
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
         execution_identity_schema,
+        execution_contract: None,
+        observed_source_digest: None,
+        observed_network_policy_digest: None,
+        observed_capability_policy_digest: None,
+        observed_filesystem_policy_digest: None,
         capsule_manifest_hash,
         surface_requirement: None,
         // A compose import is a Web artifact — no sealed restore endpoints; the
@@ -2183,6 +2409,11 @@ fn process_job(
     // rootfs build (pre-#1002, byte-for-byte); dockerfile_import = clone + params +
     // Dockerfile import. Steps 4-7 below are SHARED and unchanged.
     let produced = produce_build(cfg, job, &jobdir)?;
+    // A v1 contract is not trusted merely because its own hash is internally
+    // consistent. Finalize it against the concrete source/policy observations
+    // and the rootfs bytes produced by this exact job before capture starts.
+    let (verified_execution_id, verified_execution_identity_schema) =
+        finalize_produced_execution_identity(&produced)?;
 
     // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
     // a supervisor spec the backend drives the whole placeholder protocol itself
@@ -2232,8 +2463,8 @@ fn process_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id),
-            execution_identity_schema: produced.execution_identity_schema,
+            execution_id: Some(verified_execution_id),
+            execution_identity_schema: verified_execution_identity_schema,
             supervisor: produced.supervisor,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
@@ -2555,6 +2786,51 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_v1_finalization_rejects_stale_rootfs_bytes() {
+        let expected_rootfs = b"expected-rootfs";
+        let source = ContentDigest::blake3(b"source-tree");
+        let policy = ContentDigest::blake3(b"policy");
+        let rootfs = ContentDigest::blake3(expected_rootfs);
+        let contract: ExecutionContractV1 = serde_json::from_value(serde_json::json!({
+            "schema": "ato.execution-contract/v1",
+            "source": {"kind": "tree", "immutable_ref": "tree:1", "digest": source.to_string()},
+            "target": {"os": "linux", "architecture": "x86_64", "abi": "gnu"},
+            "runtime": {"kind": "rootfs", "resolved_ref": "rootfs:1", "digest": rootfs.to_string()},
+            "dependencies": [],
+            "build_outputs": [{"name": "rootfs", "digest": rootfs.to_string()}],
+            "launch": {"argv": ["/app"], "cwd": "/", "environment": []},
+            "filesystem": {"view_digest": rootfs.to_string(), "readonly_layers": [rootfs.to_string()], "writable_paths": []},
+            "policy": {"network_digest": policy.to_string(), "capability_digest": policy.to_string(), "filesystem_digest": policy.to_string()},
+            "guest_surface": {"protocol": "ato-guest/v1", "features": []},
+            "external_state": []
+        }))
+        .expect("contract");
+        let execution_id = contract.compute_execution_id().expect("execution id");
+        finalize_remote_execution_contract(
+            contract.clone(),
+            execution_id.as_str(),
+            expected_rootfs,
+            source,
+            policy,
+            policy,
+            policy,
+        )
+        .expect("matching observed build");
+        let error = finalize_remote_execution_contract(
+            contract,
+            execution_id.as_str(),
+            b"different-rootfs",
+            source,
+            policy,
+            policy,
+            policy,
+        )
+        .expect_err("stale contract must fail closed");
+        assert_eq!(error.0, "artifact_metadata");
+        assert!(error.1.contains("observation mismatch"), "{}", error.1);
+    }
 
     /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a
     /// SUPERVISOR build (the guest generates + injects at run — vsock channel,
@@ -3008,6 +3284,7 @@ targets = ["web"]
             params,
             execution_identity_schema: None,
             execution_id: None,
+            execution_contract: None,
         }
     }
 

@@ -6536,9 +6536,11 @@ dependencies = [
  "capsulefs",
  "protocol",
  "serde",
+ "serde_jcs",
  "serde_json",
  "snapshot",
  "tempfile",
+ "toml 0.8.23",
  "ureq",
 ]
 
