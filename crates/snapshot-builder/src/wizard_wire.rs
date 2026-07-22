@@ -433,13 +433,16 @@ pub struct WizardAck {
     /// applies to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_candidate_id: Option<String>,
-    /// Required when `status: "sealed"`. The existing sealed-receipt shape
-    /// (`capsule_manifest_hash`, `execution_id`, `artifact_manifest_hash`,
-    /// `runner_class_id`, `snapshot_backend`, `artifact_location`,
-    /// `hardware_contract_id`, `snapshot_format_id`, `snapshot_codec_id`,
-    /// `manifest_source`, ...) — i.e. what the builder serializes from its
-    /// `Artifact` struct. Kept opaque here in PR-0: the vocabulary is reused,
-    /// not redefined, and `manifest_source` gains no new value.
+    /// Required when `status: "sealed"`. The existing sealed-receipt shape —
+    /// required core keys exactly as the api's `acceptanceReceiptSchema` /
+    /// live `artifactSchema` require them: `capsule_manifest_hash`,
+    /// `execution_id`, `artifact_manifest_hash`, `runner_class_id`,
+    /// `snapshot_backend`, `artifact_location`, `no_secret_scan_clean`,
+    /// `snapshot_format_id`, `snapshot_codec_id` — plus optional passthrough
+    /// fields (`hardware_contract_id`, `manifest_source`, ...) — i.e. what the
+    /// builder serializes from its `Artifact` struct. Kept opaque here in
+    /// PR-0: the vocabulary is reused, not redefined, and `manifest_source`
+    /// gains no new value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acceptance_receipt: Option<serde_json::Value>,
     /// Required when `status: "failed"` — discriminates seal-time
@@ -655,12 +658,16 @@ fn validate_declaration_name(name: &str) -> Result<(), String> {
 }
 
 /// §7 `path`: relative, non-empty, no leading `/`, no `..` segments, no
-/// backslashes — the same constraints as ato-api's `mountRelativePath` helper
+/// backslashes, no empty segments (no trailing `/`, no `//`) — the same
+/// constraints as ato-api's `mountRelativePath` helper
 /// (`snapshot_registry.ts`: min 1 / max 200 / relative / no `..` component),
-/// plus the spec's explicit backslash rejection. The workspace's closest
-/// existing helper (`snapshot::docker_import::validate_dockerfile_path`) gates
-/// `..`/prefix components but not backslashes or the 200-char cap, so the
-/// contract gets its own validator here rather than a near-miss reuse.
+/// plus the spec's explicit backslash and empty-segment rejections. Rejecting
+/// empty segments closes the trailing-slash input class, so the
+/// [`path_is_nested_inside`] verdict cannot diverge from the api side (spec
+/// §7: one verdict on both sides). The workspace's closest existing helper
+/// (`snapshot::docker_import::validate_dockerfile_path`) gates `..`/prefix
+/// components but not backslashes or the 200-char cap, so the contract gets
+/// its own validator here rather than a near-miss reuse.
 fn validate_declared_path(path: &str) -> Result<(), String> {
     if path.is_empty() {
         return Err("path must be non-empty".into());
@@ -676,6 +683,9 @@ fn validate_declared_path(path: &str) -> Result<(), String> {
     }
     if path.split('/').any(|seg| seg == "..") {
         return Err("path must not contain a '..' component".into());
+    }
+    if path.split('/').any(str::is_empty) {
+        return Err("path must not contain an empty segment (no trailing '/' or '//')".into());
     }
     Ok(())
 }
@@ -696,8 +706,12 @@ fn validate_state_schema(schema: &str) -> Result<(), String> {
 
 /// True when `inner` is strictly nested inside `outer` (segment-boundary
 /// aware: `data/app.db` is inside `data`, but `database` is not).
+///
+/// Inputs are pre-validated by [`validate_declared_path`], which rejects
+/// trailing slashes / empty segments — so this helper is the exact logical
+/// twin of the api's `pathNestedInside` (`wire.ts`): no trailing-slash
+/// normalization on either side (spec §7: one verdict on both sides).
 fn path_is_nested_inside(inner: &str, outer: &str) -> bool {
-    let outer = outer.trim_end_matches('/');
     inner.len() > outer.len()
         && inner.starts_with(outer)
         && inner.as_bytes().get(outer.len()) == Some(&b'/')
@@ -1163,6 +1177,7 @@ mod tests {
                 "runner_class_id": "rc.kvm.x86_64",
                 "snapshot_backend": "firecracker",
                 "artifact_location": "r2://snapshots/cand_01J1Z0/seal",
+                "no_secret_scan_clean": true,
                 "snapshot_format_id": "asf.fc-memsnap-v1",
                 "snapshot_codec_id": "asc.raw-v1.v1",
                 "manifest_source": "recipe_toml"
@@ -1172,6 +1187,28 @@ mod tests {
         assert_eq!(ack.status, WizardAckStatus::Sealed);
         assert_eq!(ack.fencing.capture_epoch, 3);
         ack.validate().unwrap();
+
+        // Pin the seam: the receipt is opaque to this side (serde_json::Value),
+        // so assert the example carries every key the api's
+        // `acceptanceReceiptSchema` (mirroring the live `artifactSchema`)
+        // REQUIRES — a green example here must be green on the other side too.
+        let receipt = ack.acceptance_receipt.as_ref().unwrap();
+        for required_key in [
+            "capsule_manifest_hash",
+            "execution_id",
+            "artifact_manifest_hash",
+            "runner_class_id",
+            "snapshot_backend",
+            "artifact_location",
+            "no_secret_scan_clean",
+            "snapshot_format_id",
+            "snapshot_codec_id",
+        ] {
+            assert!(
+                receipt.get(required_key).is_some(),
+                "acceptance_receipt example is missing api-required key {required_key:?}"
+            );
+        }
 
         let mut missing_candidate = ack.clone();
         missing_candidate.accepted_candidate_id = None;
@@ -1368,6 +1405,29 @@ schema = "sqlite"
             parse_capture_declarations("[cache.up]\npath = \"../shared\"\ncapture = \"include\"\n")
                 .unwrap_err();
         assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn trailing_slash_and_empty_segment_paths_are_rejected() {
+        // A trailing '/' previously slipped past the path validator and made
+        // the cross-section nesting verdict diverge from the api side (spec
+        // §7: the same declaration must get ONE verdict on both sides).
+        let err =
+            parse_capture_declarations("[cache.a]\npath = \"data/\"\ncapture = \"include\"\n")
+                .unwrap_err();
+        assert!(err.contains("empty segment"), "{err}");
+        assert!(
+            parse_capture_declarations("[cache.a]\npath = \"data//x\"\ncapture = \"include\"\n")
+                .is_err()
+        );
+        // The seam finding's repro: { cache "data/", state "data/app.db" }
+        // must be INVALID here for the same reason it is invalid on the api.
+        assert!(
+            parse_capture_declarations(
+                "[cache.a]\npath = \"data/\"\ncapture = \"include\"\n\n[state.b]\npath = \"data/app.db\"\nsnapshot = \"exclude\"\nschema = \"sqlite\"\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]
