@@ -455,13 +455,8 @@ impl ExecutionContractV1 {
         {
             return Err(ExecutionContractError::UnresolvedField("launch.argv"));
         }
-        if self
-            .target
-            .libc
-            .as_ref()
-            .is_some_and(|value| value.trim().is_empty())
-        {
-            return Err(ExecutionContractError::UnresolvedField("target.libc"));
+        if let Some(libc) = &self.target.libc {
+            validate_ascii_identifier("target.libc", libc)?;
         }
         if self
             .target
