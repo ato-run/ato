@@ -6697,7 +6697,7 @@ image = "ghcr.io/example/app:latest"
     fn locked_dependency_resolved_ref_prefers_content_digest() {
         let locked = capsule::lockfile::LockedCapsuleDependency {
             name: "db".to_string(),
-            source: "capsule://ato/postgres@16".to_string(),
+            source: "capsule://ato/example-db@16".to_string(),
             source_type: "store".to_string(),
             contract: Some("service@1".to_string()),
             injection_bindings: BTreeMap::new(),
@@ -6715,7 +6715,7 @@ image = "ghcr.io/example/app:latest"
 
         assert_eq!(
             super::locked_dependency_resolved_ref(&locked),
-            "capsule://ato/postgres@16#blake3:abc"
+            "capsule://ato/example-db@16#blake3:abc"
         );
     }
 
@@ -6726,13 +6726,13 @@ image = "ghcr.io/example/app:latest"
             crate::application::dependency_runtime::orchestrator::OrchestratorError::OrphanAliveOtherSession {
                 alias: "db".to_string(),
                 session_pid: 4242,
-                resolved: "capsule://github.com/Koh0920/ato-postgres@65b3ee5".to_string(),
+                resolved: "capsule://github.com/example/example-db@65b3ee5".to_string(),
                 state_dir: PathBuf::from("/Users/example/.ato/state/wasedap2p/db"),
             },
         );
         let message = error.to_string();
         assert!(message.contains("dep 'db' state.dir is owned by ato session pid 4242"));
-        assert!(message.contains("capsule://github.com/Koh0920/ato-postgres@65b3ee5"));
+        assert!(message.contains("capsule://github.com/example/example-db@65b3ee5"));
     }
 
     #[test]
@@ -6792,7 +6792,7 @@ default_target = "app"
 required_env = ["ATO_TEST_TOP_LEVEL_REQUIRED", "ATO_TEST_CRED_REQUIRED"]
 
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
   [dependencies.db.parameters]
@@ -6846,7 +6846,7 @@ default_target = "app"
 required_env = ["ATO_TEST_SHARED_REQUIRED"]
 
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
   [dependencies.db.credentials]

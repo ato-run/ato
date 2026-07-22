@@ -435,7 +435,7 @@ for the full RFC.
 required_env = ["PG_PASSWORD"]
 
 [dependencies.db]
-capsule  = "capsule://ato/postgres@16"
+capsule  = "capsule://ato/example-db@16"
 contract = "service@1"
 
 # Identity-bearing parameters. These enter instance_hash and the
@@ -480,7 +480,7 @@ Hard invariants enforced fail-closed at lock time:
 
 ### `[contracts."<name>@<major>"]` — provider side
 
-Capsules that act as providers (e.g. `ato/postgres@16`) declare the
+Capsules that act as providers (e.g. `ato/example-db@16`) declare the
 contract they implement:
 
 ```toml

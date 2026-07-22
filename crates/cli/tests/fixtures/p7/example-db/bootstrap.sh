@@ -26,13 +26,13 @@ require_tool_env() {
   local var="$1"
   local val="${!var:-}"
   if [ -z "$val" ]; then
-    echo "[ato/postgres bootstrap] FATAL: $var is unset." >&2
-    echo "[ato/postgres bootstrap] This capsule requires ato-cli >= 0.5.x with the tool artifact resolver." >&2
-    echo "[ato/postgres bootstrap] Older ato-cli versions injected /opt/homebrew/bin/* directly; that path is removed." >&2
+    echo "[ato/example-db bootstrap] FATAL: $var is unset." >&2
+    echo "[ato/example-db bootstrap] This capsule requires ato-cli >= 0.5.x with the tool artifact resolver." >&2
+    echo "[ato/example-db bootstrap] Older ato-cli versions injected /opt/homebrew/bin/* directly; that path is removed." >&2
     exit 78  # EX_CONFIG
   fi
   if [ ! -x "$val" ]; then
-    echo "[ato/postgres bootstrap] FATAL: $var=$val is not executable." >&2
+    echo "[ato/example-db bootstrap] FATAL: $var=$val is not executable." >&2
     exit 78
   fi
 }
@@ -54,7 +54,7 @@ PG_OPTS=(
 )
 
 if [ ! -f "${PGDATA}/PG_VERSION" ]; then
-  echo "[ato/postgres bootstrap] initdb at ${PGDATA}" >&2
+  echo "[ato/example-db bootstrap] initdb at ${PGDATA}" >&2
   "${ATO_TOOL_INITDB}" \
     -D "${PGDATA}" \
     --encoding=UTF8 \
@@ -70,14 +70,14 @@ if [ ! -f "${PGDATA}/PG_VERSION" ]; then
     # SQL directly against the catalog. Single-user mode is
     # network-less and authentication-less, intended exactly for
     # one-shot init like this.
-    echo "[ato/postgres bootstrap] creating database ${ATO_PG_DATABASE} via postgres --single" >&2
+    echo "[ato/example-db bootstrap] creating database ${ATO_PG_DATABASE} via postgres --single" >&2
     echo "CREATE DATABASE \"${ATO_PG_DATABASE}\";" | \
       "${ATO_TOOL_POSTGRES}" --single -D "${PGDATA}" postgres >&2
   fi
-  echo "[ato/postgres bootstrap] init complete" >&2
+  echo "[ato/example-db bootstrap] init complete" >&2
 fi
 
-echo "[ato/postgres bootstrap] starting postgres on 127.0.0.1:${PORT}" >&2
+echo "[ato/example-db bootstrap] starting postgres on 127.0.0.1:${PORT}" >&2
 exec "${ATO_TOOL_POSTGRES}" \
   -D "${PGDATA}" \
   -p "${PORT}" \

@@ -324,7 +324,7 @@ runtime = "source/python"
 run = "uv run app.py"
 
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
   [dependencies.db.parameters]
@@ -342,7 +342,7 @@ contract = "service@1"
     let manifest = CapsuleManifest::from_toml(toml).expect("parse dependency contract manifest");
     let dependency = manifest.dependencies.get("db").expect("db dependency");
 
-    assert_eq!(dependency.capsule.0, "capsule://ato/postgres@16");
+    assert_eq!(dependency.capsule.0, "capsule://ato/example-db@16");
     assert_eq!(dependency.contract.to_string(), "service@1");
     assert_eq!(
         dependency.parameters.get("database"),
@@ -460,7 +460,7 @@ runtime = "source/python"
 run = "uv run app.py"
 
 [dependencies.db]
-capsule = "capsule://ato/postgres@16"
+capsule = "capsule://ato/example-db@16"
 contract = "service@1"
 
   [dependencies.db.credentials]
@@ -3294,7 +3294,7 @@ sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 fn test_parse_provider_with_tool_dependencies() {
     let toml = r#"
 schema_version = "0.3"
-name = "ato-postgres"
+name = "example-db"
 version = "0.1.0"
 type = "app"
 default_target = "server"
