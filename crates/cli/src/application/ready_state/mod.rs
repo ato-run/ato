@@ -311,6 +311,16 @@ port = 8080
             "CLI restore must delegate host runner-class resolution to the backend"
         );
 
+        // A v1 lock cannot reinterpret the same pre-v1 artifact. The operator
+        // must rebuild so acceptance produces the authenticated v1 sidecar.
+        let execution_id = ExecutionId::new(format!("blake3:{}", "a".repeat(64))).unwrap();
+        let error = decide_ready_state_run(&eligible_manifest(), hash, root, Some(&execution_id))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("rebuild the artifact"),
+            "{error}"
+        );
+
         set(prev.as_deref());
     }
 

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use capsulefs::CasStore;
-use snapshot::{ReadyStateManifest, SnapshotManifestV1};
+use snapshot::{ReadyStateManifest, SNAPSHOT_MANIFEST_V1_FILENAME, SnapshotManifestV1};
 
 /// Sanitize a `blake3:<hex>`-style id into one safe path component (hex/dash
 /// only); anything else collapses to `_`.
@@ -44,7 +44,7 @@ fn manifest_path(root: &Path, capsule_manifest_hash: &str) -> PathBuf {
 }
 
 fn v1_manifest_path(root: &Path, capsule_manifest_hash: &str) -> PathBuf {
-    artifact_dir(root, capsule_manifest_hash).join("snapshot-manifest-v1.json")
+    artifact_dir(root, capsule_manifest_hash).join(SNAPSHOT_MANIFEST_V1_FILENAME)
 }
 
 /// Persist a sealed manifest as JSON next to its CAS store.

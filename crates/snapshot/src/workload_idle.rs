@@ -63,6 +63,9 @@ pub enum WorkloadIdleError {
 }
 
 pub trait WorkloadIdleLifecycle {
+    fn report_cleanup_failure(&mut self, error: &WorkloadIdleError) {
+        eprintln!("workload_idle rollback cleanup failed: {error}");
+    }
     fn prepare_synthetic_build_bindings(
         &mut self,
         bindings: &[SyntheticBindingSpec],
@@ -310,7 +313,9 @@ pub fn restore_workload_idle_session(
         Err(error) => {
             // Cleanup remains best-effort, but it must not replace the causal
             // lifecycle/validation error that triggered rollback.
-            let _cleanup_result = cleanup_disposable(lifecycle, session);
+            if let Err(cleanup_error) = cleanup_disposable(lifecycle, session) {
+                lifecycle.report_cleanup_failure(&cleanup_error);
+            }
             Err(error)
         }
     }
@@ -375,6 +380,7 @@ mod tests {
         revoke_attested: bool,
         fail_readiness: bool,
         fail_cleanup: bool,
+        cleanup_failures_reported: usize,
     }
 
     impl MockLifecycle {
@@ -424,6 +430,10 @@ mod tests {
     }
 
     impl WorkloadIdleLifecycle for MockLifecycle {
+        fn report_cleanup_failure(&mut self, _: &WorkloadIdleError) {
+            self.cleanup_failures_reported += 1;
+        }
+
         fn prepare_synthetic_build_bindings(
             &mut self,
             _: &[SyntheticBindingSpec],
@@ -677,5 +687,6 @@ mod tests {
                 .calls
                 .ends_with(&["stop", "revoke", "detach", "destroy"])
         );
+        assert_eq!(lifecycle.cleanup_failures_reported, 1);
     }
 }

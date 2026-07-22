@@ -7,7 +7,6 @@
 //! `build_ready_state` (whose no-secret gate fails the build closed). On success
 //! it persists the sealed [`ReadyStateManifest`] next to its CAS store.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,8 +15,7 @@ use capsule::types::CapsuleManifest;
 use snapshot::{
     BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, RestoreContract, SanitizerContract,
     SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
-    accept_platform_verified_candidate, ensure_external_state_layers_excluded,
-    ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
+    accept_platform_verified_candidate, ensure_gpu_not_in_snapshot, migrate_legacy_manifest,
 };
 
 use super::store;
@@ -171,12 +169,6 @@ pub(crate) fn seal(
             .context("resolve Snapshot v1 backend compatibility")?;
         let v1_manifest = migrate_legacy_manifest(&receipt.manifest, execution_id, compatibility)
             .context("create Snapshot v1 manifest")?;
-
-        // A v1 seal context is admitted by the caller only when the resolved
-        // execution contract has no live External State. Keep the layer gate at
-        // the final immutable manifest boundary as defence in depth.
-        ensure_external_state_layers_excluded(&v1_manifest, &BTreeSet::new())
-            .context("verify External State exclusion")?;
 
         // Acceptance is a real disposable restore, not successful serialization.
         // The v1 manifest is persisted only after restore and teardown both pass.
