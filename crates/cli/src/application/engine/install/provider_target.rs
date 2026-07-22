@@ -673,6 +673,7 @@ fn compile_provider_lockfile(workspace_root: &Path) -> Result<()> {
         ])
         .arg(format!("--python={PROVIDER_PYTHON_RUNTIME_VERSION}"))
         .current_dir(workspace_root);
+    crate::common::host_shell::sanitize_untrusted_environment(&mut command);
     let output = command
         .output()
         .with_context(|| format!("failed to execute `{}`", uv.display()))?;
@@ -698,6 +699,7 @@ fn sync_provider_site_packages(workspace_root: &Path, site_packages_dir: &Path) 
         .arg(format!("--python={PROVIDER_PYTHON_RUNTIME_VERSION}"))
         .args(["--target", site_packages_dir.to_string_lossy().as_ref()])
         .current_dir(workspace_root);
+    crate::common::host_shell::sanitize_untrusted_environment(&mut command);
     let output = command
         .output()
         .with_context(|| format!("failed to execute `{}`", uv.display()))?;
@@ -835,9 +837,10 @@ fn install_node_provider_package(
     toolchain: ProviderToolchain,
 ) -> Result<PathBuf> {
     let (program, args, expected_lockfile_kind) = node_provider_install_command(toolchain)?;
-    let output = Command::new(&program)
-        .args(args)
-        .current_dir(provider_dir)
+    let mut command = Command::new(&program);
+    command.args(args).current_dir(provider_dir);
+    crate::common::host_shell::sanitize_untrusted_environment(&mut command);
+    let output = command
         .output()
         .with_context(|| format!("failed to execute `{}`", program.display()))?;
 

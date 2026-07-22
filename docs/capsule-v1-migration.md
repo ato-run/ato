@@ -89,11 +89,16 @@ Execution Identity and Snapshot instead of overwriting its sidecar.
 
 Local acceptance uses one immutable receipt per Snapshot under the Execution
 Identity directory. Each receipt authenticates the Snapshot, Envelope, and
-disposable-restore acceptance receipt IDs with a keyed MAC. The key is supplied
-from an OS-protected credential source outside the Snapshot state root (the CLI
-boundary receives it as `ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY`) and is never written
-beside local artifacts. Missing or invalid key material fails publication and
-selection closed.
+disposable-restore acceptance receipt IDs through a caller-authenticating,
+privilege-separated helper configured by
+`ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER`. This value locates the helper and is not
+a key: Ato sends a canonical projection and receives only `key_id` plus an
+opaque authenticator. The helper owns key generation, protected persistence,
+and rotation; historical key IDs remain verification-only until explicitly
+revoked. Ato never accepts key bytes through its environment, and all
+capsule-controlled install/build/probe children strip the complete
+`ATO_SNAPSHOT_ACCEPTANCE_*` namespace. Missing helper configuration, an unknown
+key ID, or a failed verification fails publication and selection closed.
 
 ## Fail-closed compatibility errors
 

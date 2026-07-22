@@ -614,12 +614,23 @@ acceptance receipt ID; a loader MUST resolve those expected IDs first and
 reject an artifact whose self-declared, recomputed Envelope differs.
 
 Local acceptance entries are immutable per-Snapshot receipts authenticated by
-a keyed MAC whose key comes from an OS-protected credential source outside the
-Snapshot state root. The key MUST NOT be stored beside the artifact or receipt.
+a caller-authenticating, privilege-separated signing helper. Ato sends only the
+canonical receipt projection to the helper and receives `key_id` plus an opaque
+authenticator; private or MAC key bytes never enter the Ato process environment.
+The helper owns generation and protected persistence, returns its current key
+ID for new receipts, and retains old key IDs for verification during rotation.
+Removal of an old key explicitly revokes receipts issued by that key.
+
+The helper MUST authenticate that its caller is the trusted Ato executable and
+MUST NOT expose a general signing interface to capsule children. Every install,
+build, warmup, and probe subprocess strips the reserved
+`ATO_SNAPSHOT_ACCEPTANCE_*` environment namespace. Missing helper configuration,
+unknown `key_id`, or helper failure fails publication and selection closed.
 Concurrent publication creates independent receipt files atomically instead of
 updating one shared read-modify-write catalog. Rehashing both an artifact and
 its public receipt fields, including changing `quarantined` to `accepted`,
-cannot produce a valid MAC and therefore cannot promote it into the catalog.
+cannot produce a valid authenticator and therefore cannot promote it into the
+catalog.
 
 ## 8. Snapshot capture and acceptance
 
