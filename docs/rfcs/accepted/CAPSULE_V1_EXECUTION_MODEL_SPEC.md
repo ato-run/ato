@@ -287,6 +287,19 @@ Requirements:
 BLAKE3, JCS, the domain separator, and the identity-bearing projection boundary
 are normative for `ato.execution-contract/v1`.
 
+Every identity-bearing content digest MUST use a typed canonical representation:
+
+```text
+ContentDigest = <allowed algorithm> ":" <exact-length lowercase hex>
+```
+
+`ato.execution-contract/v1` permits BLAKE3-256 and SHA-256 content digests.
+Each carries exactly 32 digest bytes. Empty strings, mutable references such as
+`latest`, placeholders such as `unknown`, uppercase hex, wrong lengths, and
+unknown algorithms MUST be rejected before an Execution Identity is issued.
+The same validator applies to source, runtime, dependency output, build output,
+environment, filesystem, and policy digests.
+
 ### 4.6 Build outputs and identity finalization
 
 Some identity-bearing values, especially dependency and application build
@@ -522,6 +535,60 @@ candidate -> accepted | rejected | quarantined
 
 An accepted Snapshot that later fails integrity or compatibility checks MUST be
 quarantined. It MUST NOT be silently repaired under the same `snapshot_id`.
+
+### 7.7 Authenticated Artifact Envelope
+
+The Snapshot manifest sidecar and its acceptance state MUST be inside the
+Artifact authentication boundary. Capsule v1 transport therefore carries a
+content-addressed envelope:
+
+```text
+ArtifactEnvelopeV1
+  schema = "ato.snapshot-artifact-envelope/v1"
+  legacy_manifest_id
+  snapshot_manifest_schema
+  snapshot_manifest_id
+  compatibility
+  cas_root_digest
+  acceptance.status
+  acceptance.receipt_id
+```
+
+`envelope_id` is a domain-separated content address of the canonical envelope
+payload without `envelope_id`. The compatibility evidence in this envelope is
+derived from the build backend and MUST equal the Snapshot manifest contract.
+The acceptance receipt identifies the disposable-restore verifier. A restore
+lease for Capsule v1 MUST carry the expected execution schema, Snapshot
+manifest schema and ID, and Artifact Envelope schema and ID. Restore MUST verify
+all of them before constructing an accepted catalog record or invoking a
+backend.
+
+Hash algorithm prefixes are not schema discriminators. In particular,
+`blake3:` MUST NOT imply Capsule v1. Producers, artifacts, and leases use the
+explicit schemas `ato.execution-contract/v1`, `ato.snapshot-manifest/v1`, and
+`ato.snapshot-artifact-envelope/v1`. Missing schema metadata selects only the
+legacy verification path; partial or unknown schema metadata fails closed.
+
+### 7.8 Local Snapshot Store
+
+Capsule v1 local artifacts are stored by both exact identities:
+
+```text
+snapshots/
+  <execution_id>/
+    <snapshot_id>/
+      artifact-envelope-v1.json
+      snapshot-manifest-v1.json
+      manifest.json
+      cas/
+```
+
+This layout preserves multiple resolved targets for one Capsule manifest and
+multiple immutable Snapshots for one Execution Identity. Publication uses a
+staging directory and atomic rename. An existing identity directory MUST NOT be
+overwritten with different bytes. The legacy
+`ready-state/<capsule_manifest_hash>/` layout remains a legacy-only read/write
+path and is never used to publish Capsule v1 artifacts.
 
 ## 8. Snapshot capture and acceptance
 
@@ -882,9 +949,11 @@ The runtime MUST NOT silently reinterpret a legacy manifest as a v1 manifest.
 Migration creates a new immutable manifest and therefore a new `snapshot_id`.
 Consequently, a v1 lock with only a legacy Ready-State artifact is not runnable
 until an explicit rebuild produces and accepts `ato.snapshot-manifest/v1`.
-Connected-Runner transport MUST carry `snapshot-manifest-v1.json` for v1
-`blake3:` execution IDs; its absence is an artifact-verification failure before
-restore. Historical `sha256:` execution IDs MAY use the legacy runner path only
+Connected-Runner transport MUST carry `snapshot-manifest-v1.json` and
+`artifact-envelope-v1.json` when its lease explicitly declares
+`execution_identity_schema = "ato.execution-contract/v1"`; either file's
+absence is an artifact-verification failure before restore. A BLAKE3 ID without
+that schema remains legacy. Historical IDs MAY use the legacy runner path only
 while that path independently verifies the lease execution ID, sealed backend
 facts, and exact runner contract.
 
@@ -934,11 +1003,16 @@ Tests MUST prove that excluded mutations do not change `execution_id`:
 ### 17.2 Snapshot selection and restore
 
 - exact `execution_id` mismatch is rejected
+- explicit identity/manifest/envelope schemas are required together for v1
+- legacy BLAKE3 IDs are not inferred to be v1
+- a tampered sidecar is rejected even if its `snapshot_id` is recomputed
+- Envelope acceptance and compatibility evidence are authenticated before restore
 - missing compatibility facts are rejected
 - incompatible backend, kernel, codec, or CPU template is rejected
 - compatible candidates may be ranked only after identity and compatibility
   filtering
 - quarantined Snapshots are never selected
+- one Capsule manifest may retain multiple Execution Identities without overwrite
 
 ### 17.3 Capture and acceptance
 

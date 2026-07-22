@@ -31,6 +31,18 @@ New artifacts use `ato.snapshot-manifest/v1` and require:
 - capture provenance
 - sanitization and redacted secret-scan attestations
 
+The sidecar is authenticated by `ato.snapshot-artifact-envelope/v1`, which
+content-addresses the legacy manifest ID, Snapshot manifest ID, CAS root,
+backend-derived compatibility evidence, and acceptance receipt. Connected
+Runner leases pin both `snapshot_id` and `envelope_id`; restore never promotes a
+sidecar to accepted merely because it parses. Explicit schema fields select
+this path—`blake3:` is a hash algorithm prefix, not a v1 discriminator.
+
+Local v1 artifacts are stored at
+`snapshots/<execution_id>/<snapshot_id>/`. The legacy
+`ready-state/<capsule_manifest_hash>/` layout stays isolated so another target
+or rebuild cannot overwrite a valid v1 candidate.
+
 Legacy `ato.ready-state/v1` remains readable for inspection. It is never
 eligible for Capsule v1 lookup directly. Explicit migration verifies or
 supplies the resolved v1 Execution Identity and writes a new immutable

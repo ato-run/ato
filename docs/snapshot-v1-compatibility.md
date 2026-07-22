@@ -37,6 +37,11 @@ Everything below is stated per stage, in the order the pipeline enforces it.
 Artifact eligibility never substitutes Capsule name, target label, runner name,
 or recency for identity. The runtime first matches exact `execution_id`, then
 proves backend/VMM/kernel/CPU-template/codec/runner compatibility.
+The transport additionally pins `snapshot_id` and the content-addressed
+`ato.snapshot-artifact-envelope/v1`, which authenticates the sidecar,
+backend-derived compatibility evidence, CAS root, and disposable-restore
+acceptance receipt. Explicit schema metadata—not a hash prefix—selects this v1
+verification path.
 
 ## 2. Eligibility requirements (build-time, fail-closed)
 

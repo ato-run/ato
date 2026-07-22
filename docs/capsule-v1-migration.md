@@ -64,20 +64,28 @@ application output digests before writing the v1 pair.
 |---|---|
 | `ato.ready-state/v1` without `execution_id` | inspectable; never eligible for exact v1 lookup |
 | `ato.ready-state/v1` with a historical ID | inspectable; requires explicit re-resolution and migration |
-| `ato.snapshot-manifest/v1` | requires valid `execution_id`, `snapshot_id`, and proven compatibility |
+| `ato.snapshot-manifest/v1` | requires valid `execution_id`, `snapshot_id`, authenticated Artifact Envelope, and proven compatibility |
 
 Migration writes a new immutable manifest and a new `snapshot_id`. It never
 changes old bytes or treats the legacy Ready-State ID as the new Snapshot ID.
 A v1 lock paired with only a legacy Ready-State manifest fails closed at run
 time. Rebuilding is an intentional migration cost: `ato build` must perform the
-disposable restore acceptance and persist `snapshot-manifest-v1.json` before
-that artifact is eligible for local or Connected-Runner v1 restore.
+disposable restore acceptance and persist `snapshot-manifest-v1.json` plus its
+content-addressed `artifact-envelope-v1.json` before that artifact is eligible
+for local or Connected-Runner v1 restore.
 
-Connected Runners keep a separate, explicit compatibility path for historical
-`sha256:` execution IDs. That path verifies the lease ID, sealed backend facts,
-and exact runner contract before restore. An execution ID in the v1 `blake3:`
-namespace never uses this compatibility path and requires the authenticated v1
-Snapshot manifest.
+Schema fields, not hash prefixes, choose the migration path. A lease declaring
+`execution_identity_schema = "ato.execution-contract/v1"` must also carry the
+expected Snapshot manifest schema/ID and Artifact Envelope schema/ID. A legacy
+BLAKE3 ID without this schema remains legacy and is never implicitly promoted.
+The legacy path still verifies the lease ID, sealed backend facts, and exact
+runner contract before restore.
+
+Local v1 publication uses
+`snapshots/<execution_id>/<snapshot_id>/`; the old
+`ready-state/<capsule_manifest_hash>/` directory remains legacy-only. Rebuilding
+the same Capsule manifest for a new resolved target therefore retains the old
+Execution Identity and Snapshot instead of overwriting its sidecar.
 
 ## Fail-closed compatibility errors
 
@@ -85,6 +93,8 @@ Snapshot manifest.
 - unknown execution-contract field or unresolved required value
 - stored `execution_id` mismatch
 - missing or mismatched Snapshot `execution_id`
+- partial or mismatched execution/Snapshot/Envelope schema metadata
+- sidecar, Envelope, acceptance receipt, or CAS-root mismatch
 - unknown backend, VMM, kernel, CPU-template, codec, or runner compatibility
 - running capture requested while live workload requires External State
 - External State schema mismatch before read-write attach
