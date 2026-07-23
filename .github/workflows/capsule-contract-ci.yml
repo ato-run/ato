@@ -50,5 +50,7 @@ jobs:
       - run: cargo test -p capsule --lib execution_contract
       # G0-2 lock integration (envelope D2 / lock_id exclusion D4 / env value D5).
       - run: cargo test -p capsule --lib ato_lock
+      # G0-3 ato.snapshot-manifest/v1 identity + compatibility + selection (#1087).
+      - run: cargo test -p capsule --lib snapshot_manifest
       - run: cargo test -p capsule --test execution_contract_vectors
       - run: cargo clippy -p capsule --all-targets -- -D warnings

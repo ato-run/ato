@@ -1139,12 +1139,35 @@ impl ExecutionContractV1 {
 
     pub fn compute_execution_id(&self) -> Result<ExecutionId, ExecutionContractError> {
         let canonical = self.canonical_bytes()?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(EXECUTION_CONTRACT_V1_SCHEMA.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(&canonical);
-        ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
+        ExecutionId::new(schema_domained_blake3_id(
+            EXECUTION_CONTRACT_V1_SCHEMA,
+            &canonical,
+        ))
     }
+}
+
+/// The frozen v1 structural-id preimage rule shared by every schema-scoped
+/// content address in this crate:
+///
+/// ```text
+/// id = "blake3:" + hex(BLAKE3(UTF8(schema) || 0x00 || JCS(payload)))
+/// ```
+///
+/// The `schema` string is the domain separator (so two payloads that happen to
+/// canonicalize to identical bytes under different schemas never collide), the
+/// `0x00` byte separates the domain from the payload unambiguously, and
+/// `canonical_payload` is the already-JCS-serialized payload. This is the single
+/// definition of the rule used by both [`ExecutionContractV1::compute_execution_id`]
+/// (domain `ato.execution-contract/v1`) and the `ato.snapshot-manifest/v1`
+/// `snapshot_id` derivation (see [`super::snapshot_manifest`]); neither reinvents
+/// it. Callers derive `id` *from* a payload that MUST NOT itself contain `id`, so
+/// the address is never part of its own preimage.
+pub fn schema_domained_blake3_id(schema: &str, canonical_payload: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(schema.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(canonical_payload);
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 /// Compute an opaque sub-contract digest under the pinned v1 preimage rule:
