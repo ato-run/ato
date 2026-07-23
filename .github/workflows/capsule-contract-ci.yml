@@ -1,0 +1,43 @@
+name: Capsule execution-contract CI
+
+# Focused gate for the `ato.execution-contract/v1` core in the `capsule` crate.
+#
+# The workspace `rust-ci.yml` only runs on PRs to `main` / `dev`, so 0.7 feature
+# PRs targeting `nightly` (where this contract lands, ato-run/ato#1089) got no
+# Rust test/clippy job. Rather than run the whole workspace CI on `nightly`
+# (which would surface unrelated pre-existing lint/fmt debt), this path-filtered
+# workflow runs exactly the contract's own gates on any PR that touches
+# `crates/capsule`.
+
+on:
+  pull_request:
+    paths:
+      - "crates/capsule/**"
+      - ".github/workflows/capsule-contract-ci.yml"
+  push:
+    branches: [main, dev, nightly]
+    paths:
+      - "crates/capsule/**"
+      - ".github/workflows/capsule-contract-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  execution-contract:
+    name: capsule execution-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p capsule --lib execution_contract
+      - run: cargo test -p capsule --test execution_contract_vectors
+      - run: cargo clippy -p capsule --all-targets -- -D warnings
