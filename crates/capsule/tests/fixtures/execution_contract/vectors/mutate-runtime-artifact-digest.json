@@ -1,8 +1,6 @@
 {
   "schema": "ato.execution-contract/v1",
   "source": {
-    "kind": "git",
-    "immutable_ref": "https://example.invalid/repo@012345",
     "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
     "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
   },
@@ -14,8 +12,7 @@
   },
   "runtime": {
     "kind": "node",
-    "resolved_ref": "node@22.14.0",
-    "digest": "sha256:f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2",
+    "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
   },
   "dependencies": [

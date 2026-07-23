@@ -88,13 +88,16 @@
       "os": "linux"
     }
   },
-  "execution_id": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+  "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
   "generated_at": "2026-07-21T00:00:00Z",
   "host_port": 54321,
   "provenance": {
     "builder": "runner-a",
     "display_url": "https://example.invalid/builds/123",
     "machine_id": "machine-77"
+  },
+  "resolved_refs": {
+    "source_kind": "archive"
   },
   "runner_id": "runner-a",
   "session_id": "sess-42",

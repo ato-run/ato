@@ -7,9 +7,9 @@ name: Rust CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, nightly]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, nightly]
   workflow_dispatch:
 
 permissions:

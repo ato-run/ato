@@ -19,7 +19,7 @@
       "name": "data",
       "schema": "1",
       "snapshot": "exclude",
-      "target": "/data"
+      "target": "/data/../data"
     }
   ],
   "filesystem": {
@@ -77,7 +77,7 @@
   "target": {
     "abi": "gnu",
     "architecture": "x86_64",
-    "libc": null,
+    "libc": "glibc-2.39",
     "os": "linux"
   }
 }

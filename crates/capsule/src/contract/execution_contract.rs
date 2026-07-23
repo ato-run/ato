@@ -51,7 +51,7 @@
 //! |---|---|---|
 //! | Source | materialized source digest; source projection rules | `source.digest`; `source.projection_digest` (opaque) |
 //! | Target | OS, arch, ABI/libc, observable target features | `target.os` / `target.architecture` / `target.abi` / `target.libc` / `target.observable_features` |
-//! | Runtime | resolved runtime artifact; dynamic runtime contract | `runtime.kind` / `runtime.resolved_ref` / `runtime.digest`; `runtime.dynamic_contract_digest` (opaque) |
+//! | Runtime | resolved runtime artifact; dynamic runtime contract | `runtime.kind` / `runtime.digest`; `runtime.dynamic_contract_digest` (opaque) |
 //! | Dependencies | derivation identity; immutable output identity | `dependencies[].name` / `dependencies[].derivation_digest` / `dependencies[].output_digest` |
 //! | Build outputs | immutable output digest; projection | `build_outputs[].name` / `build_outputs[].digest`; `build_outputs[].projection_digest` (opaque) |
 //! | Launch | entrypoint, exact argv, cwd; process model | `launch.argv` / `launch.cwd`; `launch.process_model_digest` (opaque) |
@@ -68,6 +68,71 @@
 //! requirements / normalization / inheritance *policy*; the resolved
 //! non-secret values are committed per-variable by
 //! `launch.environment[].value_digest`.
+//!
+//! ## Resolved refs are non-identity provenance (RFC §4.2)
+//!
+//! The *resolved ref* that names how identity content was obtained —
+//! `source.kind`, `source.immutable_ref`, and `runtime.resolved_ref` — is NOT
+//! in the identity set. Same source bytes + same projection ⇒ same Execution
+//! Identity, and same runtime artifact digest + dynamic contract ⇒ same
+//! Execution Identity, so an alias (mirror URL, tag vs commit, `node@lts` vs a
+//! pinned digest) must never split ids. These refs live on the non-identity
+//! envelope as [`ResolvedRefProvenanceV1`]; mutating them is proved
+//! id-preserving by the `*-alias` shared vectors.
+//!
+//! ## Canonical guest paths and ports
+//!
+//! `launch.cwd`, `filesystem.writable_paths[]`, and `external_state[].target`
+//! are [`GuestPath`]: an absolute path in exactly one canonical spelling (no
+//! bare `/` root unless the field opts in, no `.`/`..` segments, no repeated or
+//! trailing slash, no backslash/NUL/control chars), with segment-wise ordering
+//! for the sorted `writable_paths` list. `guest_surface.port`, when present, is
+//! a nonzero `u16` ([`NonZeroU16`]); a `0` port fails closed. Non-canonical
+//! spellings are pinned by the `invalid-relative-cwd`, `invalid-dotdot-target`,
+//! `invalid-trailing-slash-target`, and `invalid-zero-port` vectors.
+//!
+//! ## Opaque sub-contract digest preimages (normative)
+//!
+//! Every opaque `*_digest` field commits a sub-contract under a fixed preimage
+//! rule; only the *payload schema* is versioned separately (RFC §4.5). The
+//! rule is `digest = blake3(UTF8(domain) || 0x00 || JCS(payload))`
+//! ([`opaque_subcontract_digest`]), with these exact domains:
+//!
+//! | field | domain |
+//! |---|---|
+//! | `source.projection_digest` | `ato.source-projection-contract/v1` |
+//! | `runtime.dynamic_contract_digest` | `ato.runtime-dynamic-contract/v1` |
+//! | `build_outputs[].projection_digest` | `ato.build-output-projection/v1` |
+//! | `launch.process_model_digest` | `ato.process-model-contract/v1` |
+//! | `launch.environment_policy_digest` | `ato.environment-policy/v1` |
+//! | `filesystem.topology_digest` | `ato.filesystem-topology/v1` |
+//! | `launch.environment[].value_digest` | `ato.environment-value/v1` |
+//!
+//! The three `policy.*` digests keep their existing producer-defined preimages.
+//! G0-2 stores each payload in `ato.lock.json` and re-derives its digest before
+//! launch; a later PR may define/extend a payload schema without a v1 identity
+//! change, but MUST keep the domain constant and preimage rule above.
+//!
+//! ## Duplicate keys fail closed (canonicalization safety)
+//!
+//! A repeated JSON key must never silently collapse to a last-wins value that
+//! two byte-distinct inputs could share. Duplicate struct fields (top-level and
+//! nested identity objects) are rejected by serde's derived deserializers;
+//! `target.observable_features` uses a duplicate-rejecting map visitor rather
+//! than `BTreeMap`'s last-wins insert. Pinned by `invalid-duplicate-*` vectors.
+//!
+//! ## Observation / finalization is deferred to G0-2 (NOT in this surface)
+//!
+//! This G0-1 surface intentionally exposes NO "observation" or "finalization"
+//! type. A finalized execution identity MUST be witnessed against *measured*
+//! facet values, and G0-2 will introduce that as a type constructible only from
+//! measured facts — a facet-wise observation struct (e.g.
+//! `{ source_digest, target, runtime_digest, build_output_digests, … }` built
+//! from the concrete plan and materialization), whose fields are compared to
+//! the expected contract facet by facet. It MUST NOT be a clone of the expected
+//! [`ExecutionContractV1`]: an API that accepts an expected-contract copy as its
+//! own "observation" proves nothing (RFC forbids lock-copied observations).
+//! Callers in G0-1 use [`ExecutionContractV1::compute_execution_id`] directly.
 //!
 //! An execution whose launch conditions cannot be expressed under this mapping
 //! MUST NOT be issued a v1 `execution_id`. Per RFC §4.5, any change to the
@@ -99,13 +164,51 @@
 //! `crates/capsule/tests/fixtures/execution_contract/` and are exercised by
 //! `crates/capsule/tests/execution_contract_vectors.rs`.
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::num::NonZeroU16;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
+
+// Opaque sub-contract digest domain separators (normative).
+//
+// Each opaque `*_digest` facet field commits a sub-contract whose *payload
+// schema is versioned separately from v1*. Its digest is fixed by v1 as:
+//
+// ```text
+// digest = blake3(UTF8("<domain>") || 0x00 || JCS(self-describing payload))
+// ```
+//
+// The domain string below is the exact preimage prefix for that field. A
+// later PR MAY define or extend the payload schema behind a digest without a
+// v1 identity change (RFC §4.5 layering), but MUST keep this preimage rule and
+// domain constant. G0-2 stores each payload alongside its digest in
+// `ato.lock.json` and re-derives the digest before launch. See the
+// module-level "opaque sub-contract digest preimages" section.
+pub const SOURCE_PROJECTION_CONTRACT_V1_DOMAIN: &str = "ato.source-projection-contract/v1";
+pub const RUNTIME_DYNAMIC_CONTRACT_V1_DOMAIN: &str = "ato.runtime-dynamic-contract/v1";
+pub const BUILD_OUTPUT_PROJECTION_V1_DOMAIN: &str = "ato.build-output-projection/v1";
+pub const PROCESS_MODEL_CONTRACT_V1_DOMAIN: &str = "ato.process-model-contract/v1";
+pub const ENVIRONMENT_POLICY_V1_DOMAIN: &str = "ato.environment-policy/v1";
+pub const FILESYSTEM_TOPOLOGY_V1_DOMAIN: &str = "ato.filesystem-topology/v1";
+
+/// Domain separator for a single resolved non-secret environment *value*
+/// digest (`launch.environment[].value_digest`). The preimage relation is
+/// pinned as a v1 contract:
+///
+/// ```text
+/// value_digest = blake3(UTF8("ato.environment-value/v1") || 0x00 || JCS(payload))
+/// ```
+///
+/// where `payload` is a self-describing object carrying the normalized,
+/// non-secret variable value. Secret values never enter the contract at all
+/// (RFC §4.3). G0-2 stores the payload in `ato.lock.json` and verifies the
+/// digest before launch.
+pub const ENVIRONMENT_VALUE_V1_DOMAIN: &str = "ato.environment-value/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DigestAlgorithm {
@@ -250,6 +353,122 @@ impl From<ExecutionId> for String {
     }
 }
 
+/// A canonical absolute guest path.
+///
+/// Guest paths appear in identity-bearing fields (`launch.cwd`,
+/// `filesystem.writable_paths[]`, `external_state[].target`). A path is
+/// accepted only in exactly one canonical spelling so that semantically equal
+/// paths can never derive different `execution_id`s across implementations:
+///
+/// * absolute — a leading `/`;
+/// * no bare `/` root, unless the field explicitly opts in via
+///   [`GuestPath::parse_allowing_root`];
+/// * no `.` or `..` segments;
+/// * no repeated `/` (empty segment) and no trailing `/`;
+/// * no backslash, NUL, or other control characters.
+///
+/// Ordering and equality are **segment-wise** (path components compared
+/// component-by-component), which is the canonical sort order the identity
+/// lists (`writable_paths`) are validated against — independent of raw byte
+/// order. The decomposition into segments is a bijection with the accepted
+/// spelling, so segment-wise `Ord` stays consistent with the derived
+/// `PartialEq`/`Eq`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestPath(String);
+
+impl GuestPath {
+    /// Parse a canonical guest path, rejecting the bare `/` root.
+    pub fn parse(value: &str) -> Result<Self, ExecutionContractError> {
+        Self::parse_inner(value, false)
+    }
+
+    /// Parse a canonical guest path, accepting the bare `/` root. Used only by
+    /// fields that explicitly permit the filesystem root.
+    pub fn parse_allowing_root(value: &str) -> Result<Self, ExecutionContractError> {
+        Self::parse_inner(value, true)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn parse_inner(value: &str, allow_root: bool) -> Result<Self, ExecutionContractError> {
+        use ExecutionContractError::InvalidGuestPath as Bad;
+        if !value.starts_with('/') {
+            return Err(Bad("must be absolute (a leading '/')"));
+        }
+        if value
+            .bytes()
+            .any(|byte| byte == b'\\' || byte < 0x20 || byte == 0x7f)
+        {
+            return Err(Bad(
+                "must not contain a backslash, NUL, or control character",
+            ));
+        }
+        if value == "/" {
+            return if allow_root {
+                Ok(Self(value.to_string()))
+            } else {
+                Err(Bad("bare '/' root is not permitted for this field"))
+            };
+        }
+        if value.ends_with('/') {
+            return Err(Bad("must not have a trailing slash"));
+        }
+        // `value` starts with '/', so the first split segment is always the
+        // empty string before the leading slash; every later segment is a real
+        // path component.
+        for segment in value.split('/').skip(1) {
+            if segment.is_empty() {
+                return Err(Bad("must not contain a repeated slash"));
+            }
+            if segment == "." || segment == ".." {
+                return Err(Bad("must not contain a '.' or '..' segment"));
+            }
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
+impl fmt::Display for GuestPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl PartialOrd for GuestPath {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GuestPath {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Segment-wise: compare path components lexicographically. Both paths
+        // start with '/', so the leading empty segment compares equal first.
+        self.0.split('/').cmp(other.0.split('/'))
+    }
+}
+
+impl Serialize for GuestPath {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for GuestPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ExecutionContractError {
     #[error("execution contract schema must be ato.execution-contract/v1")]
@@ -262,8 +481,8 @@ pub enum ExecutionContractError {
     InvalidExecutionId,
     #[error("content digest must use blake3 or sha256 with exactly 64 lowercase hex characters")]
     InvalidContentDigest,
-    #[error("observed launch envelope does not exactly match the stored execution contract")]
-    ObservedContractMismatch,
+    #[error("guest path is not canonical: {0}")]
+    InvalidGuestPath(&'static str),
     #[error("stored execution_id {stored} does not match the canonical hash {computed}")]
     ExecutionIdMismatch { stored: String, computed: String },
     #[error("failed to canonicalize execution contract: {0}")]
@@ -289,14 +508,19 @@ pub struct ExecutionContractV1 {
 /// Resolved source facet. `digest` is the materialized source projection
 /// (RFC §4.6) — the source bytes actually presented to the build.
 /// `projection_digest` is the opaque sub-contract digest committing the
-/// *source projection rules* (include/exclude, symlink and case policy, …);
-/// its payload schema is versioned separately from v1 (see the module-level
-/// facet mapping).
+/// *source projection rules* (include/exclude, symlink and case policy, …); its
+/// preimage domain is [`SOURCE_PROJECTION_CONTRACT_V1_DOMAIN`] and its payload
+/// schema is versioned separately from v1 (see the module-level facet mapping).
+///
+/// The *resolved ref* that names how these bytes were obtained (`kind`,
+/// `immutable_ref` — VCS kind, tag/commit alias, mirror URL) is deliberately
+/// NOT here: two aliases that resolve to the same source bytes and the same
+/// projection are the SAME Execution Identity (RFC §4.2), so the ref lives in
+/// the non-identity [`ResolvedRefProvenanceV1`] on the envelope, never in the
+/// identity set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSourceContract {
-    pub kind: String,
-    pub immutable_ref: String,
     pub digest: ContentDigest,
     pub projection_digest: ContentDigest,
 }
@@ -316,22 +540,29 @@ pub struct ResolvedTargetContract {
     #[serde(
         default,
         skip_serializing_if = "BTreeMap::is_empty",
-        deserialize_with = "present_non_empty_map"
+        deserialize_with = "present_non_empty_unique_map"
     )]
     pub observable_features: BTreeMap<String, String>,
 }
 
-/// Resolved runtime artifact facet. `digest` is the resolved runtime artifact
-/// digest. `dynamic_contract_digest` is the opaque sub-contract digest
-/// committing the *dynamic runtime contract* — runtime-provided launch-time
-/// behaviour beyond the static artifact bytes (dynamic linking / loader
-/// resolution, plugin or module surface, JIT/ABI switches); its payload schema
-/// is versioned separately from v1 (see the module-level facet mapping).
+/// Resolved runtime artifact facet. `kind` is the runtime family discriminator
+/// and `digest` is the resolved runtime artifact digest.
+/// `dynamic_contract_digest` is the opaque sub-contract digest committing the
+/// *dynamic runtime contract* — runtime-provided launch-time behaviour beyond
+/// the static artifact bytes (dynamic linking / loader resolution, plugin or
+/// module surface, JIT/ABI switches); its preimage domain is
+/// [`RUNTIME_DYNAMIC_CONTRACT_V1_DOMAIN`] and its payload schema is versioned
+/// separately from v1 (see the module-level facet mapping).
+///
+/// The *resolved ref* that names how the artifact was selected
+/// (`resolved_ref` — e.g. `node@22.14.0` vs a mirror digest URL) is NOT here:
+/// two refs resolving to the same runtime artifact digest and dynamic contract
+/// are the SAME Execution Identity, so the ref lives in the non-identity
+/// [`ResolvedRefProvenanceV1`] on the envelope, never in the identity set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedArtifactContract {
     pub kind: String,
-    pub resolved_ref: String,
     pub digest: ContentDigest,
     pub dynamic_contract_digest: ContentDigest,
 }
@@ -347,8 +578,9 @@ pub struct ResolvedDependencyContract {
 /// A single actual immutable build output. `digest` is its immutable output
 /// digest; `projection_digest` is the opaque sub-contract digest committing
 /// how this output is *projected* into the launch environment (placement,
-/// rename, permission projection), with a payload schema versioned separately
-/// from v1 (see the module-level facet mapping).
+/// rename, permission projection). Its preimage domain is
+/// [`BUILD_OUTPUT_PROJECTION_V1_DOMAIN`] and its payload schema is versioned
+/// separately from v1 (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedBuildOutputContract {
@@ -357,20 +589,24 @@ pub struct ResolvedBuildOutputContract {
     pub projection_digest: ContentDigest,
 }
 
-/// Resolved launch facet. `argv` / `cwd` are the exact entrypoint.
+/// Resolved launch facet. `argv` is the exact entrypoint and `cwd` is the
+/// canonical guest working directory ([`GuestPath`]).
 /// `process_model_digest` is the opaque sub-contract digest committing the
 /// *process model* (root process, daemonization/PID-1 role, supervised child
-/// structure); its payload schema is versioned separately from v1.
-/// `environment` carries the resolved non-secret values, and
-/// `environment_policy_digest` is the opaque sub-contract digest committing
-/// the *variable requirements, normalization, and inheritance policy*. Secret
-/// values never enter the contract: secrets are bound by name in
-/// `secret_bindings` and their values are excluded from identity (RFC §4.3).
+/// structure); its preimage domain is [`PROCESS_MODEL_CONTRACT_V1_DOMAIN`] and
+/// its payload schema is versioned separately from v1. `environment` carries
+/// the resolved non-secret values (each committed under
+/// [`ENVIRONMENT_VALUE_V1_DOMAIN`]), and `environment_policy_digest` is the
+/// opaque sub-contract digest committing the *variable requirements,
+/// normalization, and inheritance policy* (domain
+/// [`ENVIRONMENT_POLICY_V1_DOMAIN`]). Secret values never enter the contract:
+/// secrets are bound by name in `secret_bindings` and their values are
+/// excluded from identity (RFC §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedLaunchContract {
     pub argv: Vec<String>,
-    pub cwd: String,
+    pub cwd: GuestPath,
     pub process_model_digest: ContentDigest,
     pub environment: Vec<EnvironmentVariableContract>,
     pub environment_policy_digest: ContentDigest,
@@ -383,8 +619,10 @@ pub struct ResolvedLaunchContract {
 }
 
 /// One resolved non-secret environment variable. `value_digest` is the
-/// content digest of the exact resolved value bytes; secret values never
-/// appear here — secrets are bound by name via
+/// content digest of the exact resolved value under the
+/// [`ENVIRONMENT_VALUE_V1_DOMAIN`] preimage rule (`blake3(domain || 0x00 ||
+/// JCS(payload))`, where `payload` is the self-describing normalized value);
+/// secret values never appear here — secrets are bound by name via
 /// `ResolvedLaunchContract::secret_bindings` and their values are excluded
 /// from identity (RFC §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,21 +633,23 @@ pub struct EnvironmentVariableContract {
 }
 
 /// Resolved filesystem facet. `readonly_layers` are the immutable layer
-/// digests; `writable_paths` is the writable-boundary contract; `view_digest`
-/// commits the composed immutable view *content*. `topology_digest` is the
-/// opaque sub-contract digest committing the *mount topology and per-mount
-/// access modes* (which layer/output is mounted where, and read-only vs
-/// read-write per mount) — content and structure are separate commitments, so
-/// a topology or access-mode change is identity-bearing even when the mounted
-/// bytes are unchanged. Its payload schema is versioned separately from v1
-/// (see the module-level facet mapping).
+/// digests; `writable_paths` is the writable-boundary contract as canonical
+/// guest paths ([`GuestPath`]); `view_digest` commits the composed immutable
+/// view *content*. `topology_digest` is the opaque sub-contract digest
+/// committing the *mount topology and per-mount access modes* (which
+/// layer/output is mounted where, and read-only vs read-write per mount) —
+/// content and structure are separate commitments, so a topology or
+/// access-mode change is identity-bearing even when the mounted bytes are
+/// unchanged. Its preimage domain is [`FILESYSTEM_TOPOLOGY_V1_DOMAIN`] and its
+/// payload schema is versioned separately from v1 (see the module-level facet
+/// mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedFilesystemContract {
     pub view_digest: ContentDigest,
     pub topology_digest: ContentDigest,
     pub readonly_layers: Vec<ContentDigest>,
-    pub writable_paths: Vec<String>,
+    pub writable_paths: Vec<GuestPath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +660,9 @@ pub struct ResolvedPolicyContract {
     pub filesystem_digest: ContentDigest,
 }
 
+/// Declared guest-facing surface. `port` is an optional guest port; when
+/// present it is a nonzero `u16` (a `0` port is never a valid declared
+/// surface, so it is rejected fail-closed via [`NonZeroU16`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GuestSurfaceContract {
@@ -430,43 +673,20 @@ pub struct GuestSurfaceContract {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "present_not_null"
     )]
-    pub port: Option<u16>,
+    pub port: Option<NonZeroU16>,
     pub features: Vec<String>,
 }
 
+/// External state binding. `target` is the canonical guest mount/injection
+/// path ([`GuestPath`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalStateContract {
     pub name: String,
-    pub target: String,
+    pub target: GuestPath,
     pub access: ExternalStateAccess,
     pub schema: String,
     pub snapshot: SnapshotExclusion,
-}
-
-/// Complete launch contract independently re-derived from the concrete plan,
-/// manifest, target, and materialization that are about to be snapshotted.
-/// Partial digest witnesses are intentionally not representable: acceptance
-/// requires equality across every identity-bearing facet.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservedExecutionContractV1 {
-    pub contract: ExecutionContractV1,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FinalizedExecutionContractV1 {
-    contract: ExecutionContractV1,
-    execution_id: ExecutionId,
-}
-
-impl FinalizedExecutionContractV1 {
-    pub fn contract(&self) -> &ExecutionContractV1 {
-        &self.contract
-    }
-
-    pub fn execution_id(&self) -> &ExecutionId {
-        &self.execution_id
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -482,21 +702,52 @@ pub enum SnapshotExclusion {
     Exclude,
 }
 
+/// Non-identity provenance for the *resolved refs* that name how the
+/// identity-bearing content was obtained.
+///
+/// `source_kind` / `source_immutable_ref` (VCS kind, tag/commit/mirror alias)
+/// and `runtime_resolved_ref` (e.g. `node@22.14.0` vs a mirror digest URL) are
+/// **aliases**: two refs that resolve to the same source bytes + projection and
+/// the same runtime artifact digest + dynamic contract are the SAME Execution
+/// Identity (RFC §4.2). They therefore live here on the non-identity envelope,
+/// never in [`ExecutionContractV1`], so an alias can never split an id.
+/// Excluded from `execution_id` by construction (it is not part of the
+/// embedded contract).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedRefProvenanceV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_immutable_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_resolved_ref: Option<String>,
+}
+
+impl ResolvedRefProvenanceV1 {
+    fn is_empty(&self) -> bool {
+        self.source_kind.is_none()
+            && self.source_immutable_ref.is_none()
+            && self.runtime_resolved_ref.is_none()
+    }
+}
+
 /// Non-identity envelope around an execution contract.
 ///
 /// Everything here besides `execution_contract` is excluded from the
-/// execution identity: provenance, diagnostics, evidence, timestamps, and
-/// the stored `execution_id` itself. Unlike the identity-bearing contract,
-/// the envelope is deliberately tolerant — unknown fields (runner names,
-/// Snapshot/Session IDs, dynamic endpoints, and other operational facts)
-/// are ignored on read instead of failing closed, because none of them may
-/// influence the id. [`Self::verify`] recomputes the canonical hash from
-/// the embedded contract and fails closed on any mismatch with the stored
-/// `execution_id`.
+/// execution identity: the resolved-ref provenance, free-form provenance,
+/// diagnostics, evidence, timestamps, and the stored `execution_id` itself.
+/// Unlike the identity-bearing contract, the envelope is deliberately tolerant
+/// — unknown fields (runner names, Snapshot/Session IDs, dynamic endpoints, and
+/// other operational facts) are ignored on read instead of failing closed,
+/// because none of them may influence the id. [`Self::verify`] recomputes the
+/// canonical hash from the embedded contract and fails closed on any mismatch
+/// with the stored `execution_id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionContractEnvelopeV1 {
     pub execution_contract: ExecutionContractV1,
     pub execution_id: ExecutionId,
+    #[serde(default, skip_serializing_if = "ResolvedRefProvenanceV1::is_empty")]
+    pub resolved_refs: ResolvedRefProvenanceV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<String>,
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -530,14 +781,10 @@ impl ExecutionContractV1 {
         }
 
         for (field, value) in [
-            ("source.kind", self.source.kind.as_str()),
-            ("source.immutable_ref", self.source.immutable_ref.as_str()),
             ("target.os", self.target.os.as_str()),
             ("target.architecture", self.target.architecture.as_str()),
             ("target.abi", self.target.abi.as_str()),
             ("runtime.kind", self.runtime.kind.as_str()),
-            ("runtime.resolved_ref", self.runtime.resolved_ref.as_str()),
-            ("launch.cwd", self.launch.cwd.as_str()),
             (
                 "guest_surface.bind_address",
                 self.guest_surface.bind_address.as_str(),
@@ -552,7 +799,6 @@ impl ExecutionContractV1 {
             }
         }
         for (field, value) in [
-            ("source.kind", self.source.kind.as_str()),
             ("target.os", self.target.os.as_str()),
             ("target.architecture", self.target.architecture.as_str()),
             ("target.abi", self.target.abi.as_str()),
@@ -603,10 +849,10 @@ impl ExecutionContractV1 {
             "filesystem.readonly_layers",
             &self.filesystem.readonly_layers,
         )?;
-        validate_sorted_ascii_strings(
-            "filesystem.writable_paths",
-            &self.filesystem.writable_paths,
-        )?;
+        // Each element is already a canonical `GuestPath` (validated on
+        // deserialization); the list only needs to be sorted (segment-wise)
+        // and duplicate-free.
+        validate_sorted_guest_paths("filesystem.writable_paths", &self.filesystem.writable_paths)?;
         validate_sorted_identifiers("guest_surface.features", &self.guest_surface.features)?;
         validate_named_list(
             "external_state",
@@ -623,10 +869,9 @@ impl ExecutionContractV1 {
             ensure_values("launch.environment", [&variable.name])?;
         }
         for state in &self.external_state {
-            ensure_values(
-                "external_state",
-                [&state.name, &state.target, &state.schema],
-            )?;
+            // `state.target` is a canonical `GuestPath`; only the free-form
+            // name and schema still need a non-empty check.
+            ensure_values("external_state", [&state.name, &state.schema])?;
         }
         Ok(())
     }
@@ -645,36 +890,41 @@ impl ExecutionContractV1 {
         hasher.update(&canonical);
         ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
     }
+}
 
-    /// Verify that the resolved contract exactly equals the contract re-derived
-    /// from this build's actual launch plan and materialized bytes.
-    ///
-    /// A mismatch is terminal: callers must not capture or publish a Snapshot
-    /// under the stale execution identity.
-    pub fn verify_observation(
-        &self,
-        observed: &ObservedExecutionContractV1,
-    ) -> Result<(), ExecutionContractError> {
-        self.validate()?;
-        observed.contract.validate()?;
-        if self == &observed.contract {
-            Ok(())
-        } else {
-            Err(ExecutionContractError::ObservedContractMismatch)
-        }
-    }
-
-    pub fn finalize_observation(
-        self,
-        observed: &ObservedExecutionContractV1,
-    ) -> Result<FinalizedExecutionContractV1, ExecutionContractError> {
-        self.verify_observation(observed)?;
-        let execution_id = self.compute_execution_id()?;
-        Ok(FinalizedExecutionContractV1 {
-            contract: self,
-            execution_id,
-        })
-    }
+/// Compute an opaque sub-contract digest under the pinned v1 preimage rule:
+///
+/// ```text
+/// digest = blake3(UTF8(domain) || 0x00 || JCS(payload))
+/// ```
+///
+/// `domain` MUST be one of the normative opaque-digest domain constants
+/// (`ato.source-projection-contract/v1`, `ato.runtime-dynamic-contract/v1`,
+/// `ato.build-output-projection/v1`, `ato.process-model-contract/v1`,
+/// `ato.environment-policy/v1`, `ato.filesystem-topology/v1`) or
+/// [`ENVIRONMENT_VALUE_V1_DOMAIN`]. `payload` is the self-describing
+/// sub-contract payload whose *schema is versioned separately from v1*. The
+/// preimage rule is fixed by v1; the payload schema is not, so a later PR can
+/// define the payload without a v1 identity change (RFC §4.5). The returned
+/// digest is what a producer stores in the matching `*_digest` /
+/// `value_digest` field.
+pub fn opaque_subcontract_digest<T>(
+    domain: &str,
+    payload: &T,
+) -> Result<ContentDigest, ExecutionContractError>
+where
+    T: Serialize,
+{
+    let canonical = serde_jcs::to_vec(payload)
+        .map_err(|error| ExecutionContractError::Canonicalization(error.to_string()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&canonical);
+    Ok(ContentDigest::new(
+        DigestAlgorithm::Blake3,
+        *hasher.finalize().as_bytes(),
+    ))
 }
 
 fn validate_sorted_digests(
@@ -714,17 +964,13 @@ fn validate_sorted_identifiers(
     Ok(())
 }
 
-fn validate_sorted_ascii_strings(
+fn validate_sorted_guest_paths(
     field: &'static str,
-    values: &[String],
+    values: &[GuestPath],
 ) -> Result<(), ExecutionContractError> {
-    if values.iter().any(|value| {
-        value.trim().is_empty()
-            || !value
-                .bytes()
-                .all(|byte| byte == b' ' || byte.is_ascii_graphic())
-    }) || values.windows(2).any(|pair| pair[0] >= pair[1])
-    {
+    // Segment-wise `Ord`: strictly increasing rejects both unsorted and
+    // duplicate entries in one pass.
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(ExecutionContractError::NonCanonicalList(field));
     }
     Ok(())
@@ -778,17 +1024,53 @@ where
     })
 }
 
-fn present_non_empty_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+// `BTreeMap::deserialize` is last-wins on duplicate keys, which would let two
+// byte-distinct JSON inputs (one with a repeated observable-feature key) map to
+// the same typed value and hash — a canonicalization hole. This visitor
+// instead fails closed on the first duplicate insertion, and still rejects the
+// non-canonical explicit-empty spelling of absence. (Duplicate keys in the
+// *struct* facets — top-level and nested identity objects — are already
+// rejected by serde's derived struct deserializers via `duplicate field`,
+// pinned by the invalid-duplicate-top-level-field / -nested-field vectors.)
+fn present_non_empty_unique_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let map = BTreeMap::deserialize(deserializer)?;
-    if map.is_empty() {
-        return Err(serde::de::Error::custom(
-            "absent optional identity collections must omit the key (explicit {} is non-canonical)",
-        ));
+    struct UniqueMapVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for UniqueMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a non-empty map of observable target features with unique keys")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut map = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, String>()? {
+                if map.insert(key.clone(), value).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate observable feature key '{key}' \
+                         (identity maps must have unique keys)"
+                    )));
+                }
+            }
+            if map.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "absent optional identity collections must omit the key \
+                     (explicit {} is non-canonical)",
+                ));
+            }
+            Ok(map)
+        }
     }
-    Ok(map)
+
+    deserializer.deserialize_map(UniqueMapVisitor)
 }
 
 fn present_non_empty_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -810,16 +1092,23 @@ mod tests {
 
     use super::*;
 
+    /// Baseline `execution_id` for [`sample_contract`]. Kept in lockstep with
+    /// the shared fixture baseline (`manifest.json` / the vector generator).
+    const BASELINE_EXECUTION_ID: &str =
+        "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464";
+
     fn digest(algorithm: DigestAlgorithm, byte: u8) -> ContentDigest {
         ContentDigest::new(algorithm, [byte; 32])
+    }
+
+    fn guest_path(value: &str) -> GuestPath {
+        GuestPath::parse(value).expect("canonical guest path")
     }
 
     fn sample_contract() -> ExecutionContractV1 {
         ExecutionContractV1 {
             schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
             source: ResolvedSourceContract {
-                kind: "git".to_string(),
-                immutable_ref: "https://example.invalid/repo@012345".to_string(),
                 digest: digest(DigestAlgorithm::Sha256, 1),
                 projection_digest: digest(DigestAlgorithm::Blake3, 0x0c),
             },
@@ -832,7 +1121,6 @@ mod tests {
             },
             runtime: ResolvedArtifactContract {
                 kind: "node".to_string(),
-                resolved_ref: "node@22.14.0".to_string(),
                 digest: digest(DigestAlgorithm::Sha256, 2),
                 dynamic_contract_digest: digest(DigestAlgorithm::Blake3, 0x0d),
             },
@@ -848,7 +1136,7 @@ mod tests {
             }],
             launch: ResolvedLaunchContract {
                 argv: vec!["node".to_string(), "dist/server.js".to_string()],
-                cwd: "/workspace".to_string(),
+                cwd: guest_path("/workspace"),
                 process_model_digest: digest(DigestAlgorithm::Blake3, 0x0f),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
@@ -861,7 +1149,7 @@ mod tests {
                 view_digest: digest(DigestAlgorithm::Blake3, 7),
                 topology_digest: digest(DigestAlgorithm::Blake3, 0x11),
                 readonly_layers: vec![digest(DigestAlgorithm::Blake3, 8)],
-                writable_paths: vec!["/tmp".to_string()],
+                writable_paths: vec![guest_path("/tmp")],
             },
             policy: ResolvedPolicyContract {
                 network_digest: digest(DigestAlgorithm::Blake3, 9),
@@ -871,80 +1159,17 @@ mod tests {
             guest_surface: GuestSurfaceContract {
                 bind_address: "0.0.0.0".to_string(),
                 protocol: "ato-guest/v1".to_string(),
-                port: Some(8080),
+                port: Some(NonZeroU16::new(8080).unwrap()),
                 features: vec!["bindings".to_string(), "exec".to_string()],
             },
             external_state: vec![ExternalStateContract {
                 name: "data".to_string(),
-                target: "/data".to_string(),
+                target: guest_path("/data"),
                 access: ExternalStateAccess::ReadWrite,
                 schema: "1".to_string(),
                 snapshot: SnapshotExclusion::Exclude,
             }],
         }
-    }
-
-    fn matching_observation(contract: &ExecutionContractV1) -> ObservedExecutionContractV1 {
-        ObservedExecutionContractV1 {
-            contract: contract.clone(),
-        }
-    }
-
-    #[test]
-    fn build_observation_must_match_the_complete_launch_envelope() {
-        let contract = sample_contract();
-        contract
-            .verify_observation(&matching_observation(&contract))
-            .expect("matching build observation");
-
-        let mut stale_output = matching_observation(&contract);
-        stale_output.contract.build_outputs[0].digest = digest(DigestAlgorithm::Blake3, 0xff);
-        assert_eq!(
-            contract.verify_observation(&stale_output),
-            Err(ExecutionContractError::ObservedContractMismatch)
-        );
-
-        for mutate in [
-            |observed: &mut ObservedExecutionContractV1| {
-                observed.contract.launch.argv.push("--new".to_string());
-            },
-            |observed: &mut ObservedExecutionContractV1| {
-                observed.contract.target.architecture = "aarch64".to_string();
-            },
-            |observed: &mut ObservedExecutionContractV1| {
-                observed.contract.launch.environment[0].value_digest =
-                    digest(DigestAlgorithm::Blake3, 0xee);
-            },
-            |observed: &mut ObservedExecutionContractV1| {
-                observed.contract.guest_surface.port = Some(9090);
-            },
-        ] {
-            let mut observed = matching_observation(&contract);
-            mutate(&mut observed);
-            assert_eq!(
-                contract.verify_observation(&observed),
-                Err(ExecutionContractError::ObservedContractMismatch)
-            );
-        }
-
-        let mut stale_derivation = matching_observation(&contract);
-        stale_derivation.contract.dependencies[0].derivation_digest =
-            digest(DigestAlgorithm::Blake3, 0xdd);
-        assert_eq!(
-            contract.verify_observation(&stale_derivation),
-            Err(ExecutionContractError::ObservedContractMismatch)
-        );
-
-        let mut stale_writable_path = matching_observation(&contract);
-        stale_writable_path
-            .contract
-            .filesystem
-            .writable_paths
-            .push("/var/tmp".to_string());
-        assert_eq!(
-            contract.verify_observation(&stale_writable_path),
-            Err(ExecutionContractError::ObservedContractMismatch)
-        );
     }
 
     #[test]
@@ -960,13 +1185,13 @@ mod tests {
             ExecutionId::new(format!("blake3:{}", blake3::hash(&expected_input).to_hex()))
                 .expect("valid id")
         );
+        // Pinned baseline id — MUST equal the shared fixture baseline
+        // (`tests/fixtures/execution_contract/manifest.json`), which the
+        // deterministic vector generator recomputes. Regenerate both together.
         assert_eq!(
             contract.compute_execution_id().expect("execution id"),
-            ExecutionId::new(
-                "blake3:f33b4afecf228ccab29e8b4b18b101f3f4539d7481e3279873312ae4a666d831"
-                    .to_string()
-            )
-            .expect("shared Rust/TypeScript vector")
+            ExecutionId::new(BASELINE_EXECUTION_ID.to_string())
+                .expect("shared Rust/TypeScript vector")
         );
     }
 
@@ -1176,12 +1401,20 @@ mod tests {
         let mut envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: expected.clone(),
+            resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
             diagnostics: serde_json::Value::Null,
             evidence: serde_json::Value::Null,
         };
 
+        // Resolved-ref provenance (aliases) is non-identity: it must not move
+        // the id.
+        envelope.resolved_refs = ResolvedRefProvenanceV1 {
+            source_kind: Some("archive".to_string()),
+            source_immutable_ref: Some("https://mirror.invalid/repo@012345".to_string()),
+            runtime_resolved_ref: Some("node@lts".to_string()),
+        };
         envelope.generated_at = Some("2026-07-21T00:00:00Z".to_string());
         envelope.provenance = serde_json::json!({
             "builder": "runner-a",
@@ -1223,6 +1456,7 @@ mod tests {
         let envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap(),
+            resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
             diagnostics: serde_json::Value::Null,
@@ -1269,12 +1503,11 @@ mod tests {
                 "name": "npm" } ],
             "runtime": { "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
                 "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
-                "resolved_ref": "node@22.14.0", "kind": "node" },
+                "kind": "node" },
             "target": { "libc": "glibc-2.39", "abi": "gnu",
                 "architecture": "x86_64", "os": "linux" },
             "source": { "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
-                "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-                "immutable_ref": "https://example.invalid/repo@012345", "kind": "git" },
+                "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101" },
             "schema": "ato.execution-contract/v1"
         }"#;
 
@@ -1285,5 +1518,79 @@ mod tests {
             parsed.canonical_bytes().unwrap(),
             baseline.canonical_bytes().unwrap()
         );
+    }
+
+    #[test]
+    fn guest_path_accepts_only_the_canonical_spelling() {
+        for good in ["/workspace", "/data/ユーザー", "/a/b/c", "/tmp"] {
+            assert!(GuestPath::parse(good).is_ok(), "{good}");
+        }
+        for (bad, _why) in [
+            ("workspace", "relative"),
+            ("", "empty"),
+            ("/", "bare root"),
+            ("/data/", "trailing slash"),
+            ("/data//x", "repeated slash"),
+            ("/data/../data", ".. segment"),
+            ("/data/./x", ". segment"),
+            ("/data\\x", "backslash"),
+            ("/data\u{7}x", "control char"),
+        ] {
+            assert!(GuestPath::parse(bad).is_err(), "{bad}");
+        }
+        // Only a field that explicitly opts in may accept the bare root.
+        assert!(GuestPath::parse("/").is_err());
+        assert!(GuestPath::parse_allowing_root("/").is_ok());
+        assert!(GuestPath::parse_allowing_root("/data/../data").is_err());
+    }
+
+    #[test]
+    fn guest_path_ordering_is_segment_wise() {
+        // Segment-wise: "/a" < "/a/b" < "/a.b" because the first component "a"
+        // sorts before "a.b", and a prefix sorts before its extension.
+        let a = guest_path("/a");
+        let a_b = guest_path("/a/b");
+        let a_dot_b = guest_path("/a.b");
+        assert!(a < a_b);
+        assert!(a_b < a_dot_b);
+    }
+
+    #[test]
+    fn zero_guest_port_is_rejected() {
+        let mut value = serde_json::to_value(sample_contract()).unwrap();
+        value["guest_surface"]["port"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<ExecutionContractV1>(value).is_err());
+    }
+
+    #[test]
+    fn duplicate_observable_feature_key_fails_closed() {
+        // serde_json::Value would silently collapse the duplicate, so feed raw
+        // bytes with a repeated key straight to the deserializer.
+        let raw = r#"{
+            "os": "linux", "architecture": "x86_64", "abi": "gnu",
+            "observable_features": { "avx512": "1", "avx512": "0" }
+        }"#;
+        assert!(serde_json::from_str::<ResolvedTargetContract>(raw).is_err());
+    }
+
+    #[test]
+    fn opaque_subcontract_digest_matches_the_pinned_preimage() {
+        // Prove the preimage shape for one domain: the environment value digest.
+        let payload = serde_json::json!({ "value": "production", "encoding": "utf-8" });
+        let got = opaque_subcontract_digest(ENVIRONMENT_VALUE_V1_DOMAIN, &payload)
+            .expect("digest computes");
+
+        let canonical = serde_jcs::to_vec(&payload).unwrap();
+        let mut preimage = ENVIRONMENT_VALUE_V1_DOMAIN.as_bytes().to_vec();
+        preimage.push(0);
+        preimage.extend(canonical);
+        let expected =
+            ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(&preimage).as_bytes());
+
+        assert_eq!(got, expected);
+        assert_eq!(got.algorithm(), DigestAlgorithm::Blake3);
+        // Domain separation: the same payload under a different domain differs.
+        let other = opaque_subcontract_digest(FILESYSTEM_TOPOLOGY_V1_DOMAIN, &payload).unwrap();
+        assert_ne!(got, other);
     }
 }

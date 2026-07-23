@@ -7,13 +7,10 @@
   },
   "source": {
     "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
-    "kind": "git",
-    "immutable_ref": "https://example.invalid/repo@012345",
     "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101"
   },
   "schema": "ato.execution-contract/v1",
   "runtime": {
-    "resolved_ref": "node@22.14.0",
     "kind": "node",
     "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
     "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202"

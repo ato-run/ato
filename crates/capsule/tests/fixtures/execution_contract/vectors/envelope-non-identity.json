@@ -1,5 +1,4 @@
 {
-  "build_job_id": "job-1234",
   "diagnostics": {
     "resolver_log": "resolved node 22.14.0 in 1.2s"
   },
@@ -75,14 +74,11 @@
     "runtime": {
       "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
       "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
-      "kind": "node",
-      "resolved_ref": "node@22.14.0"
+      "kind": "node"
     },
     "schema": "ato.execution-contract/v1",
     "source": {
       "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-      "immutable_ref": "https://example.invalid/repo@012345",
-      "kind": "git",
       "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
     },
     "target": {
@@ -92,16 +88,14 @@
       "os": "linux"
     }
   },
-  "execution_id": "blake3:f33b4afecf228ccab29e8b4b18b101f3f4539d7481e3279873312ae4a666d831",
+  "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
   "generated_at": "2026-07-21T00:00:00Z",
-  "host_ip": "203.0.113.7",
   "host_port": 54321,
   "provenance": {
     "builder": "runner-a",
     "display_url": "https://example.invalid/builds/123",
     "machine_id": "machine-77"
   },
-  "provider": "managed-cloud",
   "runner_id": "runner-a",
   "session_id": "sess-42",
   "snapshot_id": "snap-9"

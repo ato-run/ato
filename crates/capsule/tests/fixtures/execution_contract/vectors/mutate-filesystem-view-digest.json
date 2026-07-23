@@ -1,8 +1,6 @@
 {
   "schema": "ato.execution-contract/v1",
   "source": {
-    "kind": "git",
-    "immutable_ref": "https://example.invalid/repo@012345",
     "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
     "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
   },
@@ -14,7 +12,6 @@
   },
   "runtime": {
     "kind": "node",
-    "resolved_ref": "node@22.14.0",
     "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
     "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
   },
@@ -51,7 +48,7 @@
     ]
   },
   "filesystem": {
-    "view_digest": "blake3:f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7",
+    "view_digest": "blake3:2727272727272727272727272727272727272727272727272727272727272727",
     "topology_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
     "readonly_layers": [
       "blake3:0808080808080808080808080808080808080808080808080808080808080808"
