@@ -1176,4 +1176,80 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn finalize_demands_at_least_one_opaque_facet_the_contract_cannot_supply() {
+        // Regression guard for the round-2 blocker. The measured-only guarantee
+        // (RFC §4.5/§4.6) is HOLISTIC, not per-facet: `finalize` is
+        // clone-unsatisfiable ONLY because `ExecutionContractV1` makes these
+        // opaque digest fields NON-OPTIONAL and an opaque digest never carries
+        // its preimage payload. A clone-in attacker — one who copied the
+        // expected/lock contract and presents it as its own "observation" — can
+        // read every TYPED facet from the contract, but the contract stores only
+        // the DIGESTS of the opaque facets below, so the attacker can never
+        // supply a payload for even one of them and `finalize` refuses.
+        //
+        // This invariant is implicit in the contract's field types. If a future
+        // contract shape made every one of these opaque facets optional/absent,
+        // the gate would silently become clone-satisfiable again (the exact
+        // round-2 blocker). This test fails in that world: it measures every
+        // facet the contract can supply and asserts `finalize` STILL refuses,
+        // naming one of the required opaque facets.
+        const REQUIRED_OPAQUE_FACETS: &[&str] = &[
+            "source.projection_digest",
+            "runtime.dynamic_contract_digest",
+            "launch.process_model_digest",
+            "launch.environment_policy_digest",
+            "filesystem.topology_digest",
+            "policy.network_digest",
+            "policy.capability_digest",
+            "policy.filesystem_digest",
+        ];
+
+        let fx = fixtures();
+        let expected = expected_contract(&fx);
+
+        // The maximal clone-in observation: measure every facet the expected
+        // contract can supply from its own stored data. The opaque payloads are
+        // deliberately absent (the contract holds only their digests), and so
+        // are `build_outputs` / `environment`, whose measured forms structurally
+        // require an opaque payload (projection / value) the contract lacks.
+        let clone_in = ExecutionObservationV1::new()
+            .measured_source_digest(expected.source.digest)
+            .measured_target(expected.target.clone())
+            .measured_runtime(expected.runtime.kind.clone(), expected.runtime.digest)
+            .measured_dependencies(
+                expected
+                    .dependencies
+                    .iter()
+                    .map(|d| MeasuredDependency {
+                        name: d.name.clone(),
+                        derivation_digest: d.derivation_digest,
+                        output_digest: d.output_digest,
+                    })
+                    .collect(),
+            )
+            .measured_launch(expected.launch.argv.clone(), expected.launch.cwd.clone())
+            .measured_secret_bindings(expected.launch.secret_bindings.clone())
+            .measured_filesystem_view(expected.filesystem.view_digest)
+            .measured_readonly_layers(expected.filesystem.readonly_layers.clone())
+            .measured_writable_paths(expected.filesystem.writable_paths.clone())
+            .measured_guest_surface(expected.guest_surface.clone())
+            .measured_external_state(expected.external_state.clone());
+
+        let error = clone_in.finalize(&expected).expect_err(
+            "clone-in must never finalize: a required opaque facet is unmeasurable from the contract",
+        );
+        match error {
+            FinalizationError::UnmeasuredFacet(facet) => assert!(
+                REQUIRED_OPAQUE_FACETS.contains(&facet),
+                "finalize refused on {facet:?}, which is not one of the required opaque facets \
+                 {REQUIRED_OPAQUE_FACETS:?}; the measured-only guarantee no longer rests on a \
+                 required opaque facet the contract cannot supply",
+            ),
+            other => panic!(
+                "expected an UnmeasuredFacet refusal on a required opaque facet, got {other:?}"
+            ),
+        }
+    }
 }

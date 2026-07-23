@@ -10,7 +10,9 @@
 //! * [`verify_environment_values`] re-derives each persisted value's digest
 //!   under domain `ato.environment-value/v1` from its stored payload, rejects a
 //!   mismatch, rejects a secret-bearing name, and — when the envelope is also
-//!   present — cross-checks the digest against the contract's
+//!   present — requires every persisted value to be committed by the execution
+//!   identity (a D5 name the identity never committed is unvouched and rejected)
+//!   and cross-checks its digest against the contract's
 //!   `launch.environment[name].value_digest`.
 //!
 //! [`verify_lock_execution`] runs both. Wiring this into the launch re-read
@@ -51,6 +53,16 @@ pub enum LockExecutionError {
          committed environment value digest"
     )]
     EnvelopeValueDigestMismatch { name: String },
+    /// A persisted (D5) env value's name is not committed by the envelope's
+    /// execution identity. When the envelope is present it IS the execution
+    /// identity, so every persisted non-secret value must be vouched for by a
+    /// committed `launch.environment` entry; an uncommitted name is unvouched.
+    #[error(
+        "launch.environment[{name}] is persisted but is not committed by the execution \
+         contract identity; a persisted non-secret value must be vouched for by the \
+         committed execution identity"
+    )]
+    EnvelopeUncommittedValue { name: String },
     /// A persisted env value carried a secret-bearing name; secret values must
     /// never be persisted as non-secret values (RFC §4.3).
     #[error(
@@ -71,7 +83,8 @@ pub fn verify_execution_envelope(lock: &AtoLock) -> Result<(), LockExecutionErro
 
 /// Verify every persisted non-secret env value (if any) by re-deriving its
 /// `value_digest`, rejecting secret names, and — when the envelope is present —
-/// cross-checking against the contract's committed value digest.
+/// requiring each persisted name to be committed by the execution identity and
+/// cross-checking its digest against the committed value digest.
 pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionError> {
     let Some(launch) = &lock.launch else {
         return Ok(());
@@ -103,19 +116,34 @@ pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionErro
             });
         }
 
-        // Cross-check against the envelope contract's committed value digest.
-        if let Some(envelope) = &lock.execution_contract
-            && let Some(committed) = envelope
+        // Cross-check against the envelope contract's committed environment.
+        //
+        // When the envelope is present it IS the execution identity (RFC §4.5,
+        // round-2 measured-facts-only model): every persisted (D5) non-secret
+        // value MUST be vouched for by a committed `launch.environment` entry
+        // AND its digest MUST agree with the committed one. A D5 name the
+        // identity never committed is rejected here (hole (a)) — a persisted
+        // value with no committed identity is unvouched.
+        //
+        // The reverse direction is intentionally lenient (hole (b)): the
+        // committed identity MAY declare an env var whose value was not
+        // persisted in D5 (e.g. it was not measured / not stored), so a
+        // committed name absent from D5 is NOT verified or required here.
+        if let Some(envelope) = &lock.execution_contract {
+            let committed = envelope
                 .execution_contract
                 .launch
                 .environment
                 .iter()
                 .find(|variable| variable.name == entry.name)
-            && committed.value_digest != stored
-        {
-            return Err(LockExecutionError::EnvelopeValueDigestMismatch {
-                name: entry.name.clone(),
-            });
+                .ok_or_else(|| LockExecutionError::EnvelopeUncommittedValue {
+                    name: entry.name.clone(),
+                })?;
+            if committed.value_digest != stored {
+                return Err(LockExecutionError::EnvelopeValueDigestMismatch {
+                    name: entry.name.clone(),
+                });
+            }
         }
     }
 
@@ -355,6 +383,28 @@ mod tests {
             verify_environment_values(&lock),
             Err(LockExecutionError::EnvelopeValueDigestMismatch {
                 name: "NODE_ENV".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn extra_uncommitted_env_var_is_rejected() {
+        // Finding 1 hole (a): a self-consistent D5 value whose name the
+        // envelope's execution identity never committed is unvouched. Its
+        // payload/digest agree with each other, and it is not secret-bearing, so
+        // it passes self-consistency — but the committed contract only vouches
+        // for NODE_ENV, so persisting EXTRA_VAR alongside the envelope must be
+        // rejected rather than accepted on self-consistency alone.
+        let payload = json!({"raw": "extra"});
+        let digest = environment_value_digest(&payload).unwrap();
+        let lock = lock_with(
+            Some(sample_envelope()),
+            Some(env_launch("EXTRA_VAR", payload, digest.to_string())),
+        );
+        assert_eq!(
+            verify_environment_values(&lock),
+            Err(LockExecutionError::EnvelopeUncommittedValue {
+                name: "EXTRA_VAR".to_string()
             })
         );
     }
