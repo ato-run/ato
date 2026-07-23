@@ -71,6 +71,9 @@ use snapshot::{
 };
 
 mod upload;
+/// Submission Wizard PR-0 wire contract — serde/TOML types + tests only, nothing
+/// wired into the claim/dispatch loop yet (see the module doc).
+mod wizard_wire;
 
 /// PEM-marker literals: a GATE for the sealed `manifest.json` (small, structured,
 /// builder-authored — a PEM marker there is always wrong) and an ADVISORY sweep over
