@@ -246,13 +246,23 @@ pub enum AcceptanceStatus {
 /// that with a refinement on the shared ack schema, this side by construction
 /// ([`WizardTerminalAck`] has no `status` member — a `"sealed"` payload fails
 /// its strict body, tested below).
+///
+/// `"lease_expired"` is deliberately **not** a member: lease expiry is
+/// SERVER-OWNED. The API's lease sweep transitions the attempt to `expired`
+/// and revokes its bindings; the builder observes `409 fenced` on its next
+/// renew/control call and tears down LOCALLY, **without** sending a terminal
+/// ack. An expired-lease terminal ack is unsendable — FENCING-4 would `409`
+/// it because the lease is already dead — and the sweep alone moves the
+/// attempt to `expired` (no builder ack required). Reason → job-terminal
+/// projection: `Discarded`/`AttemptEnded` → `ended`;
+/// `BuildFailed`/`AcceptanceFailedSourceLost` → `failed`; lease expiry →
+/// server-owned `expired` (sweep, no builder ack). Server enforcement lands in
+/// PR-1; PR-0 pins the enum + spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalAckReason {
     /// Server directed `discard` on the control channel.
     Discarded,
-    /// The builder observed its own lease death and is reporting teardown.
-    LeaseExpired,
     /// Build/boot never reached `holding`.
     BuildFailed,
     /// ADR-012 terminal branch: source lost AND the acceptance run failed.
@@ -1159,10 +1169,13 @@ fn path_is_nested_inside(inner: &str, outer: &str) -> bool {
 impl CaptureDeclarations {
     /// The §7 validation rules, producing the PR-0 output ([`DeclaredPaths`]):
     /// name charset + cross-section uniqueness, per-path constraints, no two
-    /// identical paths, and no cross-section nesting (a state path inside a
-    /// cache path or vice versa). Collision + nesting are computed on the
-    /// absolute paths as declared (no normalization — see
-    /// [`validate_declared_path`]).
+    /// identical paths, and no nesting between ANY two declarations —
+    /// cache↔cache, cache↔state, state↔state alike (an ancestor/descendant
+    /// relation on the declared paths, not only across sections). Collision +
+    /// nesting are computed on the absolute paths as declared (no
+    /// normalization — see [`validate_declared_path`]). Nested surfaces
+    /// (longest-prefix precedence etc.) are deferred to a future contract
+    /// version.
     pub fn validate(&self) -> Result<DeclaredPaths, String> {
         let mut seen_names: BTreeSet<&str> = BTreeSet::new();
         // (section, name, path) over cache ∪ state, for the cross-checks.
@@ -1193,12 +1206,11 @@ impl CaptureDeclarations {
                         "[{section_a}.{name_a}] and [{section_b}.{name_b}] declare the identical path {path_a:?}"
                     ));
                 }
-                if section_a != section_b
-                    && (path_is_nested_inside(path_a, path_b)
-                        || path_is_nested_inside(path_b, path_a))
-                {
+                // ALL nesting is forbidden — cache↔cache, cache↔state,
+                // state↔state alike (not only across sections).
+                if path_is_nested_inside(path_a, path_b) || path_is_nested_inside(path_b, path_a) {
                     return Err(format!(
-                        "[{section_a}.{name_a}] ({path_a:?}) and [{section_b}.{name_b}] ({path_b:?}) nest across sections"
+                        "[{section_a}.{name_a}] ({path_a:?}) and [{section_b}.{name_b}] ({path_b:?}) nest"
                     ));
                 }
             }
@@ -1393,10 +1405,9 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(v).unwrap(), json!(wire));
         }
-        // NEW (§2): the five wizard terminal-ack reasons.
+        // NEW (§2): the four wizard terminal-ack reasons.
         for (v, wire) in [
             (TerminalAckReason::Discarded, "discarded"),
-            (TerminalAckReason::LeaseExpired, "lease_expired"),
             (TerminalAckReason::BuildFailed, "build_failed"),
             (
                 TerminalAckReason::AcceptanceFailedSourceLost,
@@ -1406,8 +1417,13 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(v).unwrap(), json!(wire));
         }
-        // "sealed" is not a member of the wizard terminal-ack reason enum.
+        // Neither "sealed" nor "lease_expired" is a member of the wizard
+        // terminal-ack reason enum. Lease expiry is SERVER-OWNED: the sweep
+        // moves the attempt to `expired` and the builder tears down locally on
+        // `409 fenced`, never sending a terminal ack (an expired-lease ack
+        // would itself be fenced).
         assert!(serde_json::from_value::<TerminalAckReason>(json!("sealed")).is_err());
+        assert!(serde_json::from_value::<TerminalAckReason>(json!("lease_expired")).is_err());
         assert_eq!(JOB_KIND_INTERACTIVE_CAPTURE, "interactive_capture");
         assert_eq!(JOB_STATUS_HOLDING, "holding");
     }
@@ -2083,6 +2099,18 @@ mod tests {
     }
 
     #[test]
+    fn wizard_terminal_ack_rejects_lease_expired_reason() {
+        // §2/§3.8: lease expiry is SERVER-OWNED — the API sweep moves the
+        // attempt to `expired` and the builder tears down locally on
+        // `409 fenced`, without sending a terminal ack (an expired-lease ack
+        // would itself be fenced). `"lease_expired"` is therefore absent from
+        // the reason enum, so a terminal-ack body carrying it fails at parse.
+        let mut v = terminal_ack_json();
+        v["reason"] = json!("lease_expired");
+        assert!(serde_json::from_value::<WizardTerminalAck>(v).is_err());
+    }
+
+    #[test]
     fn wizard_terminal_ack_failure_diagnostics_are_optional_refinements() {
         // failure_stage discriminates capture_seal vs acceptance as a
         // DIAGNOSTIC refinement of `reason` — optional, never required.
@@ -2424,14 +2452,14 @@ schema = "sqlite"
     }
 
     #[test]
-    fn cross_section_nesting_is_rejected_but_same_section_nesting_is_not() {
+    fn nesting_between_any_two_declarations_is_rejected() {
         // The spec's `[cache.nest]` case: a cache path nested under the state
         // path "/data".
         let err = parse_capture_declarations(
             "[state.data]\npath = \"/data\"\nsnapshot = \"exclude\"\nschema = \"1\"\n\n[cache.nest]\npath = \"/data/cache\"\ncapture = \"include\"\n",
         )
         .unwrap_err();
-        assert!(err.contains("nest across sections"), "{err}");
+        assert!(err.contains("nest"), "{err}");
         // cache path containing a state path
         assert!(
             parse_capture_declarations(
@@ -2439,11 +2467,23 @@ schema = "sqlite"
             )
             .is_err()
         );
-        // nesting WITHIN a section is not a §7 error (only across sections is)
-        parse_capture_declarations(
-            "[cache.outer]\npath = \"/vendor\"\ncapture = \"include\"\n\n[cache.inner]\npath = \"/vendor/bin\"\ncapture = \"exclude\"\n",
-        )
-        .unwrap();
+        // ALL nesting is forbidden now, not only across sections: two cache
+        // declarations in an ancestor/descendant relation are rejected too
+        // (round-2 fix — this case used to be accepted).
+        assert!(
+            parse_capture_declarations(
+                "[cache.outer]\npath = \"/vendor\"\ncapture = \"include\"\n\n[cache.inner]\npath = \"/vendor/bin\"\ncapture = \"exclude\"\n",
+            )
+            .is_err()
+        );
+        // ...and two state declarations likewise (spec §7 invalid example
+        // /var/cache + /var/cache/session).
+        assert!(
+            parse_capture_declarations(
+                "[state.outer]\npath = \"/var/cache\"\nsnapshot = \"exclude\"\nschema = \"1\"\n\n[state.inner]\npath = \"/var/cache/session\"\nsnapshot = \"exclude\"\nschema = \"1\"\n",
+            )
+            .is_err()
+        );
     }
 
     #[test]
