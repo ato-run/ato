@@ -1,0 +1,88 @@
+{
+  "build_outputs": [
+    {
+      "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
+      "name": "app",
+      "projection_digest": "blake3:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+    }
+  ],
+  "dependencies": [
+    {
+      "derivation_digest": "blake3:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "name": "zlib",
+      "output_digest": "blake3:1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d"
+    },
+    {
+      "derivation_digest": "blake3:0303030303030303030303030303030303030303030303030303030303030303",
+      "name": "npm",
+      "output_digest": "blake3:0404040404040404040404040404040404040404040404040404040404040404"
+    }
+  ],
+  "external_state": [
+    {
+      "access": "read-write",
+      "name": "data",
+      "schema": "1",
+      "snapshot": "exclude",
+      "target": "/data"
+    }
+  ],
+  "filesystem": {
+    "readonly_layers": [
+      "blake3:0808080808080808080808080808080808080808080808080808080808080808"
+    ],
+    "topology_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+    "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707",
+    "writable_paths": [
+      "/tmp"
+    ]
+  },
+  "guest_surface": {
+    "bind_address": "0.0.0.0",
+    "features": [
+      "bindings",
+      "exec"
+    ],
+    "port": 8080,
+    "protocol": "ato-guest/v1"
+  },
+  "launch": {
+    "argv": [
+      "node",
+      "dist/server.js"
+    ],
+    "cwd": "/workspace",
+    "environment": [
+      {
+        "name": "NODE_ENV",
+        "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
+      }
+    ],
+    "environment_policy_digest": "blake3:1010101010101010101010101010101010101010101010101010101010101010",
+    "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "secret_bindings": [
+      "API_TOKEN"
+    ]
+  },
+  "policy": {
+    "capability_digest": "blake3:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+    "filesystem_digest": "blake3:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+    "network_digest": "blake3:0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "runtime": {
+    "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+    "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+    "kind": "node"
+  },
+  "schema": "ato.execution-contract/v1",
+  "source": {
+    "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+    "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+  },
+  "target": {
+    "abi": "gnu",
+    "architecture": "x86_64",
+    "libc": "glibc-2.39",
+    "os": "linux"
+  }
+}
