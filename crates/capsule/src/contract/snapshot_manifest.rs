@@ -39,7 +39,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::execution_contract::{ExecutionId, schema_domained_blake3_id};
+use super::execution_contract::{ExecutionId, VerifiedExecutionId, schema_domained_blake3_id};
 
 /// Schema tag for the Capsule v1 Snapshot manifest wire format.
 pub const SNAPSHOT_MANIFEST_V1_SCHEMA: &str = "ato.snapshot-manifest/v1";
@@ -436,10 +436,13 @@ pub struct SnapshotCandidate {
 /// given restore host, in the hard order mandated by RFC §7.5:
 ///
 /// 1. **exact `execution_id` equality** — the first and non-negotiable gate.
-///    `requested` is a *verified* [`ExecutionId`] (obtained via
-///    `load_verified_from_*` → [`ExecutionContractEnvelopeV1::verify`] →
-///    `execution_id`), never a raw lock, `lock_id`, capsule name, or target
-///    label. A candidate whose manifest carries a different id is dropped here.
+///    `requested` is a [`VerifiedExecutionId`] — a proof-carrying wrapper that can
+///    only be obtained from a [`verify`](super::execution_contract::ExecutionContractEnvelopeV1::verify)'d
+///    execution-contract envelope or a completed strict finalization — never a
+///    raw [`ExecutionId`], lock, `lock_id`, capsule name, or target label. The
+///    exact match compares `requested.as_execution_id()` against the candidate's
+///    manifest id; a candidate whose manifest carries a different id is dropped
+///    here.
 /// 2. **acceptance** — only `Accepted` candidates survive (quarantined/rejected
 ///    Snapshots are never restored).
 /// 3. **proven compatibility** — the host must prove it satisfies the candidate's
@@ -454,17 +457,17 @@ pub struct SnapshotCandidate {
 /// well-formed ([`SnapshotManifestV1::validate`] fails) is dropped defensively
 /// before the compatibility gate: a malformed candidate must never be selectable,
 /// even if it was constructed by bypassing [`SnapshotManifestV1::parse`].
-///
-/// [`ExecutionContractEnvelopeV1::verify`]: super::execution_contract::ExecutionContractEnvelopeV1::verify
 pub fn select_snapshots<'a>(
-    requested: &ExecutionId,
+    requested: &VerifiedExecutionId,
     host: &HostRestoreCapabilityV1,
     candidates: &'a [SnapshotCandidate],
 ) -> Vec<&'a SnapshotCandidate> {
     let mut eligible: Vec<&SnapshotCandidate> = candidates
         .iter()
-        // Gate 1: exact execution_id equality — FIRST, before anything else.
-        .filter(|candidate| &candidate.manifest.execution_id == requested)
+        // Gate 1: exact execution_id equality — FIRST, before anything else. The
+        // requested id is a proof-carrying VerifiedExecutionId; the filter reads
+        // the proven id via `as_execution_id()`.
+        .filter(|candidate| &candidate.manifest.execution_id == requested.as_execution_id())
         // Gate 2: acceptance metadata (quarantined/rejected never restore).
         .filter(|candidate| matches!(candidate.status, AcceptanceStatus::Accepted))
         // Defensive well-formedness gate: a malformed candidate manifest must
@@ -538,10 +541,11 @@ impl LegacyReadyStateManifestV1 {
     /// **Explicit** migration to a v1 manifest. This is the only bridge from
     /// legacy to v1, and it is deliberately not automatic:
     ///
-    /// * The caller supplies a **verified** [`ExecutionId`] (obtained from a
-    ///   verified execution-contract envelope), because the legacy opaque
-    ///   `execution_id` string is untrusted and may be absent. A legacy artifact
-    ///   without a trustworthy identity therefore cannot be migrated without the
+    /// * The caller supplies a [`VerifiedExecutionId`] — a proof-carrying wrapper
+    ///   obtained from a verified execution-contract envelope or a completed
+    ///   strict finalization — because the legacy opaque `execution_id` string is
+    ///   untrusted and may be absent. The type makes this non-negotiable: a legacy
+    ///   artifact without a trustworthy identity cannot be migrated without the
     ///   caller independently proving the identity.
     /// * The caller supplies a full v1 [`SnapshotCompatibilityContractV1`],
     ///   because the legacy `runner_class_id` is not a v1 compatibility contract.
@@ -550,12 +554,12 @@ impl LegacyReadyStateManifestV1 {
     ///   legacy `capsule_manifest_hash` is carried across as provenance only.
     pub fn migrate(
         &self,
-        verified_execution_id: ExecutionId,
+        verified_execution_id: &VerifiedExecutionId,
         compatibility_contract: SnapshotCompatibilityContractV1,
     ) -> Result<SnapshotManifestV1, SnapshotManifestError> {
         let migrated = SnapshotManifestV1 {
             schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
-            execution_id: verified_execution_id,
+            execution_id: verified_execution_id.as_execution_id().clone(),
             compatibility_contract,
             capture_provenance: SnapshotCaptureProvenance {
                 capsule_manifest_hash: self.capsule_manifest_hash.clone(),
@@ -579,6 +583,16 @@ mod tests {
 
     fn exec_id(raw: &str) -> ExecutionId {
         ExecutionId::new(raw.to_string()).expect("valid execution id")
+    }
+
+    /// Wrap a synthetic identity anchor as a [`VerifiedExecutionId`] for the
+    /// selection/migration tests. These anchors (`EXEC_A`/`EXEC_B`) are opaque
+    /// distinct ids, not the hash of a real contract, so they cannot be produced
+    /// through a verifying envelope; the crate-internal `from_verified` seam
+    /// stands in for a proven id here. Non-test callers still have only the two
+    /// sanctioned public paths.
+    fn verified(raw: &str) -> VerifiedExecutionId {
+        VerifiedExecutionId::from_verified(exec_id(raw))
     }
 
     fn sample_compat() -> SnapshotCompatibilityContractV1 {
@@ -738,7 +752,7 @@ mod tests {
             },
         );
         let pool = [tempting, correct.clone()];
-        let selected = select_snapshots(&exec_id(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
         assert_eq!(selected, vec![&correct]);
     }
 
@@ -758,7 +772,7 @@ mod tests {
             ranking: SnapshotRankingSignals::default(),
         };
         let pool = [cand];
-        let selected = select_snapshots(&exec_id(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
         assert!(selected.is_empty());
     }
 
@@ -769,17 +783,17 @@ mod tests {
         let mut host = matching_host();
         host.supported_format_versions = vec![1, 3]; // not 2
         let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, &[cand]).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
 
         let mut host = matching_host();
         host.cpu_templates = vec!["T2A".to_string()]; // no T2CL
         let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, &[cand]).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
 
         let mut host = matching_host();
         host.max_portability_tier = PortabilityTier::HostPinned; // < ClassPortable
         let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, &[cand]).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
     }
 
     // --- Acceptance: a malformed candidate is never selectable (defensive gate) ---
@@ -803,7 +817,7 @@ mod tests {
             status: AcceptanceStatus::Accepted,
             ranking: SnapshotRankingSignals::default(),
         };
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
         // The compatibility check alone also fails closed on the unknown schema.
         assert!(!cand.manifest.compatibility_contract.is_satisfied_by(&host));
     }
@@ -821,7 +835,7 @@ mod tests {
             status: AcceptanceStatus::Accepted,
             ranking: SnapshotRankingSignals::default(),
         };
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
     }
 
     // --- Acceptance: SnapshotId::new distinguishes empty from malformed ---
@@ -887,7 +901,7 @@ mod tests {
             },
         );
         let pool = [expensive.clone(), wrong, cheap.clone()];
-        let selected = select_snapshots(&exec_id(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
         assert_eq!(selected, vec![&cheap, &expensive]);
     }
 
@@ -896,7 +910,7 @@ mod tests {
         let host = matching_host();
         let quarantined = candidate(EXEC_A, AcceptanceStatus::Quarantined, Default::default());
         let rejected = candidate(EXEC_A, AcceptanceStatus::Rejected, Default::default());
-        assert!(select_snapshots(&exec_id(EXEC_A), &host, &[quarantined, rejected]).is_empty());
+        assert!(select_snapshots(&verified(EXEC_A), &host, &[quarantined, rejected]).is_empty());
     }
 
     // --- Acceptance: quarantine mutates neither bytes nor id ---
@@ -994,16 +1008,15 @@ mod tests {
             capsule_manifest_hash: Some("blake3:provenance".to_string()),
             execution_id: Some("legacy-opaque-not-trusted".to_string()),
         };
-        // Migration requires a VERIFIED ExecutionId supplied by the caller — the
-        // legacy opaque string is never trusted as identity.
-        let verified = exec_id(EXEC_A);
-        let migrated = legacy
-            .migrate(verified.clone(), sample_compat())
-            .expect("migration");
+        // Migration requires a VerifiedExecutionId supplied by the caller (the
+        // type refuses a raw id) — the legacy opaque string is never trusted as
+        // identity.
+        let anchor = verified(EXEC_A);
+        let migrated = legacy.migrate(&anchor, sample_compat()).expect("migration");
 
         // New immutable v1 manifest bound to the verified identity...
         assert_eq!(migrated.schema, SNAPSHOT_MANIFEST_V1_SCHEMA);
-        assert_eq!(migrated.execution_id, verified);
+        assert_eq!(migrated.execution_id, *anchor.as_execution_id());
         // ...provenance carried across, never as identity.
         assert_eq!(
             migrated.capture_provenance.capsule_manifest_hash.as_deref(),
@@ -1021,9 +1034,23 @@ mod tests {
             ranking: SnapshotRankingSignals::default(),
         };
         assert_eq!(
-            select_snapshots(&verified, &host, std::slice::from_ref(&cand)),
+            select_snapshots(&anchor, &host, std::slice::from_ref(&cand)),
             vec![&cand]
         );
+    }
+
+    #[test]
+    fn select_snapshots_matches_exactly_via_the_verified_wrapper() {
+        // The exact-identity gate reads the proven id out of the wrapper: the
+        // matching identity selects, a different verified identity selects
+        // nothing (no substitute for exact equality).
+        let host = matching_host();
+        let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
+        assert_eq!(
+            select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)),
+            vec![&cand]
+        );
+        assert!(select_snapshots(&verified(EXEC_B), &host, std::slice::from_ref(&cand)).is_empty());
     }
 
     #[test]
