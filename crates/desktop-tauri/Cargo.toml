@@ -39,6 +39,12 @@ runner = { path = "../runner" }
 protocol = { path = "../protocol" }
 thiserror = "2"
 
+# Same-origin app-view proxy: the shell fetches the app-proxy upstream itself,
+# holding the guest app-view cookie in an HTTP-client jar so the browser never
+# has to send a cross-site cookie from the preview iframe. rustls avoids an
+# OpenSSL/native-tls build dependency; cookies enables the per-session jar.
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "rustls-tls"] }
+
 [features]
 # Enable a strict release profile later; kept minimal for the scaffold.
 default = []

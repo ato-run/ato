@@ -11,6 +11,9 @@
 //! origins (including https://ato.run) are never given Tauri capabilities.
 
 mod host;
+mod proxy;
+
+use std::sync::Arc;
 
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -21,6 +24,10 @@ const MAIN_WINDOW_LABEL: &str = "main";
 /// same shell can target mobile/IoT hosts as the `runner` abstraction grows.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The same-origin app-view proxy holds the guest app-view cookie server-side
+    // so the preview iframe never depends on a cross-site browser cookie.
+    let app_view_proxy = Arc::new(proxy::AppViewProxy::new());
+
     tauri::Builder::default()
         .manage(host::DesktopHost::new())
         .invoke_handler(tauri::generate_handler![
@@ -30,6 +37,15 @@ pub fn run() {
             host::dispatch_privileged_intent,
             host::dispatch_intent_uri,
         ])
+        .register_asynchronous_uri_scheme_protocol(
+            proxy::ATOVIEW_SCHEME,
+            move |_ctx, request, responder| {
+                let proxy = app_view_proxy.clone();
+                tauri::async_runtime::spawn(async move {
+                    responder.respond(proxy.handle(request).await);
+                });
+            },
+        )
         .setup(|app| {
             build_main_window(app.handle())?;
             Ok(())

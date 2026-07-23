@@ -9,7 +9,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://api.ato.run https://staging.api.ato.run https://app.ato.run http://127.0.0.1:* http://localhost:* ; img-src 'self' data: https: ; style-src 'self' 'unsafe-inline' ; script-src 'self' ; frame-src 'self' https: ; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src 'self' https://api.ato.run https://staging.api.ato.run https://app.ato.run http://127.0.0.1:* http://localhost:* ; img-src 'self' data: https: ; style-src 'self' 'unsafe-inline' ; script-src 'self' ; frame-src 'self' https: atoview: ; font-src 'self' data:"
     }
   },
   "bundle": {
