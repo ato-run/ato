@@ -1,18 +1,25 @@
 ---
-title: "Execution Identity Spec: execution_id via ReadyStateManifest extension"
-status: draft          # draft | accepted | archived
+title: "Execution Identity Spec: Snapshot-derived execution_id (Superseded)"
+status: archived       # superseded by Capsule v1 execution model
 date: 2026-07-13
 author: "@egamikohsuke"
 ssot:
   - "crates/snapshot/src/manifest.rs"
 related:
-  - "GITHUB_CAPSULE_REQUEST_PIPELINE.md"
-  - "A1_SOURCE_TREE_PROFILE.md"
+  - "../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
+  - "../draft/GITHUB_CAPSULE_REQUEST_PIPELINE.md"
+  - "../draft/A1_SOURCE_TREE_PROFILE.md"
   - "../accepted/ADR-002-signature-format-jcs.md"
-  - "HASH_AND_PROVENANCE_POLICY.md"
+  - "../draft/HASH_AND_PROVENANCE_POLICY.md"
 ---
 
 # Execution Identity Spec
+
+> **Superseded:** This Snapshot-derived post-seal identity model is retained for
+> design history only. The Capsule v1 model is
+> [`CAPSULE_V1_EXECUTION_MODEL_SPEC.md`](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md),
+> where Execution Identity identifies the resolved launch contract and Snapshot
+> is a subordinate cache.
 
 ## 1. Overview
 
@@ -50,7 +57,8 @@ not bumped** — the facet set carries its own version (§3.1).
 
 - RunnerClass sentinel resolution that supplies `rootfs_base_id` /
   `guest_kernel_id` — a **prerequisite tracked in a separate PR** (see §3.4).
-- The source-tree hash algorithm ([A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md)).
+- The source-tree hash algorithm
+  ([A1_SOURCE_TREE_PROFILE.md](../draft/A1_SOURCE_TREE_PROFILE.md)).
 
 ## 3. Design
 
@@ -121,7 +129,8 @@ execution_id = "blake3:" + hex(blake3(JCS(execution_identity_facets)))
 - The fold uses **BLAKE3**, placing `execution_id` in the structural-id family
   (like `ReadyStateManifest::id()`), consistent with the hash-role split:
   `sha256` facets are *identity* inputs; the `blake3` fold is the *structural
-  id* of the facet set. See [HASH_AND_PROVENANCE_POLICY.md](HASH_AND_PROVENANCE_POLICY.md) §2.
+  id* of the facet set. See
+  [HASH_AND_PROVENANCE_POLICY.md](../draft/HASH_AND_PROVENANCE_POLICY.md) §2.
 - The facet set is a fixed, ordered schema governed by
   **`execution_identity_schema`** (independent of `ato.ready-state/v1`); JCS
   makes key order irrelevant, but the version pins which facets participate so a
@@ -183,4 +192,5 @@ and reproducible from its artifact alone.
 - `crates/snapshot/src/manifest.rs:112-130` — `ReadyStateLayers` (`rootfs`/`runtime`/`app` as `BlobManifest` CAS refs — the source of the sealed-output facets).
 - `crates/snapshot/src/manifest.rs:97-104` — `ReadyStateManifest::id()` (existing JCS + BLAKE3 structural id).
 - [../accepted/ADR-002-signature-format-jcs.md](../accepted/ADR-002-signature-format-jcs.md) — JCS (RFC 8785) canonicalization.
-- [A1_SOURCE_TREE_PROFILE.md](A1_SOURCE_TREE_PROFILE.md) — `source_tree_hash` (`materialized_source_tree_hash`).
+- [A1_SOURCE_TREE_PROFILE.md](../draft/A1_SOURCE_TREE_PROFILE.md) —
+  `source_tree_hash` (`materialized_source_tree_hash`).
