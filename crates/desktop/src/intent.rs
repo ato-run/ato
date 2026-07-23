@@ -31,48 +31,13 @@
 //! and `window::launch_window::open_consent_window_for_run_agent`, not in this
 //! module's `classify` / `dispatch_privileged_intent` pair.
 
-/// Outcome of classifying an intercepted `ato://` / `capsule://` navigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IntentDecision {
-    /// A callback / deep-link verb that the existing
-    /// [`crate::state::AppState::handle_host_route`] drain already handles
-    /// (auth callback, `ato://open`, `ato://cli`, `capsule://` deep link).
-    /// The original URI is carried through unchanged. Only produced for trusted
-    /// origins.
-    HostRoute(String),
-    /// A privileged action (local execution / runner control). Only produced
-    /// for a trusted, on-origin pane; the dispatcher decides how to handle each
-    /// verb (see `crate::webview::dispatch_privileged_intent`).
-    Privileged(PrivilegedIntent),
-    /// Rejected — untrusted origin, unknown verb, or malformed payload. Carries
-    /// a human-readable reason for telemetry/logging. Never acted on.
-    Reject(String),
-}
-
-/// A privileged intent: it touches local execution or the runner agent and so
-/// requires a trusted origin (enforced here). Per-verb handling lives in the
-/// dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrivilegedIntent {
-    /// `ato://run?source=<capsule-ref>[&run_id=<id>]` — request to run a capsule
-    /// on this device.
-    Run {
-        source: String,
-        run_id: Option<String>,
-        /// The trusted pane origin the intent was emitted from (already
-        /// validated by [`is_trusted_intent_origin`] above). Carried through
-        /// so the dispatcher can show it in the consent wizard PR-D1 adds —
-        /// this verb is the only one whose dispatcher needs it today.
-        origin: String,
-    },
-    /// `ato://runner/register` — register this device as a personal Connected
-    /// Runner.
-    RunnerRegister,
-    /// `ato://runner/start` — start the local runner agent (`ato runner serve`).
-    RunnerStart,
-    /// `ato://runner/stop` — stop the local runner agent.
-    RunnerStop,
-}
+// The `ato://` intent verb vocabulary (IntentDecision / PrivilegedIntent) is
+// single-sourced in protocol::intent so both this GPUI shell and the Tauri
+// shell speak one set of verbs. Re-exported so every `crate::intent::…`
+// reference path is unchanged. The url-based classifier, the trusted-origin
+// allowlist, and the navigation rules below stay here — they are shell policy
+// (Phase 1 Step 8: intent verb split).
+pub use protocol::intent::{IntentDecision, PrivilegedIntent};
 
 /// Whether `host` is loopback (local dev). Only consulted in debug builds.
 pub(crate) fn is_loopback_host(host: &str) -> bool {
