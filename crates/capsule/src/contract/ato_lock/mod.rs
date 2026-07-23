@@ -95,7 +95,19 @@ pub fn load_verified_from_path(path: &Path) -> Result<AtoLock> {
     load_verified_from_str(&raw)
 }
 
-/// Validates a persisted lock under strict mode.
+/// Validates a persisted lock's IDENTITY under strict mode: schema version,
+/// structural shape, feature encoding, and `lock_id` (presence, format, and
+/// match against the canonical projection).
+///
+/// IDENTITY-ONLY: this does NOT verify the lock's embedded execution section. A
+/// lock carrying a tampered `execution_id`, or a tampered/secret D5
+/// `launch.environment` value payload, still returns `Ok(())` from here — those
+/// fields are excluded from lock identity by design (see `CanonicalLockProjection`).
+/// Any lock that may carry an `execution_contract` MUST be read through the
+/// trusted entrypoints [`load_verified_from_str`] / [`load_verified_from_path`],
+/// which run this strict identity validation AND then re-derive the execution
+/// section fail-closed (`verify_execution_boundary`). Call this directly only
+/// for identity-only checks where execution trust is irrelevant.
 pub fn validate_persisted_strict(
     lock: &AtoLock,
 ) -> std::result::Result<(), Vec<AtoLockValidationError>> {
