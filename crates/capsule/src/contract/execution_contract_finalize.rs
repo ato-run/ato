@@ -55,15 +55,17 @@
 //! and does no measuring itself — measuring stays in the CLI/application layer,
 //! which passes measured values in.
 
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::execution_contract::{
-    ContentDigest, EnvironmentVariableContract, ExecutionContractEnvelopeV1,
-    ExecutionContractError, ExecutionContractV1, ExecutionId, ExternalStateContract, GuestPath,
-    GuestSurfaceContract, OpaqueContractDigestV1, OpaqueContractDomainV1, ResolvedTargetContract,
-    opaque_subcontract_digest,
+    ContentDigest, EnvironmentValuePayloadV1, EnvironmentVariableContract,
+    ExecutionContractEnvelopeV1, ExecutionContractError, ExecutionContractV1, ExecutionId,
+    ExternalStateContract, GuestPath, GuestSurfaceContract, OpaqueContractDigestV1,
+    OpaqueContractDomainV1, ResolvedTargetContract, opaque_subcontract_digest,
 };
 
 /// Classifies an environment variable *name* as secret-bearing.
@@ -113,6 +115,14 @@ pub enum FinalizationError {
          non-secret value (bind it by name via secret_bindings instead)"
     )]
     SecretEnvValue(String),
+    /// An env variable bound as a secret via `secret_bindings` was measured as a
+    /// non-secret value. `secret_bindings` is the authoritative secret set, so
+    /// this catches names the heuristic misses (e.g. `DATABASE_URL`).
+    #[error(
+        "env variable '{0}' is bound as a secret via secret_bindings and must never be \
+         measured or persisted as a non-secret value"
+    )]
+    SecretBoundEnvValue(String),
     /// The expected contract itself failed validation while computing the id.
     #[error(transparent)]
     Contract(#[from] ExecutionContractError),
@@ -165,7 +175,7 @@ impl FinalizedExecution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasuredEnvValue {
     pub name: String,
-    pub value_payload: Value,
+    pub value_payload: EnvironmentValuePayloadV1,
 }
 
 /// A single measured build output: its name, immutable output `digest`, and the
@@ -535,10 +545,24 @@ impl ExecutionObservationV1 {
         if environment.len() != expected.launch.environment.len() {
             return Err(mismatch("launch.environment"));
         }
+        // `secret_bindings` is the authoritative secret set: a measured env name
+        // that is bound as a secret must never be measured as a non-secret value,
+        // even when the name heuristic does not flag it (e.g. `DATABASE_URL`).
+        let secret_bindings: BTreeSet<&str> = expected
+            .launch
+            .secret_bindings
+            .iter()
+            .map(String::as_str)
+            .collect();
         for (measured, expected_var) in environment.iter().zip(&expected.launch.environment) {
             // A secret-bearing name must never be measured as a non-secret value.
             if is_sensitive_env_key(&measured.name) {
                 return Err(FinalizationError::SecretEnvValue(measured.name.clone()));
+            }
+            if secret_bindings.contains(measured.name.as_str()) {
+                return Err(FinalizationError::SecretBoundEnvValue(
+                    measured.name.clone(),
+                ));
             }
             if measured.name != expected_var.name {
                 return Err(mismatch("launch.environment"));
@@ -619,8 +643,9 @@ pub fn verify_opaque_digest(
 /// measured/stored non-secret value payload under
 /// [`OpaqueContractDomainV1::EnvironmentValue`].
 pub fn environment_value_digest(
-    payload: &Value,
+    payload: &EnvironmentValuePayloadV1,
 ) -> Result<OpaqueContractDigestV1, ExecutionContractError> {
+    payload.validate()?;
     opaque_subcontract_digest(OpaqueContractDomainV1::EnvironmentValue, payload)
 }
 
@@ -633,6 +658,10 @@ pub fn verify_measured_env_value(
     if is_sensitive_env_key(&measured.name) {
         return Err(FinalizationError::SecretEnvValue(measured.name.clone()));
     }
+    measured
+        .value_payload
+        .validate()
+        .map_err(FinalizationError::Contract)?;
     verify_opaque_digest(
         OpaqueContractDomainV1::EnvironmentValue,
         &measured.value_payload,
@@ -672,10 +701,10 @@ mod tests {
 
     use super::*;
     use crate::execution_contract::{
-        DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, ExecutionContractV1, ExternalStateAccess,
-        ResolvedArtifactContract, ResolvedBuildOutputContract, ResolvedDependencyContract,
-        ResolvedFilesystemContract, ResolvedLaunchContract, ResolvedPolicyContract,
-        ResolvedSourceContract, SnapshotExclusion,
+        DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentValuePayloadV1,
+        ExecutionContractV1, ExternalStateAccess, ResolvedArtifactContract,
+        ResolvedBuildOutputContract, ResolvedDependencyContract, ResolvedFilesystemContract,
+        ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract, SnapshotExclusion,
     };
 
     fn content(byte: u8) -> ContentDigest {
@@ -701,7 +730,7 @@ mod tests {
         build_output_projection: Value,
         process_model: Value,
         environment_policy: Value,
-        env_node_env: Value,
+        env_node_env: EnvironmentValuePayloadV1,
         topology: Value,
         network: Value,
         capability: Value,
@@ -715,7 +744,7 @@ mod tests {
             build_output_projection: json!({"place": "/opt/app", "mode": "0755"}),
             process_model: json!({"pid1": true, "supervised": []}),
             environment_policy: json!({"inherit": false, "required": ["NODE_ENV"]}),
-            env_node_env: json!({"raw": "production", "normalization": "verbatim"}),
+            env_node_env: EnvironmentValuePayloadV1::utf8("production"),
             topology: json!({"mounts": [{"at": "/opt/app", "ro": true}]}),
             network: json!({"egress": "deny", "dns": "system"}),
             capability: json!({"caps": [], "devices": []}),
@@ -770,10 +799,8 @@ mod tests {
                 ),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
-                    value_digest: opaque(
-                        OpaqueContractDomainV1::EnvironmentValue,
-                        &fx.env_node_env,
-                    ),
+                    value_digest: environment_value_digest(&fx.env_node_env)
+                        .expect("env value digest"),
                 }],
                 environment_policy_digest: opaque(
                     OpaqueContractDomainV1::EnvironmentPolicy,
@@ -1072,7 +1099,7 @@ mod tests {
 
     #[test]
     fn env_value_digest_verifies_and_round_trips() {
-        let payload = json!({"raw": "production", "normalization": "verbatim"});
+        let payload = EnvironmentValuePayloadV1::utf8("production");
         let measured = MeasuredEnvValue {
             name: "NODE_ENV".to_string(),
             value_payload: payload.clone(),
@@ -1083,18 +1110,18 @@ mod tests {
         // A tampered payload no longer matches the stored digest.
         let tampered = MeasuredEnvValue {
             name: "NODE_ENV".to_string(),
-            value_payload: json!({"raw": "development"}),
+            value_payload: EnvironmentValuePayloadV1::utf8("development"),
         };
         assert!(verify_measured_env_value(&tampered, digest).is_err());
     }
 
     #[test]
     fn secret_env_names_are_excluded_from_value_measurement() {
-        let digest = environment_value_digest(&json!("x")).unwrap();
+        let digest = environment_value_digest(&EnvironmentValuePayloadV1::utf8("x")).unwrap();
         for name in ["OPENAI_API_KEY", "github_token", "DB_PASSWORD", "MY_SECRET"] {
             let measured = MeasuredEnvValue {
                 name: name.to_string(),
-                value_payload: json!("x"),
+                value_payload: EnvironmentValuePayloadV1::utf8("x"),
             };
             assert_eq!(
                 verify_measured_env_value(&measured, digest),
@@ -1122,7 +1149,7 @@ mod tests {
         let observation = full_observation(&fx).measured_environment(vec![
             MeasuredEnvValue {
                 name: "API_TOKEN".to_string(),
-                value_payload: json!("t"),
+                value_payload: EnvironmentValuePayloadV1::utf8("t"),
             },
             MeasuredEnvValue {
                 name: "NODE_ENV".to_string(),
@@ -1136,6 +1163,50 @@ mod tests {
             error,
             FinalizationError::SecretEnvValue("API_TOKEN".to_string())
         );
+    }
+
+    #[test]
+    fn secret_bound_env_value_refuses_finalization_even_when_heuristic_misses() {
+        // Blocker 3 layer 2: `secret_bindings` is the authoritative secret set.
+        // A name the heuristic does NOT flag (DATABASE_URL, AWS_ACCESS_KEY_ID)
+        // that is nonetheless bound as a secret must refuse finalization when
+        // measured as a non-secret value.
+        for name in ["DATABASE_URL", "AWS_ACCESS_KEY_ID"] {
+            assert!(
+                !is_sensitive_env_key(name),
+                "{name} must dodge the heuristic"
+            );
+            let fx = fixtures();
+            let mut expected = expected_contract(&fx);
+            // Bind the name as a secret and (transiently, before validate) present
+            // it as a committed env value so the length check aligns; the secret
+            // cross-check must fire first.
+            expected.launch.secret_bindings = vec!["API_TOKEN".to_string(), name.to_string()];
+            expected.launch.secret_bindings.sort();
+            expected.launch.environment.insert(
+                0,
+                EnvironmentVariableContract {
+                    name: name.to_string(),
+                    value_digest: environment_value_digest(&EnvironmentValuePayloadV1::utf8("x"))
+                        .unwrap(),
+                },
+            );
+            let observation = full_observation(&fx).measured_environment(vec![
+                MeasuredEnvValue {
+                    name: name.to_string(),
+                    value_payload: EnvironmentValuePayloadV1::utf8("x"),
+                },
+                MeasuredEnvValue {
+                    name: "NODE_ENV".to_string(),
+                    value_payload: fx.env_node_env.clone(),
+                },
+            ]);
+            assert_eq!(
+                observation.finalize(&expected),
+                Err(FinalizationError::SecretBoundEnvValue(name.to_string())),
+                "{name}"
+            );
+        }
     }
 
     #[test]

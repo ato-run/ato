@@ -6,7 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::execution_contract::ExecutionContractEnvelopeV1;
+use crate::execution_contract::{EnvironmentValuePayloadV1, ExecutionContractEnvelopeV1};
 
 pub const ATO_LOCK_SCHEMA_VERSION: u32 = 1;
 
@@ -81,14 +81,17 @@ pub struct LockLaunchSection {
 
 /// A single persisted non-secret environment value (D5, Option B).
 ///
-/// `value` is the normalized, self-describing value payload; `value_digest` is
-/// its digest under domain `ato.environment-value/v1`
-/// (`blake3(UTF8(domain) || 0x00 || JCS(value))`), re-derived and checked on
-/// read. Secret values are never persisted here (see `is_sensitive_env_key`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// `value` is the versioned, self-describing typed value payload
+/// ([`EnvironmentValuePayloadV1`]); `value_digest` is its digest under domain
+/// `ato.environment-value/v1` (`blake3(UTF8(domain) || 0x00 || JCS(value))`),
+/// re-derived and checked on read. The typed payload's `deny_unknown_fields`
+/// plus serde's duplicate-field rejection make the stored value single-valued,
+/// closing the raw-`serde_json::Value` producer-divergence / duplicate-key-loss
+/// hole. Secret values are never persisted here (see `is_sensitive_env_key`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockEnvironmentValue {
     pub name: String,
-    pub value: Value,
+    pub value: EnvironmentValuePayloadV1,
     pub value_digest: String,
 }
 

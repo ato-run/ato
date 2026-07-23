@@ -18,8 +18,8 @@ use std::path::Path;
 /// forced through persisted artifact validation too early.
 pub use canonicalize::{
     CANONICAL_IDENTITY_EXCLUDED_SECTIONS, CANONICAL_IDENTITY_INCLUDED_SECTIONS,
-    CanonicalLockProjection, canonical_identity_projection, canonical_projection,
-    is_canonical_identity_section,
+    CanonicalLockProjection, CanonicalSignatureProjection, canonical_identity_projection,
+    canonical_projection, canonical_signature_projection, is_canonical_identity_section,
 };
 pub use closure::{
     ClosureInfo, closure_info, compute_closure_digest, normalize_closure_value,
@@ -64,6 +64,37 @@ pub fn load_unvalidated_from_path(path: &Path) -> Result<AtoLock> {
     load_unvalidated_from_str(&raw)
 }
 
+/// Fail-closed re-derivation of any embedded execution section carried by a
+/// persisted lock (D2 `execution_contract` envelope + D5 `launch.environment`).
+///
+/// This is the standard-path chokepoint the read/write boundary runs so a
+/// tampered `execution_id` or a bad D5 value payload can never pass strict
+/// validation or be persisted. Launch-time re-read / OCI wiring is deferred to a
+/// later PR; only the persisted read/write boundary is enforced here.
+fn verify_execution_boundary(lock: &AtoLock) -> Result<()> {
+    verify_lock_execution(lock).map_err(|err| {
+        CapsuleError::Config(format!("ato.lock execution verification failed: {err}"))
+    })
+}
+
+/// Loads a persisted lock from JSON and verifies it fully: strict persisted
+/// validation PLUS re-derivation of any embedded execution section. This is the
+/// sanctioned entry for a persisted lock carrying an execution section.
+pub fn load_verified_from_str(raw: &str) -> Result<AtoLock> {
+    let lock = load_unvalidated_from_str(raw)?;
+    validate_persisted_strict(&lock).map_err(validation_errors_to_capsule_error)?;
+    verify_execution_boundary(&lock)?;
+    Ok(lock)
+}
+
+/// Reads a persisted lock from disk and verifies it fully (see
+/// [`load_verified_from_str`]).
+pub fn load_verified_from_path(path: &Path) -> Result<AtoLock> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
+    load_verified_from_str(&raw)
+}
+
 /// Validates a persisted lock under strict mode.
 pub fn validate_persisted_strict(
     lock: &AtoLock,
@@ -102,6 +133,7 @@ pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
+    verify_execution_boundary(&persisted)?;
     serde_json::to_string_pretty(&persisted)
         .map_err(|err| CapsuleError::Config(format!("Failed to serialize ato.lock.json: {err}")))
 }
@@ -127,6 +159,7 @@ pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
+    verify_execution_boundary(&persisted)?;
     serde_jcs::to_vec(&persisted)
         .map_err(|err| CapsuleError::Config(format!("Failed to canonicalize ato.lock JSON: {err}")))
 }

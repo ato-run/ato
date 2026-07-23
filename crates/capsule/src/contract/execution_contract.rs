@@ -647,6 +647,13 @@ pub enum ExecutionContractError {
     ExecutionIdMismatch { stored: String, computed: String },
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
+    #[error(
+        "launch.environment name '{0}' is also declared in launch.secret_bindings; \
+         a secret must never be committed as a non-secret environment value"
+    )]
+    EnvironmentNameIsSecretBinding(String),
+    #[error("non-secret environment value payload is not canonical: {0}")]
+    InvalidEnvironmentValuePayload(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -790,6 +797,59 @@ pub struct ResolvedLaunchContract {
 pub struct EnvironmentVariableContract {
     pub name: String,
     pub value_digest: OpaqueContractDigestV1,
+}
+
+/// Canonical schema string for a v1 non-secret environment value payload. It is
+/// exactly the [`OpaqueContractDomainV1::EnvironmentValue`] domain, so the
+/// payload is self-describing under the identity its digest commits.
+pub const ENVIRONMENT_VALUE_PAYLOAD_V1_SCHEMA: &str =
+    OpaqueContractDomainV1::EnvironmentValue.as_str();
+
+/// The only value encoding accepted by v1 non-secret environment value payloads.
+pub const ENVIRONMENT_VALUE_PAYLOAD_V1_ENCODING: &str = "utf8";
+
+/// A versioned, self-describing non-secret environment value payload (RFC §4.3).
+///
+/// A committed value is `blake3(UTF8(domain) || 0x00 || JCS(payload))` over the
+/// JCS of *this typed payload* under [`OpaqueContractDomainV1::EnvironmentValue`]
+/// — never a raw producer-chosen JSON value. `deny_unknown_fields` plus serde's
+/// derived duplicate-field rejection make the on-the-wire spelling single-valued,
+/// so two producers (or two languages) can neither derive different digests for
+/// the same value nor silently drop a duplicated property. The payload schema is
+/// pinned (`ato.environment-value/v1`) and the encoding is fixed to `utf8`;
+/// [`Self::validate`] rejects any other spelling fail-closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvironmentValuePayloadV1 {
+    pub schema: String,
+    pub encoding: String,
+    pub value: String,
+}
+
+impl EnvironmentValuePayloadV1 {
+    /// Build a canonical UTF-8 environment value payload.
+    pub fn utf8(value: impl Into<String>) -> Self {
+        Self {
+            schema: ENVIRONMENT_VALUE_PAYLOAD_V1_SCHEMA.to_string(),
+            encoding: ENVIRONMENT_VALUE_PAYLOAD_V1_ENCODING.to_string(),
+            value: value.into(),
+        }
+    }
+
+    /// Fail closed on any non-canonical schema/encoding spelling.
+    pub fn validate(&self) -> Result<(), ExecutionContractError> {
+        if self.schema != ENVIRONMENT_VALUE_PAYLOAD_V1_SCHEMA {
+            return Err(ExecutionContractError::InvalidEnvironmentValuePayload(
+                "schema must be ato.environment-value/v1",
+            ));
+        }
+        if self.encoding != ENVIRONMENT_VALUE_PAYLOAD_V1_ENCODING {
+            return Err(ExecutionContractError::InvalidEnvironmentValuePayload(
+                "encoding must be utf8",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Resolved filesystem facet. `readonly_layers` are the immutable layer
@@ -1016,6 +1076,30 @@ impl ExecutionContractV1 {
                 .map(|item| item.name.as_str()),
         )?;
         validate_sorted_identifiers("launch.secret_bindings", &self.launch.secret_bindings)?;
+        // `secret_bindings` is the AUTHORITATIVE secret set (RFC §4.3): a variable
+        // may not be both a committed non-secret env value and a secret binding.
+        // The name heuristic (`is_sensitive_env_key`) is defense-in-depth, not the
+        // boundary — it misses names like `DATABASE_URL` / `AWS_ACCESS_KEY_ID` that
+        // only `secret_bindings` captures.
+        {
+            let secret_bindings: BTreeSet<&str> = self
+                .launch
+                .secret_bindings
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if let Some(name) = self
+                .launch
+                .environment
+                .iter()
+                .map(|variable| variable.name.as_str())
+                .find(|name| secret_bindings.contains(name))
+            {
+                return Err(ExecutionContractError::EnvironmentNameIsSecretBinding(
+                    name.to_string(),
+                ));
+            }
+        }
         validate_sorted_digests(
             "filesystem.readonly_layers",
             &self.filesystem.readonly_layers,
@@ -1834,5 +1918,89 @@ mod tests {
         value["policy"]["network_digest"] =
             serde_json::json!(format!("sha256:{}", "ab".repeat(32)));
         assert!(serde_json::from_value::<ExecutionContractV1>(value).is_err());
+    }
+
+    #[test]
+    fn env_name_that_is_a_secret_binding_fails_validation_even_when_heuristic_misses() {
+        // Blocker 3 layer 1: secret_bindings is the authoritative secret set. A
+        // name the heuristic does NOT flag (DATABASE_URL, AWS_ACCESS_KEY_ID) that
+        // is both a committed env value AND a secret binding must fail validation.
+        for name in ["DATABASE_URL", "AWS_ACCESS_KEY_ID"] {
+            let mut contract = sample_contract();
+            contract.launch.environment = vec![EnvironmentVariableContract {
+                name: name.to_string(),
+                value_digest: opaque_digest(6),
+            }];
+            contract.launch.secret_bindings = vec![name.to_string()];
+            assert_eq!(
+                contract.validate(),
+                Err(ExecutionContractError::EnvironmentNameIsSecretBinding(
+                    name.to_string()
+                )),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_value_payload_rejects_unknown_and_duplicate_and_non_canonical() {
+        // Major 2: the typed env value payload is single-valued on the wire.
+        // Unknown field ⇒ rejected (deny_unknown_fields).
+        assert!(
+            serde_json::from_str::<EnvironmentValuePayloadV1>(
+                r#"{"schema":"ato.environment-value/v1","encoding":"utf8","value":"x","extra":1}"#,
+            )
+            .is_err()
+        );
+        // Duplicate property ⇒ rejected (serde's derived duplicate-field guard).
+        assert!(
+            serde_json::from_str::<EnvironmentValuePayloadV1>(
+                r#"{"schema":"ato.environment-value/v1","encoding":"utf8","value":"x","value":"y"}"#,
+            )
+            .is_err()
+        );
+        // Canonical payload round-trips and validates.
+        let payload = EnvironmentValuePayloadV1::utf8("x");
+        let parsed: EnvironmentValuePayloadV1 =
+            serde_json::from_str(&serde_json::to_string(&payload).unwrap()).unwrap();
+        assert_eq!(parsed, payload);
+        payload.validate().expect("canonical payload validates");
+        // Wrong schema / encoding are rejected fail-closed.
+        assert!(
+            EnvironmentValuePayloadV1 {
+                schema: "ato.environment-value/v2".to_string(),
+                encoding: "utf8".to_string(),
+                value: "x".to_string(),
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            EnvironmentValuePayloadV1 {
+                schema: ENVIRONMENT_VALUE_PAYLOAD_V1_SCHEMA.to_string(),
+                encoding: "base64".to_string(),
+                value: "x".to_string(),
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn environment_value_digest_is_taken_over_the_typed_payload() {
+        // Major 2: the committed digest is blake3(domain || 0 || JCS(typed
+        // payload)) — exactly the opaque sub-contract digest of the typed payload.
+        let payload = EnvironmentValuePayloadV1::utf8("production");
+        let via_helper =
+            crate::execution_contract_finalize::environment_value_digest(&payload).unwrap();
+        let via_opaque =
+            opaque_subcontract_digest(OpaqueContractDomainV1::EnvironmentValue, &payload).unwrap();
+        assert_eq!(via_helper, via_opaque);
+        // A different value yields a different digest.
+        let other = EnvironmentValuePayloadV1::utf8("staging");
+        assert_ne!(
+            via_helper,
+            crate::execution_contract_finalize::environment_value_digest(&other).unwrap()
+        );
     }
 }
