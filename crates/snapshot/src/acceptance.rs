@@ -249,6 +249,101 @@ pub trait DisposableAcceptanceLifecycle {
     ) -> Result<(), String>;
 }
 
+/// RAII teardown guard for a live disposable verification Session.
+///
+/// Between creating a Session and destroying it the loop runs fallible seam
+/// methods (restore / execute) and, in PR-2, `DisposableSessionHandle` owns a real
+/// firecracker microVM + overlay. Straight-line teardown would leak that VM if any
+/// seam method — or a downstream `.clone()` — panicked and unwound the loop before
+/// destroy ran. This guard closes that hole: the normal path disarms it via
+/// [`DisposableSessionGuard::teardown`] (which records the receipt fields and
+/// surfaces failures as [`AcceptanceError::Cleanup`]); on any other exit `Drop`
+/// still terminates the process tree and destroys the Session, so a disposable
+/// microVM + overlay is never leaked on the panic / early-return path (RFC §8.4).
+struct DisposableSessionGuard<'a, L: DisposableAcceptanceLifecycle + ?Sized> {
+    lifecycle: &'a mut L,
+    /// `Some` while the Session is live; `None` once `teardown` (or a prior `Drop`)
+    /// has consumed the handle, which disarms the guard so `Drop` is a no-op.
+    session: Option<DisposableSessionHandle>,
+}
+
+impl<'a, L: DisposableAcceptanceLifecycle + ?Sized> DisposableSessionGuard<'a, L> {
+    fn new(lifecycle: &'a mut L, session: DisposableSessionHandle) -> Self {
+        Self {
+            lifecycle,
+            session: Some(session),
+        }
+    }
+
+    /// Restore the immutable candidate into the still-live Session's overlay.
+    fn restore_candidate(&mut self, candidate: &CandidateSnapshot) -> Result<(), String> {
+        let session = self
+            .session
+            .as_ref()
+            .expect("disposable Session handle is live until teardown");
+        self.lifecycle.restore_candidate(session, candidate)
+    }
+
+    /// Run `seal_at.command` as exact argv in the still-live Session.
+    fn execute_exact_argv(
+        &mut self,
+        argv: &[String],
+        timeout: Duration,
+        cancellation: &AcceptanceCancellation,
+    ) -> Result<VerificationOutcome, String> {
+        let session = self
+            .session
+            .as_ref()
+            .expect("disposable Session handle is live until teardown");
+        self.lifecycle
+            .execute_exact_argv(session, argv, timeout, cancellation)
+    }
+
+    /// Disarm the guard and run the normal-path teardown: terminate the process
+    /// tree when required, then **always** destroy the Session. Records the outcome
+    /// on `receipt` and returns whether either step failed (mapped by the caller to
+    /// [`AcceptanceError::Cleanup`]). Consuming `self` here means the subsequent
+    /// `Drop` sees `session == None` and does nothing.
+    fn teardown(
+        mut self,
+        terminate_required: bool,
+        receipt: &mut AcceptanceAttemptReceipt,
+    ) -> bool {
+        let session = self
+            .session
+            .take()
+            .expect("disposable Session handle is live until teardown");
+        let mut cleanup_failed = false;
+        if terminate_required {
+            match self.lifecycle.terminate_process_tree(&session) {
+                Ok(()) => receipt.process_tree_terminated = true,
+                Err(_) => cleanup_failed = true,
+            }
+        }
+        match self.lifecycle.destroy_disposable_session(session) {
+            Ok(()) => receipt.disposable_session_destroyed = true,
+            Err(_) => cleanup_failed = true,
+        }
+        cleanup_failed
+    }
+}
+
+impl<L: DisposableAcceptanceLifecycle + ?Sized> Drop for DisposableSessionGuard<'_, L> {
+    fn drop(&mut self) {
+        // Only fires when `teardown` did NOT run — i.e. the loop unwound (panic) or
+        // returned early while the Session was still live. Best-effort and
+        // infallible: terminate the process tree, then destroy the Session, so a
+        // live disposable microVM + overlay is never leaked. Errors are
+        // unrecoverable here and are deliberately dropped (a `Drop` impl cannot
+        // surface them); the normal path uses `teardown` for the fallible,
+        // receipted teardown that reports `Cleanup`.
+        if let Some(session) = self.session.take() {
+            let _ = self.lifecycle.terminate_process_tree(&session);
+            let _ = self.lifecycle.destroy_disposable_session(session);
+        }
+    }
+}
+
 /// The pure acceptance orchestrator for `running` Snapshots.
 pub struct RunningSnapshotAcceptance;
 
@@ -348,69 +443,67 @@ impl RunningSnapshotAcceptance {
                     continue;
                 }
             };
+            // The Session is now live. Hold it in an RAII guard so that even if a
+            // seam method (restore / execute) or a downstream `.clone()` panics and
+            // unwinds the loop before the explicit teardown below, the guard's
+            // `Drop` still terminates the process tree and destroys the Session — a
+            // real firecracker microVM + overlay must never leak on that path
+            // (RFC §8.4). The normal path disarms the guard via `teardown`.
+            let mut guard = DisposableSessionGuard::new(&mut *lifecycle, session);
 
-            let (accepted, terminate_required) =
-                if lifecycle.restore_candidate(&session, &candidate).is_err() {
-                    attempt_receipt.outcome = "restore-failed".to_string();
-                    (false, false)
-                } else {
-                    match lifecycle.execute_exact_argv(
-                        &session,
-                        &config.seal_at_argv,
-                        config.verification_timeout,
-                        cancellation,
-                    ) {
-                        // A cancellation observed after a nominal exit still rejects
-                        // and tears the tree down — we never accept a race winner.
-                        Ok(VerificationOutcome::Exited(_)) if cancellation.is_cancelled() => {
-                            attempt_receipt.outcome = "cancelled".to_string();
-                            (false, true)
-                        }
-                        // Exit 0 within the deadline is the SOLE success signal.
-                        Ok(VerificationOutcome::Exited(0))
-                            if started.elapsed() < config.total_deadline =>
-                        {
-                            attempt_receipt.outcome = "accepted".to_string();
-                            (true, false)
-                        }
-                        // Exit 0 that only landed after the deadline is not an accept.
-                        Ok(VerificationOutcome::Exited(0)) => {
-                            attempt_receipt.outcome = "deadline-exceeded".to_string();
-                            (false, false)
-                        }
-                        Ok(VerificationOutcome::Exited(_)) => {
-                            attempt_receipt.outcome = "nonzero-exit".to_string();
-                            (false, false)
-                        }
-                        Ok(VerificationOutcome::TimedOut) => {
-                            attempt_receipt.outcome = "timeout".to_string();
-                            (false, true)
-                        }
-                        Ok(VerificationOutcome::Cancelled) => {
-                            attempt_receipt.outcome = "cancelled".to_string();
-                            (false, true)
-                        }
-                        Err(_) => {
-                            attempt_receipt.outcome = "verification-error".to_string();
-                            (false, true)
-                        }
+            let (accepted, terminate_required) = if guard.restore_candidate(&candidate).is_err() {
+                attempt_receipt.outcome = "restore-failed".to_string();
+                (false, false)
+            } else {
+                match guard.execute_exact_argv(
+                    &config.seal_at_argv,
+                    config.verification_timeout,
+                    cancellation,
+                ) {
+                    // A cancellation observed after a nominal exit still rejects
+                    // and tears the tree down — we never accept a race winner.
+                    Ok(VerificationOutcome::Exited(_)) if cancellation.is_cancelled() => {
+                        attempt_receipt.outcome = "cancelled".to_string();
+                        (false, true)
                     }
-                };
-
-            // Teardown is UNCONDITIONAL once a Session exists. In particular a
-            // failed process-tree termination must not leak the disposable VM, so
-            // destroy is still attempted; either failure surfaces as `Cleanup`.
-            let mut cleanup_failed = false;
-            if terminate_required {
-                match lifecycle.terminate_process_tree(&session) {
-                    Ok(()) => attempt_receipt.process_tree_terminated = true,
-                    Err(_) => cleanup_failed = true,
+                    // Exit 0 within the deadline is the SOLE success signal.
+                    Ok(VerificationOutcome::Exited(0))
+                        if started.elapsed() < config.total_deadline =>
+                    {
+                        attempt_receipt.outcome = "accepted".to_string();
+                        (true, false)
+                    }
+                    // Exit 0 that only landed after the deadline is not an accept.
+                    Ok(VerificationOutcome::Exited(0)) => {
+                        attempt_receipt.outcome = "deadline-exceeded".to_string();
+                        (false, false)
+                    }
+                    Ok(VerificationOutcome::Exited(_)) => {
+                        attempt_receipt.outcome = "nonzero-exit".to_string();
+                        (false, false)
+                    }
+                    Ok(VerificationOutcome::TimedOut) => {
+                        attempt_receipt.outcome = "timeout".to_string();
+                        (false, true)
+                    }
+                    Ok(VerificationOutcome::Cancelled) => {
+                        attempt_receipt.outcome = "cancelled".to_string();
+                        (false, true)
+                    }
+                    Err(_) => {
+                        attempt_receipt.outcome = "verification-error".to_string();
+                        (false, true)
+                    }
                 }
-            }
-            match lifecycle.destroy_disposable_session(session) {
-                Ok(()) => attempt_receipt.disposable_session_destroyed = true,
-                Err(_) => cleanup_failed = true,
-            }
+            };
+
+            // Teardown is UNCONDITIONAL once a Session exists. Disarming the guard
+            // runs the same terminate-then-destroy on the normal path: a failed
+            // process-tree termination must not skip destroy, so destroy is still
+            // attempted and either failure surfaces as `Cleanup`. (If instead the
+            // loop had unwound above, the guard's `Drop` would have run this
+            // teardown as a best-effort safety net.)
+            let cleanup_failed = guard.teardown(terminate_required, &mut attempt_receipt);
             receipt.attempts.push(attempt_receipt);
 
             if cleanup_failed {
@@ -559,6 +652,9 @@ mod tests {
         /// Optionally flip cancellation when the command is executed, to model a
         /// cancellation that races an otherwise-nominal exit.
         cancel_on_execute: Option<AcceptanceCancellation>,
+        /// Panic from inside `execute_exact_argv` to model a seam method unwinding
+        /// the acceptance loop while a disposable Session is live.
+        panic_on_execute: bool,
     }
 
     impl FakeLifecycle {
@@ -577,6 +673,7 @@ mod tests {
                 destroy_fails: false,
                 execute_delay: Duration::ZERO,
                 cancel_on_execute: None,
+                panic_on_execute: false,
             }
         }
 
@@ -630,6 +727,9 @@ mod tests {
             }
             if let Some(cancellation) = &self.cancel_on_execute {
                 cancellation.cancel();
+            }
+            if self.panic_on_execute {
+                panic!("seam method unwinds while a disposable Session is live");
             }
             Ok(self.outcomes.remove(0))
         }
@@ -810,6 +910,44 @@ mod tests {
         assert_eq!(error, AcceptanceError::Cleanup);
         assert_eq!(lifecycle.terminates, 1);
         assert_eq!(lifecycle.destroys, 1); // destroy attempted despite terminate failure
+    }
+
+    // --- AC: a panic mid-verification still tears the disposable Session down ---
+    // In PR-2 the Session handle owns a real firecracker microVM + overlay, so an
+    // unwind between create and destroy would leak a live VM. The RAII guard's Drop
+    // is the safety net: destroy MUST still run when a seam method panics.
+    #[test]
+    fn panic_during_execute_still_destroys_session() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let mut lifecycle = FakeLifecycle::new(Vec::new());
+        lifecycle.panic_on_execute = true;
+
+        // Silence the default panic hook's backtrace print for this expected panic.
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            RunningSnapshotAcceptance::accept(
+                &mut lifecycle,
+                eligible(),
+                &config(1),
+                &Default::default(),
+            )
+        }));
+        std::panic::set_hook(previous_hook);
+
+        assert!(
+            unwound.is_err(),
+            "the execute panic must unwind out of accept, not be swallowed"
+        );
+        // The guard's Drop ran on unwind: the process tree was terminated and the
+        // disposable Session was destroyed exactly once, so no live VM is leaked.
+        assert_eq!(lifecycle.destroys, 1, "destroy must run on the panic path");
+        assert_eq!(lifecycle.destroyed_sessions.len(), 1);
+        assert_eq!(
+            lifecycle.terminates, 1,
+            "the process tree must be terminated before destroy on the panic path"
+        );
     }
 
     // --- AC: recapture retries are bounded (by count AND deadline) and receipted ---
