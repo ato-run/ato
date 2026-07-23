@@ -1,0 +1,626 @@
+{
+  "schema": "ato.execution-contract/v1",
+  "description": "Shared cross-language test vectors for the ato.execution-contract/v1 canonical form. Consumed by crates/capsule/tests/execution_contract_vectors.rs and reusable verbatim by ato-api.",
+  "domain_separator_utf8": "ato.execution-contract/v1",
+  "execution_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
+  "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
+  "numbers": "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, a nonzero integer in 1..=65535 (0 is rejected fail-closed). No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.",
+  "optional_fields": "Optional identity fields (target.libc, target.observable_features, launch.secret_bindings, guest_surface.port) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.",
+  "opaque_digests": "The opaque sub-contract digest fields (source.projection_digest, runtime.dynamic_contract_digest, build_outputs[].projection_digest, launch.process_model_digest, launch.environment_policy_digest, launch.environment[].value_digest, filesystem.topology_digest, policy.network_digest, policy.capability_digest, policy.filesystem_digest) are ALWAYS blake3: their preimage is fixed by v1 as blake3(UTF8(domain) || 0x00 || JCS(payload)) under one of the frozen domains ato.source-projection-contract/v1, ato.runtime-dynamic-contract/v1, ato.build-output-projection/v1, ato.process-model-contract/v1, ato.environment-policy/v1, ato.environment-value/v1, ato.filesystem-topology/v1, ato.network-policy/v1, ato.capability-policy/v1, ato.filesystem-policy/v1. The algorithm is not a producer choice: a sha256-spelled value is NOT a valid opaque sub-contract digest and MUST be rejected before hashing. Only the payload schema behind each digest is versioned separately from v1 (RFC 4.5); the algorithm, domain, and preimage rule are frozen. Pinned by the invalid-sha256-*-digest vectors.",
+  "guest_path_ordering": "Guest-path lists (filesystem.writable_paths) are sorted segment-wise, and WITHIN each segment by UTF-8 byte lexicographic order (equivalently Unicode code-point order). TypeScript implementations MUST compare UTF-8 bytes, NOT UTF-16 code units — the two orders diverge for astral-plane characters: e.g. U+E000 precedes U+10000 by UTF-8/code point, but follows it by UTF-16 (the astral char's lead surrogate U+D800 sorts before the single unit U+E000). Guest paths also reject every Unicode control character (char::is_control: the C0 range incl. NUL, DEL, and the C1 range U+0080..U+009F), not only C0/DEL. Pinned by guest-path-utf8-order (valid, correctly ordered), invalid-guest-path-utf16-order (same pair reversed into UTF-16 order), and invalid-c1-control-target (U+0085 NEL).",
+  "baseline": "baseline",
+  "vectors": [
+    {
+      "name": "baseline",
+      "file": "vectors/baseline.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "canonical_file": "expected/baseline.canonical.json"
+    },
+    {
+      "name": "field-order",
+      "file": "vectors/field-order.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "same contract with every object's keys reverse-sorted; JCS erases key order"
+    },
+    {
+      "name": "whitespace",
+      "file": "vectors/whitespace.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "same contract minified; input whitespace never reaches the canonical form"
+    },
+    {
+      "name": "unicode-strings",
+      "file": "vectors/unicode-strings.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:50e61760e3435fc7d719bcc38f909945f22e0e8cf36919600d66e9df3669f7a4",
+      "relation": "differs-from-baseline",
+      "canonical_file": "expected/unicode-strings.canonical.json",
+      "notes": "pins RFC 8785 string canonicalization for free-form fields: input escapes (surrogate pair, control chars) and literal UTF-8 (é-acute, CJK, kana, astral-plane emoji) canonicalize identically — control characters as lowercase \\u00xx / two-char escapes, everything else as literal UTF-8"
+    },
+    {
+      "name": "mutate-source-digest",
+      "file": "vectors/mutate-source-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:994abb3e43d4d3d18f15682095df5da41430f7bb78d40d42bc7e39baa4f99a0e",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-source-projection-digest",
+      "file": "vectors/mutate-source-projection-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:07687d63ff9999caca1f8e8c9d4e8c9dd6f07c92a372f2c33dcedd7e97cf607e",
+      "relation": "differs-from-baseline",
+      "notes": "opaque source projection-rules sub-contract digest is identity-bearing (RFC §4.2 Source)"
+    },
+    {
+      "name": "mutate-target-os",
+      "file": "vectors/mutate-target-os.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:3a58f5fc69c9e22f97db7e29efa379fadc7678cbf3eb94cd8450b9cca8c99d2a",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-architecture",
+      "file": "vectors/mutate-target-architecture.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:295e28ab5936d4f07bcece32ca2f8d5bf6e60d72bf46f604d77caee436a95fb8",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-abi",
+      "file": "vectors/mutate-target-abi.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:0634c9ef7b1e5a032e213c7ac3613c30cabfecd8808ce799b177c8d00d931e4f",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-libc",
+      "file": "vectors/mutate-target-libc.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:ecb43cf963bd8e29f226ccef54babbbe9bd7b1a6ecf9ec4e26acf110fab004f7",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-observable-features",
+      "file": "vectors/mutate-target-observable-features.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:820c7645d2ab873dfdc60b2834c6b74192e610b1897ce6a4696de0e0b9606634",
+      "relation": "differs-from-baseline",
+      "notes": "baseline omits observable_features entirely; introducing one changes the id"
+    },
+    {
+      "name": "mutate-runtime-kind",
+      "file": "vectors/mutate-runtime-kind.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:7e30c84c3b99cfff7558a8a28093b855ab1785b2787f22abc2388fa684276e2c",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-runtime-artifact-digest",
+      "file": "vectors/mutate-runtime-artifact-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:ee31e107fe29459d4ce1027382eef65c889e13ea89ea0fb6717a219a93221418",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-runtime-dynamic-contract-digest",
+      "file": "vectors/mutate-runtime-dynamic-contract-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:ffbb339d932311396e6fa1b7444c30be481cb17efadedb8466aae6e696ce158f",
+      "relation": "differs-from-baseline",
+      "notes": "opaque dynamic-runtime sub-contract digest is identity-bearing (RFC §4.2 Runtime)"
+    },
+    {
+      "name": "mutate-dependency-name",
+      "file": "vectors/mutate-dependency-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:8efa280d86008c258c93d76f2b5a3252a1b400d70c239920b25f0b76626e813e",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-dependency-derivation-digest",
+      "file": "vectors/mutate-dependency-derivation-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c628c7fa7bb2a53cb21cc0cf18bf7d8c351cae6cac10e43cfe7fdf0ab449d834",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-dependency-output-digest",
+      "file": "vectors/mutate-dependency-output-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:01291dd6d65e62969b0d1a584cfe221e6fdffba012f9b8b0da5e867b981afa34",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-build-output-name",
+      "file": "vectors/mutate-build-output-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:a71bbbe12b98e78386fd5fda2d90f127c3e0510da7df44beebabaf42b79368b6",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-build-output-digest",
+      "file": "vectors/mutate-build-output-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:969d27e42c99d3b4d7cbe1a47862f6145597610db435c31b08af8b0c28a9f2ae",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-build-output-projection-digest",
+      "file": "vectors/mutate-build-output-projection-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:a65fa8dd8b9cb017f83a96b5d5f4a75ede1f761a0ab9ee74afd6c45116601ce8",
+      "relation": "differs-from-baseline",
+      "notes": "opaque build-output projection sub-contract digest is identity-bearing (RFC §4.2 Build outputs)"
+    },
+    {
+      "name": "mutate-launch-argv",
+      "file": "vectors/mutate-launch-argv.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:156ba847be399aac70902e1deb1829a894424a92a635d87a93c3f0da97b79994",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-launch-cwd",
+      "file": "vectors/mutate-launch-cwd.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:a099c2982d0e179ef6302bc28123ac8b17db1dbff96cb27716dced9a9ccd6f1f",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-launch-process-model-digest",
+      "file": "vectors/mutate-launch-process-model-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c4e71fb4f79c8259ccc56e7ebe094cbfb37895521a8e02090b413eafba0b7061",
+      "relation": "differs-from-baseline",
+      "notes": "opaque process-model sub-contract digest is identity-bearing (RFC §4.2 Launch)"
+    },
+    {
+      "name": "mutate-launch-environment-policy-digest",
+      "file": "vectors/mutate-launch-environment-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:7d7a23974ed2333f1e729ead44ce82a4184de03a31ff052be91ae69ee25775e6",
+      "relation": "differs-from-baseline",
+      "notes": "opaque environment requirements/normalization/inheritance policy sub-contract digest is identity-bearing (RFC §4.2 Environment)"
+    },
+    {
+      "name": "mutate-launch-secret-bindings",
+      "file": "vectors/mutate-launch-secret-bindings.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:9f4a73ff575f2240f0897ee3ab061b7bc4496f298dabdf96119dd591e7e6449d",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-environment-name",
+      "file": "vectors/mutate-environment-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:9d696bd61e7b96ce9c7833b620c7263843cc0b478abc044b1cb8cd10685653e5",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-environment-value-digest",
+      "file": "vectors/mutate-environment-value-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:eb4bcf06df665154d2164f98ae648c64dd68eb36adf892084be7dfc26695b7e5",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-view-digest",
+      "file": "vectors/mutate-filesystem-view-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:dad3383689ca59bf75159647ee7a388ab5cec29cccda3c002a21f213b46d9674",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-topology-digest",
+      "file": "vectors/mutate-filesystem-topology-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:082914c7c54889cde8ae62b59c91a5b63a6082b48cf2b9997ec433e7c4b1d032",
+      "relation": "differs-from-baseline",
+      "notes": "opaque mount-topology and access-modes sub-contract digest is identity-bearing (RFC §4.2 Filesystem)"
+    },
+    {
+      "name": "mutate-filesystem-readonly-layers",
+      "file": "vectors/mutate-filesystem-readonly-layers.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:15769e98b2c86811d317e2ac9035c45a579bc984c7bf2a78beb5027f1267ce8f",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-writable-paths",
+      "file": "vectors/mutate-filesystem-writable-paths.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:d71d2c52688b720f4156d93660d296b579059eeb26445f5f26ae7967254ab548",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-network-policy-digest",
+      "file": "vectors/mutate-network-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:4fbe7f4d43c38f2cf2ed541f1d894255fb6a83ff2a8b63c0dc0b4f2c7852c190",
+      "relation": "differs-from-baseline",
+      "notes": "opaque network-policy sub-contract digest is identity-bearing (RFC §4.2 Network; domain ato.network-policy/v1)"
+    },
+    {
+      "name": "mutate-capability-policy-digest",
+      "file": "vectors/mutate-capability-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:63148871d4ef83af45ecf67fe9a17aeb4788068afc458e00b106b9792b9a6ef2",
+      "relation": "differs-from-baseline",
+      "notes": "opaque capability-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.capability-policy/v1)"
+    },
+    {
+      "name": "mutate-filesystem-policy-digest",
+      "file": "vectors/mutate-filesystem-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:baa74ab06bc6731f9054500907cb782207a9e7f4bedb517004f4d3e1ed312b0d",
+      "relation": "differs-from-baseline",
+      "notes": "opaque filesystem-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.filesystem-policy/v1)"
+    },
+    {
+      "name": "mutate-guest-surface-bind-address",
+      "file": "vectors/mutate-guest-surface-bind-address.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:f469eb3475e5af8f536b5418fa3a6bf28768d7ecb68bde44421dd2d893bed322",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-protocol",
+      "file": "vectors/mutate-guest-surface-protocol.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:128f792464928fec6013051b1219df8177e78f7e074d71524196ab1d13ec004f",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-port",
+      "file": "vectors/mutate-guest-surface-port.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:15ea7f267bc8135954017a15f2e400dbc69b3fee2a8da414d593cf1a3058aeaf",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-features",
+      "file": "vectors/mutate-guest-surface-features.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:8c53922bccd374779634c3c4f7a476342e22dc2dabd680eb8f8fb2e7693e6e24",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-name",
+      "file": "vectors/mutate-external-state-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c15ebf33a61bc2be63340a10b9171df3887fdd0dbaf003072ef3c25b3f8d1252",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-target",
+      "file": "vectors/mutate-external-state-target.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:65faf33c010550df354ba85630aad72fd2fdfcf49dd53255438d7f795bd7c988",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-schema",
+      "file": "vectors/mutate-external-state-schema.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c0091da45bb3e1d47b63097d38f84ebe1116467fdf3def8e7ba08a20e055436a",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-access",
+      "file": "vectors/mutate-external-state-access.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:7591d2e8bafb1dbe68b455cc41b39bd54005f9fe65113eb4b7cb86a7e70f7ee4",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "guest-path-utf8-order",
+      "file": "vectors/guest-path-utf8-order.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:d1bee9aa938d289995ae4a6a07db32af5034fbb7d38a5d17b9f656f20fc7a379",
+      "relation": "differs-from-baseline",
+      "notes": "GuestPath lists sort segment-wise by UTF-8 byte order: U+E000 precedes U+10000 under UTF-8/code-point order (they invert under UTF-16). This correctly-ordered pair is accepted; TypeScript implementations MUST compare UTF-8 bytes, not UTF-16 code units. See invalid-guest-path-utf16-order for the rejected reverse."
+    },
+    {
+      "name": "envelope-non-identity",
+      "file": "vectors/envelope-non-identity.json",
+      "kind": "envelope",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "provenance/diagnostics/evidence/timestamps/runner/session/snapshot/host facts are non-identity and ignored"
+    },
+    {
+      "name": "source-kind-alias",
+      "file": "vectors/source-kind-alias.json",
+      "kind": "envelope",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "source.kind is a non-identity resolved-ref alias; it must not change the id"
+    },
+    {
+      "name": "source-immutable-ref-alias",
+      "file": "vectors/source-immutable-ref-alias.json",
+      "kind": "envelope",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "source.immutable_ref is a non-identity resolved-ref alias; it must not change the id"
+    },
+    {
+      "name": "runtime-resolved-ref-alias",
+      "file": "vectors/runtime-resolved-ref-alias.json",
+      "kind": "envelope",
+      "expect": "execution_id",
+      "execution_id": "blake3:fe216ebfbc65450f1cca14ca3ff41de81c42467fa672e7a7471d3392b058f464",
+      "relation": "equals-baseline",
+      "notes": "runtime.resolved_ref is a non-identity resolved-ref alias; it must not change the id"
+    },
+    {
+      "name": "envelope-execution-id-mismatch",
+      "file": "vectors/envelope-execution-id-mismatch.json",
+      "kind": "envelope",
+      "expect": "error",
+      "notes": "stored execution_id disagrees with the canonical hash; readers fail closed"
+    },
+    {
+      "name": "invalid-unknown-identity-field",
+      "file": "vectors/invalid-unknown-identity-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown top-level identity-bearing field fails closed"
+    },
+    {
+      "name": "invalid-unknown-nested-identity-field",
+      "file": "vectors/invalid-unknown-nested-identity-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown nested identity-bearing field fails closed"
+    },
+    {
+      "name": "invalid-schema-version",
+      "file": "vectors/invalid-schema-version.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "contract version mismatch fails closed"
+    },
+    {
+      "name": "invalid-placeholder-digest",
+      "file": "vectors/invalid-placeholder-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "placeholder digest values are rejected before an id is issued"
+    },
+    {
+      "name": "invalid-uppercase-digest",
+      "file": "vectors/invalid-uppercase-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "uppercase hex is non-canonical and rejected"
+    },
+    {
+      "name": "invalid-unsorted-dependencies",
+      "file": "vectors/invalid-unsorted-dependencies.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "identity lists must be pre-sorted and duplicate-free"
+    },
+    {
+      "name": "invalid-empty-argv",
+      "file": "vectors/invalid-empty-argv.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unresolved launch argv fails closed"
+    },
+    {
+      "name": "invalid-null-libc",
+      "file": "vectors/invalid-null-libc.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit null is a non-canonical spelling of an absent target.libc; only key omission is canonical"
+    },
+    {
+      "name": "invalid-null-port",
+      "file": "vectors/invalid-null-port.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit null is a non-canonical spelling of an absent guest_surface.port; only key omission is canonical"
+    },
+    {
+      "name": "invalid-empty-observable-features",
+      "file": "vectors/invalid-empty-observable-features.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit empty object is a non-canonical spelling of an absent target.observable_features; only key omission is canonical"
+    },
+    {
+      "name": "invalid-empty-secret-bindings",
+      "file": "vectors/invalid-empty-secret-bindings.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit empty array is a non-canonical spelling of an absent launch.secret_bindings; only key omission is canonical"
+    },
+    {
+      "name": "invalid-relative-cwd",
+      "file": "vectors/invalid-relative-cwd.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a relative launch.cwd is not a canonical guest path (must be absolute)"
+    },
+    {
+      "name": "invalid-dotdot-target",
+      "file": "vectors/invalid-dotdot-target.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a '..' segment in external_state[].target is not a canonical guest path"
+    },
+    {
+      "name": "invalid-trailing-slash-target",
+      "file": "vectors/invalid-trailing-slash-target.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a trailing slash in external_state[].target is not a canonical guest path"
+    },
+    {
+      "name": "invalid-zero-port",
+      "file": "vectors/invalid-zero-port.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "guest_surface.port 0 is never a valid declared surface and is rejected (NonZeroU16)"
+    },
+    {
+      "name": "invalid-sha256-source-projection-digest",
+      "file": "vectors/invalid-sha256-source-projection-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled source projection opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-runtime-dynamic-contract-digest",
+      "file": "vectors/invalid-sha256-runtime-dynamic-contract-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled runtime dynamic-contract opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-build-output-projection-digest",
+      "file": "vectors/invalid-sha256-build-output-projection-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled build-output projection opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-process-model-digest",
+      "file": "vectors/invalid-sha256-process-model-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled process-model opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-environment-policy-digest",
+      "file": "vectors/invalid-sha256-environment-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled environment-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-environment-value-digest",
+      "file": "vectors/invalid-sha256-environment-value-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled environment-value opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-filesystem-topology-digest",
+      "file": "vectors/invalid-sha256-filesystem-topology-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled filesystem-topology opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-network-policy-digest",
+      "file": "vectors/invalid-sha256-network-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled network-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-capability-policy-digest",
+      "file": "vectors/invalid-sha256-capability-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled capability-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-filesystem-policy-digest",
+      "file": "vectors/invalid-sha256-filesystem-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled filesystem-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-guest-path-utf16-order",
+      "file": "vectors/invalid-guest-path-utf16-order.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "filesystem.writable_paths sorted by UTF-16 code units is non-canonical: U+10000 before U+E000 is the reverse of the normative UTF-8 byte order (see guest-path-utf8-order)"
+    },
+    {
+      "name": "invalid-c1-control-target",
+      "file": "vectors/invalid-c1-control-target.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a C1 control character (U+0085 NEL) in external_state[].target is not a canonical guest path: all Unicode control characters are rejected, not only C0/DEL"
+    },
+    {
+      "name": "invalid-duplicate-top-level-field",
+      "file": "vectors/invalid-duplicate-top-level-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a duplicate top-level key (last-wins) is rejected by the struct deserializer"
+    },
+    {
+      "name": "invalid-duplicate-nested-field",
+      "file": "vectors/invalid-duplicate-nested-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a duplicate key inside a nested identity object is rejected by the struct deserializer"
+    },
+    {
+      "name": "invalid-duplicate-observable-feature",
+      "file": "vectors/invalid-duplicate-observable-feature.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a duplicate observable-feature map key (BTreeMap last-wins) is rejected by the unique-map visitor"
+    }
+  ]
+}
