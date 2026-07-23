@@ -149,11 +149,15 @@ impl FinalizedExecution {
     /// Obtain a [`VerifiedExecutionId`] from this finalized execution. A completed
     /// strict finalization has already proven, facet by facet, that the measured
     /// values equal the expected contract, so the issued `execution_id` is the
-    /// canonical hash by construction — no re-verification is needed. This is one
-    /// of the only two ways to obtain a [`VerifiedExecutionId`].
-    #[must_use]
-    pub fn verified_execution_id(&self) -> VerifiedExecutionId {
-        VerifiedExecutionId::from_verified(self.execution_id.clone())
+    /// canonical hash by construction. This routes through the proof-preserving
+    /// [`VerifiedExecutionId::verify_contract_id`] seam anyway — recomputing the
+    /// id from the held contract and comparing — so the wrapper can never be
+    /// minted with an id that disagrees with its contract. The recomputation is
+    /// expected to always succeed here; a failure would signal a corrupted
+    /// [`FinalizedExecution`]. This is one of the only two ways to obtain a
+    /// [`VerifiedExecutionId`].
+    pub fn verified_execution_id(&self) -> Result<VerifiedExecutionId, ExecutionContractError> {
+        VerifiedExecutionId::verify_contract_id(&self.contract, &self.execution_id)
     }
 
     #[must_use]
@@ -935,7 +939,9 @@ mod tests {
             .finalize(&expected)
             .expect("full measurement finalizes");
 
-        let verified = finalized.verified_execution_id();
+        let verified = finalized
+            .verified_execution_id()
+            .expect("finalized execution re-verifies its own id");
         assert_eq!(verified.as_execution_id(), finalized.execution_id());
         assert_eq!(
             *verified.as_execution_id(),

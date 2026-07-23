@@ -31,21 +31,39 @@
 //! * [`SnapshotCatalogRecord`] — registry acceptance metadata. Quarantine flips a
 //!   status field; it never mutates the manifest bytes or the `snapshot_id`.
 //!
-//! Byte-sealing, CAS layer refs, and live restore/runner wiring are **out of
-//! scope** for #1087 (non-goals) and remain in the `snapshot` crate, which
-//! composes these types. The normative spec is
+//! The manifest **commits to** the captured content by carrying its layer refs
+//! (`memory_layer_refs` / `vmstate_layer_refs` / `disk_layer_refs`) so
+//! `snapshot_id` is a true content address; the *byte-sealing* that produces
+//! those layers, and live restore/runner wiring, remain **out of scope** for
+//! #1087 (non-goals) and live in the `snapshot` crate, which composes these
+//! types. The `cas_root_digest` and other Artifact-Envelope fields
+//! (`ato.snapshot-artifact-envelope/v1`) are likewise out of scope here. The
+//! normative spec is
 //! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §7 and §16.3.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::execution_contract::{ExecutionId, VerifiedExecutionId, schema_domained_blake3_id};
+use super::execution_contract::{
+    ContentDigest, ExecutionId, VerifiedExecutionId, schema_domained_blake3_id,
+};
 
 /// Schema tag for the Capsule v1 Snapshot manifest wire format.
 pub const SNAPSHOT_MANIFEST_V1_SCHEMA: &str = "ato.snapshot-manifest/v1";
 
 /// Schema tag for the versioned Snapshot compatibility contract.
 pub const SNAPSHOT_COMPATIBILITY_V1_SCHEMA: &str = "ato.snapshot-compatibility/v1";
+
+/// Schema tag for the versioned Snapshot restore contract (restore-time steps).
+pub const SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA: &str = "ato.snapshot-restore-contract/v1";
+
+/// Schema tag for the versioned structural-sanitization attestation.
+pub const SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA: &str =
+    "ato.snapshot-sanitization-attestation/v1";
+
+/// Schema tag for the versioned secret-scan attestation.
+pub const SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA: &str =
+    "ato.snapshot-secret-scan-attestation/v1";
 
 /// Schema tag for the legacy Ready-State manifest (inspection / migration only).
 pub const READY_STATE_V1_SCHEMA: &str = "ato.ready-state/v1";
@@ -59,6 +77,18 @@ pub enum SnapshotManifestError {
     InvalidSchema,
     #[error("snapshot compatibility schema must be {SNAPSHOT_COMPATIBILITY_V1_SCHEMA}")]
     InvalidCompatibilitySchema,
+    #[error("snapshot restore-contract schema must be {SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA}")]
+    InvalidRestoreContractSchema,
+    #[error(
+        "snapshot sanitization-attestation schema must be \
+         {SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA}"
+    )]
+    InvalidSanitizationAttestationSchema,
+    #[error(
+        "snapshot secret-scan-attestation schema must be \
+         {SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA}"
+    )]
+    InvalidSecretScanAttestationSchema,
     #[error("legacy manifest schema must be {READY_STATE_V1_SCHEMA}")]
     InvalidLegacySchema,
     #[error("failed to canonicalize snapshot manifest: {0}")]
@@ -141,14 +171,27 @@ pub enum SnapshotBackendKind {
     Fake,
 }
 
-/// Portability tier of a captured Snapshot: how broadly a restore host may vary
-/// from the capture host and still prove compatibility. A closed enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// Portability tier of a captured Snapshot. v1 defines exactly **one** provable
+/// tier: [`PortabilityTier::ClassPortable`].
+///
+/// A prior draft also carried a `HostPinned` tier ordered below `ClassPortable`
+/// and matched by a `max_portability_tier >= portability_tier` comparison. But
+/// v1 defines **no capture-host identity** (RFC §7.4), so a host-pinned tier is
+/// unprovable: a merely class-portable host would *falsely* satisfy a
+/// host-pinned Snapshot (fail-open), violating the RFC's fail-closed rule. The
+/// variant is therefore removed. Because there is a single tier, compatibility
+/// is never decided by a tier ranking; it is proven by **exact**
+/// `compatibility_class_identity` equality (see
+/// [`SnapshotCompatibilityContractV1::is_satisfied_by`]).
+///
+/// A future host-identity contract MAY reintroduce a *provable* `HostPinned` as
+/// a new, versioned tagged variant carrying the capture-host identity a host
+/// must present — never as an unprovable ordered tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PortabilityTier {
-    /// Restorable only on a host bit-identical to the capture host.
-    HostPinned,
-    /// Restorable on any host in the same restore-compatibility class.
+    /// Restorable on any host that presents the exact matching
+    /// `compatibility_class_identity`.
     ClassPortable,
 }
 
@@ -179,8 +222,16 @@ pub struct SnapshotCompatibilityContractV1 {
     pub cpu_template: String,
     /// Runner restore-contract identity (the restore protocol the runner speaks).
     pub runner_restore_contract: String,
-    /// Portability tier — how far a restore host may vary.
+    /// Portability tier. v1 has exactly one provable tier
+    /// ([`PortabilityTier::ClassPortable`]).
     pub portability_tier: PortabilityTier,
+    /// The restore-compatibility **class identity** a host MUST present, exactly,
+    /// to prove it can restore this Snapshot. A [`ContentDigest`], so a malformed
+    /// value fails closed at deserialize. Because v1 has no capture-host identity,
+    /// this exact-equality class identity — not an ordered tier — is the sole
+    /// portability gate: a host whose class identity differs from, or is absent
+    /// against, this value can never satisfy the contract.
+    pub compatibility_class_identity: ContentDigest,
 }
 
 impl SnapshotCompatibilityContractV1 {
@@ -229,7 +280,12 @@ impl SnapshotCompatibilityContractV1 {
                 .iter()
                 .any(|t| t == &self.cpu_template)
             && capability.runner_restore_contract == self.runner_restore_contract
-            && capability.max_portability_tier >= self.portability_tier
+            // Portability: EXACT class-identity equality, never an ordered tier.
+            // The host must present a class identity, and it must equal the
+            // Snapshot's exactly. An absent (`None`) or differing class identity
+            // fails closed — there is no tier that lets a non-matching host
+            // satisfy the contract.
+            && capability.compatibility_class_identity == Some(self.compatibility_class_identity)
     }
 }
 
@@ -246,9 +302,151 @@ pub struct HostRestoreCapabilityV1 {
     pub guest_kernel_identity: String,
     pub cpu_templates: Vec<String>,
     pub runner_restore_contract: String,
-    /// The most portable tier this host can restore. `HostPinned` capture is the
-    /// least demanding; `ClassPortable` capture demands a class-portable host.
-    pub max_portability_tier: PortabilityTier,
+    /// The restore-compatibility class identity this host can prove it belongs
+    /// to, if any. `None` means the host presents no class identity and so
+    /// satisfies no `ClassPortable` Snapshot (fail-closed). A Snapshot is
+    /// restorable here only when this equals its `compatibility_class_identity`
+    /// exactly.
+    pub compatibility_class_identity: Option<ContentDigest>,
+}
+
+/// Whether the workload was running or idle at capture (RFC §8). A closed enum;
+/// the runner reads it at restore to decide whether to **resume** the captured
+/// workload or **start** it fresh (RFC §10.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapturePolicyV1 {
+    /// The workload was running at capture; restore resumes it in place.
+    Running,
+    /// The workload was stopped/idle at capture (placeholders revoked); restore
+    /// starts it fresh.
+    Idle,
+}
+
+/// The versioned Snapshot **restore contract**: the restore-time protocol and
+/// ordered steps a runner performs to rehydrate the captured state (RFC §7.3).
+/// `deny_unknown_fields` + a checked schema tag keep it fail-closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreContractV1 {
+    /// Always [`SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA`]; validated on read.
+    pub schema: String,
+    /// The restore protocol identity the runner must speak to rehydrate this
+    /// Snapshot (e.g. `ato-restore/v1`). Required and non-empty.
+    pub restore_protocol: String,
+    /// Ordered restore steps, applied before the restored session is exposed
+    /// (descriptive; may be empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+}
+
+impl RestoreContractV1 {
+    fn validate(&self) -> Result<(), SnapshotManifestError> {
+        if self.schema != SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA {
+            return Err(SnapshotManifestError::InvalidRestoreContractSchema);
+        }
+        if self.restore_protocol.trim().is_empty() {
+            return Err(SnapshotManifestError::EmptyField(
+                "restore_contract.restore_protocol",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Structural-sanitization attestation (RFC §8): which structural cleanup and
+/// revocation steps ran before the artifact was sealed. Modeled on the shape of
+/// the `snapshot` crate's `SanitizerContract`, but re-declared here as a lean
+/// pure-contract type (the `capsule` crate cannot depend on `snapshot`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SanitizationAttestationV1 {
+    /// Always [`SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA`]; validated on read.
+    pub schema: String,
+    /// Structural cleanup / revocation steps that ran (descriptive; may be
+    /// empty, e.g. `"session_id_regenerate"`, `"placeholder_revoke"`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+}
+
+impl SanitizationAttestationV1 {
+    fn validate(&self) -> Result<(), SnapshotManifestError> {
+        if self.schema != SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA {
+            return Err(SnapshotManifestError::InvalidSanitizationAttestationSchema);
+        }
+        Ok(())
+    }
+}
+
+/// Secret-scan attestation (RFC §8): scanner identity, policy, coverage, and a
+/// redacted verdict. Modeled on the shape of the `snapshot` crate's
+/// `NoSecretProof`, but re-declared here as a lean pure-contract type.
+///
+/// Secret scanning is defense in depth: this attestation records that a scan
+/// ran and its (redacted) result — it MUST NOT be read as proof of absence
+/// (RFC §8, §17.3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretScanAttestationV1 {
+    /// Always [`SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA`]; validated on read.
+    pub schema: String,
+    /// Scanner identity that produced this attestation. Required and non-empty.
+    pub scanner_identity: String,
+    /// Policy identity applied by the scan. Required and non-empty.
+    pub policy_identity: String,
+    /// Names of the layers covered by the scan (coverage; may be empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scanned_layers: Vec<String>,
+    /// Redacted verdict, e.g. `"clean"`. Required and non-empty. Never proof of
+    /// absence.
+    pub verdict: String,
+}
+
+impl SecretScanAttestationV1 {
+    fn validate(&self) -> Result<(), SnapshotManifestError> {
+        if self.schema != SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA {
+            return Err(SnapshotManifestError::InvalidSecretScanAttestationSchema);
+        }
+        if self.scanner_identity.trim().is_empty() {
+            return Err(SnapshotManifestError::EmptyField(
+                "secret_scan_attestation.scanner_identity",
+            ));
+        }
+        if self.policy_identity.trim().is_empty() {
+            return Err(SnapshotManifestError::EmptyField(
+                "secret_scan_attestation.policy_identity",
+            ));
+        }
+        if self.verdict.trim().is_empty() {
+            return Err(SnapshotManifestError::EmptyField(
+                "secret_scan_attestation.verdict",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The captured-content commitment bundle for a v1 manifest: the layer refs that
+/// bind `snapshot_id` to the actual captured bytes, plus the restore/capture and
+/// attestation metadata. Passed to [`LegacyReadyStateManifestV1::migrate`], which
+/// cannot recover any of it from a legacy artifact (legacy manifests carry no
+/// content commitment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotContentCommitmentV1 {
+    /// Content addresses of the captured guest-memory layers.
+    pub memory_layer_refs: Vec<ContentDigest>,
+    /// Content addresses of the captured VM-state layers.
+    pub vmstate_layer_refs: Vec<ContentDigest>,
+    /// Content addresses of the captured disk layers.
+    pub disk_layer_refs: Vec<ContentDigest>,
+    /// Restore-time contract.
+    pub restore_contract: RestoreContractV1,
+    /// Whether the workload was running or idle at capture.
+    pub capture_policy: CapturePolicyV1,
+    /// Structural-sanitization attestation.
+    pub sanitization_attestation: SanitizationAttestationV1,
+    /// Secret-scan attestation.
+    pub secret_scan_attestation: SecretScanAttestationV1,
 }
 
 /// Optional capture-time provenance. Provenance is descriptive only — it MUST
@@ -298,9 +496,28 @@ pub struct SnapshotManifestV1 {
     pub execution_id: ExecutionId,
     /// Typed, versioned restore requirements. Unknown compatibility is rejected.
     pub compatibility_contract: SnapshotCompatibilityContractV1,
+    /// Content addresses of the captured guest-memory layers. REQUIRED and
+    /// non-empty: with `execution_id` and `compatibility_contract` alone, two
+    /// captures of different bytes would derive the SAME `snapshot_id`. Committing
+    /// the layer refs makes `snapshot_id` a true content address of the captured
+    /// bytes.
+    pub memory_layer_refs: Vec<ContentDigest>,
+    /// Content addresses of the captured VM-state layers. REQUIRED and non-empty.
+    pub vmstate_layer_refs: Vec<ContentDigest>,
+    /// Content addresses of the captured disk layers. REQUIRED and non-empty.
+    pub disk_layer_refs: Vec<ContentDigest>,
+    /// Restore-time contract (protocol + ordered steps to rehydrate).
+    pub restore_contract: RestoreContractV1,
+    /// Whether the workload was running or idle at capture (RFC §8/§10.2).
+    pub capture_policy: CapturePolicyV1,
     /// Optional capture provenance (descriptive only; never selection input).
     #[serde(default, skip_serializing_if = "SnapshotCaptureProvenance::is_empty")]
     pub capture_provenance: SnapshotCaptureProvenance,
+    /// Structural-sanitization attestation (which cleanup/revocation ran).
+    pub sanitization_attestation: SanitizationAttestationV1,
+    /// Secret-scan attestation (scanner/policy/coverage/verdict; never proof of
+    /// absence).
+    pub secret_scan_attestation: SecretScanAttestationV1,
 }
 
 impl SnapshotManifestV1 {
@@ -324,7 +541,24 @@ impl SnapshotManifestV1 {
         if self.schema != SNAPSHOT_MANIFEST_V1_SCHEMA {
             return Err(SnapshotManifestError::InvalidSchema);
         }
-        self.compatibility_contract.validate()
+        self.compatibility_contract.validate()?;
+        // Content commitment: a `snapshot_id` that does not commit to the actual
+        // captured bytes is not a content address. Each captured layer class MUST
+        // contribute at least one ref, so two captures of different memory /
+        // vmstate / disk bytes can never collide on the same id. Missing/empty
+        // commitment fails closed (and therefore yields no `snapshot_id`).
+        for (field, refs) in [
+            ("memory_layer_refs", &self.memory_layer_refs),
+            ("vmstate_layer_refs", &self.vmstate_layer_refs),
+            ("disk_layer_refs", &self.disk_layer_refs),
+        ] {
+            if refs.is_empty() {
+                return Err(SnapshotManifestError::EmptyField(field));
+            }
+        }
+        self.restore_contract.validate()?;
+        self.sanitization_attestation.validate()?;
+        self.secret_scan_attestation.validate()
     }
 
     /// The canonical JCS bytes of this manifest — the `snapshot_id` preimage
@@ -549,22 +783,43 @@ impl LegacyReadyStateManifestV1 {
     ///   caller independently proving the identity.
     /// * The caller supplies a full v1 [`SnapshotCompatibilityContractV1`],
     ///   because the legacy `runner_class_id` is not a v1 compatibility contract.
+    /// * The caller supplies the [`SnapshotContentCommitmentV1`] (layer refs +
+    ///   restore/capture + attestations): a legacy artifact carries no content
+    ///   commitment, and a v1 manifest without one is not a content address and
+    ///   fails [`SnapshotManifestV1::validate`].
     /// * The result is a **new immutable manifest** and therefore a **new
     ///   `snapshot_id`** — the legacy bytes are never reinterpreted in place. The
     ///   legacy `capsule_manifest_hash` is carried across as provenance only.
+    ///
+    /// The legacy `schema` is re-checked first: the tolerant public fields let a
+    /// caller hand in a struct whose `schema` is not [`READY_STATE_V1_SCHEMA`]
+    /// (e.g. `ato.snapshot-manifest/v1`), and migrating such a struct would be
+    /// treating a non-legacy artifact as legacy — so it is rejected with
+    /// [`SnapshotManifestError::InvalidLegacySchema`].
     pub fn migrate(
         &self,
         verified_execution_id: &VerifiedExecutionId,
         compatibility_contract: SnapshotCompatibilityContractV1,
+        content: SnapshotContentCommitmentV1,
     ) -> Result<SnapshotManifestV1, SnapshotManifestError> {
+        if self.schema != READY_STATE_V1_SCHEMA {
+            return Err(SnapshotManifestError::InvalidLegacySchema);
+        }
         let migrated = SnapshotManifestV1 {
             schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
             execution_id: verified_execution_id.as_execution_id().clone(),
             compatibility_contract,
+            memory_layer_refs: content.memory_layer_refs,
+            vmstate_layer_refs: content.vmstate_layer_refs,
+            disk_layer_refs: content.disk_layer_refs,
+            restore_contract: content.restore_contract,
+            capture_policy: content.capture_policy,
             capture_provenance: SnapshotCaptureProvenance {
                 capsule_manifest_hash: self.capsule_manifest_hash.clone(),
                 build_receipt_id: None,
             },
+            sanitization_attestation: content.sanitization_attestation,
+            secret_scan_attestation: content.secret_scan_attestation,
         };
         migrated.validate()?;
         Ok(migrated)
@@ -575,24 +830,43 @@ impl LegacyReadyStateManifestV1 {
 mod tests {
     use super::*;
 
-    // A concrete, valid execution_id (blake3:<64 hex>). Reused across tests as
-    // the "identity anchor". A second distinct id models a different Execution
-    // Identity.
-    const EXEC_A: &str = "blake3:1111111111111111111111111111111111111111111111111111111111111111";
-    const EXEC_B: &str = "blake3:2222222222222222222222222222222222222222222222222222222222222222";
+    use crate::contract::execution_contract::test_execution_contract;
 
-    fn exec_id(raw: &str) -> ExecutionId {
-        ExecutionId::new(raw.to_string()).expect("valid execution id")
+    // Two distinct identity anchors, each the REAL canonical hash of a seeded
+    // execution contract (seeds 1 and 2). The selection/migration tests mint a
+    // `VerifiedExecutionId` through the proof-preserving `verify_contract_id`
+    // seam — no synthetic-id wrapping — and put the same real id into a
+    // candidate manifest's `execution_id`.
+    const SEED_A: u8 = 1;
+    const SEED_B: u8 = 2;
+
+    /// The real canonical `execution_id` of the seeded execution contract.
+    fn exec_id(seed: u8) -> ExecutionId {
+        test_execution_contract(seed)
+            .compute_execution_id()
+            .expect("valid execution id")
     }
 
-    /// Wrap a synthetic identity anchor as a [`VerifiedExecutionId`] for the
-    /// selection/migration tests. These anchors (`EXEC_A`/`EXEC_B`) are opaque
-    /// distinct ids, not the hash of a real contract, so they cannot be produced
-    /// through a verifying envelope; the crate-internal `from_verified` seam
-    /// stands in for a proven id here. Non-test callers still have only the two
-    /// sanctioned public paths.
-    fn verified(raw: &str) -> VerifiedExecutionId {
-        VerifiedExecutionId::from_verified(exec_id(raw))
+    /// Mint a [`VerifiedExecutionId`] via the proof-preserving seam: compute the
+    /// id from the real seeded contract and route it through `verify_contract_id`
+    /// (which recomputes and compares). No fake id is ever wrapped.
+    fn verified(seed: u8) -> VerifiedExecutionId {
+        let contract = test_execution_contract(seed);
+        let id = contract.compute_execution_id().expect("valid execution id");
+        VerifiedExecutionId::verify_contract_id(&contract, &id).expect("proof-preserving mint")
+    }
+
+    /// A valid [`ContentDigest`] seeded by a single lowercase-hex fill character.
+    fn digest(fill: char) -> ContentDigest {
+        assert!(fill.is_ascii_hexdigit() && !fill.is_ascii_uppercase());
+        ContentDigest::try_from(format!("blake3:{}", fill.to_string().repeat(64)))
+            .expect("valid content digest")
+    }
+
+    // The Snapshot's restore-compatibility class identity, shared by
+    // `sample_compat` and `matching_host` so a matching host satisfies it.
+    fn class_identity() -> ContentDigest {
+        digest('c')
     }
 
     fn sample_compat() -> SnapshotCompatibilityContractV1 {
@@ -606,15 +880,49 @@ mod tests {
             cpu_template: "T2CL".to_string(),
             runner_restore_contract: "ato-restore/v1".to_string(),
             portability_tier: PortabilityTier::ClassPortable,
+            compatibility_class_identity: class_identity(),
         }
     }
 
-    fn sample_manifest(exec: &str) -> SnapshotManifestV1 {
+    fn sample_content() -> SnapshotContentCommitmentV1 {
+        SnapshotContentCommitmentV1 {
+            memory_layer_refs: vec![digest('1')],
+            vmstate_layer_refs: vec![digest('2')],
+            disk_layer_refs: vec![digest('3')],
+            restore_contract: RestoreContractV1 {
+                schema: SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA.to_string(),
+                restore_protocol: "ato-restore/v1".to_string(),
+                steps: vec!["network_reconnect".to_string()],
+            },
+            capture_policy: CapturePolicyV1::Idle,
+            sanitization_attestation: SanitizationAttestationV1 {
+                schema: SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA.to_string(),
+                steps: vec!["session_id_regenerate".to_string()],
+            },
+            secret_scan_attestation: SecretScanAttestationV1 {
+                schema: SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA.to_string(),
+                scanner_identity: "ato-secret-scan/1.0".to_string(),
+                policy_identity: "default/v1".to_string(),
+                scanned_layers: vec!["memory".to_string(), "vmstate".to_string()],
+                verdict: "clean".to_string(),
+            },
+        }
+    }
+
+    fn sample_manifest(seed: u8) -> SnapshotManifestV1 {
+        let content = sample_content();
         SnapshotManifestV1 {
             schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
-            execution_id: exec_id(exec),
+            execution_id: exec_id(seed),
             compatibility_contract: sample_compat(),
+            memory_layer_refs: content.memory_layer_refs,
+            vmstate_layer_refs: content.vmstate_layer_refs,
+            disk_layer_refs: content.disk_layer_refs,
+            restore_contract: content.restore_contract,
+            capture_policy: content.capture_policy,
             capture_provenance: SnapshotCaptureProvenance::default(),
+            sanitization_attestation: content.sanitization_attestation,
+            secret_scan_attestation: content.secret_scan_attestation,
         }
     }
 
@@ -627,17 +935,17 @@ mod tests {
             guest_kernel_identity: "vmlinux-6.1-ato".to_string(),
             cpu_templates: vec!["T2CL".to_string(), "T2A".to_string()],
             runner_restore_contract: "ato-restore/v1".to_string(),
-            max_portability_tier: PortabilityTier::ClassPortable,
+            compatibility_class_identity: Some(class_identity()),
         }
     }
 
     fn candidate(
-        exec: &str,
+        seed: u8,
         status: AcceptanceStatus,
         ranking: SnapshotRankingSignals,
     ) -> SnapshotCandidate {
         SnapshotCandidate {
-            manifest: sample_manifest(exec),
+            manifest: sample_manifest(seed),
             status,
             ranking,
         }
@@ -647,30 +955,24 @@ mod tests {
 
     #[test]
     fn snapshot_manifest_missing_execution_id_is_rejected() {
-        // No `execution_id` key at all: required non-Option field ⇒ serde error.
-        let json = serde_json::json!({
-            "schema": SNAPSHOT_MANIFEST_V1_SCHEMA,
-            "compatibility_contract": serde_json::to_value(sample_compat()).unwrap(),
-        })
-        .to_string();
-        assert!(SnapshotManifestV1::parse(&json).is_err());
+        // Drop `execution_id` from an otherwise-valid manifest: required
+        // non-Option field ⇒ serde error.
+        let mut value = serde_json::to_value(sample_manifest(SEED_A)).unwrap();
+        value.as_object_mut().unwrap().remove("execution_id");
+        assert!(SnapshotManifestV1::parse(&value.to_string()).is_err());
     }
 
     #[test]
     fn snapshot_manifest_malformed_execution_id_is_rejected() {
         // Present but not a blake3:<64 hex> id ⇒ ExecutionId::try_from fails closed.
-        let json = serde_json::json!({
-            "schema": SNAPSHOT_MANIFEST_V1_SCHEMA,
-            "execution_id": "not-a-real-id",
-            "compatibility_contract": serde_json::to_value(sample_compat()).unwrap(),
-        })
-        .to_string();
-        assert!(SnapshotManifestV1::parse(&json).is_err());
+        let mut value = serde_json::to_value(sample_manifest(SEED_A)).unwrap();
+        value["execution_id"] = serde_json::json!("not-a-real-id");
+        assert!(SnapshotManifestV1::parse(&value.to_string()).is_err());
     }
 
     #[test]
     fn snapshot_manifest_wrong_schema_is_rejected() {
-        let mut manifest = sample_manifest(EXEC_A);
+        let mut manifest = sample_manifest(SEED_A);
         manifest.schema = "ato.ready-state/v1".to_string();
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(matches!(
@@ -684,40 +986,32 @@ mod tests {
     #[test]
     fn unknown_compatibility_field_is_rejected() {
         // A compatibility dimension this version does not model must fail closed,
-        // not be silently ignored.
-        let mut compat = serde_json::to_value(sample_compat()).unwrap();
-        compat
+        // not be silently ignored. Injected into an otherwise-valid manifest so
+        // the ONLY defect is the unknown compatibility field.
+        let mut value = serde_json::to_value(sample_manifest(SEED_A)).unwrap();
+        value["compatibility_contract"]
             .as_object_mut()
             .unwrap()
             .insert("gpu_model".to_string(), serde_json::json!("a100"));
-        let json = serde_json::json!({
-            "schema": SNAPSHOT_MANIFEST_V1_SCHEMA,
-            "execution_id": EXEC_A,
-            "compatibility_contract": compat,
-        })
-        .to_string();
-        assert!(SnapshotManifestV1::parse(&json).is_err());
+        assert!(SnapshotManifestV1::parse(&value.to_string()).is_err());
     }
 
     #[test]
     fn unknown_compatibility_backend_is_rejected() {
-        let mut compat = serde_json::to_value(sample_compat()).unwrap();
-        compat.as_object_mut().unwrap().insert(
-            "backend".to_string(),
-            serde_json::json!("some-unknown-backend"),
-        );
-        let json = serde_json::json!({
-            "schema": SNAPSHOT_MANIFEST_V1_SCHEMA,
-            "execution_id": EXEC_A,
-            "compatibility_contract": compat,
-        })
-        .to_string();
-        assert!(SnapshotManifestV1::parse(&json).is_err());
+        let mut value = serde_json::to_value(sample_manifest(SEED_A)).unwrap();
+        value["compatibility_contract"]
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "backend".to_string(),
+                serde_json::json!("some-unknown-backend"),
+            );
+        assert!(SnapshotManifestV1::parse(&value.to_string()).is_err());
     }
 
     #[test]
     fn wrong_compatibility_schema_is_rejected() {
-        let mut manifest = sample_manifest(EXEC_A);
+        let mut manifest = sample_manifest(SEED_A);
         manifest.compatibility_contract.schema = "ato.snapshot-compatibility/v2".to_string();
         assert!(matches!(
             manifest.validate(),
@@ -733,7 +1027,7 @@ mod tests {
         // A candidate with a DIFFERENT execution_id but the most attractive
         // ranking (cheapest, hotset-resident, newest) and Accepted status.
         let tempting = candidate(
-            EXEC_B,
+            SEED_B,
             AcceptanceStatus::Accepted,
             SnapshotRankingSignals {
                 restore_cost: 0,
@@ -743,7 +1037,7 @@ mod tests {
         );
         // The only correct-identity candidate is worse-ranked.
         let correct = candidate(
-            EXEC_A,
+            SEED_A,
             AcceptanceStatus::Accepted,
             SnapshotRankingSignals {
                 restore_cost: 9_999,
@@ -752,7 +1046,7 @@ mod tests {
             },
         );
         let pool = [tempting, correct.clone()];
-        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(SEED_A), &host, &pool);
         assert_eq!(selected, vec![&correct]);
     }
 
@@ -762,7 +1056,7 @@ mod tests {
         // identity input is `manifest.execution_id`. A candidate for a different
         // Execution Identity is dropped regardless of provenance overlap.
         let host = matching_host();
-        let mut other = sample_manifest(EXEC_B);
+        let mut other = sample_manifest(SEED_B);
         // Same capsule provenance (name/commit proxy) as the requested identity —
         // must NOT rescue it.
         other.capture_provenance.capsule_manifest_hash = Some("blake3:deadbeef".to_string());
@@ -772,7 +1066,7 @@ mod tests {
             ranking: SnapshotRankingSignals::default(),
         };
         let pool = [cand];
-        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(SEED_A), &host, &pool);
         assert!(selected.is_empty());
     }
 
@@ -782,18 +1076,23 @@ mod tests {
     fn host_that_cannot_prove_compatibility_selects_nothing() {
         let mut host = matching_host();
         host.supported_format_versions = vec![1, 3]; // not 2
-        let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        assert!(select_snapshots(&verified(SEED_A), &host, &[cand]).is_empty());
 
         let mut host = matching_host();
         host.cpu_templates = vec!["T2A".to_string()]; // no T2CL
-        let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        assert!(select_snapshots(&verified(SEED_A), &host, &[cand]).is_empty());
 
         let mut host = matching_host();
-        host.max_portability_tier = PortabilityTier::HostPinned; // < ClassPortable
-        let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
-        assert!(select_snapshots(&verified(EXEC_A), &host, &[cand]).is_empty());
+        host.compatibility_class_identity = Some(digest('d')); // different class
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        assert!(select_snapshots(&verified(SEED_A), &host, &[cand]).is_empty());
+
+        let mut host = matching_host();
+        host.compatibility_class_identity = None; // absent class fails closed
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        assert!(select_snapshots(&verified(SEED_A), &host, &[cand]).is_empty());
     }
 
     // --- Acceptance: a malformed candidate is never selectable (defensive gate) ---
@@ -807,7 +1106,7 @@ mod tests {
         // could slip through. Both the validate() gate and the is_satisfied_by
         // schema check must independently reject it.
         let host = matching_host();
-        let mut malformed = sample_manifest(EXEC_A);
+        let mut malformed = sample_manifest(SEED_A);
         malformed.compatibility_contract.schema = "ato.snapshot-compatibility/v2".to_string();
         // Sanity: the manifest is indeed malformed and every host dimension
         // field-equals (so only the schema hardening keeps it out).
@@ -817,7 +1116,7 @@ mod tests {
             status: AcceptanceStatus::Accepted,
             ranking: SnapshotRankingSignals::default(),
         };
-        assert!(select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+        assert!(select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)).is_empty());
         // The compatibility check alone also fails closed on the unknown schema.
         assert!(!cand.manifest.compatibility_contract.is_satisfied_by(&host));
     }
@@ -827,7 +1126,7 @@ mod tests {
         // A malformed manifest with an empty identity field, matching id and
         // Accepted status, is dropped by the defensive well-formedness gate.
         let host = matching_host();
-        let mut malformed = sample_manifest(EXEC_A);
+        let mut malformed = sample_manifest(SEED_A);
         malformed.compatibility_contract.vmm_identity = String::new();
         assert!(malformed.validate().is_err());
         let cand = SnapshotCandidate {
@@ -835,7 +1134,7 @@ mod tests {
             status: AcceptanceStatus::Accepted,
             ranking: SnapshotRankingSignals::default(),
         };
-        assert!(select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+        assert!(select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)).is_empty());
     }
 
     // --- Acceptance: SnapshotId::new distinguishes empty from malformed ---
@@ -872,7 +1171,7 @@ mod tests {
     fn ranking_orders_only_the_identity_and_compat_filtered_set() {
         let host = matching_host();
         let cheap = candidate(
-            EXEC_A,
+            SEED_A,
             AcceptanceStatus::Accepted,
             SnapshotRankingSignals {
                 restore_cost: 10,
@@ -881,7 +1180,7 @@ mod tests {
             },
         );
         let expensive = candidate(
-            EXEC_A,
+            SEED_A,
             AcceptanceStatus::Accepted,
             SnapshotRankingSignals {
                 restore_cost: 100,
@@ -892,7 +1191,7 @@ mod tests {
         // Wrong identity — must be filtered out BEFORE ranking, even though its
         // restore_cost (0) would rank it first.
         let wrong = candidate(
-            EXEC_B,
+            SEED_B,
             AcceptanceStatus::Accepted,
             SnapshotRankingSignals {
                 restore_cost: 0,
@@ -901,23 +1200,23 @@ mod tests {
             },
         );
         let pool = [expensive.clone(), wrong, cheap.clone()];
-        let selected = select_snapshots(&verified(EXEC_A), &host, &pool);
+        let selected = select_snapshots(&verified(SEED_A), &host, &pool);
         assert_eq!(selected, vec![&cheap, &expensive]);
     }
 
     #[test]
     fn quarantined_and_rejected_candidates_are_never_selected() {
         let host = matching_host();
-        let quarantined = candidate(EXEC_A, AcceptanceStatus::Quarantined, Default::default());
-        let rejected = candidate(EXEC_A, AcceptanceStatus::Rejected, Default::default());
-        assert!(select_snapshots(&verified(EXEC_A), &host, &[quarantined, rejected]).is_empty());
+        let quarantined = candidate(SEED_A, AcceptanceStatus::Quarantined, Default::default());
+        let rejected = candidate(SEED_A, AcceptanceStatus::Rejected, Default::default());
+        assert!(select_snapshots(&verified(SEED_A), &host, &[quarantined, rejected]).is_empty());
     }
 
     // --- Acceptance: quarantine mutates neither bytes nor id ---
 
     #[test]
     fn quarantine_does_not_mutate_snapshot_id() {
-        let manifest = sample_manifest(EXEC_A);
+        let manifest = sample_manifest(SEED_A);
         let id = manifest.snapshot_id().expect("id");
         let mut record = SnapshotCatalogRecord::new(id.clone(), AcceptanceStatus::Accepted);
         assert!(record.is_accepted());
@@ -933,7 +1232,7 @@ mod tests {
 
     #[test]
     fn snapshot_id_uses_domain_separated_jcs_blake3_without_self_reference() {
-        let manifest = sample_manifest(EXEC_A);
+        let manifest = sample_manifest(SEED_A);
         // Recompute the preimage by hand from the manifest's own JCS bytes (which
         // contain no `snapshot_id` field) and the schema domain.
         let canonical = serde_jcs::to_vec(&manifest).unwrap();
@@ -954,7 +1253,7 @@ mod tests {
 
     #[test]
     fn snapshot_format_change_changes_snapshot_id_not_execution_id() {
-        let base = sample_manifest(EXEC_A);
+        let base = sample_manifest(SEED_A);
         let mut reformatted = base.clone();
         // A pure Snapshot *format* change: different backend format version.
         reformatted.compatibility_contract.format_version = 99;
@@ -1011,8 +1310,10 @@ mod tests {
         // Migration requires a VerifiedExecutionId supplied by the caller (the
         // type refuses a raw id) — the legacy opaque string is never trusted as
         // identity.
-        let anchor = verified(EXEC_A);
-        let migrated = legacy.migrate(&anchor, sample_compat()).expect("migration");
+        let anchor = verified(SEED_A);
+        let migrated = legacy
+            .migrate(&anchor, sample_compat(), sample_content())
+            .expect("migration");
 
         // New immutable v1 manifest bound to the verified identity...
         assert_eq!(migrated.schema, SNAPSHOT_MANIFEST_V1_SCHEMA);
@@ -1040,17 +1341,146 @@ mod tests {
     }
 
     #[test]
+    fn migrate_rejects_a_non_legacy_schema() {
+        // The tolerant public fields let a caller construct a struct whose schema
+        // is NOT the legacy tag (here, the v1 manifest schema). migrate() must
+        // re-check and refuse to treat a non-legacy artifact as legacy.
+        let not_legacy = LegacyReadyStateManifestV1 {
+            schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
+            capsule_manifest_hash: None,
+            execution_id: None,
+        };
+        assert!(matches!(
+            not_legacy.migrate(&verified(SEED_A), sample_compat(), sample_content()),
+            Err(SnapshotManifestError::InvalidLegacySchema)
+        ));
+    }
+
+    // --- Acceptance (Blocker 1): snapshot_id commits the captured content ---
+
+    #[test]
+    fn different_content_layers_produce_different_snapshot_id() {
+        // Same execution_id + compatibility, but different memory / vmstate /
+        // disk layer bytes MUST derive different snapshot_ids: snapshot_id is a
+        // content address of the captured bytes, not just of identity+format.
+        let base = sample_manifest(SEED_A);
+
+        let mut memory = base.clone();
+        memory.memory_layer_refs = vec![digest('9')];
+        let mut vmstate = base.clone();
+        vmstate.vmstate_layer_refs = vec![digest('9')];
+        let mut disk = base.clone();
+        disk.disk_layer_refs = vec![digest('9')];
+
+        // Identity and compatibility are untouched across all three variants.
+        for variant in [&memory, &vmstate, &disk] {
+            assert_eq!(variant.execution_id, base.execution_id);
+            assert_eq!(variant.compatibility_contract, base.compatibility_contract);
+        }
+
+        let ids = [
+            base.snapshot_id().unwrap(),
+            memory.snapshot_id().unwrap(),
+            vmstate.snapshot_id().unwrap(),
+            disk.snapshot_id().unwrap(),
+        ];
+        // All four content closures are distinct ⇒ all four ids are distinct.
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "content difference must change snapshot_id");
+            }
+        }
+    }
+
+    #[test]
+    fn identical_content_closure_produces_identical_snapshot_id() {
+        // Two manifests with the same full content closure derive the SAME id
+        // deterministically (content addressing is stable).
+        let a = sample_manifest(SEED_A);
+        let b = sample_manifest(SEED_A);
+        assert_eq!(a, b);
+        assert_eq!(a.snapshot_id().unwrap(), b.snapshot_id().unwrap());
+    }
+
+    #[test]
+    fn missing_content_commitment_fails_validate_and_derivation() {
+        // A manifest whose captured-content commitment is missing/empty is not a
+        // content address: validate() (and therefore snapshot_id()) fails closed.
+        for drop in [
+            ("memory_layer_refs", 0u8),
+            ("vmstate_layer_refs", 1),
+            ("disk_layer_refs", 2),
+        ] {
+            let mut manifest = sample_manifest(SEED_A);
+            match drop.1 {
+                0 => manifest.memory_layer_refs.clear(),
+                1 => manifest.vmstate_layer_refs.clear(),
+                _ => manifest.disk_layer_refs.clear(),
+            }
+            assert_eq!(
+                manifest.validate(),
+                Err(SnapshotManifestError::EmptyField(drop.0)),
+                "{}",
+                drop.0
+            );
+            // No id is derivable from an un-committed manifest.
+            assert!(manifest.snapshot_id().is_err(), "{}", drop.0);
+        }
+    }
+
+    // --- Acceptance (Blocker 2): ClassPortable matched by EXACT class identity ---
+
+    #[test]
+    fn class_portable_requires_exact_matching_class_identity() {
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+
+        // Exact class-identity match ⇒ selected.
+        let host = matching_host();
+        assert_eq!(
+            select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)),
+            vec![&cand]
+        );
+        assert!(cand.manifest.compatibility_contract.is_satisfied_by(&host));
+
+        // A DIFFERENT class identity ⇒ nothing (no tier lets it through).
+        let mut different = matching_host();
+        different.compatibility_class_identity = Some(digest('d'));
+        assert!(
+            select_snapshots(&verified(SEED_A), &different, std::slice::from_ref(&cand)).is_empty()
+        );
+        assert!(
+            !cand
+                .manifest
+                .compatibility_contract
+                .is_satisfied_by(&different)
+        );
+
+        // An ABSENT class identity ⇒ nothing (fail-closed on unknown class).
+        let mut absent = matching_host();
+        absent.compatibility_class_identity = None;
+        assert!(
+            select_snapshots(&verified(SEED_A), &absent, std::slice::from_ref(&cand)).is_empty()
+        );
+        assert!(
+            !cand
+                .manifest
+                .compatibility_contract
+                .is_satisfied_by(&absent)
+        );
+    }
+
+    #[test]
     fn select_snapshots_matches_exactly_via_the_verified_wrapper() {
         // The exact-identity gate reads the proven id out of the wrapper: the
         // matching identity selects, a different verified identity selects
         // nothing (no substitute for exact equality).
         let host = matching_host();
-        let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
         assert_eq!(
-            select_snapshots(&verified(EXEC_A), &host, std::slice::from_ref(&cand)),
+            select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)),
             vec![&cand]
         );
-        assert!(select_snapshots(&verified(EXEC_B), &host, std::slice::from_ref(&cand)).is_empty());
+        assert!(select_snapshots(&verified(SEED_B), &host, std::slice::from_ref(&cand)).is_empty());
     }
 
     #[test]
@@ -1060,7 +1490,7 @@ mod tests {
 
     #[test]
     fn snapshot_id_and_execution_id_round_trip_through_json() {
-        let manifest = sample_manifest(EXEC_A);
+        let manifest = sample_manifest(SEED_A);
         let json = serde_json::to_string(&manifest).unwrap();
         let parsed = SnapshotManifestV1::parse(&json).expect("round-trip");
         assert_eq!(parsed, manifest);
