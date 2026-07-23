@@ -15,8 +15,10 @@
 //!    timestamps, runner/session/snapshot/host facts, unknown fields — never
 //!    influences the id.
 //! 5. Malformed identity input (unknown fields, version mismatch, placeholder
-//!    or non-canonical digests, unsorted lists, unresolved launch) and stored
-//!    `execution_id` mismatches fail closed.
+//!    or non-canonical digests, unsorted lists, unresolved launch, and
+//!    non-canonical spellings of absent optional fields — explicit `null` /
+//!    empty optional collections) and stored `execution_id` mismatches fail
+//!    closed.
 //! 6. RFC 8785 string escaping is pinned for free-form fields: the
 //!    `unicode-strings` vector records exact canonical bytes for non-ASCII
 //!    (astral-plane emoji, CJK) and control-character content, whether the
@@ -45,6 +47,8 @@ struct Manifest {
     jcs: String,
     #[allow(dead_code)]
     numbers: String,
+    #[allow(dead_code)]
+    optional_fields: String,
     baseline: String,
     vectors: Vec<Vector>,
 }

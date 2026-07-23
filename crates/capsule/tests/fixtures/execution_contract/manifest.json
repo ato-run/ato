@@ -5,6 +5,7 @@
   "execution_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
   "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
   "numbers": "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, an integer in 0..=65535. No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.",
+  "optional_fields": "Optional identity fields (target.libc, target.observable_features, launch.secret_bindings, guest_surface.port) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.",
   "baseline": "baseline",
   "vectors": [
     {
@@ -388,6 +389,34 @@
       "kind": "contract",
       "expect": "error",
       "notes": "unresolved launch argv fails closed"
+    },
+    {
+      "name": "invalid-null-libc",
+      "file": "vectors/invalid-null-libc.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit null is a non-canonical spelling of an absent target.libc; only key omission is canonical"
+    },
+    {
+      "name": "invalid-null-port",
+      "file": "vectors/invalid-null-port.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit null is a non-canonical spelling of an absent guest_surface.port; only key omission is canonical"
+    },
+    {
+      "name": "invalid-empty-observable-features",
+      "file": "vectors/invalid-empty-observable-features.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit empty object is a non-canonical spelling of an absent target.observable_features; only key omission is canonical"
+    },
+    {
+      "name": "invalid-empty-secret-bindings",
+      "file": "vectors/invalid-empty-secret-bindings.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "explicit empty array is a non-canonical spelling of an absent launch.secret_bindings; only key omission is canonical"
     }
   ]
 }

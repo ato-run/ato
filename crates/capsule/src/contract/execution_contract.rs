@@ -5,18 +5,30 @@
 //! * [`ExecutionContractV1`] (and its facet structs) is the identity-bearing
 //!   contract. Every field participates in `execution_id`, deserialization is
 //!   fail-closed (`deny_unknown_fields`), and all lists must already be in
-//!   canonical (sorted, duplicate-free) order.
+//!   canonical (sorted, duplicate-free) order. Absent optional fields have
+//!   exactly one canonical spelling — the key is omitted; explicit `null` and
+//!   explicit-empty optional collections (`{}` / `[]`) are rejected so that a
+//!   consumer canonicalizing the raw JSON can never hash a different form
+//!   than the typed layer.
 //! * [`ExecutionContractEnvelopeV1`] is the non-identity envelope around a
 //!   contract: provenance, diagnostics, evidence, timestamps, and the stored
 //!   `execution_id`. It is tolerant of unknown fields by design — nothing in
 //!   the envelope besides the embedded contract may influence the id, and
 //!   [`ExecutionContractEnvelopeV1::verify`] re-derives the id fail-closed.
 //!
-//! Canonical form (normative, RFC `CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §4.5):
+//! Canonical form (normative):
 //!
 //! ```text
 //! execution_id = "blake3:" + hex(BLAKE3(UTF8("ato.execution-contract/v1") || 0x00 || JCS(contract)))
 //! ```
+//!
+//! Until the Capsule v1 execution model RFC lands on `nightly`, this module
+//! and the shared vectors below are the normative definition of the canonical
+//! form. The full spec — §4.5 of
+//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` — is in flight on
+//! the `feat/capsule-v1-execution-model-rfc` branch (tracking issue
+//! ato-run/ato#1086) and is not yet in this tree; its front-matter names this
+//! file as SSOT, so the two must be kept in lockstep when it merges.
 //!
 //! Shared cross-language test vectors live in
 //! `crates/capsule/tests/fixtures/execution_contract/` and are exercised by
@@ -223,9 +235,17 @@ pub struct ResolvedTargetContract {
     pub os: String,
     pub architecture: String,
     pub abi: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null"
+    )]
     pub libc: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map"
+    )]
     pub observable_features: BTreeMap<String, String>,
 }
 
@@ -258,7 +278,11 @@ pub struct ResolvedLaunchContract {
     pub argv: Vec<String>,
     pub cwd: String,
     pub environment: Vec<EnvironmentVariableContract>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_string_list"
+    )]
     pub secret_bindings: Vec<String>,
 }
 
@@ -290,7 +314,11 @@ pub struct ResolvedPolicyContract {
 pub struct GuestSurfaceContract {
     pub bind_address: String,
     pub protocol: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null"
+    )]
     pub port: Option<u16>,
     pub features: Vec<String>,
 }
@@ -620,6 +648,51 @@ fn ensure_values<const N: usize>(
     Ok(())
 }
 
+// Absent optional identity fields have exactly one canonical spelling: the
+// key is omitted. The deserializers below reject the non-canonical spellings
+// of absence (`null`, `{}`, `[]`) fail-closed, so an implementation that
+// canonicalizes the raw JSON directly (parse → JCS → BLAKE3) can never
+// include a key this typed layer would have dropped — the same input either
+// hashes identically everywhere or is rejected everywhere.
+
+fn present_not_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some).map_err(|error| {
+        serde::de::Error::custom(format!(
+            "{error}; absent optional identity fields must omit the key (explicit null is non-canonical)"
+        ))
+    })
+}
+
+fn present_non_empty_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let map = BTreeMap::deserialize(deserializer)?;
+    if map.is_empty() {
+        return Err(serde::de::Error::custom(
+            "absent optional identity collections must omit the key (explicit {} is non-canonical)",
+        ));
+    }
+    Ok(map)
+}
+
+fn present_non_empty_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let list = Vec::deserialize(deserializer)?;
+    if list.is_empty() {
+        return Err(serde::de::Error::custom(
+            "absent optional identity collections must omit the key (explicit [] is non-canonical)",
+        ));
+    }
+    Ok(list)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -876,6 +949,55 @@ mod tests {
                 "launch.secret_bindings"
             ))
         ));
+    }
+
+    #[test]
+    fn non_canonical_spellings_of_absent_optional_fields_fail_closed() {
+        let baseline = serde_json::to_value(sample_contract()).unwrap();
+        for (facet, field, non_canonical) in [
+            ("target", "libc", serde_json::Value::Null),
+            ("guest_surface", "port", serde_json::Value::Null),
+            ("target", "observable_features", serde_json::json!({})),
+            ("launch", "secret_bindings", serde_json::json!([])),
+        ] {
+            let mut value = baseline.clone();
+            value[facet][field] = non_canonical;
+            assert!(
+                serde_json::from_value::<ExecutionContractV1>(value).is_err(),
+                "{facet}.{field}: non-canonical spelling of absence must fail closed"
+            );
+        }
+
+        // The canonical spelling of absence — omitting the key — still parses,
+        // and the typed defaults serialize back to the omitted form.
+        let mut omitted = baseline;
+        omitted["target"].as_object_mut().unwrap().remove("libc");
+        omitted["guest_surface"]
+            .as_object_mut()
+            .unwrap()
+            .remove("port");
+        omitted["launch"]
+            .as_object_mut()
+            .unwrap()
+            .remove("secret_bindings");
+        let parsed = serde_json::from_value::<ExecutionContractV1>(omitted).unwrap();
+        assert_eq!(parsed.target.libc, None);
+        assert_eq!(parsed.guest_surface.port, None);
+        assert!(parsed.launch.secret_bindings.is_empty());
+        assert!(parsed.target.observable_features.is_empty());
+
+        let reserialized = serde_json::to_value(&parsed).unwrap();
+        for (facet, field) in [
+            ("target", "libc"),
+            ("target", "observable_features"),
+            ("guest_surface", "port"),
+            ("launch", "secret_bindings"),
+        ] {
+            assert!(
+                reserialized[facet].get(field).is_none(),
+                "{facet}.{field}: absent field must serialize as omitted"
+            );
+        }
     }
 
     #[test]
