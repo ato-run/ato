@@ -1,0 +1,81 @@
+{
+  "schema": "ato.execution-contract/v1",
+  "source": {
+    "kind": "git",
+    "immutable_ref": "https://example.invalid/repo@012345",
+    "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101"
+  },
+  "target": {
+    "os": "linux",
+    "architecture": "x86_64",
+    "abi": "gnu",
+    "libc": "glibc-2.39"
+  },
+  "runtime": {
+    "kind": "node",
+    "resolved_ref": "node@22.14.0",
+    "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202"
+  },
+  "dependencies": [
+    {
+      "name": "npm",
+      "derivation_digest": "blake3:0303030303030303030303030303030303030303030303030303030303030303",
+      "output_digest": "blake3:0404040404040404040404040404040404040404040404040404040404040404"
+    }
+  ],
+  "build_outputs": [
+    {
+      "name": "app",
+      "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505"
+    }
+  ],
+  "launch": {
+    "argv": [
+      "node",
+      "dist/server.js",
+      "--trace"
+    ],
+    "cwd": "/workspace",
+    "environment": [
+      {
+        "name": "NODE_ENV",
+        "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
+      }
+    ],
+    "secret_bindings": [
+      "API_TOKEN"
+    ]
+  },
+  "filesystem": {
+    "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707",
+    "readonly_layers": [
+      "blake3:0808080808080808080808080808080808080808080808080808080808080808"
+    ],
+    "writable_paths": [
+      "/tmp"
+    ]
+  },
+  "policy": {
+    "network_digest": "blake3:0909090909090909090909090909090909090909090909090909090909090909",
+    "capability_digest": "blake3:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+    "filesystem_digest": "blake3:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+  },
+  "guest_surface": {
+    "bind_address": "0.0.0.0",
+    "protocol": "ato-guest/v1",
+    "port": 8080,
+    "features": [
+      "bindings",
+      "exec"
+    ]
+  },
+  "external_state": [
+    {
+      "name": "data",
+      "target": "/data",
+      "access": "read-write",
+      "schema": "1",
+      "snapshot": "exclude"
+    }
+  ]
+}

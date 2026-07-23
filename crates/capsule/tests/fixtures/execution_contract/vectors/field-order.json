@@ -1,0 +1,80 @@
+{
+  "external_state": [
+    {
+      "snapshot": "exclude",
+      "schema": "1",
+      "access": "read-write",
+      "target": "/data",
+      "name": "data"
+    }
+  ],
+  "guest_surface": {
+    "features": [
+      "bindings",
+      "exec"
+    ],
+    "port": 8080,
+    "protocol": "ato-guest/v1",
+    "bind_address": "0.0.0.0"
+  },
+  "policy": {
+    "filesystem_digest": "blake3:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+    "capability_digest": "blake3:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+    "network_digest": "blake3:0909090909090909090909090909090909090909090909090909090909090909"
+  },
+  "filesystem": {
+    "writable_paths": [
+      "/tmp"
+    ],
+    "readonly_layers": [
+      "blake3:0808080808080808080808080808080808080808080808080808080808080808"
+    ],
+    "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707"
+  },
+  "launch": {
+    "secret_bindings": [
+      "API_TOKEN"
+    ],
+    "environment": [
+      {
+        "name": "NODE_ENV",
+        "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
+      }
+    ],
+    "cwd": "/workspace",
+    "argv": [
+      "node",
+      "dist/server.js"
+    ]
+  },
+  "build_outputs": [
+    {
+      "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
+      "name": "app"
+    }
+  ],
+  "dependencies": [
+    {
+      "output_digest": "blake3:0404040404040404040404040404040404040404040404040404040404040404",
+      "derivation_digest": "blake3:0303030303030303030303030303030303030303030303030303030303030303",
+      "name": "npm"
+    }
+  ],
+  "runtime": {
+    "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+    "resolved_ref": "node@22.14.0",
+    "kind": "node"
+  },
+  "target": {
+    "libc": "glibc-2.39",
+    "abi": "gnu",
+    "architecture": "x86_64",
+    "os": "linux"
+  },
+  "source": {
+    "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+    "immutable_ref": "https://example.invalid/repo@012345",
+    "kind": "git"
+  },
+  "schema": "ato.execution-contract/v1"
+}

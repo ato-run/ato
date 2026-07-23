@@ -1,0 +1,261 @@
+{
+  "schema": "ato.execution-contract/v1",
+  "description": "Shared cross-language test vectors for the ato.execution-contract/v1 canonical form. Consumed by crates/capsule/tests/execution_contract_vectors.rs and reusable verbatim by ato-api.",
+  "domain_separator_utf8": "ato.execution-contract/v1",
+  "execution_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
+  "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
+  "baseline": "baseline",
+  "vectors": [
+    {
+      "name": "baseline",
+      "file": "vectors/baseline.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
+      "canonical_file": "expected/baseline.canonical.json"
+    },
+    {
+      "name": "field-order",
+      "file": "vectors/field-order.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
+      "relation": "equals-baseline",
+      "notes": "same contract with every object's keys reordered; JCS erases key order"
+    },
+    {
+      "name": "whitespace",
+      "file": "vectors/whitespace.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
+      "relation": "equals-baseline",
+      "notes": "same contract minified; input whitespace never reaches the canonical form"
+    },
+    {
+      "name": "mutate-source-immutable-ref",
+      "file": "vectors/mutate-source-immutable-ref.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:649f033d8df6fa64c1bf390139a984ef658afe71351ea39236364bae4994fbbc",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-source-digest",
+      "file": "vectors/mutate-source-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:eea829ae76933d15ab0eb6aa295956223596b92e7b913342cfb50e1208625630",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-os",
+      "file": "vectors/mutate-target-os.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:18ccc15b91e38975479d6d55347bc4ccf27b4256517af114bd989a761e1aac60",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-architecture",
+      "file": "vectors/mutate-target-architecture.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:5488c6b57a97f1a2ef090f10bbfc2b07283e9f7e6b01693ea78b4bccf2310fda",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-abi",
+      "file": "vectors/mutate-target-abi.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:b161e24f91aa8746d2c698cd3a4d8788edf75abf257715fe6ae5577630512d34",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-target-libc",
+      "file": "vectors/mutate-target-libc.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:2ca39ea8376973fa5f06d2e755a59be65619f28b206e69558eebb35ec5a01bd5",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-runtime-artifact-digest",
+      "file": "vectors/mutate-runtime-artifact-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:74da66f0bda4314d097a0497d6d97282db27b8134421c606223931797cbe3903",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-dependency-derivation-digest",
+      "file": "vectors/mutate-dependency-derivation-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:adf246ad7fd0077c23581fea964eb213b516384728ca366ec2ec3cb5c0fd010a",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-dependency-output-digest",
+      "file": "vectors/mutate-dependency-output-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:314173cabd7640fcfb262e8d76367b6b5d87cd723aaff6b54d2687e814ad8f57",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-build-output-digest",
+      "file": "vectors/mutate-build-output-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:2982a5ebde8cc20960b395d6f69c19db25b25af31e61f5683e5960bd0c06a2e5",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-launch-argv",
+      "file": "vectors/mutate-launch-argv.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:4531451e47fa3b68b196807434bc376aa2da515e2ea2c648b12014a035ed3b91",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-launch-cwd",
+      "file": "vectors/mutate-launch-cwd.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:df3ad1746e3a436490dd0004c4cf59580e33783d3911fb6928e3536095aec26d",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-environment-value-digest",
+      "file": "vectors/mutate-environment-value-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:aa5ab9607dcdacf13c4f3968581b7612aaad4abd6f68729a94e9b7fa3d885c47",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-view-digest",
+      "file": "vectors/mutate-filesystem-view-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:f791012431434fb2fa8d6734fead5af4cd1583dd2c0a4cf31bf271bdad0e2f4b",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-writable-paths",
+      "file": "vectors/mutate-filesystem-writable-paths.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:8fd35e7a3d4cc6fc1668615f1d82b902962f815b680d40b91799b68a95483f95",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-network-policy-digest",
+      "file": "vectors/mutate-network-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:1fbf503b6a2330f70076581f9f7ed53028d70b6ea8576bc732f22973391849fb",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-capability-policy-digest",
+      "file": "vectors/mutate-capability-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:85af8724ca28620b88c8876c460ec665246914734ea08231d133bd32eb9a2a5a",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-port",
+      "file": "vectors/mutate-guest-surface-port.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:4020d1f93beceaabd2024132ce6b4ad90a58f3787b877355da5192c946a9a963",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-schema",
+      "file": "vectors/mutate-external-state-schema.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:33c3ad26aaf8e0ec0513f10af55d1192b606e96bb16570a7892d359764a72b33",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-access",
+      "file": "vectors/mutate-external-state-access.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:2e608a0a2539875a45ecf22cf49bf43d3350122b22353c167bb13440351ffd97",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "envelope-non-identity",
+      "file": "vectors/envelope-non-identity.json",
+      "kind": "envelope",
+      "expect": "execution_id",
+      "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
+      "relation": "equals-baseline",
+      "notes": "provenance/diagnostics/evidence/timestamps/runner/session/snapshot/host facts are non-identity and ignored"
+    },
+    {
+      "name": "envelope-execution-id-mismatch",
+      "file": "vectors/envelope-execution-id-mismatch.json",
+      "kind": "envelope",
+      "expect": "error",
+      "notes": "stored execution_id disagrees with the canonical hash; readers fail closed"
+    },
+    {
+      "name": "invalid-unknown-identity-field",
+      "file": "vectors/invalid-unknown-identity-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown top-level identity-bearing field fails closed"
+    },
+    {
+      "name": "invalid-unknown-nested-identity-field",
+      "file": "vectors/invalid-unknown-nested-identity-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown nested identity-bearing field fails closed"
+    },
+    {
+      "name": "invalid-schema-version",
+      "file": "vectors/invalid-schema-version.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "contract version mismatch fails closed"
+    },
+    {
+      "name": "invalid-placeholder-digest",
+      "file": "vectors/invalid-placeholder-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "placeholder digest values are rejected before an id is issued"
+    },
+    {
+      "name": "invalid-uppercase-digest",
+      "file": "vectors/invalid-uppercase-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "uppercase hex is non-canonical and rejected"
+    },
+    {
+      "name": "invalid-unsorted-dependencies",
+      "file": "vectors/invalid-unsorted-dependencies.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "identity lists must be pre-sorted and duplicate-free"
+    },
+    {
+      "name": "invalid-empty-argv",
+      "file": "vectors/invalid-empty-argv.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unresolved launch argv fails closed"
+    }
+  ]
+}

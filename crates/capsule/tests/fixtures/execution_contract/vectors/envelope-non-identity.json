@@ -1,0 +1,102 @@
+{
+  "execution_contract": {
+    "schema": "ato.execution-contract/v1",
+    "source": {
+      "kind": "git",
+      "immutable_ref": "https://example.invalid/repo@012345",
+      "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101"
+    },
+    "target": {
+      "os": "linux",
+      "architecture": "x86_64",
+      "abi": "gnu",
+      "libc": "glibc-2.39"
+    },
+    "runtime": {
+      "kind": "node",
+      "resolved_ref": "node@22.14.0",
+      "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202"
+    },
+    "dependencies": [
+      {
+        "name": "npm",
+        "derivation_digest": "blake3:0303030303030303030303030303030303030303030303030303030303030303",
+        "output_digest": "blake3:0404040404040404040404040404040404040404040404040404040404040404"
+      }
+    ],
+    "build_outputs": [
+      {
+        "name": "app",
+        "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505"
+      }
+    ],
+    "launch": {
+      "argv": [
+        "node",
+        "dist/server.js"
+      ],
+      "cwd": "/workspace",
+      "environment": [
+        {
+          "name": "NODE_ENV",
+          "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
+        }
+      ],
+      "secret_bindings": [
+        "API_TOKEN"
+      ]
+    },
+    "filesystem": {
+      "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707",
+      "readonly_layers": [
+        "blake3:0808080808080808080808080808080808080808080808080808080808080808"
+      ],
+      "writable_paths": [
+        "/tmp"
+      ]
+    },
+    "policy": {
+      "network_digest": "blake3:0909090909090909090909090909090909090909090909090909090909090909",
+      "capability_digest": "blake3:0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "filesystem_digest": "blake3:0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+    },
+    "guest_surface": {
+      "bind_address": "0.0.0.0",
+      "protocol": "ato-guest/v1",
+      "port": 8080,
+      "features": [
+        "bindings",
+        "exec"
+      ]
+    },
+    "external_state": [
+      {
+        "name": "data",
+        "target": "/data",
+        "access": "read-write",
+        "schema": "1",
+        "snapshot": "exclude"
+      }
+    ]
+  },
+  "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
+  "generated_at": "2026-07-21T00:00:00Z",
+  "provenance": {
+    "builder": "runner-a",
+    "machine_id": "machine-77",
+    "display_url": "https://example.invalid/builds/123"
+  },
+  "diagnostics": {
+    "resolver_log": "resolved node 22.14.0 in 1.2s"
+  },
+  "evidence": {
+    "readiness_probe": "http-200"
+  },
+  "runner_id": "runner-a",
+  "provider": "managed-cloud",
+  "session_id": "sess-42",
+  "snapshot_id": "snap-9",
+  "host_ip": "203.0.113.7",
+  "host_port": 54321,
+  "build_job_id": "job-1234"
+}
