@@ -45,6 +45,10 @@ jobs:
       # Prove the active toolchain is the pinned 1.96.0 (visible in the log).
       - run: rustc --version && cargo --version
       - run: cargo fmt -p capsule -- --check
+      # `execution_contract` matches both the core module and the G0-2
+      # `execution_contract_finalize` finalization gate (substring filter).
       - run: cargo test -p capsule --lib execution_contract
+      # G0-2 lock integration (envelope D2 / lock_id exclusion D4 / env value D5).
+      - run: cargo test -p capsule --lib ato_lock
       - run: cargo test -p capsule --test execution_contract_vectors
       - run: cargo clippy -p capsule --all-targets -- -D warnings

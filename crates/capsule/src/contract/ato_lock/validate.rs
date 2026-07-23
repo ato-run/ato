@@ -106,9 +106,22 @@ pub fn validate_structural(
 
 /// Persisted validation applies structural validation and then enforces lock_id.
 ///
-/// Call this only when validating a durable ato.lock artifact or when preparing
-/// to serialize one. Draft lock values produced by later resolver/importer
-/// stages should use structural validation until lock_id has been recomputed.
+/// IDENTITY-ONLY: this validates schema version, `generated_at` formatting,
+/// feature/unresolved/signature shape, and `lock_id` (presence, format, and
+/// match against the canonical projection). It does NOT verify the lock's
+/// embedded execution section — neither the D2 `execution_contract` envelope nor
+/// the D5 `launch.environment` value payloads, which are excluded from lock
+/// identity by design. A lock with a tampered `execution_id` or a
+/// tampered/secret D5 payload still passes here. Any lock that may carry an
+/// execution section MUST instead be read through the trusted entrypoints
+/// `load_verified_from_str` / `load_verified_from_path` (in the parent
+/// `ato_lock` module), which run this identity validation AND then re-derive the
+/// execution section fail-closed.
+///
+/// Call this only when validating a durable ato.lock artifact's identity or when
+/// preparing to serialize one. Draft lock values produced by later
+/// resolver/importer stages should use structural validation until lock_id has
+/// been recomputed.
 pub fn validate_persisted(
     lock: &AtoLock,
     mode: ValidationMode,
