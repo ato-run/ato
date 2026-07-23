@@ -31,6 +31,14 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The shell drives the host-agnostic `runner` supervisor (which drives the `ato`
+# CLI — the sole owner of capsule execution) and speaks the shared
+# `protocol::intent` verb vocabulary. This is the whole point of Phase 1: the
+# Tauri shell consumes these instead of forking the GPUI desktop crate.
+runner = { path = "../runner" }
+protocol = { path = "../protocol" }
+thiserror = "2"
+
 [features]
 # Enable a strict release profile later; kept minimal for the scaffold.
 default = []

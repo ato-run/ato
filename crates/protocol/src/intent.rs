@@ -11,11 +11,17 @@
 //!
 //! The verbs map onto supervision actions (`Run`, runner register/start/stop);
 //! per-verb dispatch and the confirmation model live in the shell, never here.
+//!
+//! The types are `serde`-serializable so a shell can carry a classified verb
+//! across its `invoke` boundary (the Tauri shell) or an IPC hop; the
+//! representation is the default externally-tagged form.
+
+use serde::{Deserialize, Serialize};
 
 /// A privileged intent: it touches local execution or the runner agent and so
 /// requires a trusted origin (enforced by the classifying shell). Per-verb
 /// handling lives in the shell's dispatcher.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivilegedIntent {
     /// `ato://run?source=<capsule-ref>[&run_id=<id>]` — request to run a capsule
     /// on this device.
@@ -38,7 +44,7 @@ pub enum PrivilegedIntent {
 }
 
 /// Outcome of classifying an intercepted `ato://` / `capsule://` navigation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IntentDecision {
     /// A callback / deep-link verb that the shell's existing host-route drain
     /// already handles (auth callback, `ato://open`, `ato://cli`, `capsule://`
