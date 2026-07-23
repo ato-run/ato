@@ -39,5 +39,8 @@ pub use os::{
     CommandNoWindowExt, NativeChild, NativeHost, mark_process_group_leader, resolve_on_path,
     terminate_process_group,
 };
-pub use session::{SessionId, SessionState, SessionSupervisor};
+pub use session::{
+    DEFAULT_MAX_RETAINED, DEFAULT_TTL, EvictionReason, RetainedSession, RetentionTable, SessionId,
+    SessionState, SessionSupervisor,
+};
 pub use supervisor::ProcessSupervisor;
