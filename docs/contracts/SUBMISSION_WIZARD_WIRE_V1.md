@@ -158,7 +158,7 @@ failure_stage:                     any stage value, plus "capture_seal" | "accep
 control directive:                 "hold" | "capture" | "discard"
 candidate status:                  "reported" | "verifying" | "accepted" | "rejected" | "expired"
 acceptance status:                 "accepted" | "rejected"                      ← NEW (§3.7 body)
-terminal ack reason:               "discarded" | "lease_expired" | "build_failed"
+terminal ack reason:               "discarded" | "build_failed"
                                   | "acceptance_failed_source_lost" | "attempt_ended"  ← NEW (§3.8)
 verify session status:             "pending" | "active" | "ended" | "failed" | "expired"
 quiesce message type:              "quiesce" | "quiesced" | "unquiesce"
@@ -177,6 +177,12 @@ Notes:
   this: the wizard terminal-ack schema has no `"sealed"` member, and the
   shared ack schema refines `status: "sealed"` to be invalid when the job
   kind is `interactive_capture`.
+- **`"lease_expired"` is NOT a terminal-ack reason — lease expiry is
+  SERVER-OWNED.** The API's lease sweep transitions an expired attempt to
+  `expired` and revokes its bindings; the builder observes `409 fenced` on
+  its next renew/control call and tears down LOCALLY, without sending a
+  terminal ack (an expired-lease ack is unsendable — FENCING-4 would `409`
+  it, the lease being already dead). See §3.8 for the projection table.
 - The job-kind list above is the **enqueue** kind vocabulary
   (`WIZARD_WIRE_JOB_KINDS` api-side; the `JOB_KIND_INTERACTIVE_CAPTURE`
   constant Rust-side), NOT the union of the kinds a builder advertises in
@@ -461,9 +467,30 @@ Header: `X-Ato-Lease-Token`. Fencing: FENCING-4. Epoch: none (§1.2).
 | Field | Type | Req | Semantics |
 |---|---|---|---|
 | `agent_id` | string 1..120 (existing bounds) | yes | as the existing ack |
-| `reason` | terminal ack reason enum (§2): `"discarded" \| "lease_expired" \| "build_failed" \| "acceptance_failed_source_lost" \| "attempt_ended"` | yes | the ONLY legal job-terminal reasons for a wizard job. `discarded` = server directed discard; `lease_expired` = builder observed its own lease death and is reporting teardown; `build_failed` = build/boot never reached holding; `acceptance_failed_source_lost` = ADR-012 terminal branch (source lost AND acceptance failed); `attempt_ended` = orderly end of the interactive attempt (publisher done / session ended) |
+| `reason` | terminal ack reason enum (§2): `"discarded" \| "build_failed" \| "acceptance_failed_source_lost" \| "attempt_ended"` | yes | the ONLY legal job-terminal reasons for a wizard job. `discarded` = server directed discard; `build_failed` = build/boot never reached holding; `acceptance_failed_source_lost` = ADR-012 terminal branch (source lost AND acceptance failed); `attempt_ended` = orderly end of the interactive attempt (publisher done / session ended). **Lease expiry is NOT a reason here** — see the server-owned note + projection table below |
 | `failure_stage` | failure_stage enum (§2: stages + `"capture_seal"` + `"acceptance"`) | optional | diagnostic refinement of a failure reason |
 | `failure_reason` | string ≤ 2000 | optional | as existing (builder truncates at 1800) |
+
+**Lease expiry is SERVER-OWNED — never a builder terminal ack.** An
+`interactive_capture` attempt whose lease expires is swept by the API: the
+sweep transitions the attempt to `expired` and revokes its bindings. The
+builder observes `409 { "error": "fenced" }` on its next renew/control call
+and tears down LOCALLY, WITHOUT sending a terminal ack. An expired-lease
+terminal ack is unsendable — FENCING-4 would `409` it (the lease is already
+dead) — and the sweep alone moves the attempt to `expired` (no builder ack
+required). `"lease_expired"` is therefore absent from the reason enum. Server
+enforcement (sweep + `409` on a dead lease) lands in PR-1; PR-0 pins the enum
++ this rule with a schema-level reject test on both sides.
+
+Job-terminal projection of the reasons (plus the server-owned expiry path):
+
+| Terminal condition | Job-terminal state | Owner |
+|---|---|---|
+| `discarded` (ack) | `ended` | builder ack |
+| `attempt_ended` (ack) | `ended` | builder ack |
+| `build_failed` (ack) | `failed` | builder ack |
+| `acceptance_failed_source_lost` (ack) | `failed` | builder ack |
+| lease expiry (no ack) | `expired` | server sweep (no builder ack) |
 
 **The legacy `status: "sealed"` terminal ack is NOT used by
 `interactive_capture` jobs** (§2 note). There is no `accepted_candidate_id`
@@ -586,12 +613,14 @@ Rules:
   - no trailing `/` (an empty last segment);
   - non-empty beyond the leading `/` (bare `"/"` is rejected);
   - length ≤ 200 **UTF-16 code units** (bounds unchanged from the draft).
-- Two declarations may not have identical paths; nesting across sections (a
-  state path inside a cache path or vice versa) is a validation error. Both
-  the collision and nesting checks are computed on the **absolute** paths
-  exactly as declared (no normalization pass exists, because every input
-  that would need normalizing — `//`, `.`/`..`, trailing `/` — is already
-  rejected above).
+- Two declarations may not have identical paths; **nesting between ANY two
+  declarations** — cache↔cache, cache↔state, state↔state alike — is a
+  validation error (any ancestor/descendant relation on the declared paths,
+  not only across sections). Both the collision and nesting checks are
+  computed on the **absolute** paths exactly as declared (no normalization
+  pass exists, because every input that would need normalizing — `//`,
+  `.`/`..`, trailing `/` — is already rejected above). Nested surfaces
+  (longest-prefix precedence etc.) are deferred to a future contract version.
 - **Capture-refusal domain**: any filesystem write at capture time that is
   outside every declared `[cache.*]`/`[state.*]` path is grounds for the
   capture to be refused (enforced later; the parser only produces the
@@ -661,8 +690,16 @@ path = "/data"              # ERROR: duplicate path with [state.data]
 capture = "include"
 
 [cache.nest]
-path = "/data/cache"        # ERROR: nested under state path "/data"
+path = "/data/cache"        # ERROR: nested under state path "/data" (cross-section)
 capture = "include"
+
+[cache.vendor]
+path = "/var/cache"         # (with [cache.session] below) two cache decls…
+capture = "include"
+
+[cache.session]
+path = "/var/cache/session" # ERROR: nested under [cache.vendor] — same-section
+capture = "include"         #        nesting is ALSO rejected (any two decls)
 ```
 
 ---
@@ -743,9 +780,11 @@ key beside those two rejects), `failure_reason`.
 Acceptance response: `candidate_id`, `status`.
 
 **Wizard terminal ack**: `agent_id`, `reason`
-(`"discarded"|"lease_expired"|"build_failed"|"acceptance_failed_source_lost"|"attempt_ended"`),
+(`"discarded"|"build_failed"|"acceptance_failed_source_lost"|"attempt_ended"`),
 `failure_stage`, `failure_reason` — and the ABSENCE of `status: "sealed"` /
-`accepted_candidate_id` / any receipt for `interactive_capture` jobs.
+`accepted_candidate_id` / any receipt for `interactive_capture` jobs. Lease
+expiry is server-owned (sweep → `expired`, no builder terminal ack);
+`"lease_expired"` is a reason-enum reject on both sides.
 
 **Quiesce messages**: `type`, `epoch`, `inflight`.
 
@@ -760,7 +799,8 @@ acceptance statuses, terminal-ack reasons,
 
 **TOML keys**: table names `cache`, `state`; keys `path`, `capture`,
 `snapshot`, `schema`; values `"include"`, `"exclude"`; paths GUEST-ABSOLUTE
-per §7.
+per §7. Nesting between ANY two declarations (cache↔cache, cache↔state,
+state↔state) is rejected on both sides.
 
 **ID prefixes**: `job_`, `subatt_`, `claim_`, `cand_`, `vsess_` (+ opaque
 `lease_token`, integer epochs).
@@ -810,9 +850,9 @@ D1–D3:
   may retake). New endpoint
   `POST /jobs/:job_id/candidates/:candidate_id/acceptance` (§3.7); the
   terminal ack is restricted to the reason enum
-  `discarded | lease_expired | build_failed | acceptance_failed_source_lost |
-  attempt_ended` (§3.8) and `"sealed"` is never used by
-  `interactive_capture` jobs.
+  `discarded | build_failed | acceptance_failed_source_lost | attempt_ended`
+  (§3.8) and `"sealed"` is never used by `interactive_capture` jobs. (The
+  round-1 draft also listed `lease_expired`; the round-2 fix below removed it.)
 - **[B3] SSOT moved into the ato repo.** The contract previously lived only
   in a session scratchpad — unversioned and invisible to reviewers of either
   implementation. It now lives at
@@ -863,3 +903,24 @@ Post-review seam fixes:
   (§1.1/§3 mandate all bodies strict). The envelope now pins its own
   strictness (`deny_unknown_fields`), with the unknown-envelope-key test
   mirrored on the Rust side.
+
+Round-2 review fixes:
+
+- **[Round-2] `lease_expired` removed — lease expiry is server-owned.** The
+  round-1 terminal-ack reason `lease_expired` was unsendable: by the time the
+  builder would report it, the lease is already dead, so FENCING-4 `409`s the
+  ack. The reason enum is now
+  `discarded | build_failed | acceptance_failed_source_lost | attempt_ended`;
+  lease expiry is handled entirely server-side — the sweep transitions the
+  attempt to `expired` and the builder tears down locally on `409 fenced`,
+  sending no terminal ack (§3.8 server-owned note + projection table). Pinned
+  by a schema-level `"lease_expired"` reject test on both sides.
+- **[Round-2] All nesting between declarations is forbidden.** §7 rejected
+  only cross-section nesting; two same-section declarations in an
+  ancestor/descendant relation (e.g. two `[cache.*]` at `/var/cache` +
+  `/var/cache/session`) slipped through. The rule now rejects nesting between
+  ANY two declarations (cache↔cache, cache↔state, state↔state). Nested
+  surfaces (longest-prefix precedence etc.) are deferred to a future contract
+  version. Both validators, the §7 rule text + invalid examples, and the
+  fixtures are updated — the round-1 same-section-accept tests are flipped to
+  reject on both sides.
