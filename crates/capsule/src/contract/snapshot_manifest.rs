@@ -65,6 +65,8 @@ pub enum SnapshotManifestError {
     Canonicalization(String),
     #[error("snapshot manifest field '{0}' must be non-empty")]
     EmptyField(&'static str),
+    #[error("snapshot_id must be blake3:<64 lowercase hex characters>")]
+    InvalidSnapshotId,
 }
 
 /// A Snapshot content address: `blake3:<64 lowercase hex>`.
@@ -79,15 +81,22 @@ pub struct SnapshotId(String);
 
 impl SnapshotId {
     pub fn new(value: String) -> Result<Self, SnapshotManifestError> {
-        let Some(hex) = value.strip_prefix("blake3:") else {
+        // Distinguish a genuinely empty address (EmptyField) from a malformed
+        // but non-empty one (InvalidSnapshotId) — the latter's "must be
+        // non-empty" message would be misleading. Mirrors
+        // `ExecutionContractError::InvalidExecutionId`.
+        if value.is_empty() {
             return Err(SnapshotManifestError::EmptyField("snapshot_id"));
+        }
+        let Some(hex) = value.strip_prefix("blake3:") else {
+            return Err(SnapshotManifestError::InvalidSnapshotId);
         };
         if hex.len() != 64
             || !hex
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(SnapshotManifestError::EmptyField("snapshot_id"));
+            return Err(SnapshotManifestError::InvalidSnapshotId);
         }
         Ok(Self(value))
     }
@@ -202,9 +211,13 @@ impl SnapshotCompatibilityContractV1 {
     /// Whether a restore host that offers `capability` can *prove* it satisfies
     /// every requirement of this contract. Fail-closed: any dimension the host
     /// does not positively match rejects the pair. There is no "unknown ⇒
-    /// compatible" branch.
+    /// compatible" branch — and a contract whose own compatibility `schema` is
+    /// not the known [`SNAPSHOT_COMPATIBILITY_V1_SCHEMA`] satisfies nothing, so a
+    /// wrong/unknown schema version can never field-match its way to
+    /// compatibility even if every host dimension would otherwise equal.
     pub fn is_satisfied_by(&self, capability: &HostRestoreCapabilityV1) -> bool {
-        capability.backend == self.backend
+        self.schema == SNAPSHOT_COMPATIBILITY_V1_SCHEMA
+            && capability.backend == self.backend
             && capability
                 .supported_format_versions
                 .contains(&self.format_version)
@@ -405,6 +418,13 @@ pub struct SnapshotRankingSignals {
 /// A selection candidate: an immutable v1 manifest plus its registry acceptance
 /// status and ranking signals. The manifest is the *only* identity/compatibility
 /// input; status gates eligibility; ranking orders survivors.
+///
+/// Invariant: `manifest` MUST be a [`SnapshotManifestV1::parse`]-validated (or
+/// [`LegacyReadyStateManifestV1::migrate`]-produced) manifest. This type exposes
+/// no validated constructor, so a direct struct literal *can* technically wrap an
+/// unvalidated manifest; [`select_snapshots`] therefore re-checks
+/// [`SnapshotManifestV1::validate`] defensively and never selects a malformed
+/// candidate regardless of how it was constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotCandidate {
     pub manifest: SnapshotManifestV1,
@@ -430,6 +450,11 @@ pub struct SnapshotCandidate {
 ///    newer). Ranking runs **only** on the post-identity, post-compatibility set;
 ///    it can never promote a candidate past the identity/compatibility gates.
 ///
+/// Independently of the four gates, any candidate whose manifest is not
+/// well-formed ([`SnapshotManifestV1::validate`] fails) is dropped defensively
+/// before the compatibility gate: a malformed candidate must never be selectable,
+/// even if it was constructed by bypassing [`SnapshotManifestV1::parse`].
+///
 /// [`ExecutionContractEnvelopeV1::verify`]: super::execution_contract::ExecutionContractEnvelopeV1::verify
 pub fn select_snapshots<'a>(
     requested: &ExecutionId,
@@ -442,6 +467,10 @@ pub fn select_snapshots<'a>(
         .filter(|candidate| &candidate.manifest.execution_id == requested)
         // Gate 2: acceptance metadata (quarantined/rejected never restore).
         .filter(|candidate| matches!(candidate.status, AcceptanceStatus::Accepted))
+        // Defensive well-formedness gate: a malformed candidate manifest must
+        // never be selectable, even if constructed by bypassing `parse`. This
+        // also fails closed on a wrong/unknown compatibility schema.
+        .filter(|candidate| candidate.manifest.validate().is_ok())
         // Gate 3: proven compatibility (fail-closed).
         .filter(|candidate| {
             candidate
@@ -751,6 +780,76 @@ mod tests {
         host.max_portability_tier = PortabilityTier::HostPinned; // < ClassPortable
         let cand = candidate(EXEC_A, AcceptanceStatus::Accepted, Default::default());
         assert!(select_snapshots(&exec_id(EXEC_A), &host, &[cand]).is_empty());
+    }
+
+    // --- Acceptance: a malformed candidate is never selectable (defensive gate) ---
+
+    #[test]
+    fn candidate_with_wrong_compat_schema_is_never_selected() {
+        // Model a candidate constructed by bypassing `parse` (direct struct
+        // literal) whose compatibility `schema` is an unknown version. Its
+        // execution_id matches the request and every *host dimension* would
+        // field-equal (schema is not a host field), so without the hardening it
+        // could slip through. Both the validate() gate and the is_satisfied_by
+        // schema check must independently reject it.
+        let host = matching_host();
+        let mut malformed = sample_manifest(EXEC_A);
+        malformed.compatibility_contract.schema = "ato.snapshot-compatibility/v2".to_string();
+        // Sanity: the manifest is indeed malformed and every host dimension
+        // field-equals (so only the schema hardening keeps it out).
+        assert!(malformed.validate().is_err());
+        let cand = SnapshotCandidate {
+            manifest: malformed,
+            status: AcceptanceStatus::Accepted,
+            ranking: SnapshotRankingSignals::default(),
+        };
+        assert!(select_snapshots(&exec_id(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+        // The compatibility check alone also fails closed on the unknown schema.
+        assert!(!cand.manifest.compatibility_contract.is_satisfied_by(&host));
+    }
+
+    #[test]
+    fn candidate_with_empty_compat_identity_field_is_never_selected() {
+        // A malformed manifest with an empty identity field, matching id and
+        // Accepted status, is dropped by the defensive well-formedness gate.
+        let host = matching_host();
+        let mut malformed = sample_manifest(EXEC_A);
+        malformed.compatibility_contract.vmm_identity = String::new();
+        assert!(malformed.validate().is_err());
+        let cand = SnapshotCandidate {
+            manifest: malformed,
+            status: AcceptanceStatus::Accepted,
+            ranking: SnapshotRankingSignals::default(),
+        };
+        assert!(select_snapshots(&exec_id(EXEC_A), &host, std::slice::from_ref(&cand)).is_empty());
+    }
+
+    // --- Acceptance: SnapshotId::new distinguishes empty from malformed ---
+
+    #[test]
+    fn snapshot_id_new_reports_empty_and_malformed_distinctly() {
+        // Genuinely empty ⇒ EmptyField ("must be non-empty").
+        assert!(matches!(
+            SnapshotId::new(String::new()),
+            Err(SnapshotManifestError::EmptyField("snapshot_id"))
+        ));
+        // Non-empty but malformed (missing prefix / wrong length / non-hex /
+        // uppercase) ⇒ InvalidSnapshotId, never the misleading EmptyField.
+        let no_prefix = "1".repeat(64);
+        let too_short = "blake3:abc123".to_string();
+        let uppercase = format!("blake3:{}", "A".repeat(64));
+        let non_hex = format!("blake3:{}", "g".repeat(64));
+        for malformed in [no_prefix, too_short, uppercase, non_hex] {
+            assert!(
+                matches!(
+                    SnapshotId::new(malformed.clone()),
+                    Err(SnapshotManifestError::InvalidSnapshotId)
+                ),
+                "expected InvalidSnapshotId for {malformed:?}"
+            );
+        }
+        // A well-formed address still constructs.
+        assert!(SnapshotId::new(format!("blake3:{}", "a".repeat(64))).is_ok());
     }
 
     // --- Acceptance: ranking happens ONLY after identity + compat filtering ---
