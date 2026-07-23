@@ -65,7 +65,7 @@ use crate::execution_contract::{
     ContentDigest, EnvironmentValuePayloadV1, EnvironmentVariableContract,
     ExecutionContractEnvelopeV1, ExecutionContractError, ExecutionContractV1, ExecutionId,
     ExternalStateContract, GuestPath, GuestSurfaceContract, OpaqueContractDigestV1,
-    OpaqueContractDomainV1, ResolvedTargetContract, opaque_subcontract_digest,
+    OpaqueContractDomainV1, ResolvedTargetContract, VerifiedExecutionId, opaque_subcontract_digest,
 };
 
 /// Classifies an environment variable *name* as secret-bearing.
@@ -144,6 +144,20 @@ impl FinalizedExecution {
     #[must_use]
     pub fn execution_id(&self) -> &ExecutionId {
         &self.execution_id
+    }
+
+    /// Obtain a [`VerifiedExecutionId`] from this finalized execution. A completed
+    /// strict finalization has already proven, facet by facet, that the measured
+    /// values equal the expected contract, so the issued `execution_id` is the
+    /// canonical hash by construction. This routes through the proof-preserving
+    /// [`VerifiedExecutionId::verify_contract_id`] seam anyway — recomputing the
+    /// id from the held contract and comparing — so the wrapper can never be
+    /// minted with an id that disagrees with its contract. The recomputation is
+    /// expected to always succeed here; a failure would signal a corrupted
+    /// [`FinalizedExecution`]. This is one of the only two ways to obtain a
+    /// [`VerifiedExecutionId`].
+    pub fn verified_execution_id(&self) -> Result<VerifiedExecutionId, ExecutionContractError> {
+        VerifiedExecutionId::verify_contract_id(&self.contract, &self.execution_id)
     }
 
     #[must_use]
@@ -912,6 +926,27 @@ mod tests {
             .into_envelope()
             .verify()
             .expect("envelope verifies");
+    }
+
+    #[test]
+    fn verified_execution_id_is_obtainable_from_the_finalized_execution() {
+        // A completed strict finalization is one of the two sanctioned sources of
+        // a VerifiedExecutionId: the measured facets already proved the id is the
+        // canonical hash, so the wrapper is available without re-verification.
+        let fx = fixtures();
+        let expected = expected_contract(&fx);
+        let finalized = full_observation(&fx)
+            .finalize(&expected)
+            .expect("full measurement finalizes");
+
+        let verified = finalized
+            .verified_execution_id()
+            .expect("finalized execution re-verifies its own id");
+        assert_eq!(verified.as_execution_id(), finalized.execution_id());
+        assert_eq!(
+            *verified.as_execution_id(),
+            expected.compute_execution_id().unwrap()
+        );
     }
 
     #[test]

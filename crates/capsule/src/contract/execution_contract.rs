@@ -497,6 +497,105 @@ impl From<ExecutionId> for String {
     }
 }
 
+/// A proof-carrying wrapper over an [`ExecutionId`] whose value has been shown to
+/// equal the canonical hash of its execution contract.
+///
+/// `VerifiedExecutionId` proves the execution id equals the canonical hash of its
+/// execution contract. It does NOT prove signature, provenance, acceptance, or
+/// that it was measured.
+///
+/// It cannot be minted from a bare [`ExecutionId`]: it has a private field and no
+/// public constructor — no `new`, no `From<ExecutionId>`, no `TryFrom<String>`,
+/// no `Deserialize`, and it is never produced directly from
+/// [`ExecutionContractV1::compute_execution_id`] (which stays a pure hash). The
+/// **only** two ways to obtain one are:
+///
+/// * [`ExecutionContractEnvelopeV1::verified_execution_id`], which re-derives the
+///   canonical hash via [`ExecutionContractEnvelopeV1::verify`] and only then
+///   wraps the now-proven stored id; and
+/// * [`FinalizedExecution::verified_execution_id`](crate::execution_contract_finalize::FinalizedExecution::verified_execution_id),
+///   where a completed strict finalization (RFC §4.6) has already proven the
+///   measured facets equal the contract, so the issued id is canonical by
+///   construction.
+///
+/// Because it can only come from one of those two paths, an API that takes a
+/// `&VerifiedExecutionId` — [`select_snapshots`](super::snapshot_manifest::select_snapshots)
+/// and legacy [`migrate`](super::snapshot_manifest::LegacyReadyStateManifestV1::migrate)
+/// in [`super::snapshot_manifest`] — statically refuses a raw, unproven
+/// `ExecutionId`.
+///
+/// A raw `ExecutionId` cannot be wrapped (there is no public constructor):
+///
+/// ```compile_fail
+/// use capsule::execution_contract::{ExecutionId, VerifiedExecutionId};
+///
+/// let raw = ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap();
+/// // The field is private and there is no `new`/`From`/`TryFrom`/`Deserialize`.
+/// let _wrapped = VerifiedExecutionId { execution_id: raw };
+/// ```
+///
+/// and a raw `&ExecutionId` cannot stand in for a `&VerifiedExecutionId` at a
+/// selection call site:
+///
+/// ```compile_fail
+/// use capsule::execution_contract::ExecutionId;
+/// use capsule::snapshot_manifest::{select_snapshots, HostRestoreCapabilityV1, SnapshotCandidate};
+///
+/// let raw = ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap();
+/// let host: HostRestoreCapabilityV1 = unimplemented!();
+/// let candidates: Vec<SnapshotCandidate> = Vec::new();
+/// // A raw &ExecutionId is not a &VerifiedExecutionId: this is a type error.
+/// let _ = select_snapshots(&raw, &host, &candidates);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedExecutionId {
+    execution_id: ExecutionId,
+}
+
+impl VerifiedExecutionId {
+    /// The proven execution id: the canonical hash of the execution contract it
+    /// was derived from.
+    pub fn as_execution_id(&self) -> &ExecutionId {
+        &self.execution_id
+    }
+
+    /// Crate-internal, **proof-preserving** construction seam. NOT public and
+    /// NOT a third "way to obtain" a `VerifiedExecutionId`: it exists only so the
+    /// two sanctioned paths — [`ExecutionContractEnvelopeV1::verified_execution_id`]
+    /// and
+    /// [`FinalizedExecution::verified_execution_id`](crate::execution_contract_finalize::FinalizedExecution::verified_execution_id)
+    /// — can build the wrapper across module boundaries without a public
+    /// constructor.
+    ///
+    /// Unlike a bare wrap, this seam **re-derives** the canonical execution id
+    /// from `contract` and compares it to the caller-supplied `execution_id`,
+    /// failing closed with [`ExecutionContractError::ExecutionIdMismatch`] on any
+    /// disagreement. A caller (or a test using a fake id) therefore cannot mint a
+    /// wrapper whose id differs from its contract's hash: the proof is recomputed
+    /// here, not trusted.
+    ///
+    /// Scoped to `crate::contract` (not the whole crate): the only callers are
+    /// the two sanctioned minting methods and the in-module tests, all of which
+    /// live under this module tree. Narrowing the visibility keeps the "exactly
+    /// two ways to obtain a verified id" guarantee from widening to any future
+    /// capsule-crate module.
+    pub(in crate::contract) fn verify_contract_id(
+        contract: &ExecutionContractV1,
+        execution_id: &ExecutionId,
+    ) -> Result<Self, ExecutionContractError> {
+        let computed = contract.compute_execution_id()?;
+        if computed != *execution_id {
+            return Err(ExecutionContractError::ExecutionIdMismatch {
+                stored: execution_id.to_string(),
+                computed: computed.to_string(),
+            });
+        }
+        Ok(Self {
+            execution_id: execution_id.clone(),
+        })
+    }
+}
+
 /// A canonical absolute guest path.
 ///
 /// Guest paths appear in identity-bearing fields (`launch.cwd`,
@@ -1003,6 +1102,15 @@ impl ExecutionContractEnvelopeV1 {
         }
         Ok(())
     }
+
+    /// Obtain a [`VerifiedExecutionId`] from this envelope. Routes through the
+    /// proof-preserving [`VerifiedExecutionId::verify_contract_id`] seam, which
+    /// re-derives the canonical hash from the embedded contract and fails closed
+    /// on any mismatch with the stored `execution_id` before wrapping it. This is
+    /// one of the only two ways to obtain a [`VerifiedExecutionId`].
+    pub fn verified_execution_id(&self) -> Result<VerifiedExecutionId, ExecutionContractError> {
+        VerifiedExecutionId::verify_contract_id(&self.execution_contract, &self.execution_id)
+    }
 }
 
 impl ExecutionContractV1 {
@@ -1139,12 +1247,35 @@ impl ExecutionContractV1 {
 
     pub fn compute_execution_id(&self) -> Result<ExecutionId, ExecutionContractError> {
         let canonical = self.canonical_bytes()?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(EXECUTION_CONTRACT_V1_SCHEMA.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(&canonical);
-        ExecutionId::new(format!("blake3:{}", hasher.finalize().to_hex()))
+        ExecutionId::new(schema_domained_blake3_id(
+            EXECUTION_CONTRACT_V1_SCHEMA,
+            &canonical,
+        ))
     }
+}
+
+/// The frozen v1 structural-id preimage rule shared by every schema-scoped
+/// content address in this crate:
+///
+/// ```text
+/// id = "blake3:" + hex(BLAKE3(UTF8(schema) || 0x00 || JCS(payload)))
+/// ```
+///
+/// The `schema` string is the domain separator (so two payloads that happen to
+/// canonicalize to identical bytes under different schemas never collide), the
+/// `0x00` byte separates the domain from the payload unambiguously, and
+/// `canonical_payload` is the already-JCS-serialized payload. This is the single
+/// definition of the rule used by both [`ExecutionContractV1::compute_execution_id`]
+/// (domain `ato.execution-contract/v1`) and the `ato.snapshot-manifest/v1`
+/// `snapshot_id` derivation (see [`super::snapshot_manifest`]); neither reinvents
+/// it. Callers derive `id` *from* a payload that MUST NOT itself contain `id`, so
+/// the address is never part of its own preimage.
+pub fn schema_domained_blake3_id(schema: &str, canonical_payload: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(schema.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(canonical_payload);
+    format!("blake3:{}", hasher.finalize().to_hex())
 }
 
 /// Compute an opaque sub-contract digest under the pinned v1 preimage rule:
@@ -1337,6 +1468,83 @@ where
         ));
     }
     Ok(list)
+}
+
+/// A minimal, valid [`ExecutionContractV1`] for cross-module tests, seeded so
+/// distinct `seed` values derive distinct canonical `execution_id`s. The
+/// snapshot-manifest selection tests use it to mint a real
+/// [`VerifiedExecutionId`] through the proof-preserving
+/// [`VerifiedExecutionId::verify_contract_id`] seam — computing the id from a
+/// real contract instead of wrapping a synthetic id.
+#[cfg(test)]
+pub(in crate::contract) fn test_execution_contract(seed: u8) -> ExecutionContractV1 {
+    let content = |byte: u8| ContentDigest::new(DigestAlgorithm::Blake3, [byte; 32]);
+    let opaque = |byte: u8| OpaqueContractDigestV1::new([byte; 32]);
+    let path = |value: &str| GuestPath::parse(value).expect("canonical guest path");
+    ExecutionContractV1 {
+        schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+        source: ResolvedSourceContract {
+            digest: content(seed),
+            projection_digest: opaque(seed ^ 0x11),
+        },
+        target: ResolvedTargetContract {
+            os: "linux".to_string(),
+            architecture: "x86_64".to_string(),
+            abi: "gnu".to_string(),
+            libc: Some("glibc-2.39".to_string()),
+            observable_features: std::collections::BTreeMap::new(),
+        },
+        runtime: ResolvedArtifactContract {
+            kind: "node".to_string(),
+            digest: content(seed ^ 0x22),
+            dynamic_contract_digest: opaque(seed ^ 0x33),
+        },
+        dependencies: vec![ResolvedDependencyContract {
+            name: "npm".to_string(),
+            derivation_digest: content(seed ^ 0x44),
+            output_digest: content(seed ^ 0x55),
+        }],
+        build_outputs: vec![ResolvedBuildOutputContract {
+            name: "app".to_string(),
+            digest: content(seed ^ 0x66),
+            projection_digest: opaque(seed ^ 0x77),
+        }],
+        launch: ResolvedLaunchContract {
+            argv: vec!["node".to_string(), "dist/server.js".to_string()],
+            cwd: path("/workspace"),
+            process_model_digest: opaque(seed ^ 0x88),
+            environment: vec![EnvironmentVariableContract {
+                name: "NODE_ENV".to_string(),
+                value_digest: opaque(seed ^ 0x99),
+            }],
+            environment_policy_digest: opaque(seed ^ 0xaa),
+            secret_bindings: vec!["API_TOKEN".to_string()],
+        },
+        filesystem: ResolvedFilesystemContract {
+            view_digest: content(seed ^ 0xbb),
+            topology_digest: opaque(seed ^ 0xcc),
+            readonly_layers: vec![content(seed ^ 0xdd)],
+            writable_paths: vec![path("/tmp")],
+        },
+        policy: ResolvedPolicyContract {
+            network_digest: opaque(seed ^ 0xee),
+            capability_digest: opaque(seed ^ 0xf0),
+            filesystem_digest: opaque(seed ^ 0x0f),
+        },
+        guest_surface: GuestSurfaceContract {
+            bind_address: "0.0.0.0".to_string(),
+            protocol: "ato-guest/v1".to_string(),
+            port: Some(std::num::NonZeroU16::new(8080).unwrap()),
+            features: vec!["bindings".to_string(), "exec".to_string()],
+        },
+        external_state: vec![ExternalStateContract {
+            name: "data".to_string(),
+            target: path("/data"),
+            access: ExternalStateAccess::ReadWrite,
+            schema: "1".to_string(),
+            snapshot: SnapshotExclusion::Exclude,
+        }],
+    }
 }
 
 #[cfg(test)]
@@ -1732,6 +1940,69 @@ mod tests {
 
         assert!(matches!(
             envelope.verify(),
+            Err(ExecutionContractError::ExecutionIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_execution_id_is_obtainable_from_a_valid_envelope() {
+        let contract = sample_contract();
+        let execution_id = contract.compute_execution_id().unwrap();
+        let envelope = ExecutionContractEnvelopeV1 {
+            execution_contract: contract,
+            execution_id: execution_id.clone(),
+            resolved_refs: ResolvedRefProvenanceV1::default(),
+            generated_at: None,
+            provenance: serde_json::Value::Null,
+            diagnostics: serde_json::Value::Null,
+            evidence: serde_json::Value::Null,
+        };
+
+        let verified = envelope
+            .verified_execution_id()
+            .expect("a matching envelope yields a verified id");
+        assert_eq!(*verified.as_execution_id(), execution_id);
+    }
+
+    #[test]
+    fn verified_execution_id_is_refused_from_a_tampered_envelope() {
+        // A stored id that is not the canonical hash of the contract must never
+        // yield a VerifiedExecutionId — verify() fails closed first.
+        let contract = sample_contract();
+        let envelope = ExecutionContractEnvelopeV1 {
+            execution_contract: contract,
+            execution_id: ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap(),
+            resolved_refs: ResolvedRefProvenanceV1::default(),
+            generated_at: None,
+            provenance: serde_json::Value::Null,
+            diagnostics: serde_json::Value::Null,
+            evidence: serde_json::Value::Null,
+        };
+
+        assert!(matches!(
+            envelope.verified_execution_id(),
+            Err(ExecutionContractError::ExecutionIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_contract_id_recomputes_and_rejects_a_mismatch() {
+        // The proof-preserving seam must recompute the id from the contract and
+        // reject any supplied id that is not the canonical hash — a fake id can
+        // never mint a VerifiedExecutionId.
+        let contract = sample_contract();
+        let real_id = contract.compute_execution_id().unwrap();
+
+        // The correct id wraps.
+        let verified = VerifiedExecutionId::verify_contract_id(&contract, &real_id)
+            .expect("matching id is proof-preserving");
+        assert_eq!(*verified.as_execution_id(), real_id);
+
+        // A different (fake) id fails closed.
+        let fake_id = ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap();
+        assert_ne!(fake_id, real_id);
+        assert!(matches!(
+            VerifiedExecutionId::verify_contract_id(&contract, &fake_id),
             Err(ExecutionContractError::ExecutionIdMismatch { .. })
         ));
     }
