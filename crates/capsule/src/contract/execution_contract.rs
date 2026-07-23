@@ -24,10 +24,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
@@ -64,23 +62,6 @@ impl ContentDigest {
 
     pub fn bytes(self) -> [u8; 32] {
         self.bytes
-    }
-
-    pub fn blake3(bytes: &[u8]) -> Self {
-        Self::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())
-    }
-
-    /// Hash concrete materialization bytes with the algorithm selected by the
-    /// resolved contract. Callers must not compare an algorithm-tagged string
-    /// without recomputing the bytes through this function.
-    pub fn hash(algorithm: DigestAlgorithm, bytes: &[u8]) -> Self {
-        match algorithm {
-            DigestAlgorithm::Blake3 => Self::blake3(bytes),
-            DigestAlgorithm::Sha256 => {
-                let digest: [u8; 32] = Sha256::digest(bytes).into();
-                Self::new(DigestAlgorithm::Sha256, digest)
-            }
-        }
     }
 }
 
@@ -210,79 +191,6 @@ pub enum ExecutionContractError {
     ExecutionIdMismatch { stored: String, computed: String },
     #[error("failed to canonicalize execution contract: {0}")]
     Canonicalization(String),
-    #[error("failed to observe execution source tree: {0}")]
-    Observation(String),
-}
-
-const SOURCE_OBSERVATION_IGNORED_DIRS: &[&str] = &[
-    ".git",
-    ".tmp",
-    "node_modules",
-    ".venv",
-    "target",
-    "__pycache__",
-    ".ato",
-];
-
-/// Hash the concrete source files consumed by a build using one canonical
-/// projection shared by the local CLI and Connected Snapshot Builder.
-pub fn observe_source_tree_digest(
-    root: &Path,
-    excluded_roots: &[PathBuf],
-    algorithm: DigestAlgorithm,
-) -> Result<ContentDigest, ExecutionContractError> {
-    let mut paths = Vec::new();
-    let walker = walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|entry| {
-            let Ok(relative) = entry.path().strip_prefix(root) else {
-                return false;
-            };
-            if relative.as_os_str().is_empty() {
-                return true;
-            }
-            if excluded_roots
-                .iter()
-                .any(|excluded| relative.starts_with(excluded))
-            {
-                return false;
-            }
-            !(entry.file_type().is_dir()
-                && relative
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .is_some_and(|name| SOURCE_OBSERVATION_IGNORED_DIRS.contains(&name)))
-        });
-    for entry in walker {
-        let entry =
-            entry.map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let relative = entry
-            .path()
-            .strip_prefix(root)
-            .map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
-        if relative == Path::new(crate::input_resolver::ATO_LOCK_FILE_NAME) {
-            continue;
-        }
-        paths.push(relative.to_path_buf());
-    }
-    paths.sort();
-
-    let mut canonical = Vec::new();
-    canonical.extend_from_slice(b"ato.execution-source-observation/v1\0");
-    for relative in paths {
-        let name = relative.to_string_lossy();
-        canonical.extend_from_slice(&(name.len() as u64).to_le_bytes());
-        canonical.extend_from_slice(name.as_bytes());
-        let bytes = std::fs::read(root.join(&relative))
-            .map_err(|error| ExecutionContractError::Observation(error.to_string()))?;
-        canonical.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        canonical.extend_from_slice(&bytes);
-    }
-    Ok(ContentDigest::hash(algorithm, &canonical))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -896,28 +804,6 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<ContentDigest>(&json).unwrap(),
             expected
-        );
-    }
-
-    #[test]
-    fn source_observation_is_stable_across_lock_and_excluded_output_changes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("app.rs"), b"fn main() {}").unwrap();
-        std::fs::write(dir.path().join("ato.lock.json"), b"first").unwrap();
-        std::fs::create_dir(dir.path().join("dist")).unwrap();
-        std::fs::write(dir.path().join("dist/app"), b"first-build").unwrap();
-        let excluded = vec![PathBuf::from("dist")];
-        let first =
-            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap();
-        std::fs::write(dir.path().join("ato.lock.json"), b"second").unwrap();
-        std::fs::write(dir.path().join("dist/app"), b"second-build").unwrap();
-        let second =
-            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap();
-        assert_eq!(first, second);
-        std::fs::write(dir.path().join("app.rs"), b"fn main() { println!(\"x\"); }").unwrap();
-        assert_ne!(
-            first,
-            observe_source_tree_digest(dir.path(), &excluded, DigestAlgorithm::Blake3).unwrap()
         );
     }
 

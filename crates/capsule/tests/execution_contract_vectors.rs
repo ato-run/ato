@@ -17,6 +17,10 @@
 //! 5. Malformed identity input (unknown fields, version mismatch, placeholder
 //!    or non-canonical digests, unsorted lists, unresolved launch) and stored
 //!    `execution_id` mismatches fail closed.
+//! 6. RFC 8785 string escaping is pinned for free-form fields: the
+//!    `unicode-strings` vector records exact canonical bytes for non-ASCII
+//!    (astral-plane emoji, CJK) and control-character content, whether the
+//!    input spells them as `\uXXXX` escapes or literal UTF-8.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,6 +43,8 @@ struct Manifest {
     execution_id_formula: String,
     #[allow(dead_code)]
     jcs: String,
+    #[allow(dead_code)]
+    numbers: String,
     baseline: String,
     vectors: Vec<Vector>,
 }

@@ -4,6 +4,7 @@
   "domain_separator_utf8": "ato.execution-contract/v1",
   "execution_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
   "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
+  "numbers": "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, an integer in 0..=65535. No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.",
   "baseline": "baseline",
   "vectors": [
     {
@@ -31,6 +32,24 @@
       "execution_id": "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f",
       "relation": "equals-baseline",
       "notes": "same contract minified; input whitespace never reaches the canonical form"
+    },
+    {
+      "name": "unicode-strings",
+      "file": "vectors/unicode-strings.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:e7d11a2049815d75f8e6df4efa40cea798f981ad4d26babf6490513b10470e1b",
+      "relation": "differs-from-baseline",
+      "canonical_file": "expected/unicode-strings.canonical.json",
+      "notes": "pins RFC 8785 string canonicalization for free-form fields: input escapes (\\ud83d\\ude80 surrogate pair, \\u0007, \\u001f) and literal UTF-8 (e-acute, CJK, kana, astral-plane emoji) must canonicalize identically — control characters as lowercase \\u00xx / two-char escapes, everything else as literal UTF-8"
+    },
+    {
+      "name": "mutate-source-kind",
+      "file": "vectors/mutate-source-kind.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:de0fc9e53567d5edcc3e026f14c3611593e5bf747be0e7581b34b06cce7a1da9",
+      "relation": "differs-from-baseline"
     },
     {
       "name": "mutate-source-immutable-ref",
@@ -81,11 +100,44 @@
       "relation": "differs-from-baseline"
     },
     {
+      "name": "mutate-target-observable-features",
+      "file": "vectors/mutate-target-observable-features.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c75e7fe3b908932336216f3be79c58c0a6a5793d4cb8c9e06074c54a3e73eb94",
+      "relation": "differs-from-baseline",
+      "notes": "baseline omits observable_features entirely; introducing one changes the id"
+    },
+    {
+      "name": "mutate-runtime-kind",
+      "file": "vectors/mutate-runtime-kind.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:1a41f99868d35b01687ef0f79f2f5bf79e14ad2200339b77a9b8c5139b0b281e",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-runtime-resolved-ref",
+      "file": "vectors/mutate-runtime-resolved-ref.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c83c6d724382e07068f333c060cda33c34a520694704059594ab90aec2c475fd",
+      "relation": "differs-from-baseline"
+    },
+    {
       "name": "mutate-runtime-artifact-digest",
       "file": "vectors/mutate-runtime-artifact-digest.json",
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:74da66f0bda4314d097a0497d6d97282db27b8134421c606223931797cbe3903",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-dependency-name",
+      "file": "vectors/mutate-dependency-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:7b6a41be164f8fdbdc3668cb575eceb78533245c431d835ccde0a180c99e30a1",
       "relation": "differs-from-baseline"
     },
     {
@@ -102,6 +154,14 @@
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:314173cabd7640fcfb262e8d76367b6b5d87cd723aaff6b54d2687e814ad8f57",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-build-output-name",
+      "file": "vectors/mutate-build-output-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:b84d2bcbeb07e2d4f837efdf80f4a4aa99b189b275b867ccdbf91033df2a1faf",
       "relation": "differs-from-baseline"
     },
     {
@@ -129,6 +189,22 @@
       "relation": "differs-from-baseline"
     },
     {
+      "name": "mutate-launch-secret-bindings",
+      "file": "vectors/mutate-launch-secret-bindings.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:f992f57d3db9752807c42759c3de158f3889416ecda52430a4fe594a3fc2dcca",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-environment-name",
+      "file": "vectors/mutate-environment-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:c4da25f4463c87f138261ed4ab3723ede1170e5d30b4596574dcc8a36debc6a8",
+      "relation": "differs-from-baseline"
+    },
+    {
       "name": "mutate-environment-value-digest",
       "file": "vectors/mutate-environment-value-digest.json",
       "kind": "contract",
@@ -142,6 +218,14 @@
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:f791012431434fb2fa8d6734fead5af4cd1583dd2c0a4cf31bf271bdad0e2f4b",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-filesystem-readonly-layers",
+      "file": "vectors/mutate-filesystem-readonly-layers.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:7755df0ab463b020f17bcba1577e1c654eee71399ba78ae4015af6cc73a4ff5c",
       "relation": "differs-from-baseline"
     },
     {
@@ -169,11 +253,59 @@
       "relation": "differs-from-baseline"
     },
     {
+      "name": "mutate-filesystem-policy-digest",
+      "file": "vectors/mutate-filesystem-policy-digest.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:1f96195df245d3a0653c28358d2fe7b1de5199fe60353578f3d1a77711d8960f",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-bind-address",
+      "file": "vectors/mutate-guest-surface-bind-address.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:a320f144d7ca86d8e3485ac12f212a46eceac3b368d3e1a9c86570eda57b2979",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-protocol",
+      "file": "vectors/mutate-guest-surface-protocol.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:4879026d67c89d6acf48c020ad928cdac3ec4ca5598d7883a4796c76d73aea65",
+      "relation": "differs-from-baseline"
+    },
+    {
       "name": "mutate-guest-surface-port",
       "file": "vectors/mutate-guest-surface-port.json",
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:4020d1f93beceaabd2024132ce6b4ad90a58f3787b877355da5192c946a9a963",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-guest-surface-features",
+      "file": "vectors/mutate-guest-surface-features.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:191c5615cabed70ae7a4539cd616ee764ab7875a4977df0e0dc02af3869659a3",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-name",
+      "file": "vectors/mutate-external-state-name.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:4da30c350c716ce3a17456672dd7800e7e5e006a612a9fcb61e0e301dc1874fe",
+      "relation": "differs-from-baseline"
+    },
+    {
+      "name": "mutate-external-state-target",
+      "file": "vectors/mutate-external-state-target.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:8c135e6db300a745b4521ac475fa13894377f0909d90c479a3fdcb16572bdd71",
       "relation": "differs-from-baseline"
     },
     {
