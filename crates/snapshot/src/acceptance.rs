@@ -98,12 +98,26 @@ pub struct AcceptanceConfig {
 }
 
 /// The process result of one `seal_at.command` run. Only [`VerificationOutcome::Exited`]
-/// with code `0` accepts; every other value (including a non-zero exit, a signal
-/// surfaced as a non-zero code, a timeout, or a cancellation) rejects.
+/// with code `0` accepts; every other variant (a non-zero exit, a signal, a lost
+/// child, a timeout, or a cancellation) rejects.
+///
+/// A signalled or lost process has **no** exit code, so it gets its own variant
+/// rather than being squeezed into `Exited`: this makes the exit-0-only invariant
+/// *structural*. A seam impl (PR-2) cannot represent "terminated by a signal" or
+/// "child was lost" as `Exited(0)` — the only way to reach the accept arm — so it
+/// cannot falsely accept a process that never cleanly exited 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationOutcome {
     /// The command exited with this status code. `0` is the sole success signal.
     Exited(i32),
+    /// The command was terminated by a signal (`WIFSIGNALED`), carrying the signal
+    /// number. A signal is **never** success: the seam MUST surface a signalled
+    /// process as `Signalled`, never as `Exited(0)`. Always rejects.
+    Signalled(i32),
+    /// The child was lost or produced no decodable exit status — an unexpected EOF
+    /// on the control channel, a missing exit code, or any wait status that is
+    /// neither a clean exit nor a signal. **Never** success; always rejects.
+    Lost,
     /// The command exceeded [`AcceptanceConfig::verification_timeout`].
     TimedOut,
     /// The run was cancelled before the command produced a result.
@@ -229,6 +243,17 @@ pub trait DisposableAcceptanceLifecycle {
     /// Execute `seal_at.command` as exact argv in the disposable Session, bounded
     /// by `timeout` and cooperatively cancellable. No implicit shell; argument
     /// boundaries are preserved.
+    ///
+    /// The returned [`VerificationOutcome`] MUST faithfully classify the wait
+    /// status: a process that exited maps to [`VerificationOutcome::Exited`] with
+    /// its real code; a signal-terminated process (`WIFSIGNALED`) to
+    /// [`VerificationOutcome::Signalled`]; a lost / undecodable child (unexpected
+    /// EOF, missing exit code, any non-exit non-signal status) to
+    /// [`VerificationOutcome::Lost`]; a timeout to [`VerificationOutcome::TimedOut`].
+    /// Mapping any non-clean wait status to `Exited(0)` is a **contract violation**:
+    /// `Exited(0)` is the sole accept, so an impl that reports a signalled, lost, or
+    /// timed-out process as `Exited(0)` would falsely accept it. Only a genuine,
+    /// clean exit with code 0 may be reported as `Exited(0)`.
     fn execute_exact_argv(
         &mut self,
         session: &DisposableSessionHandle,
@@ -480,6 +505,19 @@ impl RunningSnapshotAcceptance {
                     }
                     Ok(VerificationOutcome::Exited(_)) => {
                         attempt_receipt.outcome = "nonzero-exit".to_string();
+                        (false, false)
+                    }
+                    // A signal-terminated process has NO exit code, so it can never
+                    // be `Exited(0)`: it is structurally impossible for it to reach
+                    // the accept arm. Reject on the same path as a non-zero exit.
+                    Ok(VerificationOutcome::Signalled(_)) => {
+                        attempt_receipt.outcome = "signalled".to_string();
+                        (false, false)
+                    }
+                    // A lost / undecodable child likewise has no exit code and can
+                    // never be `Exited(0)`. Reject like a non-zero exit.
+                    Ok(VerificationOutcome::Lost) => {
+                        attempt_receipt.outcome = "lost".to_string();
                         (false, false)
                     }
                     Ok(VerificationOutcome::TimedOut) => {
@@ -813,6 +851,62 @@ mod tests {
             panic!("expected exhausted");
         };
         assert_eq!(receipt.attempts[0].outcome, "nonzero-exit");
+    }
+
+    // --- AC: a signal-terminated process is REJECTED, never accepted ---
+    // exit-0-only is structural: a `Signalled` outcome has no exit code, so it can
+    // never be `Exited(0)` and can never reach the sole accept arm.
+    #[test]
+    fn signalled_outcome_is_rejected_and_destroys_session() {
+        // SIGKILL (9): a signal is never success.
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Signalled(9)]);
+        let error = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            eligible(),
+            &config(1),
+            &Default::default(),
+        )
+        .expect_err("a signalled process never accepts");
+
+        let AcceptanceError::Exhausted { receipt } = error else {
+            panic!("expected exhausted");
+        };
+        assert_eq!(receipt.attempts.len(), 1);
+        assert_eq!(receipt.attempts[0].outcome, "signalled");
+        assert!(
+            receipt.accepted_snapshot_id.is_none(),
+            "a signalled outcome must never be accepted"
+        );
+        // Reject paths still tear the disposable Session down (cleanup).
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(lifecycle.destroyed_sessions.len(), 1);
+    }
+
+    // --- AC: a lost / undecodable child is REJECTED, never accepted ---
+    // Like `Signalled`, `Lost` carries no exit code and cannot be `Exited(0)`.
+    #[test]
+    fn lost_outcome_is_rejected_and_destroys_session() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Lost]);
+        let error = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            eligible(),
+            &config(1),
+            &Default::default(),
+        )
+        .expect_err("a lost child never accepts");
+
+        let AcceptanceError::Exhausted { receipt } = error else {
+            panic!("expected exhausted");
+        };
+        assert_eq!(receipt.attempts.len(), 1);
+        assert_eq!(receipt.attempts[0].outcome, "lost");
+        assert!(
+            receipt.accepted_snapshot_id.is_none(),
+            "a lost outcome must never be accepted"
+        );
+        // Reject paths still tear the disposable Session down (cleanup).
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(lifecycle.destroyed_sessions.len(), 1);
     }
 
     // --- AC: verification side effects do not alter accepted bytes;
