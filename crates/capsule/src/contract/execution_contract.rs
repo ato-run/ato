@@ -568,7 +568,13 @@ impl VerifiedExecutionId {
     /// wrapper across module boundaries without a public constructor. Every
     /// caller MUST have already proven `execution_id` equals the canonical hash
     /// of its execution contract.
-    pub(crate) fn from_verified(execution_id: ExecutionId) -> Self {
+    ///
+    /// Scoped to `crate::contract` (not the whole crate): the only callers are
+    /// the two sanctioned minting methods and the in-module tests, all of which
+    /// live under this module tree. Narrowing the visibility keeps the "exactly
+    /// two ways to obtain a verified id" guarantee from widening to any future
+    /// capsule-crate module.
+    pub(in crate::contract) fn from_verified(execution_id: ExecutionId) -> Self {
         Self { execution_id }
     }
 }
