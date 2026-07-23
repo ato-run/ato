@@ -59,3 +59,63 @@ pub enum IntentDecision {
     /// a human-readable reason for telemetry/logging. Never acted on.
     Reject(String),
 }
+
+/// Parse an `ato://runner/{register,start,stop}` URI into its runner-control
+/// verb. Returns `None` for any other scheme, namespace, or action.
+///
+/// This is the shared, **trust-free** verb parser: it decides *which* runner
+/// verb a URI names, never *whether* the caller may act on it. Origin trust is
+/// host policy applied by the caller (the GPUI shell gates on its https origin
+/// allowlist; the Tauri shell trusts the bundled main window's local asset).
+/// It reuses the canonical [`crate::handle::parse_host_route`] splitter, so no
+/// second `ato://` parser can drift from it, and needs no `url` dependency.
+///
+/// The query-bearing `run` verb and the `auth`/`open`/`cli` host-route verbs are
+/// intentionally out of scope here — they are wired on separate, shell-specific
+/// paths (the consent-gated launch; the host-route drain).
+pub fn parse_runner_control_intent(uri: &str) -> Option<PrivilegedIntent> {
+    let route = crate::handle::parse_host_route(uri).ok()?;
+    if route.namespace != "runner" {
+        return None;
+    }
+    match route.path_segments.first().map(String::as_str) {
+        Some("register") => Some(PrivilegedIntent::RunnerRegister),
+        Some("start") => Some(PrivilegedIntent::RunnerStart),
+        Some("stop") => Some(PrivilegedIntent::RunnerStop),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_three_runner_control_verbs() {
+        assert_eq!(
+            parse_runner_control_intent("ato://runner/register"),
+            Some(PrivilegedIntent::RunnerRegister)
+        );
+        assert_eq!(
+            parse_runner_control_intent("ato://runner/start"),
+            Some(PrivilegedIntent::RunnerStart)
+        );
+        assert_eq!(
+            parse_runner_control_intent("ato://runner/stop"),
+            Some(PrivilegedIntent::RunnerStop)
+        );
+    }
+
+    #[test]
+    fn rejects_non_runner_and_malformed_uris() {
+        // Other namespaces are not runner-control intents.
+        assert_eq!(parse_runner_control_intent("ato://run?source=x"), None);
+        assert_eq!(parse_runner_control_intent("ato://open?handle=x"), None);
+        assert_eq!(parse_runner_control_intent("capsule://ato.run/a/b"), None);
+        // Unknown runner action / missing action.
+        assert_eq!(parse_runner_control_intent("ato://runner/restart"), None);
+        assert_eq!(parse_runner_control_intent("ato://runner"), None);
+        // Not an ato:// URI at all.
+        assert_eq!(parse_runner_control_intent("https://app.ato.run"), None);
+    }
+}

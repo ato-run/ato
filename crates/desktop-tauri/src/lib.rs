@@ -23,6 +23,7 @@ pub fn run() {
             host::runner_start,
             host::runner_stop,
             host::dispatch_privileged_intent,
+            host::dispatch_intent_uri,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Ato desktop shell");

@@ -96,6 +96,18 @@ impl DesktopHost {
             PrivilegedIntent::Run { .. } => Err(HostControlError::Unsupported("run")),
         }
     }
+
+    /// Classify an intercepted `ato://runner/*` navigation and dispatch it. The
+    /// caller has already established trust (the bundled main window is the only
+    /// window granted these commands); this maps the URI onto a host action via
+    /// the shared, url-free [`protocol::intent::parse_runner_control_intent`]
+    /// parser so the Tauri and GPUI shells never drift on verb spelling.
+    pub fn dispatch_intent_uri(&self, uri: &str) -> Result<(), HostControlError> {
+        match protocol::intent::parse_runner_control_intent(uri) {
+            Some(intent) => self.dispatch_privileged_intent(&intent),
+            None => Err(HostControlError::UnrecognizedIntent(uri.to_string())),
+        }
+    }
 }
 
 impl Default for DesktopHost {
@@ -117,6 +129,8 @@ pub enum HostControlError {
     Teardown(#[source] HostError),
     #[error("intent verb '{0}' is not yet supported by the Tauri shell")]
     Unsupported(&'static str),
+    #[error("not a recognized runner-control intent: {0}")]
+    UnrecognizedIntent(String),
 }
 
 /// Runner-agent status returned to the UI.
@@ -157,6 +171,14 @@ pub fn dispatch_privileged_intent(
 ) -> Result<(), String> {
     host.dispatch_privileged_intent(&intent)
         .map_err(|e| e.to_string())
+}
+
+/// `invoke('dispatch_intent_uri', { uri })` — hand the shell an intercepted
+/// `ato://runner/*` URI to classify (via the shared parser) and dispatch. The
+/// eventual navigation handler routes intercepted navigations through here.
+#[tauri::command]
+pub fn dispatch_intent_uri(host: State<'_, DesktopHost>, uri: String) -> Result<(), String> {
+    host.dispatch_intent_uri(&uri).map_err(|e| e.to_string())
 }
 
 // ── Host policy (binary + log resolution) ───────────────────────────────────
@@ -239,5 +261,27 @@ mod tests {
         host.dispatch_privileged_intent(&PrivilegedIntent::RunnerStop)
             .expect("stop verb on idle host is a no-op");
         assert!(!host.runner_running());
+    }
+
+    #[test]
+    fn intent_uri_for_stop_routes_through_the_shared_parser() {
+        let host = DesktopHost::new();
+        // An `ato://runner/stop` navigation is classified and dispatched.
+        host.dispatch_intent_uri("ato://runner/stop")
+            .expect("runner/stop uri dispatches");
+        assert!(!host.runner_running());
+    }
+
+    #[test]
+    fn unrecognized_intent_uri_is_rejected() {
+        let host = DesktopHost::new();
+        assert!(matches!(
+            host.dispatch_intent_uri("ato://run?source=x"),
+            Err(HostControlError::UnrecognizedIntent(_))
+        ));
+        assert!(matches!(
+            host.dispatch_intent_uri("https://evil.example"),
+            Err(HostControlError::UnrecognizedIntent(_))
+        ));
     }
 }
