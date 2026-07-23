@@ -22,6 +22,11 @@ pub const CANONICAL_IDENTITY_EXCLUDED_SECTIONS: &[&str] = &[
     "policy",
     "attestations",
     "signatures",
+    // D5 / D2 — additive lock sections that MUST NOT change lock identity.
+    // They are excluded by construction (absent from `CanonicalLockProjection`);
+    // listing them here keeps the introspection helpers in sync.
+    "launch",
+    "execution_contract",
 ];
 
 pub fn canonical_projection(lock: &AtoLock) -> Result<CanonicalLockProjection> {

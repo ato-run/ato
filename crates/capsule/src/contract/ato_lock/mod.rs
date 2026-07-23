@@ -1,5 +1,6 @@
 mod canonicalize;
 mod closure;
+mod execution;
 mod hash;
 pub mod oci;
 mod schema;
@@ -24,6 +25,9 @@ pub use closure::{
     ClosureInfo, closure_info, compute_closure_digest, normalize_closure_value,
     normalize_lock_closure, normalize_resolution_closure_entries, validate_closure_value,
 };
+pub use execution::{
+    LockExecutionError, verify_environment_values, verify_execution_envelope, verify_lock_execution,
+};
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
     compute_lock_id, recompute_lock_id,
@@ -37,9 +41,9 @@ pub use oci::{
 pub use schema::{
     ATO_LOCK_SCHEMA_VERSION, AtoLock, AttestationsSection, BindingSection, ContractSection,
     DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck, DeliveryRepair, DeliveryService,
-    FeatureName, KnownFeature, LockFeatures, LockId, LockSignature, PolicySection,
-    ResolutionSection, UnresolvedReason, UnresolvedValue, delivery_environment,
-    parse_delivery_environment_value,
+    FeatureName, KnownFeature, LockEnvironmentValue, LockFeatures, LockId, LockLaunchSection,
+    LockSignature, PolicySection, ResolutionSection, UnresolvedReason, UnresolvedValue,
+    delivery_environment, parse_delivery_environment_value,
 };
 pub use validate::{
     AtoLockValidationError, ValidationMode, validate_persisted, validate_structural,

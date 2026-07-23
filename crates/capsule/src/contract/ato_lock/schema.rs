@@ -6,6 +6,8 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::execution_contract::ExecutionContractEnvelopeV1;
+
 pub const ATO_LOCK_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +31,25 @@ pub struct AtoLock {
     pub attestations: AttestationsSection,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub signatures: Vec<LockSignature>,
+    /// D5 — non-secret normalized environment value payloads (`launch.environment`).
+    ///
+    /// Optional, additive top-level section. It carries per-variable normalized
+    /// value payloads whose `value_digest` (domain `ato.environment-value/v1`)
+    /// is re-derived and checked on read. Secret values never appear here.
+    /// Excluded from `lock_id` (not part of [`crate::ato_lock::CanonicalLockProjection`]),
+    /// so adding/removing it never changes an existing lock's identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LockLaunchSection>,
+    /// D2 — the finalized [`ExecutionContractEnvelopeV1`] (execution contract +
+    /// `execution_id` + resolved-ref provenance + provenance/diagnostics/evidence).
+    ///
+    /// Optional, additive top-level field. Existing readers ignore it as an
+    /// unknown field (parse-compatible both ways), and it is excluded from
+    /// `lock_id` (not part of the canonical projection). The read path recomputes
+    /// `execution_id` via [`ExecutionContractEnvelopeV1::verify`] and rejects a
+    /// mismatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_contract: Option<ExecutionContractEnvelopeV1>,
 }
 
 impl Default for AtoLock {
@@ -44,8 +65,31 @@ impl Default for AtoLock {
             policy: PolicySection::default(),
             attestations: AttestationsSection::default(),
             signatures: Vec::new(),
+            launch: None,
+            execution_contract: None,
         }
     }
+}
+
+/// D5 — the optional `launch` lock section carrying persisted non-secret
+/// environment value payloads. Additive and excluded from `lock_id`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct LockLaunchSection {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub environment: Vec<LockEnvironmentValue>,
+}
+
+/// A single persisted non-secret environment value (D5, Option B).
+///
+/// `value` is the normalized, self-describing value payload; `value_digest` is
+/// its digest under domain `ato.environment-value/v1`
+/// (`blake3(UTF8(domain) || 0x00 || JCS(value))`), re-derived and checked on
+/// read. Secret values are never persisted here (see `is_sensitive_env_key`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LockEnvironmentValue {
+    pub name: String,
+    pub value: Value,
+    pub value_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -48,6 +48,7 @@ pub use foundation::types;
 pub mod contract;
 pub use contract::ato_lock;
 pub use contract::execution_contract;
+pub use contract::execution_contract_finalize;
 pub use contract::lock_runtime;
 pub use contract::lockfile;
 pub use contract::manifest;
