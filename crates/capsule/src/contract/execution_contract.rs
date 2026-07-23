@@ -22,13 +22,92 @@
 //! execution_id = "blake3:" + hex(BLAKE3(UTF8("ato.execution-contract/v1") || 0x00 || JCS(contract)))
 //! ```
 //!
+//! # RFC §4.2 facet mapping (normative)
+//!
+//! Every row of the RFC's §4.2 identity-bearing facet table is committed by
+//! v1 in exactly one of three ways:
+//!
+//! * **direct** — a dedicated field carries the resolved content;
+//! * **transitive** — the content determines bytes that a committed digest
+//!   already covers, so it cannot change without changing that digest;
+//! * **pinned** — the content cannot vary within v1 at all; the schema
+//!   string / domain separator itself commits the constant.
+//!
+//! An execution whose launch conditions cannot be expressed under this
+//! mapping MUST NOT be issued a v1 `execution_id`. Per RFC §4.5, any change
+//! to the mapping — adding or removing a field, loosening a pin, or moving a
+//! facet between commitment modes — is a semantic change to the
+//! identity-bearing field set and requires a new contract version.
+//!
+//! * **Source** — materialized source digest: direct (`source.digest`).
+//!   Source projection rules: transitive — `source.digest` covers the
+//!   *materialized source projection* (RFC §4.6), so a projection-rule
+//!   change that alters the materialized tree changes the digest, and one
+//!   that does not cannot change the launch envelope.
+//! * **Target** — OS, architecture, ABI/libc, observable target features:
+//!   direct (`target.*`).
+//! * **Runtime** — resolved runtime artifact: direct (`runtime.*`). Dynamic
+//!   runtime contract: pinned — v1 runtime contracts are fully resolved;
+//!   `runtime.digest` commits the complete runtime surface, and launch-time
+//!   runtime configuration may only flow through `launch.argv`,
+//!   `launch.environment`, or bytes committed by `filesystem.view_digest`.
+//!   A runtime whose contract varies outside those committed channels is
+//!   not representable in v1.
+//! * **Dependencies** — derivation identity and actual immutable output
+//!   identity: direct (`dependencies[]`).
+//! * **Build outputs** — actual immutable output digest: direct
+//!   (`build_outputs[].digest`). Projection: transitive — how outputs are
+//!   projected into the launch filesystem is part of the view committed by
+//!   `filesystem.view_digest`.
+//! * **Launch** — entrypoint, exact argv, cwd: direct (`launch.argv`,
+//!   `launch.cwd`). Process model: pinned + transitive — v1 launches
+//!   exactly one root process (`launch.argv` in `launch.cwd`); any further
+//!   process structure (supervisor trees, sidecar services) must be spawned
+//!   by that root process from bytes committed by `filesystem.view_digest`,
+//!   so every process-model change alters `launch.argv` or
+//!   `filesystem.view_digest`.
+//! * **Environment** — non-secret values: direct
+//!   (`launch.environment[].value_digest`, the content digest of the exact
+//!   resolved value bytes). Variable requirements, normalization, and
+//!   inheritance policy: pinned — v1 environments are closed; the guest
+//!   environment is exactly `launch.environment` plus the secrets bound by
+//!   name in `launch.secret_bindings` (secret values are excluded from
+//!   identity per RFC §4.3), nothing is inherited from the host, and
+//!   normalization is fixed by [`ExecutionContractV1::validate`] (sorted
+//!   duplicate-free ASCII names, exactly one canonical spelling of
+//!   absence).
+//! * **Filesystem** — immutable layers: direct
+//!   (`filesystem.readonly_layers`). Mount topology and access modes:
+//!   transitive, with a normative producer obligation —
+//!   `filesystem.view_digest` MUST commit to the complete mount topology
+//!   and per-mount access modes of the immutable view, not merely file
+//!   content; a producer that derives `view_digest` from content alone is
+//!   non-conformant. Writable-boundary contracts: direct
+//!   (`filesystem.writable_paths`).
+//! * **Network** — effective ingress, egress, DNS, and isolation policy:
+//!   transitive (`policy.network_digest`).
+//! * **Capabilities** — effective filesystem, host, device, and sandbox
+//!   policy: transitive (`policy.capability_digest`,
+//!   `policy.filesystem_digest`).
+//! * **Surface** — declared guest bind address, protocol, and guest port:
+//!   direct (`guest_surface.*`).
+//! * **External State schema** — binding name, mount/injection contract,
+//!   access mode, schema identity, and Snapshot exclusion rule: direct
+//!   (`external_state[]`).
+//!
 //! Until the Capsule v1 execution model RFC lands on `nightly`, this module
 //! and the shared vectors below are the normative definition of the canonical
-//! form. The full spec — §4.5 of
-//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` — is in flight on
-//! the `feat/capsule-v1-execution-model-rfc` branch (tracking issue
+//! form. The full spec —
+//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` (§4.2 facet
+//! table, §4.5 canonicalization) — is in flight on the
+//! `feat/capsule-v1-execution-model-rfc` branch (tracking issue
 //! ato-run/ato#1086) and is not yet in this tree; its front-matter names this
-//! file as SSOT, so the two must be kept in lockstep when it merges.
+//! file as SSOT. Lockstep with the RFC is defined by the facet mapping
+//! above: every row of the RFC's §4.2 table must stay committed exactly as
+//! the mapping states, and when the RFC merges its §4.2 table must reference
+//! (or restate) this mapping. A divergence on any row — a facet the mapping
+//! no longer covers, or a pin the RFC loosens — is a §4.5 semantic change
+//! requiring a new contract version, not a doc-only fix.
 //!
 //! Shared cross-language test vectors live in
 //! `crates/capsule/tests/fixtures/execution_contract/` and are exercised by
@@ -221,6 +300,10 @@ pub struct ExecutionContractV1 {
     pub external_state: Vec<ExternalStateContract>,
 }
 
+/// Resolved source facet. `digest` covers the *materialized source
+/// projection* (RFC §4.6) — the source bytes actually presented to the
+/// build — so source projection rules are committed transitively through it
+/// (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSourceContract {
@@ -249,6 +332,10 @@ pub struct ResolvedTargetContract {
     pub observable_features: BTreeMap<String, String>,
 }
 
+/// Resolved runtime artifact facet. `digest` commits the complete runtime
+/// surface; v1 pins that there is no separate dynamic runtime contract —
+/// launch-time runtime configuration may only flow through the committed
+/// launch and filesystem channels (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedArtifactContract {
@@ -265,6 +352,9 @@ pub struct ResolvedDependencyContract {
     pub output_digest: ContentDigest,
 }
 
+/// A single actual immutable build output. Its projection into the launch
+/// filesystem is committed by `ResolvedFilesystemContract::view_digest`,
+/// not by this record (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedBuildOutputContract {
@@ -272,6 +362,14 @@ pub struct ResolvedBuildOutputContract {
     pub digest: ContentDigest,
 }
 
+/// Resolved launch facet. v1 pins the process model: exactly one root
+/// process is launched from `argv` in `cwd`, and any further process
+/// structure (supervisor trees, sidecar services) must be spawned by that
+/// root process from bytes committed by
+/// `ResolvedFilesystemContract::view_digest`. v1 environments are closed:
+/// the guest sees exactly `environment` plus the secrets bound by name in
+/// `secret_bindings` — nothing is inherited from the host (see the
+/// module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedLaunchContract {
@@ -286,6 +384,11 @@ pub struct ResolvedLaunchContract {
     pub secret_bindings: Vec<String>,
 }
 
+/// One resolved non-secret environment variable. `value_digest` is the
+/// content digest of the exact resolved value bytes; secret values never
+/// appear here — secrets are bound by name via
+/// `ResolvedLaunchContract::secret_bindings` and their values are excluded
+/// from identity (RFC §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentVariableContract {
@@ -293,6 +396,12 @@ pub struct EnvironmentVariableContract {
     pub value_digest: ContentDigest,
 }
 
+/// Resolved filesystem facet. `view_digest` MUST commit to the complete
+/// immutable view — mount topology and per-mount access modes included, not
+/// merely file content; a producer that derives it from content alone is
+/// non-conformant. `readonly_layers` are the immutable layer digests and
+/// `writable_paths` is the writable-boundary contract (see the module-level
+/// facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedFilesystemContract {
