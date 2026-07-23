@@ -285,7 +285,17 @@ impl SnapshotCompatibilityContractV1 {
             // Snapshot's exactly. An absent (`None`) or differing class identity
             // fails closed — there is no tier that lets a non-matching host
             // satisfy the contract.
-            && capability.compatibility_class_identity == Some(self.compatibility_class_identity)
+            //
+            // The tier is matched EXHAUSTIVELY with no wildcard arm: adding a
+            // future `PortabilityTier` variant (e.g. a provable host-pinned tier)
+            // is a compile error here, forcing an explicit matching rule for it
+            // rather than silently fail-opening through this class-identity check.
+            && match self.portability_tier {
+                PortabilityTier::ClassPortable => {
+                    capability.compatibility_class_identity
+                        == Some(self.compatibility_class_identity)
+                }
+            }
     }
 }
 
