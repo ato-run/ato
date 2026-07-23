@@ -21,5 +21,6 @@ capsulefs = { path = "../capsulefs" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 ureq = { version = "2.12.1", features = ["json"] }
 blake3 = "1"
