@@ -18,16 +18,15 @@
 //! `seal_at.command` is evaluated against a *disposable restore of a candidate*,
 //! so it determines **acceptance**, not the capture instant (RFC §6.3). Ato
 //! interprets only the process result: **exit 0 is the sole success signal**;
-//! any non-zero exit, signal, or timeout rejects, and a timeout MUST terminate
-//! the full verification process tree (RFC §6.3 / §8.4).
+//! any non-zero exit, signal, or timeout rejects, and every non-accepted outcome
+//! that reached command execution MUST terminate the full verification process
+//! tree before the Session is destroyed (RFC §6.3 / §8.4).
 //!
-//! This module is **Gate-0 style**: pure, deterministic orchestration with one
-//! injectable IO seam ([`DisposableAcceptanceLifecycle`]). It performs no live
-//! builder / runner / firecracker work — that wiring is PR-2. The trait is the
-//! entire boundary between this deterministic loop and real capture / restore /
-//! process control, mirroring the crate's established `SnapshotBackend` +
-//! `FakeSnapshotBackend` "trait seam + fake" pattern so the loop is fully
-//! unit-testable without a VM.
+//! This module is **Gate-0 style**: pure, deterministic orchestration with two
+//! injectable seams — the IO seam ([`DisposableAcceptanceLifecycle`]) and a
+//! monotonic [`MonotonicClock`] so deadline behavior is deterministic under test
+//! (no wall-clock sleeps). It performs no live builder / runner / firecracker
+//! work — that wiring is PR-2.
 //!
 //! **Immutability model.** The candidate is held by value as an immutable
 //! [`SnapshotManifestV1`]; its content address ([`SnapshotManifestV1::snapshot_id`])
@@ -35,8 +34,20 @@
 //! is a *separate* [`DisposableSessionHandle`] that the lifecycle restores into,
 //! runs the command in, and then destroys. Because every verification method
 //! borrows the candidate immutably and mutates only the Session overlay, the
-//! accepted bytes are the candidate bytes **unchanged**: the overlay is discarded
-//! and never folded back into the candidate.
+//! accepted bytes are the candidate bytes **unchanged**.
+//!
+//! **Fail-closed eligibility.** A `running` capture of a Capsule whose live
+//! workload requires External State is ineligible (RFC §8.3). Eligibility is
+//! carried as a proof-token ([`VerifiedRunningSnapshotEligibility`]) that only a
+//! verified-Execution-Contract analysis (#1090) can mint — never a caller-supplied
+//! bool — so a production caller structurally cannot drive an ineligible workload
+//! into running capture.
+//!
+//! **Always-receipted.** [`RunningSnapshotAcceptance::accept`] returns an
+//! [`AcceptanceRun`] on every terminal outcome — accept, reject, cancel, cleanup
+//! failure, validation failure — each carrying an [`AcceptanceReceiptV1`] that
+//! identifies the disposable-restore verifier. `Err` is reserved for a truly
+//! unreceiptable internal fault.
 //!
 //! **Scope.** `running` capture policy only. `workload_idle`, placeholder
 //! revocation, restore-time real bindings, and restart are #1093 and out of
@@ -49,12 +60,37 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use capsule::execution_contract::ExecutionId;
 use capsule::snapshot_manifest::{
     AcceptanceStatus, CapturePolicyV1, SanitizationAttestationV1, SecretScanAttestationV1,
-    SnapshotCatalogRecord, SnapshotManifestV1,
+    SnapshotCatalogRecord, SnapshotId, SnapshotManifestV1,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Schema id of the acceptance receipt wire format.
+pub const ACCEPTANCE_RECEIPT_V1_SCHEMA: &str = "ato.snapshot.acceptance-receipt/v1";
+/// Stable identity of the disposable-restore verifier that produced a receipt.
+pub const DISPOSABLE_RESTORE_VERIFIER_IDENTITY: &str = "ato.snapshot.disposable-restore-verifier";
+/// Version of the verifier, pinned to this crate's version.
+pub const DISPOSABLE_RESTORE_VERIFIER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// An injectable monotonic clock. The acceptance loop reads time **only** through
+/// this seam so deadline truncation and expiry are deterministic under test
+/// without real sleeps. Production uses [`SystemClock`].
+pub trait MonotonicClock {
+    fn now(&self) -> Instant;
+}
+
+/// The real monotonic clock: [`Instant::now`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl MonotonicClock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
 
 /// An immutable capture candidate. Its `manifest` is never mutated by
 /// verification; the accepted Snapshot's bytes are exactly these bytes.
@@ -71,13 +107,48 @@ pub struct DisposableSessionHandle {
     pub opaque_id: String,
 }
 
-/// Snapshot-build eligibility for a live-workload `running` capture. A Capsule
-/// whose live workload requires External State cannot be captured `running`
-/// without binding production secrets / user state, so it fails **closed** here
-/// (RFC §8.3) — it must never fall back to a secret-bearing running capture.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SnapshotEligibility {
-    pub external_state_required_by_live_workload: bool,
+/// A **proof** that a `running` Snapshot capture is eligible — i.e. the Capsule's
+/// live workload does **not** require External State (RFC §8.3).
+///
+/// This replaces the earlier caller-supplied `bool`: a bool is a *calling
+/// convention* a PR-2 caller could get wrong (pass `false` and wrongly proceed),
+/// exactly the failure class the `VerifiedExecutionId` fix closed. The proof has
+/// **no** public constructor, no `From<bool>` / `new`, and is not `Deserialize`:
+/// it can only be minted by a future (#1090) verified-Execution-Contract analysis
+/// that fails closed when the workload requires External State. In #1102 there is
+/// deliberately **no** production constructor, so production callers cannot build
+/// it yet — the running-capture path is closed until #1090 lands.
+///
+/// ```compile_fail
+/// use snapshot::acceptance::VerifiedRunningSnapshotEligibility;
+/// // The proof has no public constructor: a caller cannot mint eligibility.
+/// let _proof = VerifiedRunningSnapshotEligibility { _private: () };
+/// ```
+#[derive(Debug)]
+pub struct VerifiedRunningSnapshotEligibility {
+    _private: (),
+}
+
+impl VerifiedRunningSnapshotEligibility {
+    /// TEST-ONLY: mint a proof unconditionally, standing in for #1090's analysis
+    /// when exercising the accept path.
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self { _private: () }
+    }
+
+    /// TEST-ONLY stand-in for the #1090 verified-Execution-Contract analysis that
+    /// will be the *only* real constructor. Fails **closed** when the live
+    /// workload requires External State (RFC §8.3); otherwise mints the proof.
+    #[cfg(test)]
+    pub(crate) fn analyze_for_test(
+        external_state_required_by_live_workload: bool,
+    ) -> Result<Self, AcceptanceFailure> {
+        if external_state_required_by_live_workload {
+            return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
+        }
+        Ok(Self { _private: () })
+    }
 }
 
 /// Bounds for one acceptance run: the exact `seal_at` argv, the per-attempt
@@ -86,10 +157,12 @@ pub struct SnapshotEligibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcceptanceConfig {
     /// `seal_at.command` as exact argv — executed with no implicit shell and with
-    /// argument boundaries preserved (RFC §6.1). Must be non-empty and NUL-free.
+    /// argument boundaries preserved (RFC §6.1). `argv[0]` (the program) must be
+    /// non-empty; later arguments MAY be empty strings; no argument may contain a
+    /// NUL.
     pub seal_at_argv: Vec<String>,
-    /// Per-attempt verification timeout. On timeout the full process tree is
-    /// terminated and the attempt rejects.
+    /// Per-attempt verification timeout. Truncated to the remaining deadline
+    /// budget so the total run never exceeds `total_deadline`.
     pub verification_timeout: Duration,
     /// Overall build deadline across all attempts.
     pub total_deadline: Duration,
@@ -111,14 +184,11 @@ pub enum VerificationOutcome {
     /// The command exited with this status code. `0` is the sole success signal.
     Exited(i32),
     /// The command was terminated by a signal (`WIFSIGNALED`), carrying the signal
-    /// number. A signal is **never** success: the seam MUST surface a signalled
-    /// process as `Signalled`, never as `Exited(0)`. Always rejects.
+    /// number. A signal is **never** success. Always rejects.
     Signalled(i32),
-    /// The child was lost or produced no decodable exit status — an unexpected EOF
-    /// on the control channel, a missing exit code, or any wait status that is
-    /// neither a clean exit nor a signal. **Never** success; always rejects.
+    /// The child was lost or produced no decodable exit status. **Never** success.
     Lost,
-    /// The command exceeded [`AcceptanceConfig::verification_timeout`].
+    /// The command exceeded its (deadline-truncated) verification timeout.
     TimedOut,
     /// The run was cancelled before the command produced a result.
     Cancelled,
@@ -138,63 +208,143 @@ impl AcceptanceCancellation {
     }
 }
 
-/// One attempt's receipt: which candidate was verified, the outcome label, and
-/// whether the (always-attempted) teardown actually ran.
+/// The shared per-run budget threaded into every lifecycle phase: an **absolute**
+/// deadline plus the cancellation token, read through the injected clock. A PR-2
+/// impl uses it to honor cancellation and the remaining deadline inside its own
+/// capture / create / restore / execute work rather than blocking unbounded.
+pub struct AcceptanceBudget<'a> {
+    absolute_deadline: Instant,
+    cancellation: &'a AcceptanceCancellation,
+    clock: &'a dyn MonotonicClock,
+}
+
+impl AcceptanceBudget<'_> {
+    /// Whether the run has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    /// The absolute instant past which no work should proceed.
+    pub fn deadline(&self) -> Instant {
+        self.absolute_deadline
+    }
+
+    /// Time left before the deadline, saturating to zero once exceeded.
+    pub fn remaining(&self) -> Duration {
+        self.absolute_deadline
+            .saturating_duration_since(self.clock.now())
+    }
+
+    /// Whether the deadline has been reached or passed.
+    pub fn is_expired(&self) -> bool {
+        self.clock.now() >= self.absolute_deadline
+    }
+}
+
+/// The typed outcome of one acceptance attempt. A closed enum with pinned
+/// kebab-case wire spellings: an unknown outcome string fails deserialization
+/// rather than round-tripping as an opaque value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcceptanceAttemptOutcome {
+    /// Capturing the candidate failed.
+    CaptureFailed,
+    /// The captured candidate failed its own manifest invariants.
+    CandidateValidationFailed,
+    /// The candidate's `capture_policy` is not `running`.
+    UnsupportedCapturePolicy,
+    /// Creating the disposable Session failed.
+    CreateSessionFailed,
+    /// Restoring the candidate into the Session failed.
+    RestoreFailed,
+    /// The command exited 0 within the deadline: accepted.
+    Accepted,
+    /// The command exited 0, but only after the deadline: not an accept.
+    DeadlineExceeded,
+    /// The command exited non-zero.
+    NonzeroExit,
+    /// The command was terminated by a signal.
+    Signalled,
+    /// The child was lost / produced no decodable exit status.
+    Lost,
+    /// The command exceeded its verification timeout.
+    Timeout,
+    /// The run was cancelled around this attempt.
+    Cancelled,
+    /// The verification seam itself errored.
+    VerificationError,
+}
+
+/// The final disposition label recorded on the run receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcceptanceOutcome {
+    Accepted,
+    Rejected,
+}
+
+/// One attempt's receipt: which candidate was verified, the typed outcome, and
+/// whether the (always-attempted) teardown actually ran. The id is a typed
+/// [`SnapshotId`], so a malformed address fails closed at deserialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptanceAttemptReceipt {
+pub struct AcceptanceAttemptReceiptV1 {
     pub attempt: u32,
-    pub candidate_snapshot_id: Option<String>,
-    pub outcome: String,
+    pub candidate_snapshot_id: Option<SnapshotId>,
+    pub outcome: AcceptanceAttemptOutcome,
     pub process_tree_terminated: bool,
     pub disposable_session_destroyed: bool,
 }
 
-/// The receipt for a whole acceptance run. Records the capture policy, the
-/// per-attempt history (so bounded recapture retries are auditable), and — on
-/// acceptance — the accepted address plus the sanitization and **redacted**
-/// secret-scan attestations carried by the accepted manifest.
+/// The receipt for a whole acceptance run, produced on **every** terminal
+/// outcome. Identifies the disposable-restore verifier (identity + version) and
+/// the subordinate `execution_id`, records the capture policy and per-attempt
+/// history (so bounded recapture retries are auditable), the final disposition,
+/// and — on acceptance — the accepted address plus the sanitization and
+/// **redacted** secret-scan attestations carried by the accepted manifest.
 ///
 /// The secret-scan attestation is exactly that: an *attestation that a scan ran*
 /// with a redacted verdict. It is **never** a proof of absence of secrets (RFC
-/// §8 / §17.3) — it is defense in depth alongside the structural sanitization and
-/// the fail-closed External-State eligibility gate, not a substitute for them.
+/// §8 / §17.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AcceptanceReceipt {
+pub struct AcceptanceReceiptV1 {
+    /// Always [`ACCEPTANCE_RECEIPT_V1_SCHEMA`].
+    pub schema: String,
+    /// Identity of the verifier that ran the disposable restore + command.
+    pub verifier_identity: String,
+    /// Verifier version (this crate's version).
+    pub verifier_version: String,
+    /// The `execution_id` the verified candidate is subordinate to. `None` when no
+    /// candidate was ever captured. Typed, so a malformed id fails closed.
+    pub execution_id: Option<ExecutionId>,
     pub capture_policy: CapturePolicyV1,
     pub maximum_attempts: u32,
-    pub attempts: Vec<AcceptanceAttemptReceipt>,
-    pub accepted_snapshot_id: Option<String>,
-    /// Structural-sanitization attestation of the accepted candidate (which
-    /// cleanup / revocation steps ran). `None` when nothing was accepted.
+    pub attempts: Vec<AcceptanceAttemptReceiptV1>,
+    /// The run's final disposition.
+    pub outcome: AcceptanceOutcome,
+    /// The accepted content address, if any. Typed [`SnapshotId`].
+    pub accepted_snapshot_id: Option<SnapshotId>,
+    /// Structural-sanitization attestation of the accepted candidate. `None` when
+    /// nothing was accepted.
     pub sanitization_attestation: Option<SanitizationAttestationV1>,
     /// Redacted secret-scan attestation of the accepted candidate. `None` when
     /// nothing was accepted. Attestation only — never proof of absence.
     pub secret_scan_attestation: Option<SecretScanAttestationV1>,
 }
 
-/// A successful acceptance: the accepted catalog record and the run receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcceptanceResult {
-    pub snapshot: SnapshotCatalogRecord,
-    pub receipt: AcceptanceReceipt,
-}
-
-/// Fail-closed acceptance errors. Every variant refuses to accept: a candidate
-/// that cannot be proven acceptable never yields an accepted [`SnapshotCatalogRecord`].
+/// A fail-closed rejection reason. Every variant refuses to accept: a candidate
+/// that cannot be proven acceptable never yields an accepted
+/// [`SnapshotCatalogRecord`]. Unlike a hard error, a rejection is still receipted
+/// (it rides in [`AcceptanceDisposition::Rejected`] alongside a receipt).
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum AcceptanceError {
+pub enum AcceptanceFailure {
     /// The live workload requires External State, so a `running` capture is
-    /// ineligible: it would have to bind production secrets / user state. Fails
-    /// closed at the entry point, before any capture (RFC §8.3).
+    /// ineligible. Minted only by the #1090 eligibility analysis (RFC §8.3).
     #[error("running Snapshot is ineligible because the live workload requires External State")]
     ExternalStateRequiresWorkloadIdle,
-    /// The candidate's own `capture_policy` is not `running`. This first slice
-    /// accepts `running` only; the check is on the candidate manifest itself and
-    /// never relies solely on a host advertising `[Running]`.
+    /// The candidate's own `capture_policy` is not `running`.
     #[error("unsupported capture policy: this acceptance path accepts `running` candidates only")]
     UnsupportedCapturePolicy,
-    /// The acceptance configuration is malformed (empty/NUL argv, zero timeout,
-    /// zero attempts, or a deadline that cannot cover one verification).
+    /// The acceptance configuration is malformed.
     #[error("invalid Snapshot acceptance configuration: {0}")]
     InvalidConfig(&'static str),
     /// The run was cancelled.
@@ -207,22 +357,72 @@ pub enum AcceptanceError {
     /// destroy) failed. The Session must be treated as leaked and quarantined.
     #[error("disposable Session cleanup failed")]
     Cleanup,
-    /// No candidate was accepted within the configured attempts and deadline. The
-    /// receipt carries the full bounded-retry history.
+    /// No candidate was accepted within the configured attempts and deadline.
     #[error("Snapshot candidate was not accepted within the configured attempts and deadline")]
-    Exhausted { receipt: Box<AcceptanceReceipt> },
+    Exhausted,
 }
+
+/// The disposition of an acceptance run: either an accepted catalog record or a
+/// fail-closed rejection. Both arms are accompanied by a receipt in
+/// [`AcceptanceRun`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcceptanceDisposition {
+    Accepted(SnapshotCatalogRecord),
+    Rejected(AcceptanceFailure),
+}
+
+/// The always-receipted result of an acceptance run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptanceRun {
+    pub disposition: AcceptanceDisposition,
+    pub receipt: AcceptanceReceiptV1,
+}
+
+impl AcceptanceRun {
+    pub fn is_accepted(&self) -> bool {
+        matches!(self.disposition, AcceptanceDisposition::Accepted(_))
+    }
+
+    /// The accepted catalog record, if the run accepted.
+    pub fn accepted_record(&self) -> Option<&SnapshotCatalogRecord> {
+        match &self.disposition {
+            AcceptanceDisposition::Accepted(record) => Some(record),
+            AcceptanceDisposition::Rejected(_) => None,
+        }
+    }
+
+    /// The rejection reason, if the run rejected.
+    pub fn failure(&self) -> Option<&AcceptanceFailure> {
+        match &self.disposition {
+            AcceptanceDisposition::Rejected(failure) => Some(failure),
+            AcceptanceDisposition::Accepted(_) => None,
+        }
+    }
+}
+
+/// A truly unreceiptable internal fault. The pure acceptance loop always produces
+/// a receipt, so this is not returned by [`RunningSnapshotAcceptance::accept`] in
+/// #1102; it exists so a PR-2 worker boundary can surface a genuinely
+/// receipt-less crash without conflating it with a receipted rejection.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("unreceiptable internal acceptance fault: {0}")]
+pub struct FatalInternalError(pub &'static str);
 
 /// The single injectable IO seam between the pure acceptance loop and the real
 /// world. A production impl (PR-2) captures on a live builder, restores into a
 /// firecracker microVM with **no** production secret / user state / Ato identity
 /// attached (empty/synthetic ephemeral state only, RFC §8.4), runs the exact
 /// argv in that guest, and tears the Session's process tree and overlay down.
-/// Tests supply a deterministic fake.
+/// Every phase receives the [`AcceptanceBudget`] so it can honor cancellation and
+/// the remaining deadline. Tests supply a deterministic fake.
 pub trait DisposableAcceptanceLifecycle {
     /// Capture an immutable candidate Snapshot for this attempt. A fresh capture
     /// per attempt is what makes recapture retries meaningful.
-    fn capture_candidate(&mut self, attempt: u32) -> Result<CandidateSnapshot, String>;
+    fn capture_candidate(
+        &mut self,
+        attempt: u32,
+        budget: &AcceptanceBudget,
+    ) -> Result<CandidateSnapshot, String>;
 
     /// Create an isolated disposable Session with **no** production secrets, user
     /// state, or Ato user identity attached. Implementations MUST treat that
@@ -230,6 +430,7 @@ pub trait DisposableAcceptanceLifecycle {
     fn create_disposable_session(
         &mut self,
         candidate: &CandidateSnapshot,
+        budget: &AcceptanceBudget,
     ) -> Result<DisposableSessionHandle, String>;
 
     /// Restore the immutable candidate into the disposable Session's overlay. The
@@ -238,32 +439,30 @@ pub trait DisposableAcceptanceLifecycle {
         &mut self,
         session: &DisposableSessionHandle,
         candidate: &CandidateSnapshot,
+        budget: &AcceptanceBudget,
     ) -> Result<(), String>;
 
     /// Execute `seal_at.command` as exact argv in the disposable Session, bounded
-    /// by `timeout` and cooperatively cancellable. No implicit shell; argument
-    /// boundaries are preserved.
+    /// by `timeout` (already truncated to the remaining deadline) and cooperatively
+    /// cancellable via `budget`. No implicit shell; argument boundaries are
+    /// preserved.
     ///
     /// The returned [`VerificationOutcome`] MUST faithfully classify the wait
     /// status: a process that exited maps to [`VerificationOutcome::Exited`] with
     /// its real code; a signal-terminated process (`WIFSIGNALED`) to
-    /// [`VerificationOutcome::Signalled`]; a lost / undecodable child (unexpected
-    /// EOF, missing exit code, any non-exit non-signal status) to
+    /// [`VerificationOutcome::Signalled`]; a lost / undecodable child to
     /// [`VerificationOutcome::Lost`]; a timeout to [`VerificationOutcome::TimedOut`].
-    /// Mapping any non-clean wait status to `Exited(0)` is a **contract violation**:
-    /// `Exited(0)` is the sole accept, so an impl that reports a signalled, lost, or
-    /// timed-out process as `Exited(0)` would falsely accept it. Only a genuine,
-    /// clean exit with code 0 may be reported as `Exited(0)`.
+    /// Mapping any non-clean wait status to `Exited(0)` is a **contract violation**.
     fn execute_exact_argv(
         &mut self,
         session: &DisposableSessionHandle,
         argv: &[String],
         timeout: Duration,
-        cancellation: &AcceptanceCancellation,
+        budget: &AcceptanceBudget,
     ) -> Result<VerificationOutcome, String>;
 
     /// Terminate the **full** verification process tree in the Session (RFC §8.4).
-    /// Called on timeout / cancellation / verification error before destroy.
+    /// Called before destroy on every non-accepted outcome that ran the command.
     fn terminate_process_tree(&mut self, session: &DisposableSessionHandle) -> Result<(), String>;
 
     /// Destroy the disposable Session and its overlay. Called unconditionally
@@ -281,10 +480,8 @@ pub trait DisposableAcceptanceLifecycle {
 /// firecracker microVM + overlay. Straight-line teardown would leak that VM if any
 /// seam method — or a downstream `.clone()` — panicked and unwound the loop before
 /// destroy ran. This guard closes that hole: the normal path disarms it via
-/// [`DisposableSessionGuard::teardown`] (which records the receipt fields and
-/// surfaces failures as [`AcceptanceError::Cleanup`]); on any other exit `Drop`
-/// still terminates the process tree and destroys the Session, so a disposable
-/// microVM + overlay is never leaked on the panic / early-return path (RFC §8.4).
+/// [`DisposableSessionGuard::teardown`]; on any other exit `Drop` still terminates
+/// the process tree and destroys the Session (RFC §8.4).
 struct DisposableSessionGuard<'a, L: DisposableAcceptanceLifecycle + ?Sized> {
     lifecycle: &'a mut L,
     /// `Some` while the Session is live; `None` once `teardown` (or a prior `Drop`)
@@ -301,12 +498,16 @@ impl<'a, L: DisposableAcceptanceLifecycle + ?Sized> DisposableSessionGuard<'a, L
     }
 
     /// Restore the immutable candidate into the still-live Session's overlay.
-    fn restore_candidate(&mut self, candidate: &CandidateSnapshot) -> Result<(), String> {
+    fn restore_candidate(
+        &mut self,
+        candidate: &CandidateSnapshot,
+        budget: &AcceptanceBudget,
+    ) -> Result<(), String> {
         let session = self
             .session
             .as_ref()
             .expect("disposable Session handle is live until teardown");
-        self.lifecycle.restore_candidate(session, candidate)
+        self.lifecycle.restore_candidate(session, candidate, budget)
     }
 
     /// Run `seal_at.command` as exact argv in the still-live Session.
@@ -314,25 +515,24 @@ impl<'a, L: DisposableAcceptanceLifecycle + ?Sized> DisposableSessionGuard<'a, L
         &mut self,
         argv: &[String],
         timeout: Duration,
-        cancellation: &AcceptanceCancellation,
+        budget: &AcceptanceBudget,
     ) -> Result<VerificationOutcome, String> {
         let session = self
             .session
             .as_ref()
             .expect("disposable Session handle is live until teardown");
         self.lifecycle
-            .execute_exact_argv(session, argv, timeout, cancellation)
+            .execute_exact_argv(session, argv, timeout, budget)
     }
 
     /// Disarm the guard and run the normal-path teardown: terminate the process
     /// tree when required, then **always** destroy the Session. Records the outcome
     /// on `receipt` and returns whether either step failed (mapped by the caller to
-    /// [`AcceptanceError::Cleanup`]). Consuming `self` here means the subsequent
-    /// `Drop` sees `session == None` and does nothing.
+    /// [`AcceptanceFailure::Cleanup`]).
     fn teardown(
         mut self,
         terminate_required: bool,
-        receipt: &mut AcceptanceAttemptReceipt,
+        receipt: &mut AcceptanceAttemptReceiptV1,
     ) -> bool {
         let session = self
             .session
@@ -358,10 +558,7 @@ impl<L: DisposableAcceptanceLifecycle + ?Sized> Drop for DisposableSessionGuard<
         // Only fires when `teardown` did NOT run — i.e. the loop unwound (panic) or
         // returned early while the Session was still live. Best-effort and
         // infallible: terminate the process tree, then destroy the Session, so a
-        // live disposable microVM + overlay is never leaked. Errors are
-        // unrecoverable here and are deliberately dropped (a `Drop` impl cannot
-        // surface them); the normal path uses `teardown` for the fallible,
-        // receipted teardown that reports `Cleanup`.
+        // live disposable microVM + overlay is never leaked.
         if let Some(session) = self.session.take() {
             let _ = self.lifecycle.terminate_process_tree(&session);
             let _ = self.lifecycle.destroy_disposable_session(session);
@@ -374,233 +571,307 @@ pub struct RunningSnapshotAcceptance;
 
 impl RunningSnapshotAcceptance {
     /// Accept a `running` candidate by verifying it through a disposable restored
-    /// Session, or fail closed.
+    /// Session, or fail closed — always returning a receipted [`AcceptanceRun`].
     ///
     /// Ordering of the fail-closed gates:
-    /// 1. Configuration is validated.
-    /// 2. External-State-for-live-workload eligibility is rejected **before any
-    ///    capture** (RFC §8.3).
-    /// 3. Per attempt (bounded by `maximum_attempts` **and** `total_deadline`):
-    ///    capture an immutable candidate, reject any candidate whose own
-    ///    `capture_policy` is not `running`, create a disposable Session, restore
-    ///    the candidate into it, run the exact argv, accept on and only on exit
-    ///    `0`, and **always** tear the Session down.
+    /// 1. Holding `eligibility` is itself the External-State gate (RFC §8.3).
+    /// 2. Configuration is validated.
+    /// 3. Per attempt (bounded by `maximum_attempts` **and** the absolute deadline):
+    ///    before and after each phase, honor cancellation and the deadline; capture
+    ///    an immutable candidate; reject any candidate whose own `capture_policy`
+    ///    is not `running`; create a disposable Session; restore the candidate;
+    ///    run the exact argv with a timeout truncated to the remaining budget;
+    ///    accept on and only on exit `0` within the deadline; and **always** tear
+    ///    the Session down, terminating its process tree on every non-accepted
+    ///    outcome that reached command execution.
     pub fn accept(
         lifecycle: &mut impl DisposableAcceptanceLifecycle,
-        eligibility: SnapshotEligibility,
+        eligibility: VerifiedRunningSnapshotEligibility,
         config: &AcceptanceConfig,
         cancellation: &AcceptanceCancellation,
-    ) -> Result<AcceptanceResult, AcceptanceError> {
-        validate_config(config)?;
-        // Fail closed at the entry point: an External-State live workload is
-        // ineligible for a `running` capture and must never fall back to a
-        // secret-bearing running capture (RFC §8.3). Checked before any capture.
-        if eligibility.external_state_required_by_live_workload {
-            return Err(AcceptanceError::ExternalStateRequiresWorkloadIdle);
+        clock: &dyn MonotonicClock,
+    ) -> Result<AcceptanceRun, FatalInternalError> {
+        // Holding `eligibility` IS the fail-closed External-State gate: the proof
+        // can only be minted by the (future #1090) verified-Execution-Contract
+        // analysis, never by a caller-supplied bool, so a Capsule whose live
+        // workload requires External State can never reach this path (RFC §8.3).
+        let VerifiedRunningSnapshotEligibility { .. } = eligibility;
+
+        let mut receipt = new_receipt(config);
+
+        if let Err(failure) = validate_config(config) {
+            return Ok(reject(receipt, failure));
         }
 
-        let started = Instant::now();
-        let mut receipt = AcceptanceReceipt {
-            capture_policy: CapturePolicyV1::Running,
-            maximum_attempts: config.maximum_attempts,
-            attempts: Vec::new(),
-            accepted_snapshot_id: None,
-            sanitization_attestation: None,
-            secret_scan_attestation: None,
+        let started = clock.now();
+        let absolute_deadline = started + config.total_deadline;
+        let budget = AcceptanceBudget {
+            absolute_deadline,
+            cancellation,
+            clock,
         };
 
         for attempt in 1..=config.maximum_attempts {
-            if cancellation.is_cancelled() {
-                return Err(AcceptanceError::Cancelled);
+            // Before each attempt: cancellation, then deadline. No new attempt
+            // starts after the deadline (RFC §8.2).
+            if budget.is_cancelled() {
+                return Ok(reject(receipt, AcceptanceFailure::Cancelled));
             }
-            if started.elapsed() >= config.total_deadline {
+            if budget.is_expired() {
                 break;
             }
 
-            let candidate = match lifecycle.capture_candidate(attempt) {
+            let candidate = match lifecycle.capture_candidate(attempt, &budget) {
                 Ok(candidate) => candidate,
                 Err(_) => {
-                    receipt.attempts.push(AcceptanceAttemptReceipt {
+                    receipt.attempts.push(attempt_receipt(
                         attempt,
-                        candidate_snapshot_id: None,
-                        outcome: "capture-failed".to_string(),
-                        process_tree_terminated: false,
-                        disposable_session_destroyed: false,
-                    });
+                        None,
+                        AcceptanceAttemptOutcome::CaptureFailed,
+                    ));
                     continue;
                 }
             };
-            candidate
-                .manifest
-                .validate()
-                .map_err(|_| AcceptanceError::Lifecycle {
-                    phase: "candidate-validation",
-                })?;
-            // Capture-policy gate on the CANDIDATE MANIFEST ITSELF. The RFC's
-            // first slice accepts `running` only; we never rely solely on a host
+            if receipt.execution_id.is_none() {
+                receipt.execution_id = Some(candidate.manifest.execution_id.clone());
+            }
+
+            if candidate.manifest.validate().is_err() {
+                receipt.attempts.push(attempt_receipt(
+                    attempt,
+                    None,
+                    AcceptanceAttemptOutcome::CandidateValidationFailed,
+                ));
+                return Ok(reject(
+                    receipt,
+                    AcceptanceFailure::Lifecycle {
+                        phase: "candidate-validation",
+                    },
+                ));
+            }
+            // Capture-policy gate on the CANDIDATE MANIFEST ITSELF. The RFC's first
+            // slice accepts `running` only; we never rely solely on a host
             // advertising `[Running]` — the candidate must declare `running`.
             if candidate.manifest.capture_policy != CapturePolicyV1::Running {
-                return Err(AcceptanceError::UnsupportedCapturePolicy);
+                receipt.attempts.push(attempt_receipt(
+                    attempt,
+                    None,
+                    AcceptanceAttemptOutcome::UnsupportedCapturePolicy,
+                ));
+                return Ok(reject(receipt, AcceptanceFailure::UnsupportedCapturePolicy));
             }
             // The accepted address is derived from the candidate bytes ONCE, up
             // front. Verification borrows the candidate immutably and touches only
             // the disposable Session, so this address is exactly what is accepted.
-            let snapshot_id =
-                candidate
-                    .manifest
-                    .snapshot_id()
-                    .map_err(|_| AcceptanceError::Lifecycle {
-                        phase: "candidate-validation",
-                    })?;
-
-            let mut attempt_receipt = AcceptanceAttemptReceipt {
-                attempt,
-                candidate_snapshot_id: Some(snapshot_id.as_str().to_string()),
-                outcome: "restore-failed".to_string(),
-                process_tree_terminated: false,
-                disposable_session_destroyed: false,
+            let snapshot_id = match candidate.manifest.snapshot_id() {
+                Ok(id) => id,
+                Err(_) => {
+                    receipt.attempts.push(attempt_receipt(
+                        attempt,
+                        None,
+                        AcceptanceAttemptOutcome::CandidateValidationFailed,
+                    ));
+                    return Ok(reject(
+                        receipt,
+                        AcceptanceFailure::Lifecycle {
+                            phase: "candidate-validation",
+                        },
+                    ));
+                }
             };
-            let session = match lifecycle.create_disposable_session(&candidate) {
+
+            // After capture, before creating a Session: honor cancellation and the
+            // deadline so no disposable Session is ever created past the budget.
+            if budget.is_cancelled() {
+                receipt.attempts.push(attempt_receipt(
+                    attempt,
+                    Some(snapshot_id.clone()),
+                    AcceptanceAttemptOutcome::Cancelled,
+                ));
+                return Ok(reject(receipt, AcceptanceFailure::Cancelled));
+            }
+            if budget.is_expired() {
+                receipt.attempts.push(attempt_receipt(
+                    attempt,
+                    Some(snapshot_id.clone()),
+                    AcceptanceAttemptOutcome::DeadlineExceeded,
+                ));
+                break;
+            }
+
+            let mut attempt_rec = attempt_receipt(
+                attempt,
+                Some(snapshot_id.clone()),
+                AcceptanceAttemptOutcome::RestoreFailed,
+            );
+            let session = match lifecycle.create_disposable_session(&candidate, &budget) {
                 Ok(session) => session,
                 Err(_) => {
-                    attempt_receipt.outcome = "create-session-failed".to_string();
-                    receipt.attempts.push(attempt_receipt);
+                    attempt_rec.outcome = AcceptanceAttemptOutcome::CreateSessionFailed;
+                    receipt.attempts.push(attempt_rec);
                     continue;
                 }
             };
+
             // The Session is now live. Hold it in an RAII guard so that even if a
-            // seam method (restore / execute) or a downstream `.clone()` panics and
-            // unwinds the loop before the explicit teardown below, the guard's
-            // `Drop` still terminates the process tree and destroys the Session — a
-            // real firecracker microVM + overlay must never leak on that path
-            // (RFC §8.4). The normal path disarms the guard via `teardown`.
+            // seam method or a downstream `.clone()` panics and unwinds the loop
+            // before the explicit teardown below, the guard's `Drop` still
+            // terminates the process tree and destroys the Session (RFC §8.4).
             let mut guard = DisposableSessionGuard::new(&mut *lifecycle, session);
 
-            let (accepted, terminate_required) = if guard.restore_candidate(&candidate).is_err() {
-                attempt_receipt.outcome = "restore-failed".to_string();
-                (false, false)
+            // Determine acceptance and whether the process tree must be terminated.
+            // Per RFC §8.4, the tree is terminated on EVERY non-accepted outcome
+            // that reached command execution; a clean accepted exit 0 needs no kill.
+            let (accepted, terminate_required, outcome) = if budget.is_cancelled() {
+                // Cancelled after Session creation, before restore: no process tree.
+                (false, false, AcceptanceAttemptOutcome::Cancelled)
+            } else if guard.restore_candidate(&candidate, &budget).is_err() {
+                // Restore failed: the command never ran, so no process tree exists.
+                (false, false, AcceptanceAttemptOutcome::RestoreFailed)
+            } else if budget.is_cancelled() {
+                // Cancelled after restore, before execute: the command MUST NOT run.
+                (false, false, AcceptanceAttemptOutcome::Cancelled)
             } else {
-                match guard.execute_exact_argv(
-                    &config.seal_at_argv,
-                    config.verification_timeout,
-                    cancellation,
-                ) {
-                    // A cancellation observed after a nominal exit still rejects
-                    // and tears the tree down — we never accept a race winner.
-                    Ok(VerificationOutcome::Exited(_)) if cancellation.is_cancelled() => {
-                        attempt_receipt.outcome = "cancelled".to_string();
-                        (false, true)
-                    }
-                    // Exit 0 within the deadline is the SOLE success signal.
-                    Ok(VerificationOutcome::Exited(0))
-                        if started.elapsed() < config.total_deadline =>
-                    {
-                        attempt_receipt.outcome = "accepted".to_string();
-                        (true, false)
-                    }
-                    // Exit 0 that only landed after the deadline is not an accept.
-                    Ok(VerificationOutcome::Exited(0)) => {
-                        attempt_receipt.outcome = "deadline-exceeded".to_string();
-                        (false, false)
-                    }
-                    Ok(VerificationOutcome::Exited(_)) => {
-                        attempt_receipt.outcome = "nonzero-exit".to_string();
-                        (false, false)
-                    }
-                    // A signal-terminated process has NO exit code, so it can never
-                    // be `Exited(0)`: it is structurally impossible for it to reach
-                    // the accept arm. Reject on the same path as a non-zero exit.
-                    Ok(VerificationOutcome::Signalled(_)) => {
-                        attempt_receipt.outcome = "signalled".to_string();
-                        (false, false)
-                    }
-                    // A lost / undecodable child likewise has no exit code and can
-                    // never be `Exited(0)`. Reject like a non-zero exit.
-                    Ok(VerificationOutcome::Lost) => {
-                        attempt_receipt.outcome = "lost".to_string();
-                        (false, false)
-                    }
-                    Ok(VerificationOutcome::TimedOut) => {
-                        attempt_receipt.outcome = "timeout".to_string();
-                        (false, true)
-                    }
-                    Ok(VerificationOutcome::Cancelled) => {
-                        attempt_receipt.outcome = "cancelled".to_string();
-                        (false, true)
-                    }
-                    Err(_) => {
-                        attempt_receipt.outcome = "verification-error".to_string();
-                        (false, true)
-                    }
-                }
+                // Truncate the per-attempt timeout to the remaining deadline so the
+                // total run never overshoots `total_deadline`.
+                let exec_timeout = config.verification_timeout.min(budget.remaining());
+                classify(
+                    guard.execute_exact_argv(&config.seal_at_argv, exec_timeout, &budget),
+                    &budget,
+                )
             };
 
-            // Teardown is UNCONDITIONAL once a Session exists. Disarming the guard
-            // runs the same terminate-then-destroy on the normal path: a failed
-            // process-tree termination must not skip destroy, so destroy is still
-            // attempted and either failure surfaces as `Cleanup`. (If instead the
-            // loop had unwound above, the guard's `Drop` would have run this
-            // teardown as a best-effort safety net.)
-            let cleanup_failed = guard.teardown(terminate_required, &mut attempt_receipt);
-            receipt.attempts.push(attempt_receipt);
+            attempt_rec.outcome = outcome;
+            let cleanup_failed = guard.teardown(terminate_required, &mut attempt_rec);
+            receipt.attempts.push(attempt_rec);
 
             if cleanup_failed {
-                return Err(AcceptanceError::Cleanup);
+                return Ok(reject(receipt, AcceptanceFailure::Cleanup));
             }
-
             if accepted {
-                // Accepted bytes = candidate bytes, unchanged. The overlay that
-                // the command wrote to has been destroyed above; the accepted
-                // record pins the address derived from the candidate before any
-                // verification ran.
-                receipt.accepted_snapshot_id = Some(snapshot_id.as_str().to_string());
+                // Accepted bytes = candidate bytes, unchanged. The overlay the
+                // command wrote to has been destroyed above; the record pins the
+                // address derived from the candidate before any verification ran.
+                receipt.accepted_snapshot_id = Some(snapshot_id.clone());
                 receipt.sanitization_attestation =
                     Some(candidate.manifest.sanitization_attestation.clone());
                 receipt.secret_scan_attestation =
                     Some(candidate.manifest.secret_scan_attestation.clone());
-                return Ok(AcceptanceResult {
-                    snapshot: SnapshotCatalogRecord::new(snapshot_id, AcceptanceStatus::Accepted),
+                receipt.outcome = AcceptanceOutcome::Accepted;
+                return Ok(AcceptanceRun {
+                    disposition: AcceptanceDisposition::Accepted(SnapshotCatalogRecord::new(
+                        snapshot_id,
+                        AcceptanceStatus::Accepted,
+                    )),
                     receipt,
                 });
             }
-            if cancellation.is_cancelled() {
-                return Err(AcceptanceError::Cancelled);
+            if budget.is_cancelled() {
+                return Ok(reject(receipt, AcceptanceFailure::Cancelled));
             }
         }
 
-        Err(AcceptanceError::Exhausted {
-            receipt: Box::new(receipt),
-        })
+        Ok(reject(receipt, AcceptanceFailure::Exhausted))
     }
 }
 
-fn validate_config(config: &AcceptanceConfig) -> Result<(), AcceptanceError> {
+/// Map an `execute_exact_argv` result to `(accepted, terminate_required, outcome)`.
+/// A clean exit 0 within the deadline is the sole accept and needs no tree kill;
+/// every other outcome that reached execution rejects AND terminates the tree.
+fn classify(
+    result: Result<VerificationOutcome, String>,
+    budget: &AcceptanceBudget,
+) -> (bool, bool, AcceptanceAttemptOutcome) {
+    match result {
+        // A cancellation observed after a nominal exit still rejects and tears the
+        // tree down — we never accept a race winner.
+        Ok(VerificationOutcome::Exited(_)) if budget.is_cancelled() => {
+            (false, true, AcceptanceAttemptOutcome::Cancelled)
+        }
+        // Exit 0 within the deadline is the SOLE success signal.
+        Ok(VerificationOutcome::Exited(0)) if !budget.is_expired() => {
+            (true, false, AcceptanceAttemptOutcome::Accepted)
+        }
+        // Exit 0 that only landed after the deadline is not an accept.
+        Ok(VerificationOutcome::Exited(0)) => {
+            (false, true, AcceptanceAttemptOutcome::DeadlineExceeded)
+        }
+        Ok(VerificationOutcome::Exited(_)) => (false, true, AcceptanceAttemptOutcome::NonzeroExit),
+        // A signalled or lost process has no exit code, so it can never be
+        // `Exited(0)`: structurally impossible to reach the accept arm.
+        Ok(VerificationOutcome::Signalled(_)) => (false, true, AcceptanceAttemptOutcome::Signalled),
+        Ok(VerificationOutcome::Lost) => (false, true, AcceptanceAttemptOutcome::Lost),
+        Ok(VerificationOutcome::TimedOut) => (false, true, AcceptanceAttemptOutcome::Timeout),
+        Ok(VerificationOutcome::Cancelled) => (false, true, AcceptanceAttemptOutcome::Cancelled),
+        Err(_) => (false, true, AcceptanceAttemptOutcome::VerificationError),
+    }
+}
+
+fn new_receipt(config: &AcceptanceConfig) -> AcceptanceReceiptV1 {
+    AcceptanceReceiptV1 {
+        schema: ACCEPTANCE_RECEIPT_V1_SCHEMA.to_string(),
+        verifier_identity: DISPOSABLE_RESTORE_VERIFIER_IDENTITY.to_string(),
+        verifier_version: DISPOSABLE_RESTORE_VERIFIER_VERSION.to_string(),
+        execution_id: None,
+        capture_policy: CapturePolicyV1::Running,
+        maximum_attempts: config.maximum_attempts,
+        attempts: Vec::new(),
+        outcome: AcceptanceOutcome::Rejected,
+        accepted_snapshot_id: None,
+        sanitization_attestation: None,
+        secret_scan_attestation: None,
+    }
+}
+
+fn attempt_receipt(
+    attempt: u32,
+    candidate_snapshot_id: Option<SnapshotId>,
+    outcome: AcceptanceAttemptOutcome,
+) -> AcceptanceAttemptReceiptV1 {
+    AcceptanceAttemptReceiptV1 {
+        attempt,
+        candidate_snapshot_id,
+        outcome,
+        process_tree_terminated: false,
+        disposable_session_destroyed: false,
+    }
+}
+
+fn reject(mut receipt: AcceptanceReceiptV1, failure: AcceptanceFailure) -> AcceptanceRun {
+    receipt.outcome = AcceptanceOutcome::Rejected;
+    AcceptanceRun {
+        disposition: AcceptanceDisposition::Rejected(failure),
+        receipt,
+    }
+}
+
+fn validate_config(config: &AcceptanceConfig) -> Result<(), AcceptanceFailure> {
     if config.maximum_attempts == 0 {
-        return Err(AcceptanceError::InvalidConfig(
+        return Err(AcceptanceFailure::InvalidConfig(
             "maximum_attempts must be positive",
         ));
     }
     if config.verification_timeout.is_zero() {
-        return Err(AcceptanceError::InvalidConfig(
+        return Err(AcceptanceFailure::InvalidConfig(
             "verification_timeout must be positive",
         ));
     }
     if config.total_deadline < config.verification_timeout {
-        return Err(AcceptanceError::InvalidConfig(
+        return Err(AcceptanceFailure::InvalidConfig(
             "total_deadline must cover one verification timeout",
         ));
     }
-    // Exact argv, no implicit shell: reject an empty argv, an empty argument, or a
-    // NUL (which no exec boundary can carry) so a malformed command never reaches
-    // a real executor unquoted (RFC §6.1).
+    // Exact argv, no implicit shell (RFC §6.1). Reject ONLY an empty argv, an empty
+    // `argv[0]` (the program), or a NUL byte in any argument (which no exec
+    // boundary can carry). Empty-string arguments in positions >= 1 are VALID argv
+    // (e.g. `["prog", "--value", ""]`) and are preserved unchanged — dropping or
+    // rejecting them would silently change the authored command's meaning.
     if config.seal_at_argv.is_empty()
-        || config
-            .seal_at_argv
-            .iter()
-            .any(|arg| arg.is_empty() || arg.contains('\0'))
+        || config.seal_at_argv[0].is_empty()
+        || config.seal_at_argv.iter().any(|arg| arg.contains('\0'))
     {
-        return Err(AcceptanceError::InvalidConfig(
-            "seal_at argv must be non-empty exact arguments without NUL",
+        return Err(AcceptanceFailure::InvalidConfig(
+            "seal_at argv must be non-empty with a non-empty program and no NUL bytes",
         ));
     }
     Ok(())
@@ -608,6 +879,8 @@ fn validate_config(config: &AcceptanceConfig) -> Result<(), AcceptanceError> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use capsule::execution_contract::{ContentDigest, ExecutionId};
     use capsule::snapshot_manifest::{
         PortabilityTier, RestoreContractV1, SNAPSHOT_COMPATIBILITY_V1_SCHEMA,
@@ -627,7 +900,35 @@ mod tests {
         ExecutionId::new(format!("blake3:{}", "a".repeat(64))).expect("valid execution id")
     }
 
-    /// A valid `running` candidate manifest (the acceptance happy path).
+    /// A controllable monotonic clock: `now()` is `base + elapsed`, where
+    /// `elapsed` is advanced explicitly by tests (or by the fake lifecycle sharing
+    /// a clone). No wall-clock sleeps.
+    #[derive(Clone)]
+    struct FakeClock {
+        base: Instant,
+        elapsed_nanos: Arc<AtomicU64>,
+    }
+
+    impl FakeClock {
+        fn new() -> Self {
+            Self {
+                base: Instant::now(),
+                elapsed_nanos: Arc::new(AtomicU64::new(0)),
+            }
+        }
+
+        fn advance(&self, by: Duration) {
+            self.elapsed_nanos
+                .fetch_add(by.as_nanos() as u64, Ordering::SeqCst);
+        }
+    }
+
+    impl MonotonicClock for FakeClock {
+        fn now(&self) -> Instant {
+            self.base + Duration::from_nanos(self.elapsed_nanos.load(Ordering::SeqCst))
+        }
+    }
+
     fn running_manifest() -> SnapshotManifestV1 {
         manifest_with_policy(CapturePolicyV1::Running)
     }
@@ -673,25 +974,28 @@ mod tests {
     }
 
     /// A deterministic fake lifecycle. It hands out a fixed `running` manifest and
-    /// a Session handle distinct from any candidate, and records what the loop did.
+    /// a Session handle distinct from any candidate, records what the loop did, and
+    /// can advance a shared [`FakeClock`] at capture / execute to exercise deadlines
+    /// without sleeping.
     struct FakeLifecycle {
         manifest: SnapshotManifestV1,
         outcomes: Vec<VerificationOutcome>,
         captures: u32,
+        creates: u32,
         restores: u32,
         terminates: u32,
         destroys: u32,
         executed_argv: Vec<Vec<String>>,
+        recorded_timeouts: Vec<Duration>,
         destroyed_sessions: Vec<DisposableSessionHandle>,
         restore_fails: bool,
         terminate_fails: bool,
         destroy_fails: bool,
-        execute_delay: Duration,
-        /// Optionally flip cancellation when the command is executed, to model a
-        /// cancellation that races an otherwise-nominal exit.
+        clock: Option<FakeClock>,
+        advance_on_capture: Duration,
+        advance_on_execute: Duration,
         cancel_on_execute: Option<AcceptanceCancellation>,
-        /// Panic from inside `execute_exact_argv` to model a seam method unwinding
-        /// the acceptance loop while a disposable Session is live.
+        cancel_on_restore: Option<AcceptanceCancellation>,
         panic_on_execute: bool,
     }
 
@@ -701,16 +1005,21 @@ mod tests {
                 manifest: running_manifest(),
                 outcomes,
                 captures: 0,
+                creates: 0,
                 restores: 0,
                 terminates: 0,
                 destroys: 0,
                 executed_argv: Vec::new(),
+                recorded_timeouts: Vec::new(),
                 destroyed_sessions: Vec::new(),
                 restore_fails: false,
                 terminate_fails: false,
                 destroy_fails: false,
-                execute_delay: Duration::ZERO,
+                clock: None,
+                advance_on_capture: Duration::ZERO,
+                advance_on_execute: Duration::ZERO,
                 cancel_on_execute: None,
+                cancel_on_restore: None,
                 panic_on_execute: false,
             }
         }
@@ -723,8 +1032,15 @@ mod tests {
     }
 
     impl DisposableAcceptanceLifecycle for FakeLifecycle {
-        fn capture_candidate(&mut self, _attempt: u32) -> Result<CandidateSnapshot, String> {
+        fn capture_candidate(
+            &mut self,
+            _attempt: u32,
+            _budget: &AcceptanceBudget,
+        ) -> Result<CandidateSnapshot, String> {
             self.captures += 1;
+            if let Some(clock) = &self.clock {
+                clock.advance(self.advance_on_capture);
+            }
             Ok(CandidateSnapshot {
                 manifest: self.manifest.clone(),
             })
@@ -733,7 +1049,9 @@ mod tests {
         fn create_disposable_session(
             &mut self,
             _candidate: &CandidateSnapshot,
+            _budget: &AcceptanceBudget,
         ) -> Result<DisposableSessionHandle, String> {
+            self.creates += 1;
             Ok(DisposableSessionHandle {
                 opaque_id: format!("disposable-session-{}", self.captures),
             })
@@ -743,8 +1061,12 @@ mod tests {
             &mut self,
             _session: &DisposableSessionHandle,
             _candidate: &CandidateSnapshot,
+            _budget: &AcceptanceBudget,
         ) -> Result<(), String> {
             self.restores += 1;
+            if let Some(cancellation) = &self.cancel_on_restore {
+                cancellation.cancel();
+            }
             if self.restore_fails {
                 Err("restore failed".to_string())
             } else {
@@ -756,12 +1078,13 @@ mod tests {
             &mut self,
             _session: &DisposableSessionHandle,
             argv: &[String],
-            _timeout: Duration,
-            _cancellation: &AcceptanceCancellation,
+            timeout: Duration,
+            _budget: &AcceptanceBudget,
         ) -> Result<VerificationOutcome, String> {
             self.executed_argv.push(argv.to_vec());
-            if self.execute_delay > Duration::ZERO {
-                std::thread::sleep(self.execute_delay);
+            self.recorded_timeouts.push(timeout);
+            if let Some(clock) = &self.clock {
+                clock.advance(self.advance_on_execute);
             }
             if let Some(cancellation) = &self.cancel_on_execute {
                 cancellation.cancel();
@@ -811,10 +1134,20 @@ mod tests {
         }
     }
 
-    fn eligible() -> SnapshotEligibility {
-        SnapshotEligibility {
-            external_state_required_by_live_workload: false,
-        }
+    fn proof() -> VerifiedRunningSnapshotEligibility {
+        VerifiedRunningSnapshotEligibility::for_test()
+    }
+
+    /// Run acceptance with a real system clock and no cancellation (the common case).
+    fn run(lifecycle: &mut FakeLifecycle, config: &AcceptanceConfig) -> AcceptanceRun {
+        RunningSnapshotAcceptance::accept(
+            lifecycle,
+            proof(),
+            config,
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault")
     }
 
     // --- AC: exit 0 is the ONLY success; exact argv preserved ---
@@ -825,120 +1158,145 @@ mod tests {
             VerificationOutcome::Exited(1),
             VerificationOutcome::Exited(0),
         ]);
-        let result = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(2),
-            &Default::default(),
-        )
-        .expect("second attempt (exit 0) accepts");
+        let run = run(&mut lifecycle, &config(2));
 
         assert_eq!(lifecycle.executed_argv, vec![config(2).seal_at_argv; 2]);
-        assert_eq!(result.receipt.attempts[0].outcome, "nonzero-exit");
-        assert_eq!(result.receipt.attempts[1].outcome, "accepted");
-        assert!(result.snapshot.is_accepted());
-
-        // A signal-terminated command (surfaced as a non-zero code) is rejected.
-        let mut signalled = FakeLifecycle::new(vec![VerificationOutcome::Exited(137)]);
-        let error = RunningSnapshotAcceptance::accept(
-            &mut signalled,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .expect_err("a signalled (non-zero) command never accepts");
-        let AcceptanceError::Exhausted { receipt } = error else {
-            panic!("expected exhausted");
-        };
-        assert_eq!(receipt.attempts[0].outcome, "nonzero-exit");
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::NonzeroExit
+        );
+        assert_eq!(
+            run.receipt.attempts[1].outcome,
+            AcceptanceAttemptOutcome::Accepted
+        );
+        assert!(run.is_accepted());
+        assert!(run.accepted_record().unwrap().is_accepted());
     }
 
-    // --- AC: a signal-terminated process is REJECTED, never accepted ---
-    // exit-0-only is structural: a `Signalled` outcome has no exit code, so it can
-    // never be `Exited(0)` and can never reach the sole accept arm.
+    // --- Major 1: exact argv preserves empty-string arguments ---
     #[test]
-    fn signalled_outcome_is_rejected_and_destroys_session() {
-        // SIGKILL (9): a signal is never success.
+    fn empty_string_argument_is_preserved_through_to_the_lifecycle() {
+        let cfg = AcceptanceConfig {
+            // A valid argv whose second argument is deliberately the empty string.
+            seal_at_argv: vec!["prog".to_string(), "--value".to_string(), String::new()],
+            ..config(1)
+        };
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let run = run(&mut lifecycle, &cfg);
+
+        assert!(run.is_accepted());
+        // The empty argument survived validation AND was passed through unchanged.
+        assert_eq!(lifecycle.executed_argv, vec![cfg.seal_at_argv]);
+    }
+
+    // --- AC: a signal-terminated process is REJECTED, and its tree is terminated ---
+    #[test]
+    fn signalled_outcome_is_rejected_terminated_and_destroyed() {
         let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Signalled(9)]);
-        let error = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .expect_err("a signalled process never accepts");
+        let run = run(&mut lifecycle, &config(1));
 
-        let AcceptanceError::Exhausted { receipt } = error else {
-            panic!("expected exhausted");
-        };
-        assert_eq!(receipt.attempts.len(), 1);
-        assert_eq!(receipt.attempts[0].outcome, "signalled");
-        assert!(
-            receipt.accepted_snapshot_id.is_none(),
-            "a signalled outcome must never be accepted"
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Exhausted));
+        assert_eq!(run.receipt.attempts.len(), 1);
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::Signalled
         );
-        // Reject paths still tear the disposable Session down (cleanup).
+        assert!(run.receipt.accepted_snapshot_id.is_none());
+        // Blocker 1: a signalled outcome terminates the tree AND destroys.
+        assert_eq!(lifecycle.terminates, 1);
         assert_eq!(lifecycle.destroys, 1);
-        assert_eq!(lifecycle.destroyed_sessions.len(), 1);
+        assert!(run.receipt.attempts[0].process_tree_terminated);
     }
 
-    // --- AC: a lost / undecodable child is REJECTED, never accepted ---
-    // Like `Signalled`, `Lost` carries no exit code and cannot be `Exited(0)`.
+    // --- AC: a lost / undecodable child is REJECTED, terminated, destroyed ---
     #[test]
-    fn lost_outcome_is_rejected_and_destroys_session() {
+    fn lost_outcome_is_rejected_terminated_and_destroyed() {
         let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Lost]);
-        let error = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .expect_err("a lost child never accepts");
+        let run = run(&mut lifecycle, &config(1));
 
-        let AcceptanceError::Exhausted { receipt } = error else {
-            panic!("expected exhausted");
-        };
-        assert_eq!(receipt.attempts.len(), 1);
-        assert_eq!(receipt.attempts[0].outcome, "lost");
-        assert!(
-            receipt.accepted_snapshot_id.is_none(),
-            "a lost outcome must never be accepted"
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::Lost
         );
-        // Reject paths still tear the disposable Session down (cleanup).
+        assert!(run.receipt.accepted_snapshot_id.is_none());
+        // Blocker 1: a lost outcome terminates the tree AND destroys.
+        assert_eq!(lifecycle.terminates, 1);
         assert_eq!(lifecycle.destroys, 1);
-        assert_eq!(lifecycle.destroyed_sessions.len(), 1);
     }
 
-    // --- AC: verification side effects do not alter accepted bytes;
-    //         candidate + accepted bytes immutable ---
+    // --- Blocker 1: a non-zero exit terminates the tree AND destroys ---
+    #[test]
+    fn nonzero_exit_terminates_and_destroys() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(2)]);
+        let run = run(&mut lifecycle, &config(1));
+
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::NonzeroExit
+        );
+        assert_eq!(lifecycle.terminates, 1);
+        assert_eq!(lifecycle.destroys, 1);
+    }
+
+    // --- Blocker 1: a clean accepted exit 0 destroys WITHOUT terminating ---
+    #[test]
+    fn accepted_exit_zero_destroys_without_terminating() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let run = run(&mut lifecycle, &config(1));
+
+        assert!(run.is_accepted());
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(lifecycle.terminates, 0, "a clean exit 0 needs no tree kill");
+        assert!(!run.receipt.attempts[0].process_tree_terminated);
+        assert!(run.receipt.attempts[0].disposable_session_destroyed);
+    }
+
+    // --- Blocker 1: a deadline-exceeded exit 0 terminates the tree AND destroys ---
+    #[test]
+    fn deadline_exceeded_exit_zero_terminates_and_destroys() {
+        // Exit 0 that only lands after the deadline: reject, and (Blocker 1)
+        // terminate the tree since the command reached execution.
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        lifecycle.clock = Some(clock.clone());
+        // The command runs, then wall-clock (the fake clock) crosses the deadline.
+        lifecycle.advance_on_execute = Duration::from_secs(20);
+
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &clock,
+        )
+        .expect("no internal fault");
+
+        assert!(!run.is_accepted());
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::DeadlineExceeded
+        );
+        assert_eq!(lifecycle.terminates, 1);
+        assert_eq!(lifecycle.destroys, 1);
+    }
+
+    // --- AC: verification side effects do not alter accepted bytes ---
     #[test]
     fn accepted_bytes_are_the_unchanged_candidate_bytes() {
         let manifest = running_manifest();
-        // The address the candidate commits to, computed independently of the run.
         let expected_id = manifest.snapshot_id().expect("valid snapshot id");
         let mut lifecycle = FakeLifecycle::with_manifest(manifest.clone());
         lifecycle.outcomes = vec![VerificationOutcome::Exited(0)];
 
-        let result = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .expect("running candidate accepts");
+        let run = run(&mut lifecycle, &config(1));
 
-        // The accepted record pins exactly the candidate's content address: the
-        // disposable-restore + command produced no change to the accepted bytes.
-        assert_eq!(result.snapshot.snapshot_id, expected_id);
+        assert_eq!(run.accepted_record().unwrap().snapshot_id, expected_id);
         assert_eq!(
-            result.receipt.accepted_snapshot_id.as_deref(),
-            Some(expected_id.as_str())
+            run.receipt.accepted_snapshot_id.as_ref(),
+            Some(&expected_id)
         );
-        // The fake's source manifest is byte-identical after the run: verification
-        // never mutated the candidate.
+        // The fake's source manifest is byte-identical after the run.
         assert_eq!(lifecycle.manifest, manifest);
-        // The verification wrote only to a disposable Session that was destroyed,
-        // and that Session is not the candidate.
         assert_eq!(lifecycle.destroyed_sessions.len(), 1);
         assert!(
             lifecycle.destroyed_sessions[0]
@@ -953,37 +1311,34 @@ mod tests {
     fn session_is_always_destroyed_across_outcomes() {
         // success
         let mut ok = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
-        RunningSnapshotAcceptance::accept(&mut ok, eligible(), &config(1), &Default::default())
-            .unwrap();
+        assert!(run(&mut ok, &config(1)).is_accepted());
         assert_eq!(ok.destroys, 1);
 
-        // non-zero failure
+        // non-zero failure: Blocker 1 now terminates the tree too.
         let mut fail = FakeLifecycle::new(vec![VerificationOutcome::Exited(2)]);
-        RunningSnapshotAcceptance::accept(&mut fail, eligible(), &config(1), &Default::default())
-            .unwrap_err();
+        assert!(!run(&mut fail, &config(1)).is_accepted());
         assert_eq!(fail.destroys, 1);
-        assert_eq!(fail.terminates, 0); // a clean non-zero exit needs no tree kill
+        assert_eq!(fail.terminates, 1);
 
         // timeout: full process tree terminated AND session destroyed
         let mut timed = FakeLifecycle::new(vec![VerificationOutcome::TimedOut]);
-        RunningSnapshotAcceptance::accept(&mut timed, eligible(), &config(1), &Default::default())
-            .unwrap_err();
+        assert!(!run(&mut timed, &config(1)).is_accepted());
         assert_eq!(timed.terminates, 1);
         assert_eq!(timed.destroys, 1);
-        assert_eq!(timed.destroyed_sessions.len(), 1);
 
         // cancellation racing a nominal exit: tree terminated AND session destroyed
         let cancellation = AcceptanceCancellation::default();
         let mut cancelled = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
         cancelled.cancel_on_execute = Some(cancellation.clone());
-        let error = RunningSnapshotAcceptance::accept(
+        let run = RunningSnapshotAcceptance::accept(
             &mut cancelled,
-            eligible(),
+            proof(),
             &config(1),
             &cancellation,
+            &SystemClock,
         )
-        .unwrap_err();
-        assert_eq!(error, AcceptanceError::Cancelled);
+        .expect("no internal fault");
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Cancelled));
         assert_eq!(cancelled.terminates, 1);
         assert_eq!(cancelled.destroys, 1);
     }
@@ -993,23 +1348,20 @@ mod tests {
     fn termination_failure_still_destroys_and_surfaces_cleanup() {
         let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::TimedOut]);
         lifecycle.terminate_fails = true;
-        let error = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .unwrap_err();
+        let run = run(&mut lifecycle, &config(1));
 
-        assert_eq!(error, AcceptanceError::Cleanup);
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Cleanup));
         assert_eq!(lifecycle.terminates, 1);
         assert_eq!(lifecycle.destroys, 1); // destroy attempted despite terminate failure
+        // Major 2: a cleanup failure is still receipted.
+        assert_eq!(run.receipt.attempts.len(), 1);
+        assert_eq!(
+            run.receipt.verifier_identity,
+            DISPOSABLE_RESTORE_VERIFIER_IDENTITY
+        );
     }
 
     // --- AC: a panic mid-verification still tears the disposable Session down ---
-    // In PR-2 the Session handle owns a real firecracker microVM + overlay, so an
-    // unwind between create and destroy would leak a live VM. The RAII guard's Drop
-    // is the safety net: destroy MUST still run when a seam method panics.
     #[test]
     fn panic_during_execute_still_destroys_session() {
         use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -1017,25 +1369,15 @@ mod tests {
         let mut lifecycle = FakeLifecycle::new(Vec::new());
         lifecycle.panic_on_execute = true;
 
-        // Silence the default panic hook's backtrace print for this expected panic.
         let previous_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
-        let unwound = catch_unwind(AssertUnwindSafe(|| {
-            RunningSnapshotAcceptance::accept(
-                &mut lifecycle,
-                eligible(),
-                &config(1),
-                &Default::default(),
-            )
-        }));
+        let unwound = catch_unwind(AssertUnwindSafe(|| run(&mut lifecycle, &config(1))));
         std::panic::set_hook(previous_hook);
 
         assert!(
             unwound.is_err(),
-            "the execute panic must unwind out of accept, not be swallowed"
+            "the execute panic must unwind out of accept"
         );
-        // The guard's Drop ran on unwind: the process tree was terminated and the
-        // disposable Session was destroyed exactly once, so no live VM is leaked.
         assert_eq!(lifecycle.destroys, 1, "destroy must run on the panic path");
         assert_eq!(lifecycle.destroyed_sessions.len(), 1);
         assert_eq!(
@@ -1054,110 +1396,312 @@ mod tests {
             VerificationOutcome::Exited(1),
             VerificationOutcome::Exited(1),
         ]);
-        let error = RunningSnapshotAcceptance::accept(
-            &mut by_count,
-            eligible(),
-            &config(3),
-            &Default::default(),
-        )
-        .unwrap_err();
-        let AcceptanceError::Exhausted { receipt } = error else {
-            panic!("expected exhausted");
-        };
+        let run = run(&mut by_count, &config(3));
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Exhausted));
         assert_eq!(by_count.captures, 3);
-        assert_eq!(receipt.attempts.len(), 3);
-        assert_eq!(receipt.maximum_attempts, 3);
-        for (i, attempt) in receipt.attempts.iter().enumerate() {
+        assert_eq!(run.receipt.attempts.len(), 3);
+        assert_eq!(run.receipt.maximum_attempts, 3);
+        for (i, attempt) in run.receipt.attempts.iter().enumerate() {
             assert_eq!(attempt.attempt, i as u32 + 1);
-            assert_eq!(attempt.outcome, "nonzero-exit");
+            assert_eq!(attempt.outcome, AcceptanceAttemptOutcome::NonzeroExit);
             assert!(attempt.candidate_snapshot_id.is_some());
         }
 
-        // Bounded by deadline: a per-attempt delay past a tiny total deadline stops
-        // recapture even though the attempt budget is not exhausted.
+        // Bounded by deadline (no sleep): the fake advances the injected clock past
+        // a tiny deadline during the first execute, so no second attempt starts.
+        let clock = FakeClock::new();
         let mut by_deadline = FakeLifecycle::new(vec![VerificationOutcome::Exited(1)]);
-        by_deadline.execute_delay = Duration::from_millis(5);
+        by_deadline.clock = Some(clock.clone());
+        by_deadline.advance_on_execute = Duration::from_secs(5);
         let deadline_config = AcceptanceConfig {
-            verification_timeout: Duration::from_millis(1),
-            total_deadline: Duration::from_millis(1),
+            verification_timeout: Duration::from_secs(1),
+            total_deadline: Duration::from_secs(1),
             maximum_attempts: 100,
             ..config(1)
         };
         RunningSnapshotAcceptance::accept(
             &mut by_deadline,
-            eligible(),
+            proof(),
             &deadline_config,
-            &Default::default(),
+            &AcceptanceCancellation::default(),
+            &clock,
         )
-        .unwrap_err();
-        assert!(
-            by_deadline.captures < 100,
-            "deadline must bound recapture below the attempt cap, got {} captures",
-            by_deadline.captures
+        .expect("no internal fault");
+        assert_eq!(
+            by_deadline.captures, 1,
+            "deadline must stop recapture after the first over-budget attempt"
         );
     }
 
-    // --- AC: External State for a live workload fails eligibility CLOSED ---
+    // --- Blocker 3: no new attempt starts after the deadline ---
     #[test]
-    fn external_state_live_workload_fails_closed_before_any_capture() {
-        let mut lifecycle = FakeLifecycle::new(Vec::new());
-        let error = RunningSnapshotAcceptance::accept(
+    fn no_new_attempt_starts_after_the_deadline() {
+        // The first attempt runs and its command overruns the deadline; the loop
+        // must then break instead of starting a second attempt, even though the
+        // attempt budget (3) is nowhere near exhausted.
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(1)]);
+        lifecycle.clock = Some(clock.clone());
+        lifecycle.advance_on_execute = Duration::from_secs(20);
+        let cfg = AcceptanceConfig {
+            verification_timeout: Duration::from_secs(1),
+            total_deadline: Duration::from_secs(1),
+            maximum_attempts: 3,
+            ..config(3)
+        };
+        let run = RunningSnapshotAcceptance::accept(
             &mut lifecycle,
-            SnapshotEligibility {
-                external_state_required_by_live_workload: true,
-            },
-            &config(1),
-            &Default::default(),
+            proof(),
+            &cfg,
+            &AcceptanceCancellation::default(),
+            &clock,
         )
-        .unwrap_err();
+        .expect("no internal fault");
 
-        assert_eq!(error, AcceptanceError::ExternalStateRequiresWorkloadIdle);
-        // Fails closed with NO capture, restore, or Session created — no chance to
-        // bind production secrets / user state during acceptance.
-        assert_eq!(lifecycle.captures, 0);
-        assert_eq!(lifecycle.restores, 0);
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Exhausted));
+        assert_eq!(
+            lifecycle.captures, 1,
+            "the second attempt must not start once the deadline has passed"
+        );
+    }
+
+    // --- Blocker 3: the verification timeout is truncated to the remaining budget ---
+    #[test]
+    fn verification_timeout_is_truncated_to_remaining_deadline() {
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        lifecycle.clock = Some(clock.clone());
+        // Consume 8s of a 10s deadline during capture, leaving 2s < the 5s timeout.
+        lifecycle.advance_on_capture = Duration::from_secs(8);
+        let cfg = AcceptanceConfig {
+            verification_timeout: Duration::from_secs(5),
+            total_deadline: Duration::from_secs(10),
+            maximum_attempts: 1,
+            ..config(1)
+        };
+        RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &cfg,
+            &AcceptanceCancellation::default(),
+            &clock,
+        )
+        .expect("no internal fault");
+
+        // execute saw the remaining 2s, not the full 5s verification timeout.
+        assert_eq!(lifecycle.recorded_timeouts, vec![Duration::from_secs(2)]);
+    }
+
+    // --- Blocker 3: if the deadline is exceeded after capture, no Session is created ---
+    #[test]
+    fn deadline_exceeded_after_capture_creates_no_session() {
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(Vec::new());
+        lifecycle.clock = Some(clock.clone());
+        // Capture itself overruns the whole deadline.
+        lifecycle.advance_on_capture = Duration::from_secs(20);
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &clock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(lifecycle.captures, 1);
+        assert_eq!(lifecycle.creates, 0, "no Session past the deadline");
         assert_eq!(lifecycle.destroys, 0);
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::DeadlineExceeded
+        );
+    }
+
+    // --- Blocker 3: if cancelled after restore, the command is not executed ---
+    #[test]
+    fn cancelled_after_restore_does_not_execute_the_command() {
+        let cancellation = AcceptanceCancellation::default();
+        let mut lifecycle = FakeLifecycle::new(Vec::new());
+        lifecycle.cancel_on_restore = Some(cancellation.clone());
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &config(1),
+            &cancellation,
+            &SystemClock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Cancelled));
+        assert!(
+            lifecycle.executed_argv.is_empty(),
+            "the command must not run once cancelled after restore"
+        );
+        // The Session was created and restored, then torn down.
+        assert_eq!(lifecycle.creates, 1);
+        assert_eq!(lifecycle.restores, 1);
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(
+            lifecycle.terminates, 0,
+            "no process ran, so no tree to kill"
+        );
+    }
+
+    // --- Blocker 2: acceptance requires a proof-carrying eligibility ---
+    #[test]
+    fn acceptance_requires_proof_carrying_eligibility() {
+        // The proof mints (in tests) via the #1090 analysis stand-in; the accept
+        // signature takes the proof by value — there is no bool to pass.
+        let eligibility =
+            VerifiedRunningSnapshotEligibility::analyze_for_test(false).expect("eligible");
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            eligibility,
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault");
+        assert!(run.is_accepted());
+    }
+
+    // --- Blocker 2: the capsule-requires-external-state path fails CLOSED ---
+    #[test]
+    fn external_state_live_workload_fails_eligibility_closed() {
+        // The #1090 analysis stand-in refuses to mint a proof when the live
+        // workload requires External State, so acceptance can never proceed.
+        let denied = VerifiedRunningSnapshotEligibility::analyze_for_test(true);
+        assert_eq!(
+            denied.unwrap_err(),
+            AcceptanceFailure::ExternalStateRequiresWorkloadIdle
+        );
     }
 
     // --- AC: the secret scan is recorded as an ATTESTATION, not proof of absence ---
     #[test]
     fn receipt_records_secret_scan_as_attestation_not_proof() {
         let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
-        let result = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .unwrap();
+        let run = run(&mut lifecycle, &config(1));
 
-        // Capture policy + both attestations are recorded on acceptance.
-        assert_eq!(result.receipt.capture_policy, CapturePolicyV1::Running);
-        let sanitization = result
+        assert_eq!(run.receipt.capture_policy, CapturePolicyV1::Running);
+        let sanitization = run
             .receipt
             .sanitization_attestation
+            .as_ref()
             .expect("sanitization attestation recorded");
         assert_eq!(
             sanitization.steps,
             vec!["session_id_regenerate".to_string()]
         );
 
-        let secret_scan = result
+        let secret_scan = run
             .receipt
             .secret_scan_attestation
+            .as_ref()
             .expect("secret-scan attestation recorded");
-        // It is an attestation that a scan ran (scanner + policy + redacted
-        // verdict), never a boolean "no secrets present" proof of absence.
         assert_eq!(secret_scan.scanner_identity, "ato-secret-scan/1.0");
         assert_eq!(secret_scan.policy_identity, "default/v1");
         assert_eq!(secret_scan.verdict, "clean");
 
-        // The type-level contract: the attestation is a redacted verdict, and the
-        // module never treats "clean" as a proof of absence — there is no boolean
-        // `secrets_absent` field to mistake for one.
         let json = serde_json::to_string(&secret_scan).unwrap();
         assert!(!json.contains("proof"));
         assert!(!json.contains("secrets_absent"));
+    }
+
+    // --- Major 2: the receipt identifies the verifier and the execution id ---
+    #[test]
+    fn receipt_identifies_the_verifier_and_execution_id() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let run = run(&mut lifecycle, &config(1));
+
+        assert_eq!(run.receipt.schema, ACCEPTANCE_RECEIPT_V1_SCHEMA);
+        assert_eq!(
+            run.receipt.verifier_identity,
+            DISPOSABLE_RESTORE_VERIFIER_IDENTITY
+        );
+        assert_eq!(
+            run.receipt.verifier_version,
+            DISPOSABLE_RESTORE_VERIFIER_VERSION
+        );
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&exec_id()));
+        assert_eq!(run.receipt.outcome, AcceptanceOutcome::Accepted);
+    }
+
+    // --- Major 2: every terminal outcome yields a receipt via the Rejected arm ---
+    #[test]
+    fn every_terminal_outcome_is_receipted() {
+        // cancel (pre-cancelled)
+        let cancellation = AcceptanceCancellation::default();
+        cancellation.cancel();
+        let mut cancelled = FakeLifecycle::new(Vec::new());
+        let cancelled_run = RunningSnapshotAcceptance::accept(
+            &mut cancelled,
+            proof(),
+            &config(1),
+            &cancellation,
+            &SystemClock,
+        )
+        .expect("no internal fault");
+        assert_eq!(cancelled_run.failure(), Some(&AcceptanceFailure::Cancelled));
+        assert_eq!(cancelled_run.receipt.schema, ACCEPTANCE_RECEIPT_V1_SCHEMA);
+        assert_eq!(cancelled.captures, 0);
+
+        // unsupported capture policy
+        let mut wrong_policy =
+            FakeLifecycle::with_manifest(manifest_with_policy(CapturePolicyV1::WorkloadIdle));
+        let policy_run = run(&mut wrong_policy, &config(1));
+        assert_eq!(
+            policy_run.failure(),
+            Some(&AcceptanceFailure::UnsupportedCapturePolicy)
+        );
+        assert_eq!(
+            policy_run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::UnsupportedCapturePolicy
+        );
+        assert_eq!(wrong_policy.restores, 0);
+
+        // invalid config
+        let mut bad_cfg = FakeLifecycle::new(Vec::new());
+        let cfg_run = run(
+            &mut bad_cfg,
+            &AcceptanceConfig {
+                maximum_attempts: 0,
+                ..config(1)
+            },
+        );
+        assert!(matches!(
+            cfg_run.failure(),
+            Some(&AcceptanceFailure::InvalidConfig(_))
+        ));
+        assert!(cfg_run.receipt.attempts.is_empty());
+
+        // cleanup failure
+        let mut cleanup = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        cleanup.destroy_fails = true;
+        let cleanup_run = run(&mut cleanup, &config(1));
+        assert_eq!(cleanup_run.failure(), Some(&AcceptanceFailure::Cleanup));
+        assert_eq!(cleanup_run.receipt.attempts.len(), 1);
+    }
+
+    // --- Major 2: typed receipt fields reject unknown / malformed values ---
+    #[test]
+    fn typed_receipt_fields_reject_unknown_and_malformed_values() {
+        // A known-good receipt round-trips.
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let run = run(&mut lifecycle, &config(1));
+        let json = serde_json::to_string(&run.receipt).unwrap();
+        let parsed: AcceptanceReceiptV1 = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, run.receipt);
+
+        // An unknown attempt outcome is rejected at deserialize.
+        let bad_outcome = json.replace("\"accepted\"", "\"totally-bogus\"");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&bad_outcome).is_err());
+
+        // A malformed snapshot id is rejected at deserialize (typed SnapshotId).
+        let bad_id = json.replace("blake3:", "not-a-digest:");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&bad_id).is_err());
     }
 
     // --- Capture-policy gate: a non-`running` candidate is rejected explicitly ---
@@ -1165,29 +1709,32 @@ mod tests {
     fn non_running_candidate_manifest_is_rejected_with_unsupported_policy() {
         let mut lifecycle =
             FakeLifecycle::with_manifest(manifest_with_policy(CapturePolicyV1::WorkloadIdle));
-        let error = RunningSnapshotAcceptance::accept(
-            &mut lifecycle,
-            eligible(),
-            &config(1),
-            &Default::default(),
-        )
-        .unwrap_err();
+        let run = run(&mut lifecycle, &config(1));
 
-        assert_eq!(error, AcceptanceError::UnsupportedCapturePolicy);
-        // Rejected on the candidate manifest itself, before any Session work.
+        assert_eq!(
+            run.failure(),
+            Some(&AcceptanceFailure::UnsupportedCapturePolicy)
+        );
         assert_eq!(lifecycle.restores, 0);
         assert_eq!(lifecycle.destroys, 0);
     }
 
-    // --- Config validation: empty/NUL argv, zero timeout, zero attempts ---
+    // --- Config validation: empty/NUL argv, empty program, zero timeout, zero attempts ---
     #[test]
     fn invalid_configurations_fail_closed() {
         let mut lifecycle = FakeLifecycle::new(Vec::new());
         let bad = [
+            // empty argv
             AcceptanceConfig {
                 seal_at_argv: Vec::new(),
                 ..config(1)
             },
+            // empty argv[0] (the program)
+            AcceptanceConfig {
+                seal_at_argv: vec![String::new(), "arg".to_string()],
+                ..config(1)
+            },
+            // NUL byte in an argument
             AcceptanceConfig {
                 seal_at_argv: vec!["ok".to_string(), "bad\0arg".to_string()],
                 ..config(1)
@@ -1202,16 +1749,12 @@ mod tests {
             },
         ];
         for cfg in bad {
-            let error = RunningSnapshotAcceptance::accept(
-                &mut lifecycle,
-                eligible(),
-                &cfg,
-                &Default::default(),
-            )
-            .unwrap_err();
-            assert!(matches!(error, AcceptanceError::InvalidConfig(_)));
+            let run = run(&mut lifecycle, &cfg);
+            assert!(matches!(
+                run.failure(),
+                Some(&AcceptanceFailure::InvalidConfig(_))
+            ));
         }
-        // No capture happens for any invalid config.
         assert_eq!(lifecycle.captures, 0);
     }
 
@@ -1221,14 +1764,15 @@ mod tests {
         let cancellation = AcceptanceCancellation::default();
         cancellation.cancel();
         let mut lifecycle = FakeLifecycle::new(Vec::new());
-        let error = RunningSnapshotAcceptance::accept(
+        let run = RunningSnapshotAcceptance::accept(
             &mut lifecycle,
-            eligible(),
+            proof(),
             &config(1),
             &cancellation,
+            &SystemClock,
         )
-        .unwrap_err();
-        assert_eq!(error, AcceptanceError::Cancelled);
+        .expect("no internal fault");
+        assert_eq!(run.failure(), Some(&AcceptanceFailure::Cancelled));
         assert_eq!(lifecycle.captures, 0);
     }
 }

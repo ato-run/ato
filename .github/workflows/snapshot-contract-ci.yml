@@ -15,12 +15,30 @@ name: Snapshot acceptance CI
 on:
   pull_request:
     paths:
+      # The snapshot crate itself...
       - "crates/snapshot/**"
+      # ...and the crates it depends on: a change to capsule / capsulefs /
+      # protocol can break the acceptance API without touching crates/snapshot,
+      # so the gate must fire on those too (verified against
+      # crates/snapshot/Cargo.toml [dependencies]).
+      - "crates/capsule/**"
+      - "crates/capsulefs/**"
+      - "crates/protocol/**"
+      # ...and the workspace pins that determine how it builds.
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/snapshot-contract-ci.yml"
   push:
     branches: [main, dev, nightly]
     paths:
       - "crates/snapshot/**"
+      - "crates/capsule/**"
+      - "crates/capsulefs/**"
+      - "crates/protocol/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
       - ".github/workflows/snapshot-contract-ci.yml"
   workflow_dispatch:
 
