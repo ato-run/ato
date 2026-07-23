@@ -2,8 +2,9 @@
   "schema": "ato.execution-contract/v1",
   "source": {
     "kind": "git",
-    "immutable_ref": "https://example.invalid/repo@abcdef",
-    "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101"
+    "immutable_ref": "https://example.invalid/repo@ffffff",
+    "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+    "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
   },
   "target": {
     "os": "linux",
@@ -14,7 +15,8 @@
   "runtime": {
     "kind": "node",
     "resolved_ref": "node@22.14.0",
-    "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202"
+    "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+    "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d"
   },
   "dependencies": [
     {
@@ -26,7 +28,8 @@
   "build_outputs": [
     {
       "name": "app",
-      "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505"
+      "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
+      "projection_digest": "blake3:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
     }
   ],
   "launch": {
@@ -35,18 +38,21 @@
       "dist/server.js"
     ],
     "cwd": "/workspace",
+    "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     "environment": [
       {
         "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],
+    "environment_policy_digest": "blake3:1010101010101010101010101010101010101010101010101010101010101010",
     "secret_bindings": [
       "API_TOKEN"
     ]
   },
   "filesystem": {
     "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707",
+    "topology_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
     "readonly_layers": [
       "blake3:0808080808080808080808080808080808080808080808080808080808080808"
     ],

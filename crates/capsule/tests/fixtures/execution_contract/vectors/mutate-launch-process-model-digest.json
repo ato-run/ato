@@ -38,10 +38,10 @@
       "dist/server.js"
     ],
     "cwd": "/workspace",
-    "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+    "process_model_digest": "blake3:afafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafaf",
     "environment": [
       {
-        "name": "NODE_OPTIONS",
+        "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],

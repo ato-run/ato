@@ -24,90 +24,76 @@
 //!
 //! # RFC §4.2 facet mapping (normative)
 //!
-//! Every row of the RFC's §4.2 identity-bearing facet table is committed by
-//! v1 in exactly one of three ways:
+//! Every row of the RFC's §4.2 identity-bearing facet table maps to an
+//! explicit field of [`ExecutionContractV1`]. There are no transitive-only or
+//! "pinned by the schema string" rows: each required facet content has a
+//! dedicated identity-bearing field whose mutation changes `execution_id`,
+//! pinned by a `mutate-*` shared vector. Two field shapes appear:
 //!
-//! * **direct** — a dedicated field carries the resolved content;
-//! * **transitive** — the content determines bytes that a committed digest
-//!   already covers, so it cannot change without changing that digest;
-//! * **pinned** — the content cannot vary within v1 at all; the schema
-//!   string / domain separator itself commits the constant.
+//! * **typed** — the resolved content is carried by concrete typed fields
+//!   whose shape is fixed by v1 (`source.digest`, `target.*`, `launch.argv`,
+//!   `guest_surface.*`, `external_state[]`, …).
+//! * **opaque sub-contract digest** — a [`ContentDigest`] field commits a
+//!   sub-contract whose *payload schema is versioned separately from v1*. The
+//!   digest is inside the v1 identity set (mutating it changes
+//!   `execution_id`), but the bytes a producer hashes into it are defined by a
+//!   sub-contract that MAY gain structure in a later revision without touching
+//!   the v1 identity set. This is the RFC §4.5 layering — a digest pins
+//!   identity while its payload schema is versioned separately — and matches
+//!   the pre-existing `policy.network_digest`, `policy.capability_digest`, and
+//!   `policy.filesystem_digest` fields. The opaque `*_digest` facet fields are
+//!   `source.projection_digest`, `runtime.dynamic_contract_digest`,
+//!   `build_outputs[].projection_digest`, `launch.process_model_digest`,
+//!   `launch.environment_policy_digest`, `filesystem.topology_digest`, and the
+//!   three `policy.*` digests.
 //!
-//! An execution whose launch conditions cannot be expressed under this
-//! mapping MUST NOT be issued a v1 `execution_id`. Per RFC §4.5, any change
-//! to the mapping — adding or removing a field, loosening a pin, or moving a
-//! facet between commitment modes — is a semantic change to the
-//! identity-bearing field set and requires a new contract version.
+//! | RFC §4.2 facet | Required identity-bearing content | v1 field(s) |
+//! |---|---|---|
+//! | Source | materialized source digest; source projection rules | `source.digest`; `source.projection_digest` (opaque) |
+//! | Target | OS, arch, ABI/libc, observable target features | `target.os` / `target.architecture` / `target.abi` / `target.libc` / `target.observable_features` |
+//! | Runtime | resolved runtime artifact; dynamic runtime contract | `runtime.kind` / `runtime.resolved_ref` / `runtime.digest`; `runtime.dynamic_contract_digest` (opaque) |
+//! | Dependencies | derivation identity; immutable output identity | `dependencies[].name` / `dependencies[].derivation_digest` / `dependencies[].output_digest` |
+//! | Build outputs | immutable output digest; projection | `build_outputs[].name` / `build_outputs[].digest`; `build_outputs[].projection_digest` (opaque) |
+//! | Launch | entrypoint, exact argv, cwd; process model | `launch.argv` / `launch.cwd`; `launch.process_model_digest` (opaque) |
+//! | Environment | non-secret values; variable requirements, normalization, inheritance policy | `launch.environment[].name` / `launch.environment[].value_digest`; `launch.environment_policy_digest` (opaque) |
+//! | Filesystem | immutable layers; mount topology; access modes; writable-boundary contracts | `filesystem.readonly_layers`; `filesystem.topology_digest` (opaque: mount topology + per-mount access modes); `filesystem.writable_paths`; `filesystem.view_digest` (immutable view content) |
+//! | Network | ingress, egress, DNS, isolation policy | `policy.network_digest` (opaque) |
+//! | Capabilities | filesystem, host, device, sandbox policy | `policy.capability_digest` / `policy.filesystem_digest` (opaque) |
+//! | Surface | declared guest bind address, protocol, guest port | `guest_surface.bind_address` / `guest_surface.protocol` / `guest_surface.port` / `guest_surface.features` |
+//! | External State schema | binding name, mount/injection target, access mode, schema identity, Snapshot exclusion | `external_state[].name` / `external_state[].target` / `external_state[].access` / `external_state[].schema` / `external_state[].snapshot` |
 //!
-//! * **Source** — materialized source digest: direct (`source.digest`).
-//!   Source projection rules: transitive — `source.digest` covers the
-//!   *materialized source projection* (RFC §4.6), so a projection-rule
-//!   change that alters the materialized tree changes the digest, and one
-//!   that does not cannot change the launch envelope.
-//! * **Target** — OS, architecture, ABI/libc, observable target features:
-//!   direct (`target.*`).
-//! * **Runtime** — resolved runtime artifact: direct (`runtime.*`). Dynamic
-//!   runtime contract: pinned — v1 runtime contracts are fully resolved;
-//!   `runtime.digest` commits the complete runtime surface, and launch-time
-//!   runtime configuration may only flow through `launch.argv`,
-//!   `launch.environment`, or bytes committed by `filesystem.view_digest`.
-//!   A runtime whose contract varies outside those committed channels is
-//!   not representable in v1.
-//! * **Dependencies** — derivation identity and actual immutable output
-//!   identity: direct (`dependencies[]`).
-//! * **Build outputs** — actual immutable output digest: direct
-//!   (`build_outputs[].digest`). Projection: transitive — how outputs are
-//!   projected into the launch filesystem is part of the view committed by
-//!   `filesystem.view_digest`.
-//! * **Launch** — entrypoint, exact argv, cwd: direct (`launch.argv`,
-//!   `launch.cwd`). Process model: pinned + transitive — v1 launches
-//!   exactly one root process (`launch.argv` in `launch.cwd`); any further
-//!   process structure (supervisor trees, sidecar services) must be spawned
-//!   by that root process from bytes committed by `filesystem.view_digest`,
-//!   so every process-model change alters `launch.argv` or
-//!   `filesystem.view_digest`.
-//! * **Environment** — non-secret values: direct
-//!   (`launch.environment[].value_digest`, the content digest of the exact
-//!   resolved value bytes). Variable requirements, normalization, and
-//!   inheritance policy: pinned — v1 environments are closed; the guest
-//!   environment is exactly `launch.environment` plus the secrets bound by
-//!   name in `launch.secret_bindings` (secret values are excluded from
-//!   identity per RFC §4.3), nothing is inherited from the host, and
-//!   normalization is fixed by [`ExecutionContractV1::validate`] (sorted
-//!   duplicate-free ASCII names, exactly one canonical spelling of
-//!   absence).
-//! * **Filesystem** — immutable layers: direct
-//!   (`filesystem.readonly_layers`). Mount topology and access modes:
-//!   transitive, with a normative producer obligation —
-//!   `filesystem.view_digest` MUST commit to the complete mount topology
-//!   and per-mount access modes of the immutable view, not merely file
-//!   content; a producer that derives `view_digest` from content alone is
-//!   non-conformant. Writable-boundary contracts: direct
-//!   (`filesystem.writable_paths`).
-//! * **Network** — effective ingress, egress, DNS, and isolation policy:
-//!   transitive (`policy.network_digest`).
-//! * **Capabilities** — effective filesystem, host, device, and sandbox
-//!   policy: transitive (`policy.capability_digest`,
-//!   `policy.filesystem_digest`).
-//! * **Surface** — declared guest bind address, protocol, and guest port:
-//!   direct (`guest_surface.*`).
-//! * **External State schema** — binding name, mount/injection contract,
-//!   access mode, schema identity, and Snapshot exclusion rule: direct
-//!   (`external_state[]`).
+//! Secret *values* are never identity-bearing (RFC §4.3): secrets are bound by
+//! name via `launch.secret_bindings` and their values never enter the
+//! contract. `launch.environment_policy_digest` commits the variable
+//! requirements / normalization / inheritance *policy*; the resolved
+//! non-secret values are committed per-variable by
+//! `launch.environment[].value_digest`.
 //!
-//! Until the Capsule v1 execution model RFC lands on `nightly`, this module
-//! and the shared vectors below are the normative definition of the canonical
-//! form. The full spec —
-//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` (§4.2 facet
-//! table, §4.5 canonicalization) — is in flight on the
-//! `feat/capsule-v1-execution-model-rfc` branch (tracking issue
-//! ato-run/ato#1086) and is not yet in this tree; its front-matter names this
-//! file as SSOT. Lockstep with the RFC is defined by the facet mapping
-//! above: every row of the RFC's §4.2 table must stay committed exactly as
-//! the mapping states, and when the RFC merges its §4.2 table must reference
-//! (or restate) this mapping. A divergence on any row — a facet the mapping
-//! no longer covers, or a pin the RFC loosens — is a §4.5 semantic change
-//! requiring a new contract version, not a doc-only fix.
+//! An execution whose launch conditions cannot be expressed under this mapping
+//! MUST NOT be issued a v1 `execution_id`. Per RFC §4.5, any change to the
+//! mapping — adding or removing a field, or moving a facet's commitment — is a
+//! semantic change to the identity-bearing field set and requires a new
+//! contract version. Defining or evolving the payload schema *behind* an
+//! opaque `*_digest` is NOT such a change: the v1 identity set already commits
+//! the digest, so the sub-contract can be versioned independently.
+//!
+//! This contract is `ato.execution-contract/v1` — the sole exact Capsule v1
+//! execution identity (RFC §4.1, §13). It supersedes the archived
+//! Snapshot-layer-derived `execution_id` model (RFC §16.2): runtime,
+//! dependency, and build-output digests remain identity-bearing, Snapshot
+//! memory/vmstate/disk layer IDs are excluded, and `execution_id` is finalized
+//! before Snapshot capture. The `blake3:` hash prefix is not a schema
+//! discriminator (RFC §7.7); the schema string / domain separator
+//! `ato.execution-contract/v1` is.
+//!
+//! The normative spec is
+//! `docs/rfcs/accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md` (§4.2 facet table,
+//! §4.5 canonicalization), whose front-matter names this file as SSOT. It is
+//! landing on `nightly` via ato-run/ato#1098 (tracking issue #1086); until it
+//! is in this tree, this module and the shared vectors below are the normative
+//! definition of the canonical form. When the spec lands, its §4.2 table and
+//! this mapping must stay row-for-row identical; a divergence on any row is a
+//! §4.5 version bump, not a doc-only fix.
 //!
 //! Shared cross-language test vectors live in
 //! `crates/capsule/tests/fixtures/execution_contract/` and are exercised by
@@ -300,16 +286,19 @@ pub struct ExecutionContractV1 {
     pub external_state: Vec<ExternalStateContract>,
 }
 
-/// Resolved source facet. `digest` covers the *materialized source
-/// projection* (RFC §4.6) — the source bytes actually presented to the
-/// build — so source projection rules are committed transitively through it
-/// (see the module-level facet mapping).
+/// Resolved source facet. `digest` is the materialized source projection
+/// (RFC §4.6) — the source bytes actually presented to the build.
+/// `projection_digest` is the opaque sub-contract digest committing the
+/// *source projection rules* (include/exclude, symlink and case policy, …);
+/// its payload schema is versioned separately from v1 (see the module-level
+/// facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSourceContract {
     pub kind: String,
     pub immutable_ref: String,
     pub digest: ContentDigest,
+    pub projection_digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -332,16 +321,19 @@ pub struct ResolvedTargetContract {
     pub observable_features: BTreeMap<String, String>,
 }
 
-/// Resolved runtime artifact facet. `digest` commits the complete runtime
-/// surface; v1 pins that there is no separate dynamic runtime contract —
-/// launch-time runtime configuration may only flow through the committed
-/// launch and filesystem channels (see the module-level facet mapping).
+/// Resolved runtime artifact facet. `digest` is the resolved runtime artifact
+/// digest. `dynamic_contract_digest` is the opaque sub-contract digest
+/// committing the *dynamic runtime contract* — runtime-provided launch-time
+/// behaviour beyond the static artifact bytes (dynamic linking / loader
+/// resolution, plugin or module surface, JIT/ABI switches); its payload schema
+/// is versioned separately from v1 (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedArtifactContract {
     pub kind: String,
     pub resolved_ref: String,
     pub digest: ContentDigest,
+    pub dynamic_contract_digest: ContentDigest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,30 +344,36 @@ pub struct ResolvedDependencyContract {
     pub output_digest: ContentDigest,
 }
 
-/// A single actual immutable build output. Its projection into the launch
-/// filesystem is committed by `ResolvedFilesystemContract::view_digest`,
-/// not by this record (see the module-level facet mapping).
+/// A single actual immutable build output. `digest` is its immutable output
+/// digest; `projection_digest` is the opaque sub-contract digest committing
+/// how this output is *projected* into the launch environment (placement,
+/// rename, permission projection), with a payload schema versioned separately
+/// from v1 (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedBuildOutputContract {
     pub name: String,
     pub digest: ContentDigest,
+    pub projection_digest: ContentDigest,
 }
 
-/// Resolved launch facet. v1 pins the process model: exactly one root
-/// process is launched from `argv` in `cwd`, and any further process
-/// structure (supervisor trees, sidecar services) must be spawned by that
-/// root process from bytes committed by
-/// `ResolvedFilesystemContract::view_digest`. v1 environments are closed:
-/// the guest sees exactly `environment` plus the secrets bound by name in
-/// `secret_bindings` — nothing is inherited from the host (see the
-/// module-level facet mapping).
+/// Resolved launch facet. `argv` / `cwd` are the exact entrypoint.
+/// `process_model_digest` is the opaque sub-contract digest committing the
+/// *process model* (root process, daemonization/PID-1 role, supervised child
+/// structure); its payload schema is versioned separately from v1.
+/// `environment` carries the resolved non-secret values, and
+/// `environment_policy_digest` is the opaque sub-contract digest committing
+/// the *variable requirements, normalization, and inheritance policy*. Secret
+/// values never enter the contract: secrets are bound by name in
+/// `secret_bindings` and their values are excluded from identity (RFC §4.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedLaunchContract {
     pub argv: Vec<String>,
     pub cwd: String,
+    pub process_model_digest: ContentDigest,
     pub environment: Vec<EnvironmentVariableContract>,
+    pub environment_policy_digest: ContentDigest,
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -396,16 +394,20 @@ pub struct EnvironmentVariableContract {
     pub value_digest: ContentDigest,
 }
 
-/// Resolved filesystem facet. `view_digest` MUST commit to the complete
-/// immutable view — mount topology and per-mount access modes included, not
-/// merely file content; a producer that derives it from content alone is
-/// non-conformant. `readonly_layers` are the immutable layer digests and
-/// `writable_paths` is the writable-boundary contract (see the module-level
-/// facet mapping).
+/// Resolved filesystem facet. `readonly_layers` are the immutable layer
+/// digests; `writable_paths` is the writable-boundary contract; `view_digest`
+/// commits the composed immutable view *content*. `topology_digest` is the
+/// opaque sub-contract digest committing the *mount topology and per-mount
+/// access modes* (which layer/output is mounted where, and read-only vs
+/// read-write per mount) — content and structure are separate commitments, so
+/// a topology or access-mode change is identity-bearing even when the mounted
+/// bytes are unchanged. Its payload schema is versioned separately from v1
+/// (see the module-level facet mapping).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedFilesystemContract {
     pub view_digest: ContentDigest,
+    pub topology_digest: ContentDigest,
     pub readonly_layers: Vec<ContentDigest>,
     pub writable_paths: Vec<String>,
 }
@@ -804,7 +806,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
 
@@ -819,6 +821,7 @@ mod tests {
                 kind: "git".to_string(),
                 immutable_ref: "https://example.invalid/repo@012345".to_string(),
                 digest: digest(DigestAlgorithm::Sha256, 1),
+                projection_digest: digest(DigestAlgorithm::Blake3, 0x0c),
             },
             target: ResolvedTargetContract {
                 os: "linux".to_string(),
@@ -831,6 +834,7 @@ mod tests {
                 kind: "node".to_string(),
                 resolved_ref: "node@22.14.0".to_string(),
                 digest: digest(DigestAlgorithm::Sha256, 2),
+                dynamic_contract_digest: digest(DigestAlgorithm::Blake3, 0x0d),
             },
             dependencies: vec![ResolvedDependencyContract {
                 name: "npm".to_string(),
@@ -840,18 +844,22 @@ mod tests {
             build_outputs: vec![ResolvedBuildOutputContract {
                 name: "app".to_string(),
                 digest: digest(DigestAlgorithm::Blake3, 5),
+                projection_digest: digest(DigestAlgorithm::Blake3, 0x0e),
             }],
             launch: ResolvedLaunchContract {
                 argv: vec!["node".to_string(), "dist/server.js".to_string()],
                 cwd: "/workspace".to_string(),
+                process_model_digest: digest(DigestAlgorithm::Blake3, 0x0f),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
                     value_digest: digest(DigestAlgorithm::Blake3, 6),
                 }],
+                environment_policy_digest: digest(DigestAlgorithm::Blake3, 0x10),
                 secret_bindings: vec!["API_TOKEN".to_string()],
             },
             filesystem: ResolvedFilesystemContract {
                 view_digest: digest(DigestAlgorithm::Blake3, 7),
+                topology_digest: digest(DigestAlgorithm::Blake3, 0x11),
                 readonly_layers: vec![digest(DigestAlgorithm::Blake3, 8)],
                 writable_paths: vec!["/tmp".to_string()],
             },
@@ -955,7 +963,7 @@ mod tests {
         assert_eq!(
             contract.compute_execution_id().expect("execution id"),
             ExecutionId::new(
-                "blake3:883d60a0b9960131abf69d739ed81a968d89f1e191656497daba248aecbfca3f"
+                "blake3:f33b4afecf228ccab29e8b4b18b101f3f4539d7481e3279873312ae4a666d831"
                     .to_string()
             )
             .expect("shared Rust/TypeScript vector")
@@ -1011,6 +1019,58 @@ mod tests {
             first.compute_execution_id().unwrap(),
             second.compute_execution_id().unwrap()
         );
+    }
+
+    #[test]
+    fn opaque_subcontract_digests_are_identity_bearing() {
+        // Each RFC §4.2 facet that v1 commits as an opaque sub-contract digest
+        // (source projection rules, dynamic runtime contract, build-output
+        // projection, launch process model, environment policy, filesystem
+        // mount topology + access modes) must be in the identity set: mutating
+        // its digest must change execution_id, and pairwise-distinctly so.
+        let baseline = sample_contract();
+        let baseline_id = baseline.compute_execution_id().unwrap();
+
+        type Mutation = (&'static str, fn(&mut ExecutionContractV1));
+        let mutations: [Mutation; 6] = [
+            ("source.projection_digest", |contract| {
+                contract.source.projection_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xac; 32]);
+            }),
+            ("runtime.dynamic_contract_digest", |contract| {
+                contract.runtime.dynamic_contract_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xad; 32]);
+            }),
+            ("build_outputs[].projection_digest", |contract| {
+                contract.build_outputs[0].projection_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xae; 32]);
+            }),
+            ("launch.process_model_digest", |contract| {
+                contract.launch.process_model_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xaf; 32]);
+            }),
+            ("launch.environment_policy_digest", |contract| {
+                contract.launch.environment_policy_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xb0; 32]);
+            }),
+            ("filesystem.topology_digest", |contract| {
+                contract.filesystem.topology_digest =
+                    ContentDigest::new(DigestAlgorithm::Blake3, [0xb1; 32]);
+            }),
+        ];
+
+        let mut ids = BTreeSet::new();
+        ids.insert(baseline_id.as_str().to_string());
+        for (field, apply) in mutations {
+            let mut mutated = baseline.clone();
+            apply(&mut mutated);
+            let id = mutated.compute_execution_id().unwrap();
+            assert_ne!(id, baseline_id, "{field} must change execution_id");
+            assert!(
+                ids.insert(id.as_str().to_string()),
+                "{field} must produce a distinct execution_id"
+            );
+        }
     }
 
     #[test]
@@ -1193,21 +1253,27 @@ mod tests {
                 "network_digest": "blake3:0909090909090909090909090909090909090909090909090909090909090909" },
             "filesystem": { "writable_paths": ["/tmp"],
                 "readonly_layers": ["blake3:0808080808080808080808080808080808080808080808080808080808080808"],
+                "topology_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
                 "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707" },
             "launch": { "secret_bindings": ["API_TOKEN"],
+                "environment_policy_digest": "blake3:1010101010101010101010101010101010101010101010101010101010101010",
                 "environment": [ { "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606",
                     "name": "NODE_ENV" } ],
+                "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
                 "cwd": "/workspace", "argv": ["node", "dist/server.js"] },
-            "build_outputs": [ { "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
+            "build_outputs": [ { "projection_digest": "blake3:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+                "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
                 "name": "app" } ],
             "dependencies": [ { "output_digest": "blake3:0404040404040404040404040404040404040404040404040404040404040404",
                 "derivation_digest": "blake3:0303030303030303030303030303030303030303030303030303030303030303",
                 "name": "npm" } ],
-            "runtime": { "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
+            "runtime": { "dynamic_contract_digest": "blake3:0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+                "digest": "sha256:0202020202020202020202020202020202020202020202020202020202020202",
                 "resolved_ref": "node@22.14.0", "kind": "node" },
             "target": { "libc": "glibc-2.39", "abi": "gnu",
                 "architecture": "x86_64", "os": "linux" },
-            "source": { "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
+            "source": { "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+                "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
                 "immutable_ref": "https://example.invalid/repo@012345", "kind": "git" },
             "schema": "ato.execution-contract/v1"
         }"#;

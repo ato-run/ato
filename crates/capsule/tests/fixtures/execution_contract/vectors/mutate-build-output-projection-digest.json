@@ -29,7 +29,7 @@
     {
       "name": "app",
       "digest": "blake3:0505050505050505050505050505050505050505050505050505050505050505",
-      "projection_digest": "blake3:0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e"
+      "projection_digest": "blake3:aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
     }
   ],
   "launch": {
@@ -41,7 +41,7 @@
     "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     "environment": [
       {
-        "name": "NODE_OPTIONS",
+        "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],

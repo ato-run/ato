@@ -4,7 +4,7 @@
     "kind": "git",
     "immutable_ref": "https://example.invalid/repo@012345",
     "digest": "sha256:0101010101010101010101010101010101010101010101010101010101010101",
-    "projection_digest": "blake3:0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c"
+    "projection_digest": "blake3:acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac"
   },
   "target": {
     "os": "linux",
@@ -41,7 +41,7 @@
     "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     "environment": [
       {
-        "name": "NODE_OPTIONS",
+        "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],

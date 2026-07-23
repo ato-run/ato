@@ -41,11 +41,11 @@
     "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     "environment": [
       {
-        "name": "NODE_OPTIONS",
+        "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],
-    "environment_policy_digest": "blake3:1010101010101010101010101010101010101010101010101010101010101010",
+    "environment_policy_digest": "blake3:b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
     "secret_bindings": [
       "API_TOKEN"
     ]

@@ -41,7 +41,7 @@
     "process_model_digest": "blake3:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
     "environment": [
       {
-        "name": "NODE_OPTIONS",
+        "name": "NODE_ENV",
         "value_digest": "blake3:0606060606060606060606060606060606060606060606060606060606060606"
       }
     ],
@@ -52,7 +52,7 @@
   },
   "filesystem": {
     "view_digest": "blake3:0707070707070707070707070707070707070707070707070707070707070707",
-    "topology_digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+    "topology_digest": "blake3:b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
     "readonly_layers": [
       "blake3:0808080808080808080808080808080808080808080808080808080808080808"
     ],
