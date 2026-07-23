@@ -97,6 +97,12 @@ pub enum SnapshotManifestError {
     EmptyField(&'static str),
     #[error("snapshot_id must be blake3:<64 lowercase hex characters>")]
     InvalidSnapshotId,
+    #[error(
+        "restore_contract.restore_protocol must equal \
+         compatibility_contract.runner_restore_contract (they are the same restore \
+         protocol the runner speaks)"
+    )]
+    RestoreContractMismatch,
 }
 
 /// A Snapshot content address: `blake3:<64 lowercase hex>`.
@@ -318,19 +324,31 @@ pub struct HostRestoreCapabilityV1 {
     /// restorable here only when this equals its `compatibility_class_identity`
     /// exactly.
     pub compatibility_class_identity: Option<ContentDigest>,
+    /// The [`CapturePolicyV1`] values this host can actually honor at restore
+    /// (RFC §10.2 resume-vs-start semantics). Fail-closed: a candidate whose
+    /// `capture_policy` is not listed here is never selected, because the host
+    /// cannot prove it can rehydrate that policy. An empty list satisfies no
+    /// Snapshot.
+    pub supported_capture_policies: Vec<CapturePolicyV1>,
 }
 
 /// Whether the workload was running or idle at capture (RFC §8). A closed enum;
 /// the runner reads it at restore to decide whether to **resume** the captured
 /// workload or **start** it fresh (RFC §10.2).
+///
+/// The wire spellings are pinned to the exact RFC §8 names (`running` /
+/// `workload_idle`) with explicit per-variant renames rather than a blanket
+/// `rename_all`: the closed enum then fails closed on the pre-RFC spelling
+/// `idle` and on any unknown value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 pub enum CapturePolicyV1 {
     /// The workload was running at capture; restore resumes it in place.
+    #[serde(rename = "running")]
     Running,
     /// The workload was stopped/idle at capture (placeholders revoked); restore
     /// starts it fresh.
-    Idle,
+    #[serde(rename = "workload_idle")]
+    WorkloadIdle,
 }
 
 /// The versioned Snapshot **restore contract**: the restore-time protocol and
@@ -567,6 +585,19 @@ impl SnapshotManifestV1 {
             }
         }
         self.restore_contract.validate()?;
+        // Restore-protocol identity: `restore_contract.restore_protocol` (the
+        // protocol the manifest's restore steps are written for) and
+        // `compatibility_contract.runner_restore_contract` (the protocol a host
+        // must prove it speaks) are the SAME concept. If they disagree, a host
+        // that field-matches `runner_restore_contract` would restore under a
+        // protocol the manifest never declared. Enforcing equality here makes the
+        // host's existing `runner_restore_contract` match transitively prove
+        // `restore_protocol` — no separate host field is needed for the protocol.
+        if self.restore_contract.restore_protocol
+            != self.compatibility_contract.runner_restore_contract
+        {
+            return Err(SnapshotManifestError::RestoreContractMismatch);
+        }
         self.sanitization_attestation.validate()?;
         self.secret_scan_attestation.validate()
     }
@@ -690,8 +721,10 @@ pub struct SnapshotCandidate {
 /// 2. **acceptance** — only `Accepted` candidates survive (quarantined/rejected
 ///    Snapshots are never restored).
 /// 3. **proven compatibility** — the host must prove it satisfies the candidate's
-///    compatibility contract ([`SnapshotCompatibilityContractV1::is_satisfied_by`]);
-///    unknown compatibility fails closed.
+///    compatibility contract ([`SnapshotCompatibilityContractV1::is_satisfied_by`])
+///    **and** positively support the candidate's [`CapturePolicyV1`] (its
+///    `supported_capture_policies` must contain it). Unknown compatibility and an
+///    unsupported capture policy both fail closed.
 /// 4. **ranking** — surviving candidates are ordered by
 ///    [`SnapshotRankingSignals`] (lower restore cost, then hotset-resident, then
 ///    newer). Ranking runs **only** on the post-identity, post-compatibility set;
@@ -724,6 +757,14 @@ pub fn select_snapshots<'a>(
                 .manifest
                 .compatibility_contract
                 .is_satisfied_by(host)
+        })
+        // Gate 3 (capture policy): the host must positively support the
+        // candidate's capture policy, or it cannot honor the resume-vs-start
+        // restore semantics that policy dictates (RFC §10.2). Fail-closed — a
+        // policy absent from `supported_capture_policies` is never selected.
+        .filter(|candidate| {
+            host.supported_capture_policies
+                .contains(&candidate.manifest.capture_policy)
         })
         .collect();
 
@@ -904,7 +945,7 @@ mod tests {
                 restore_protocol: "ato-restore/v1".to_string(),
                 steps: vec!["network_reconnect".to_string()],
             },
-            capture_policy: CapturePolicyV1::Idle,
+            capture_policy: CapturePolicyV1::WorkloadIdle,
             sanitization_attestation: SanitizationAttestationV1 {
                 schema: SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA.to_string(),
                 steps: vec!["session_id_regenerate".to_string()],
@@ -946,6 +987,10 @@ mod tests {
             cpu_templates: vec!["T2CL".to_string(), "T2A".to_string()],
             runner_restore_contract: "ato-restore/v1".to_string(),
             compatibility_class_identity: Some(class_identity()),
+            supported_capture_policies: vec![
+                CapturePolicyV1::Running,
+                CapturePolicyV1::WorkloadIdle,
+            ],
         }
     }
 
@@ -1508,5 +1553,108 @@ mod tests {
             parsed.snapshot_id().unwrap(),
             manifest.snapshot_id().unwrap()
         );
+    }
+
+    // --- Acceptance (Blocker): capture-policy proven at SELECTION ---
+
+    #[test]
+    fn candidate_with_unsupported_capture_policy_is_never_selected() {
+        // The candidate is captured `WorkloadIdle` (the sample default) and both
+        // identity and every compatibility dimension match, but the host lists
+        // only `Running` in `supported_capture_policies`. The host cannot prove it
+        // can honor the workload_idle restore semantics, so the candidate is
+        // dropped fail-closed at selection — the capture policy is the ONLY thing
+        // keeping it out.
+        let mut host = matching_host();
+        host.supported_capture_policies = vec![CapturePolicyV1::Running];
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        // Sanity: identity + compatibility both hold; only the capture policy differs.
+        assert!(cand.manifest.compatibility_contract.is_satisfied_by(&host));
+        assert_eq!(cand.manifest.capture_policy, CapturePolicyV1::WorkloadIdle);
+        assert!(select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)).is_empty());
+        // An empty support list satisfies no Snapshot either.
+        let mut none = matching_host();
+        none.supported_capture_policies = vec![];
+        assert!(select_snapshots(&verified(SEED_A), &none, std::slice::from_ref(&cand)).is_empty());
+    }
+
+    #[test]
+    fn candidate_with_supported_capture_policy_and_matching_protocol_is_selected() {
+        // Host supports the candidate's capture policy AND shares the restore
+        // protocol (`runner_restore_contract` == `restore_protocol`), so the
+        // candidate survives every gate and is selected.
+        let host = matching_host();
+        let cand = candidate(SEED_A, AcceptanceStatus::Accepted, Default::default());
+        assert!(
+            host.supported_capture_policies
+                .contains(&cand.manifest.capture_policy)
+        );
+        assert_eq!(
+            cand.manifest.restore_contract.restore_protocol,
+            cand.manifest.compatibility_contract.runner_restore_contract
+        );
+        assert_eq!(
+            select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)),
+            vec![&cand]
+        );
+    }
+
+    // --- Acceptance (Blocker): restore_protocol identity enforced in validate() ---
+
+    #[test]
+    fn restore_protocol_must_equal_runner_restore_contract() {
+        // `restore_contract.restore_protocol` and
+        // `compatibility_contract.runner_restore_contract` are the same concept.
+        // A manifest whose two disagree is rejected fail-closed at validate()
+        // with `RestoreContractMismatch`, yields no `snapshot_id`, and is
+        // therefore also unselectable via the defensive validate() gate — even
+        // though identity + every host dimension would otherwise match.
+        let mut manifest = sample_manifest(SEED_A);
+        manifest.restore_contract.restore_protocol = "ato-restore/v2".to_string();
+        // (compatibility_contract.runner_restore_contract is still "ato-restore/v1")
+        assert_eq!(
+            manifest.validate(),
+            Err(SnapshotManifestError::RestoreContractMismatch)
+        );
+        // A mismatched manifest is not a content address.
+        assert!(manifest.snapshot_id().is_err());
+        let host = matching_host();
+        let cand = SnapshotCandidate {
+            manifest,
+            status: AcceptanceStatus::Accepted,
+            ranking: SnapshotRankingSignals::default(),
+        };
+        assert!(select_snapshots(&verified(SEED_A), &host, std::slice::from_ref(&cand)).is_empty());
+    }
+
+    // --- Acceptance (Major): capture-policy wire values match the RFC ---
+
+    #[test]
+    fn capture_policy_wire_values_match_the_rfc() {
+        // RFC §8 pins the two policy spellings to exactly "running" and
+        // "workload_idle".
+        assert_eq!(
+            serde_json::to_value(CapturePolicyV1::Running).unwrap(),
+            serde_json::json!("running")
+        );
+        assert_eq!(
+            serde_json::to_value(CapturePolicyV1::WorkloadIdle).unwrap(),
+            serde_json::json!("workload_idle")
+        );
+        assert_eq!(
+            serde_json::from_value::<CapturePolicyV1>(serde_json::json!("running")).unwrap(),
+            CapturePolicyV1::Running
+        );
+        assert_eq!(
+            serde_json::from_value::<CapturePolicyV1>(serde_json::json!("workload_idle")).unwrap(),
+            CapturePolicyV1::WorkloadIdle
+        );
+        // The pre-RFC spelling "idle" and any unknown value fail closed (a closed
+        // enum with explicit renames accepts neither).
+        assert!(serde_json::from_value::<CapturePolicyV1>(serde_json::json!("idle")).is_err());
+        assert!(
+            serde_json::from_value::<CapturePolicyV1>(serde_json::json!("workload-idle")).is_err()
+        );
+        assert!(serde_json::from_value::<CapturePolicyV1>(serde_json::json!("suspended")).is_err());
     }
 }
