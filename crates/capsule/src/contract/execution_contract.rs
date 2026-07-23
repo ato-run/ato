@@ -33,19 +33,21 @@
 //! * **typed** — the resolved content is carried by concrete typed fields
 //!   whose shape is fixed by v1 (`source.digest`, `target.*`, `launch.argv`,
 //!   `guest_surface.*`, `external_state[]`, …).
-//! * **opaque sub-contract digest** — a [`ContentDigest`] field commits a
-//!   sub-contract whose *payload schema is versioned separately from v1*. The
-//!   digest is inside the v1 identity set (mutating it changes
-//!   `execution_id`), but the bytes a producer hashes into it are defined by a
-//!   sub-contract that MAY gain structure in a later revision without touching
-//!   the v1 identity set. This is the RFC §4.5 layering — a digest pins
-//!   identity while its payload schema is versioned separately — and matches
-//!   the pre-existing `policy.network_digest`, `policy.capability_digest`, and
-//!   `policy.filesystem_digest` fields. The opaque `*_digest` facet fields are
+//! * **opaque sub-contract digest** — an [`OpaqueContractDigestV1`] field (a
+//!   BLAKE3-only digest, never `sha256`) commits a sub-contract whose *payload
+//!   schema is versioned separately from v1*. The digest is inside the v1
+//!   identity set (mutating it changes `execution_id`), but the bytes a
+//!   producer hashes into it are defined by a sub-contract that MAY gain
+//!   structure in a later revision without touching the v1 identity set. This
+//!   is the RFC §4.5 layering — a digest pins identity while its payload schema
+//!   is versioned separately. The preimage is fixed by v1 under a **typed**
+//!   domain ([`OpaqueContractDomainV1`], never a producer-chosen string), so no
+//!   opaque digest — including the three `policy.*` digests — has a
+//!   producer-defined preimage. The opaque `*_digest` facet fields are
 //!   `source.projection_digest`, `runtime.dynamic_contract_digest`,
 //!   `build_outputs[].projection_digest`, `launch.process_model_digest`,
-//!   `launch.environment_policy_digest`, `filesystem.topology_digest`, and the
-//!   three `policy.*` digests.
+//!   `launch.environment_policy_digest`, `launch.environment[].value_digest`,
+//!   `filesystem.topology_digest`, and the three `policy.*` digests.
 //!
 //! | RFC §4.2 facet | Required identity-bearing content | v1 field(s) |
 //! |---|---|---|
@@ -85,33 +87,58 @@
 //! `launch.cwd`, `filesystem.writable_paths[]`, and `external_state[].target`
 //! are [`GuestPath`]: an absolute path in exactly one canonical spelling (no
 //! bare `/` root unless the field opts in, no `.`/`..` segments, no repeated or
-//! trailing slash, no backslash/NUL/control chars), with segment-wise ordering
-//! for the sorted `writable_paths` list. `guest_surface.port`, when present, is
-//! a nonzero `u16` ([`NonZeroU16`]); a `0` port fails closed. Non-canonical
-//! spellings are pinned by the `invalid-relative-cwd`, `invalid-dotdot-target`,
+//! trailing slash, no backslash, and no Unicode control character — the C0
+//! range incl. NUL, DEL, and the C1 range U+0080..=U+009F, i.e.
+//! `char::is_control`).
+//!
+//! The sorted `writable_paths` list uses **segment-wise ordering, and within
+//! each segment UTF-8 byte lexicographic order** (normative — Option A,
+//! Unicode paths retained). A cross-language implementation **MUST compare
+//! UTF-8 bytes, not UTF-16 code units**: the two orders diverge for
+//! astral-plane characters (e.g. `U+E000` precedes `U+10000` under UTF-8 /
+//! code-point order but follows it under UTF-16). Pinned by the
+//! `guest-path-utf8-order` (valid, correctly ordered) and
+//! `invalid-guest-path-utf16-order` (the same pair reversed into UTF-16 order,
+//! rejected) vectors, and C1-control rejection by `invalid-c1-control-target`
+//! (U+0085).
+//!
+//! `guest_surface.port`, when present, is a nonzero `u16` ([`NonZeroU16`]); a
+//! `0` port fails closed. Other non-canonical spellings are pinned by the
+//! `invalid-relative-cwd`, `invalid-dotdot-target`,
 //! `invalid-trailing-slash-target`, and `invalid-zero-port` vectors.
 //!
 //! ## Opaque sub-contract digest preimages (normative)
 //!
-//! Every opaque `*_digest` field commits a sub-contract under a fixed preimage
-//! rule; only the *payload schema* is versioned separately (RFC §4.5). The
-//! rule is `digest = blake3(UTF8(domain) || 0x00 || JCS(payload))`
-//! ([`opaque_subcontract_digest`]), with these exact domains:
+//! Every opaque digest field ([`OpaqueContractDigestV1`]) commits a
+//! sub-contract under one fixed preimage rule; only the *payload schema* is
+//! versioned separately (RFC §4.5). The rule is
+//! `digest = blake3(UTF8(domain) || 0x00 || JCS(payload))`
+//! ([`opaque_subcontract_digest`]), where `domain` is the typed
+//! [`OpaqueContractDomainV1`] for the facet — never a producer-chosen string.
+//! The exact field → domain mapping is:
 //!
-//! | field | domain |
-//! |---|---|
-//! | `source.projection_digest` | `ato.source-projection-contract/v1` |
-//! | `runtime.dynamic_contract_digest` | `ato.runtime-dynamic-contract/v1` |
-//! | `build_outputs[].projection_digest` | `ato.build-output-projection/v1` |
-//! | `launch.process_model_digest` | `ato.process-model-contract/v1` |
-//! | `launch.environment_policy_digest` | `ato.environment-policy/v1` |
-//! | `filesystem.topology_digest` | `ato.filesystem-topology/v1` |
-//! | `launch.environment[].value_digest` | `ato.environment-value/v1` |
+//! | field | domain | [`OpaqueContractDomainV1`] |
+//! |---|---|---|
+//! | `source.projection_digest` | `ato.source-projection-contract/v1` | `SourceProjection` |
+//! | `runtime.dynamic_contract_digest` | `ato.runtime-dynamic-contract/v1` | `RuntimeDynamic` |
+//! | `build_outputs[].projection_digest` | `ato.build-output-projection/v1` | `BuildOutputProjection` |
+//! | `launch.process_model_digest` | `ato.process-model-contract/v1` | `ProcessModel` |
+//! | `launch.environment_policy_digest` | `ato.environment-policy/v1` | `EnvironmentPolicy` |
+//! | `launch.environment[].value_digest` | `ato.environment-value/v1` | `EnvironmentValue` |
+//! | `filesystem.topology_digest` | `ato.filesystem-topology/v1` | `FilesystemTopology` |
+//! | `policy.network_digest` | `ato.network-policy/v1` | `NetworkPolicy` |
+//! | `policy.capability_digest` | `ato.capability-policy/v1` | `CapabilityPolicy` |
+//! | `policy.filesystem_digest` | `ato.filesystem-policy/v1` | `FilesystemPolicy` |
 //!
-//! The three `policy.*` digests keep their existing producer-defined preimages.
-//! G0-2 stores each payload in `ato.lock.json` and re-derives its digest before
-//! launch; a later PR may define/extend a payload schema without a v1 identity
-//! change, but MUST keep the domain constant and preimage rule above.
+//! The three `policy.*` digests are on exactly the same footing as the other
+//! opaque facets: their **domain and preimage rule are frozen by v1 now** (no
+//! producer-defined preimage), while their payload *schemas* are defined in a
+//! later PR. G0-2 stores each payload in `ato.lock.json` and re-derives its
+//! digest before launch; a later PR may define/extend a payload schema without
+//! a v1 identity change, but MUST keep the domain constant and preimage rule
+//! above. No in-tree normative preimage spec for the network/capability/
+//! filesystem policy payloads exists yet; this module is the SSOT freezing
+//! their domain + rule until that schema PR lands.
 //!
 //! ## Duplicate keys fail closed (canonicalization safety)
 //!
@@ -174,41 +201,71 @@ use thiserror::Error;
 
 pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
 
-// Opaque sub-contract digest domain separators (normative).
-//
-// Each opaque `*_digest` facet field commits a sub-contract whose *payload
-// schema is versioned separately from v1*. Its digest is fixed by v1 as:
-//
-// ```text
-// digest = blake3(UTF8("<domain>") || 0x00 || JCS(self-describing payload))
-// ```
-//
-// The domain string below is the exact preimage prefix for that field. A
-// later PR MAY define or extend the payload schema behind a digest without a
-// v1 identity change (RFC §4.5 layering), but MUST keep this preimage rule and
-// domain constant. G0-2 stores each payload alongside its digest in
-// `ato.lock.json` and re-derives the digest before launch. See the
-// module-level "opaque sub-contract digest preimages" section.
-pub const SOURCE_PROJECTION_CONTRACT_V1_DOMAIN: &str = "ato.source-projection-contract/v1";
-pub const RUNTIME_DYNAMIC_CONTRACT_V1_DOMAIN: &str = "ato.runtime-dynamic-contract/v1";
-pub const BUILD_OUTPUT_PROJECTION_V1_DOMAIN: &str = "ato.build-output-projection/v1";
-pub const PROCESS_MODEL_CONTRACT_V1_DOMAIN: &str = "ato.process-model-contract/v1";
-pub const ENVIRONMENT_POLICY_V1_DOMAIN: &str = "ato.environment-policy/v1";
-pub const FILESYSTEM_TOPOLOGY_V1_DOMAIN: &str = "ato.filesystem-topology/v1";
-
-/// Domain separator for a single resolved non-secret environment *value*
-/// digest (`launch.environment[].value_digest`). The preimage relation is
-/// pinned as a v1 contract:
+/// The normative domain separator for each opaque sub-contract digest facet.
+///
+/// Every opaque `*_digest` / `value_digest` field commits a sub-contract under
+/// exactly one of these domains. Its digest is fixed by v1 as:
 ///
 /// ```text
-/// value_digest = blake3(UTF8("ato.environment-value/v1") || 0x00 || JCS(payload))
+/// digest = blake3(UTF8(domain) || 0x00 || JCS(self-describing payload))
 /// ```
 ///
-/// where `payload` is a self-describing object carrying the normalized,
-/// non-secret variable value. Secret values never enter the contract at all
-/// (RFC §4.3). G0-2 stores the payload in `ato.lock.json` and verifies the
-/// digest before launch.
-pub const ENVIRONMENT_VALUE_V1_DOMAIN: &str = "ato.environment-value/v1";
+/// The domain is inside the v1 identity set (it is baked into the digest
+/// preimage), and the preimage rule and algorithm ([`DigestAlgorithm::Blake3`],
+/// carried by [`OpaqueContractDigestV1`]) are frozen. Only the *payload schema*
+/// behind the digest is versioned separately from v1 (RFC §4.5 layering): a
+/// later PR MAY define or extend a payload without a v1 identity change, but
+/// MUST keep the domain and preimage rule constant. G0-2 stores each payload
+/// alongside its digest in `ato.lock.json` and re-derives the digest before
+/// launch.
+///
+/// The domain is a **typed** value, never a free `&str`: this makes it
+/// impossible for a producer to invent a domain string, misspell one, or reuse
+/// the wrong domain for a facet. `network`/`capability`/`filesystem` policy
+/// digests are on the same footing as the other opaque facets — their domains
+/// are frozen here even though their payload schemas land in a later PR (there
+/// is no producer-defined preimage: the domain and rule are normative now).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OpaqueContractDomainV1 {
+    /// `source.projection_digest` — source projection rules.
+    SourceProjection,
+    /// `runtime.dynamic_contract_digest` — dynamic runtime contract.
+    RuntimeDynamic,
+    /// `build_outputs[].projection_digest` — build-output projection.
+    BuildOutputProjection,
+    /// `launch.process_model_digest` — process model.
+    ProcessModel,
+    /// `launch.environment_policy_digest` — env requirements/normalization/inheritance policy.
+    EnvironmentPolicy,
+    /// `launch.environment[].value_digest` — a single resolved non-secret value.
+    EnvironmentValue,
+    /// `filesystem.topology_digest` — mount topology + per-mount access modes.
+    FilesystemTopology,
+    /// `policy.network_digest` — ingress/egress/DNS/isolation policy.
+    NetworkPolicy,
+    /// `policy.capability_digest` — host/device/sandbox capability policy.
+    CapabilityPolicy,
+    /// `policy.filesystem_digest` — filesystem capability policy.
+    FilesystemPolicy,
+}
+
+impl OpaqueContractDomainV1 {
+    /// The exact normative domain string hashed into the digest preimage.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SourceProjection => "ato.source-projection-contract/v1",
+            Self::RuntimeDynamic => "ato.runtime-dynamic-contract/v1",
+            Self::BuildOutputProjection => "ato.build-output-projection/v1",
+            Self::ProcessModel => "ato.process-model-contract/v1",
+            Self::EnvironmentPolicy => "ato.environment-policy/v1",
+            Self::EnvironmentValue => "ato.environment-value/v1",
+            Self::FilesystemTopology => "ato.filesystem-topology/v1",
+            Self::NetworkPolicy => "ato.network-policy/v1",
+            Self::CapabilityPolicy => "ato.capability-policy/v1",
+            Self::FilesystemPolicy => "ato.filesystem-policy/v1",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DigestAlgorithm {
@@ -309,6 +366,93 @@ impl<'de> Deserialize<'de> for ContentDigest {
     }
 }
 
+/// A BLAKE3 opaque sub-contract digest (`blake3:<64 lowercase hex>`).
+///
+/// Unlike [`ContentDigest`] — which addresses concrete content and may be
+/// `blake3` or `sha256` — an opaque sub-contract digest is **always** BLAKE3,
+/// because v1 fixes its preimage to
+/// `blake3(UTF8(domain) || 0x00 || JCS(payload))` ([`opaque_subcontract_digest`]).
+/// The algorithm is therefore not a producer choice: a `sha256:`-spelled value
+/// is not a valid opaque digest and fails deserialization closed. Only the
+/// *payload schema* behind the digest is versioned separately from v1
+/// (RFC §4.5); the algorithm, domain ([`OpaqueContractDomainV1`]), and preimage
+/// rule are frozen. Enforcing BLAKE3 at the type level means the shared fixture
+/// bytes for every opaque facet can never carry an `execution_id`-affecting
+/// algorithm variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OpaqueContractDigestV1([u8; 32]);
+
+impl OpaqueContractDigestV1 {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl fmt::Display for OpaqueContractDigestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}:{}",
+            DigestAlgorithm::Blake3.as_str(),
+            hex::encode(self.0)
+        )
+    }
+}
+
+impl TryFrom<String> for OpaqueContractDigestV1 {
+    type Error = ExecutionContractError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        // BLAKE3-only: the `blake3:` prefix is mandatory. A `sha256:` (or any
+        // other) spelling is not a valid opaque sub-contract digest.
+        let encoded = value
+            .strip_prefix("blake3:")
+            .ok_or(ExecutionContractError::InvalidOpaqueContractDigest)?;
+        if encoded.len() != 64
+            || !encoded
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ExecutionContractError::InvalidOpaqueContractDigest);
+        }
+        let decoded = hex::decode(encoded)
+            .map_err(|_| ExecutionContractError::InvalidOpaqueContractDigest)?;
+        let bytes = decoded
+            .try_into()
+            .map_err(|_| ExecutionContractError::InvalidOpaqueContractDigest)?;
+        Ok(Self(bytes))
+    }
+}
+
+impl From<OpaqueContractDigestV1> for String {
+    fn from(value: OpaqueContractDigestV1) -> Self {
+        value.to_string()
+    }
+}
+
+impl Serialize for OpaqueContractDigestV1 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueContractDigestV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::try_from(value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ExecutionId(String);
@@ -365,14 +509,16 @@ impl From<ExecutionId> for String {
 ///   [`GuestPath::parse_allowing_root`];
 /// * no `.` or `..` segments;
 /// * no repeated `/` (empty segment) and no trailing `/`;
-/// * no backslash, NUL, or other control characters.
+/// * no backslash and no Unicode control character (`char::is_control`: the C0
+///   range incl. NUL, DEL, and the C1 range U+0080..=U+009F).
 ///
 /// Ordering and equality are **segment-wise** (path components compared
-/// component-by-component), which is the canonical sort order the identity
-/// lists (`writable_paths`) are validated against — independent of raw byte
-/// order. The decomposition into segments is a bijection with the accepted
-/// spelling, so segment-wise `Ord` stays consistent with the derived
-/// `PartialEq`/`Eq`.
+/// component-by-component); **within each segment the comparison is UTF-8 byte
+/// lexicographic** (normative — see the module-level "Canonical guest paths"
+/// section). This is the canonical sort order the identity lists
+/// (`writable_paths`) are validated against. The decomposition into segments is
+/// a bijection with the accepted spelling, so segment-wise `Ord` stays
+/// consistent with the derived `PartialEq`/`Eq`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestPath(String);
 
@@ -397,12 +543,13 @@ impl GuestPath {
         if !value.starts_with('/') {
             return Err(Bad("must be absolute (a leading '/')"));
         }
-        if value
-            .bytes()
-            .any(|byte| byte == b'\\' || byte < 0x20 || byte == 0x7f)
-        {
+        // Reject a backslash and *every* Unicode control character
+        // (`char::is_control`: the C0 range incl. NUL, DEL, and the C1 range
+        // U+0080..=U+009F). A byte-wise C0/DEL-only check would wrongly accept
+        // C1 controls such as U+0085 (NEL), so scan by `char`.
+        if value.chars().any(|ch| ch == '\\' || ch.is_control()) {
             return Err(Bad(
-                "must not contain a backslash, NUL, or control character",
+                "must not contain a backslash, NUL, or Unicode control character",
             ));
         }
         if value == "/" {
@@ -446,6 +593,14 @@ impl Ord for GuestPath {
     fn cmp(&self, other: &Self) -> Ordering {
         // Segment-wise: compare path components lexicographically. Both paths
         // start with '/', so the leading empty segment compares equal first.
+        //
+        // Rust's `str: Ord` compares by UTF-8 bytes, which for valid UTF-8
+        // equals Unicode code-point order. This is the normative rule
+        // (Option A): a cross-language implementation MUST compare UTF-8 bytes
+        // per segment, NOT UTF-16 code units — the two diverge for astral-plane
+        // characters (e.g. U+E000 precedes U+10000 by UTF-8/code point but
+        // follows it by UTF-16). Pinned by the guest-path-utf8-order /
+        // invalid-guest-path-utf16-order vectors.
         self.0.split('/').cmp(other.0.split('/'))
     }
 }
@@ -481,6 +636,11 @@ pub enum ExecutionContractError {
     InvalidExecutionId,
     #[error("content digest must use blake3 or sha256 with exactly 64 lowercase hex characters")]
     InvalidContentDigest,
+    #[error(
+        "opaque sub-contract digest must be blake3:<64 lowercase hex characters> \
+         (sha256 is not a valid opaque digest algorithm)"
+    )]
+    InvalidOpaqueContractDigest,
     #[error("guest path is not canonical: {0}")]
     InvalidGuestPath(&'static str),
     #[error("stored execution_id {stored} does not match the canonical hash {computed}")]
@@ -522,7 +682,7 @@ pub struct ExecutionContractV1 {
 #[serde(deny_unknown_fields)]
 pub struct ResolvedSourceContract {
     pub digest: ContentDigest,
-    pub projection_digest: ContentDigest,
+    pub projection_digest: OpaqueContractDigestV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,7 +724,7 @@ pub struct ResolvedTargetContract {
 pub struct ResolvedArtifactContract {
     pub kind: String,
     pub digest: ContentDigest,
-    pub dynamic_contract_digest: ContentDigest,
+    pub dynamic_contract_digest: OpaqueContractDigestV1,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -586,7 +746,7 @@ pub struct ResolvedDependencyContract {
 pub struct ResolvedBuildOutputContract {
     pub name: String,
     pub digest: ContentDigest,
-    pub projection_digest: ContentDigest,
+    pub projection_digest: OpaqueContractDigestV1,
 }
 
 /// Resolved launch facet. `argv` is the exact entrypoint and `cwd` is the
@@ -607,9 +767,9 @@ pub struct ResolvedBuildOutputContract {
 pub struct ResolvedLaunchContract {
     pub argv: Vec<String>,
     pub cwd: GuestPath,
-    pub process_model_digest: ContentDigest,
+    pub process_model_digest: OpaqueContractDigestV1,
     pub environment: Vec<EnvironmentVariableContract>,
-    pub environment_policy_digest: ContentDigest,
+    pub environment_policy_digest: OpaqueContractDigestV1,
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -629,7 +789,7 @@ pub struct ResolvedLaunchContract {
 #[serde(deny_unknown_fields)]
 pub struct EnvironmentVariableContract {
     pub name: String,
-    pub value_digest: ContentDigest,
+    pub value_digest: OpaqueContractDigestV1,
 }
 
 /// Resolved filesystem facet. `readonly_layers` are the immutable layer
@@ -647,17 +807,28 @@ pub struct EnvironmentVariableContract {
 #[serde(deny_unknown_fields)]
 pub struct ResolvedFilesystemContract {
     pub view_digest: ContentDigest,
-    pub topology_digest: ContentDigest,
+    pub topology_digest: OpaqueContractDigestV1,
     pub readonly_layers: Vec<ContentDigest>,
     pub writable_paths: Vec<GuestPath>,
 }
 
+/// Resolved policy facet. All three digests are opaque sub-contract digests
+/// ([`OpaqueContractDigestV1`]) under the same normative preimage rule as the
+/// other opaque facets — `network_digest` uses domain
+/// [`OpaqueContractDomainV1::NetworkPolicy`] (ingress/egress/DNS/isolation),
+/// `capability_digest` uses [`OpaqueContractDomainV1::CapabilityPolicy`]
+/// (host/device/sandbox capabilities), and `filesystem_digest` uses
+/// [`OpaqueContractDomainV1::FilesystemPolicy`]. The preimages are **not**
+/// producer-defined: the domain and rule
+/// (`blake3(UTF8(domain) || 0x00 || JCS(payload))`) are frozen by v1, while
+/// each policy payload schema is versioned separately from v1 (RFC §4.5),
+/// exactly like the other opaque facets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedPolicyContract {
-    pub network_digest: ContentDigest,
-    pub capability_digest: ContentDigest,
-    pub filesystem_digest: ContentDigest,
+    pub network_digest: OpaqueContractDigestV1,
+    pub capability_digest: OpaqueContractDigestV1,
+    pub filesystem_digest: OpaqueContractDigestV1,
 }
 
 /// Declared guest-facing surface. `port` is an optional guest port; when
@@ -898,33 +1069,31 @@ impl ExecutionContractV1 {
 /// digest = blake3(UTF8(domain) || 0x00 || JCS(payload))
 /// ```
 ///
-/// `domain` MUST be one of the normative opaque-digest domain constants
-/// (`ato.source-projection-contract/v1`, `ato.runtime-dynamic-contract/v1`,
-/// `ato.build-output-projection/v1`, `ato.process-model-contract/v1`,
-/// `ato.environment-policy/v1`, `ato.filesystem-topology/v1`) or
-/// [`ENVIRONMENT_VALUE_V1_DOMAIN`]. `payload` is the self-describing
-/// sub-contract payload whose *schema is versioned separately from v1*. The
-/// preimage rule is fixed by v1; the payload schema is not, so a later PR can
-/// define the payload without a v1 identity change (RFC §4.5). The returned
-/// digest is what a producer stores in the matching `*_digest` /
-/// `value_digest` field.
+/// `domain` is a typed [`OpaqueContractDomainV1`] — never a free `&str` — so a
+/// producer can neither invent nor misspell a domain. `payload` is the
+/// self-describing sub-contract payload whose *schema is versioned separately
+/// from v1*. The preimage rule and BLAKE3 algorithm are fixed by v1; the
+/// payload schema is not, so a later PR can define the payload without a v1
+/// identity change (RFC §4.5). The returned [`OpaqueContractDigestV1`] is what a
+/// producer stores in the matching `*_digest` / `value_digest` field.
+///
+/// Returns [`ExecutionContractError::Canonicalization`] if the payload cannot
+/// be JCS-serialized (fail-closed: an unserializable payload never yields a
+/// digest).
 pub fn opaque_subcontract_digest<T>(
-    domain: &str,
+    domain: OpaqueContractDomainV1,
     payload: &T,
-) -> Result<ContentDigest, ExecutionContractError>
+) -> Result<OpaqueContractDigestV1, ExecutionContractError>
 where
     T: Serialize,
 {
     let canonical = serde_jcs::to_vec(payload)
         .map_err(|error| ExecutionContractError::Canonicalization(error.to_string()))?;
     let mut hasher = blake3::Hasher::new();
-    hasher.update(domain.as_bytes());
+    hasher.update(domain.as_str().as_bytes());
     hasher.update(&[0]);
     hasher.update(&canonical);
-    Ok(ContentDigest::new(
-        DigestAlgorithm::Blake3,
-        *hasher.finalize().as_bytes(),
-    ))
+    Ok(OpaqueContractDigestV1::new(*hasher.finalize().as_bytes()))
 }
 
 fn validate_sorted_digests(
@@ -1101,6 +1270,10 @@ mod tests {
         ContentDigest::new(algorithm, [byte; 32])
     }
 
+    fn opaque_digest(byte: u8) -> OpaqueContractDigestV1 {
+        OpaqueContractDigestV1::new([byte; 32])
+    }
+
     fn guest_path(value: &str) -> GuestPath {
         GuestPath::parse(value).expect("canonical guest path")
     }
@@ -1110,7 +1283,7 @@ mod tests {
             schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
             source: ResolvedSourceContract {
                 digest: digest(DigestAlgorithm::Sha256, 1),
-                projection_digest: digest(DigestAlgorithm::Blake3, 0x0c),
+                projection_digest: opaque_digest(0x0c),
             },
             target: ResolvedTargetContract {
                 os: "linux".to_string(),
@@ -1122,7 +1295,7 @@ mod tests {
             runtime: ResolvedArtifactContract {
                 kind: "node".to_string(),
                 digest: digest(DigestAlgorithm::Sha256, 2),
-                dynamic_contract_digest: digest(DigestAlgorithm::Blake3, 0x0d),
+                dynamic_contract_digest: opaque_digest(0x0d),
             },
             dependencies: vec![ResolvedDependencyContract {
                 name: "npm".to_string(),
@@ -1132,29 +1305,29 @@ mod tests {
             build_outputs: vec![ResolvedBuildOutputContract {
                 name: "app".to_string(),
                 digest: digest(DigestAlgorithm::Blake3, 5),
-                projection_digest: digest(DigestAlgorithm::Blake3, 0x0e),
+                projection_digest: opaque_digest(0x0e),
             }],
             launch: ResolvedLaunchContract {
                 argv: vec!["node".to_string(), "dist/server.js".to_string()],
                 cwd: guest_path("/workspace"),
-                process_model_digest: digest(DigestAlgorithm::Blake3, 0x0f),
+                process_model_digest: opaque_digest(0x0f),
                 environment: vec![EnvironmentVariableContract {
                     name: "NODE_ENV".to_string(),
-                    value_digest: digest(DigestAlgorithm::Blake3, 6),
+                    value_digest: opaque_digest(6),
                 }],
-                environment_policy_digest: digest(DigestAlgorithm::Blake3, 0x10),
+                environment_policy_digest: opaque_digest(0x10),
                 secret_bindings: vec!["API_TOKEN".to_string()],
             },
             filesystem: ResolvedFilesystemContract {
                 view_digest: digest(DigestAlgorithm::Blake3, 7),
-                topology_digest: digest(DigestAlgorithm::Blake3, 0x11),
+                topology_digest: opaque_digest(0x11),
                 readonly_layers: vec![digest(DigestAlgorithm::Blake3, 8)],
                 writable_paths: vec![guest_path("/tmp")],
             },
             policy: ResolvedPolicyContract {
-                network_digest: digest(DigestAlgorithm::Blake3, 9),
-                capability_digest: digest(DigestAlgorithm::Blake3, 10),
-                filesystem_digest: digest(DigestAlgorithm::Blake3, 11),
+                network_digest: opaque_digest(9),
+                capability_digest: opaque_digest(10),
+                filesystem_digest: opaque_digest(11),
             },
             guest_surface: GuestSurfaceContract {
                 bind_address: "0.0.0.0".to_string(),
@@ -1250,37 +1423,47 @@ mod tests {
     fn opaque_subcontract_digests_are_identity_bearing() {
         // Each RFC §4.2 facet that v1 commits as an opaque sub-contract digest
         // (source projection rules, dynamic runtime contract, build-output
-        // projection, launch process model, environment policy, filesystem
-        // mount topology + access modes) must be in the identity set: mutating
-        // its digest must change execution_id, and pairwise-distinctly so.
+        // projection, launch process model, environment policy, environment
+        // value, filesystem mount topology + access modes, and the three
+        // network/capability/filesystem policies) must be in the identity set:
+        // mutating its digest must change execution_id, and pairwise-distinctly
+        // so.
         let baseline = sample_contract();
         let baseline_id = baseline.compute_execution_id().unwrap();
 
         type Mutation = (&'static str, fn(&mut ExecutionContractV1));
-        let mutations: [Mutation; 6] = [
+        let mutations: [Mutation; 10] = [
             ("source.projection_digest", |contract| {
-                contract.source.projection_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xac; 32]);
+                contract.source.projection_digest = OpaqueContractDigestV1::new([0xac; 32]);
             }),
             ("runtime.dynamic_contract_digest", |contract| {
-                contract.runtime.dynamic_contract_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xad; 32]);
+                contract.runtime.dynamic_contract_digest = OpaqueContractDigestV1::new([0xad; 32]);
             }),
             ("build_outputs[].projection_digest", |contract| {
                 contract.build_outputs[0].projection_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xae; 32]);
+                    OpaqueContractDigestV1::new([0xae; 32]);
             }),
             ("launch.process_model_digest", |contract| {
-                contract.launch.process_model_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xaf; 32]);
+                contract.launch.process_model_digest = OpaqueContractDigestV1::new([0xaf; 32]);
             }),
             ("launch.environment_policy_digest", |contract| {
-                contract.launch.environment_policy_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xb0; 32]);
+                contract.launch.environment_policy_digest = OpaqueContractDigestV1::new([0xb0; 32]);
+            }),
+            ("launch.environment[].value_digest", |contract| {
+                contract.launch.environment[0].value_digest =
+                    OpaqueContractDigestV1::new([0xb2; 32]);
             }),
             ("filesystem.topology_digest", |contract| {
-                contract.filesystem.topology_digest =
-                    ContentDigest::new(DigestAlgorithm::Blake3, [0xb1; 32]);
+                contract.filesystem.topology_digest = OpaqueContractDigestV1::new([0xb1; 32]);
+            }),
+            ("policy.network_digest", |contract| {
+                contract.policy.network_digest = OpaqueContractDigestV1::new([0xb3; 32]);
+            }),
+            ("policy.capability_digest", |contract| {
+                contract.policy.capability_digest = OpaqueContractDigestV1::new([0xb4; 32]);
+            }),
+            ("policy.filesystem_digest", |contract| {
+                contract.policy.filesystem_digest = OpaqueContractDigestV1::new([0xb5; 32]);
             }),
         ];
 
@@ -1522,7 +1705,14 @@ mod tests {
 
     #[test]
     fn guest_path_accepts_only_the_canonical_spelling() {
-        for good in ["/workspace", "/data/ユーザー", "/a/b/c", "/tmp"] {
+        for good in [
+            "/workspace",
+            "/data/ユーザー",
+            "/a/b/c",
+            "/tmp",
+            "/\u{e000}",  // private-use BMP char (not a control char)
+            "/\u{10000}", // astral-plane char (not a control char)
+        ] {
             assert!(GuestPath::parse(good).is_ok(), "{good}");
         }
         for (bad, _why) in [
@@ -1534,7 +1724,9 @@ mod tests {
             ("/data/../data", ".. segment"),
             ("/data/./x", ". segment"),
             ("/data\\x", "backslash"),
-            ("/data\u{7}x", "control char"),
+            ("/data\u{7}x", "C0 control char"),
+            ("/data\u{7f}x", "DEL control char"),
+            ("/data\u{85}x", "C1 control char (U+0085 NEL)"),
         ] {
             assert!(GuestPath::parse(bad).is_err(), "{bad}");
         }
@@ -1553,6 +1745,19 @@ mod tests {
         let a_dot_b = guest_path("/a.b");
         assert!(a < a_b);
         assert!(a_b < a_dot_b);
+    }
+
+    #[test]
+    fn guest_path_ordering_is_utf8_byte_order_not_utf16() {
+        // U+E000 (private-use, BMP) vs U+10000 (astral). Under UTF-8 / code
+        // point order, U+E000 < U+10000 (first bytes 0xEE < 0xF0). Under UTF-16
+        // code-unit order they invert (U+10000's lead surrogate 0xD800 < the
+        // single unit 0xE000). The normative rule is UTF-8 byte order, so the
+        // private-use char MUST sort first — the same order Rust's `str: Ord`
+        // and the shared guest-path-utf8-order vector encode.
+        let private_use = guest_path("/\u{e000}");
+        let astral = guest_path("/\u{10000}");
+        assert!(private_use < astral);
     }
 
     #[test]
@@ -1577,20 +1782,57 @@ mod tests {
     fn opaque_subcontract_digest_matches_the_pinned_preimage() {
         // Prove the preimage shape for one domain: the environment value digest.
         let payload = serde_json::json!({ "value": "production", "encoding": "utf-8" });
-        let got = opaque_subcontract_digest(ENVIRONMENT_VALUE_V1_DOMAIN, &payload)
+        let got = opaque_subcontract_digest(OpaqueContractDomainV1::EnvironmentValue, &payload)
             .expect("digest computes");
 
         let canonical = serde_jcs::to_vec(&payload).unwrap();
-        let mut preimage = ENVIRONMENT_VALUE_V1_DOMAIN.as_bytes().to_vec();
+        let mut preimage = OpaqueContractDomainV1::EnvironmentValue
+            .as_str()
+            .as_bytes()
+            .to_vec();
         preimage.push(0);
         preimage.extend(canonical);
-        let expected =
-            ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(&preimage).as_bytes());
+        let expected = OpaqueContractDigestV1::new(*blake3::hash(&preimage).as_bytes());
 
         assert_eq!(got, expected);
-        assert_eq!(got.algorithm(), DigestAlgorithm::Blake3);
+        // The wire form is BLAKE3-only.
+        assert_eq!(
+            got.to_string(),
+            format!("blake3:{}", hex::encode(got.bytes()))
+        );
         // Domain separation: the same payload under a different domain differs.
-        let other = opaque_subcontract_digest(FILESYSTEM_TOPOLOGY_V1_DOMAIN, &payload).unwrap();
+        let other = opaque_subcontract_digest(OpaqueContractDomainV1::FilesystemTopology, &payload)
+            .unwrap();
         assert_ne!(got, other);
+    }
+
+    #[test]
+    fn opaque_contract_digest_rejects_sha256_and_wrong_shapes() {
+        // A sha256-spelled value is not a valid opaque sub-contract digest:
+        // the algorithm is fixed to blake3 at the type level.
+        for invalid in [
+            format!("sha256:{}", "ab".repeat(32)),
+            format!("blake3:{}", "A".repeat(64)), // uppercase hex is non-canonical
+            format!("blake3:{}", "aa".repeat(31)), // too short
+            "blake3:not-hex".to_string(),
+            "aa".repeat(32), // missing algorithm prefix
+        ] {
+            assert!(
+                OpaqueContractDigestV1::try_from(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+        // The canonical blake3 spelling round-trips.
+        let ok = format!("blake3:{}", "0c".repeat(32));
+        let parsed =
+            OpaqueContractDigestV1::try_from(ok.clone()).expect("valid blake3 opaque digest");
+        assert_eq!(parsed.to_string(), ok);
+
+        // Fail-closed at the struct layer too: a sha256-spelled opaque field
+        // must reject on deserialization (representative field: policy.network_digest).
+        let mut value = serde_json::to_value(sample_contract()).unwrap();
+        value["policy"]["network_digest"] =
+            serde_json::json!(format!("sha256:{}", "ab".repeat(32)));
+        assert!(serde_json::from_value::<ExecutionContractV1>(value).is_err());
     }
 }

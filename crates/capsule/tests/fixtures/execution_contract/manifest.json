@@ -6,6 +6,8 @@
   "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
   "numbers": "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, a nonzero integer in 1..=65535 (0 is rejected fail-closed). No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.",
   "optional_fields": "Optional identity fields (target.libc, target.observable_features, launch.secret_bindings, guest_surface.port) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.",
+  "opaque_digests": "The opaque sub-contract digest fields (source.projection_digest, runtime.dynamic_contract_digest, build_outputs[].projection_digest, launch.process_model_digest, launch.environment_policy_digest, launch.environment[].value_digest, filesystem.topology_digest, policy.network_digest, policy.capability_digest, policy.filesystem_digest) are ALWAYS blake3: their preimage is fixed by v1 as blake3(UTF8(domain) || 0x00 || JCS(payload)) under one of the frozen domains ato.source-projection-contract/v1, ato.runtime-dynamic-contract/v1, ato.build-output-projection/v1, ato.process-model-contract/v1, ato.environment-policy/v1, ato.environment-value/v1, ato.filesystem-topology/v1, ato.network-policy/v1, ato.capability-policy/v1, ato.filesystem-policy/v1. The algorithm is not a producer choice: a sha256-spelled value is NOT a valid opaque sub-contract digest and MUST be rejected before hashing. Only the payload schema behind each digest is versioned separately from v1 (RFC 4.5); the algorithm, domain, and preimage rule are frozen. Pinned by the invalid-sha256-*-digest vectors.",
+  "guest_path_ordering": "Guest-path lists (filesystem.writable_paths) are sorted segment-wise, and WITHIN each segment by UTF-8 byte lexicographic order (equivalently Unicode code-point order). TypeScript implementations MUST compare UTF-8 bytes, NOT UTF-16 code units — the two orders diverge for astral-plane characters: e.g. U+E000 precedes U+10000 by UTF-8/code point, but follows it by UTF-16 (the astral char's lead surrogate U+D800 sorts before the single unit U+E000). Guest paths also reject every Unicode control character (char::is_control: the C0 range incl. NUL, DEL, and the C1 range U+0080..U+009F), not only C0/DEL. Pinned by guest-path-utf8-order (valid, correctly ordered), invalid-guest-path-utf16-order (same pair reversed into UTF-16 order), and invalid-c1-control-target (U+0085 NEL).",
   "baseline": "baseline",
   "vectors": [
     {
@@ -273,7 +275,8 @@
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:4fbe7f4d43c38f2cf2ed541f1d894255fb6a83ff2a8b63c0dc0b4f2c7852c190",
-      "relation": "differs-from-baseline"
+      "relation": "differs-from-baseline",
+      "notes": "opaque network-policy sub-contract digest is identity-bearing (RFC §4.2 Network; domain ato.network-policy/v1)"
     },
     {
       "name": "mutate-capability-policy-digest",
@@ -281,7 +284,8 @@
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:63148871d4ef83af45ecf67fe9a17aeb4788068afc458e00b106b9792b9a6ef2",
-      "relation": "differs-from-baseline"
+      "relation": "differs-from-baseline",
+      "notes": "opaque capability-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.capability-policy/v1)"
     },
     {
       "name": "mutate-filesystem-policy-digest",
@@ -289,7 +293,8 @@
       "kind": "contract",
       "expect": "execution_id",
       "execution_id": "blake3:baa74ab06bc6731f9054500907cb782207a9e7f4bedb517004f4d3e1ed312b0d",
-      "relation": "differs-from-baseline"
+      "relation": "differs-from-baseline",
+      "notes": "opaque filesystem-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.filesystem-policy/v1)"
     },
     {
       "name": "mutate-guest-surface-bind-address",
@@ -354,6 +359,15 @@
       "expect": "execution_id",
       "execution_id": "blake3:7591d2e8bafb1dbe68b455cc41b39bd54005f9fe65113eb4b7cb86a7e70f7ee4",
       "relation": "differs-from-baseline"
+    },
+    {
+      "name": "guest-path-utf8-order",
+      "file": "vectors/guest-path-utf8-order.json",
+      "kind": "contract",
+      "expect": "execution_id",
+      "execution_id": "blake3:d1bee9aa938d289995ae4a6a07db32af5034fbb7d38a5d17b9f656f20fc7a379",
+      "relation": "differs-from-baseline",
+      "notes": "GuestPath lists sort segment-wise by UTF-8 byte order: U+E000 precedes U+10000 under UTF-8/code-point order (they invert under UTF-16). This correctly-ordered pair is accepted; TypeScript implementations MUST compare UTF-8 bytes, not UTF-16 code units. See invalid-guest-path-utf16-order for the rejected reverse."
     },
     {
       "name": "envelope-non-identity",
@@ -502,6 +516,90 @@
       "kind": "contract",
       "expect": "error",
       "notes": "guest_surface.port 0 is never a valid declared surface and is rejected (NonZeroU16)"
+    },
+    {
+      "name": "invalid-sha256-source-projection-digest",
+      "file": "vectors/invalid-sha256-source-projection-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled source projection opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-runtime-dynamic-contract-digest",
+      "file": "vectors/invalid-sha256-runtime-dynamic-contract-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled runtime dynamic-contract opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-build-output-projection-digest",
+      "file": "vectors/invalid-sha256-build-output-projection-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled build-output projection opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-process-model-digest",
+      "file": "vectors/invalid-sha256-process-model-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled process-model opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-environment-policy-digest",
+      "file": "vectors/invalid-sha256-environment-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled environment-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-environment-value-digest",
+      "file": "vectors/invalid-sha256-environment-value-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled environment-value opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-filesystem-topology-digest",
+      "file": "vectors/invalid-sha256-filesystem-topology-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled filesystem-topology opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-network-policy-digest",
+      "file": "vectors/invalid-sha256-network-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled network-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-capability-policy-digest",
+      "file": "vectors/invalid-sha256-capability-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled capability-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-sha256-filesystem-policy-digest",
+      "file": "vectors/invalid-sha256-filesystem-policy-digest.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a sha256-spelled filesystem-policy opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+    },
+    {
+      "name": "invalid-guest-path-utf16-order",
+      "file": "vectors/invalid-guest-path-utf16-order.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "filesystem.writable_paths sorted by UTF-16 code units is non-canonical: U+10000 before U+E000 is the reverse of the normative UTF-8 byte order (see guest-path-utf8-order)"
+    },
+    {
+      "name": "invalid-c1-control-target",
+      "file": "vectors/invalid-c1-control-target.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a C1 control character (U+0085 NEL) in external_state[].target is not a canonical guest path: all Unicode control characters are rejected, not only C0/DEL"
     },
     {
       "name": "invalid-duplicate-top-level-field",

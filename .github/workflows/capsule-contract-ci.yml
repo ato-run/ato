@@ -34,10 +34,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to the repo's rust-toolchain.toml channel (1.96.0). The default
+      # `@stable` used by other workflows floats to the newest stable, which
+      # can diverge from the pinned channel and surface version-dependent
+      # fmt/clippy behaviour; this gate must match the toolchain the tree pins.
+      - uses: dtolnay/rust-toolchain@1.96.0
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # Prove the active toolchain is the pinned 1.96.0 (visible in the log).
+      - run: rustc --version && cargo --version
+      - run: cargo fmt -p capsule -- --check
       - run: cargo test -p capsule --lib execution_contract
       - run: cargo test -p capsule --test execution_contract_vectors
       - run: cargo clippy -p capsule --all-targets -- -D warnings

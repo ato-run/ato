@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 use capsule::execution_contract::{
     ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentVariableContract,
     ExecutionContractV1, ExternalStateAccess, ExternalStateContract, GuestPath,
-    GuestSurfaceContract, ResolvedArtifactContract, ResolvedBuildOutputContract,
-    ResolvedDependencyContract, ResolvedFilesystemContract, ResolvedLaunchContract,
-    ResolvedPolicyContract, ResolvedSourceContract, ResolvedTargetContract, SnapshotExclusion,
+    GuestSurfaceContract, OpaqueContractDigestV1, ResolvedArtifactContract,
+    ResolvedBuildOutputContract, ResolvedDependencyContract, ResolvedFilesystemContract,
+    ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract, ResolvedTargetContract,
+    SnapshotExclusion,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -39,6 +40,10 @@ fn digest(algorithm: DigestAlgorithm, byte: u8) -> ContentDigest {
     ContentDigest::new(algorithm, [byte; 32])
 }
 
+fn opaque(byte: u8) -> OpaqueContractDigestV1 {
+    OpaqueContractDigestV1::new([byte; 32])
+}
+
 fn path(value: &str) -> GuestPath {
     GuestPath::parse(value).expect("canonical guest path")
 }
@@ -48,7 +53,7 @@ fn baseline() -> ExecutionContractV1 {
         schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
         source: ResolvedSourceContract {
             digest: digest(DigestAlgorithm::Sha256, 1),
-            projection_digest: digest(DigestAlgorithm::Blake3, 0x0c),
+            projection_digest: opaque(0x0c),
         },
         target: ResolvedTargetContract {
             os: "linux".to_string(),
@@ -60,7 +65,7 @@ fn baseline() -> ExecutionContractV1 {
         runtime: ResolvedArtifactContract {
             kind: "node".to_string(),
             digest: digest(DigestAlgorithm::Sha256, 2),
-            dynamic_contract_digest: digest(DigestAlgorithm::Blake3, 0x0d),
+            dynamic_contract_digest: opaque(0x0d),
         },
         dependencies: vec![ResolvedDependencyContract {
             name: "npm".to_string(),
@@ -70,29 +75,29 @@ fn baseline() -> ExecutionContractV1 {
         build_outputs: vec![ResolvedBuildOutputContract {
             name: "app".to_string(),
             digest: digest(DigestAlgorithm::Blake3, 5),
-            projection_digest: digest(DigestAlgorithm::Blake3, 0x0e),
+            projection_digest: opaque(0x0e),
         }],
         launch: ResolvedLaunchContract {
             argv: vec!["node".to_string(), "dist/server.js".to_string()],
             cwd: path("/workspace"),
-            process_model_digest: digest(DigestAlgorithm::Blake3, 0x0f),
+            process_model_digest: opaque(0x0f),
             environment: vec![EnvironmentVariableContract {
                 name: "NODE_ENV".to_string(),
-                value_digest: digest(DigestAlgorithm::Blake3, 6),
+                value_digest: opaque(6),
             }],
-            environment_policy_digest: digest(DigestAlgorithm::Blake3, 0x10),
+            environment_policy_digest: opaque(0x10),
             secret_bindings: vec!["API_TOKEN".to_string()],
         },
         filesystem: ResolvedFilesystemContract {
             view_digest: digest(DigestAlgorithm::Blake3, 7),
-            topology_digest: digest(DigestAlgorithm::Blake3, 0x11),
+            topology_digest: opaque(0x11),
             readonly_layers: vec![digest(DigestAlgorithm::Blake3, 8)],
             writable_paths: vec![path("/tmp")],
         },
         policy: ResolvedPolicyContract {
-            network_digest: digest(DigestAlgorithm::Blake3, 9),
-            capability_digest: digest(DigestAlgorithm::Blake3, 10),
-            filesystem_digest: digest(DigestAlgorithm::Blake3, 11),
+            network_digest: opaque(9),
+            capability_digest: opaque(10),
+            filesystem_digest: opaque(11),
         },
         guest_surface: GuestSurfaceContract {
             bind_address: "0.0.0.0".to_string(),
@@ -151,6 +156,8 @@ struct GenManifest {
     jcs: String,
     numbers: String,
     optional_fields: String,
+    opaque_digests: String,
+    guest_path_ordering: String,
     baseline: String,
     vectors: Vec<GenVector>,
 }
@@ -228,7 +235,7 @@ fn identity_mutations() -> Vec<Mutation> {
             Some(
                 "opaque source projection-rules sub-contract digest is identity-bearing (RFC §4.2 Source)",
             ),
-            |c| c.source.projection_digest = digest(DigestAlgorithm::Blake3, 0xac),
+            |c| c.source.projection_digest = opaque(0xac),
         ),
         ("mutate-target-os", None, |c| {
             c.target.os = "windows".to_string()
@@ -262,7 +269,7 @@ fn identity_mutations() -> Vec<Mutation> {
             Some(
                 "opaque dynamic-runtime sub-contract digest is identity-bearing (RFC §4.2 Runtime)",
             ),
-            |c| c.runtime.dynamic_contract_digest = digest(DigestAlgorithm::Blake3, 0xad),
+            |c| c.runtime.dynamic_contract_digest = opaque(0xad),
         ),
         ("mutate-dependency-name", None, |c| {
             c.dependencies[0].name = "pnpm".to_string();
@@ -284,7 +291,7 @@ fn identity_mutations() -> Vec<Mutation> {
             Some(
                 "opaque build-output projection sub-contract digest is identity-bearing (RFC §4.2 Build outputs)",
             ),
-            |c| c.build_outputs[0].projection_digest = digest(DigestAlgorithm::Blake3, 0xae),
+            |c| c.build_outputs[0].projection_digest = opaque(0xae),
         ),
         ("mutate-launch-argv", None, |c| {
             c.launch.argv = vec!["node".to_string(), "dist/main.js".to_string()];
@@ -293,14 +300,14 @@ fn identity_mutations() -> Vec<Mutation> {
         (
             "mutate-launch-process-model-digest",
             Some("opaque process-model sub-contract digest is identity-bearing (RFC §4.2 Launch)"),
-            |c| c.launch.process_model_digest = digest(DigestAlgorithm::Blake3, 0xaf),
+            |c| c.launch.process_model_digest = opaque(0xaf),
         ),
         (
             "mutate-launch-environment-policy-digest",
             Some(
                 "opaque environment requirements/normalization/inheritance policy sub-contract digest is identity-bearing (RFC §4.2 Environment)",
             ),
-            |c| c.launch.environment_policy_digest = digest(DigestAlgorithm::Blake3, 0xb0),
+            |c| c.launch.environment_policy_digest = opaque(0xb0),
         ),
         ("mutate-launch-secret-bindings", None, |c| {
             c.launch.secret_bindings = vec!["API_TOKEN".to_string(), "DB_PASSWORD".to_string()];
@@ -309,7 +316,7 @@ fn identity_mutations() -> Vec<Mutation> {
             c.launch.environment[0].name = "RUST_LOG".to_string();
         }),
         ("mutate-environment-value-digest", None, |c| {
-            c.launch.environment[0].value_digest = digest(DigestAlgorithm::Blake3, 0x26);
+            c.launch.environment[0].value_digest = opaque(0x26);
         }),
         ("mutate-filesystem-view-digest", None, |c| {
             c.filesystem.view_digest = digest(DigestAlgorithm::Blake3, 0x27);
@@ -319,7 +326,7 @@ fn identity_mutations() -> Vec<Mutation> {
             Some(
                 "opaque mount-topology and access-modes sub-contract digest is identity-bearing (RFC §4.2 Filesystem)",
             ),
-            |c| c.filesystem.topology_digest = digest(DigestAlgorithm::Blake3, 0xb1),
+            |c| c.filesystem.topology_digest = opaque(0xb1),
         ),
         ("mutate-filesystem-readonly-layers", None, |c| {
             c.filesystem.readonly_layers = vec![digest(DigestAlgorithm::Blake3, 0x28)];
@@ -327,15 +334,27 @@ fn identity_mutations() -> Vec<Mutation> {
         ("mutate-filesystem-writable-paths", None, |c| {
             c.filesystem.writable_paths = vec![path("/var/tmp")];
         }),
-        ("mutate-network-policy-digest", None, |c| {
-            c.policy.network_digest = digest(DigestAlgorithm::Blake3, 0x29);
-        }),
-        ("mutate-capability-policy-digest", None, |c| {
-            c.policy.capability_digest = digest(DigestAlgorithm::Blake3, 0x2a);
-        }),
-        ("mutate-filesystem-policy-digest", None, |c| {
-            c.policy.filesystem_digest = digest(DigestAlgorithm::Blake3, 0x2b);
-        }),
+        (
+            "mutate-network-policy-digest",
+            Some(
+                "opaque network-policy sub-contract digest is identity-bearing (RFC §4.2 Network; domain ato.network-policy/v1)",
+            ),
+            |c| c.policy.network_digest = opaque(0x29),
+        ),
+        (
+            "mutate-capability-policy-digest",
+            Some(
+                "opaque capability-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.capability-policy/v1)",
+            ),
+            |c| c.policy.capability_digest = opaque(0x2a),
+        ),
+        (
+            "mutate-filesystem-policy-digest",
+            Some(
+                "opaque filesystem-policy sub-contract digest is identity-bearing (RFC §4.2 Capabilities; domain ato.filesystem-policy/v1)",
+            ),
+            |c| c.policy.filesystem_digest = opaque(0x2b),
+        ),
         ("mutate-guest-surface-bind-address", None, |c| {
             c.guest_surface.bind_address = "127.0.0.1".to_string();
         }),
@@ -361,6 +380,13 @@ fn identity_mutations() -> Vec<Mutation> {
         ("mutate-external-state-access", None, |c| {
             c.external_state[0].access = ExternalStateAccess::ReadOnly;
         }),
+        (
+            "guest-path-utf8-order",
+            Some(
+                "GuestPath lists sort segment-wise by UTF-8 byte order: U+E000 precedes U+10000 under UTF-8/code-point order (they invert under UTF-16). This correctly-ordered pair is accepted; TypeScript implementations MUST compare UTF-8 bytes, not UTF-16 code units. See invalid-guest-path-utf16-order for the rejected reverse.",
+            ),
+            |c| c.filesystem.writable_paths = vec![path("/\u{e000}"), path("/\u{10000}")],
+        ),
     ]
 }
 
@@ -701,6 +727,79 @@ fn regenerate_shared_vectors() {
         &|v| v["guest_surface"]["port"] = json!(0),
     );
 
+    // --- opaque digests are BLAKE3-only: a sha256 spelling fails closed -------
+    // One per opaque `*_digest` / `value_digest` facet field. The algorithm is
+    // fixed by v1 (blake3(UTF8(domain) || 0x00 || JCS(payload))); a
+    // producer-supplied sha256 value is not a valid opaque sub-contract digest.
+    let sha256 = || json!(format!("sha256:{}", "ab".repeat(32)));
+    let sha256_note = |facet: &str| {
+        format!(
+            "a sha256-spelled {facet} opaque digest is rejected: opaque sub-contract digests are BLAKE3-only"
+        )
+    };
+    invalid(
+        "invalid-sha256-source-projection-digest",
+        &sha256_note("source projection"),
+        &|v| v["source"]["projection_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-runtime-dynamic-contract-digest",
+        &sha256_note("runtime dynamic-contract"),
+        &|v| v["runtime"]["dynamic_contract_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-build-output-projection-digest",
+        &sha256_note("build-output projection"),
+        &|v| v["build_outputs"][0]["projection_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-process-model-digest",
+        &sha256_note("process-model"),
+        &|v| v["launch"]["process_model_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-environment-policy-digest",
+        &sha256_note("environment-policy"),
+        &|v| v["launch"]["environment_policy_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-environment-value-digest",
+        &sha256_note("environment-value"),
+        &|v| v["launch"]["environment"][0]["value_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-filesystem-topology-digest",
+        &sha256_note("filesystem-topology"),
+        &|v| v["filesystem"]["topology_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-network-policy-digest",
+        &sha256_note("network-policy"),
+        &|v| v["policy"]["network_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-capability-policy-digest",
+        &sha256_note("capability-policy"),
+        &|v| v["policy"]["capability_digest"] = sha256(),
+    );
+    invalid(
+        "invalid-sha256-filesystem-policy-digest",
+        &sha256_note("filesystem-policy"),
+        &|v| v["policy"]["filesystem_digest"] = sha256(),
+    );
+
+    // --- guest-path ordering + control-character canonicalization ------------
+    invalid(
+        "invalid-guest-path-utf16-order",
+        "filesystem.writable_paths sorted by UTF-16 code units is non-canonical: U+10000 before U+E000 is the reverse of the normative UTF-8 byte order (see guest-path-utf8-order)",
+        &|v| v["filesystem"]["writable_paths"] = json!(["/\u{10000}", "/\u{e000}"]),
+    );
+    invalid(
+        "invalid-c1-control-target",
+        "a C1 control character (U+0085 NEL) in external_state[].target is not a canonical guest path: all Unicode control characters are rejected, not only C0/DEL",
+        &|v| v["external_state"][0]["target"] = json!("/data\u{85}x"),
+    );
+
     // --- invalid vectors that require literal duplicate keys ----------------
     // serde_json::Value cannot represent a duplicate key, so these are injected
     // textually into the compact baseline so the duplicate survives in the
@@ -760,6 +859,8 @@ fn regenerate_shared_vectors() {
         jcs: "RFC 8785 (JSON Canonicalization Scheme)".to_string(),
         numbers: "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, a nonzero integer in 1..=65535 (0 is rejected fail-closed). No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.".to_string(),
         optional_fields: "Optional identity fields (target.libc, target.observable_features, launch.secret_bindings, guest_surface.port) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.".to_string(),
+        opaque_digests: "The opaque sub-contract digest fields (source.projection_digest, runtime.dynamic_contract_digest, build_outputs[].projection_digest, launch.process_model_digest, launch.environment_policy_digest, launch.environment[].value_digest, filesystem.topology_digest, policy.network_digest, policy.capability_digest, policy.filesystem_digest) are ALWAYS blake3: their preimage is fixed by v1 as blake3(UTF8(domain) || 0x00 || JCS(payload)) under one of the frozen domains ato.source-projection-contract/v1, ato.runtime-dynamic-contract/v1, ato.build-output-projection/v1, ato.process-model-contract/v1, ato.environment-policy/v1, ato.environment-value/v1, ato.filesystem-topology/v1, ato.network-policy/v1, ato.capability-policy/v1, ato.filesystem-policy/v1. The algorithm is not a producer choice: a sha256-spelled value is NOT a valid opaque sub-contract digest and MUST be rejected before hashing. Only the payload schema behind each digest is versioned separately from v1 (RFC 4.5); the algorithm, domain, and preimage rule are frozen. Pinned by the invalid-sha256-*-digest vectors.".to_string(),
+        guest_path_ordering: "Guest-path lists (filesystem.writable_paths) are sorted segment-wise, and WITHIN each segment by UTF-8 byte lexicographic order (equivalently Unicode code-point order). TypeScript implementations MUST compare UTF-8 bytes, NOT UTF-16 code units — the two orders diverge for astral-plane characters: e.g. U+E000 precedes U+10000 by UTF-8/code point, but follows it by UTF-16 (the astral char's lead surrogate U+D800 sorts before the single unit U+E000). Guest paths also reject every Unicode control character (char::is_control: the C0 range incl. NUL, DEL, and the C1 range U+0080..U+009F), not only C0/DEL. Pinned by guest-path-utf8-order (valid, correctly ordered), invalid-guest-path-utf16-order (same pair reversed into UTF-16 order), and invalid-c1-control-target (U+0085 NEL).".to_string(),
         baseline: "baseline".to_string(),
         vectors,
     };

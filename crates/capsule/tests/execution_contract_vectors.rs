@@ -49,6 +49,10 @@ struct Manifest {
     numbers: String,
     #[allow(dead_code)]
     optional_fields: String,
+    #[allow(dead_code)]
+    opaque_digests: String,
+    #[allow(dead_code)]
+    guest_path_ordering: String,
     baseline: String,
     vectors: Vec<Vector>,
 }
