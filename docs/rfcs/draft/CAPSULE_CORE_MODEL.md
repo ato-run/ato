@@ -5,6 +5,12 @@
 **Issue**: ato-run/ato#503 (umbrella ato-run/ato#502)
 **Related**: #490 (Execution Graph Model, internal IR), #501 (provider boundary), #498/#499 (realization), #508 (installed-state DB), #509 (cross-device placement)
 
+> **Capsule v1 identity baseline:**
+> [CAPSULE_V1_EXECUTION_MODEL_SPEC](../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md)
+> supersedes the multi-identity wording in earlier revisions of this draft.
+> ExecutionGraph, ExecutionPlan, Realization, and Materialization remain
+> internal implementation structures, not public exact identities.
+
 ---
 
 ## Summary
@@ -75,9 +81,9 @@ GPU/CUDA/VRAM/RAM/OS/arch/disk/egress/…). Both are conditions in the contract.
 
 The user-facing subjects are **Capsule** (the app's execution contract) and
 **Placement** (where Ato satisfies it). **ExecutionGraph (#490) is internal** —
-the canonical representation of those conditions across declared / resolved /
-observed layers, used to resolve, verify, reconstruct, and diff. It is not the
-user-facing subject.
+an intermediate representation used to resolve, verify, reconstruct, and diff.
+Its declared/resolved/observed facets are diagnostic evidence, not competing
+public exact identities.
 
 > Capsule = an app self-describing its launch conditions; Ato finds where they
 > hold and launches; ExecutionGraph is the internal verification form.
@@ -103,19 +109,21 @@ Capsule {
 }
 ```
 
-Lifecycle:
+Capsule v1 lifecycle:
 
 ```
-Declared → resolve → Resolved → realize → Realized → launch → Running
-        → install/pin → Installed Capsule Revision → relaunch → Re-realized
+capsule.toml → resolve/build → Execution Identity
+                              ├─ cold reconstruction
+                              └─ Snapshot cache
+                                      + External State
+                                      → Session → Receipt
 ```
 
-Identities are distinct: `declared_capsule_id` / `resolved_capsule_id` /
-`realization_id`; and on the install axis `install_profile_key` (stable,
-user-facing) / `install_revision_id` (immutable installed revision) /
-`capsule_instance_key = H(install_profile_key, install_revision_id,
-resolved_execution_id)`. OS shortcuts and Dashboard entries point to
-`install_profile_key`, never to `execution_id`.
+Execution Identity is the sole exact execution identity. Registry names,
+versions, install profile keys, revision records, and shortcuts are locators or
+grouping metadata that resolve to an `execution_id`; they are not alternate
+execution identities. Snapshot and Session IDs remain subordinate artifact and
+run identifiers.
 
 ## 5. Lockfile / Installed-State DB / Placement Index (three layers)
 
@@ -196,10 +204,9 @@ Each node of the resolved capsule is classified `materializable` / `host-bound`
 (source / runtime / runtime tool / dependency-output / build-artifact /
 filesystem-view). Receipts become **materialization proofs**, not logs.
 
-Discipline (no overclaiming): this RFC does **not** claim full reproducibility,
-and Ato does not claim identical behavior. While runtime observation is
-unimplemented (#490), receipts do not synthesize `observed_execution_id` and
-`GraphCompleteness::Complete` is not emitted. Reproducibility is classified
+Discipline (no overclaiming): this RFC does **not** claim deterministic trace
+replay or identical behavior. Runtime observation remains Receipt evidence and
+does not issue another public identity. Reproducibility is classified
 (pure / host-bound / state-bound / time-bound / network-bound / best-effort),
 and pre-observation classification is conservative — `network-bound` means
 egress is allowed in the envelope, not that the network was accessed.
@@ -238,11 +245,11 @@ container wrapper; it is a capsule realization engine, and OCI is one provider.*
 
 ## 11. Relationship to the Execution Graph Model (#490)
 
-`#490` is the internal canonical IR, identity, receipt, replay, and
-provider-projection *implementation*. This Capsule Core Model defines the
-application-facing contract; `G_declared` / `G_resolved` / `G_observed` are the
-Declared / Resolved / Observed Capsule graphs. The Capsule is the subject;
-ExecutionGraph is how Ato verifies and reconstructs it.
+`#490` is the internal canonical IR, Receipt evidence, and provider-projection
+implementation. This Capsule Core Model defines the application-facing
+contract. `G_declared`, `G_resolved`, and `G_observed` may remain internal graph
+facets, but only the platform-resolved `ato.execution-contract/v1` digest is the
+public exact Execution Identity.
 
 ## 12. Implementation epic map
 
