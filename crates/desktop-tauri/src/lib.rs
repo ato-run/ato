@@ -12,6 +12,11 @@
 
 mod host;
 
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+/// Window label the capability (`capabilities/default.json`) is scoped to.
+const MAIN_WINDOW_LABEL: &str = "main";
+
 /// Run the desktop shell. Mobile-ready entry point (Tauri v2 convention) so the
 /// same shell can target mobile/IoT hosts as the `runner` abstraction grows.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -25,6 +30,43 @@ pub fn run() {
             host::dispatch_privileged_intent,
             host::dispatch_intent_uri,
         ])
+        .setup(|app| {
+            build_main_window(app.handle())?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running the Ato desktop shell");
+}
+
+/// Build the single `main` window hosting the bundled PWA and intercept its
+/// `ato://` intent navigations.
+///
+/// The bundled PWA emits intents exactly as it does in the GPUI shell — by
+/// navigating to an `ato://…` URL (see ato-pwa `src/desktop/bridge.ts`). Here
+/// that navigation never loads a page: [`WebviewWindowBuilder::on_navigation`]
+/// intercepts every `ato://` URL, hands it to the host, and cancels the
+/// navigation so the PWA stays put. Trust is the window itself — this is the
+/// bundled first-party local asset — not a web origin, so the origin allowlist
+/// classifier stays in the GPUI shell and only the verb parsing is shared.
+fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let handle = app.clone();
+    WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::default())
+        .title("Ato")
+        .inner_size(1200.0, 800.0)
+        .resizable(true)
+        .on_navigation(move |url| {
+            if url.scheme() != "ato" {
+                // Everything that is not an intent navigates normally.
+                return true;
+            }
+            let host = handle.state::<host::DesktopHost>();
+            if let Err(err) = host.dispatch_intent_uri(url.as_str()) {
+                // Unwired / malformed intents are logged, never navigated to.
+                eprintln!("ato-desktop: unhandled intent {url}: {err}");
+            }
+            // An `ato://` URL must never actually load — always cancel.
+            false
+        })
+        .build()?;
+    Ok(())
 }
