@@ -1,0 +1,54 @@
+name: Snapshot acceptance CI
+
+# Focused gate for the `snapshot` crate (Ready-State build/restore + the #1088
+# `running` acceptance orchestration).
+#
+# The workspace `rust-ci.yml` only runs on PRs to `main` / `dev`, so 0.7 feature
+# PRs targeting `nightly` (where the running-acceptance work lands,
+# ato-run/ato#1088) got no Rust test/clippy job. The `capsule-contract-ci.yml`
+# gate path-filters `crates/capsule/**` only, so changes under `crates/snapshot`
+# ran no cargo test/clippy at all. Rather than run the whole workspace CI on
+# `nightly` (which would surface unrelated pre-existing lint/fmt debt), this
+# path-filtered workflow runs exactly the snapshot crate's own gates on any PR
+# that touches `crates/snapshot`.
+
+on:
+  pull_request:
+    paths:
+      - "crates/snapshot/**"
+      - ".github/workflows/snapshot-contract-ci.yml"
+  push:
+    branches: [main, dev, nightly]
+    paths:
+      - "crates/snapshot/**"
+      - ".github/workflows/snapshot-contract-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  snapshot-acceptance:
+    name: snapshot acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin to the repo's rust-toolchain.toml channel (1.96.0). The default
+      # `@stable` used by other workflows floats to the newest stable, which
+      # can diverge from the pinned channel and surface version-dependent
+      # fmt/clippy behaviour; this gate must match the toolchain the tree pins.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # Prove the active toolchain is the pinned 1.96.0 (visible in the log).
+      - run: rustc --version && cargo --version
+      - run: cargo fmt -p snapshot -- --check
+      # `--lib` covers the crate's unit tests, including the #1088 `acceptance`
+      # module's disposable-orchestration tests (`pub mod acceptance;`).
+      - run: cargo test -p snapshot --lib
+      - run: cargo clippy -p snapshot --all-targets -- -D warnings
