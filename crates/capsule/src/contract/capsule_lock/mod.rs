@@ -26,7 +26,8 @@ pub use closure::{
     normalize_lock_closure, normalize_resolution_closure_entries, validate_closure_value,
 };
 pub use execution::{
-    LockExecutionError, verify_environment_values, verify_execution_envelope, verify_lock_execution,
+    LockExecutionError, verify_environment_values, verify_execution_envelope,
+    verify_lock_execution, verify_lock_program_identity,
 };
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
@@ -64,16 +65,26 @@ pub fn load_unvalidated_from_path(path: &Path) -> Result<CapsuleLock> {
     load_unvalidated_from_str(&raw)
 }
 
-/// Fail-closed re-derivation of any embedded execution section carried by a
-/// persisted lock (D2 `execution_contract` envelope + D5 `launch.environment`).
+/// Fail-closed re-derivation of every trusted section carried by a persisted
+/// lock: the embedded execution section (D2 `execution_contract` envelope + D5
+/// `launch.environment`) and the ADR-014 Capsule Program identity states
+/// (`program_identity` envelope + the execution envelope's parent claim, the
+/// §5 four-state matrix).
 ///
 /// This is the standard-path chokepoint the read/write boundary runs so a
-/// tampered `execution_id` or a bad D5 value payload can never pass strict
-/// validation or be persisted. Launch-time re-read / OCI wiring is deferred to a
-/// later PR; only the persisted read/write boundary is enforced here.
-fn verify_execution_boundary(lock: &CapsuleLock) -> Result<()> {
+/// tampered `execution_id`, a bad D5 value payload, a tampered
+/// `capsule_program_id`, or an inconsistent/orphan parent claim can never pass
+/// strict validation or be persisted. Launch-time re-read / OCI wiring is
+/// deferred to a later PR; only the persisted read/write boundary is enforced
+/// here.
+fn verify_lock_trust_boundary(lock: &CapsuleLock) -> Result<()> {
     verify_lock_execution(lock).map_err(|err| {
         CapsuleError::Config(format!("capsule.lock execution verification failed: {err}"))
+    })?;
+    verify_lock_program_identity(lock).map_err(|err| {
+        CapsuleError::Config(format!(
+            "capsule.lock program identity verification failed: {err}"
+        ))
     })
 }
 
@@ -83,7 +94,7 @@ fn verify_execution_boundary(lock: &CapsuleLock) -> Result<()> {
 pub fn load_verified_from_str(raw: &str) -> Result<CapsuleLock> {
     let lock = load_unvalidated_from_str(raw)?;
     validate_persisted_strict(&lock).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&lock)?;
+    verify_lock_trust_boundary(&lock)?;
     Ok(lock)
 }
 
@@ -106,7 +117,7 @@ pub fn load_verified_from_path(path: &Path) -> Result<CapsuleLock> {
 /// Any lock that may carry an `execution_contract` MUST be read through the
 /// trusted entrypoints [`load_verified_from_str`] / [`load_verified_from_path`],
 /// which run this strict identity validation AND then re-derive the execution
-/// section fail-closed (`verify_execution_boundary`). Call this directly only
+/// section fail-closed (`verify_lock_trust_boundary`). Call this directly only
 /// for identity-only checks where execution trust is irrelevant.
 pub fn validate_persisted_strict(
     lock: &CapsuleLock,
@@ -145,7 +156,7 @@ pub fn to_pretty_json(lock: &CapsuleLock) -> Result<String> {
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&persisted)?;
+    verify_lock_trust_boundary(&persisted)?;
     serde_json::to_string_pretty(&persisted)
         .map_err(|err| CapsuleError::Config(format!("Failed to serialize capsule.lock: {err}")))
 }
@@ -171,7 +182,7 @@ pub fn write_canonical_to_vec(lock: &CapsuleLock) -> Result<Vec<u8>> {
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&persisted)?;
+    verify_lock_trust_boundary(&persisted)?;
     serde_jcs::to_vec(&persisted).map_err(|err| {
         CapsuleError::Config(format!("Failed to canonicalize capsule.lock JSON: {err}"))
     })

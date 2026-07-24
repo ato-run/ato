@@ -6,6 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::capsule_program_contract::CapsuleProgramEnvelopeV1;
 use crate::execution_contract::{EnvironmentValuePayloadV1, ExecutionContractEnvelopeV1};
 
 pub const CAPSULE_LOCK_SCHEMA_VERSION: u32 = 1;
@@ -50,6 +51,16 @@ pub struct CapsuleLock {
     /// mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_contract: Option<ExecutionContractEnvelopeV1>,
+    /// ADR-014 — the optional [`CapsuleProgramEnvelopeV1`] (declaration
+    /// contract + `capsule_program_id`).
+    ///
+    /// Optional, additive top-level field: excluded from `lock_id` (not part
+    /// of the canonical identity projection) but covered by the lock signature
+    /// ([`crate::capsule_lock::CanonicalSignatureProjection`]). The trust
+    /// boundary re-derives `capsule_program_id` and checks the execution
+    /// envelope's parent claim fail-closed on every read/write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_identity: Option<CapsuleProgramEnvelopeV1>,
 }
 
 impl Default for CapsuleLock {
@@ -67,6 +78,7 @@ impl Default for CapsuleLock {
             signatures: Vec::new(),
             launch: None,
             execution_contract: None,
+            program_identity: None,
         }
     }
 }

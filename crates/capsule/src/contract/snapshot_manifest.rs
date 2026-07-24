@@ -734,6 +734,9 @@ pub struct SnapshotCandidate {
 /// well-formed ([`SnapshotManifestV1::validate`] fails) is dropped defensively
 /// before the compatibility gate: a malformed candidate must never be selectable,
 /// even if it was constructed by bypassing [`SnapshotManifestV1::parse`].
+///
+/// Capsule Program Identity is intentionally NOT a parameter here: it is never
+/// a Snapshot selection, placement, or restore key (ADR-014 §10).
 pub fn select_snapshots<'a>(
     requested: &VerifiedExecutionId,
     host: &HostRestoreCapabilityV1,

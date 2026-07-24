@@ -109,6 +109,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2356,6 +2357,42 @@ pub fn verify_program_parent(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Derivation entrypoint
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Derive the Capsule Program Contract from one pinned capsule root
+/// (ADR-014 §2.0 — the ONLY public derivation path).
+///
+/// The manifest is read from `<pinned_root>/capsule.toml` inside this
+/// function; there is deliberately no variant taking manifest text and a
+/// source root as independent inputs, so a producer can never pair source A
+/// with manifest B. Both the ordinary v0.3 normalizer (`load_manifest`,
+/// strict validation) and the strict identity gate
+/// (`parse_program_manifest_v03_input`, run inside the adapter) must accept
+/// the manifest, and the source projection A1-gates the full tree before
+/// filtering the resolved control files.
+pub fn derive_capsule_program_contract(
+    pinned_root: &Path,
+) -> Result<CapsuleProgramContractV1, CapsuleProgramError> {
+    let manifest_path = pinned_root.join("capsule.toml");
+    let loaded = crate::contract::manifest::load_manifest(&manifest_path)
+        .map_err(|error| CapsuleProgramError::ManifestLoad(error.to_string()))?;
+    let manifest_intent = crate::contract::program_manifest_input::program_intent_from_v03(
+        &loaded.model,
+        &loaded.raw_text,
+        pinned_root,
+    )?;
+    let source = crate::contract::program_source_projection::project_program_source(pinned_root)?;
+    let contract = CapsuleProgramContractV1 {
+        schema: CAPSULE_PROGRAM_V1_SCHEMA.to_string(),
+        source,
+        manifest_intent,
+    };
+    contract.validate()?;
+    Ok(contract)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2446,6 +2483,71 @@ mod tests {
 
     fn fake_id() -> CapsuleProgramId {
         CapsuleProgramId::new(format!("blake3:{}", "0".repeat(64))).expect("valid id shape")
+    }
+
+    // ── derivation entrypoint (end to end) ───────────────────────────────
+
+    const DERIVE_MANIFEST: &str = r#"
+schema_version = "0.3"
+name = "derive-fixture"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+port = 8080
+"#;
+
+    #[test]
+    fn derive_entrypoint_is_deterministic_and_lock_file_immune() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
+        std::fs::write(root.path().join("app.py"), b"print('hi')\n").expect("source");
+
+        let first = derive_capsule_program_contract(root.path()).expect("derive");
+        let second = derive_capsule_program_contract(root.path()).expect("derive again");
+        assert_eq!(first, second);
+        let baseline = first.compute_capsule_program_id().expect("id");
+
+        // A canonical lock at the root never reaches the preimage — even one
+        // carrying a program_identity-shaped body (self-reference immunity
+        // through the full entrypoint, not just the projection layer).
+        std::fs::write(
+            root.path().join("capsule.lock"),
+            format!(
+                "{{\"schema_version\":1,\"program_identity\":{{\"capsule_program_id\":\"{baseline}\"}}}}"
+            ),
+        )
+        .expect("lock");
+        let with_lock = derive_capsule_program_contract(root.path()).expect("derive with lock");
+        assert_eq!(
+            with_lock.compute_capsule_program_id().expect("id"),
+            baseline
+        );
+
+        // Source bytes DO reach the preimage.
+        std::fs::write(root.path().join("app.py"), b"print('bye')\n").expect("mutate source");
+        let mutated = derive_capsule_program_contract(root.path()).expect("derive mutated");
+        assert_ne!(mutated.compute_capsule_program_id().expect("id"), baseline);
+    }
+
+    #[test]
+    fn derive_entrypoint_rejects_lock_coexistence_and_missing_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            derive_capsule_program_contract(root.path()),
+            Err(CapsuleProgramError::ManifestLoad(_))
+        ));
+
+        std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
+        std::fs::write(root.path().join("capsule.lock"), b"{}").expect("canonical lock");
+        std::fs::write(root.path().join("ato.lock.json"), b"{}").expect("alias lock");
+        assert!(matches!(
+            derive_capsule_program_contract(root.path()),
+            Err(CapsuleProgramError::SourceProjection(_))
+        ));
     }
 
     // ── id + envelope ────────────────────────────────────────────────────
