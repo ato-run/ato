@@ -140,6 +140,29 @@ before implementation starts.
 > lock name was itself `capsule.lock`; its read path is retired in the same
 > change (see the spec amendment), so no content sniffing is ever needed to
 > tell canonical from ancient-legacy at the root.
+>
+> **r10 (2026-07-25), amendment — review round 2:** three normative gaps the
+> first implementation round exposed. (1) §1 gains step 0: a root-level
+> `.git` of any node type disqualifies the input as a pinned materialization
+> (previously the `.git` rejection would have been implementation-chosen
+> strictness, and a bare Git checkout could have pulled `.git` into the
+> projection since A1v2 only rejects a NESTED `.git`). (2) §1 gains step 1b:
+> a process-private staging copy immediately after the admissibility pass,
+> with steps 2–6 resolving exclusively inside it. Without it an
+> implementation could satisfy the six steps literally and still leave a
+> TOCTOU window in which manifest intent and source digest come from
+> different tree states. (3) §1 gains the lexical, fail-closed presence rule
+> for control-file names, shared with the runtime canonical-lock resolver —
+> two independent spellings of "exists" diverge on a dangling symlink, which
+> let one path select a lock the other rejected as a split brain.
+>
+> Not amended, because the ADR text was already correct and the
+> implementation had drifted from it: §2.2 requires a `SourceExistingPath`
+> to exist **in the ProgramSourceProjection**, so a manifest naming a
+> control file (the manifest itself or the resolved lock) as a
+> source-existing path must be rejected — those bytes are excluded from the
+> projection, and accepting them would put a reference in the identity that
+> the hashed tree does not contain.
 
 ## Context
 
@@ -295,9 +318,25 @@ manifests) as ordinary source.
 **Order (normative)**:
 
 ```text
+0. Reject a root that is not a pinned materialization BEFORE step 1. A
+   root-level `.git` entry — of any node type (directory, gitfile, symlink)
+   — is disqualifying: a Git checkout is exactly the working-tree lane
+   Phase 0 forbids, its index/pack bytes are nondeterministic, and A1v2 only
+   rejects a NESTED `.git` (submodule signal) plus a root `.gitmodules`, so
+   this closes the remaining hole. Excluding it instead would silently widen
+   the exhaustive control-file list in step 4.
 1. A1v2 admissibility over the ORIGINAL tree, in full — including the
    control files. A control file that is a symlink, FIFO, or device fails
    closed here; exclusion never hides it from admissibility.
+1b. IMMEDIATELY after step 1, materialize a process-private staging copy of
+   the pinned root. Steps 2–6 resolve exclusively inside that copy and the
+   original tree is never read again. Without this, an implementation that
+   satisfies steps 1–6 literally still leaves a TOCTOU window: the manifest
+   parse, the `SourceExistingPath` checks, and the projection copy would each
+   re-open paths an outside process can mutate after the admissibility pass,
+   so manifest intent and source digest could come from different tree
+   states, and a regular file could be swapped for a symlink between the
+   check and the copy.
 2. Verify <selected-root>/capsule.toml exists and parses per §2.
 3. Resolve CapsuleControlFiles (above); coexistence of capsule.lock and
    ato.lock.json at the selected root rejects here.
@@ -308,6 +347,18 @@ manifests) as ordinary source.
 6. materialized_source_tree_hash(projected_root) — existing, frozen,
    unmodified.
 ```
+
+**Lock-name presence is lexical and fail-closed** (normative): whether a
+control-file name is "present" is decided WITHOUT following symlinks and
+WITHOUT collapsing errors into absence — only a `NotFound` metadata error
+means absent; every other error (permission, I/O) propagates. A dangling
+symlink, directory, or FIFO occupying a lock name IS present, so it
+participates in the coexistence check; a lock path that is selected but is
+not a regular file is then rejected. The same helper MUST decide presence
+for both this projection and the runtime canonical-lock resolver — two
+implementations of "exists" diverge (e.g. `Path::exists()` follows a
+dangling symlink to `false` while `symlink_metadata` sees the entry), which
+would let one path resolve a lock the other treats as a split brain.
 
 **Types** (Major 3 — no algorithm laundering):
 

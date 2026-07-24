@@ -33,11 +33,14 @@
 //! Wasm target ⇒ fail closed; `targets.<label>.model` must be a relative,
 //! in-tree, EXISTING path under the selected root; `build.inputs.lockfiles`
 //! and `targets.source.dependencies` are existence-checked, `artifacts` and
-//! entrypoints stay lexical-only.
+//! entrypoints stay lexical-only. Existence is checked against the
+//! PROJECTION, not merely the tree: a `SourceExistingPath` resolving to a
+//! control file (the manifest or the ONE resolved lock, both excluded from
+//! the hashed tree by §1 step 4) ⇒ fail closed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -68,6 +71,7 @@ use crate::capsule_program_contract::{
     TcpProbeTarget, UniqueBTreeMap, WitWorldRef,
 };
 use crate::execution_contract::GuestPath;
+use crate::program_source_projection::{CapsuleControlFiles, resolve_capsule_control_files};
 use crate::types::{
     BuildConfig, CapsuleCapabilities, CapsuleExecution, CapsuleExports, CapsuleManifest,
     CapsuleRequirements, CapsuleStorage, CommandSpec, ConfigField, ConfigKind, ContextConfig,
@@ -1290,21 +1294,34 @@ enum ExpectedPathKind {
     FileOrDirectory,
 }
 
+/// The selected root every `SourceExistingPath` resolves against, carried
+/// together with the control files resolved for it. The two travel as one
+/// value because a `SourceExistingPath` must exist in the
+/// `ProgramSourceProjection`, and the projection is the staged tree MINUS
+/// exactly these control files (ADR-014 §1 step 4) — a root alone cannot
+/// answer the question.
+#[derive(Clone, Copy)]
+struct SelectedSourceRoot<'a> {
+    root: &'a Path,
+    control_files: &'a CapsuleControlFiles,
+}
+
 /// `SourceExistingPath` policy (ADR-014 §2.2): lexical validation (the
 /// grammar itself guarantees containment — no absolute paths, no `..`
 /// segments), then the joined path must exist under the selected root as a
-/// regular file or directory of the expected kind. Symlink traversal is
-/// excluded a priori by the A1v2 admissibility pass over the full tree.
+/// regular file or directory of the expected kind, and must NOT be one of the
+/// control files. Symlink traversal is excluded a priori by the A1v2
+/// admissibility pass over the full tree.
 fn existing_path(
     field: &'static str,
     value: &str,
-    selected_root: &Path,
+    selected_root: SelectedSourceRoot<'_>,
     expected: ExpectedPathKind,
 ) -> Result<SourceExistingPath, CapsuleProgramError> {
     let relative = source_relative(field, value)?;
     let joined = match &relative {
-        SourceRelativePath::Root => selected_root.to_path_buf(),
-        SourceRelativePath::Relative(path) => selected_root.join(path),
+        SourceRelativePath::Root => selected_root.root.to_path_buf(),
+        SourceRelativePath::Relative(path) => selected_root.root.join(path),
     };
     let metadata = std::fs::symlink_metadata(&joined).map_err(|_| {
         invalid_value(
@@ -1323,7 +1340,58 @@ fn existing_path(
             format!("'{value}' is not a regular file or directory of the expected kind"),
         ));
     }
+    reject_control_file(field, value, &joined, selected_root.control_files)?;
     Ok(SourceExistingPath(relative))
+}
+
+/// Existence under the selected root is not existence in the projection: the
+/// manifest and the ONE resolved lock are removed before the source digest is
+/// taken (ADR-014 §1 step 4), so a `SourceExistingPath` resolving to either
+/// would put a reference in the identity that the hashed tree does not
+/// contain. The comparison is by resolved absolute path, not by file NAME —
+/// §1 selects the control files by EXACT path, so a nested
+/// `fixtures/capsule.lock` is ordinary source and must still be accepted.
+fn reject_control_file(
+    field: &'static str,
+    value: &str,
+    joined: &Path,
+    control_files: &CapsuleControlFiles,
+) -> Result<(), CapsuleProgramError> {
+    // A path that cannot be resolved is never assumed to differ from a
+    // control file.
+    let resolve = |path: &Path| -> Result<PathBuf, CapsuleProgramError> {
+        std::fs::canonicalize(path).map_err(|source| {
+            invalid_value(
+                field,
+                format!("'{value}' could not be resolved for the control-file check: {source}"),
+            )
+        })
+    };
+    let resolved = resolve(joined)?;
+    let control = [
+        Some(control_files.manifest.as_path()),
+        control_files.lock.as_deref(),
+    ];
+    for candidate in control.into_iter().flatten() {
+        if resolved != resolve(candidate)? {
+            continue;
+        }
+        // Named by file name, never by absolute path: in the derivation flow
+        // the selected root is a process-private staging copy.
+        let name = candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| candidate.display().to_string());
+        return Err(invalid_value(
+            field,
+            format!(
+                "'{value}' resolves to the capsule control file '{name}', which the program \
+                 source projection excludes (ADR-014 §1) — a source-existing path must name \
+                 bytes the source digest covers"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Collapse a section whose canonical serialization is `{}` — an authored
@@ -1432,11 +1500,21 @@ fn working_dir_intent(
 /// (ADR-014 §2.0.1: the strict gate over `raw_text` runs FIRST and only
 /// rejects; every value consumed afterwards is the normalizer's canonical
 /// output, never a re-interpretation of raw TOML).
+///
+/// `selected_root` must be the root `raw_text` was loaded from: the control
+/// files are resolved from it here — with the projection's own selector, so
+/// the adapter and the projection can never disagree about which lock path
+/// won — and every `SourceExistingPath` is checked against them.
 pub fn program_intent_from_v03(
     model: &CapsuleManifest,
     raw_text: &str,
     selected_root: &Path,
 ) -> Result<ProgramManifestIntentV1, CapsuleProgramError> {
+    let control_files = resolve_capsule_control_files(selected_root)?;
+    let selected_root = SelectedSourceRoot {
+        root: selected_root,
+        control_files: &control_files,
+    };
     let input = parse_program_manifest_v03_input(raw_text)?;
     if input.workspace.is_some() || model.workspace.is_some() {
         return Err(CapsuleProgramError::UnsupportedField("workspace"));
@@ -1867,7 +1945,7 @@ fn transparency_intent(
 /// stay lexical-only.
 fn build_intent(
     build: &BuildConfig,
-    selected_root: &Path,
+    selected_root: SelectedSourceRoot<'_>,
 ) -> Result<Option<NormalizedBuildIntent>, CapsuleProgramError> {
     let lifecycle = match &build.lifecycle {
         Some(lifecycle) => {
@@ -1938,7 +2016,7 @@ fn build_intent(
 
 fn targets_intent(
     targets: &TargetsConfig,
-    selected_root: &Path,
+    selected_root: SelectedSourceRoot<'_>,
 ) -> Result<Option<NormalizedTargetsIntent>, CapsuleProgramError> {
     let mut map: UniqueBTreeMap<ProgramIdentifier, NormalizedTargetIntent> = UniqueBTreeMap::new();
     for (label, named) in &targets.named {
@@ -2054,7 +2132,7 @@ fn empty_target_intent() -> NormalizedTargetIntent {
 
 fn named_target_intent(
     target: &NamedTarget,
-    selected_root: &Path,
+    selected_root: SelectedSourceRoot<'_>,
 ) -> Result<NormalizedTargetIntent, CapsuleProgramError> {
     if target.engine_path.is_some() {
         return Err(CapsuleProgramError::UnsupportedField("engine_path"));
@@ -2318,7 +2396,7 @@ fn wasm_target_intent(target: &WasmTarget) -> Result<NormalizedTargetIntent, Cap
 
 fn source_target_intent(
     target: &SourceTarget,
-    selected_root: &Path,
+    selected_root: SelectedSourceRoot<'_>,
 ) -> Result<NormalizedTargetIntent, CapsuleProgramError> {
     Ok(NormalizedTargetIntent {
         runtime: Some(authored("targets.source", "source")?),
@@ -3193,11 +3271,27 @@ mod tests {
         CapsuleManifest::from_toml(toml_text).expect("model parses")
     }
 
+    /// The adapter resolves the control files at the selected root, so the
+    /// manifest under adaptation must be present there — the same shape
+    /// `StagedCapsuleSource` hands it in the derivation flow.
+    fn stage_manifest(toml_text: &str, root: &Path) {
+        std::fs::write(root.join("capsule.toml"), toml_text).expect("write manifest");
+    }
+
+    /// The resolved control files of a staged root, for the tests that call an
+    /// inner adapter function directly.
+    fn staged_control_files(toml_text: &str, root: &Path) -> CapsuleControlFiles {
+        stage_manifest(toml_text, root);
+        resolve_capsule_control_files(root).expect("control files resolve")
+    }
+
     fn intent(toml_text: &str, root: &Path) -> ProgramManifestIntentV1 {
+        stage_manifest(toml_text, root);
         program_intent_from_v03(&model(toml_text), toml_text, root).expect("intent")
     }
 
     fn intent_err(toml_text: &str, root: &Path) -> CapsuleProgramError {
+        stage_manifest(toml_text, root);
         program_intent_from_v03(&model(toml_text), toml_text, root).expect_err("must reject")
     }
 
@@ -3232,6 +3326,11 @@ port = 8080
     #[test]
     fn structured_source_target_and_equivalent_named_target_canonicalize_identically() {
         let root = tmp();
+        let control_files = staged_control_files(BASE, root.path());
+        let selected_root = SelectedSourceRoot {
+            root: root.path(),
+            control_files: &control_files,
+        };
         let structured = source_target_intent(
             &SourceTarget {
                 language: "python".to_string(),
@@ -3241,7 +3340,7 @@ port = 8080
                 args: Vec::new(),
                 dev_mode: false,
             },
-            root.path(),
+            selected_root,
         )
         .expect("structured source target");
         let named = named_target_intent(
@@ -3251,7 +3350,7 @@ port = 8080
                 entrypoint: "main.py".to_string(),
                 ..NamedTarget::default()
             },
-            root.path(),
+            selected_root,
         )
         .expect("named source target");
         assert_eq!(
@@ -3372,7 +3471,9 @@ runtime = "oci"
 image = "ghcr.io/example/app:1"
 bogus_key = 1
 "#;
-        let error = program_intent_from_v03(&model(BASE), manifest, tmp().path())
+        let root = tmp();
+        stage_manifest(manifest, root.path());
+        let error = program_intent_from_v03(&model(BASE), manifest, root.path())
             .expect_err("unknown named-target key must fail closed");
         match error {
             CapsuleProgramError::ManifestInput(message) => {
@@ -3496,6 +3597,136 @@ model = "{path}"
         );
     }
 
+    // ── SourceExistingPath must exist in the PROJECTION, not just the tree ──
+
+    /// A manifest whose `targets.chat.model` names `path`.
+    fn model_manifest(path: &str) -> String {
+        format!(
+            r#"
+schema_version = "0.3"
+name = "gate-fixture"
+version = "0.1.0"
+type = "app"
+default_target = "chat"
+
+[targets.chat]
+runtime = "native-inference"
+engine = "llama.cpp"
+model = "{path}"
+"#
+        )
+    }
+
+    fn assert_control_file_rejection(error: &CapsuleProgramError, expected_field: &str) {
+        match error {
+            CapsuleProgramError::InvalidValue { field, reason } => {
+                assert_eq!(*field, expected_field, "{error}");
+                assert!(
+                    reason.contains("control file"),
+                    "rejection must name the control-file reason: {reason}"
+                );
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn model_naming_the_manifest_is_rejected_as_a_control_file() {
+        let root = tmp();
+        // `intent_err` stages the manifest itself, so `capsule.toml` exists.
+        assert_control_file_rejection(
+            &intent_err(&model_manifest("capsule.toml"), root.path()),
+            "targets.*.model",
+        );
+    }
+
+    #[test]
+    fn model_naming_the_resolved_canonical_lock_is_rejected_as_a_control_file() {
+        let root = tmp();
+        std::fs::write(root.path().join("capsule.lock"), b"lock").expect("write lock");
+        assert_control_file_rejection(
+            &intent_err(&model_manifest("capsule.lock"), root.path()),
+            "targets.*.model",
+        );
+    }
+
+    #[test]
+    fn model_naming_the_resolved_deprecated_lock_alias_is_rejected_as_a_control_file() {
+        // Whichever lock name wins the §1 selection is THE control file; with
+        // only the deprecated alias present, that is `ato.lock.json`.
+        let root = tmp();
+        std::fs::write(root.path().join("ato.lock.json"), b"lock").expect("write lock alias");
+        assert_control_file_rejection(
+            &intent_err(&model_manifest("ato.lock.json"), root.path()),
+            "targets.*.model",
+        );
+    }
+
+    #[test]
+    fn build_input_lockfile_naming_the_resolved_lock_is_rejected_as_a_control_file() {
+        let manifest = r#"
+schema_version = "0.3"
+name = "gate-fixture"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+
+[build.inputs]
+lockfiles = ["capsule.lock"]
+"#;
+        let root = tmp();
+        std::fs::write(root.path().join("capsule.lock"), b"lock").expect("write lock");
+        assert_control_file_rejection(&intent_err(manifest, root.path()), "build.inputs.lockfiles");
+    }
+
+    // Exercised at the adapter seam with a constructed model: the raw
+    // `entrypoint` spelling a structured source target needs never survives
+    // v0.3 TOML normalization (legacy-field rule).
+    #[test]
+    fn source_target_dependencies_naming_the_manifest_is_rejected_as_a_control_file() {
+        let root = tmp();
+        let control_files = staged_control_files(BASE, root.path());
+        let error = source_target_intent(
+            &SourceTarget {
+                language: "python".to_string(),
+                version: None,
+                entrypoint: "main.py".to_string(),
+                dependencies: Some("capsule.toml".to_string()),
+                args: Vec::new(),
+                dev_mode: false,
+            },
+            SelectedSourceRoot {
+                root: root.path(),
+                control_files: &control_files,
+            },
+        )
+        .expect_err("a dependencies file naming the manifest must fail closed");
+        assert_control_file_rejection(&error, "targets.source.dependencies");
+    }
+
+    #[test]
+    fn a_nested_file_sharing_a_control_file_name_stays_ordinary_source() {
+        // ADR-014 §1 selects the control files by EXACT path, so the rejection
+        // must be by resolved path and never by file NAME.
+        let root = tmp();
+        std::fs::write(root.path().join("capsule.lock"), b"lock").expect("write lock");
+        std::fs::create_dir(root.path().join("fixtures")).expect("create fixtures dir");
+        std::fs::write(root.path().join("fixtures/capsule.lock"), b"fixture")
+            .expect("write nested lock fixture");
+
+        let accepted = intent(&model_manifest("fixtures/capsule.lock"), root.path());
+        let target =
+            &accepted.targets.as_ref().unwrap().targets[&ProgramIdentifier::parse("chat").unwrap()];
+        assert_eq!(
+            serde_json::to_value(target.model.as_ref().unwrap()).unwrap(),
+            serde_json::json!("fixtures/capsule.lock")
+        );
+    }
+
     // ── working_dir 3-way split / semantic types ─────────────────────────
 
     #[test]
@@ -3548,13 +3779,17 @@ working_dir = "packages/app"
     #[test]
     fn web_root_entrypoint_canonicalizes_as_root() {
         let root = tmp();
+        let control_files = staged_control_files(BASE, root.path());
         let target = named_target_intent(
             &NamedTarget {
                 runtime: "web".to_string(),
                 entrypoint: ".".to_string(),
                 ..NamedTarget::default()
             },
-            root.path(),
+            SelectedSourceRoot {
+                root: root.path(),
+                control_files: &control_files,
+            },
         )
         .expect("web root entrypoint");
         assert_eq!(
@@ -3711,8 +3946,10 @@ image = "ghcr.io/example/app:1"
             .unwrap()
             .named
             .insert("oci".to_string(), NamedTarget::default());
+        let root = tmp();
+        stage_manifest(manifest, root.path());
         assert!(matches!(
-            program_intent_from_v03(&collided, manifest, tmp().path()),
+            program_intent_from_v03(&collided, manifest, root.path()),
             Err(CapsuleProgramError::InvalidValue {
                 field: "targets",
                 ..

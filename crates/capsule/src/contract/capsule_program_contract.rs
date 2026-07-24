@@ -1158,6 +1158,253 @@ where
     }
 }
 
+// Absent optional IR fields have exactly one canonical spelling: the key is
+// omitted — and a flag whose default is dropped on serialization is spelled
+// only by its non-default value. The deserializers below reject the
+// non-canonical spellings (`null`, `{}`, `[]`, and a flag written as the value
+// that is skipped) fail-closed, so an implementation that canonicalizes the raw
+// JSON directly (parse -> JCS -> BLAKE3) can never include a key this typed
+// layer would have dropped: one document either hashes identically everywhere
+// or is rejected everywhere. This mirrors the execution contract's
+// `present_not_null` / `present_non_empty_unique_map` /
+// `present_non_empty_string_list`, generalized because the IR's value types are
+// richer. Serialization is unchanged — only the accepted input set narrows.
+
+/// The one message shape for every non-canonical spelling of absence, naming
+/// the offending key: serde attaches no field context to a `deserialize_with`
+/// error, so the per-field wrappers supply it.
+fn non_canonical_absence(field: &str, spelling: &str) -> String {
+    format!(
+        "`{field}`: the canonical spelling of absence is an omitted key \
+         (explicit {spelling} is non-canonical)"
+    )
+}
+
+/// `Option` field omitted when `None`: explicit `null` fails closed. The
+/// present value is deserialized through `visit_some`, so a malformed value
+/// still reports its own error rather than this one.
+fn reject_explicit_null<'de, D, T>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct NotNullVisitor<T>(&'static str, std::marker::PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for NotNullVisitor<T> {
+        type Value = Option<T>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(formatter, "a present value for `{}`", self.0)
+        }
+
+        // `null` lands on `visit_none` for a self-describing format and on
+        // `visit_unit` for a format that has already committed to a value.
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Err(E::custom(non_canonical_absence(self.0, "null")))
+        }
+
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Err(E::custom(non_canonical_absence(self.0, "null")))
+        }
+
+        fn visit_some<D: serde::Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Self::Value, D::Error> {
+            T::deserialize(deserializer).map(Some)
+        }
+    }
+
+    deserializer.deserialize_option(NotNullVisitor(field, std::marker::PhantomData))
+}
+
+/// Identity map omitted when empty: explicit `{}` fails closed. Duplicate keys
+/// are already rejected by [`UniqueBTreeMap`].
+fn reject_explicit_empty_map<'de, D, K, V>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<UniqueBTreeMap<K, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    K: Deserialize<'de> + Ord + fmt::Display,
+    V: Deserialize<'de>,
+{
+    let map = UniqueBTreeMap::<K, V>::deserialize(deserializer)?;
+    if map.is_empty() {
+        return Err(serde::de::Error::custom(non_canonical_absence(field, "{}")));
+    }
+    Ok(map)
+}
+
+/// Identity list omitted when empty: explicit `[]` fails closed.
+fn reject_explicit_empty_list<'de, D, T>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let list = Vec::<T>::deserialize(deserializer)?;
+    if list.is_empty() {
+        return Err(serde::de::Error::custom(non_canonical_absence(field, "[]")));
+    }
+    Ok(list)
+}
+
+/// Flag omitted when it equals `skipped`: spelling that value explicitly fails
+/// closed, so the key is present only when it carries the other value.
+fn reject_skipped_flag<'de, D>(
+    deserializer: D,
+    field: &'static str,
+    skipped: bool,
+) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = bool::deserialize(deserializer)?;
+    if value == skipped {
+        return Err(serde::de::Error::custom(non_canonical_absence(
+            field,
+            if skipped { "true" } else { "false" },
+        )));
+    }
+    Ok(value)
+}
+
+/// One `deserialize_with` wrapper per field NAME per kind, so the rejection
+/// names the offending key. A field added to the IR without a name listed here
+/// fails to compile at its `deserialize_with` path.
+macro_rules! absent_key_deserializers {
+    (
+        present_not_null { $($null_field:ident),* $(,)? }
+        present_non_empty_map { $($map_field:ident),* $(,)? }
+        present_non_empty_list { $($list_field:ident),* $(,)? }
+        present_true { $($true_field:ident),* $(,)? }
+        present_false { $($false_field:ident),* $(,)? }
+    ) => {
+        mod present_not_null {
+            $(
+                pub(super) fn $null_field<'de, D, T>(
+                    deserializer: D,
+                ) -> Result<Option<T>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    T: serde::Deserialize<'de>,
+                {
+                    super::reject_explicit_null(deserializer, stringify!($null_field))
+                }
+            )*
+        }
+
+        mod present_non_empty_map {
+            $(
+                pub(super) fn $map_field<'de, D, K, V>(
+                    deserializer: D,
+                ) -> Result<super::UniqueBTreeMap<K, V>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    K: serde::Deserialize<'de> + Ord + std::fmt::Display,
+                    V: serde::Deserialize<'de>,
+                {
+                    super::reject_explicit_empty_map(deserializer, stringify!($map_field))
+                }
+            )*
+        }
+
+        mod present_non_empty_list {
+            $(
+                pub(super) fn $list_field<'de, D, T>(
+                    deserializer: D,
+                ) -> Result<Vec<T>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    T: serde::Deserialize<'de>,
+                {
+                    super::reject_explicit_empty_list(deserializer, stringify!($list_field))
+                }
+            )*
+        }
+
+        mod present_true {
+            $(
+                pub(super) fn $true_field<'de, D>(deserializer: D) -> Result<bool, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    super::reject_skipped_flag(deserializer, stringify!($true_field), false)
+                }
+            )*
+        }
+
+        mod present_false {
+            $(
+                pub(super) fn $false_field<'de, D>(deserializer: D) -> Result<bool, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    super::reject_skipped_flag(deserializer, stringify!($false_field), true)
+                }
+            )*
+        }
+    };
+}
+
+absent_key_deserializers! {
+    present_not_null {
+        alias, allow_network, attach, boot_until, build, build_command,
+        bytes, capabilities, class, component, content_ready_path, context,
+        context_length, contract, cwd, database, default, default_target,
+        degraded, delivery, dependencies, description, digest, disk, driver,
+        engine, engine_variant, engine_version, entrypoint, env, exec,
+        execution, expect_status, exports, foundation_requirements, fs_writes,
+        generator, gid, health_check, http_get, image, ingress, initial_delay_seconds,
+        inputs, install_command, interval_seconds, isolation, kill, label,
+        language, level, lifecycle, locality, max_restore_seconds, mode,
+        model, model_repo, model_repo_sha256, model_revision, model_sha256,
+        model_url, mount, network, owner, ownership, pack, package, package_type,
+        placeholder, polymorphism, port, prepare, prestart_command, producer,
+        profile, profiles, provider, provision, publish, quantization,
+        readiness_probe, reproducibility, requirements, run_command, runner_class,
+        runtime, runtime_version, schema_id, scope, secrets_required, service_target,
+        sharing, shell_kind, side_effects, signals, size_bytes, size_mb,
+        snapshot, source, source_digest, source_layout, stable_interval_ms,
+        stable_successes, startup_timeout, state, stop, storage, store,
+        surface, target, targets, tcp_connect, timeout, timeout_seconds,
+        toolchain, transparency, upstream_path_prefix, use_thin, user,
+        verify, version, vram_min, vram_recommended, working_dir, world,
+    }
+    present_non_empty_map {
+        binaries, bind_env, bindings, cli, config, contracts, credentials,
+        dependencies, env, env_inject, external, external_injection, generated_bindings,
+        identity_exports, injection_bindings, parameters, paths, platforms,
+        routes, runtime_exports, runtime_tools, secrets, services, state,
+        targets, tool_dependencies,
+    }
+    present_non_empty_list {
+        aliases, allow_env, allow_from, allowed_binaries, args, artifacts,
+        build_env, choices, cmd, config_schema, dependencies, depends_on,
+        egress_allow, egress_id_allow, engines, env_allowlist, exclude,
+        exclude_libs, expose, external_dependencies, host_capabilities,
+        implements, include, lockfiles, model_repo_include, needs, outputs,
+        package_dependencies, platform, preference, providers, public,
+        required_env, runtimes, secrets, server_args, state_bindings, targets,
+        tool_artifacts, volumes, warmup_paths,
+    }
+    present_true {
+        allow_emulation, artifacts, chat, dev_mode, encrypted, function_calling,
+        gpu, index, listed, model_repo_gated, provenance, publish, read_only,
+        recursive, required, root, run_once, secret, use_thin_provisioning,
+        vision,
+    }
+    present_false {
+        egress_proxy, required, sanitize_after_restore, strip_prefix,
+    }
+}
+
 /// The normalized authored manifest intent (ADR-014 §2). Top-level coverage
 /// is the complete §2.1 classification: the 31 identity-bearing sections are
 /// explicit fields; the 9 non-identity sections (`schema_version`, `name`,
@@ -1171,67 +1418,187 @@ pub struct ProgramManifestIntentV1 {
     /// Must equal [`CAPSULE_PROGRAM_MANIFEST_INTENT_V1_SCHEMA`].
     pub schema: String,
     pub capsule_type: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::default_target"
+    )]
     pub default_target: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::requirements"
+    )]
     pub requirements: Option<NormalizedRequirementsIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::capabilities"
+    )]
     pub capabilities: Option<NormalizedCapabilitiesIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::execution"
+    )]
     pub execution: Option<NormalizedExecutionIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::storage"
+    )]
     pub storage: Option<NormalizedStorageIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::state"
+    )]
     pub state: UniqueBTreeMap<ProgramIdentifier, NormalizedStateIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::network"
+    )]
     pub network: Option<NormalizedNetworkIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model"
+    )]
     pub model: Option<NormalizedModelIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::transparency"
+    )]
     pub transparency: Option<NormalizedTransparencyIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::build"
+    )]
     pub build: Option<NormalizedBuildIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::pack"
+    )]
     pub pack: Option<NormalizedPackIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::isolation"
+    )]
     pub isolation: Option<NormalizedIsolationIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::polymorphism"
+    )]
     pub polymorphism: Option<NormalizedPolymorphismIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::targets"
+    )]
     pub targets: Option<NormalizedTargetsIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::platforms"
+    )]
     pub platforms: UniqueBTreeMap<ProgramIdentifier, NormalizedPlatformArtifactIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::exports"
+    )]
     pub exports: Option<NormalizedExportsIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::services"
+    )]
     pub services: UniqueBTreeMap<ProgramIdentifier, NormalizedServiceIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::dependencies"
+    )]
     pub dependencies: UniqueBTreeMap<ProgramIdentifier, NormalizedDependencyIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::tool_dependencies"
+    )]
     pub tool_dependencies: UniqueBTreeMap<ProgramIdentifier, NormalizedToolDependencyIntent>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::required_env"
+    )]
     pub required_env: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::contracts"
+    )]
     pub contracts: UniqueBTreeMap<ProgramIdentifier, NormalizedContractIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::foundation_requirements"
+    )]
     pub foundation_requirements: Option<NormalizedFoundationRequirementsIntent>,
     /// Sorted by `name`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::host_capabilities"
+    )]
     pub host_capabilities: Vec<NormalizedHostCapabilityIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::ingress"
+    )]
     pub ingress: Option<NormalizedIngressIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::snapshot"
+    )]
     pub snapshot: Option<NormalizedSnapshotIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::secrets"
+    )]
     pub secrets: UniqueBTreeMap<ProgramIdentifier, NormalizedSecretIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::bindings"
+    )]
     pub bindings: UniqueBTreeMap<ProgramIdentifier, NormalizedBindingIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::external"
+    )]
     pub external: UniqueBTreeMap<ProgramIdentifier, NormalizedExternalIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::context"
+    )]
     pub context: Option<NormalizedContextIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::generated_bindings"
+    )]
     pub generated_bindings: UniqueBTreeMap<ProgramIdentifier, NormalizedGeneratedBindingIntent>,
 }
 
@@ -1240,18 +1607,42 @@ pub struct ProgramManifestIntentV1 {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedRequirementsIntent {
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::platform"
+    )]
     pub platform: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::vram_min"
+    )]
     pub vram_min: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::vram_recommended"
+    )]
     pub vram_recommended: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::disk"
+    )]
     pub disk: Option<OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::dependencies"
+    )]
     pub dependencies: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::capabilities"
+    )]
     pub capabilities: Option<NormalizedSecurityCapabilitiesIntent>,
 }
 
@@ -1259,13 +1650,29 @@ pub struct NormalizedRequirementsIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedSecurityCapabilitiesIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::network"
+    )]
     pub network: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::fs_writes"
+    )]
     pub fs_writes: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::side_effects"
+    )]
     pub side_effects: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::secrets_required"
+    )]
     pub secrets_required: Option<bool>,
 }
 
@@ -1273,13 +1680,29 @@ pub struct NormalizedSecurityCapabilitiesIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedCapabilitiesIntent {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::chat"
+    )]
     pub chat: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::function_calling"
+    )]
     pub function_calling: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::vision"
+    )]
     pub vision: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::context_length"
+    )]
     pub context_length: Option<u32>,
 }
 
@@ -1291,16 +1714,36 @@ pub struct NormalizedCapabilitiesIntent {
 pub struct NormalizedExecutionIntent {
     pub runtime: ProgramIdentifier,
     pub entrypoint: NormalizedExecutionEntrypointIntent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::port"
+    )]
     pub port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::health_check"
+    )]
     pub health_check: Option<HttpRequestTarget>,
     /// Omitted when equal to the normalizer default (60).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::startup_timeout"
+    )]
     pub startup_timeout: Option<u32>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::env"
+    )]
     pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::signals"
+    )]
     pub signals: Option<NormalizedSignalsIntent>,
 }
 
@@ -1318,9 +1761,17 @@ pub enum NormalizedExecutionEntrypointIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedSignalsIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::stop"
+    )]
     pub stop: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::kill"
+    )]
     pub kill: Option<ProgramIdentifier>,
 }
 
@@ -1329,9 +1780,17 @@ pub struct NormalizedSignalsIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedStorageIntent {
     /// Sorted by `name` (a named set, not an ordered list).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::volumes"
+    )]
     pub volumes: Vec<NormalizedStorageVolumeIntent>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::use_thin_provisioning"
+    )]
     pub use_thin_provisioning: bool,
 }
 
@@ -1340,14 +1799,30 @@ pub struct NormalizedStorageIntent {
 pub struct NormalizedStorageVolumeIntent {
     pub name: ProgramIdentifier,
     pub mount_path: GuestPath,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::read_only"
+    )]
     pub read_only: bool,
     /// Omitted when the manifest default (0 = engine default).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::size_bytes"
+    )]
     pub size_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::use_thin"
+    )]
     pub use_thin: Option<bool>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::encrypted"
+    )]
     pub encrypted: bool,
 }
 
@@ -1360,17 +1835,37 @@ pub struct NormalizedStateIntent {
     pub kind: ProgramIdentifier,
     pub durability: ProgramIdentifier,
     pub purpose: OpaqueAuthoredString,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::producer"
+    )]
     pub producer: Option<ProgramIdentifier>,
     /// Omitted when the default (`auto`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::attach"
+    )]
     pub attach: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::schema_id"
+    )]
     pub schema_id: Option<ProgramIdentifier>,
     /// Omitted when the default (`exclusive`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::sharing"
+    )]
     pub sharing: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::size_mb"
+    )]
     pub size_mb: Option<u32>,
 }
 
@@ -1379,10 +1874,18 @@ pub struct NormalizedStateIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedNetworkIntent {
     /// Set-like: sorted + deduplicated (ADR-014 §2.3 names this list).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::egress_allow"
+    )]
     pub egress_allow: Vec<RemoteArtifactRef>,
     /// Set-like: sorted by `(rule_type, value)` + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::egress_id_allow"
+    )]
     pub egress_id_allow: Vec<NormalizedEgressIdRuleIntent>,
 }
 
@@ -1397,9 +1900,17 @@ pub struct NormalizedEgressIdRuleIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedModelIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::source"
+    )]
     pub source: Option<RemoteArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::quantization"
+    )]
     pub quantization: Option<ProgramIdentifier>,
 }
 
@@ -1408,10 +1919,18 @@ pub struct NormalizedModelIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedTransparencyIntent {
     /// Omitted when the default (`loose`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::level"
+    )]
     pub level: Option<ProgramIdentifier>,
     /// Allowlist (any-match): sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::allowed_binaries"
+    )]
     pub allowed_binaries: Vec<GlobPattern>,
 }
 
@@ -1422,13 +1941,29 @@ pub struct NormalizedTransparencyIntent {
 pub struct NormalizedBuildIntent {
     /// Exclusion patterns: authored order preserved (same discipline as
     /// `pack.exclude`).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::exclude_libs"
+    )]
     pub exclude_libs: Vec<GlobPattern>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::gpu"
+    )]
     pub gpu: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::lifecycle"
+    )]
     pub lifecycle: Option<NormalizedBuildLifecycleIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::inputs"
+    )]
     pub inputs: Option<NormalizedBuildInputsIntent>,
 }
 
@@ -1436,15 +1971,35 @@ pub struct NormalizedBuildIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedBuildLifecycleIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::prepare"
+    )]
     pub prepare: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::build"
+    )]
     pub build: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::package"
+    )]
     pub package: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::verify"
+    )]
     pub verify: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::publish"
+    )]
     pub publish: Option<OpaqueCommand>,
 }
 
@@ -1453,16 +2008,36 @@ pub struct NormalizedBuildLifecycleIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedBuildInputsIntent {
     /// Existence-checked by the adapter; set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::lockfiles"
+    )]
     pub lockfiles: Vec<SourceExistingPath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::toolchain"
+    )]
     pub toolchain: Option<OpaqueAuthoredString>,
     /// Lexical-only; set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::artifacts"
+    )]
     pub artifacts: Vec<SourceRelativeFuturePath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::allow_network"
+    )]
     pub allow_network: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::reproducibility"
+    )]
     pub reproducibility: Option<OpaqueAuthoredString>,
 }
 
@@ -1471,9 +2046,17 @@ pub struct NormalizedBuildInputsIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPackIntent {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::include"
+    )]
     pub include: Vec<GlobPattern>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::exclude"
+    )]
     pub exclude: Vec<GlobPattern>,
 }
 
@@ -1482,7 +2065,11 @@ pub struct NormalizedPackIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedIsolationIntent {
     /// Env NAMES; set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::allow_env"
+    )]
     pub allow_env: Vec<ProgramIdentifier>,
 }
 
@@ -1491,7 +2078,11 @@ pub struct NormalizedIsolationIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedPolymorphismIntent {
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::implements"
+    )]
     pub implements: Vec<ProgramIdentifier>,
 }
 
@@ -1505,21 +2096,49 @@ pub struct NormalizedPolymorphismIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedTargetsIntent {
     /// ORDER-SENSITIVE resolution preference: preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::preference"
+    )]
     pub preference: Vec<ProgramIdentifier>,
     /// Authored `sha256:`-prefixed only ([`Sha256DigestPin::parse_prefixed`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::source_digest"
+    )]
     pub source_digest: Option<Sha256DigestPin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::port"
+    )]
     pub port: Option<u16>,
     /// Omitted when equal to the normalizer default (60).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::startup_timeout"
+    )]
     pub startup_timeout: Option<u32>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::env"
+    )]
     pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::health_check"
+    )]
     pub health_check: Option<HttpRequestTarget>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::targets"
+    )]
     pub targets: UniqueBTreeMap<ProgramIdentifier, NormalizedTargetIntent>,
 }
 
@@ -1530,137 +2149,349 @@ pub struct NormalizedTargetsIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedTargetIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::runtime"
+    )]
     pub runtime: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::surface"
+    )]
     pub surface: Option<NormalizedSurfaceIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::driver"
+    )]
     pub driver: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::language"
+    )]
     pub language: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::runtime_version"
+    )]
     pub runtime_version: Option<OpaqueAuthoredString>,
     /// The structured source target's version CONSTRAINT (`"^3.11"`), kept
     /// distinct from the pinned `runtime_version`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::version"
+    )]
     pub version: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::runtime_tools"
+    )]
     pub runtime_tools: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::tool_artifacts"
+    )]
     pub tool_artifacts: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::entrypoint"
+    )]
     pub entrypoint: Option<SourceRelativeFuturePath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::component"
+    )]
     pub component: Option<SourceRelativeFuturePath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::image"
+    )]
     pub image: Option<RemoteArtifactRef>,
     /// `targets.wasm.digest` / `targets.oci.digest`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::digest"
+    )]
     pub digest: Option<CasContentDigest>,
     /// `targets.wasm.world` — default-expanded to `wasi:cli/command` by the
     /// adapter before hashing when authored absent on a Wasm target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::world"
+    )]
     pub world: Option<WitWorldRef>,
     /// `targets.wasm.config` — component config values.
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::config"
+    )]
     pub config: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Argv: ORDER-SENSITIVE, preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::cmd"
+    )]
     pub cmd: Vec<OpaqueCommand>,
     /// `targets.source.args` — ORDER-SENSITIVE, preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::args"
+    )]
     pub args: Vec<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::env"
+    )]
     pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::user"
+    )]
     pub user: Option<ContainerUserSpec>,
     /// Runtime-class-resolved: source/web ⇒ source-relative; OCI ⇒ absolute
     /// guest path; Wasm ⇒ rejected at adapter time (Rule 3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::working_dir"
+    )]
     pub working_dir: Option<NormalizedWorkingDir>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::port"
+    )]
     pub port: Option<u16>,
     /// `targets.source.dependencies` — the declared dependencies file
     /// (requirements.txt / package.json); existence-checked by the adapter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::dependencies"
+    )]
     pub dependencies: Option<SourceExistingPath>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::dev_mode"
+    )]
     pub dev_mode: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::engine"
+    )]
     pub engine: Option<RemoteArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::engine_version"
+    )]
     pub engine_version: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::engine_variant"
+    )]
     pub engine_variant: Option<OpaqueAuthoredString>,
     /// In-tree only; absolute/out-of-tree rejected at adapter time (Rule 3).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model"
+    )]
     pub model: Option<SourceExistingPath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model_url"
+    )]
     pub model_url: Option<RemoteArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model_sha256"
+    )]
     pub model_sha256: Option<Sha256DigestPin>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model_repo"
+    )]
     pub model_repo: Option<RemoteArtifactRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model_revision"
+    )]
     pub model_revision: Option<GitCommitRevision>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::model_repo_sha256"
+    )]
     pub model_repo_sha256: Option<Sha256DigestPin>,
     /// Allowlist (any-match): sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::model_repo_include"
+    )]
     pub model_repo_include: Vec<GlobPattern>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::model_repo_gated"
+    )]
     pub model_repo_gated: bool,
     /// Extra argv: ORDER-SENSITIVE, preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::server_args"
+    )]
     pub server_args: Vec<OpaqueCommand>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::required_env"
+    )]
     pub required_env: Vec<ProgramIdentifier>,
     /// Form fields: ORDER-SENSITIVE (display order), preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::config_schema"
+    )]
     pub config_schema: Vec<NormalizedConfigFieldIntent>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::env_allowlist"
+    )]
     pub env_allowlist: Vec<ProgramIdentifier>,
     /// Allowlist (any-match): sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::public"
+    )]
     pub public: Vec<GlobPattern>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::source_layout"
+    )]
     pub source_layout: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::package_type"
+    )]
     pub package_type: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::build_command"
+    )]
     pub build_command: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::install_command"
+    )]
     pub install_command: Option<NormalizedCommandIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::prestart_command"
+    )]
     pub prestart_command: Option<NormalizedCommandIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::run_command"
+    )]
     pub run_command: Option<OpaqueCommand>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::outputs"
+    )]
     pub outputs: Vec<SourceRelativeFuturePath>,
     /// Env NAMES; set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::build_env"
+    )]
     pub build_env: Vec<ProgramIdentifier>,
     /// Set-like: sorted + deduplicated (startup order derives from the graph,
     /// never from list position).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::needs"
+    )]
     pub needs: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::readiness_probe"
+    )]
     pub readiness_probe: Option<NormalizedReadinessProbeIntent>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::package_dependencies"
+    )]
     pub package_dependencies: Vec<ProgramIdentifier>,
     /// Sorted by `alias`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::external_dependencies"
+    )]
     pub external_dependencies: Vec<NormalizedExternalDependencyIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::external_injection"
+    )]
     pub external_injection: UniqueBTreeMap<ProgramIdentifier, NormalizedExternalInjectionIntent>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::allow_emulation"
+    )]
     pub allow_emulation: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::run_once"
+    )]
     pub run_once: bool,
 }
 
@@ -1681,7 +2512,11 @@ pub enum NormalizedWorkingDir {
 pub struct NormalizedSurfaceIntent {
     pub kind: ProgramIdentifier,
     /// `None` and `Some([])` stay distinct, mirroring the authoring type.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::profiles"
+    )]
     pub profiles: Option<Vec<ProgramIdentifier>>,
 }
 
@@ -1690,17 +2525,37 @@ pub struct NormalizedSurfaceIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedConfigFieldIntent {
     pub name: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::label"
+    )]
     pub label: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::description"
+    )]
     pub description: Option<OpaqueAuthoredString>,
     pub kind: ProgramIdentifier,
     /// Enum-kind choices: ORDER-SENSITIVE (display order), preserved.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::choices"
+    )]
     pub choices: Vec<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::default"
+    )]
     pub default: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::placeholder"
+    )]
     pub placeholder: Option<OpaqueAuthoredString>,
 }
 
@@ -1713,17 +2568,33 @@ pub enum NormalizedCommandIntent {
     Shell {
         shell: OpaqueCommand,
         /// Omitted when the default (`posix-sh`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::shell_kind"
+        )]
         shell_kind: Option<ProgramIdentifier>,
     },
     /// Explicit argv command.
     Argv {
         cmd: OpaqueCommand,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "present_non_empty_list::args"
+        )]
         args: Vec<OpaqueCommand>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::cwd"
+        )]
         cwd: Option<NormalizedWorkingDir>,
-        #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+        #[serde(
+            default,
+            skip_serializing_if = "UniqueBTreeMap::is_empty",
+            deserialize_with = "present_non_empty_map::env"
+        )]
         env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     },
     /// Backward-compatible string form (auto-detected at execution time).
@@ -1737,20 +2608,48 @@ pub enum NormalizedCommandIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedReadinessProbeIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::http_get"
+    )]
     pub http_get: Option<HttpRequestTarget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::tcp_connect"
+    )]
     pub tcp_connect: Option<TcpProbeTarget>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::exec"
+    )]
     pub exec: Option<Vec<OpaqueCommand>>,
     /// A placeholder NAME (`"PORT"`, `"web"`), never a host:port target.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::port"
+    )]
     pub port: Option<ProbePortReference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::initial_delay_seconds"
+    )]
     pub initial_delay_seconds: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::timeout_seconds"
+    )]
     pub timeout_seconds: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::interval_seconds"
+    )]
     pub interval_seconds: Option<u32>,
 }
 
@@ -1761,13 +2660,29 @@ pub struct NormalizedExternalDependencyIntent {
     pub alias: ProgramIdentifier,
     pub source: RemoteArtifactRef,
     pub source_type: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::contract"
+    )]
     pub contract: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::injection_bindings"
+    )]
     pub injection_bindings: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::parameters"
+    )]
     pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::credentials"
+    )]
     pub credentials: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
 }
 
@@ -1787,9 +2702,17 @@ pub enum NormalizedParamValueIntent {
 pub struct NormalizedExternalInjectionIntent {
     pub injection_type: ProgramIdentifier,
     /// Omitted when the default (`true`).
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "is_true",
+        deserialize_with = "present_false::required"
+    )]
     pub required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::default"
+    )]
     pub default: Option<OpaqueAuthoredString>,
 }
 
@@ -1807,12 +2730,24 @@ pub struct NormalizedPlatformArtifactIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedExportsIntent {
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::cli"
+    )]
     pub cli: UniqueBTreeMap<ProgramIdentifier, NormalizedCliExportIntent>,
     /// Alias → path relative to the materialized tool root.
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::binaries"
+    )]
     pub binaries: UniqueBTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::paths"
+    )]
     pub paths: UniqueBTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
 }
 
@@ -1824,7 +2759,11 @@ pub struct NormalizedCliExportIntent {
     pub kind: ProgramIdentifier,
     pub target: ProgramIdentifier,
     /// Argv: ORDER-SENSITIVE, preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::args"
+    )]
     pub args: Vec<OpaqueCommand>,
 }
 
@@ -1832,29 +2771,69 @@ pub struct NormalizedCliExportIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedServiceIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::entrypoint"
+    )]
     pub entrypoint: Option<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::target"
+    )]
     pub target: Option<ProgramIdentifier>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::depends_on"
+    )]
     pub depends_on: Vec<ProgramIdentifier>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::expose"
+    )]
     pub expose: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::env"
+    )]
     pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::secrets"
+    )]
     pub secrets: Vec<ProgramIdentifier>,
     /// Sorted by `(state, target)`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::state_bindings"
+    )]
     pub state_bindings: Vec<NormalizedServiceStateBindingIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::readiness_probe"
+    )]
     pub readiness_probe: Option<NormalizedReadinessProbeIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::network"
+    )]
     pub network: Option<NormalizedServiceNetworkIntent>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::run_once"
+    )]
     pub run_once: bool,
 }
 
@@ -1864,12 +2843,24 @@ pub struct NormalizedServiceIntent {
 pub struct NormalizedServiceStateBindingIntent {
     pub state: ProgramIdentifier,
     pub target: GuestPath,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::service_target"
+    )]
     pub service_target: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::owner"
+    )]
     pub owner: Option<NormalizedStateOwnerIntent>,
     /// Octal permission string (`"0700"`), hashed as authored.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mode"
+    )]
     pub mode: Option<OpaqueAuthoredString>,
 }
 
@@ -1877,9 +2868,17 @@ pub struct NormalizedServiceStateBindingIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedStateOwnerIntent {
     pub uid: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::gid"
+    )]
     pub gid: Option<u32>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::recursive"
+    )]
     pub recursive: bool,
 }
 
@@ -1888,15 +2887,31 @@ pub struct NormalizedStateOwnerIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedServiceNetworkIntent {
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::aliases"
+    )]
     pub aliases: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::publish"
+    )]
     pub publish: bool,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::allow_from"
+    )]
     pub allow_from: Vec<ProgramIdentifier>,
     /// Omitted when the default (`true`).
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "is_true",
+        deserialize_with = "present_false::egress_proxy"
+    )]
     pub egress_proxy: bool,
 }
 
@@ -1907,11 +2922,23 @@ pub struct NormalizedDependencyIntent {
     pub capsule: RemoteArtifactRef,
     /// `<name>@<major>` contract reference spelling.
     pub contract: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::parameters"
+    )]
     pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::credentials"
+    )]
     pub credentials: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::state"
+    )]
     pub state: Option<NormalizedDependencyStateIntent>,
 }
 
@@ -1920,7 +2947,11 @@ pub struct NormalizedDependencyIntent {
 pub struct NormalizedDependencyStateIntent {
     pub name: ProgramIdentifier,
     /// Omitted when the default (`parent`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::ownership"
+    )]
     pub ownership: Option<ProgramIdentifier>,
 }
 
@@ -1931,10 +2962,18 @@ pub struct NormalizedToolDependencyIntent {
     /// The authored `ref` capsule URL.
     pub capsule_ref: RemoteArtifactRef,
     /// Version CONSTRAINT (`">=16,<17"`) — the lock records the resolution.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::version"
+    )]
     pub version: Option<OpaqueAuthoredString>,
     /// Export name → env var name.
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::bind_env"
+    )]
     pub bind_env: UniqueBTreeMap<ProgramIdentifier, ProgramIdentifier>,
 }
 
@@ -1944,15 +2983,35 @@ pub struct NormalizedToolDependencyIntent {
 pub struct NormalizedContractIntent {
     pub target: ProgramIdentifier,
     pub ready: NormalizedReadyProbeIntent,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::parameters"
+    )]
     pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::credentials"
+    )]
     pub credentials: UniqueBTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::identity_exports"
+    )]
     pub identity_exports: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::runtime_exports"
+    )]
     pub runtime_exports: UniqueBTreeMap<ProgramIdentifier, NormalizedRuntimeExportIntent>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::state"
+    )]
     pub state: Option<NormalizedContractStateIntent>,
 }
 
@@ -1967,34 +3026,66 @@ pub struct NormalizedContractIntent {
 pub enum NormalizedReadyProbeIntent {
     Tcp {
         target: TemplatedString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::timeout"
+        )]
         timeout: Option<OpaqueAuthoredString>,
     },
     Probe {
         run: TemplatedString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::timeout"
+        )]
         timeout: Option<OpaqueAuthoredString>,
     },
     Postgres {
         host: TemplatedString,
         port: TemplatedString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::user"
+        )]
         user: Option<TemplatedString>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::database"
+        )]
         database: Option<TemplatedString>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::timeout"
+        )]
         timeout: Option<OpaqueAuthoredString>,
     },
     Http {
         url: TemplatedString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::expect_status"
+        )]
         expect_status: Option<u16>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::timeout"
+        )]
         timeout: Option<OpaqueAuthoredString>,
     },
     UnixSocket {
         path: TemplatedString,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "present_not_null::timeout"
+        )]
         timeout: Option<OpaqueAuthoredString>,
     },
 }
@@ -2005,9 +3096,17 @@ pub enum NormalizedReadyProbeIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedValueSchemaIntent {
     pub value_type: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::required"
+    )]
     pub required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::default"
+    )]
     pub default: Option<NormalizedParamValueIntent>,
 }
 
@@ -2017,7 +3116,11 @@ pub struct NormalizedValueSchemaIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedRuntimeExportIntent {
     pub value: TemplatedString,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::secret"
+    )]
     pub secret: bool,
 }
 
@@ -2025,11 +3128,23 @@ pub struct NormalizedRuntimeExportIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedContractStateIntent {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::required"
+    )]
     pub required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::version"
+    )]
     pub version: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mount"
+    )]
     pub mount: Option<GuestPath>,
 }
 
@@ -2037,13 +3152,25 @@ pub struct NormalizedContractStateIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedFoundationRequirementsIntent {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::profile"
+    )]
     pub profile: Option<ProgramIdentifier>,
     /// `name@version-range` constraints; set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::runtimes"
+    )]
     pub runtimes: Vec<OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::engines"
+    )]
     pub engines: Vec<OpaqueAuthoredString>,
 }
 
@@ -2064,10 +3191,18 @@ pub struct NormalizedIngressIntent {
     /// the path prefix, but their authored spelling is a name, not an
     /// origin-form target). `upstream_path_prefix` IS an origin-form
     /// [`HttpRequestTarget`].
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::routes"
+    )]
     pub routes: UniqueBTreeMap<ProgramIdentifier, NormalizedIngressRouteIntent>,
     /// Service → env name → authored template value.
-    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "UniqueBTreeMap::is_empty",
+        deserialize_with = "present_non_empty_map::env_inject"
+    )]
     pub env_inject:
         UniqueBTreeMap<ProgramIdentifier, UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>>,
 }
@@ -2077,16 +3212,36 @@ pub struct NormalizedIngressIntent {
 pub struct NormalizedIngressRouteIntent {
     pub target: ProgramIdentifier,
     pub port: u16,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::listed"
+    )]
     pub listed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::alias"
+    )]
     pub alias: Option<ProgramIdentifier>,
     /// Omitted when the default (`true`).
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "is_true",
+        deserialize_with = "present_false::strip_prefix"
+    )]
     pub strip_prefix: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::upstream_path_prefix"
+    )]
     pub upstream_path_prefix: Option<HttpRequestTarget>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::root"
+    )]
     pub root: bool,
 }
 
@@ -2097,29 +3252,65 @@ pub struct NormalizedIngressRouteIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedSnapshotIntent {
     /// Omitted when the default (`none`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mode"
+    )]
     pub mode: Option<ProgramIdentifier>,
     /// Omitted when the default (`healthcheck`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::boot_until"
+    )]
     pub boot_until: Option<ProgramIdentifier>,
     /// Omitted when the default (`true`).
-    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    #[serde(
+        default = "default_true",
+        skip_serializing_if = "is_true",
+        deserialize_with = "present_false::sanitize_after_restore"
+    )]
     pub sanitize_after_restore: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::runner_class"
+    )]
     pub runner_class: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::max_restore_seconds"
+    )]
     pub max_restore_seconds: Option<u32>,
     /// HTTP request-targets, not filesystem paths; ORDER-SENSITIVE (warmup
     /// sequence), preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::warmup_paths"
+    )]
     pub warmup_paths: Vec<HttpRequestTarget>,
     /// Omitted when the default (1).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::stable_successes"
+    )]
     pub stable_successes: Option<u32>,
     /// Omitted when the default (250).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::stable_interval_ms"
+    )]
     pub stable_interval_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::content_ready_path"
+    )]
     pub content_ready_path: Option<HttpRequestTarget>,
 }
 
@@ -2127,17 +3318,37 @@ pub struct NormalizedSnapshotIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedSecretIntent {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::required"
+    )]
     pub required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::description"
+    )]
     pub description: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::env"
+    )]
     pub env: Option<ProgramIdentifier>,
     /// Omitted when the default (`env`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::delivery"
+    )]
     pub delivery: Option<ProgramIdentifier>,
     /// Omitted when the default (`api_key`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::class"
+    )]
     pub class: Option<ProgramIdentifier>,
 }
 
@@ -2146,16 +3357,36 @@ pub struct NormalizedSecretIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedBindingIntent {
     pub kind: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::required"
+    )]
     pub required: bool,
     /// Omitted when the default (`user`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::scope"
+    )]
     pub scope: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mount"
+    )]
     pub mount: Option<GuestPath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mode"
+    )]
     pub mode: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::provider"
+    )]
     pub provider: Option<ProgramIdentifier>,
 }
 
@@ -2164,21 +3395,45 @@ pub struct NormalizedBindingIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedExternalIntent {
     pub kind: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::required"
+    )]
     pub required: bool,
     /// PREFERENCE order: preserved as authored.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::providers"
+    )]
     pub providers: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::provider"
+    )]
     pub provider: Option<ProgramIdentifier>,
     /// Omitted when the default (`parallel`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::provision"
+    )]
     pub provision: Option<ProgramIdentifier>,
     /// Omitted when the default (`local_preferred`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::locality"
+    )]
     pub locality: Option<ProgramIdentifier>,
     /// Omitted when the default (`demo`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::degraded"
+    )]
     pub degraded: Option<ProgramIdentifier>,
 }
 
@@ -2187,15 +3442,35 @@ pub struct NormalizedExternalIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedContextIntent {
     /// Omitted when the default (`app_private`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::store"
+    )]
     pub store: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::artifacts"
+    )]
     pub artifacts: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::index"
+    )]
     pub index: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::mount"
+    )]
     pub mount: Option<GuestPath>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        skip_serializing_if = "std::ops::Not::not",
+        deserialize_with = "present_true::provenance"
+    )]
     pub provenance: bool,
 }
 
@@ -2205,16 +3480,32 @@ pub struct NormalizedContextIntent {
 #[serde(deny_unknown_fields)]
 pub struct NormalizedGeneratedBindingIntent {
     /// Omitted when the default (`random_base64`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::generator"
+    )]
     pub generator: Option<ProgramIdentifier>,
     /// Omitted when the default (32).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::bytes"
+    )]
     pub bytes: Option<u32>,
     /// Omitted when the default (`run`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::scope"
+    )]
     pub scope: Option<ProgramIdentifier>,
     /// Set-like: sorted + deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list::targets"
+    )]
     pub targets: Vec<ProgramIdentifier>,
 }
 
@@ -3115,6 +4406,107 @@ port = 8080
             error.to_string().contains("duplicate identity map key 'A'"),
             "error must name the duplicated inner key, got: {error}"
         );
+    }
+
+    // ── non-canonical spellings of absence ───────────────────────────────
+
+    /// The recorded shared-vector baseline (`contract/vectors/baseline.json`),
+    /// verbatim, with the `capsule_program_id` recorded for it BEFORE the
+    /// absence-spelling tightening. Absence is spelled by omission here, so
+    /// the tightening narrows only what is REJECTED: this document, its
+    /// serialized form, and its id are untouched.
+    const RECORDED_BASELINE_CONTRACT: &str = r#"{
+      "manifest_intent": {
+        "capsule_type": "web-app",
+        "schema": "ato.capsule-program-manifest-intent/v1",
+        "state": {
+          "scratch": {
+            "durability": "ephemeral",
+            "kind": "filesystem",
+            "purpose": "run scratch"
+          }
+        }
+      },
+      "schema": "ato.capsule-program/v1",
+      "source": {
+        "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "projection_schema": "ato.capsule-program-source-projection/v1"
+      }
+    }"#;
+
+    const RECORDED_BASELINE_ID: &str =
+        "blake3:eaf5c32fa4a5c4fe83b6c1bad10d556ca82cde5b948f40a26323ebe7b9b81c4f";
+
+    #[test]
+    fn omitted_absence_round_trips_to_the_recorded_id() {
+        let document: serde_json::Value =
+            serde_json::from_str(RECORDED_BASELINE_CONTRACT).expect("fixture text is JSON");
+        let contract = serde_json::from_value::<CapsuleProgramContractV1>(document.clone())
+            .expect("the canonical spelling of absence — an omitted key — still parses");
+
+        assert_eq!(
+            contract.compute_capsule_program_id().unwrap().to_string(),
+            RECORDED_BASELINE_ID,
+            "tightening deserialization must not move a recorded id"
+        );
+        assert_eq!(
+            serde_json::to_value(&contract).unwrap(),
+            document,
+            "the omitted spelling must survive a round trip unchanged"
+        );
+    }
+
+    #[test]
+    fn non_canonical_spellings_of_absence_fail_closed() {
+        // `field` is the key the message must name; each body is a spelling
+        // the typed layer would otherwise DROP on the way back out, letting a
+        // consumer that canonicalizes the raw JSON hash a document this layer
+        // never represents.
+        for (field, spelling, body) in [
+            ("default_target", "null", r#", "default_target": null"#),
+            ("state", "{}", r#", "state": {}"#),
+            ("required_env", "[]", r#", "required_env": []"#),
+            // Nested: one and two levels below the top-level intent.
+            (
+                "producer",
+                "null",
+                r#", "state": { "scratch": { "kind": "filesystem",
+                    "durability": "ephemeral", "purpose": "run scratch",
+                    "producer": null } }"#,
+            ),
+            ("env", "{}", r#", "targets": { "env": {} }"#),
+            (
+                "egress_allow",
+                "[]",
+                r#", "network": { "egress_allow": [] }"#,
+            ),
+            // A flag omitted when false: writing the skipped value explicitly
+            // is the same ambiguity in a different shape.
+            ("chat", "false", r#", "capabilities": { "chat": false }"#),
+        ] {
+            let error = serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(body))
+                .expect_err("a non-canonical spelling of absence must fail closed");
+            assert!(
+                error.to_string().contains(&format!("`{field}`")),
+                "explicit {spelling} must be rejected naming `{field}`, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn present_identity_values_still_parse_after_the_tightening() {
+        for body in [
+            r#", "default_target": "linux-x86_64""#,
+            r#", "required_env": ["PORT"]"#,
+            r#", "targets": { "env": { "PORT": "8080" } }"#,
+            r#", "capabilities": { "chat": true }"#,
+            r#", "state": { "scratch": { "kind": "filesystem",
+                "durability": "ephemeral", "purpose": "run scratch",
+                "producer": "builder" } }"#,
+        ] {
+            serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(body))
+                .unwrap_or_else(|error| panic!("present value must parse: {body}: {error}"));
+        }
     }
 
     #[test]

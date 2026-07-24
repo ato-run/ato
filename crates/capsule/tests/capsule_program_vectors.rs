@@ -2,7 +2,7 @@
 //!
 //! The fixtures under `tests/fixtures/capsule_program_contract/` are the
 //! cross-language source of truth for the canonical form (RFC 8785 JCS +
-//! domain-separated BLAKE3) in two suites indexed by one `manifest.json`;
+//! domain-separated BLAKE3) in three suites indexed by one `manifest.json`;
 //! other implementations (Phase 1) consume the same files. Invariants
 //! exercised here:
 //!
@@ -26,10 +26,19 @@
 //! equivalent authored spellings share one expected file; rejection vectors
 //! pin a distinctive error substring.
 //!
-//! The source-projection suite (ADR-014 §9 source/) is deliberately NOT here:
-//! it lives as tempdir unit tests in
-//! `crates/capsule/src/contract/program_source_projection.rs` because
-//! committed symlink/executable-bit fixtures are not portable.
+//! **source/** — committed fixture tree → projected file set → expected
+//! `ProgramSourceDigest`: the projection excludes exactly the selected root's
+//! control files, the digest is a fixed point across {no lock, `capsule.lock`,
+//! `ato.lock.json`}, and control-file NAMES at nested paths stay in the
+//! projection and move the digest.
+//!
+//! Only the two non-portable source scenarios stay out of the committed tree —
+//! a control-file-shaped symlink and an executable-bit flip do not survive
+//! every platform/VCS checkout, so they remain tempdir unit tests in
+//! `crates/capsule/src/contract/program_source_projection.rs`
+//! (`symlink_named_capsule_lock_rejected_by_admissibility_pass`,
+//! `executable_bit_flip_changes_projection_digest`,
+//! `staged_copy_preserves_executable_bit`).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -42,6 +51,9 @@ use capsule::capsule_program_contract::{
 };
 use capsule::manifest::load_manifest;
 use capsule::program_manifest_input::program_intent_from_v03;
+use capsule::program_source_projection::{
+    StagedCapsuleSource, VerifiedPinnedSourceMaterialization,
+};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -61,8 +73,10 @@ struct Manifest {
     #[allow(dead_code)]
     source_projection_suite: String,
     contract_baseline: String,
+    source_baseline: String,
     contract_vectors: Vec<ContractVector>,
     manifest_vectors: Vec<ManifestVector>,
+    source_vectors: Vec<SourceVector>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +134,21 @@ struct ManifestVector {
 enum ManifestExpect {
     Intent,
     Error,
+}
+
+/// One committed source-suite fixture tree: the projected file set a second
+/// implementation must reproduce, and the digest of that projection.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceVector {
+    name: String,
+    dir: String,
+    /// Paths relative to `dir`, `/`-joined, lexicographically sorted.
+    projected_files: Vec<String>,
+    source_digest: String,
+    relation: Option<Relation>,
+    #[allow(dead_code)]
+    notes: Option<String>,
 }
 
 fn fixture_dir() -> PathBuf {
@@ -414,6 +443,177 @@ fn cross_suite_capsule_program_id_is_deterministic() {
     assert_eq!(
         first, second,
         "manifest pipeline + contract hash must be deterministic end to end"
+    );
+}
+
+/// The control-file names that are special **at the selected root only**. A
+/// projection may never contain any of them at its root, whatever the vector.
+const ROOT_CONTROL_FILE_NAMES: [&str; 3] = ["capsule.toml", "capsule.lock", "ato.lock.json"];
+
+/// Every regular file under `root` as a `/`-joined path relative to `root`,
+/// sorted lexicographically. This is the projected file set a second
+/// implementation must reproduce before it can reproduce the digest.
+///
+/// Keep in sync with the identical function in
+/// `gen_capsule_program_vectors.rs`.
+fn projected_file_set(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).expect("read projected directory") {
+            let entry = entry.expect("projected directory entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.path().is_dir() {
+                walk(&entry.path(), &relative, out);
+            } else {
+                out.push(relative);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    out.sort();
+    out
+}
+
+/// Runs the real projection over a committed fixture tree and returns
+/// (projected file set, `sha256:<hex>` digest). The fixture tree is only read:
+/// the derivation excludes the control files from its own staging copy.
+///
+/// Keep in sync with the identical function in
+/// `gen_capsule_program_vectors.rs`.
+fn project_source_vector(root: &Path) -> (Vec<String>, String) {
+    let pinned = VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
+        .expect("committed fixture tree is a pinned materialization");
+    let projected = StagedCapsuleSource::stage(&pinned)
+        .expect("fixture tree stages")
+        .into_projected()
+        .expect("control files are excluded");
+    let files = projected_file_set(projected.root());
+    let digest = projected
+        .source_contract()
+        .expect("projected tree hashes")
+        .digest
+        .to_string();
+    (files, digest)
+}
+
+#[test]
+fn source_vectors_pin_the_projected_file_set_and_digest() {
+    let dir = fixture_dir();
+    let index = load_index();
+
+    let baseline = index
+        .source_vectors
+        .iter()
+        .find(|vector| vector.name == index.source_baseline)
+        .expect("source baseline vector present");
+    let (_, baseline_digest) = project_source_vector(&dir.join(&baseline.dir));
+    assert_eq!(
+        baseline_digest, baseline.source_digest,
+        "source baseline digest drifted — the A1 tree hash or the control-file exclusion changed"
+    );
+
+    let mut differing_digests = BTreeSet::new();
+    for vector in &index.source_vectors {
+        let (files, digest) = project_source_vector(&dir.join(&vector.dir));
+
+        assert_eq!(
+            files, vector.projected_files,
+            "vector '{}': projected file set drifted",
+            vector.name
+        );
+        assert_eq!(
+            digest, vector.source_digest,
+            "vector '{}': ProgramSourceDigest drifted",
+            vector.name
+        );
+        for name in ROOT_CONTROL_FILE_NAMES {
+            assert!(
+                !files.iter().any(|file| file == name),
+                "vector '{}': root control file {name} must never reach the projection",
+                vector.name
+            );
+        }
+
+        match vector.relation {
+            Some(Relation::EqualsBaseline) => assert_eq!(
+                digest, baseline_digest,
+                "vector '{}': the lock spelling must not move the digest",
+                vector.name
+            ),
+            Some(Relation::DiffersFromBaseline) => {
+                assert_ne!(
+                    digest, baseline_digest,
+                    "vector '{}': a source-bytes change must move the digest",
+                    vector.name
+                );
+                assert!(
+                    differing_digests.insert(digest),
+                    "vector '{}': differing digests must be pairwise distinct",
+                    vector.name
+                );
+            }
+            None => assert_eq!(vector.name, index.source_baseline),
+        }
+    }
+}
+
+/// The exact-path rule the `nested-control-names` vector exists to pin: only
+/// the SELECTED ROOT's control files are special, so control-file names at
+/// nested paths are ordinary source — in the projected set, and digest-bearing.
+#[test]
+fn nested_control_file_names_stay_in_the_projected_set() {
+    let index = load_index();
+    let vector = index
+        .source_vectors
+        .iter()
+        .find(|vector| vector.name == "nested-control-names")
+        .expect("nested-control-names vector present");
+
+    for nested in ["examples/capsule.toml", "fixtures/capsule.lock"] {
+        assert!(
+            vector.projected_files.iter().any(|file| file == nested),
+            "{nested} must stay in the projection: exclusion is by exact path, not by file name"
+        );
+    }
+    assert_eq!(vector.relation, Some(Relation::DiffersFromBaseline));
+}
+
+#[test]
+fn every_source_vector_directory_is_listed_in_the_manifest() {
+    let dir = fixture_dir();
+    let index = load_index();
+
+    let listed: BTreeSet<String> = index
+        .source_vectors
+        .iter()
+        .map(|vector| {
+            Path::new(&vector.dir)
+                .file_name()
+                .expect("vector directory name")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let on_disk: BTreeSet<String> = fs::read_dir(dir.join("source/vectors"))
+        .expect("read source vectors dir")
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        listed, on_disk,
+        "manifest and source/vectors/ directory diverged — a fixture tree cannot be \
+         added without an index entry that verifies it"
     );
 }
 

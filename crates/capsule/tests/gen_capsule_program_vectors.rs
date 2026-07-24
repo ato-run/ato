@@ -1,15 +1,21 @@
 //! Deterministic generator for the shared `ato.capsule-program/v1` test
-//! vectors (ADR-014 §9, contract/ + manifest/ suites).
+//! vectors (ADR-014 §9, contract/ + manifest/ + source/ suites).
 //!
 //! This is the single source of truth for every fixture under
 //! `tests/fixtures/capsule_program_contract/` **and** for its `manifest.json`.
-//! It never hand-authors a `capsule_program_id` or an expected intent JSON:
-//! every id is computed from the typed contract with
-//! [`CapsuleProgramContractV1::compute_capsule_program_id`], and every
+//! It never hand-authors a `capsule_program_id`, an expected intent JSON, or a
+//! `ProgramSourceDigest`: every id is computed from the typed contract with
+//! [`CapsuleProgramContractV1::compute_capsule_program_id`], every
 //! `manifest/expected/*.intent.json` is derived by running the real pipeline
 //! (`capsule::manifest::load_manifest` →
 //! [`capsule::program_manifest_input::program_intent_from_v03`]) over the
-//! committed `.toml` vector.
+//! committed `.toml` vector, and every source-suite file set + digest is
+//! derived by running the real projection over the committed fixture tree.
+//!
+//! The `source/vectors/<name>/` trees are the one class of fixture this
+//! generator does NOT write: they are hand-authored INPUTS (a second
+//! implementation reads the same bytes), so the generator only recomputes
+//! their recorded projected file set and digest.
 //!
 //! It is `#[ignore]`d so it never runs in normal CI; regenerate with:
 //!
@@ -29,6 +35,9 @@ use capsule::capsule_program_contract::{
 };
 use capsule::manifest::load_manifest;
 use capsule::program_manifest_input::program_intent_from_v03;
+use capsule::program_source_projection::{
+    StagedCapsuleSource, VerifiedPinnedSourceMaterialization,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -387,6 +396,100 @@ port = 8080
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Suite 3 — source/: fixture tree → projected file set → ProgramSourceDigest
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// (vector directory name, relation to the source baseline, manifest.json note).
+///
+/// Regular files only, by design: a committed symlink or executable-bit fixture
+/// does not survive every platform/VCS checkout, so those two scenarios stay in
+/// the tempdir unit tests named in the fixture README.
+type SourceVectorSpec = (&'static str, Option<&'static str>, &'static str);
+
+const SOURCE_VECTORS: [SourceVectorSpec; 5] = [
+    (
+        "baseline",
+        None,
+        "manifest + two ordinary source files, no lock: the root capsule.toml is excluded and \
+         everything else is hashed",
+    ),
+    (
+        "with-canonical-lock",
+        Some("equals-baseline"),
+        "baseline's source bytes plus a root capsule.lock: the resolved lock never reaches the \
+         preimage, so the digest is the baseline's exactly (fixed point)",
+    ),
+    (
+        "with-deprecated-alias-lock",
+        Some("equals-baseline"),
+        "baseline's source bytes plus a root ato.lock.json: the deprecated alias resolves to the \
+         same single excluded lock path, so the digest survives the lock-file rename",
+    ),
+    (
+        "nested-control-names",
+        Some("differs-from-baseline"),
+        "baseline's source bytes plus examples/capsule.toml and fixtures/capsule.lock: only the \
+         SELECTED ROOT's control files are special, so both nested files are ordinary source, stay \
+         in the projected set, and change the digest (exact-path rule, no content sniffing)",
+    ),
+    (
+        "nested-dir-tree",
+        Some("differs-from-baseline"),
+        "nested directories plus sibling names that sort across the '/' boundary (a.txt / a/ / \
+         ab/): pins recursion and the A1 child-ordering rule",
+    ),
+];
+
+/// Every regular file under `root` as a `/`-joined path relative to `root`,
+/// sorted lexicographically. This is the projected file set a second
+/// implementation must reproduce before it can reproduce the digest.
+///
+/// Keep in sync with the identical function in `capsule_program_vectors.rs`.
+fn projected_file_set(root: &Path) -> Vec<String> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).expect("read projected directory") {
+            let entry = entry.expect("projected directory entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let relative = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if entry.path().is_dir() {
+                walk(&entry.path(), &relative, out);
+            } else {
+                out.push(relative);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(root, "", &mut out);
+    out.sort();
+    out
+}
+
+/// Runs the real projection over a committed fixture tree and returns
+/// (projected file set, `sha256:<hex>` digest).
+///
+/// Keep in sync with the identical function in `capsule_program_vectors.rs`.
+fn project_source_vector(root: &Path) -> (Vec<String>, String) {
+    let pinned = VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
+        .expect("committed fixture tree is a pinned materialization");
+    let projected = StagedCapsuleSource::stage(&pinned)
+        .expect("fixture tree stages")
+        .into_projected()
+        .expect("control files are excluded");
+    let files = projected_file_set(projected.root());
+    let digest = projected
+        .source_contract()
+        .expect("projected tree hashes")
+        .digest
+        .to_string();
+    (files, digest)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // manifest.json index shapes
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -424,6 +527,18 @@ struct GenManifestVector {
 }
 
 #[derive(Serialize)]
+struct GenSourceVector {
+    name: String,
+    dir: String,
+    projected_files: Vec<String>,
+    source_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    notes: Option<String>,
+}
+
+#[derive(Serialize)]
 struct GenManifest {
     schema: String,
     description: String,
@@ -433,8 +548,10 @@ struct GenManifest {
     manifest_suite_pipeline: String,
     source_projection_suite: String,
     contract_baseline: String,
+    source_baseline: String,
     contract_vectors: Vec<GenContractVector>,
     manifest_vectors: Vec<GenManifestVector>,
+    source_vectors: Vec<GenSourceVector>,
 }
 
 #[test]
@@ -443,7 +560,8 @@ fn regenerate_shared_vectors() {
     let dir = fixture_dir();
 
     // Clean regeneration so obsolete vectors cannot linger and desync the
-    // completeness checks.
+    // completeness checks. `source/vectors` is NOT cleaned: those trees are
+    // hand-authored inputs, and the generator only re-derives their index entry.
     for sub in [
         "contract/vectors",
         "contract/expected",
@@ -936,13 +1054,61 @@ fn regenerate_shared_vectors() {
         });
     }
 
+    // ── source/: committed fixture trees → file set + digest ────────────
+    let mut source_vectors: Vec<GenSourceVector> = Vec::new();
+    let mut source_baseline_digest: Option<String> = None;
+    let mut source_digests: BTreeSet<String> = BTreeSet::new();
+    for (name, relation, notes) in SOURCE_VECTORS {
+        let vector_dir = format!("source/vectors/{name}");
+        let (projected_files, source_digest) = project_source_vector(&dir.join(&vector_dir));
+        assert!(
+            !projected_files.is_empty(),
+            "source vector '{name}': the projected tree must not be empty"
+        );
+        match relation {
+            None => {
+                assert!(
+                    source_baseline_digest
+                        .replace(source_digest.clone())
+                        .is_none(),
+                    "source suite must declare exactly one baseline"
+                );
+            }
+            Some("equals-baseline") => assert_eq!(
+                Some(&source_digest),
+                source_baseline_digest.as_ref(),
+                "source vector '{name}': the lock spelling must not move the digest"
+            ),
+            Some("differs-from-baseline") => {
+                assert_ne!(
+                    Some(&source_digest),
+                    source_baseline_digest.as_ref(),
+                    "source vector '{name}': a source-bytes change must move the digest"
+                );
+                assert!(
+                    source_digests.insert(source_digest.clone()),
+                    "source vector '{name}': differing digests must be pairwise distinct"
+                );
+            }
+            Some(other) => panic!("source vector '{name}': unknown relation '{other}'"),
+        }
+        source_vectors.push(GenSourceVector {
+            name: name.to_string(),
+            dir: vector_dir,
+            projected_files,
+            source_digest,
+            relation,
+            notes: Some(notes.to_string()),
+        });
+    }
+
     // ── manifest.json ───────────────────────────────────────────────────
     let manifest = GenManifest {
         schema: CAPSULE_PROGRAM_V1_SCHEMA.to_string(),
         description: "Shared cross-language test vectors for the ato.capsule-program/v1 \
-                      canonical form (ADR-014 §9: contract/ + manifest/ suites). Consumed by \
-                      crates/capsule/tests/capsule_program_vectors.rs and reusable verbatim by \
-                      a second-language implementation (Phase 1)."
+                      canonical form (ADR-014 §9: contract/ + manifest/ + source/ suites). \
+                      Consumed by crates/capsule/tests/capsule_program_vectors.rs and reusable \
+                      verbatim by a second-language implementation (Phase 1)."
             .to_string(),
         domain_separator_utf8: CAPSULE_PROGRAM_V1_SCHEMA.to_string(),
         capsule_program_id_formula: "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))".to_string(),
@@ -958,24 +1124,37 @@ fn regenerate_shared_vectors() {
                                   vectors must fail (at either pipeline stage) with a message \
                                   containing error_substring."
             .to_string(),
-        source_projection_suite: "Deliberately absent here: source-projection vectors \
-                                  (ADR-014 §9 source/) live as tempdir-built unit tests in \
-                                  crates/capsule/src/contract/program_source_projection.rs \
-                                  because committed symlink/executable-bit fixtures are not \
-                                  portable across platforms and VCS checkouts."
+        source_projection_suite: "Each source/vectors/<name>/ directory is a committed, \
+                                  regular-files-only fixture tree. Assert it is a pinned source \
+                                  materialization, run the ProgramSourceProjectionV1 derivation \
+                                  over it (A1v2 admissibility, staging copy, resolve the control \
+                                  files at the selected root, exclude exactly those paths), and \
+                                  compare: the remaining files must equal projected_files (paths \
+                                  relative to the vector root, '/'-joined, lexicographically \
+                                  sorted) and the A1 tree hash of that projection must equal \
+                                  source_digest. relation is measured against source_baseline. \
+                                  Symlink and executable-bit scenarios are deliberately NOT \
+                                  committed here (they do not survive every platform/VCS \
+                                  checkout) — see README.md for the unit tests that cover them."
             .to_string(),
         contract_baseline: "baseline".to_string(),
+        source_baseline: "baseline".to_string(),
         contract_vectors,
         manifest_vectors,
+        source_vectors,
     };
     let mut manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
     manifest_json.push('\n');
     fs::write(dir.join("manifest.json"), manifest_json).unwrap();
 
     println!(
-        "regenerated {} contract vectors + {} manifest vectors",
+        "regenerated {} contract vectors + {} manifest vectors + {} source vectors",
         manifest.contract_vectors.len(),
-        manifest.manifest_vectors.len()
+        manifest.manifest_vectors.len(),
+        manifest.source_vectors.len()
     );
     println!("baseline capsule_program_id = {baseline_id}");
+    if let Some(digest) = source_baseline_digest {
+        println!("baseline ProgramSourceDigest = {digest}");
+    }
 }

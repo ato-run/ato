@@ -1,12 +1,13 @@
 {
   "schema": "ato.capsule-program/v1",
-  "description": "Shared cross-language test vectors for the ato.capsule-program/v1 canonical form (ADR-014 §9: contract/ + manifest/ suites). Consumed by crates/capsule/tests/capsule_program_vectors.rs and reusable verbatim by a second-language implementation (Phase 1).",
+  "description": "Shared cross-language test vectors for the ato.capsule-program/v1 canonical form (ADR-014 §9: contract/ + manifest/ + source/ suites). Consumed by crates/capsule/tests/capsule_program_vectors.rs and reusable verbatim by a second-language implementation (Phase 1).",
   "domain_separator_utf8": "ato.capsule-program/v1",
   "capsule_program_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
   "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
   "manifest_suite_pipeline": "Each manifest/vectors/*.toml is written to an otherwise-empty source root (plus the side files listed in the harness setup: model-sha256-* and reject-engine-path materialize model.gguf), loaded with the ordinary v0.3 normalizer (load_manifest, strict validation), then adapted with program_intent_from_v03. expect=intent vectors must equal their expected_file JSON exactly; vectors sharing one expected_file are equivalent authored spellings of the same declaration. expect=error vectors must fail (at either pipeline stage) with a message containing error_substring.",
-  "source_projection_suite": "Deliberately absent here: source-projection vectors (ADR-014 §9 source/) live as tempdir-built unit tests in crates/capsule/src/contract/program_source_projection.rs because committed symlink/executable-bit fixtures are not portable across platforms and VCS checkouts.",
+  "source_projection_suite": "Each source/vectors/<name>/ directory is a committed, regular-files-only fixture tree. Assert it is a pinned source materialization, run the ProgramSourceProjectionV1 derivation over it (A1v2 admissibility, staging copy, resolve the control files at the selected root, exclude exactly those paths), and compare: the remaining files must equal projected_files (paths relative to the vector root, '/'-joined, lexicographically sorted) and the A1 tree hash of that projection must equal source_digest. relation is measured against source_baseline. Symlink and executable-bit scenarios are deliberately NOT committed here (they do not survive every platform/VCS checkout) — see README.md for the unit tests that cover them.",
   "contract_baseline": "baseline",
+  "source_baseline": "baseline",
   "contract_vectors": [
     {
       "name": "baseline",
@@ -205,6 +206,68 @@
       "expect": "error",
       "error_substring": "source_digest must start with 'sha256:'",
       "notes": "targets.source_digest requires the sha256: prefix (existing validator); the bare spelling is rejected before the adapter runs"
+    }
+  ],
+  "source_vectors": [
+    {
+      "name": "baseline",
+      "dir": "source/vectors/baseline",
+      "projected_files": [
+        "README.md",
+        "src/main.py"
+      ],
+      "source_digest": "sha256:29eb615e13a46633d42df3bcb13227dfe24930ae6647b77dd68ad3f71db00feb",
+      "notes": "manifest + two ordinary source files, no lock: the root capsule.toml is excluded and everything else is hashed"
+    },
+    {
+      "name": "with-canonical-lock",
+      "dir": "source/vectors/with-canonical-lock",
+      "projected_files": [
+        "README.md",
+        "src/main.py"
+      ],
+      "source_digest": "sha256:29eb615e13a46633d42df3bcb13227dfe24930ae6647b77dd68ad3f71db00feb",
+      "relation": "equals-baseline",
+      "notes": "baseline's source bytes plus a root capsule.lock: the resolved lock never reaches the preimage, so the digest is the baseline's exactly (fixed point)"
+    },
+    {
+      "name": "with-deprecated-alias-lock",
+      "dir": "source/vectors/with-deprecated-alias-lock",
+      "projected_files": [
+        "README.md",
+        "src/main.py"
+      ],
+      "source_digest": "sha256:29eb615e13a46633d42df3bcb13227dfe24930ae6647b77dd68ad3f71db00feb",
+      "relation": "equals-baseline",
+      "notes": "baseline's source bytes plus a root ato.lock.json: the deprecated alias resolves to the same single excluded lock path, so the digest survives the lock-file rename"
+    },
+    {
+      "name": "nested-control-names",
+      "dir": "source/vectors/nested-control-names",
+      "projected_files": [
+        "README.md",
+        "examples/capsule.toml",
+        "fixtures/capsule.lock",
+        "src/main.py"
+      ],
+      "source_digest": "sha256:bf64463c898029d75cbdfef10efa986307f0e200050294e7aded07a13f24e51e",
+      "relation": "differs-from-baseline",
+      "notes": "baseline's source bytes plus examples/capsule.toml and fixtures/capsule.lock: only the SELECTED ROOT's control files are special, so both nested files are ordinary source, stay in the projected set, and change the digest (exact-path rule, no content sniffing)"
+    },
+    {
+      "name": "nested-dir-tree",
+      "dir": "source/vectors/nested-dir-tree",
+      "projected_files": [
+        "a.txt",
+        "a/nested/deep/three.txt",
+        "a/nested/two.txt",
+        "a/one.txt",
+        "ab/four.txt",
+        "z/last.txt"
+      ],
+      "source_digest": "sha256:b522c45aaad666ba47b493694cbbd4e4cc5bf64414ef8350d3bd9ffe77936364",
+      "relation": "differs-from-baseline",
+      "notes": "nested directories plus sibling names that sort across the '/' boundary (a.txt / a/ / ab/): pins recursion and the A1 child-ordering rule"
     }
   ]
 }
