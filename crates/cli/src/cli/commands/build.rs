@@ -660,6 +660,10 @@ fn seal_ready_state_if_enabled(
         &manifest,
         layers,
         backend.as_ref(),
+        // No caller yet supplies a verified Execution Contract envelope here
+        // (that requires loading + verifying an `ato.lock`, not yet wired
+        // into `ato build`) — legacy-only sealing, unchanged behavior.
+        None,
     )?;
     futures::executor::block_on(reporter.notify(format!(
         "READY-STATE: sealed {hash} backend={} no_secret_clean={} sealed_bytes={} -> {}",

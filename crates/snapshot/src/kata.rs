@@ -9,6 +9,7 @@
 //! [`SnapshotError::Unsupported`]. If a real Kata warm-restore path is wanted
 //! later, that flag flips with the real implementation.
 
+use capsule::snapshot_manifest::SnapshotCompatibilityContractV1;
 use capsulefs::CasStore;
 
 use crate::backend::{
@@ -73,6 +74,12 @@ impl SnapshotBackend for KataBackend {
             uffd_reason: Some("kata is not a Firecracker UFFD mem-backend".to_string()),
             binding: Default::default(),
         }
+    }
+
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContractV1, SnapshotError> {
+        Err(self.unsupported())
     }
 
     fn build_ready_state(
@@ -148,6 +155,10 @@ mod tests {
         };
         assert!(matches!(
             b.inspect(&store, &m),
+            Err(SnapshotError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            b.snapshot_compatibility_contract(),
             Err(SnapshotError::Unsupported { .. })
         ));
     }
