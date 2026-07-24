@@ -672,6 +672,10 @@ pub struct OpaqueStateRef(String);
 impl OpaqueStateRef {
     /// Prefix every opaque reference carries.
     const PREFIX: &'static str = "opaque:";
+    /// The reserved synthetic-namespace prefix. A ref whose handle begins with
+    /// `synthetic:` (i.e. the full ref begins with `opaque:synthetic:`) is a
+    /// validation-only ephemeral ref (RFC §8.4) and can never be a production proof.
+    const SYNTHETIC_PREFIX: &'static str = "opaque:synthetic:";
     /// The maximum accepted handle (post-prefix) length. A ref is a short id, not
     /// a payload.
     const MAX_HANDLE_LEN: usize = 128;
@@ -722,7 +726,17 @@ impl OpaqueStateRef {
     /// rather than producing an asymmetric value that serializes but is rejected on
     /// deserialize. Used solely by [`SyntheticValidationStateInstance`].
     pub(crate) fn synthetic(binding: &str) -> Result<Self, OpaqueStateRefError> {
-        Self::new(format!("{}synthetic:{binding}", Self::PREFIX))
+        Self::new(format!("{}{binding}", Self::SYNTHETIC_PREFIX))
+    }
+
+    /// Whether this ref is in the reserved synthetic (validation-only) namespace
+    /// (`opaque:synthetic:*`). A synthetic ref is disposable acceptance/build state and
+    /// is never a production proof, so it can never be promoted to a
+    /// [`TrustedProductionStateRef`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn is_synthetic(&self) -> bool {
+        self.0.starts_with(Self::SYNTHETIC_PREFIX)
     }
 
     /// The canonical `opaque:<handle>` string.
@@ -871,17 +885,32 @@ impl VerifiedExternalStateBinding {
     }
 }
 
+/// Why a raw opaque ref may not be promoted to a [`TrustedProductionStateRef`].
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(crate) enum TrustedProductionStateRefError {
+    /// The ref is in the reserved synthetic (validation-only) namespace
+    /// (`opaque:synthetic:*`). A synthetic ref is disposable acceptance/build state
+    /// (RFC §8.4) and is never a production proof, so it can never become a trusted
+    /// production ref — not even through the test factory.
+    #[error("synthetic-namespace ref `{0}` cannot be promoted to a trusted production ref")]
+    SyntheticNamespace(String),
+}
+
 /// A production state reference **minted only by a trusted resolver**.
 ///
 /// The non-secret / non-authorization property of a production `state_ref` is a
 /// consequence of *who minted it*, not of the [`OpaqueStateRef`] wire grammar (a
 /// lowercase secret such as `opaque:sk_live_123456` satisfies the grammar). This
 /// type makes "minted by a trusted resolver" a **type-level** fact rather than a
-/// comment: it has **no** public constructor and **no** `From`/`TryFrom` from
-/// [`String`] or [`OpaqueStateRef`], so a caller cannot wrap a raw wire ref into a
-/// trusted one. Only in-crate code can mint it (via the `pub(crate)` constructor),
-/// and the sanctioned live production resolver / verified-`BindingLease` constructor
-/// is added in **PR-2**; until then it is minted only by the `#[cfg(test)]` factory.
+/// comment: it has **no** public constructor, **no** `From`/`TryFrom` from [`String`]
+/// or [`OpaqueStateRef`], and **no** generic `pub(crate)` constructor either — so
+/// neither an out-of-crate caller nor any other in-crate module can wrap a raw wire
+/// ref (or a synthetic ref) into a trusted one. The sanctioned live production
+/// resolver / verified-`BindingLease` constructor is added in **PR-2**; until then the
+/// **only** constructor is a `#[cfg(test)]` factory, and even that factory rejects the
+/// synthetic namespace. Consequently, in a non-test build the type has no constructor
+/// at all, so a production [`ExternalStateInstance`] cannot be built until PR-2.
 ///
 /// ```compile_fail
 /// use snapshot::external_state::{OpaqueStateRef, TrustedProductionStateRef};
@@ -902,29 +931,24 @@ pub struct TrustedProductionStateRef {
 }
 
 impl TrustedProductionStateRef {
-    /// Wrap a trusted-resolver-minted opaque ref. `pub(crate)`: there is **no**
-    /// public constructor. The sanctioned production resolver / verified-`BindingLease`
-    /// constructor is added in PR-2; until then this is reached only by the
-    /// `#[cfg(test)]` factory and the (future) in-crate resolver.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "sanctioned production resolver is PR-2 live wiring; only the test factory mints one today"
-        )
-    )]
-    pub(crate) fn new(value: OpaqueStateRef) -> Self {
-        Self {
+    /// A `#[cfg(test)]` factory standing in for the PR-2 trusted resolver, so tests
+    /// can mint a production ref without a public (or generic `pub(crate)`) constructor
+    /// existing. It **rejects the synthetic namespace** (`opaque:synthetic:*`) with
+    /// [`TrustedProductionStateRefError::SyntheticNamespace`]: a validation-only ref can
+    /// never be promoted to a production proof, even in a test. There is deliberately no
+    /// generic `new(OpaqueStateRef)`; PR-2 adds the sanctioned production-resolver /
+    /// verified-`BindingLease` constructor in this same module.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: OpaqueStateRef) -> Result<Self, TrustedProductionStateRefError> {
+        if value.is_synthetic() {
+            return Err(TrustedProductionStateRefError::SyntheticNamespace(
+                value.as_str().to_string(),
+            ));
+        }
+        Ok(Self {
             value,
             _private: (),
-        }
-    }
-
-    /// A `#[cfg(test)]` factory standing in for the PR-2 trusted resolver, so tests
-    /// can mint a production ref without a public constructor existing.
-    #[cfg(test)]
-    pub(crate) fn for_test(value: OpaqueStateRef) -> Self {
-        Self::new(value)
+        })
     }
 
     /// The underlying opaque wire reference.
@@ -1401,10 +1425,13 @@ struct SessionStateReceiptWireV1 {
 /// **Inspection only.** A decoded `SessionStateReceiptV1` is self-declared: its
 /// `execution_id` is a string the wire record carries, not a proof that its
 /// `binding_name` / `target` / `access` / `schema_identity` actually belong to that
-/// identity. Use a bare receipt only to *inspect* recorded facts; any authorization /
-/// audit-evidence / state-reattach decision MUST first reconcile it against the
-/// Execution Contract via [`SessionStateReceiptV1::verify_against`] and consume the
-/// resulting [`VerifiedSessionStateReceiptV1`].
+/// identity. Use a bare receipt only to *inspect* recorded facts.
+/// [`SessionStateReceiptV1::match_against`] additionally reconciles it against the
+/// Execution Contract and yields a [`ContractMatchedSessionStateReceiptV1`], but that
+/// proves only STRUCTURAL match — not the authenticity of the issuer, the `state_ref`,
+/// or the generation. A security decision (authorization / audit evidence / state
+/// reattach) additionally requires composition with an authenticated outer receipt
+/// (MAC/signature), which is PR-2.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionStateReceiptV1 {
     /// Always [`SESSION_STATE_RECEIPT_V1_SCHEMA`].
@@ -1532,42 +1559,47 @@ impl SessionStateReceiptV1 {
         &self.state_generation
     }
 
-    /// **Verify** this receipt against the Execution Contract it claims to belong to,
-    /// yielding a [`VerifiedSessionStateReceiptV1`] — the **only** way to obtain one.
+    /// **Match** this receipt structurally against the Execution Contract it claims to
+    /// belong to, yielding a [`ContractMatchedSessionStateReceiptV1`] — the **only**
+    /// way to obtain one.
     ///
     /// A bare [`SessionStateReceiptV1`] is self-declared: its `execution_id` is just a
     /// string a wire record carries, so a receipt can claim identity A while its
     /// `binding_name` / `target` / `access` / `schema_identity` describe a *foreign*
-    /// contract B. That re-opens on the consumer side the producer-side hole this
-    /// track closed. Any authorization / audit-evidence / state-reattach decision MUST
-    /// therefore consume a [`VerifiedSessionStateReceiptV1`], never a bare receipt.
+    /// contract B. Matching reconciles those facets against the verified contract and
+    /// rejects a mismatch. **It proves only STRUCTURAL match**, not the authenticity of
+    /// the issuer, the `state_ref`, or the generation: the Execution Contract and its
+    /// `execution_id` are public, so a hand-authored receipt with correct facets but a
+    /// foreign `state_ref`/generation still matches. A security decision (authorization
+    /// / audit evidence / state reattach) additionally requires composition with an
+    /// authenticated outer receipt (MAC/signature), which is PR-2.
     ///
     /// Steps, all fail-closed:
     ///
     /// 1. **Re-verify the envelope** — [`ExecutionContractEnvelopeV1::verified_execution_id`]
     ///    recomputes the canonical hash and matches it against the stored id; a
-    ///    disagreement is [`SessionStateReceiptVerifyError::UnverifiedContract`].
+    ///    disagreement is [`SessionStateReceiptMatchError::UnverifiedContract`].
     /// 2. **Bind identity** — the receipt's `execution_id` must equal the *verified*
-    ///    identity ([`SessionStateReceiptVerifyError::ExecutionIdentityMismatch`]).
+    ///    identity ([`SessionStateReceiptMatchError::ExecutionIdentityMismatch`]).
     /// 3. **Exact binding lookup** — `binding_name` must be declared in that verified
-    ///    contract's `external_state` ([`SessionStateReceiptVerifyError::UnknownBinding`]).
+    ///    contract's `external_state` ([`SessionStateReceiptMatchError::UnknownBinding`]).
     /// 4. **Exact facet match** — `target`, `access`, and `schema_identity` must each
     ///    EXACTLY equal that binding's identity-bearing facets
-    ///    ([`SessionStateReceiptVerifyError::TargetMismatch`] /
-    ///    [`SessionStateReceiptVerifyError::AccessMismatch`] /
-    ///    [`SessionStateReceiptVerifyError::SchemaIdentityMismatch`]).
+    ///    ([`SessionStateReceiptMatchError::TargetMismatch`] /
+    ///    [`SessionStateReceiptMatchError::AccessMismatch`] /
+    ///    [`SessionStateReceiptMatchError::SchemaIdentityMismatch`]).
     /// 5. **Non-empty generation** — a recorded state must carry a generation
-    ///    ([`SessionStateReceiptVerifyError::EmptyGeneration`]).
-    pub fn verify_against(
+    ///    ([`SessionStateReceiptMatchError::EmptyGeneration`]).
+    pub fn match_against(
         self,
         envelope: &ExecutionContractEnvelopeV1,
-    ) -> Result<VerifiedSessionStateReceiptV1, SessionStateReceiptVerifyError> {
+    ) -> Result<ContractMatchedSessionStateReceiptV1, SessionStateReceiptMatchError> {
         let verified = envelope
             .verified_execution_id()
-            .map_err(|_| SessionStateReceiptVerifyError::UnverifiedContract)?;
+            .map_err(|_| SessionStateReceiptMatchError::UnverifiedContract)?;
         let verified_id = verified.as_execution_id();
         if &self.execution_id != verified_id {
-            return Err(SessionStateReceiptVerifyError::ExecutionIdentityMismatch {
+            return Err(SessionStateReceiptMatchError::ExecutionIdentityMismatch {
                 receipt: self.execution_id.to_string(),
                 verified: verified_id.to_string(),
             });
@@ -1578,49 +1610,49 @@ impl SessionStateReceiptV1 {
             .iter()
             .find(|binding| binding.name == self.binding_name)
             .ok_or_else(|| {
-                SessionStateReceiptVerifyError::UnknownBinding(self.binding_name.clone())
+                SessionStateReceiptMatchError::UnknownBinding(self.binding_name.clone())
             })?;
         if self.target != binding.target {
-            return Err(SessionStateReceiptVerifyError::TargetMismatch {
+            return Err(SessionStateReceiptMatchError::TargetMismatch {
                 binding: self.binding_name.clone(),
                 expected: binding.target.to_string(),
                 found: self.target.to_string(),
             });
         }
         if self.access != binding.access {
-            return Err(SessionStateReceiptVerifyError::AccessMismatch {
+            return Err(SessionStateReceiptMatchError::AccessMismatch {
                 binding: self.binding_name.clone(),
                 expected: format!("{:?}", binding.access),
                 found: format!("{:?}", self.access),
             });
         }
         if self.schema_identity != binding.schema {
-            return Err(SessionStateReceiptVerifyError::SchemaIdentityMismatch {
+            return Err(SessionStateReceiptMatchError::SchemaIdentityMismatch {
                 binding: self.binding_name.clone(),
                 expected: binding.schema.clone(),
                 found: self.schema_identity.clone(),
             });
         }
         if self.state_generation.is_empty() {
-            return Err(SessionStateReceiptVerifyError::EmptyGeneration);
+            return Err(SessionStateReceiptMatchError::EmptyGeneration);
         }
-        Ok(VerifiedSessionStateReceiptV1 {
+        Ok(ContractMatchedSessionStateReceiptV1 {
             receipt: self,
             _private: (),
         })
     }
 }
 
-/// Why a [`SessionStateReceiptV1`] failed verification against its Execution Contract.
-/// Every variant fails closed: no [`VerifiedSessionStateReceiptV1`] is produced, so an
-/// unverified or foreign-contract receipt can never be accepted for authorization,
-/// audit evidence, or state reattach.
+/// Why a [`SessionStateReceiptV1`] failed to structurally match its Execution
+/// Contract. Every variant fails closed: no [`ContractMatchedSessionStateReceiptV1`]
+/// is produced, so a receipt whose facets do not reconcile with the verified contract
+/// can never be presented as a contract match.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum SessionStateReceiptVerifyError {
+pub enum SessionStateReceiptMatchError {
     /// The Execution Contract envelope failed verification (its stored `execution_id`
     /// is not the canonical hash of the embedded contract), so the receipt cannot be
-    /// verified against it at all.
-    #[error("execution contract failed verification; cannot verify a session state receipt")]
+    /// matched against it at all.
+    #[error("execution contract failed verification; cannot match a session state receipt")]
     UnverifiedContract,
     /// The receipt's self-declared `execution_id` does not equal the verified identity
     /// — the receipt does not belong to this contract.
@@ -1670,39 +1702,45 @@ pub enum SessionStateReceiptVerifyError {
     EmptyGeneration,
 }
 
-/// A **consumer proof** that a [`SessionStateReceiptV1`] was verified against the
-/// Execution Contract it claims to belong to — identity, exact binding, and each
-/// identity-bearing facet reconciled (see [`SessionStateReceiptV1::verify_against`]).
+/// A proof that a [`SessionStateReceiptV1`] **structurally matches** the Execution
+/// Contract it claims to belong to — identity, exact binding, and each
+/// identity-bearing facet reconciled (see [`SessionStateReceiptV1::match_against`]).
 ///
-/// This is the type an authorization / audit-evidence / state-reattach decision MUST
-/// consume; a bare [`SessionStateReceiptV1`] is for **inspection only**. Its fields
-/// are private and it is not `Deserialize`, so the **only** way to obtain one is
-/// [`SessionStateReceiptV1::verify_against`] — a wire receipt can never be decoded
-/// directly into a verified proof.
+/// Proves only STRUCTURAL match with the Execution Contract. Does NOT prove the
+/// authenticity of the issuer, the `state_ref`, or the generation. A security decision
+/// (authorization / audit evidence / state reattach) additionally requires composition
+/// with an authenticated outer receipt (MAC/signature), which is PR-2.
+///
+/// The Execution Contract and its `execution_id` are public, so an attacker can
+/// hand-author a receipt with correct binding facets but a foreign `state_ref` /
+/// generation and still obtain this type — contract match is not authenticity. Its
+/// fields are private and it is not `Deserialize`, so the **only** way to obtain one is
+/// [`SessionStateReceiptV1::match_against`]; a wire receipt can never be decoded
+/// directly into a contract-matched proof.
 ///
 /// ```compile_fail
-/// use snapshot::external_state::{SessionStateReceiptV1, VerifiedSessionStateReceiptV1};
-/// // No public constructor and no struct literal (private fields): a verified receipt
-/// // can only come from `verify_against`.
+/// use snapshot::external_state::{SessionStateReceiptV1, ContractMatchedSessionStateReceiptV1};
+/// // No public constructor and no struct literal (private fields): a contract-matched
+/// // receipt can only come from `match_against`.
 /// fn demo(receipt: SessionStateReceiptV1) {
-///     let _ = VerifiedSessionStateReceiptV1 { receipt, _private: () };
+///     let _ = ContractMatchedSessionStateReceiptV1 { receipt, _private: () };
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedSessionStateReceiptV1 {
+pub struct ContractMatchedSessionStateReceiptV1 {
     receipt: SessionStateReceiptV1,
     _private: (),
 }
 
-impl VerifiedSessionStateReceiptV1 {
-    /// The underlying receipt, now proven consistent with its verified Execution
-    /// Contract.
+impl ContractMatchedSessionStateReceiptV1 {
+    /// The underlying receipt, now proven to structurally match its verified Execution
+    /// Contract (structural match only — not authenticity; see the type doc).
     #[must_use]
     pub fn receipt(&self) -> &SessionStateReceiptV1 {
         &self.receipt
     }
 
-    /// Consume the proof, returning the verified receipt.
+    /// Consume the proof, returning the contract-matched receipt.
     #[must_use]
     pub fn into_receipt(self) -> SessionStateReceiptV1 {
         self.receipt
@@ -1739,6 +1777,7 @@ mod tests {
 
     fn trusted_ref(handle: &str) -> TrustedProductionStateRef {
         TrustedProductionStateRef::for_test(OpaqueStateRef::new(handle).expect("canonical ref"))
+            .expect("a non-synthetic ref is a valid trusted production ref")
     }
 
     fn instance(schema: &str) -> ExternalStateInstance {
@@ -1850,6 +1889,37 @@ mod tests {
             let reparsed: OpaqueStateRef = serde_json::from_str(&json).unwrap();
             assert_eq!(reparsed, reference);
         }
+    }
+
+    // --- Blocker 2: the ONLY constructor of a TrustedProductionStateRef is the
+    // #[cfg(test)] factory (no generic pub(crate) `new`), and even it REJECTS the
+    // synthetic (validation-only) namespace — so a synthetic ref can never become a
+    // production proof, and a raw/synthetic ref has no non-test promotion path (see the
+    // compile_fail doctests on TrustedProductionStateRef). ---
+    #[test]
+    fn trusted_production_ref_rejects_synthetic_namespace() {
+        // A normal (non-synthetic) opaque ref promotes fine through the test factory.
+        let ok = TrustedProductionStateRef::for_test(
+            OpaqueStateRef::new("opaque:user-state-ref").unwrap(),
+        )
+        .expect("a non-synthetic ref is a valid trusted production ref");
+        assert_eq!(ok.as_opaque().as_str(), "opaque:user-state-ref");
+
+        // A synthetic-namespace ref — even though it is a perfectly canonical
+        // OpaqueStateRef — is REFUSED promotion to a trusted production ref.
+        let synthetic = OpaqueStateRef::synthetic("data").expect("canonical synthetic ref");
+        assert!(synthetic.is_synthetic());
+        assert_eq!(
+            TrustedProductionStateRef::for_test(synthetic.clone()).unwrap_err(),
+            TrustedProductionStateRefError::SyntheticNamespace(synthetic.as_str().to_string())
+        );
+
+        // The same holds for a hand-written `opaque:synthetic:*` value.
+        let hand = OpaqueStateRef::new("opaque:synthetic:forged").unwrap();
+        assert!(matches!(
+            TrustedProductionStateRef::for_test(hand).unwrap_err(),
+            TrustedProductionStateRefError::SyntheticNamespace(_)
+        ));
     }
 
     // --- AC (17.4): a compatible schema attaches successfully (production path) ---
@@ -2589,12 +2659,13 @@ mod tests {
         );
     }
 
-    // --- Blocker 2: a bare receipt is only INSPECTION; a VerifiedSessionStateReceiptV1
-    // is obtainable ONLY by reconciling against the verified Execution Contract, and a
-    // self-declared execution_id / foreign or tampered facet / empty generation /
-    // unverified envelope all fail closed ---
+    // --- Blocker 1: `match_against` proves only STRUCTURAL contract match, never
+    // authenticity; a ContractMatchedSessionStateReceiptV1 is obtainable ONLY by
+    // reconciling against the verified Execution Contract, and a self-declared
+    // execution_id / foreign or tampered facet / empty generation / unverified
+    // envelope all fail closed ---
     #[test]
-    fn session_receipt_verify_against_is_fail_closed() {
+    fn session_receipt_match_against_is_fail_closed() {
         let envelope = crate::contract_fixtures::envelope_for(
             crate::contract_fixtures::sample_execution_contract(),
         );
@@ -2607,50 +2678,70 @@ mod tests {
         // Fully-consistent case -> Ok, and the proof exposes the same receipt.
         let verified = receipt
             .clone()
-            .verify_against(&envelope)
-            .expect("a consistent receipt verifies against its contract");
+            .match_against(&envelope)
+            .expect("a consistent receipt matches its contract");
         assert_eq!(verified.receipt(), &receipt);
         assert_eq!(verified.into_receipt(), receipt);
+
+        // AUTHENTICITY GAP (documented, not a bug): contract match is NOT authenticity.
+        // A hand-authored receipt carrying the SAME identity-bearing facets but a
+        // FOREIGN `state_ref` and a different (non-empty) generation still matches,
+        // because the Execution Contract and its `execution_id` are public and
+        // `match_against` reconciles only the contract facets — never the authenticity
+        // of the issuer, the state_ref, or the generation. This is exactly why the type
+        // is named ContractMatched (not Verified/Authenticated) and why a security
+        // decision needs an authenticated outer receipt (PR-2).
+        let mut foreign_state = receipt.clone();
+        foreign_state.state_ref = OpaqueStateRef::new("opaque:attacker-forged-ref").unwrap();
+        foreign_state.state_generation = "gen_forged".to_string();
+        let matched_forged = foreign_state
+            .clone()
+            .match_against(&envelope)
+            .expect("contract match holds for a foreign state_ref — match is not authenticity");
+        assert_eq!(
+            matched_forged.receipt().state_ref().as_str(),
+            "opaque:attacker-forged-ref"
+        );
 
         // execution_id A + binding B: the receipt names a binding absent from the
         // verified contract A -> UnknownBinding.
         let mut foreign_binding = receipt.clone();
         foreign_binding.binding_name = "ghost".to_string();
         assert_eq!(
-            foreign_binding.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::UnknownBinding("ghost".to_string())
+            foreign_binding.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::UnknownBinding("ghost".to_string())
         );
 
         // A + tampered target -> reject.
         let mut bad_target = receipt.clone();
         bad_target.target = guest_path("/var/data");
         assert!(matches!(
-            bad_target.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::TargetMismatch { .. }
+            bad_target.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::TargetMismatch { .. }
         ));
 
         // A + tampered access -> reject (sample binding is read-write).
         let mut bad_access = receipt.clone();
         bad_access.access = ExternalStateAccess::ReadOnly;
         assert!(matches!(
-            bad_access.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::AccessMismatch { .. }
+            bad_access.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::AccessMismatch { .. }
         ));
 
         // A + tampered schema_identity -> reject.
         let mut bad_schema = receipt.clone();
         bad_schema.schema_identity = "2".to_string();
         assert!(matches!(
-            bad_schema.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::SchemaIdentityMismatch { .. }
+            bad_schema.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::SchemaIdentityMismatch { .. }
         ));
 
         // Empty generation -> reject.
         let mut empty_generation = receipt.clone();
         empty_generation.state_generation = String::new();
         assert_eq!(
-            empty_generation.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::EmptyGeneration
+            empty_generation.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::EmptyGeneration
         );
 
         // Self-declared execution_id that does not equal the verified identity ->
@@ -2659,8 +2750,8 @@ mod tests {
         wrong_identity.execution_id =
             ExecutionId::new(format!("blake3:{}", "b".repeat(64))).expect("valid id shape");
         assert!(matches!(
-            wrong_identity.verify_against(&envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::ExecutionIdentityMismatch { .. }
+            wrong_identity.match_against(&envelope).unwrap_err(),
+            SessionStateReceiptMatchError::ExecutionIdentityMismatch { .. }
         ));
 
         // Unverified / tampered envelope -> reject (even a fully consistent receipt
@@ -2671,8 +2762,8 @@ mod tests {
         tampered_envelope.execution_id =
             ExecutionId::new(format!("blake3:{}", "e".repeat(64))).expect("valid id shape");
         assert_eq!(
-            receipt.verify_against(&tampered_envelope).unwrap_err(),
-            SessionStateReceiptVerifyError::UnverifiedContract
+            receipt.match_against(&tampered_envelope).unwrap_err(),
+            SessionStateReceiptMatchError::UnverifiedContract
         );
     }
 }
