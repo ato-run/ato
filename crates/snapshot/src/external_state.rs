@@ -113,15 +113,72 @@ pub fn requires_restore_time_bindings_for_live_workload(contract: &ExecutionCont
 ///
 /// A mount-boundary id is supplied by the trusted capture backend that actually
 /// placed each excluded volume; this pure slice models it as an opaque identifier.
+/// Even a trusted-backend id is **validated on construction** (non-empty, bounded,
+/// canonical, control-char-free) so an in-crate mis-implementation cannot promote a
+/// malformed identifier into a proof.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct CaptureMountId(String);
 
+/// Why a string is not a valid capture-time mount-boundary id.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum CaptureMountIdError {
+    /// The id is empty. An empty mount boundary is never a real volume instance and
+    /// would collapse separateness, so it is refused fail-closed.
+    #[error("capture mount id is empty")]
+    Empty,
+    /// The id exceeds the maximum mount-boundary length. A mount id names a volume
+    /// instance, never a payload; an over-long value is refused.
+    #[error("capture mount id exceeds the maximum length")]
+    TooLong,
+    /// The id is not the canonical spelling: it must begin with a lowercase-ASCII
+    /// alphanumeric and otherwise contain only `[a-z0-9._:/-]`. This rejects control
+    /// characters, whitespace, and upper-case tokens.
+    #[error(
+        "capture mount id is not canonical: it must be a lowercase ASCII [a-z0-9] first \
+         character followed by [a-z0-9._:/-], with no control characters"
+    )]
+    NonCanonical,
+}
+
 impl CaptureMountId {
-    /// Wrap a capture-time mount-source / volume-instance identifier. Supplied by
-    /// the trusted capture backend.
-    #[must_use]
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+    /// The maximum accepted mount-boundary length. A mount id names a volume
+    /// instance, not a payload.
+    const MAX_LEN: usize = 256;
+
+    /// Validate and wrap a capture-time mount-source / volume-instance identifier.
+    /// Supplied by the trusted capture backend, but validated here so a malformed
+    /// (empty / over-length / control-char / non-canonical) id cannot enter a
+    /// [`VerifiedCaptureTopology`] proof.
+    pub fn new(value: impl Into<String>) -> Result<Self, CaptureMountIdError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(CaptureMountIdError::Empty);
+        }
+        if value.len() > Self::MAX_LEN {
+            return Err(CaptureMountIdError::TooLong);
+        }
+        if !Self::is_canonical(&value) {
+            return Err(CaptureMountIdError::NonCanonical);
+        }
+        Ok(Self(value))
+    }
+
+    /// A canonical mount id is a lowercase ASCII `[a-z0-9]` first character followed
+    /// by `[a-z0-9._:/-]`. Rejects control characters, whitespace, and upper-case
+    /// tokens.
+    fn is_canonical(value: &str) -> bool {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+            return false;
+        }
+        chars.all(|ch| {
+            ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '-' | '_' | '.' | ':' | '/')
+        })
     }
 
     /// The opaque mount-boundary identifier.
@@ -188,9 +245,9 @@ impl StateVolumeMount {
 ///
 /// ```compile_fail
 /// use snapshot::external_state::{ExcludedStateCaptureTopology, StateVolumeMount};
-/// // `new` is pub(crate): a caller outside the crate cannot fabricate a topology
+/// // `try_new` is pub(crate): a caller outside the crate cannot fabricate a topology
 /// // from an arbitrary name→volume map.
-/// let _ = ExcludedStateCaptureTopology::new(std::iter::empty::<(String, StateVolumeMount)>());
+/// let _ = ExcludedStateCaptureTopology::try_new(std::iter::empty::<(String, StateVolumeMount)>());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExcludedStateCaptureTopology {
@@ -198,9 +255,31 @@ pub struct ExcludedStateCaptureTopology {
     state_volumes: BTreeMap<String, StateVolumeMount>,
 }
 
+/// Why a capture topology could not be built from its `(binding_name, volume)` pairs.
+/// Every variant fails closed: no topology is produced, so a duplicate or malformed
+/// report from a trusted backend cannot be silently promoted into a proof.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum TopologyError {
+    /// A `(binding_name, volume)` pair carries an empty binding name — never a real
+    /// declared External State binding, so it is refused fail-closed.
+    #[error("capture topology entry has an empty binding name")]
+    EmptyBindingName,
+    /// Two `(binding_name, volume)` pairs share one binding name. A duplicate report
+    /// is a trusted-backend bug; rather than silently overwrite one volume with the
+    /// other (dropping a binding), the whole topology is refused fail-closed.
+    #[error("capture topology names binding `{0}` more than once")]
+    DuplicateBindingName(String),
+}
+
 impl ExcludedStateCaptureTopology {
     /// Build a topology from `(binding_name, separate_volume)` pairs — the separate
     /// volume that backs each `snapshot = "exclude"` binding at capture.
+    ///
+    /// Fail-closed on malformed input so an in-crate mis-implementation cannot be
+    /// promoted into a proof: an empty binding name is
+    /// [`TopologyError::EmptyBindingName`]; a **duplicate** binding name is
+    /// [`TopologyError::DuplicateBindingName`] (never a silent last-writer-wins
+    /// overwrite). Every distinct binding is preserved exactly once.
     ///
     /// `pub(crate)`: the arbitrary-map path is closed to callers. In PR-2 a trusted
     /// capture backend is the sole minter; until that live wiring lands, only the
@@ -212,10 +291,21 @@ impl ExcludedStateCaptureTopology {
             reason = "trusted-backend minter is PR-2 live wiring; only tests construct a topology today"
         )
     )]
-    pub(crate) fn new(volumes: impl IntoIterator<Item = (String, StateVolumeMount)>) -> Self {
-        Self {
-            state_volumes: volumes.into_iter().collect(),
+    pub(crate) fn try_new(
+        volumes: impl IntoIterator<Item = (String, StateVolumeMount)>,
+    ) -> Result<Self, TopologyError> {
+        let mut state_volumes = BTreeMap::new();
+        for (name, volume) in volumes {
+            if name.is_empty() {
+                return Err(TopologyError::EmptyBindingName);
+            }
+            // `insert` returns the previous value when the key already exists; a
+            // duplicate binding name is a fail-closed error, not a silent overwrite.
+            if state_volumes.insert(name.clone(), volume).is_some() {
+                return Err(TopologyError::DuplicateBindingName(name));
+            }
         }
+        Ok(Self { state_volumes })
     }
 }
 
@@ -781,6 +871,69 @@ impl VerifiedExternalStateBinding {
     }
 }
 
+/// A production state reference **minted only by a trusted resolver**.
+///
+/// The non-secret / non-authorization property of a production `state_ref` is a
+/// consequence of *who minted it*, not of the [`OpaqueStateRef`] wire grammar (a
+/// lowercase secret such as `opaque:sk_live_123456` satisfies the grammar). This
+/// type makes "minted by a trusted resolver" a **type-level** fact rather than a
+/// comment: it has **no** public constructor and **no** `From`/`TryFrom` from
+/// [`String`] or [`OpaqueStateRef`], so a caller cannot wrap a raw wire ref into a
+/// trusted one. Only in-crate code can mint it (via the `pub(crate)` constructor),
+/// and the sanctioned live production resolver / verified-`BindingLease` constructor
+/// is added in **PR-2**; until then it is minted only by the `#[cfg(test)]` factory.
+///
+/// ```compile_fail
+/// use snapshot::external_state::{OpaqueStateRef, TrustedProductionStateRef};
+/// // No `From`/`Into`: a raw wire ref cannot become a trusted production ref.
+/// let raw = OpaqueStateRef::new("opaque:x").unwrap();
+/// let _: TrustedProductionStateRef = raw.into();
+/// ```
+///
+/// ```compile_fail
+/// use snapshot::external_state::TrustedProductionStateRef;
+/// // No `TryFrom<String>`: a bare string cannot become a trusted production ref.
+/// let _ = TrustedProductionStateRef::try_from("opaque:x".to_string());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustedProductionStateRef {
+    value: OpaqueStateRef,
+    _private: (),
+}
+
+impl TrustedProductionStateRef {
+    /// Wrap a trusted-resolver-minted opaque ref. `pub(crate)`: there is **no**
+    /// public constructor. The sanctioned production resolver / verified-`BindingLease`
+    /// constructor is added in PR-2; until then this is reached only by the
+    /// `#[cfg(test)]` factory and the (future) in-crate resolver.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "sanctioned production resolver is PR-2 live wiring; only the test factory mints one today"
+        )
+    )]
+    pub(crate) fn new(value: OpaqueStateRef) -> Self {
+        Self {
+            value,
+            _private: (),
+        }
+    }
+
+    /// A `#[cfg(test)]` factory standing in for the PR-2 trusted resolver, so tests
+    /// can mint a production ref without a public constructor existing.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: OpaqueStateRef) -> Self {
+        Self::new(value)
+    }
+
+    /// The underlying opaque wire reference.
+    #[must_use]
+    pub fn as_opaque(&self) -> &OpaqueStateRef {
+        &self.value
+    }
+}
+
 /// A concrete **production** External State instance presented at attach time.
 ///
 /// Everything here **except** the schema identity is a non-identity infrastructure
@@ -791,21 +944,74 @@ impl VerifiedExternalStateBinding {
 /// the runner attaches, never in a value passed through this pure layer — so they
 /// cannot leak into a lockfile, Snapshot, or Receipt via this path.
 ///
+/// **Closed construction.** Its fields are private, it has no public struct literal,
+/// and its only constructor ([`ExternalStateInstance::new`], `pub(crate)`) requires a
+/// [`TrustedProductionStateRef`] — so a raw [`OpaqueStateRef`] can never build a
+/// production instance, and the whole production path is unreachable from outside the
+/// crate until PR-2 wires the sanctioned resolver.
+///
 /// It is a DISTINCT type from [`SyntheticValidationStateInstance`]: only a
 /// production instance is accepted by the production attach path
 /// ([`plan_production_attach`]).
+///
+/// ```compile_fail
+/// use snapshot::external_state::{ExternalStateInstance, OpaqueStateRef};
+/// // A raw opaque ref cannot build a production instance: `new` requires a
+/// // `TrustedProductionStateRef` (and is itself `pub(crate)`).
+/// let raw = OpaqueStateRef::new("opaque:x").unwrap();
+/// let _ = ExternalStateInstance::new(raw, "gen", "1", "owner", "vol");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalStateInstance {
-    /// Opaque handle naming which concrete state this is.
-    pub state_ref: OpaqueStateRef,
+    /// Trusted-resolver-minted opaque handle naming which concrete state this is.
+    state_ref: TrustedProductionStateRef,
     /// Monotonic generation marker of the concrete state (non-identity).
-    pub generation: String,
+    generation: String,
     /// The concrete volume's schema identity, gated against the contract's.
-    pub schema: String,
-    /// The owning principal id (non-identity; never enters a Receipt).
-    pub owner_id: String,
-    /// The volume/binding instance id (non-identity; never enters a Receipt).
-    pub volume_id: String,
+    schema: String,
+    /// The owning principal id (non-identity; deliberately never read here — it must
+    /// never reach a Receipt).
+    #[allow(
+        dead_code,
+        reason = "owner id is a deliberately inert input: it is carried but never propagated, so it can never leak into a Receipt"
+    )]
+    owner_id: String,
+    /// The volume/binding instance id (non-identity; deliberately never read here — it
+    /// must never reach a Receipt).
+    #[allow(
+        dead_code,
+        reason = "volume id is a deliberately inert input: it is carried but never propagated, so it can never leak into a Receipt"
+    )]
+    volume_id: String,
+}
+
+impl ExternalStateInstance {
+    /// Assemble a production instance from a [`TrustedProductionStateRef`] and its
+    /// non-identity facts. `pub(crate)`: the production path is unexported until PR-2
+    /// wires the sanctioned resolver, and a raw [`OpaqueStateRef`] cannot be passed
+    /// where a `TrustedProductionStateRef` is required.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "production instance minter is PR-2 live wiring; only tests construct one today"
+        )
+    )]
+    pub(crate) fn new(
+        state_ref: TrustedProductionStateRef,
+        generation: impl Into<String>,
+        schema: impl Into<String>,
+        owner_id: impl Into<String>,
+        volume_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            state_ref,
+            generation: generation.into(),
+            schema: schema.into(),
+            owner_id: owner_id.into(),
+            volume_id: volume_id.into(),
+        }
+    }
 }
 
 /// A **synthetic, validation-only** External State instance (RFC §8.4).
@@ -1052,37 +1258,29 @@ impl ValidationExternalStateAttachment {
 /// [`SyntheticValidationStateInstance`] is a distinct type and cannot be passed
 /// here, so a validation-only instance can never drive a production attach.
 ///
-/// ```compile_fail
-/// use capsule::execution_contract::ExternalStateContract;
-/// use snapshot::external_state::{plan_production_attach, ExternalStateInstance};
-///
-/// fn demo(contract: &ExternalStateContract, instance: &ExternalStateInstance) {
-///     // `plan_production_attach` requires a `&VerifiedExternalStateBinding`; a raw
-///     // contract is not proven to belong to the verified execution, so this fails
-///     // to compile.
-///     let _ = plan_production_attach(contract, instance);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use snapshot::external_state::{
-///     plan_production_attach, SyntheticValidationStateInstance, VerifiedExternalStateBinding,
-/// };
-///
-/// fn demo(binding: &VerifiedExternalStateBinding, synthetic: &SyntheticValidationStateInstance) {
-///     // A synthetic validation instance is a distinct type, so this fails to
-///     // compile.
-///     let _ = plan_production_attach(binding, synthetic);
-/// }
-/// ```
-pub fn plan_production_attach(
+/// It is `pub(crate)`: the production attach path is **unexported until PR-2** wires
+/// the sanctioned resolver. Two type-level invariants hold regardless: the `binding`
+/// is a [`VerifiedExternalStateBinding`] (a raw `&ExternalStateContract` cannot be
+/// passed, so a caller-fabricated contract can never drive a production attach), and
+/// the `instance` is an [`ExternalStateInstance`] (a [`SyntheticValidationStateInstance`]
+/// is a distinct type and cannot be passed here). See the `compile_fail` doctests on
+/// [`ExternalStateInstance`] and [`TrustedProductionStateRef`] for the boundary that
+/// keeps the whole path unreachable from outside the crate.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "production attach path is PR-2 live wiring; only tests drive it today"
+    )
+)]
+pub(crate) fn plan_production_attach(
     binding: &VerifiedExternalStateBinding,
     instance: &ExternalStateInstance,
 ) -> Result<ProductionExternalStateAttachment, ExternalStateAttachError> {
     let core = attach_core(
         binding.contract(),
         &instance.schema,
-        &instance.state_ref,
+        instance.state_ref.as_opaque(),
         &instance.generation,
     )?;
     Ok(ProductionExternalStateAttachment {
@@ -1096,6 +1294,16 @@ pub fn plan_production_attach(
 /// path that accepts a [`SyntheticValidationStateInstance`], and it produces a
 /// [`ValidationExternalStateAttachment`] — never a production attachment or a
 /// production Receipt. Production attaches go through [`plan_production_attach`].
+///
+/// **#1093 handoff (not a blocker for the running lane).** This path still takes a
+/// raw `&ExternalStateContract`, not an identity-bound binding — acceptable today
+/// because the running lane rejects External State outright (see
+/// [`requires_restore_time_bindings_for_live_workload`]), so nothing drives this path
+/// against a live workload. When #1093 lands `workload_idle`, the validation path MUST
+/// also require a [`VerifiedExternalStateBinding`] (or an equivalent identity-bound
+/// validation binding) so disposable verification cannot be run against a *different*
+/// schema contract than the one under the verified Execution Identity. Do not promote
+/// this raw-contract signature into the `workload_idle` lifecycle without that gate.
 pub fn plan_validation_attach(
     contract: &ExternalStateContract,
     instance: &SyntheticValidationStateInstance,
@@ -1189,6 +1397,14 @@ struct SessionStateReceiptWireV1 {
 /// validated boundary — `serde_json::from_str` of a wrong-schema receipt is
 /// **rejected**, never silently read as v1. [`SessionStateReceiptV1::parse`] is the
 /// sanctioned entry that additionally maps decode errors into a typed error.
+///
+/// **Inspection only.** A decoded `SessionStateReceiptV1` is self-declared: its
+/// `execution_id` is a string the wire record carries, not a proof that its
+/// `binding_name` / `target` / `access` / `schema_identity` actually belong to that
+/// identity. Use a bare receipt only to *inspect* recorded facts; any authorization /
+/// audit-evidence / state-reattach decision MUST first reconcile it against the
+/// Execution Contract via [`SessionStateReceiptV1::verify_against`] and consume the
+/// resulting [`VerifiedSessionStateReceiptV1`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionStateReceiptV1 {
     /// Always [`SESSION_STATE_RECEIPT_V1_SCHEMA`].
@@ -1315,6 +1531,182 @@ impl SessionStateReceiptV1 {
     pub fn state_generation(&self) -> &str {
         &self.state_generation
     }
+
+    /// **Verify** this receipt against the Execution Contract it claims to belong to,
+    /// yielding a [`VerifiedSessionStateReceiptV1`] — the **only** way to obtain one.
+    ///
+    /// A bare [`SessionStateReceiptV1`] is self-declared: its `execution_id` is just a
+    /// string a wire record carries, so a receipt can claim identity A while its
+    /// `binding_name` / `target` / `access` / `schema_identity` describe a *foreign*
+    /// contract B. That re-opens on the consumer side the producer-side hole this
+    /// track closed. Any authorization / audit-evidence / state-reattach decision MUST
+    /// therefore consume a [`VerifiedSessionStateReceiptV1`], never a bare receipt.
+    ///
+    /// Steps, all fail-closed:
+    ///
+    /// 1. **Re-verify the envelope** — [`ExecutionContractEnvelopeV1::verified_execution_id`]
+    ///    recomputes the canonical hash and matches it against the stored id; a
+    ///    disagreement is [`SessionStateReceiptVerifyError::UnverifiedContract`].
+    /// 2. **Bind identity** — the receipt's `execution_id` must equal the *verified*
+    ///    identity ([`SessionStateReceiptVerifyError::ExecutionIdentityMismatch`]).
+    /// 3. **Exact binding lookup** — `binding_name` must be declared in that verified
+    ///    contract's `external_state` ([`SessionStateReceiptVerifyError::UnknownBinding`]).
+    /// 4. **Exact facet match** — `target`, `access`, and `schema_identity` must each
+    ///    EXACTLY equal that binding's identity-bearing facets
+    ///    ([`SessionStateReceiptVerifyError::TargetMismatch`] /
+    ///    [`SessionStateReceiptVerifyError::AccessMismatch`] /
+    ///    [`SessionStateReceiptVerifyError::SchemaIdentityMismatch`]).
+    /// 5. **Non-empty generation** — a recorded state must carry a generation
+    ///    ([`SessionStateReceiptVerifyError::EmptyGeneration`]).
+    pub fn verify_against(
+        self,
+        envelope: &ExecutionContractEnvelopeV1,
+    ) -> Result<VerifiedSessionStateReceiptV1, SessionStateReceiptVerifyError> {
+        let verified = envelope
+            .verified_execution_id()
+            .map_err(|_| SessionStateReceiptVerifyError::UnverifiedContract)?;
+        let verified_id = verified.as_execution_id();
+        if &self.execution_id != verified_id {
+            return Err(SessionStateReceiptVerifyError::ExecutionIdentityMismatch {
+                receipt: self.execution_id.to_string(),
+                verified: verified_id.to_string(),
+            });
+        }
+        let binding = envelope
+            .execution_contract
+            .external_state
+            .iter()
+            .find(|binding| binding.name == self.binding_name)
+            .ok_or_else(|| {
+                SessionStateReceiptVerifyError::UnknownBinding(self.binding_name.clone())
+            })?;
+        if self.target != binding.target {
+            return Err(SessionStateReceiptVerifyError::TargetMismatch {
+                binding: self.binding_name.clone(),
+                expected: binding.target.to_string(),
+                found: self.target.to_string(),
+            });
+        }
+        if self.access != binding.access {
+            return Err(SessionStateReceiptVerifyError::AccessMismatch {
+                binding: self.binding_name.clone(),
+                expected: format!("{:?}", binding.access),
+                found: format!("{:?}", self.access),
+            });
+        }
+        if self.schema_identity != binding.schema {
+            return Err(SessionStateReceiptVerifyError::SchemaIdentityMismatch {
+                binding: self.binding_name.clone(),
+                expected: binding.schema.clone(),
+                found: self.schema_identity.clone(),
+            });
+        }
+        if self.state_generation.is_empty() {
+            return Err(SessionStateReceiptVerifyError::EmptyGeneration);
+        }
+        Ok(VerifiedSessionStateReceiptV1 {
+            receipt: self,
+            _private: (),
+        })
+    }
+}
+
+/// Why a [`SessionStateReceiptV1`] failed verification against its Execution Contract.
+/// Every variant fails closed: no [`VerifiedSessionStateReceiptV1`] is produced, so an
+/// unverified or foreign-contract receipt can never be accepted for authorization,
+/// audit evidence, or state reattach.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SessionStateReceiptVerifyError {
+    /// The Execution Contract envelope failed verification (its stored `execution_id`
+    /// is not the canonical hash of the embedded contract), so the receipt cannot be
+    /// verified against it at all.
+    #[error("execution contract failed verification; cannot verify a session state receipt")]
+    UnverifiedContract,
+    /// The receipt's self-declared `execution_id` does not equal the verified identity
+    /// — the receipt does not belong to this contract.
+    #[error(
+        "session state receipt Execution Identity {receipt} does not match the verified contract \
+         identity {verified}"
+    )]
+    ExecutionIdentityMismatch { receipt: String, verified: String },
+    /// The verified contract declares no External State binding with the receipt's
+    /// `binding_name` — the receipt names a binding that is not part of this identity.
+    #[error("verified execution contract declares no External State binding named `{0}`")]
+    UnknownBinding(String),
+    /// The receipt's `target` does not exactly match the verified binding's target.
+    #[error(
+        "session state receipt target mismatch for binding `{binding}`: verified `{expected}`, \
+         receipt `{found}`"
+    )]
+    TargetMismatch {
+        binding: String,
+        expected: String,
+        found: String,
+    },
+    /// The receipt's `access` does not exactly match the verified binding's access.
+    #[error(
+        "session state receipt access mismatch for binding `{binding}`: verified `{expected}`, \
+         receipt `{found}`"
+    )]
+    AccessMismatch {
+        binding: String,
+        expected: String,
+        found: String,
+    },
+    /// The receipt's `schema_identity` does not exactly match the verified binding's
+    /// schema — the compatibility evidence belongs to a different schema contract.
+    #[error(
+        "session state receipt schema identity mismatch for binding `{binding}`: verified \
+         `{expected}`, receipt `{found}`"
+    )]
+    SchemaIdentityMismatch {
+        binding: String,
+        expected: String,
+        found: String,
+    },
+    /// The receipt carries an empty `state_generation` — a recorded state must have a
+    /// generation marker.
+    #[error("session state receipt carries an empty state generation")]
+    EmptyGeneration,
+}
+
+/// A **consumer proof** that a [`SessionStateReceiptV1`] was verified against the
+/// Execution Contract it claims to belong to — identity, exact binding, and each
+/// identity-bearing facet reconciled (see [`SessionStateReceiptV1::verify_against`]).
+///
+/// This is the type an authorization / audit-evidence / state-reattach decision MUST
+/// consume; a bare [`SessionStateReceiptV1`] is for **inspection only**. Its fields
+/// are private and it is not `Deserialize`, so the **only** way to obtain one is
+/// [`SessionStateReceiptV1::verify_against`] — a wire receipt can never be decoded
+/// directly into a verified proof.
+///
+/// ```compile_fail
+/// use snapshot::external_state::{SessionStateReceiptV1, VerifiedSessionStateReceiptV1};
+/// // No public constructor and no struct literal (private fields): a verified receipt
+/// // can only come from `verify_against`.
+/// fn demo(receipt: SessionStateReceiptV1) {
+///     let _ = VerifiedSessionStateReceiptV1 { receipt, _private: () };
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSessionStateReceiptV1 {
+    receipt: SessionStateReceiptV1,
+    _private: (),
+}
+
+impl VerifiedSessionStateReceiptV1 {
+    /// The underlying receipt, now proven consistent with its verified Execution
+    /// Contract.
+    #[must_use]
+    pub fn receipt(&self) -> &SessionStateReceiptV1 {
+        &self.receipt
+    }
+
+    /// Consume the proof, returning the verified receipt.
+    #[must_use]
+    pub fn into_receipt(self) -> SessionStateReceiptV1 {
+        self.receipt
+    }
 }
 
 #[cfg(test)]
@@ -1328,7 +1720,7 @@ mod tests {
     }
 
     fn mount(tag: &str) -> CaptureMountId {
-        CaptureMountId::new(tag)
+        CaptureMountId::new(tag).expect("canonical mount id")
     }
 
     fn guest_path(value: &str) -> GuestPath {
@@ -1345,14 +1737,18 @@ mod tests {
         }
     }
 
+    fn trusted_ref(handle: &str) -> TrustedProductionStateRef {
+        TrustedProductionStateRef::for_test(OpaqueStateRef::new(handle).expect("canonical ref"))
+    }
+
     fn instance(schema: &str) -> ExternalStateInstance {
-        ExternalStateInstance {
-            state_ref: OpaqueStateRef::new("opaque:user-state-ref").unwrap(),
-            generation: "gen_456".to_string(),
-            schema: schema.to_string(),
-            owner_id: "user-123".to_string(),
-            volume_id: "vol-789".to_string(),
-        }
+        ExternalStateInstance::new(
+            trusted_ref("opaque:user-state-ref"),
+            "gen_456",
+            schema,
+            "user-123",
+            "vol-789",
+        )
     }
 
     /// A verified binding for the sample contract's single `data` binding, with the
@@ -1381,7 +1777,8 @@ mod tests {
     }
 
     fn empty_topology() -> ExcludedStateCaptureTopology {
-        ExcludedStateCaptureTopology::new(Vec::<(String, StateVolumeMount)>::new())
+        ExcludedStateCaptureTopology::try_new(Vec::<(String, StateVolumeMount)>::new())
+            .expect("empty topology is valid")
     }
 
     // --- Opaque ref: canonical, bounded, non-secret `opaque:<handle>` only ---
@@ -1598,13 +1995,15 @@ mod tests {
         let envelope = crate::contract_fixtures::envelope_for(contract);
         let binding = VerifiedExternalStateBinding::from_verified_envelope(&envelope, "data")
             .expect("declared binding resolves");
-        let inst = ExternalStateInstance {
-            // Deliberately hostile owner/volume values: they must NOT reach the
-            // receipt. There is no content/secret field on the instance at all.
-            owner_id: "SECRET-owner-token".to_string(),
-            volume_id: "SECRET-volume-key".to_string(),
-            ..instance("1")
-        };
+        // Deliberately hostile owner/volume values: they must NOT reach the receipt.
+        // There is no content/secret field on the instance at all.
+        let inst = ExternalStateInstance::new(
+            trusted_ref("opaque:user-state-ref"),
+            "gen_456",
+            "1",
+            "SECRET-owner-token",
+            "SECRET-volume-key",
+        );
         let receipt = plan_production_attach(&binding, &inst)
             .unwrap()
             .session_receipt();
@@ -1757,19 +2156,20 @@ mod tests {
         // Two different concrete instances of the SAME binding: different owner,
         // volume id, generation, and opaque ref. None is part of the identity
         // contract, so it can never have been an input to the id.
-        let inst_a = ExternalStateInstance {
-            owner_id: "owner-a".to_string(),
-            volume_id: "vol-a".to_string(),
-            generation: "gen_1".to_string(),
-            ..instance("1")
-        };
-        let inst_b = ExternalStateInstance {
-            owner_id: "owner-b".to_string(),
-            volume_id: "vol-b".to_string(),
-            generation: "gen_2".to_string(),
-            state_ref: OpaqueStateRef::new("opaque:other-ref").unwrap(),
-            ..instance("1")
-        };
+        let inst_a = ExternalStateInstance::new(
+            trusted_ref("opaque:user-state-ref"),
+            "gen_1",
+            "1",
+            "owner-a",
+            "vol-a",
+        );
+        let inst_b = ExternalStateInstance::new(
+            trusted_ref("opaque:other-ref"),
+            "gen_2",
+            "1",
+            "owner-b",
+            "vol-b",
+        );
         let receipt_a = plan_production_attach(&binding, &inst_a)
             .unwrap()
             .session_receipt();
@@ -1818,10 +2218,11 @@ mod tests {
         let envelope = crate::contract_fixtures::envelope_for(
             crate::contract_fixtures::sample_execution_contract(),
         );
-        let topology = ExcludedStateCaptureTopology::new([(
+        let topology = ExcludedStateCaptureTopology::try_new([(
             "data".to_string(),
             StateVolumeMount::new(mount("mnt-data"), volume),
-        )]);
+        )])
+        .expect("distinct-mount topology is valid");
         VerifiedCaptureTopology::from_verified_capture(&envelope, manifest, &topology)
             .expect("verified contract + separate-volume topology mints a topology")
     }
@@ -1964,7 +2365,7 @@ mod tests {
 
         // Extraneous: a topology naming a volume for a binding the contract does
         // not declare.
-        let extra = ExcludedStateCaptureTopology::new([
+        let extra = ExcludedStateCaptureTopology::try_new([
             (
                 "data".to_string(),
                 StateVolumeMount::new(mount("m-data"), digest(0x99)),
@@ -1973,7 +2374,8 @@ mod tests {
                 "ghost".to_string(),
                 StateVolumeMount::new(mount("m-ghost"), digest(0xaa)),
             ),
-        ]);
+        ])
+        .expect("two distinct bindings is a valid topology");
         assert_eq!(
             VerifiedCaptureTopology::from_verified_capture(&envelope, &manifest, &extra)
                 .unwrap_err(),
@@ -2007,7 +2409,7 @@ mod tests {
 
         // Same MOUNT boundary, DISTINCT content digests → NOT separate (rejected).
         let shared_mount = mount("shared-mnt");
-        let shared = ExcludedStateCaptureTopology::new([
+        let shared = ExcludedStateCaptureTopology::try_new([
             (
                 "data".to_string(),
                 StateVolumeMount::new(shared_mount.clone(), digest(0x99)),
@@ -2016,7 +2418,8 @@ mod tests {
                 "store".to_string(),
                 StateVolumeMount::new(shared_mount.clone(), digest(0xaa)),
             ),
-        ]);
+        ])
+        .expect("distinct binding names is a valid topology");
         assert_eq!(
             VerifiedCaptureTopology::from_verified_capture(&envelope, &manifest, &shared)
                 .unwrap_err(),
@@ -2026,7 +2429,7 @@ mod tests {
         // Distinct MOUNT boundaries, IDENTICAL (empty) content digest → separate:
         // two distinct empty volumes must NOT be falsely rejected as shared.
         let empty_content = digest(0x00);
-        let separate = ExcludedStateCaptureTopology::new([
+        let separate = ExcludedStateCaptureTopology::try_new([
             (
                 "data".to_string(),
                 StateVolumeMount::new(mount("mnt-data"), empty_content),
@@ -2035,7 +2438,8 @@ mod tests {
                 "store".to_string(),
                 StateVolumeMount::new(mount("mnt-store"), empty_content),
             ),
-        ]);
+        ])
+        .expect("distinct mounts is a valid topology");
         let topology =
             VerifiedCaptureTopology::from_verified_capture(&envelope, &manifest, &separate)
                 .expect("distinct mounts are separate even with identical empty content");
@@ -2058,10 +2462,11 @@ mod tests {
     #[test]
     fn topology_cannot_be_minted_from_unverified_or_foreign_candidate() {
         let manifest = sample_manifest_bound();
-        let topology = ExcludedStateCaptureTopology::new([(
+        let topology = ExcludedStateCaptureTopology::try_new([(
             "data".to_string(),
             StateVolumeMount::new(mount("mnt-data"), digest(0x99)),
-        )]);
+        )])
+        .expect("single distinct binding is a valid topology");
 
         // Unverified: tamper the stored id so it no longer equals the canonical hash.
         let mut tampered = crate::contract_fixtures::envelope_for(
@@ -2091,5 +2496,183 @@ mod tests {
             .unwrap_err(),
             ExcludedStateBoundaryError::CandidateIdentityMismatch { .. }
         ));
+    }
+
+    // --- Major: CaptureMountId::new validates input fail-closed inside the crate ---
+    #[test]
+    fn capture_mount_id_rejects_malformed_input() {
+        // A canonical id is accepted.
+        assert_eq!(
+            CaptureMountId::new("mnt-data").unwrap().as_str(),
+            "mnt-data"
+        );
+        assert!(CaptureMountId::new("vol/0:a.b_c").is_ok());
+
+        // Empty -> Empty.
+        assert_eq!(
+            CaptureMountId::new("").unwrap_err(),
+            CaptureMountIdError::Empty
+        );
+        // Control characters -> NonCanonical.
+        assert_eq!(
+            CaptureMountId::new("mnt\u{7f}data").unwrap_err(),
+            CaptureMountIdError::NonCanonical
+        );
+        assert_eq!(
+            CaptureMountId::new("mnt data").unwrap_err(),
+            CaptureMountIdError::NonCanonical
+        );
+        // Upper-case "shouting" tokens are non-canonical.
+        assert_eq!(
+            CaptureMountId::new("MNT-DATA").unwrap_err(),
+            CaptureMountIdError::NonCanonical
+        );
+        // Over-length -> TooLong.
+        let too_long = "a".repeat(CaptureMountId::MAX_LEN + 1);
+        assert_eq!(
+            CaptureMountId::new(too_long).unwrap_err(),
+            CaptureMountIdError::TooLong
+        );
+    }
+
+    // --- Major: ExcludedStateCaptureTopology::try_new rejects a duplicate / empty
+    // binding name and preserves every distinct binding exactly once ---
+    #[test]
+    fn topology_try_new_is_fail_closed_on_duplicate_or_empty_binding() {
+        // A valid distinct-mount topology is accepted and preserves both bindings.
+        let ok = ExcludedStateCaptureTopology::try_new([
+            (
+                "data".to_string(),
+                StateVolumeMount::new(mount("mnt-data"), digest(0x11)),
+            ),
+            (
+                "store".to_string(),
+                StateVolumeMount::new(mount("mnt-store"), digest(0x22)),
+            ),
+        ])
+        .expect("two distinct bindings is a valid topology");
+        assert_eq!(ok.state_volumes.len(), 2);
+        assert_eq!(
+            ok.state_volumes.get("data").unwrap().content(),
+            digest(0x11)
+        );
+        assert_eq!(
+            ok.state_volumes.get("store").unwrap().content(),
+            digest(0x22)
+        );
+
+        // A duplicate binding name is REJECTED — never a silent last-writer-wins
+        // overwrite that would drop a binding.
+        assert_eq!(
+            ExcludedStateCaptureTopology::try_new([
+                (
+                    "data".to_string(),
+                    StateVolumeMount::new(mount("mnt-a"), digest(0x11)),
+                ),
+                (
+                    "data".to_string(),
+                    StateVolumeMount::new(mount("mnt-b"), digest(0x22)),
+                ),
+            ])
+            .unwrap_err(),
+            TopologyError::DuplicateBindingName("data".to_string())
+        );
+
+        // An empty binding name is REJECTED.
+        assert_eq!(
+            ExcludedStateCaptureTopology::try_new([(
+                String::new(),
+                StateVolumeMount::new(mount("mnt-data"), digest(0x11)),
+            )])
+            .unwrap_err(),
+            TopologyError::EmptyBindingName
+        );
+    }
+
+    // --- Blocker 2: a bare receipt is only INSPECTION; a VerifiedSessionStateReceiptV1
+    // is obtainable ONLY by reconciling against the verified Execution Contract, and a
+    // self-declared execution_id / foreign or tampered facet / empty generation /
+    // unverified envelope all fail closed ---
+    #[test]
+    fn session_receipt_verify_against_is_fail_closed() {
+        let envelope = crate::contract_fixtures::envelope_for(
+            crate::contract_fixtures::sample_execution_contract(),
+        );
+        let binding = VerifiedExternalStateBinding::from_verified_envelope(&envelope, "data")
+            .expect("declared binding resolves");
+        let receipt = plan_production_attach(&binding, &instance("1"))
+            .unwrap()
+            .session_receipt();
+
+        // Fully-consistent case -> Ok, and the proof exposes the same receipt.
+        let verified = receipt
+            .clone()
+            .verify_against(&envelope)
+            .expect("a consistent receipt verifies against its contract");
+        assert_eq!(verified.receipt(), &receipt);
+        assert_eq!(verified.into_receipt(), receipt);
+
+        // execution_id A + binding B: the receipt names a binding absent from the
+        // verified contract A -> UnknownBinding.
+        let mut foreign_binding = receipt.clone();
+        foreign_binding.binding_name = "ghost".to_string();
+        assert_eq!(
+            foreign_binding.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::UnknownBinding("ghost".to_string())
+        );
+
+        // A + tampered target -> reject.
+        let mut bad_target = receipt.clone();
+        bad_target.target = guest_path("/var/data");
+        assert!(matches!(
+            bad_target.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::TargetMismatch { .. }
+        ));
+
+        // A + tampered access -> reject (sample binding is read-write).
+        let mut bad_access = receipt.clone();
+        bad_access.access = ExternalStateAccess::ReadOnly;
+        assert!(matches!(
+            bad_access.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::AccessMismatch { .. }
+        ));
+
+        // A + tampered schema_identity -> reject.
+        let mut bad_schema = receipt.clone();
+        bad_schema.schema_identity = "2".to_string();
+        assert!(matches!(
+            bad_schema.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::SchemaIdentityMismatch { .. }
+        ));
+
+        // Empty generation -> reject.
+        let mut empty_generation = receipt.clone();
+        empty_generation.state_generation = String::new();
+        assert_eq!(
+            empty_generation.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::EmptyGeneration
+        );
+
+        // Self-declared execution_id that does not equal the verified identity ->
+        // reject (the core "carry a foreign identity string" attack).
+        let mut wrong_identity = receipt.clone();
+        wrong_identity.execution_id =
+            ExecutionId::new(format!("blake3:{}", "b".repeat(64))).expect("valid id shape");
+        assert!(matches!(
+            wrong_identity.verify_against(&envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::ExecutionIdentityMismatch { .. }
+        ));
+
+        // Unverified / tampered envelope -> reject (even a fully consistent receipt
+        // cannot be verified against a contract that does not verify).
+        let mut tampered_envelope = crate::contract_fixtures::envelope_for(
+            crate::contract_fixtures::sample_execution_contract(),
+        );
+        tampered_envelope.execution_id =
+            ExecutionId::new(format!("blake3:{}", "e".repeat(64))).expect("valid id shape");
+        assert_eq!(
+            receipt.verify_against(&tampered_envelope).unwrap_err(),
+            SessionStateReceiptVerifyError::UnverifiedContract
+        );
     }
 }
