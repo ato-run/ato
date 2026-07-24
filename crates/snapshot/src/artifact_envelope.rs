@@ -221,7 +221,8 @@ impl ArtifactEnvelopeV1 {
         if self.envelope_id != self.compute_envelope_id()? {
             return Err(ArtifactEnvelopeError::InvalidId);
         }
-        if self.legacy_manifest_id != legacy.id() || self.cas_root_digest != cas_root_digest(legacy)?
+        if self.legacy_manifest_id != legacy.id()
+            || self.cas_root_digest != cas_root_digest(legacy)?
         {
             return Err(ArtifactEnvelopeError::LegacyManifestMismatch);
         }
@@ -260,9 +261,7 @@ fn cas_root_digest(legacy: &ReadyStateManifest) -> Result<ContentDigest, Artifac
 /// Snapshot id, disposition, and verifier identity. Pinned to
 /// `"platform-disposable-restore/v1"` — the only verifier this crate mints an
 /// envelope on behalf of today (see `snapshot::acceptance`).
-fn acceptance_receipt_id(
-    snapshot_id: &SnapshotId,
-) -> Result<ContentDigest, ArtifactEnvelopeError> {
+fn acceptance_receipt_id(snapshot_id: &SnapshotId) -> Result<ContentDigest, ArtifactEnvelopeError> {
     domain_hash(
         ACCEPTANCE_RECEIPT_ID_DOMAIN,
         &AcceptanceReceiptProjection {
@@ -301,7 +300,9 @@ mod tests {
     use capsulefs::{CasStore, ChunkingKind, HotsetProfile, LayerKind, store_blob};
 
     use super::*;
-    use crate::manifest::{ReadyStateLayers, RestoreContract, SanitizerContract, SnapshotBackendInfo};
+    use crate::manifest::{
+        ReadyStateLayers, RestoreContract, SanitizerContract, SnapshotBackendInfo,
+    };
 
     fn digest(fill: char) -> ContentDigest {
         assert!(fill.is_ascii_hexdigit() && !fill.is_ascii_uppercase());
@@ -400,7 +401,10 @@ mod tests {
         let (_dir, legacy) = legacy_manifest();
         let snapshot = snapshot_manifest(execution_id('a'), 2);
         let envelope = ArtifactEnvelopeV1::accepted(&legacy, &snapshot).unwrap();
-        assert_eq!(envelope.acceptance.status, ArtifactAcceptanceStatus::Accepted);
+        assert_eq!(
+            envelope.acceptance.status,
+            ArtifactAcceptanceStatus::Accepted
+        );
         envelope.verify(&legacy, &snapshot).unwrap();
     }
 
@@ -410,7 +414,10 @@ mod tests {
         let snapshot = snapshot_manifest(execution_id('a'), 2);
         let envelope = ArtifactEnvelopeV1::accepted(&legacy, &snapshot).unwrap();
         let mut tampered = snapshot;
-        tampered.sanitization_attestation.steps.push("attacker".to_string());
+        tampered
+            .sanitization_attestation
+            .steps
+            .push("attacker".to_string());
 
         assert_eq!(
             envelope.verify(&legacy, &tampered),
