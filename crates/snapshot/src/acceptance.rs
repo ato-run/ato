@@ -60,7 +60,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use capsule::execution_contract::ExecutionId;
+use capsule::execution_contract::{ExecutionContractEnvelopeV1, ExecutionId};
 use capsule::snapshot_manifest::{
     AcceptanceStatus, CapturePolicyV1, SanitizationAttestationV1, SecretScanAttestationV1,
     SnapshotCatalogRecord, SnapshotId, SnapshotManifestV1,
@@ -113,11 +113,14 @@ pub struct DisposableSessionHandle {
 /// This replaces the earlier caller-supplied `bool`: a bool is a *calling
 /// convention* a PR-2 caller could get wrong (pass `false` and wrongly proceed),
 /// exactly the failure class the `VerifiedExecutionId` fix closed. The proof has
-/// **no** public constructor, no `From<bool>` / `new`, and is not `Deserialize`:
-/// it can only be minted by a future (#1090) verified-Execution-Contract analysis
-/// that fails closed when the workload requires External State. In #1102 there is
-/// deliberately **no** production constructor, so production callers cannot build
-/// it yet — the running-capture path is closed until #1090 lands.
+/// **no** struct-literal constructor (its `execution_id` field is private), no
+/// `From<bool>` / `new`, and is not `Deserialize`: the single sanctioned
+/// production path is [`VerifiedRunningSnapshotEligibility::analyze_execution_contract`]
+/// (#1090), which verifies the Execution Contract and fails closed when the live
+/// workload requires External State. There is deliberately no constructor that
+/// takes a raw [`ExecutionId`] alone, a bare bool alone, or an unverified
+/// contract — so a caller structurally cannot drive an ineligible workload into
+/// running capture.
 ///
 /// The proof also **binds** the verified [`ExecutionId`] it was proven against
 /// (its single, private field). `accept` reads that identity to seed the receipt
@@ -148,6 +151,69 @@ impl VerifiedRunningSnapshotEligibility {
     /// candidate whose own `execution_id` differs from it.
     fn execution_id(&self) -> &ExecutionId {
         &self.execution_id
+    }
+
+    /// The sanctioned **production** constructor (#1090): mint a running-capture
+    /// eligibility proof from a verified Execution Contract, in a **single,
+    /// indivisible** step that both proves identity and analyzes the
+    /// External-State requirement.
+    ///
+    /// This is deliberately the *only* production way to obtain a
+    /// [`VerifiedRunningSnapshotEligibility`]. It takes a proof-carrying
+    /// [`ExecutionContractEnvelopeV1`] — never a raw [`ExecutionId`], never a bare
+    /// bool, never an *unverified* bare [`ExecutionContractV1`](capsule::execution_contract::ExecutionContractV1)
+    /// — and in one call:
+    ///
+    /// 1. **Verifies the Execution Contract** — [`ExecutionContractEnvelopeV1::verified_execution_id`]
+    ///    recomputes the canonical hash of the embedded contract and fails closed
+    ///    (returning [`AcceptanceFailure::ExecutionContractVerificationFailed`]) if
+    ///    it disagrees with the stored `execution_id`. The proof is *recomputed*
+    ///    here, not trusted.
+    /// 2. **Analyzes the External-State requirement** of that same verified
+    ///    contract via [`crate::external_state::requires_external_state_for_live_workload`].
+    /// 3. **Fails closed** with [`AcceptanceFailure::ExternalStateRequiresWorkloadIdle`]
+    ///    when the live workload requires External State — a `running` capture of
+    ///    such a Capsule is ineligible (RFC §8.3); it must use `workload_idle`
+    ///    (#1093), never a secret-bearing running fallback.
+    /// 4. On success, **binds the proof's `execution_id` from the SAME verified
+    ///    contract** — the id proven in step 1, not any caller-supplied value — so
+    ///    the eligibility can only ever accept candidates of the exact identity it
+    ///    was analyzed against.
+    ///
+    /// Because the id is bound from the *verified* contract and the analysis reads
+    /// that *same* contract, there is no seam between "which contract was proven"
+    /// and "which contract was analyzed": a caller cannot verify one contract and
+    /// smuggle a different id or a different external-state shape.
+    ///
+    /// There is no bare-bool (or raw-id) constructor path — the only production
+    /// constructor takes a verified envelope:
+    ///
+    /// ```compile_fail
+    /// use snapshot::acceptance::VerifiedRunningSnapshotEligibility;
+    /// // A bare bool is not a `&ExecutionContractEnvelopeV1`: this is a type error,
+    /// // so an ineligible workload cannot be waved through with `false`.
+    /// let _ = VerifiedRunningSnapshotEligibility::analyze_execution_contract(false);
+    /// ```
+    pub fn analyze_execution_contract(
+        envelope: &ExecutionContractEnvelopeV1,
+    ) -> Result<Self, AcceptanceFailure> {
+        // (1) Verify the Execution Contract: recompute the canonical hash and
+        // match it against the stored id, fail closed on any disagreement. This
+        // yields a proof-carrying VerifiedExecutionId over the embedded contract.
+        let verified = envelope
+            .verified_execution_id()
+            .map_err(|_| AcceptanceFailure::ExecutionContractVerificationFailed)?;
+        // (2)+(3) Analyze the SAME verified contract's External-State requirement
+        // and fail CLOSED when a live workload requires External State.
+        if crate::external_state::requires_external_state_for_live_workload(
+            &envelope.execution_contract,
+        ) {
+            return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
+        }
+        // (4) Bind the proof id from the SAME verified contract.
+        Ok(Self {
+            execution_id: verified.as_execution_id().clone(),
+        })
     }
 
     /// TEST-ONLY: mint a proof unconditionally for the given verified Execution
@@ -477,9 +543,16 @@ impl AcceptanceReceiptV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AcceptanceFailure {
     /// The live workload requires External State, so a `running` capture is
-    /// ineligible. Minted only by the #1090 eligibility analysis (RFC §8.3).
+    /// ineligible. Raised by the #1090 eligibility analysis (RFC §8.3).
     #[error("running Snapshot is ineligible because the live workload requires External State")]
     ExternalStateRequiresWorkloadIdle,
+    /// The Execution Contract failed verification: its stored `execution_id` did
+    /// not match the canonical hash of the embedded contract, so no eligibility
+    /// proof can be minted from it (fail closed — #1090).
+    #[error(
+        "Execution Contract verification failed: stored execution_id is not the canonical hash"
+    )]
+    ExecutionContractVerificationFailed,
     /// The candidate's own `capture_policy` is not `running`.
     #[error("unsupported capture policy: this acceptance path accepts `running` candidates only")]
     UnsupportedCapturePolicy,
@@ -1786,6 +1859,76 @@ mod tests {
         assert_eq!(
             denied.unwrap_err(),
             AcceptanceFailure::ExternalStateRequiresWorkloadIdle
+        );
+    }
+
+    // --- #1090: the production constructor mints eligibility from a verified
+    // contract and BINDS the proof id to that same verified contract ---
+    #[test]
+    fn production_constructor_binds_eligibility_to_the_verified_contract() {
+        // An External-State-free contract is eligible for a running capture.
+        let contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract
+        };
+        let bound_id = contract
+            .compute_execution_id()
+            .expect("valid contract hashes");
+        let envelope = crate::contract_fixtures::envelope_for(contract);
+
+        let eligibility = VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope)
+            .expect("external-state-free contract is eligible");
+
+        // The proof is bound to the verified contract's id: a candidate carrying
+        // exactly that id is accepted, and the receipt is bound to that id — proof
+        // the constructor sourced the id from the SAME verified contract.
+        let mut lifecycle =
+            FakeLifecycle::with_manifest(manifest_with_execution_id(bound_id.clone()));
+        lifecycle.outcomes = vec![VerificationOutcome::Exited(0)];
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            eligibility,
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault");
+        assert!(run.is_accepted());
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&bound_id));
+    }
+
+    // --- #1090: the production constructor fails CLOSED on an external-state-
+    // required live workload (running-snapshot ineligible) ---
+    #[test]
+    fn production_constructor_fails_closed_on_external_state_required_workload() {
+        // The sample contract declares a live-required External State binding.
+        let envelope = crate::contract_fixtures::envelope_for(
+            crate::contract_fixtures::sample_execution_contract(),
+        );
+        assert_eq!(
+            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err(),
+            AcceptanceFailure::ExternalStateRequiresWorkloadIdle
+        );
+    }
+
+    // --- #1090: the production constructor rejects an UNVERIFIED contract (a
+    // tampered stored id) before analyzing or binding anything ---
+    #[test]
+    fn production_constructor_fails_closed_on_unverified_contract() {
+        let contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract
+        };
+        let mut envelope = crate::contract_fixtures::envelope_for(contract);
+        // Tamper the stored id so it no longer equals the contract's canonical
+        // hash: verification (recompute+match) must fail closed.
+        envelope.execution_id =
+            ExecutionId::new(format!("blake3:{}", "e".repeat(64))).expect("valid id shape");
+        assert_eq!(
+            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err(),
+            AcceptanceFailure::ExecutionContractVerificationFailed
         );
     }
 
