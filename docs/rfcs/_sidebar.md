@@ -35,6 +35,7 @@
 - [ADR-003 Publish Capabilities Versioning](accepted/ADR-003-publish-capabilities-versioning.md)
 - [ADR-005 Secrets Management Architecture](accepted/ADR-005-secrets-management-architecture.md)
 - [ADR-007 macOS Sandbox API Strategy](accepted/ADR-007-macos-sandbox-api-strategy.md)
+- [ADR-014 Capsule Program Identity](accepted/ADR-014-capsule-program-identity.md)
 
 **Draft**
 
