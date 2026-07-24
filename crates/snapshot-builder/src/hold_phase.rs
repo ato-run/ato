@@ -16,7 +16,13 @@
 //!   `quiesced { inflight: 0 }` ack). No capture before the quiesced ack. The
 //!   hold deadline is fail-closed: a capture is never forced past it.
 //! - **ADR-008** — `capture_epoch` is a monotonic command cursor (adopted from
-//!   the [`ControlResponse`]), NOT part of FENCING-4.
+//!   the [`ControlResponse`]), NOT part of FENCING-4. The machine ENFORCES this
+//!   monotonicity on capture, not merely on polling: a `Capture` directive whose
+//!   epoch is `<=` the last epoch already captured is ignored — a stale or
+//!   duplicate command never re-drives capture. In particular, after an ADR-012
+//!   source-available acceptance failure returns to holding, a replayed command
+//!   carrying the same (or an older) epoch cannot trigger a second capture; only
+//!   a strictly-newer epoch proceeds.
 //! - **ADR-012** — after capture, `accepting_source_available` (resume ok →
 //!   acceptance failure returns to holding, re-capture possible) vs
 //!   `accepting_source_lost` (resume failed → acceptance failure ends the attempt,
@@ -255,7 +261,10 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
     ///    [`ExtendPolicy`]); then a control poll adopts the server epoch and
     ///    dispatches on the directive.
     /// 3. `capture` is **refused** unless `pause_permitted` (ADR-007) — never a
-    ///    capture before the quiesced ack.
+    ///    capture before the quiesced ack — and unless the epoch is strictly
+    ///    newer than the last captured epoch (ADR-008 monotonicity: a stale or
+    ///    duplicate command never re-drives capture, e.g. after a source-available
+    ///    return to holding).
     /// 4. On capture, run the capture-action, then #1088 acceptance:
     ///    - accepted → terminal ([`HoldTermination::Accepted`]);
     ///    - acceptance failed + source available → return to holding (re-capture);
@@ -279,6 +288,10 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
         };
 
         let mut observed_epoch: u64 = 0;
+        // The highest epoch that has already driven a capture (ADR-008). Guards
+        // against a stale/duplicate Capture command re-driving capture after a
+        // source-available return to holding. `None` until the first capture.
+        let mut last_captured_epoch: Option<u64> = None;
         let mut deadline = self.clock.now() + self.hold_ttl;
 
         loop {
@@ -310,6 +323,21 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     }
                     let epoch = response.server_capture_epoch;
 
+                    // (3a) ADR-008 capture-epoch monotonicity: the epoch is a
+                    // monotonic command cursor, enforced on capture (not just on
+                    // polling). A stale or duplicate Capture whose epoch is `<=`
+                    // the last epoch already captured must never re-drive capture
+                    // — in particular, after an ADR-012 source-available
+                    // acceptance failure returns to holding, a replayed command
+                    // with the same (or an older) epoch is ignored. Only a
+                    // strictly-newer epoch proceeds. Checked AFTER the
+                    // `pause_permitted` gate so an unpermitted directive never
+                    // consumes an epoch (a later permitted retry of the same epoch
+                    // must still capture).
+                    if matches!(last_captured_epoch, Some(last) if epoch <= last) {
+                        continue;
+                    }
+
                     // (4) Firecracker-concrete capture for this epoch.
                     let held = match self.capture.capture(epoch) {
                         Ok(held) => held,
@@ -324,6 +352,9 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                             continue;
                         }
                     };
+                    // Record the captured epoch (ADR-008): a later return to
+                    // holding must not let a stale/duplicate command re-capture it.
+                    last_captured_epoch = Some(epoch);
 
                     // Fresh eligibility proof to seed accept() (it consumes the
                     // proof by value); re-analysis on later captures fails closed.
@@ -952,6 +983,54 @@ mod tests {
             outcome.failure_stage(),
             Some(WizardFailureStage::Acceptance)
         );
+    }
+
+    // ── (v-b) capture-epoch monotonicity (ADR-008): a stale/duplicate Capture ──
+    //    after a source-available acceptance failure is ignored; a strictly
+    //    newer epoch DOES drive a fresh capture.
+    #[test]
+    fn stale_capture_epoch_after_source_available_failure_is_ignored() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // Epoch 1 captures (permitted, source alive) → acceptance rejects
+        // (exit 1) → return to holding. A DUPLICATE Capture with the SAME epoch 1
+        // must be IGNORED (no second capture). A strictly-greater epoch 2 then
+        // DOES drive a second capture, which is accepted (exit 0).
+        let mut control = ScriptedControl::new(vec![
+            capture(1, "cand_1", true),
+            capture(1, "cand_1", true), // stale/duplicate epoch → ignored
+            capture(2, "cand_2", true), // newer epoch → captures
+        ]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![
+            VerificationOutcome::Exited(1),
+            VerificationOutcome::Exited(0),
+        ]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        // Exactly two captures — epoch 1 and epoch 2. The duplicate epoch-1
+        // directive between them drove NO capture.
+        assert_eq!(
+            cap.calls, 2,
+            "duplicate/stale epoch ignored; only a strictly-newer epoch captures"
+        );
+        assert_eq!(
+            lifecycle.executes, 2,
+            "acceptance ran once per distinct capture"
+        );
+        assert!(matches!(outcome, HoldTermination::Accepted { .. }));
     }
 
     // ── (vi) external-state capsule → eligibility fails closed, never captures ─

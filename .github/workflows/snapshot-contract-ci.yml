@@ -89,3 +89,49 @@ jobs:
       - run: cargo fmt -p snapshot-builder -- --check
       - run: cargo test -p snapshot-builder
       - run: cargo clippy -p snapshot-builder --all-targets -- -D warnings
+      # ── `test-support` must stay dev-dependency-only (feature-unification guard) ─
+      # snapshot's `test-support` feature exposes the eligibility TEST constructors
+      # (`for_test` / `analyze_for_test`) that BYPASS the running-capture
+      # eligibility gate. It is activated only under [dev-dependencies] (see
+      # crates/snapshot-builder/Cargo.toml), so it can never reach a release build.
+      # But Cargo feature unification is global: if ANY crate ever lists a
+      # dependency with `features = [ ... "test-support" ... ]` in a NORMAL (non-dev)
+      # dependency table — [dependencies], [dependencies.*], [build-dependencies],
+      # or a [target.*.dependencies] table — the bypass constructors would unify
+      # into release builds of the WHOLE workspace. This static gate fails if that
+      # invariant is ever broken. It tracks the current TOML table header and flags
+      # any `test-support` occurrence inside a non-dev dependency table (comments
+      # and the [features] definition of `test-support = []` are ignored).
+      - name: test-support stays dev-dependency-only
+        run: |
+          violations=$(find . -name Cargo.toml -not -path '*/target/*' -print0 \
+            | xargs -0 -r awk '
+                FNR == 1 { in_normal_dep = 0 }
+                /^[[:space:]]*\[/ {
+                  header = $0
+                  sub(/#.*/, "", header)
+                  # A non-dev dependency table has a standalone `dependencies` or
+                  # `build-dependencies` component. `dev-dependencies` is excluded
+                  # because the `dependencies` there is preceded by `-`, not by
+                  # `[`/`.`, so the boundary class does not match it.
+                  if (header ~ /[.[]dependencies[].]/ || header ~ /[.[]build-dependencies[].]/)
+                    in_normal_dep = 1
+                  else
+                    in_normal_dep = 0
+                  next
+                }
+                {
+                  line = $0
+                  sub(/#.*/, "", line)
+                  if (in_normal_dep && line ~ /test-support/)
+                    printf "%s:%d:%s\n", FILENAME, FNR, $0
+                }
+              ')
+          if [ -n "$violations" ]; then
+            echo "ERROR: snapshot test-support activated outside [dev-dependencies]:" >&2
+            echo "$violations" >&2
+            echo "The test-support feature exposes eligibility-gate BYPASS constructors" >&2
+            echo "and must be activated ONLY under a [dev-dependencies] table." >&2
+            exit 1
+          fi
+          echo "OK: test-support is activated only under [dev-dependencies]."
