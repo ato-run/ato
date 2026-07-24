@@ -77,23 +77,40 @@ jobs:
           done
       - run: cargo test -p capsule --test execution_contract_vectors
       - run: cargo test -p capsule --test capsule_program_vectors
-      # Enforce the compile_fail guards on the proof-carrying id seams: a raw
-      # ExecutionId must never wrap into a VerifiedExecutionId, and a raw
-      # CapsuleProgramId never into a VerifiedCapsuleProgramId (ADR-014 §4).
+      # Enforce the compile_fail guards on every proof-carrying seam: a raw
+      # ExecutionId must never wrap into a VerifiedExecutionId, a raw
+      # CapsuleProgramId never into a VerifiedCapsuleProgramId, and a bare
+      # &Path never into a VerifiedPinnedSourceMaterialization (ADR-014 §1/§4).
       # Lib/vector tests do not run doctests, so run them explicitly — behind
       # the same empty-filter guard, since a renamed type would otherwise
       # silently retire the compile_fail proofs.
+      #
+      # The three filters must partition every doctest in the crate: the
+      # coverage check below fails if the crate grows a doctest no filter
+      # reaches, so a future proof seam cannot be added-but-unenforced.
       - name: proof-carrying id doctests (fail closed on an empty filter)
         run: |
           set -euo pipefail
-          for filter in VerifiedExecutionId CapsuleProgram; do
+          covered=0
+          for filter in VerifiedExecutionId CapsuleProgram PinnedSource; do
             echo "::group::cargo test -p capsule --doc -- $filter"
             out=$(cargo test -p capsule --doc -- "$filter" 2>&1)
             echo "$out"
             echo "::endgroup::"
-            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' <<<"$out"; then
+            n=$(grep -oE 'test result: ok\. [0-9]+ passed' <<<"$out" | grep -oE '[0-9]+' | paste -sd+ - | bc)
+            if [ "${n:-0}" -eq 0 ]; then
               echo "::error::doctest filter '$filter' matched no tests (renamed type?)"
               exit 1
             fi
+            covered=$((covered + n))
           done
+          # Denominator is the crate's compile_fail doctests — i.e. exactly the
+          # proof seams. (Ordinary documentation examples are doctests too and
+          # must NOT be counted, or this gate would fail on unrelated docs.)
+          seams=$(cargo test -p capsule --doc 2>&1 | grep -c ' - compile fail \.\.\. ok$')
+          echo "proof-seam doctests covered: $covered of $seams compile_fail doctests"
+          if [ "$covered" -ne "$seams" ]; then
+            echo "::error::$((seams - covered)) compile_fail doctest(s) are not reached by any filter above — a new proof seam was added without its filter"
+            exit 1
+          fi
       - run: cargo clippy -p capsule --all-targets -- -D warnings
