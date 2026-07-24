@@ -60,7 +60,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use capsule::execution_contract::{ExecutionContractEnvelopeV1, ExecutionId};
+use capsule::execution_contract::{
+    ExecutionContractEnvelopeV1, ExecutionContractError, ExecutionId,
+};
 use capsule::snapshot_manifest::{
     AcceptanceStatus, CapturePolicyV1, SanitizationAttestationV1, SecretScanAttestationV1,
     SnapshotCatalogRecord, SnapshotId, SnapshotManifestV1,
@@ -169,12 +171,14 @@ impl VerifiedRunningSnapshotEligibility {
     ///    (returning [`AcceptanceFailure::ExecutionContractVerificationFailed`]) if
     ///    it disagrees with the stored `execution_id`. The proof is *recomputed*
     ///    here, not trusted.
-    /// 2. **Analyzes the External-State requirement** of that same verified
-    ///    contract via [`crate::external_state::requires_external_state_for_live_workload`].
+    /// 2. **Analyzes the restore-time-binding requirement** of that same verified
+    ///    contract via [`crate::external_state::requires_restore_time_bindings_for_live_workload`]
+    ///    — declared External State **or** declared restore-time secret bindings.
     /// 3. **Fails closed** with [`AcceptanceFailure::ExternalStateRequiresWorkloadIdle`]
-    ///    when the live workload requires External State — a `running` capture of
-    ///    such a Capsule is ineligible (RFC §8.3); it must use `workload_idle`
-    ///    (#1093), never a secret-bearing running fallback.
+    ///    when the live workload requires External State or restore-time secret
+    ///    bindings — a `running` capture of such a Capsule is ineligible (RFC §8.3);
+    ///    it must use `workload_idle` (#1093), never a secret-bearing running
+    ///    fallback.
     /// 4. On success, **binds the proof's `execution_id` from the SAME verified
     ///    contract** — the id proven in step 1, not any caller-supplied value — so
     ///    the eligibility can only ever accept candidates of the exact identity it
@@ -202,10 +206,11 @@ impl VerifiedRunningSnapshotEligibility {
         // yields a proof-carrying VerifiedExecutionId over the embedded contract.
         let verified = envelope
             .verified_execution_id()
-            .map_err(|_| AcceptanceFailure::ExecutionContractVerificationFailed)?;
-        // (2)+(3) Analyze the SAME verified contract's External-State requirement
-        // and fail CLOSED when a live workload requires External State.
-        if crate::external_state::requires_external_state_for_live_workload(
+            .map_err(AcceptanceFailure::ExecutionContractVerificationFailed)?;
+        // (2)+(3) Analyze the SAME verified contract's restore-time-binding
+        // requirement and fail CLOSED when a live workload requires External State
+        // OR declared restore-time secret bindings.
+        if crate::external_state::requires_restore_time_bindings_for_live_workload(
             &envelope.execution_contract,
         ) {
             return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
@@ -225,14 +230,14 @@ impl VerifiedRunningSnapshotEligibility {
 
     /// TEST-ONLY stand-in for the #1090 verified-Execution-Contract analysis that
     /// will be the *only* real constructor. Fails **closed** when the live
-    /// workload requires External State (RFC §8.3); otherwise mints the proof
-    /// bound to the verified Execution Identity.
+    /// workload requires External State or restore-time secret bindings (RFC §8.3);
+    /// otherwise mints the proof bound to the verified Execution Identity.
     #[cfg(test)]
     pub(crate) fn analyze_for_test(
-        external_state_required_by_live_workload: bool,
+        restore_time_bindings_required_by_live_workload: bool,
         execution_id: ExecutionId,
     ) -> Result<Self, AcceptanceFailure> {
-        if external_state_required_by_live_workload {
+        if restore_time_bindings_required_by_live_workload {
             return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
         }
         Ok(Self { execution_id })
@@ -548,11 +553,14 @@ pub enum AcceptanceFailure {
     ExternalStateRequiresWorkloadIdle,
     /// The Execution Contract failed verification: its stored `execution_id` did
     /// not match the canonical hash of the embedded contract, so no eligibility
-    /// proof can be minted from it (fail closed — #1090).
+    /// proof can be minted from it (fail closed — #1090). Carries the underlying
+    /// [`ExecutionContractError`] as its `#[source]` so diagnostics reflect the real
+    /// cause (invalid schema / non-canonical / id mismatch) while the public message
+    /// stays general; fail-closed semantics are unchanged.
     #[error(
         "Execution Contract verification failed: stored execution_id is not the canonical hash"
     )]
-    ExecutionContractVerificationFailed,
+    ExecutionContractVerificationFailed(#[source] ExecutionContractError),
     /// The candidate's own `capture_policy` is not `running`.
     #[error("unsupported capture policy: this acceptance path accepts `running` candidates only")]
     UnsupportedCapturePolicy,
@@ -1866,10 +1874,13 @@ mod tests {
     // contract and BINDS the proof id to that same verified contract ---
     #[test]
     fn production_constructor_binds_eligibility_to_the_verified_contract() {
-        // An External-State-free contract is eligible for a running capture.
+        // A contract with NO External State AND NO restore-time secret bindings is
+        // eligible for a running capture — both must be cleared (secret values are
+        // External State; a secret-bearing running capture has no fallback).
         let contract = {
             let mut contract = crate::contract_fixtures::sample_execution_contract();
             contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
             contract
         };
         let bound_id = contract
@@ -1898,27 +1909,64 @@ mod tests {
         assert_eq!(run.receipt.execution_id.as_ref(), Some(&bound_id));
     }
 
-    // --- #1090: the production constructor fails CLOSED on an external-state-
-    // required live workload (running-snapshot ineligible) ---
+    // --- Blocker 1 (#1090): the production constructor's 4 eligibility quadrants
+    // over the REAL analyze_execution_contract path — External State and/or
+    // restore-time secret bindings both make a running capture ineligible ---
     #[test]
-    fn production_constructor_fails_closed_on_external_state_required_workload() {
-        // The sample contract declares a live-required External State binding.
-        let envelope = crate::contract_fixtures::envelope_for(
-            crate::contract_fixtures::sample_execution_contract(),
-        );
-        assert_eq!(
-            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err(),
-            AcceptanceFailure::ExternalStateRequiresWorkloadIdle
-        );
+    fn production_constructor_eligibility_four_quadrants() {
+        // Build an envelope from a mutated sample contract (re-hashing the stored
+        // id so verification passes), then assert eligibility.
+        let envelope_of = |external: bool, secret: bool| {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            if !external {
+                contract.external_state.clear();
+            }
+            if !secret {
+                contract.launch.secret_bindings.clear();
+            }
+            crate::contract_fixtures::envelope_for(contract)
+        };
+        let ineligible = |external: bool, secret: bool| {
+            matches!(
+                VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope_of(
+                    external, secret
+                )),
+                Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle)
+            )
+        };
+
+        // external present & no secret -> reject.
+        assert!(ineligible(true, false));
+        // no external & secret present -> reject.
+        assert!(ineligible(false, true));
+        // both present -> reject.
+        assert!(ineligible(true, true));
+        // both empty -> eligible (proof minted, bound to the verified id).
+        let eligible_contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
+            contract
+        };
+        let bound_id = eligible_contract
+            .compute_execution_id()
+            .expect("valid contract hashes");
+        let proof = VerifiedRunningSnapshotEligibility::analyze_execution_contract(
+            &crate::contract_fixtures::envelope_for(eligible_contract),
+        )
+        .expect("external-state-free, secret-free contract is eligible");
+        assert_eq!(proof.execution_id(), &bound_id);
     }
 
-    // --- #1090: the production constructor rejects an UNVERIFIED contract (a
-    // tampered stored id) before analyzing or binding anything ---
+    // --- Blocker 1 / #1090: the production constructor rejects an UNVERIFIED
+    // contract (a tampered stored id) before analyzing or binding anything, and the
+    // failure preserves the underlying ExecutionContractError as its source ---
     #[test]
     fn production_constructor_fails_closed_on_unverified_contract() {
         let contract = {
             let mut contract = crate::contract_fixtures::sample_execution_contract();
             contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
             contract
         };
         let mut envelope = crate::contract_fixtures::envelope_for(contract);
@@ -1926,10 +1974,23 @@ mod tests {
         // hash: verification (recompute+match) must fail closed.
         envelope.execution_id =
             ExecutionId::new(format!("blake3:{}", "e".repeat(64))).expect("valid id shape");
-        assert_eq!(
-            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err(),
-            AcceptanceFailure::ExecutionContractVerificationFailed
+        let error =
+            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err();
+        // The public message stays general, but the real cause (an id mismatch) is
+        // preserved as the error `#[source]`.
+        let source = std::error::Error::source(&error).expect("verification failure has a source");
+        assert!(
+            source
+                .downcast_ref::<ExecutionContractError>()
+                .is_some_and(|inner| {
+                    matches!(inner, ExecutionContractError::ExecutionIdMismatch { .. })
+                }),
+            "source must be the underlying ExecutionContractError id mismatch"
         );
+        assert!(matches!(
+            error,
+            AcceptanceFailure::ExecutionContractVerificationFailed(_)
+        ));
     }
 
     // --- AC: the secret scan is recorded as an ATTESTATION, not proof of absence ---
