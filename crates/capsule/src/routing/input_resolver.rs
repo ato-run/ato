@@ -5,7 +5,7 @@ use crate::ato_lock::{
 };
 use crate::common::paths::path_contains_workspace_internal_subtree;
 use crate::error::{CapsuleError, Result};
-use crate::lockfile::{self, CapsuleLock};
+use crate::lockfile::{self, LegacyCapsuleLock};
 use crate::manifest::{self, LoadedManifest};
 use crate::types::ValidationMode as ManifestValidationMode;
 
@@ -103,7 +103,7 @@ pub struct ResolvedCompatibilityProject {
 #[derive(Debug, Clone)]
 pub struct ResolvedCompatibilityLock {
     pub path: PathBuf,
-    pub lock: CapsuleLock,
+    pub lock: LegacyCapsuleLock,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

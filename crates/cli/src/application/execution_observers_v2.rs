@@ -15,7 +15,7 @@ use capsule::execution_identity::{
 };
 use capsule::execution_plan::model::ExecutionPlan;
 use capsule::launch_spec::LaunchSpec;
-use capsule::lockfile::CapsuleLock;
+use capsule::lockfile::LegacyCapsuleLock;
 use capsule::router::ManifestData;
 use capsule::types::StateSharing;
 use serde::Serialize;
@@ -287,7 +287,7 @@ fn read_direct_capsule_dependency_inputs(
         )
     })?;
 
-    let mut dependencies = match serde_json::from_slice::<CapsuleLock>(&bytes) {
+    let mut dependencies = match serde_json::from_slice::<LegacyCapsuleLock>(&bytes) {
         Ok(lock) => lock
             .capsule_dependencies
             .into_iter()
@@ -1397,7 +1397,7 @@ env_allowlist = ["DATABASE_URL"]
         path: &Path,
         identity_exports: BTreeMap<String, String>,
     ) {
-        let lock = capsule::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-04T00:00:00Z".to_string(),
@@ -1518,7 +1518,7 @@ run = "main.py"
     }
 
     fn write_capsule_lock(path: &Path, database: &str, password: &str) {
-        let lock = capsule::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-04T00:00:00Z".to_string(),

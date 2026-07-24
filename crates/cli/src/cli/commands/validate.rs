@@ -341,7 +341,7 @@ fn debug_assert_provider_node_parity(
 /// consistency check.
 fn debug_assert_provider_aliases_match_lock(
     external_dependencies: &[capsule::types::ExternalCapsuleDependency],
-    lock: &capsule::lockfile::CapsuleLock,
+    lock: &capsule::lockfile::LegacyCapsuleLock,
 ) {
     let input = build_input_from_external_dependencies(external_dependencies, None);
     let graph = ExecutionGraphBuilder::build(input);
@@ -489,8 +489,8 @@ mod tests {
 
     fn empty_lock_with(
         capsule_dependencies: Vec<capsule::lockfile::LockedCapsuleDependency>,
-    ) -> capsule::lockfile::CapsuleLock {
-        capsule::lockfile::CapsuleLock {
+    ) -> capsule::lockfile::LegacyCapsuleLock {
+        capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-09T00:00:00Z".to_string(),

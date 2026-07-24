@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use capsule::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
 use capsule::common::paths::runtime_cache_dir;
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact,
+    CAPSULE_LOCK_FILE_NAME, LegacyCapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact,
     parse_lockfile_text, resolve_existing_lockfile_path,
 };
 use capsule::packers::runtime_fetcher::RuntimeFetcher;
@@ -18,7 +18,7 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 pub struct RuntimeManager {
-    lockfile: CapsuleLock,
+    lockfile: LegacyCapsuleLock,
     target_triple: String,
     platform_key: String,
     cache_root: PathBuf,
@@ -42,7 +42,7 @@ impl RuntimeManager {
                     .with_context(|| format!("Failed to read {}", lockfile_path.display()));
             }
         };
-        let lockfile: CapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
+        let lockfile: LegacyCapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
             .with_context(|| format!("Failed to parse {}", lockfile_path.display()))?;
         let (target_triple, platform_key) = current_platform_keys()?;
         let cache_root = runtime_cache_dir()?;

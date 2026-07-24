@@ -58,7 +58,7 @@ pub const CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock.json";
 pub const LEGACY_CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapsuleLock {
+pub struct LegacyCapsuleLock {
     pub version: String,
     pub meta: LockMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,7 +353,7 @@ impl std::error::Error for ToolEnvConflict {}
 /// the same env-var are surfaced as `ToolEnvConflict` rather than silently
 /// shadowed.
 pub fn tool_capsule_env_bindings(
-    lock: &CapsuleLock,
+    lock: &LegacyCapsuleLock,
     layout: &crate::common::paths::AtoRunLayout,
 ) -> std::result::Result<BTreeMap<String, PathBuf>, ToolEnvConflict> {
     let mut out: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -700,7 +700,7 @@ fn verify_lockfile_manifest_hash(lockfile_path: &Path, expected_hash: &str) -> R
     Ok(())
 }
 
-fn read_lockfile(path: &Path) -> Result<CapsuleLock> {
+fn read_lockfile(path: &Path) -> Result<LegacyCapsuleLock> {
     let raw = fs::read_to_string(path)
         .map_err(|e| CapsuleError::Config(format!("Failed to read {}: {}", path.display(), e)))?;
     parse_lockfile_text(&raw, path)
@@ -725,7 +725,7 @@ pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
     legacy.exists().then_some(legacy)
 }
 
-pub fn parse_lockfile_text(raw: &str, path: &Path) -> Result<CapsuleLock> {
+pub fn parse_lockfile_text(raw: &str, path: &Path) -> Result<LegacyCapsuleLock> {
     serde_json::from_str(raw)
         .or_else(|_| toml::from_str(raw))
         .map_err(|e| CapsuleError::Config(format!("Failed to parse {}: {}", path.display(), e)))
@@ -740,7 +740,7 @@ fn existing_lockfile_has_required_platform_coverage(
 }
 
 fn lockfile_has_required_platform_coverage(
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
     manifest: &toml::Value,
 ) -> Result<bool> {
     let required_platforms = lockfile_runtime_platforms(manifest)?;
@@ -1408,7 +1408,7 @@ async fn resolve_external_capsule_dependencies(
 
 pub fn verify_lockfile_external_dependencies(
     manifest_raw: &toml::Value,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
 ) -> Result<()> {
     let expected = manifest_external_capsule_dependencies(manifest_raw)?;
     if expected.is_empty() {
@@ -1461,7 +1461,7 @@ pub fn verify_lockfile_external_dependencies(
 /// values. See `GraphDependencyInput`'s safety rule docstring.
 pub fn verify_lockfile_against_contracts(
     contracts: &crate::engine::execution_graph::DerivedDependencyContracts,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
 ) -> Result<()> {
     if contracts.providers.is_empty() {
         return Ok(());
@@ -1628,7 +1628,7 @@ async fn generate_lockfile(
     manifest_dir: &Path,
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
-) -> Result<CapsuleLock> {
+) -> Result<LegacyCapsuleLock> {
     let draft = validate_ready_lock_draft(evaluate_lock_draft_for_manifest(
         manifest_raw,
         manifest_text,
@@ -1650,7 +1650,7 @@ async fn generate_lockfile_for_compat_input(
     compat_input: &CompatProjectInput,
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
-) -> Result<CapsuleLock> {
+) -> Result<LegacyCapsuleLock> {
     let draft = validate_ready_lock_draft(evaluate_lock_draft_for_compat_input(compat_input)?)?;
     finalize_lockfile_from_draft(
         draft,
@@ -1697,7 +1697,7 @@ async fn finalize_lockfile_from_draft(
     manifest_dir: &Path,
     reporter: Arc<dyn CapsuleReporter + 'static>,
     timings: bool,
-) -> Result<CapsuleLock> {
+) -> Result<LegacyCapsuleLock> {
     let allowlist = read_allowlist(manifest_raw);
     let target_key = platform_target_key()?;
     let runtime_platforms = runtime_platforms_from_draft(&draft)?;
@@ -1816,7 +1816,7 @@ async fn finalize_lockfile_from_draft(
     let raw_manifest_text = fs::read_to_string(manifest_dir.join("capsule.toml"))
         .unwrap_or_else(|_| manifest_text.to_string());
 
-    Ok(CapsuleLock {
+    Ok(LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: Utc::now().to_rfc3339(),

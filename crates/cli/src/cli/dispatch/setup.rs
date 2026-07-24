@@ -315,7 +315,7 @@ fn detect_lockfile_capsule_dependencies(project_root: &Path) -> Result<Vec<Capsu
 
     let raw = fs::read_to_string(&lock_path)
         .with_context(|| format!("failed to read {}", lock_path.display()))?;
-    let lock = serde_json::from_str::<capsule::lockfile::CapsuleLock>(&raw)
+    let lock = serde_json::from_str::<capsule::lockfile::LegacyCapsuleLock>(&raw)
         .with_context(|| format!("failed to parse {}", lock_path.display()))?;
 
     let mut plans = Vec::new();
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn detects_capsule_dependencies_from_lockfile() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let lock = capsule::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-04-03T00:00:00Z".to_string(),
@@ -714,7 +714,7 @@ source = "ato/ato-desktop"
         )
         .expect("write manifest");
 
-        let lock = capsule::lockfile::CapsuleLock {
+        let lock = capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-04-03T00:00:00Z".to_string(),

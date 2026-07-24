@@ -17,7 +17,7 @@ use capsule::execution_identity::EnvOrigin;
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::execution_plan::guard::ExecutorKind;
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
+    CAPSULE_LOCK_FILE_NAME, LegacyCapsuleLock, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
 use capsule::types::{
@@ -73,7 +73,7 @@ pub(crate) trait ConsumerRunProgress {
 pub(crate) struct CompatibilityLegacyLockContext {
     pub(crate) manifest_path: PathBuf,
     pub(crate) path: PathBuf,
-    pub(crate) lock: CapsuleLock,
+    pub(crate) lock: LegacyCapsuleLock,
 }
 
 #[derive(Debug, Clone)]
@@ -963,7 +963,7 @@ fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<Depende
 pub(crate) async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
     plan: &capsule::router::ManifestData,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
 ) -> Result<DependencyContractGuard> {
     let consumer =
         router::CompatManifestBridge::from_manifest_value(prepared.bridge_manifest.as_toml())
@@ -1378,7 +1378,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             let bytes = std::fs::read(&lock_path).with_context(|| {
                 format!("failed to read auto-generated lock {}", lock_path.display())
             })?;
-            let lock: capsule::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+            let lock: capsule::lockfile::LegacyCapsuleLock = serde_json::from_slice(&bytes)
                 .with_context(|| {
                     format!(
                         "failed to parse auto-generated lock {}",

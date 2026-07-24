@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use capsule::CapsuleReporter;
-use capsule::lockfile::{CapsuleLock, manifest_external_capsule_dependencies};
+use capsule::lockfile::{LegacyCapsuleLock, manifest_external_capsule_dependencies};
 use capsule::router::{ExecutionProfile, ManifestData};
 
 use crate::reporters::CliReporter;
@@ -55,7 +55,7 @@ impl Drop for ExternalCapsuleGuard {
 
 pub async fn start_external_capsules(
     plan: &ManifestData,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
     cli_inject_bindings: &[String],
     reporter: std::sync::Arc<CliReporter>,
     options: &ExternalCapsuleOptions,
