@@ -401,7 +401,16 @@ pub struct AcceptanceAttemptReceiptV1 {
 /// The secret-scan attestation is exactly that: an *attestation that a scan ran*
 /// with a redacted verdict. It is **never** a proof of absence of secrets (RFC
 /// §8 / §17.3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Schema enforced at deserialize.** `schema` is the wire-version discriminator,
+/// so it is checked *at deserialize* via a custom [`Deserialize`] that runs
+/// [`AcceptanceReceiptV1::validate`] (below) — a generic
+/// `serde_json::from_str::<AcceptanceReceiptV1>()` of a wrong/unknown schema (or an
+/// otherwise-inconsistent receipt) is **rejected**, never silently read as v1. The
+/// tolerant (no `deny_unknown_fields`) decode is preserved by routing through a
+/// private [`AcceptanceReceiptWireV1`] twin; only the schema/consumer-boundary
+/// invariants are added on top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AcceptanceReceiptV1 {
     /// Always [`ACCEPTANCE_RECEIPT_V1_SCHEMA`].
     pub schema: String,
@@ -427,6 +436,55 @@ pub struct AcceptanceReceiptV1 {
     /// Redacted secret-scan attestation of the accepted candidate. `None` when
     /// nothing was accepted. Attestation only — never proof of absence.
     pub secret_scan_attestation: Option<SecretScanAttestationV1>,
+}
+
+/// The private wire twin of [`AcceptanceReceiptV1`]: a tolerant (no
+/// `deny_unknown_fields`, preserving the deliberate envelope-style tolerance) raw
+/// decode. It exists **only** as the input to [`AcceptanceReceiptV1`]'s custom
+/// [`Deserialize`], which runs the consumer-boundary [`AcceptanceReceiptV1::validate`]
+/// (schema discriminator + verifier + capture policy + accept/reject shape) before
+/// yielding a public receipt. A generic consumer therefore cannot obtain an
+/// `AcceptanceReceiptV1` whose `schema` was never checked.
+#[derive(Deserialize)]
+struct AcceptanceReceiptWireV1 {
+    schema: String,
+    verifier_identity: String,
+    verifier_version: String,
+    execution_id: Option<ExecutionId>,
+    capture_policy: CapturePolicyV1,
+    maximum_attempts: u32,
+    attempts: Vec<AcceptanceAttemptReceiptV1>,
+    outcome: AcceptanceOutcome,
+    accepted_snapshot_id: Option<SnapshotId>,
+    sanitization_attestation: Option<SanitizationAttestationV1>,
+    secret_scan_attestation: Option<SecretScanAttestationV1>,
+}
+
+impl<'de> Deserialize<'de> for AcceptanceReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AcceptanceReceiptWireV1::deserialize(deserializer)?;
+        let receipt = Self {
+            schema: wire.schema,
+            verifier_identity: wire.verifier_identity,
+            verifier_version: wire.verifier_version,
+            execution_id: wire.execution_id,
+            capture_policy: wire.capture_policy,
+            maximum_attempts: wire.maximum_attempts,
+            attempts: wire.attempts,
+            outcome: wire.outcome,
+            accepted_snapshot_id: wire.accepted_snapshot_id,
+            sanitization_attestation: wire.sanitization_attestation,
+            secret_scan_attestation: wire.secret_scan_attestation,
+        };
+        // Wire-version dispatch + consumer boundary: the schema discriminator (and
+        // the rest of the integrity check) is enforced HERE, so a wrong/unknown
+        // schema can never be read as v1 through the raw path.
+        receipt.validate().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
 }
 
 /// Why a deserialized [`AcceptanceReceiptV1`] failed its consumer-boundary
@@ -469,8 +527,9 @@ impl AcceptanceReceiptV1 {
     /// deserialize, but `schema` / `verifier_identity` / `verifier_version` are
     /// free `String`s and the cross-field invariants (accepted ⇒ snapshot id +
     /// attestations + final-attempt agreement; rejected ⇒ none of those; attempts
-    /// monotonic and bounded) are not expressible in the type. A consumer MUST
-    /// call `validate` before trusting a receipt it did not itself produce; a
+    /// monotonic and bounded) are not expressible in the type. This is run
+    /// automatically by the custom [`Deserialize`] (so a raw
+    /// `serde_json::from_str` cannot bypass it), and remains callable directly; a
     /// receipt with an attacker-chosen schema, an untrusted verifier, or an
     /// inconsistent accept/reject shape fails closed here.
     pub fn validate(&self) -> Result<(), AcceptanceReceiptValidationError> {
@@ -2116,6 +2175,26 @@ mod tests {
         // A malformed snapshot id is rejected at deserialize (typed SnapshotId).
         let bad_id = json.replace("blake3:", "not-a-digest:");
         assert!(serde_json::from_str::<AcceptanceReceiptV1>(&bad_id).is_err());
+    }
+
+    // --- Major 3: the schema discriminator is enforced AT deserialize (wire-version
+    // dispatch), so a wrong/unknown schema is never silently read as v1 ---
+    #[test]
+    fn receipt_wrong_schema_is_rejected_at_deserialize() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let receipt = run(&mut lifecycle, &config(1)).receipt;
+        let json = serde_json::to_string(&receipt).unwrap();
+        // A valid receipt round-trips through the validated Deserialize boundary.
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&json).is_ok());
+
+        // A wrong/unknown schema is REJECTED at deserialize — not read as v1.
+        let wrong = json.replace(ACCEPTANCE_RECEIPT_V1_SCHEMA, "attacker.receipt/v999");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&wrong).is_err());
+
+        // An untrusted verifier is likewise rejected at deserialize, closing the
+        // raw-path bypass of the consumer boundary.
+        let untrusted = json.replace(DISPOSABLE_RESTORE_VERIFIER_IDENTITY, "attacker.verifier");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&untrusted).is_err());
     }
 
     // --- Capture-policy gate: a non-`running` candidate is rejected explicitly ---
