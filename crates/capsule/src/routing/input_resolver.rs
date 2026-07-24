@@ -3,18 +3,22 @@ use std::path::{Component, Path, PathBuf};
 use crate::capsule_lock::{
     self, CapsuleLock, CapsuleLockValidationError, ValidationMode as CanonicalValidationMode,
 };
+use crate::common::lock_presence::{
+    CanonicalLockSelectionError, select_canonical_lock_path as select_lock_path,
+};
 use crate::common::paths::path_contains_workspace_internal_subtree;
 use crate::error::{CapsuleError, Result};
 use crate::lockfile::{self, LegacyCapsuleLock};
 use crate::manifest::{self, LoadedManifest};
 use crate::types::ValidationMode as ManifestValidationMode;
 
-/// Canonical lock file name (see CAPSULE_V1_EXECUTION_MODEL_SPEC §5).
-pub const CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock";
-/// Deprecated pre-amendment name for the canonical lock. Still accepted as a
-/// read-compatible alias (with a rename warning); writers must never produce
-/// new files under this name.
-pub const DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME: &str = "ato.lock.json";
+/// The canonical lock file names. Defined in `common::lock_presence` (Layer 1)
+/// alongside the shared lexical-presence rules the program source projection
+/// also consumes; re-exported here because `capsule::input_resolver::…` is the
+/// established import path across the workspace.
+pub use crate::common::lock_presence::{
+    CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExplicitInputKind {
@@ -300,23 +304,37 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
 /// * only `capsule.lock`            → canonical input
 /// * only `ato.lock.json`           → deprecated alias, read-compatible
 /// * `capsule.lock` + `ato.lock.json` → fail closed (split-brain)
+///
+/// Presence is decided by the shared, fail-closed
+/// [`select_canonical_lock_path`](crate::common::lock_presence::select_canonical_lock_path):
+/// occupancy is lexical (a dangling symlink under a lock name IS present, so
+/// it cannot silently downgrade a split-brain root to "alias only"), a
+/// non-`NotFound` metadata error is never read as absent, and the selected
+/// path must be a regular file. The program source projection (ADR-014 §1)
+/// consumes the same helper, so both paths reach the same verdict.
 pub fn resolve_canonical_lock_path(project_root: &Path) -> Result<Option<PathBuf>> {
-    let canonical = project_root.join(CAPSULE_LOCK_FILE_NAME);
-    let alias = project_root.join(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
-    match (canonical.exists(), alias.exists()) {
-        (true, true) => Err(CapsuleError::Config(format!(
-            "Both {canonical_name} and {alias_name} exist at {root}. \
-             {canonical_name} is the canonical lock and {alias_name} is its deprecated \
-             alias; no automatic authority choice is made. Remove one of the two files \
-             (keep {canonical_name}) and retry.",
-            canonical_name = CAPSULE_LOCK_FILE_NAME,
-            alias_name = DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
-            root = project_root.display(),
-        ))),
-        (true, false) => Ok(Some(canonical)),
-        (false, true) => Ok(Some(alias)),
-        (false, false) => Ok(None),
-    }
+    select_lock_path(project_root)
+        .map(|selection| selection.into_path())
+        .map_err(|error| match error {
+            CanonicalLockSelectionError::Coexistence { root } => CapsuleError::Config(format!(
+                "Both {canonical_name} and {alias_name} exist at {root}. \
+                 {canonical_name} is the canonical lock and {alias_name} is its deprecated \
+                 alias; no automatic authority choice is made. Remove one of the two files \
+                 (keep {canonical_name}) and retry.",
+                canonical_name = CAPSULE_LOCK_FILE_NAME,
+                alias_name = DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+                root = root.display(),
+            )),
+            CanonicalLockSelectionError::NotRegularFile { path, kind } => {
+                CapsuleError::Config(format!(
+                    "{} must be a regular file, found {kind}. Remove or replace it and retry.",
+                    path.display(),
+                ))
+            }
+            CanonicalLockSelectionError::Io { path, source } => {
+                CapsuleError::Config(format!("Failed to inspect {}: {source}", path.display()))
+            }
+        })
 }
 
 fn is_import_preview_workspace(path: &Path) -> bool {
@@ -745,6 +763,44 @@ run = "dist""#
         assert!(message.contains(CAPSULE_LOCK_FILE_NAME));
         assert!(message.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME));
         assert!(message.contains("Remove one"));
+    }
+
+    /// Presence is lexical: a dangling `capsule.lock` symlink beside a valid
+    /// alias is split-brain, not "alias only". `exists()` followed the link and
+    /// silently selected the alias here, diverging from the program source
+    /// projection's `symlink_metadata` view of the same root.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_canonical_symlink_beside_alias_fails_closed() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(dir.path(), "demo");
+        write_canonical_lock_as(dir.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+        std::os::unix::fs::symlink("nowhere", dir.path().join(CAPSULE_LOCK_FILE_NAME))
+            .expect("dangling symlink");
+
+        let err = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect_err("a dangling canonical lock name must not read as absent");
+        let message = err.to_string();
+        assert!(message.contains(CAPSULE_LOCK_FILE_NAME), "{message}");
+        assert!(
+            message.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME),
+            "{message}"
+        );
+    }
+
+    /// The selected lock must be a regular file: a directory under the lock
+    /// name is rejected, never treated as an authoritative lock.
+    #[test]
+    fn non_regular_canonical_lock_is_rejected() {
+        let dir = tempdir().expect("tempdir");
+        write_manifest(dir.path(), "demo");
+        fs::create_dir(dir.path().join(CAPSULE_LOCK_FILE_NAME)).expect("lock directory");
+
+        let err = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect_err("a directory under the lock name must fail closed");
+        let message = err.to_string();
+        assert!(message.contains("must be a regular file"), "{message}");
+        assert!(message.contains("a directory"), "{message}");
     }
 
     #[test]

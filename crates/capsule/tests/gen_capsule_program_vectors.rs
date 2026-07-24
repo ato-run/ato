@@ -402,6 +402,10 @@ struct GenContractVector {
     relation: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     canonical_file: Option<String>,
+    /// Recorded for `expect: "error"` vectors whose rejection REASON is the
+    /// point of the vector (same role as `GenManifestVector::error_substring`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_substring: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     notes: Option<String>,
 }
@@ -490,6 +494,7 @@ fn regenerate_shared_vectors() {
         capsule_program_id: Some(baseline_id.clone()),
         relation: None,
         canonical_file: Some("contract/expected/baseline.canonical.json".to_string()),
+        error_substring: None,
         notes: None,
     });
 
@@ -507,6 +512,7 @@ fn regenerate_shared_vectors() {
         capsule_program_id: Some(baseline_id.clone()),
         relation: Some("equals-baseline"),
         canonical_file: Some("contract/expected/baseline.canonical.json".to_string()),
+        error_substring: None,
         notes: Some(
             "same contract with every object's keys reverse-sorted; JCS erases key order, so \
              canonical bytes and id equal the baseline's exactly"
@@ -552,6 +558,7 @@ fn regenerate_shared_vectors() {
             capsule_program_id: Some(id),
             relation: Some("differs-from-baseline"),
             canonical_file: None,
+            error_substring: None,
             notes: Some(note.to_string()),
         });
     }
@@ -606,6 +613,86 @@ fn regenerate_shared_vectors() {
             capsule_program_id: None,
             relation: None,
             canonical_file: None,
+            error_substring: None,
+            notes: Some(note.to_string()),
+        });
+    }
+
+    // ── contract/: duplicate-key vectors (literal text, not a Value) ─────
+    // `serde_json::Value` cannot hold a duplicate key — it is last-wins like
+    // every stock JSON parser — so these are injected TEXTUALLY into the
+    // rendered baseline: the repeated key must survive in the fixture bytes
+    // and reach the deserializer, where the identity maps' UniqueBTreeMap
+    // rejects it instead of silently collapsing two byte-distinct documents
+    // onto one capsule_program_id.
+    let mut duplicate: Vec<(&str, String, &str, &str)> = Vec::new();
+
+    // A SECOND "scratch" entry, spelled at the baseline's own indentation.
+    let repeated_state_entry = r#"      "scratch": {
+        "durability": "persistent",
+        "kind": "database",
+        "purpose": "app data"
+      },
+"#;
+    let state_key = pretty_value(&base_value).replacen(
+        "    \"state\": {\n",
+        &format!("    \"state\": {{\n{repeated_state_entry}"),
+        1,
+    );
+    assert_eq!(
+        state_key.matches("\"scratch\"").count(),
+        2,
+        "duplicate state key injection missed its anchor"
+    );
+    duplicate.push((
+        "invalid-duplicate-state-key",
+        state_key,
+        "duplicate identity map key 'scratch'",
+        "a duplicate key in a top-level identity map (state) is rejected by the unique-map \
+         deserializer: BTreeMap last-wins would give two byte-distinct documents one id",
+    ));
+
+    let mut nested = base_value.clone();
+    nested["manifest_intent"]["targets"] = json!({
+        "targets": { "app": { "env": { "PORT": "8080" } } }
+    });
+    typed(&nested);
+    let nested_env_key = pretty_value(&nested).replacen(
+        "          \"env\": {\n",
+        "          \"env\": {\n            \"PORT\": \"9090\",\n",
+        1,
+    );
+    assert_eq!(
+        nested_env_key.matches("\"PORT\"").count(),
+        2,
+        "duplicate nested env key injection missed its anchor"
+    );
+    duplicate.push((
+        "invalid-duplicate-nested-env-key",
+        nested_env_key,
+        "duplicate identity map key 'PORT'",
+        "a duplicate key in a NESTED identity map (targets.<label>.env) is rejected too — the \
+         fail-closed rule is not only top level",
+    ));
+
+    for (name, text, error_substring, note) in duplicate {
+        let error = serde_json::from_str::<CapsuleProgramContractV1>(&text)
+            .expect_err("a duplicate identity map key must fail closed");
+        assert!(
+            error.to_string().contains(error_substring),
+            "vector '{name}': error '{error}' must contain '{error_substring}'"
+        );
+        let file = format!("contract/vectors/{name}.json");
+        write_file(&dir, &file, &text);
+        contract_vectors.push(GenContractVector {
+            name: name.to_string(),
+            file,
+            kind: "contract",
+            expect: "error",
+            capsule_program_id: None,
+            relation: None,
+            canonical_file: None,
+            error_substring: Some(error_substring.to_string()),
             notes: Some(note.to_string()),
         });
     }
@@ -629,6 +716,7 @@ fn regenerate_shared_vectors() {
         capsule_program_id: Some(baseline_id.clone()),
         relation: Some("equals-baseline"),
         canonical_file: None,
+        error_substring: None,
         notes: Some(
             "envelope metadata (generated_at/provenance/diagnostics) is non-identity".to_string(),
         ),
@@ -666,6 +754,7 @@ fn regenerate_shared_vectors() {
         capsule_program_id: Some(baseline_id.clone()),
         relation: Some("equals-baseline"),
         canonical_file: None,
+        error_substring: None,
         notes: Some(
             "same contract as envelope-non-identity-a with different generated_at/provenance/\
              diagnostics and a tolerated unknown envelope field; verify() passes and the \
@@ -694,6 +783,7 @@ fn regenerate_shared_vectors() {
         capsule_program_id: None,
         relation: None,
         canonical_file: None,
+        error_substring: None,
         notes: Some(
             "stored capsule_program_id disagrees with the canonical hash of program_contract; \
              readers fail closed"

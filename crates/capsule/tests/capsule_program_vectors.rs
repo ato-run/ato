@@ -75,6 +75,9 @@ struct ContractVector {
     capsule_program_id: Option<String>,
     relation: Option<Relation>,
     canonical_file: Option<String>,
+    /// Recorded when the REASON a vector is rejected is the point of the
+    /// vector (the `invalid-duplicate-*` pair), mirroring `ManifestVector`.
+    error_substring: Option<String>,
     #[allow(dead_code)]
     notes: Option<String>,
 }
@@ -213,11 +216,20 @@ fn contract_vectors_pin_the_canonical_form() {
 
         match vector.expect {
             ContractExpect::Error => {
-                assert!(
-                    outcome.is_err(),
-                    "vector '{}': expected fail-closed error, got {outcome:?}",
-                    vector.name
-                );
+                let error = match outcome {
+                    Err(error) => error.to_string(),
+                    Ok(id) => panic!(
+                        "vector '{}': expected fail-closed error, got {id}",
+                        vector.name
+                    ),
+                };
+                if let Some(substring) = &vector.error_substring {
+                    assert!(
+                        error.contains(substring),
+                        "vector '{}': error '{error}' must contain '{substring}'",
+                        vector.name
+                    );
+                }
             }
             ContractExpect::CapsuleProgramId => {
                 let id =

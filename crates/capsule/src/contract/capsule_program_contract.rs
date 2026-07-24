@@ -80,8 +80,10 @@
 //!   absolute [`GuestPath`] for OCI targets).
 //! * **Rule 4** — every string leaf uses the matrix's semantic newtype.
 //!
-//! Canonicalization (ADR-014 §2.3): maps are `BTreeMap` (sorted keys,
-//! duplicate rejection on the JSON layer); set-like lists are sorted +
+//! Canonicalization (ADR-014 §2.3): maps are [`UniqueBTreeMap`] — sorted keys,
+//! and a repeated JSON key is rejected on deserialization rather than
+//! silently last-wins (`BTreeMap`'s stock behaviour), so one typed value never
+//! has two byte-distinct preimages; set-like lists are sorted +
 //! deduplicated and validated as strictly increasing; order-sensitive lists
 //! (build lifecycle, `targets.preference`, `pack.include`/`exclude`, argv
 //! lists, `external.*.providers`, `snapshot.warmup_paths`, `config_schema`)
@@ -109,12 +111,14 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use unicode_normalization::is_nfc;
 
+use crate::contract::program_source_projection::{
+    StagedCapsuleSource, VerifiedPinnedSourceMaterialization,
+};
 use crate::execution_contract::{
     ExecutionContractEnvelopeV1, GuestPath, schema_domained_blake3_id,
 };
@@ -148,6 +152,8 @@ pub enum CapsuleProgramError {
     ManifestInput(String),
     #[error("program manifest load failed: {0}")]
     ManifestLoad(String),
+    #[error("input is not a pinned source materialization: {0}")]
+    NotPinnedMaterialization(String),
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> CapsuleProgramError {
@@ -1023,6 +1029,135 @@ fn is_true(value: &bool) -> bool {
     *value
 }
 
+/// A sorted map whose `Deserialize` fails closed on a repeated key.
+///
+/// `BTreeMap`'s stock deserializer inserts every entry, so a repeated JSON key
+/// silently last-wins: two byte-distinct documents would map to one typed
+/// value and therefore claim one `capsule_program_id`. That is an identity
+/// preimage ambiguity no non-Rust consumer could detect either (`JSON.parse`
+/// is last-wins too), so EVERY identity-bearing map in the IR uses this type —
+/// nested ones included — mirroring the execution contract's
+/// `present_non_empty_unique_map` (ADR-014 §2.3: maps are sorted with
+/// duplicate-key rejection). Pinned by the `invalid-duplicate-*` vectors.
+///
+/// The serialized form is exactly `BTreeMap`'s (a JSON object, sorted keys),
+/// so the canonical bytes and ids recorded by the shared vectors are
+/// independent of the wrapper. In-memory construction cannot introduce a
+/// duplicate key, so the fail-closed check is only needed on the JSON layer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueBTreeMap<K, V>(BTreeMap<K, V>);
+
+impl<K, V> UniqueBTreeMap<K, V> {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Values are freely mutable; the KEY set is only ever extended through
+    /// [`UniqueBTreeMap::insert`] or a deserialization that checked it.
+    pub fn values_mut(&mut self) -> std::collections::btree_map::ValuesMut<'_, K, V> {
+        self.0.values_mut()
+    }
+}
+
+impl<K: Ord, V> UniqueBTreeMap<K, V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.0.insert(key, value)
+    }
+}
+
+impl<K, V> Default for UniqueBTreeMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Read-only `BTreeMap` surface (`get`/`iter`/`values`/`contains_key`/…);
+/// mutation stays on the inherent [`UniqueBTreeMap::insert`].
+impl<K, V> std::ops::Deref for UniqueBTreeMap<K, V> {
+    type Target = BTreeMap<K, V>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for UniqueBTreeMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<K, V> IntoIterator for UniqueBTreeMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::btree_map::IntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a UniqueBTreeMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::collections::btree_map::Iter<'a, K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<K: Serialize, V: Serialize> Serialize for UniqueBTreeMap<K, V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de, K, V> Deserialize<'de> for UniqueBTreeMap<K, V>
+where
+    K: Deserialize<'de> + Ord + fmt::Display,
+    V: Deserialize<'de>,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueMapVisitor<K, V>(std::marker::PhantomData<(K, V)>);
+
+        impl<'de, K, V> serde::de::Visitor<'de> for UniqueMapVisitor<K, V>
+        where
+            K: Deserialize<'de> + Ord + fmt::Display,
+            V: Deserialize<'de>,
+        {
+            type Value = UniqueBTreeMap<K, V>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a map with unique keys")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut access: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut map = BTreeMap::new();
+                while let Some((key, value)) = access.next_entry::<K, V>()? {
+                    // Checked before insert so the rejected key is still owned
+                    // here and can name itself in the error.
+                    if map.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate identity map key '{key}' \
+                             (identity maps must have unique keys)"
+                        )));
+                    }
+                    map.insert(key, value);
+                }
+                Ok(UniqueBTreeMap(map))
+            }
+        }
+
+        deserializer.deserialize_map(UniqueMapVisitor(std::marker::PhantomData))
+    }
+}
+
 /// The normalized authored manifest intent (ADR-014 §2). Top-level coverage
 /// is the complete §2.1 classification: the 31 identity-bearing sections are
 /// explicit fields; the 9 non-identity sections (`schema_version`, `name`,
@@ -1046,8 +1181,8 @@ pub struct ProgramManifestIntentV1 {
     pub execution: Option<NormalizedExecutionIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<NormalizedStorageIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub state: BTreeMap<ProgramIdentifier, NormalizedStateIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub state: UniqueBTreeMap<ProgramIdentifier, NormalizedStateIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NormalizedNetworkIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1064,21 +1199,21 @@ pub struct ProgramManifestIntentV1 {
     pub polymorphism: Option<NormalizedPolymorphismIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub targets: Option<NormalizedTargetsIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub platforms: BTreeMap<ProgramIdentifier, NormalizedPlatformArtifactIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub platforms: UniqueBTreeMap<ProgramIdentifier, NormalizedPlatformArtifactIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exports: Option<NormalizedExportsIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub services: BTreeMap<ProgramIdentifier, NormalizedServiceIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub dependencies: BTreeMap<ProgramIdentifier, NormalizedDependencyIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub tool_dependencies: BTreeMap<ProgramIdentifier, NormalizedToolDependencyIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub services: UniqueBTreeMap<ProgramIdentifier, NormalizedServiceIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub dependencies: UniqueBTreeMap<ProgramIdentifier, NormalizedDependencyIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub tool_dependencies: UniqueBTreeMap<ProgramIdentifier, NormalizedToolDependencyIntent>,
     /// Set-like: sorted + deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub contracts: BTreeMap<ProgramIdentifier, NormalizedContractIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub contracts: UniqueBTreeMap<ProgramIdentifier, NormalizedContractIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foundation_requirements: Option<NormalizedFoundationRequirementsIntent>,
     /// Sorted by `name`.
@@ -1088,16 +1223,16 @@ pub struct ProgramManifestIntentV1 {
     pub ingress: Option<NormalizedIngressIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<NormalizedSnapshotIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub secrets: BTreeMap<ProgramIdentifier, NormalizedSecretIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub bindings: BTreeMap<ProgramIdentifier, NormalizedBindingIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub external: BTreeMap<ProgramIdentifier, NormalizedExternalIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub secrets: UniqueBTreeMap<ProgramIdentifier, NormalizedSecretIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub bindings: UniqueBTreeMap<ProgramIdentifier, NormalizedBindingIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub external: UniqueBTreeMap<ProgramIdentifier, NormalizedExternalIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<NormalizedContextIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub generated_bindings: BTreeMap<ProgramIdentifier, NormalizedGeneratedBindingIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub generated_bindings: UniqueBTreeMap<ProgramIdentifier, NormalizedGeneratedBindingIntent>,
 }
 
 /// `[requirements]` — system requirements (declaration semantics, §0).
@@ -1163,8 +1298,8 @@ pub struct NormalizedExecutionIntent {
     /// Omitted when equal to the normalizer default (60).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_timeout: Option<u32>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signals: Option<NormalizedSignalsIntent>,
 }
@@ -1380,12 +1515,12 @@ pub struct NormalizedTargetsIntent {
     /// Omitted when equal to the normalizer default (60).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_timeout: Option<u32>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HttpRequestTarget>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub targets: BTreeMap<ProgramIdentifier, NormalizedTargetIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub targets: UniqueBTreeMap<ProgramIdentifier, NormalizedTargetIntent>,
 }
 
 /// One normalized target (named or canonicalized-structured). Rule-3
@@ -1409,8 +1544,8 @@ pub struct NormalizedTargetIntent {
     /// distinct from the pinned `runtime_version`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub runtime_tools: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub runtime_tools: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_artifacts: Vec<ProgramIdentifier>,
@@ -1428,16 +1563,16 @@ pub struct NormalizedTargetIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub world: Option<WitWorldRef>,
     /// `targets.wasm.config` — component config values.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub config: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub config: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Argv: ORDER-SENSITIVE, preserved as authored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cmd: Vec<OpaqueCommand>,
     /// `targets.source.args` — ORDER-SENSITIVE, preserved as authored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<OpaqueCommand>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<ContainerUserSpec>,
     /// Runtime-class-resolved: source/web ⇒ source-relative; OCI ⇒ absolute
@@ -1521,8 +1656,8 @@ pub struct NormalizedTargetIntent {
     /// Sorted by `alias`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_dependencies: Vec<NormalizedExternalDependencyIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub external_injection: BTreeMap<ProgramIdentifier, NormalizedExternalInjectionIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub external_injection: UniqueBTreeMap<ProgramIdentifier, NormalizedExternalInjectionIntent>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_emulation: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1588,8 +1723,8 @@ pub enum NormalizedCommandIntent {
         args: Vec<OpaqueCommand>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<NormalizedWorkingDir>,
-        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-        env: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+        #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+        env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     },
     /// Backward-compatible string form (auto-detected at execution time).
     Raw(OpaqueCommand),
@@ -1628,12 +1763,12 @@ pub struct NormalizedExternalDependencyIntent {
     pub source_type: ProgramIdentifier,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub injection_bindings: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<ProgramIdentifier, TemplatedString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub injection_bindings: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub credentials: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
 }
 
 /// A typed parameter value (mirrors the dependency grammar's `ParamValue`;
@@ -1672,13 +1807,13 @@ pub struct NormalizedPlatformArtifactIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedExportsIntent {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub cli: BTreeMap<ProgramIdentifier, NormalizedCliExportIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub cli: UniqueBTreeMap<ProgramIdentifier, NormalizedCliExportIntent>,
     /// Alias → path relative to the materialized tool root.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub binaries: BTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub paths: BTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub binaries: UniqueBTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub paths: UniqueBTreeMap<ProgramIdentifier, SourceRelativeFuturePath>,
 }
 
 /// `exports.cli.<name>` — `description` is a Rule-2 exclusion (display-only)
@@ -1707,8 +1842,8 @@ pub struct NormalizedServiceIntent {
     /// Set-like: sorted + deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<ProgramIdentifier>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub env: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>,
     /// Set-like: sorted + deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<ProgramIdentifier>,
@@ -1772,10 +1907,10 @@ pub struct NormalizedDependencyIntent {
     pub capsule: RemoteArtifactRef,
     /// `<name>@<major>` contract reference spelling.
     pub contract: ProgramIdentifier,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<ProgramIdentifier, TemplatedString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedParamValueIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub credentials: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<NormalizedDependencyStateIntent>,
 }
@@ -1799,8 +1934,8 @@ pub struct NormalizedToolDependencyIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<OpaqueAuthoredString>,
     /// Export name → env var name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub bind_env: BTreeMap<ProgramIdentifier, ProgramIdentifier>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub bind_env: UniqueBTreeMap<ProgramIdentifier, ProgramIdentifier>,
 }
 
 /// `[contracts.<name>]`.
@@ -1809,14 +1944,14 @@ pub struct NormalizedToolDependencyIntent {
 pub struct NormalizedContractIntent {
     pub target: ProgramIdentifier,
     pub ready: NormalizedReadyProbeIntent,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub parameters: BTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub credentials: BTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub identity_exports: BTreeMap<ProgramIdentifier, TemplatedString>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub runtime_exports: BTreeMap<ProgramIdentifier, NormalizedRuntimeExportIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub parameters: UniqueBTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub credentials: UniqueBTreeMap<ProgramIdentifier, NormalizedValueSchemaIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub identity_exports: UniqueBTreeMap<ProgramIdentifier, TemplatedString>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub runtime_exports: UniqueBTreeMap<ProgramIdentifier, NormalizedRuntimeExportIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<NormalizedContractStateIntent>,
 }
@@ -1929,11 +2064,12 @@ pub struct NormalizedIngressIntent {
     /// the path prefix, but their authored spelling is a name, not an
     /// origin-form target). `upstream_path_prefix` IS an origin-form
     /// [`HttpRequestTarget`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub routes: BTreeMap<ProgramIdentifier, NormalizedIngressRouteIntent>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub routes: UniqueBTreeMap<ProgramIdentifier, NormalizedIngressRouteIntent>,
     /// Service → env name → authored template value.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env_inject: BTreeMap<ProgramIdentifier, BTreeMap<ProgramIdentifier, OpaqueAuthoredString>>,
+    #[serde(default, skip_serializing_if = "UniqueBTreeMap::is_empty")]
+    pub env_inject:
+        UniqueBTreeMap<ProgramIdentifier, UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2363,26 +2499,53 @@ pub fn verify_program_parent(
 /// Derive the Capsule Program Contract from one pinned capsule root
 /// (ADR-014 §2.0 — the ONLY public derivation path).
 ///
-/// The manifest is read from `<pinned_root>/capsule.toml` inside this
-/// function; there is deliberately no variant taking manifest text and a
-/// source root as independent inputs, so a producer can never pair source A
-/// with manifest B. Both the ordinary v0.3 normalizer (`load_manifest`,
-/// strict validation) and the strict identity gate
-/// (`parse_program_manifest_v03_input`, run inside the adapter) must accept
-/// the manifest, and the source projection A1-gates the full tree before
-/// filtering the resolved control files.
+/// The input is a
+/// [`VerifiedPinnedSourceMaterialization`](crate::program_source_projection::VerifiedPinnedSourceMaterialization),
+/// not a bare path: ADR-014 §1 admits only a pinned source materialization
+/// (immutable archive / `source_materialize` output), and a local working tree
+/// is inadmissible in Phase 0 — admitting one needs its own follow-up ADR.
+///
+/// The manifest is read from `<root>/capsule.toml` inside this function; there
+/// is deliberately no variant taking manifest text and a source root as
+/// independent inputs, so a producer can never pair source A with manifest B.
+///
+/// Ordering follows ADR-014 §1: A1v2 admissibility runs over the ORIGINAL tree
+/// FIRST, in full, before any manifest byte is parsed — the strict adapter's
+/// `SourceExistingPath` checks may only assume "A1 already rejected every
+/// in-tree symlink" because A1 has already run. Everything after that gate
+/// reads from ONE process-private staging copy
+/// ([`StagedCapsuleSource`](crate::program_source_projection::StagedCapsuleSource)):
+/// control files are resolved in it, the manifest is loaded from it, existence
+/// checks resolve against it, and the digest is taken over it with exactly the
+/// resolved control files removed. Manifest intent and source digest therefore
+/// provably come from one tree state that no outside process can mutate
+/// mid-derivation.
+///
+/// Both the ordinary v0.3 normalizer (`load_manifest`, strict validation) and
+/// the strict identity gate (`parse_program_manifest_v03_input`, run inside the
+/// adapter) must accept the manifest.
 pub fn derive_capsule_program_contract(
-    pinned_root: &Path,
+    pinned: &VerifiedPinnedSourceMaterialization,
 ) -> Result<CapsuleProgramContractV1, CapsuleProgramError> {
-    let manifest_path = pinned_root.join("capsule.toml");
-    let loaded = crate::contract::manifest::load_manifest(&manifest_path)
-        .map_err(|error| CapsuleProgramError::ManifestLoad(error.to_string()))?;
+    // Steps 1-3: admissibility over the original tree, staging copy, control
+    // files resolved inside the copy.
+    let staged = StagedCapsuleSource::stage(pinned)?;
+
+    // The manifest comes from the staging copy, so the bytes parsed here are
+    // the bytes the digest below was taken over.
+    let loaded =
+        crate::contract::manifest::load_manifest(staged.manifest_path()).map_err(|error| {
+            staged.attribute_to_origin(CapsuleProgramError::ManifestLoad(error.to_string()))
+        })?;
     let manifest_intent = crate::contract::program_manifest_input::program_intent_from_v03(
         &loaded.model,
         &loaded.raw_text,
-        pinned_root,
+        staged.root(),
     )?;
-    let source = crate::contract::program_source_projection::project_program_source(pinned_root)?;
+
+    // Steps 4-6: exclude exactly the resolved control files, then hash.
+    let source = staged.into_projected()?.source_contract()?;
+
     let contract = CapsuleProgramContractV1 {
         schema: CAPSULE_PROGRAM_V1_SCHEMA.to_string(),
         source,
@@ -2402,7 +2565,7 @@ pub fn derive_capsule_program_contract(
 #[cfg(test)]
 pub(in crate::contract) fn test_capsule_program_contract(seed: u8) -> CapsuleProgramContractV1 {
     let identifier = |value: &str| ProgramIdentifier::parse(value).expect("valid identifier");
-    let mut state = BTreeMap::new();
+    let mut state = UniqueBTreeMap::new();
     state.insert(
         identifier("scratch"),
         NormalizedStateIntent {
@@ -2439,22 +2602,22 @@ pub(in crate::contract) fn test_capsule_program_contract(seed: u8) -> CapsulePro
             isolation: None,
             polymorphism: None,
             targets: None,
-            platforms: BTreeMap::new(),
+            platforms: UniqueBTreeMap::new(),
             exports: None,
-            services: BTreeMap::new(),
-            dependencies: BTreeMap::new(),
-            tool_dependencies: BTreeMap::new(),
+            services: UniqueBTreeMap::new(),
+            dependencies: UniqueBTreeMap::new(),
+            tool_dependencies: UniqueBTreeMap::new(),
             required_env: Vec::new(),
-            contracts: BTreeMap::new(),
+            contracts: UniqueBTreeMap::new(),
             foundation_requirements: None,
             host_capabilities: Vec::new(),
             ingress: None,
             snapshot: None,
-            secrets: BTreeMap::new(),
-            bindings: BTreeMap::new(),
-            external: BTreeMap::new(),
+            secrets: UniqueBTreeMap::new(),
+            bindings: UniqueBTreeMap::new(),
+            external: UniqueBTreeMap::new(),
             context: None,
-            generated_bindings: BTreeMap::new(),
+            generated_bindings: UniqueBTreeMap::new(),
         },
     }
 }
@@ -2500,14 +2663,22 @@ image = "ghcr.io/example/app:1"
 port = 8080
 "#;
 
+    /// The Phase-0 minting path: the test asserts the tempdir IS a pinned
+    /// materialization, exactly as a caller holding `source_materialize` output
+    /// would.
+    fn pinned(root: &std::path::Path) -> VerifiedPinnedSourceMaterialization {
+        VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
+            .expect("pinned materialization")
+    }
+
     #[test]
     fn derive_entrypoint_is_deterministic_and_lock_file_immune() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
         std::fs::write(root.path().join("app.py"), b"print('hi')\n").expect("source");
 
-        let first = derive_capsule_program_contract(root.path()).expect("derive");
-        let second = derive_capsule_program_contract(root.path()).expect("derive again");
+        let first = derive_capsule_program_contract(&pinned(root.path())).expect("derive");
+        let second = derive_capsule_program_contract(&pinned(root.path())).expect("derive again");
         assert_eq!(first, second);
         let baseline = first.compute_capsule_program_id().expect("id");
 
@@ -2521,7 +2692,8 @@ port = 8080
             ),
         )
         .expect("lock");
-        let with_lock = derive_capsule_program_contract(root.path()).expect("derive with lock");
+        let with_lock =
+            derive_capsule_program_contract(&pinned(root.path())).expect("derive with lock");
         assert_eq!(
             with_lock.compute_capsule_program_id().expect("id"),
             baseline
@@ -2529,25 +2701,63 @@ port = 8080
 
         // Source bytes DO reach the preimage.
         std::fs::write(root.path().join("app.py"), b"print('bye')\n").expect("mutate source");
-        let mutated = derive_capsule_program_contract(root.path()).expect("derive mutated");
+        let mutated =
+            derive_capsule_program_contract(&pinned(root.path())).expect("derive mutated");
         assert_ne!(mutated.compute_capsule_program_id().expect("id"), baseline);
     }
 
     #[test]
     fn derive_entrypoint_rejects_lock_coexistence_and_missing_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
-        assert!(matches!(
-            derive_capsule_program_contract(root.path()),
-            Err(CapsuleProgramError::ManifestLoad(_))
-        ));
+        // The manifest is verified as a control file inside the staging copy
+        // (ADR-014 §1 step 2), which runs before any manifest byte is parsed.
+        let error = derive_capsule_program_contract(&pinned(root.path())).unwrap_err();
+        let CapsuleProgramError::SourceProjection(message) = &error else {
+            panic!("expected SourceProjection, got {error:?}");
+        };
+        assert!(message.contains("does not exist"), "{message}");
 
         std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
         std::fs::write(root.path().join("capsule.lock"), b"{}").expect("canonical lock");
         std::fs::write(root.path().join("ato.lock.json"), b"{}").expect("alias lock");
         assert!(matches!(
-            derive_capsule_program_contract(root.path()),
+            derive_capsule_program_contract(&pinned(root.path())),
             Err(CapsuleProgramError::SourceProjection(_))
         ));
+    }
+
+    /// A malformed manifest fails at load time, and the message names the
+    /// caller's root — never the process-private staging copy it was read from.
+    #[test]
+    fn derive_entrypoint_reports_manifest_errors_against_the_pinned_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("capsule.toml"), b"not = [valid").expect("manifest");
+
+        let error = derive_capsule_program_contract(&pinned(root.path())).unwrap_err();
+        let CapsuleProgramError::ManifestLoad(message) = &error else {
+            panic!("expected ManifestLoad, got {error:?}");
+        };
+        assert!(
+            message.contains(&root.path().display().to_string()),
+            "{message}"
+        );
+    }
+
+    /// A1v2 admissibility runs over the ORIGINAL tree before the manifest is
+    /// parsed (ADR-014 §1 step 1): an in-tree symlink is rejected even though
+    /// the manifest itself is perfectly valid.
+    #[cfg(unix)]
+    #[test]
+    fn derive_entrypoint_gates_admissibility_before_parsing_the_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
+        std::os::unix::fs::symlink("capsule.toml", root.path().join("link.toml")).expect("symlink");
+
+        let error = derive_capsule_program_contract(&pinned(root.path())).unwrap_err();
+        let CapsuleProgramError::SourceProjection(message) = &error else {
+            panic!("expected SourceProjection, got {error:?}");
+        };
+        assert!(message.contains("A1v2 admissibility"), "{message}");
     }
 
     // ── id + envelope ────────────────────────────────────────────────────
@@ -2808,6 +3018,135 @@ port = 8080
         assert_eq!(
             contract.validate(),
             Err(CapsuleProgramError::NonCanonicalList("required_env"))
+        );
+    }
+
+    // ── duplicate identity map keys ──────────────────────────────────────
+
+    /// A contract document whose `manifest_intent` carries `body` in addition
+    /// to the two mandatory intent fields. Duplicate-key vectors must be fed
+    /// as raw TEXT: `serde_json::Value` is itself last-wins and would collapse
+    /// the duplicate before the typed layer ever saw it.
+    fn contract_json(body: &str) -> String {
+        format!(
+            r#"{{
+                "schema": "ato.capsule-program/v1",
+                "source": {{
+                    "digest": "sha256:{digest}",
+                    "projection_schema": "ato.capsule-program-source-projection/v1"
+                }},
+                "manifest_intent": {{
+                    "schema": "ato.capsule-program-manifest-intent/v1",
+                    "capsule_type": "web-app"{body}
+                }}
+            }}"#,
+            digest = "07".repeat(32)
+        )
+    }
+
+    #[test]
+    fn duplicate_top_level_identity_map_key_fails_closed() {
+        let state = |first: &str, second: &str| {
+            format!(
+                r#", "state": {{
+                    "{first}": {{ "kind": "filesystem", "durability": "ephemeral",
+                                  "purpose": "run scratch" }},
+                    "{second}": {{ "kind": "database", "durability": "persistent",
+                                   "purpose": "app data" }}
+                }}"#
+            )
+        };
+
+        let unique = serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&state(
+            "scratch", "data",
+        )))
+        .expect("distinct keys parse");
+        assert_eq!(unique.manifest_intent.state.len(), 2);
+
+        let error = serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&state(
+            "scratch", "scratch",
+        )))
+        .expect_err("a repeated identity map key must not last-wins");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate identity map key 'scratch'"),
+            "error must name the duplicated key, got: {error}"
+        );
+    }
+
+    #[test]
+    fn duplicate_nested_identity_map_key_fails_closed() {
+        // targets.<label>.env — one level below a map that is itself keyed.
+        let target_env = |first: &str, second: &str| {
+            format!(
+                r#", "targets": {{ "targets": {{ "app": {{
+                    "env": {{ "{first}": "8080", "{second}": "9090" }} }} }} }}"#
+            )
+        };
+        serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&target_env(
+            "PORT", "HOST",
+        )))
+        .expect("distinct nested keys parse");
+        let error = serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&target_env(
+            "PORT", "PORT",
+        )))
+        .expect_err("a repeated nested map key must not last-wins");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate identity map key 'PORT'"),
+            "error must name the duplicated nested key, got: {error}"
+        );
+
+        // ingress.env_inject — a map of maps: the INNER map is checked too.
+        let env_inject = |first: &str, second: &str| {
+            format!(
+                r#", "ingress": {{ "mode": "path", "env_inject": {{
+                    "web": {{ "{first}": "a", "{second}": "b" }} }} }}"#
+            )
+        };
+        serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&env_inject("A", "B")))
+            .expect("distinct inner keys parse");
+        let error =
+            serde_json::from_str::<CapsuleProgramContractV1>(&contract_json(&env_inject("A", "A")))
+                .expect_err("a repeated doubly-nested map key must not last-wins");
+        assert!(
+            error.to_string().contains("duplicate identity map key 'A'"),
+            "error must name the duplicated inner key, got: {error}"
+        );
+    }
+
+    #[test]
+    fn unique_map_serializes_exactly_as_a_btree_map() {
+        let entry = |name: &str, value: &str| {
+            (
+                ProgramIdentifier::parse(name).unwrap(),
+                OpaqueAuthoredString::parse(value).unwrap(),
+            )
+        };
+        let entries = [entry("b", "2"), entry("a", "1")];
+        let unique: UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString> =
+            entries.iter().cloned().collect();
+        let plain: BTreeMap<ProgramIdentifier, OpaqueAuthoredString> =
+            entries.iter().cloned().collect();
+
+        assert_eq!(
+            serde_jcs::to_vec(&unique).unwrap(),
+            serde_jcs::to_vec(&plain).unwrap(),
+            "the wrapper must not change the canonical preimage"
+        );
+        assert_eq!(
+            serde_json::to_string(&unique).unwrap(),
+            r#"{"a":"1","b":"2"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>>(
+                r#"{"a":"1","b":"2"}"#
+            )
+            .unwrap(),
+            unique,
+            "a duplicate-free map still round-trips"
         );
     }
 

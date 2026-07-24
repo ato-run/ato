@@ -65,7 +65,7 @@ use crate::capsule_program_contract::{
     NormalizedTransparencyIntent, NormalizedValueSchemaIntent, OpaqueAuthoredString, OpaqueCommand,
     ProbePortReference, ProgramIdentifier, ProgramManifestIntentV1, RemoteArtifactRef,
     Sha256DigestPin, SourceExistingPath, SourceRelativeFuturePath, SourceRelativePath,
-    TcpProbeTarget, WitWorldRef,
+    TcpProbeTarget, UniqueBTreeMap, WitWorldRef,
 };
 use crate::execution_contract::GuestPath;
 use crate::types::{
@@ -1370,7 +1370,7 @@ fn glob_set(
 fn env_map(
     field: &'static str,
     values: &HashMap<String, String>,
-) -> Result<BTreeMap<ProgramIdentifier, OpaqueAuthoredString>, CapsuleProgramError> {
+) -> Result<UniqueBTreeMap<ProgramIdentifier, OpaqueAuthoredString>, CapsuleProgramError> {
     values
         .iter()
         .map(|(name, value)| Ok((identifier(field, name)?, authored(field, value)?)))
@@ -1536,7 +1536,7 @@ pub fn program_intent_from_v03(
                     Ok((identifier("services", name)?, service_intent(service)?))
                 })
                 .collect::<Result<_, CapsuleProgramError>>()?,
-            None => BTreeMap::new(),
+            None => UniqueBTreeMap::new(),
         },
         dependencies: model
             .dependencies
@@ -1940,7 +1940,7 @@ fn targets_intent(
     targets: &TargetsConfig,
     selected_root: &Path,
 ) -> Result<Option<NormalizedTargetsIntent>, CapsuleProgramError> {
-    let mut map: BTreeMap<ProgramIdentifier, NormalizedTargetIntent> = BTreeMap::new();
+    let mut map: UniqueBTreeMap<ProgramIdentifier, NormalizedTargetIntent> = UniqueBTreeMap::new();
     for (label, named) in &targets.named {
         map.insert(
             identifier("targets", label)?,
@@ -2002,17 +2002,17 @@ fn empty_target_intent() -> NormalizedTargetIntent {
         language: None,
         runtime_version: None,
         version: None,
-        runtime_tools: BTreeMap::new(),
+        runtime_tools: UniqueBTreeMap::new(),
         tool_artifacts: Vec::new(),
         entrypoint: None,
         component: None,
         image: None,
         digest: None,
         world: None,
-        config: BTreeMap::new(),
+        config: UniqueBTreeMap::new(),
         cmd: Vec::new(),
         args: Vec::new(),
-        env: BTreeMap::new(),
+        env: UniqueBTreeMap::new(),
         user: None,
         working_dir: None,
         port: None,
@@ -2046,7 +2046,7 @@ fn empty_target_intent() -> NormalizedTargetIntent {
         readiness_probe: None,
         package_dependencies: Vec::new(),
         external_dependencies: Vec::new(),
-        external_injection: BTreeMap::new(),
+        external_injection: UniqueBTreeMap::new(),
         allow_emulation: false,
         run_once: false,
     }
@@ -2712,7 +2712,7 @@ fn service_intent(service: &ServiceSpec) -> Result<NormalizedServiceIntent, Caps
         )?,
         env: match &service.env {
             Some(env) => env_map("services.*.env", env)?,
-            None => BTreeMap::new(),
+            None => UniqueBTreeMap::new(),
         },
         secrets: identifier_set(
             "services.*.secrets",
@@ -3013,7 +3013,7 @@ fn ingress_intent(ingress: &IngressConfig) -> Result<NormalizedIngressIntent, Ca
                                 authored("ingress.env_inject", value)?,
                             ))
                         })
-                        .collect::<Result<BTreeMap<_, _>, CapsuleProgramError>>()?,
+                        .collect::<Result<UniqueBTreeMap<_, _>, CapsuleProgramError>>()?,
                 ))
             })
             .collect::<Result<_, CapsuleProgramError>>()?,

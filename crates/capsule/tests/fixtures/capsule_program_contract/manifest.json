@@ -73,6 +73,22 @@
       "notes": "a blake3-spelled ProgramSourceDigest is rejected on typed parse: the A1 source tree hash is sha256-only"
     },
     {
+      "name": "invalid-duplicate-state-key",
+      "file": "contract/vectors/invalid-duplicate-state-key.json",
+      "kind": "contract",
+      "expect": "error",
+      "error_substring": "duplicate identity map key 'scratch'",
+      "notes": "a duplicate key in a top-level identity map (state) is rejected by the unique-map deserializer: BTreeMap last-wins would give two byte-distinct documents one id"
+    },
+    {
+      "name": "invalid-duplicate-nested-env-key",
+      "file": "contract/vectors/invalid-duplicate-nested-env-key.json",
+      "kind": "contract",
+      "expect": "error",
+      "error_substring": "duplicate identity map key 'PORT'",
+      "notes": "a duplicate key in a NESTED identity map (targets.<label>.env) is rejected too — the fail-closed rule is not only top level"
+    },
+    {
       "name": "envelope-non-identity-a",
       "file": "contract/vectors/envelope-non-identity-a.json",
       "kind": "envelope",
