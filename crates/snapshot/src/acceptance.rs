@@ -119,35 +119,57 @@ pub struct DisposableSessionHandle {
 /// deliberately **no** production constructor, so production callers cannot build
 /// it yet — the running-capture path is closed until #1090 lands.
 ///
+/// The proof also **binds** the verified [`ExecutionId`] it was proven against
+/// (its single, private field). `accept` reads that identity to seed the receipt
+/// and to enforce, per candidate, that every captured candidate belongs to the
+/// *same* Execution Identity the proof was obtained for — so a proof analyzed
+/// against Execution Contract A can never accept a candidate of Identity B, and a
+/// candidate cannot drift identity across retries.
+///
 /// ```compile_fail
 /// use snapshot::acceptance::VerifiedRunningSnapshotEligibility;
-/// // The proof has no public constructor: a caller cannot mint eligibility.
-/// let _proof = VerifiedRunningSnapshotEligibility { _private: () };
+/// // The proof has no public constructor and its `execution_id` field is
+/// // private: a caller outside the module cannot mint eligibility with a struct
+/// // literal (E0451), whatever value it tries to supply.
+/// let _proof = VerifiedRunningSnapshotEligibility {
+///     execution_id: unreachable!(),
+/// };
 /// ```
 #[derive(Debug)]
 pub struct VerifiedRunningSnapshotEligibility {
-    _private: (),
+    /// The verified Execution Identity this proof was minted against. Private, so
+    /// only a sanctioned constructor (test stand-ins now; #1090 later) can set it.
+    execution_id: ExecutionId,
 }
 
 impl VerifiedRunningSnapshotEligibility {
-    /// TEST-ONLY: mint a proof unconditionally, standing in for #1090's analysis
-    /// when exercising the accept path.
+    /// The verified Execution Identity this eligibility is bound to. Read by
+    /// [`RunningSnapshotAcceptance::accept`] to seed the receipt and to reject any
+    /// candidate whose own `execution_id` differs from it.
+    fn execution_id(&self) -> &ExecutionId {
+        &self.execution_id
+    }
+
+    /// TEST-ONLY: mint a proof unconditionally for the given verified Execution
+    /// Identity, standing in for #1090's analysis when exercising the accept path.
     #[cfg(test)]
-    pub(crate) fn for_test() -> Self {
-        Self { _private: () }
+    pub(crate) fn for_test(execution_id: ExecutionId) -> Self {
+        Self { execution_id }
     }
 
     /// TEST-ONLY stand-in for the #1090 verified-Execution-Contract analysis that
     /// will be the *only* real constructor. Fails **closed** when the live
-    /// workload requires External State (RFC §8.3); otherwise mints the proof.
+    /// workload requires External State (RFC §8.3); otherwise mints the proof
+    /// bound to the verified Execution Identity.
     #[cfg(test)]
     pub(crate) fn analyze_for_test(
         external_state_required_by_live_workload: bool,
+        execution_id: ExecutionId,
     ) -> Result<Self, AcceptanceFailure> {
         if external_state_required_by_live_workload {
             return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
         }
-        Ok(Self { _private: () })
+        Ok(Self { execution_id })
     }
 }
 
@@ -253,6 +275,9 @@ pub enum AcceptanceAttemptOutcome {
     CandidateValidationFailed,
     /// The candidate's `capture_policy` is not `running`.
     UnsupportedCapturePolicy,
+    /// The candidate's Execution Identity did not match the eligibility proof's
+    /// verified Execution Identity: rejected before any create/restore/execute.
+    ExecutionIdentityMismatch,
     /// Creating the disposable Session failed.
     CreateSessionFailed,
     /// Restoring the candidate into the Session failed.
@@ -313,8 +338,10 @@ pub struct AcceptanceReceiptV1 {
     pub verifier_identity: String,
     /// Verifier version (this crate's version).
     pub verifier_version: String,
-    /// The `execution_id` the verified candidate is subordinate to. `None` when no
-    /// candidate was ever captured. Typed, so a malformed id fails closed.
+    /// The verified Execution Identity this run is bound to, seeded from the
+    /// eligibility proof at the start of the run (not from the first captured
+    /// candidate) so it cannot drift across retries. `None` only on a legacy /
+    /// hand-built receipt. Typed, so a malformed id fails closed.
     pub execution_id: Option<ExecutionId>,
     pub capture_policy: CapturePolicyV1,
     pub maximum_attempts: u32,
@@ -331,6 +358,118 @@ pub struct AcceptanceReceiptV1 {
     pub secret_scan_attestation: Option<SecretScanAttestationV1>,
 }
 
+/// Why a deserialized [`AcceptanceReceiptV1`] failed its consumer-boundary
+/// integrity check. Every variant means the receipt is untrustworthy and must be
+/// rejected rather than acted on.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum AcceptanceReceiptValidationError {
+    /// `schema` is not [`ACCEPTANCE_RECEIPT_V1_SCHEMA`].
+    #[error("acceptance receipt schema is not the supported v1 schema")]
+    UnsupportedSchema,
+    /// `verifier_identity` is not a supported verifier identity.
+    #[error("acceptance receipt was produced by an unsupported / untrusted verifier")]
+    UntrustedVerifier,
+    /// `capture_policy` is not `running` (this acceptance path is running-only).
+    #[error("acceptance receipt capture policy is not `running`")]
+    UnsupportedCapturePolicy,
+    /// The attempt numbers are not the contiguous sequence `1..=attempts.len()`.
+    #[error("acceptance receipt attempt numbers are not monotonic from 1")]
+    NonMonotonicAttempts,
+    /// More attempts are recorded than `maximum_attempts` permits.
+    #[error("acceptance receipt records more attempts than maximum_attempts")]
+    TooManyAttempts,
+    /// An accepted receipt is missing a field the accept path always fills.
+    #[error("accepted receipt is missing required field: {0}")]
+    AcceptedMissingField(&'static str),
+    /// An accepted receipt's final attempt is not itself `Accepted`.
+    #[error("accepted receipt's final attempt outcome is not `accepted`")]
+    AcceptedFinalAttemptNotAccepted,
+    /// `accepted_snapshot_id` does not equal the final attempt's candidate id.
+    #[error("accepted_snapshot_id does not match the final attempt's candidate snapshot id")]
+    AcceptedSnapshotIdMismatch,
+    /// A rejected receipt carries an accepted-only field.
+    #[error("rejected receipt carries an accepted-only field: {0}")]
+    RejectedCarriesAcceptedField(&'static str),
+}
+
+impl AcceptanceReceiptV1 {
+    /// The **mandatory consumer boundary** for a deserialized receipt. Typed
+    /// fields already reject unknown outcome strings and malformed ids at
+    /// deserialize, but `schema` / `verifier_identity` / `verifier_version` are
+    /// free `String`s and the cross-field invariants (accepted ⇒ snapshot id +
+    /// attestations + final-attempt agreement; rejected ⇒ none of those; attempts
+    /// monotonic and bounded) are not expressible in the type. A consumer MUST
+    /// call `validate` before trusting a receipt it did not itself produce; a
+    /// receipt with an attacker-chosen schema, an untrusted verifier, or an
+    /// inconsistent accept/reject shape fails closed here.
+    pub fn validate(&self) -> Result<(), AcceptanceReceiptValidationError> {
+        use AcceptanceReceiptValidationError as E;
+
+        if self.schema != ACCEPTANCE_RECEIPT_V1_SCHEMA {
+            return Err(E::UnsupportedSchema);
+        }
+        if self.verifier_identity != DISPOSABLE_RESTORE_VERIFIER_IDENTITY {
+            return Err(E::UntrustedVerifier);
+        }
+        if self.capture_policy != CapturePolicyV1::Running {
+            return Err(E::UnsupportedCapturePolicy);
+        }
+
+        // Attempt numbers are the contiguous sequence 1..=len, and never exceed
+        // the declared bound.
+        if self.attempts.len() as u64 > u64::from(self.maximum_attempts) {
+            return Err(E::TooManyAttempts);
+        }
+        for (index, attempt) in self.attempts.iter().enumerate() {
+            if attempt.attempt != index as u32 + 1 {
+                return Err(E::NonMonotonicAttempts);
+            }
+        }
+
+        match self.outcome {
+            AcceptanceOutcome::Accepted => {
+                if self.execution_id.is_none() {
+                    return Err(E::AcceptedMissingField("execution_id"));
+                }
+                let accepted_id = self
+                    .accepted_snapshot_id
+                    .as_ref()
+                    .ok_or(E::AcceptedMissingField("accepted_snapshot_id"))?;
+                if self.sanitization_attestation.is_none() {
+                    return Err(E::AcceptedMissingField("sanitization_attestation"));
+                }
+                if self.secret_scan_attestation.is_none() {
+                    return Err(E::AcceptedMissingField("secret_scan_attestation"));
+                }
+                let final_attempt = self
+                    .attempts
+                    .last()
+                    .ok_or(E::AcceptedMissingField("attempts"))?;
+                if final_attempt.outcome != AcceptanceAttemptOutcome::Accepted {
+                    return Err(E::AcceptedFinalAttemptNotAccepted);
+                }
+                match &final_attempt.candidate_snapshot_id {
+                    Some(candidate_id) if candidate_id == accepted_id => {}
+                    _ => return Err(E::AcceptedSnapshotIdMismatch),
+                }
+            }
+            AcceptanceOutcome::Rejected => {
+                if self.accepted_snapshot_id.is_some() {
+                    return Err(E::RejectedCarriesAcceptedField("accepted_snapshot_id"));
+                }
+                if self.sanitization_attestation.is_some() {
+                    return Err(E::RejectedCarriesAcceptedField("sanitization_attestation"));
+                }
+                if self.secret_scan_attestation.is_some() {
+                    return Err(E::RejectedCarriesAcceptedField("secret_scan_attestation"));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// A fail-closed rejection reason. Every variant refuses to accept: a candidate
 /// that cannot be proven acceptable never yields an accepted
 /// [`SnapshotCatalogRecord`]. Unlike a hard error, a rejection is still receipted
@@ -344,6 +483,12 @@ pub enum AcceptanceFailure {
     /// The candidate's own `capture_policy` is not `running`.
     #[error("unsupported capture policy: this acceptance path accepts `running` candidates only")]
     UnsupportedCapturePolicy,
+    /// A captured candidate's Execution Identity did not match the eligibility
+    /// proof's verified Execution Identity. Fail closed before any
+    /// create/restore/execute so a proof for Identity A can never accept a
+    /// candidate of Identity B (RFC §8.3).
+    #[error("Snapshot candidate Execution Identity does not match the verified eligibility proof")]
+    ExecutionIdentityMismatch,
     /// The acceptance configuration is malformed.
     #[error("invalid Snapshot acceptance configuration: {0}")]
     InvalidConfig(&'static str),
@@ -577,10 +722,13 @@ impl RunningSnapshotAcceptance {
     /// 1. Holding `eligibility` is itself the External-State gate (RFC §8.3).
     /// 2. Configuration is validated.
     /// 3. Per attempt (bounded by `maximum_attempts` **and** the absolute deadline):
-    ///    before and after each phase, honor cancellation and the deadline; capture
-    ///    an immutable candidate; reject any candidate whose own `capture_policy`
-    ///    is not `running`; create a disposable Session; restore the candidate;
-    ///    run the exact argv with a timeout truncated to the remaining budget;
+    ///    before and after each phase, honor cancellation and the deadline (no
+    ///    create, restore, or execute is started once the deadline has passed);
+    ///    capture an immutable candidate; reject any candidate whose own
+    ///    `capture_policy` is not `running` or whose Execution Identity differs
+    ///    from the eligibility proof's; create a disposable Session; restore the
+    ///    candidate; run the exact argv with a timeout truncated to the remaining
+    ///    budget;
     ///    accept on and only on exit `0` within the deadline; and **always** tear
     ///    the Session down, terminating its process tree on every non-accepted
     ///    outcome that reached command execution.
@@ -595,9 +743,15 @@ impl RunningSnapshotAcceptance {
         // can only be minted by the (future #1090) verified-Execution-Contract
         // analysis, never by a caller-supplied bool, so a Capsule whose live
         // workload requires External State can never reach this path (RFC §8.3).
-        let VerifiedRunningSnapshotEligibility { .. } = eligibility;
+        // The proof also carries the *verified Execution Identity*: every candidate
+        // must match it, and the receipt is bound to it up front.
+        let verified_execution_id = eligibility.execution_id().clone();
 
         let mut receipt = new_receipt(config);
+        // Bind the receipt to the eligibility proof's Execution Identity at the
+        // START — not from the first captured candidate — so the accepted-record /
+        // receipt identity cannot drift across retries.
+        receipt.execution_id = Some(verified_execution_id.clone());
 
         if let Err(failure) = validate_config(config) {
             return Ok(reject(receipt, failure));
@@ -632,10 +786,6 @@ impl RunningSnapshotAcceptance {
                     continue;
                 }
             };
-            if receipt.execution_id.is_none() {
-                receipt.execution_id = Some(candidate.manifest.execution_id.clone());
-            }
-
             if candidate.manifest.validate().is_err() {
                 receipt.attempts.push(attempt_receipt(
                     attempt,
@@ -679,6 +829,24 @@ impl RunningSnapshotAcceptance {
                     ));
                 }
             };
+
+            // Bind EVERY candidate to the eligibility proof's verified Execution
+            // Identity, BEFORE creating / restoring / executing anything. A proof
+            // analyzed against Execution Contract A must never accept a candidate of
+            // Identity B, and across retries the candidate identity must not drift
+            // from the receipted one. Fail CLOSED: no create, no restore, no
+            // execute — just a typed rejection receipt.
+            if candidate.manifest.execution_id != verified_execution_id {
+                receipt.attempts.push(attempt_receipt(
+                    attempt,
+                    Some(snapshot_id.clone()),
+                    AcceptanceAttemptOutcome::ExecutionIdentityMismatch,
+                ));
+                return Ok(reject(
+                    receipt,
+                    AcceptanceFailure::ExecutionIdentityMismatch,
+                ));
+            }
 
             // After capture, before creating a Session: honor cancellation and the
             // deadline so no disposable Session is ever created past the budget.
@@ -725,12 +893,22 @@ impl RunningSnapshotAcceptance {
             let (accepted, terminate_required, outcome) = if budget.is_cancelled() {
                 // Cancelled after Session creation, before restore: no process tree.
                 (false, false, AcceptanceAttemptOutcome::Cancelled)
+            } else if budget.is_expired() {
+                // Deadline exceeded DURING create, before restore: do not start a
+                // restore past the budget. Teardown still runs (destroy), but no
+                // new phase begins.
+                (false, false, AcceptanceAttemptOutcome::DeadlineExceeded)
             } else if guard.restore_candidate(&candidate, &budget).is_err() {
                 // Restore failed: the command never ran, so no process tree exists.
                 (false, false, AcceptanceAttemptOutcome::RestoreFailed)
             } else if budget.is_cancelled() {
                 // Cancelled after restore, before execute: the command MUST NOT run.
                 (false, false, AcceptanceAttemptOutcome::Cancelled)
+            } else if budget.is_expired() {
+                // Deadline exceeded DURING restore, before execute: do not start the
+                // command past the budget (it would otherwise get a 0-length
+                // timeout). Teardown still runs.
+                (false, false, AcceptanceAttemptOutcome::DeadlineExceeded)
             } else {
                 // Truncate the per-attempt timeout to the remaining deadline so the
                 // total run never overshoots `total_deadline`.
@@ -900,6 +1078,12 @@ mod tests {
         ExecutionId::new(format!("blake3:{}", "a".repeat(64))).expect("valid execution id")
     }
 
+    /// A second, distinct verified Execution Identity (identity "B"), used to
+    /// exercise the per-candidate identity-binding gate.
+    fn exec_id_b() -> ExecutionId {
+        ExecutionId::new(format!("blake3:{}", "b".repeat(64))).expect("valid execution id")
+    }
+
     /// A controllable monotonic clock: `now()` is `base + elapsed`, where
     /// `elapsed` is advanced explicitly by tests (or by the fake lifecycle sharing
     /// a clone). No wall-clock sleeps.
@@ -931,6 +1115,14 @@ mod tests {
 
     fn running_manifest() -> SnapshotManifestV1 {
         manifest_with_policy(CapturePolicyV1::Running)
+    }
+
+    /// A valid `running` manifest whose Execution Identity is `execution_id`.
+    fn manifest_with_execution_id(execution_id: ExecutionId) -> SnapshotManifestV1 {
+        SnapshotManifestV1 {
+            execution_id,
+            ..running_manifest()
+        }
     }
 
     fn manifest_with_policy(capture_policy: CapturePolicyV1) -> SnapshotManifestV1 {
@@ -979,6 +1171,10 @@ mod tests {
     /// without sleeping.
     struct FakeLifecycle {
         manifest: SnapshotManifestV1,
+        /// When non-empty, the candidate captured on attempt N is
+        /// `manifests_per_attempt[N-1]` instead of `manifest` — lets a test drift
+        /// the candidate's Execution Identity across retries.
+        manifests_per_attempt: Vec<SnapshotManifestV1>,
         outcomes: Vec<VerificationOutcome>,
         captures: u32,
         creates: u32,
@@ -993,6 +1189,8 @@ mod tests {
         destroy_fails: bool,
         clock: Option<FakeClock>,
         advance_on_capture: Duration,
+        advance_on_create: Duration,
+        advance_on_restore: Duration,
         advance_on_execute: Duration,
         cancel_on_execute: Option<AcceptanceCancellation>,
         cancel_on_restore: Option<AcceptanceCancellation>,
@@ -1003,6 +1201,7 @@ mod tests {
         fn new(outcomes: Vec<VerificationOutcome>) -> Self {
             Self {
                 manifest: running_manifest(),
+                manifests_per_attempt: Vec::new(),
                 outcomes,
                 captures: 0,
                 creates: 0,
@@ -1017,6 +1216,8 @@ mod tests {
                 destroy_fails: false,
                 clock: None,
                 advance_on_capture: Duration::ZERO,
+                advance_on_create: Duration::ZERO,
+                advance_on_restore: Duration::ZERO,
                 advance_on_execute: Duration::ZERO,
                 cancel_on_execute: None,
                 cancel_on_restore: None,
@@ -1034,16 +1235,19 @@ mod tests {
     impl DisposableAcceptanceLifecycle for FakeLifecycle {
         fn capture_candidate(
             &mut self,
-            _attempt: u32,
+            attempt: u32,
             _budget: &AcceptanceBudget,
         ) -> Result<CandidateSnapshot, String> {
             self.captures += 1;
             if let Some(clock) = &self.clock {
                 clock.advance(self.advance_on_capture);
             }
-            Ok(CandidateSnapshot {
-                manifest: self.manifest.clone(),
-            })
+            let manifest = if self.manifests_per_attempt.is_empty() {
+                self.manifest.clone()
+            } else {
+                self.manifests_per_attempt[(attempt - 1) as usize].clone()
+            };
+            Ok(CandidateSnapshot { manifest })
         }
 
         fn create_disposable_session(
@@ -1052,6 +1256,9 @@ mod tests {
             _budget: &AcceptanceBudget,
         ) -> Result<DisposableSessionHandle, String> {
             self.creates += 1;
+            if let Some(clock) = &self.clock {
+                clock.advance(self.advance_on_create);
+            }
             Ok(DisposableSessionHandle {
                 opaque_id: format!("disposable-session-{}", self.captures),
             })
@@ -1064,6 +1271,9 @@ mod tests {
             _budget: &AcceptanceBudget,
         ) -> Result<(), String> {
             self.restores += 1;
+            if let Some(clock) = &self.clock {
+                clock.advance(self.advance_on_restore);
+            }
             if let Some(cancellation) = &self.cancel_on_restore {
                 cancellation.cancel();
             }
@@ -1135,7 +1345,7 @@ mod tests {
     }
 
     fn proof() -> VerifiedRunningSnapshotEligibility {
-        VerifiedRunningSnapshotEligibility::for_test()
+        VerifiedRunningSnapshotEligibility::for_test(exec_id())
     }
 
     /// Run acceptance with a real system clock and no cancellation (the common case).
@@ -1553,8 +1763,8 @@ mod tests {
     fn acceptance_requires_proof_carrying_eligibility() {
         // The proof mints (in tests) via the #1090 analysis stand-in; the accept
         // signature takes the proof by value — there is no bool to pass.
-        let eligibility =
-            VerifiedRunningSnapshotEligibility::analyze_for_test(false).expect("eligible");
+        let eligibility = VerifiedRunningSnapshotEligibility::analyze_for_test(false, exec_id())
+            .expect("eligible");
         let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
         let run = RunningSnapshotAcceptance::accept(
             &mut lifecycle,
@@ -1572,7 +1782,7 @@ mod tests {
     fn external_state_live_workload_fails_eligibility_closed() {
         // The #1090 analysis stand-in refuses to mint a proof when the live
         // workload requires External State, so acceptance can never proceed.
-        let denied = VerifiedRunningSnapshotEligibility::analyze_for_test(true);
+        let denied = VerifiedRunningSnapshotEligibility::analyze_for_test(true, exec_id());
         assert_eq!(
             denied.unwrap_err(),
             AcceptanceFailure::ExternalStateRequiresWorkloadIdle
@@ -1774,5 +1984,241 @@ mod tests {
         .expect("no internal fault");
         assert_eq!(run.failure(), Some(&AcceptanceFailure::Cancelled));
         assert_eq!(lifecycle.captures, 0);
+    }
+
+    // --- Blocker 1: a proof for Identity A rejects a candidate of Identity B ---
+    #[test]
+    fn candidate_execution_identity_mismatch_is_rejected_before_create() {
+        // Proof bound to Identity A; the captured candidate carries Identity B.
+        let mut lifecycle = FakeLifecycle::with_manifest(manifest_with_execution_id(exec_id_b()));
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            VerifiedRunningSnapshotEligibility::for_test(exec_id()),
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(
+            run.failure(),
+            Some(&AcceptanceFailure::ExecutionIdentityMismatch)
+        );
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::ExecutionIdentityMismatch
+        );
+        // Fail CLOSED: nothing was created, restored, or executed.
+        assert_eq!(lifecycle.creates, 0);
+        assert_eq!(lifecycle.restores, 0);
+        assert!(lifecycle.executed_argv.is_empty());
+        assert!(run.receipt.accepted_snapshot_id.is_none());
+        // The receipt is bound to the proof's identity (A), not the candidate's (B).
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&exec_id()));
+    }
+
+    // --- Blocker 1: candidate identity must not drift across retries ---
+    #[test]
+    fn candidate_identity_drift_across_retries_rejects_and_never_executes_b() {
+        // Attempt 1's candidate is Identity A (runs, exits non-zero → would retry);
+        // attempt 2's candidate drifts to Identity B → identity-mismatch reject.
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(1)]);
+        lifecycle.manifests_per_attempt = vec![
+            manifest_with_execution_id(exec_id()),
+            manifest_with_execution_id(exec_id_b()),
+        ];
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            VerifiedRunningSnapshotEligibility::for_test(exec_id()),
+            &config(2),
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(
+            run.failure(),
+            Some(&AcceptanceFailure::ExecutionIdentityMismatch)
+        );
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::NonzeroExit
+        );
+        assert_eq!(
+            run.receipt.attempts[1].outcome,
+            AcceptanceAttemptOutcome::ExecutionIdentityMismatch
+        );
+        // Only the Identity-A candidate ever executed; B never ran.
+        assert_eq!(lifecycle.executed_argv.len(), 1);
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&exec_id()));
+    }
+
+    // --- Blocker 1: a run whose every candidate matches the proof proceeds ---
+    #[test]
+    fn matching_identity_across_all_attempts_proceeds_normally() {
+        // Both attempts carry Identity A (the proof's identity): the identity gate
+        // never fires and the second attempt's exit 0 accepts.
+        let mut lifecycle = FakeLifecycle::new(vec![
+            VerificationOutcome::Exited(1),
+            VerificationOutcome::Exited(0),
+        ]);
+        lifecycle.manifests_per_attempt = vec![
+            manifest_with_execution_id(exec_id()),
+            manifest_with_execution_id(exec_id()),
+        ];
+        let run = run(&mut lifecycle, &config(2));
+
+        assert!(run.is_accepted());
+        assert_eq!(lifecycle.executed_argv.len(), 2);
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&exec_id()));
+    }
+
+    // --- Blocker 2: deadline exceeded DURING create → no restore, no execute ---
+    #[test]
+    fn deadline_exceeded_during_create_skips_restore_and_execute() {
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        lifecycle.clock = Some(clock.clone());
+        // Creating the Session itself overruns the whole deadline.
+        lifecycle.advance_on_create = Duration::from_secs(20);
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &clock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(lifecycle.creates, 1);
+        assert_eq!(
+            lifecycle.restores, 0,
+            "no restore is started past the deadline"
+        );
+        assert!(
+            lifecycle.executed_argv.is_empty(),
+            "no command is started past the deadline"
+        );
+        // The created Session is still torn down even though the deadline passed.
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::DeadlineExceeded
+        );
+    }
+
+    // --- Blocker 2: deadline exceeded DURING restore → no execute ---
+    #[test]
+    fn deadline_exceeded_during_restore_skips_execute() {
+        let clock = FakeClock::new();
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        lifecycle.clock = Some(clock.clone());
+        // Restore runs, but overruns the whole deadline before execute can start.
+        lifecycle.advance_on_restore = Duration::from_secs(20);
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            proof(),
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &clock,
+        )
+        .expect("no internal fault");
+
+        assert_eq!(lifecycle.restores, 1);
+        assert!(
+            lifecycle.executed_argv.is_empty(),
+            "no command is started once the deadline passed during restore"
+        );
+        assert_eq!(lifecycle.destroys, 1);
+        assert_eq!(
+            run.receipt.attempts[0].outcome,
+            AcceptanceAttemptOutcome::DeadlineExceeded
+        );
+    }
+
+    // --- Major: AcceptanceReceiptV1::validate() is the consumer boundary ---
+    #[test]
+    fn receipt_validate_enforces_the_consumer_boundary() {
+        // A produced accepted receipt (with a preceding non-zero attempt) validates.
+        let mut acc = FakeLifecycle::new(vec![
+            VerificationOutcome::Exited(1),
+            VerificationOutcome::Exited(0),
+        ]);
+        let accepted = run(&mut acc, &config(2)).receipt;
+        accepted
+            .validate()
+            .expect("a produced accepted receipt validates");
+
+        // A produced rejected receipt validates too.
+        let mut rej = FakeLifecycle::new(vec![VerificationOutcome::Exited(2)]);
+        let rejected = run(&mut rej, &config(1)).receipt;
+        rejected
+            .validate()
+            .expect("a produced rejected receipt validates");
+
+        // Negative vectors.
+        let other_id = SnapshotId::new(format!("blake3:{}", "d".repeat(64))).unwrap();
+
+        // wrong schema rejected
+        let mut bad = accepted.clone();
+        bad.schema = "attacker.receipt/v99".to_string();
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::UnsupportedSchema)
+        );
+
+        // untrusted verifier rejected
+        let mut bad = accepted.clone();
+        bad.verifier_identity = "attacker.verifier".to_string();
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::UntrustedVerifier)
+        );
+
+        // accepted-without-snapshot-id rejected
+        let mut bad = accepted.clone();
+        bad.accepted_snapshot_id = None;
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::AcceptedMissingField(
+                "accepted_snapshot_id"
+            ))
+        );
+
+        // accepted_snapshot_id != final attempt candidate rejected
+        let mut bad = accepted.clone();
+        bad.accepted_snapshot_id = Some(other_id.clone());
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::AcceptedSnapshotIdMismatch)
+        );
+
+        // rejected-with-snapshot-id rejected
+        let mut bad = rejected.clone();
+        bad.accepted_snapshot_id = Some(other_id);
+        assert_eq!(
+            bad.validate(),
+            Err(
+                AcceptanceReceiptValidationError::RejectedCarriesAcceptedField(
+                    "accepted_snapshot_id"
+                )
+            )
+        );
+
+        // non-monotonic attempts rejected
+        let mut bad = accepted.clone();
+        bad.attempts[0].attempt = 7;
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::NonMonotonicAttempts)
+        );
+
+        // over-max attempts rejected
+        let mut bad = accepted.clone();
+        bad.maximum_attempts = 1; // but two attempts were recorded
+        assert_eq!(
+            bad.validate(),
+            Err(AcceptanceReceiptValidationError::TooManyAttempts)
+        );
     }
 }

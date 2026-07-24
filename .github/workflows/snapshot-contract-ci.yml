@@ -69,4 +69,8 @@ jobs:
       # `--lib` covers the crate's unit tests, including the #1088 `acceptance`
       # module's disposable-orchestration tests (`pub mod acceptance;`).
       - run: cargo test -p snapshot --lib
+      # `--doc` enforces the `compile_fail` doctest that guards the
+      # no-public-constructor property of `VerifiedRunningSnapshotEligibility`
+      # (a raw struct literal must fail on its private `execution_id` field).
+      - run: cargo test -p snapshot --doc
       - run: cargo clippy -p snapshot --all-targets -- -D warnings
