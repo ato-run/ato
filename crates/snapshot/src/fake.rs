@@ -131,6 +131,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
             has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
             execution_id: input.execution_id.clone(),
+            // `BuildReadyStateInput` does not yet carry a schema tag for the
+            // declared execution id — that wiring is later, separate work.
+            // Until then every sealed manifest is honestly legacy.
+            execution_identity_schema: None,
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,

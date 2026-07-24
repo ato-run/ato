@@ -2002,6 +2002,10 @@ impl SnapshotBackend for FirecrackerBackend {
             has_vsock: vsock_enabled(),
             runner_class_id,
             execution_id: input.execution_id.clone(),
+            // `BuildReadyStateInput` does not yet carry a schema tag for the
+            // declared execution id — that wiring is later, separate work.
+            // Until then every sealed manifest is honestly legacy.
+            execution_identity_schema: None,
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
@@ -3586,6 +3590,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: ReadyStateLayers::default(),
             hotset_profile: Default::default(),
