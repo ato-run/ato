@@ -1076,6 +1076,13 @@ impl ResolvedRefProvenanceV1 {
 pub struct ExecutionContractEnvelopeV1 {
     pub execution_contract: ExecutionContractV1,
     pub execution_id: ExecutionId,
+    /// Non-identity parent-association CLAIM naming the Capsule Program
+    /// declaration this contract was resolved from (ADR-014 §5). Excluded
+    /// from `execution_id` by construction (it is not part of the embedded
+    /// contract); verified pairwise via
+    /// [`crate::capsule_program_contract::verify_program_parent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule_program_id: Option<crate::contract::capsule_program_contract::CapsuleProgramId>,
     #[serde(default, skip_serializing_if = "ResolvedRefProvenanceV1::is_empty")]
     pub resolved_refs: ResolvedRefProvenanceV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1876,6 +1883,7 @@ mod tests {
         let mut envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: expected.clone(),
+            capsule_program_id: None,
             resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -1931,6 +1939,7 @@ mod tests {
         let envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap(),
+            capsule_program_id: None,
             resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -1951,6 +1960,7 @@ mod tests {
         let envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: execution_id.clone(),
+            capsule_program_id: None,
             resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -1972,6 +1982,7 @@ mod tests {
         let envelope = ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id: ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap(),
+            capsule_program_id: None,
             resolved_refs: ResolvedRefProvenanceV1::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,

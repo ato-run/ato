@@ -173,6 +173,7 @@ impl FinalizedExecution {
         ExecutionContractEnvelopeV1 {
             execution_contract: self.contract,
             execution_id: self.execution_id,
+            capsule_program_id: None,
             resolved_refs: Default::default(),
             generated_at: None,
             provenance: Value::Null,
