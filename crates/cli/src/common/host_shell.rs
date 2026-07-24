@@ -7,8 +7,40 @@
 //! escapes).
 
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
+
+/// Environment namespace reserved for the trusted Snapshot acceptance broker.
+///
+/// Capsule-controlled install, build, and probe processes must never inherit
+/// values from this namespace. The broker locator is a capability hint rather
+/// than key material, but hiding the entire namespace keeps the trust boundary
+/// simple and prevents future credentials from being exposed accidentally.
+pub const SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX: &str = "ATO_SNAPSHOT_ACCEPTANCE_";
+
+/// Remove every Snapshot acceptance credential from an untrusted child.
+///
+/// Call this immediately before spawning as well as when constructing shared
+/// shell commands: callers may add ordinary environment overrides after
+/// construction, but cannot accidentally reintroduce a credential inherited
+/// by the Ato process.
+pub fn sanitize_untrusted_environment(command: &mut Command) {
+    for (name, _) in std::env::vars_os() {
+        if os_str_starts_with(&name, SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX) {
+            command.env_remove(name);
+        }
+    }
+    // Always remove the currently defined names, even when they are not set in
+    // Ato's environment at construction time and a caller added one explicitly.
+    command
+        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY")
+        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER");
+}
+
+fn os_str_starts_with(value: &OsStr, prefix: &str) -> bool {
+    value.to_string_lossy().starts_with(prefix)
+}
 
 /// The deterministic Windows shell invocation for a command string:
 /// `cmd.exe /D /S /C "<command>"`.
@@ -26,6 +58,7 @@ pub fn windows_cmd_shell_command(command: &str) -> Command {
     let mut cmd = Command::new("cmd.exe");
     cmd.arg("/D").arg("/S").arg("/C");
     cmd.raw_arg(format!("\"{command}\""));
+    sanitize_untrusted_environment(&mut cmd);
     cmd
 }
 
@@ -41,6 +74,7 @@ pub fn lifecycle_shell_command(command: &str) -> Command {
     {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", command]);
+        sanitize_untrusted_environment(&mut cmd);
         cmd
     }
 }
@@ -68,6 +102,7 @@ pub fn cmd_shim_command(program: &str, args: &[&str]) -> Command {
     {
         let mut cmd = Command::new(program);
         cmd.args(args);
+        sanitize_untrusted_environment(&mut cmd);
         cmd
     }
 }
@@ -85,6 +120,7 @@ pub struct StreamedCommandOutput {
 /// (preserving the interactive progress UX of `Stdio::inherit`) while
 /// retaining a bounded tail of each stream for failure reporting.
 pub fn run_streaming_with_tails(cmd: &mut Command) -> io::Result<StreamedCommandOutput> {
+    sanitize_untrusted_environment(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     let stdout_thread = child
@@ -185,6 +221,23 @@ mod tests {
             "inner quotes must survive: {payload}"
         );
         assert!(payload.contains("&&"), "operators must survive: {payload}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn untrusted_shell_cannot_read_snapshot_acceptance_credentials() {
+        let mut cmd = lifecycle_shell_command(
+            "test -z \"$ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY\" && test -z \"$ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER\"",
+        );
+        cmd.env("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY", "leaked-key")
+            .env(
+                "ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER",
+                "/protected/acceptance-signer",
+            );
+        sanitize_untrusted_environment(&mut cmd);
+
+        let status = cmd.status().expect("spawn malicious lifecycle command");
+        assert!(status.success(), "acceptance credentials reached child");
     }
 
     #[test]

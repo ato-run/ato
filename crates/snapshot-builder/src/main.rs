@@ -40,7 +40,13 @@ use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
-use capsule::foundation::blob::{SourceMaterializeError, materialize_source_archive};
+use capsule::execution_contract::{
+    ContentDigest, DigestAlgorithm, ExecutionContractEnvelopeV1, ExecutionContractV1,
+};
+use capsule::execution_contract_finalize::{ExecutionObservationV1, FinalizationError};
+use capsule::foundation::blob::{
+    SourceMaterializeError, materialize_source_archive, materialized_source_tree_hash,
+};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsule::foundation::types::ready_state::{
     DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES,
@@ -206,6 +212,14 @@ struct ClaimedJob {
     /// any use ([`parse_import_params`]).
     #[serde(default)]
     params: Option<serde_json::Value>,
+    /// Capsule v1 (`ato.execution-contract/v1`) expected contract, if the
+    /// control plane pinned one for this job. `#[serde(default)]` so an
+    /// ato-api that does not send this field yet (every ato-api today)
+    /// parses exactly as before — this is a forward-compatible, additive
+    /// field with no real sender yet; see `attempt_v1_execution_identity`'s
+    /// doc comment for what happens once one is present.
+    #[serde(default)]
+    execution_contract: Option<ExecutionContractV1>,
 }
 
 fn default_job_kind() -> String {
@@ -827,6 +841,24 @@ fn produce_recipe_build(
     build_rootfs(&src, &spec, &ext4, cfg.rootfs_size_mib).map_err(|e| fail("rootfs_build", e))?;
     let rootfs = std::fs::read(&ext4).map_err(|e| fail("rootfs_build", e.to_string()))?;
 
+    // Capsule v1 execution identity (`ato.execution-contract/v1`, RFC §4.6
+    // strict finalization gate) — confirm-only, and ONLY attempted when the
+    // claimed job itself carries an expected contract (`job.execution_contract`,
+    // pinned by the control plane). No ato-api deployment sends this field yet
+    // (a repo-wide search of the claim wire protocol confirms it), so this is
+    // unreachable in production today — it exists so the wiring is already
+    // correct (and tested) for the day it is. See
+    // `attempt_v1_execution_identity`'s doc for exactly which facets are
+    // measured for real vs. why the rest legitimately cannot be. Only the
+    // recipe lane resolves a `CapsuleManifest`/target/source triple in the
+    // shape this needs — the import lanes (`dockerfile_import`/
+    // `oci_image_import`/`compose_import`) are not wired here, matching the
+    // discarded old PR's own scoping (it finalized v1 contracts only in this
+    // lane too).
+    if let Some(expected) = job.execution_contract.as_ref() {
+        attempt_v1_execution_identity(expected, &src, &rootfs)?;
+    }
+
     // v1.2 PR 3e-2c: capture the supervisor binding names for the SEALED ACK. ato-api's
     // artifactSchema now accepts an optional `supervisor_build` (3e-2), so the ack must
     // carry the names — otherwise ato-api registers the row as no-binding + PUBLIC
@@ -893,6 +925,139 @@ fn produce_recipe_build(
         stable_interval_ms: warmup.stable_interval_ms,
         content_ready_path: warmup.content_ready_path,
     })
+}
+
+/// Attempt to confirm this build's Capsule v1 Execution Identity
+/// (`ato.execution-contract/v1`) against `expected` — the contract the
+/// control plane pinned on the claimed job (`job.execution_contract`). This
+/// function only ever reads `expected`; it never derives, invents, or
+/// self-attests one (there is no other source of "expected" available to
+/// this daemon — see the call site's doc comment).
+///
+/// Returns:
+/// * `Ok(None)` — the RFC §4.6 strict gate legitimately refused because some
+///   required facet has no measurement producer anywhere in this codebase
+///   yet ([`FinalizationError::UnmeasuredFacet`] — see "Honest scope" below
+///   for exactly which facet that is in practice today). Not an error: the
+///   legacy (non-v1) seal proceeds unchanged.
+/// * `Ok(Some(envelope))` — every facet this function measured agreed with
+///   `expected` AND every other required facet was already satisfied. Not
+///   reachable with any producer coverage that exists in this codebase today
+///   (see "Honest scope"), but this is the success path a future producer PR
+///   unlocks without any further change here.
+/// * `Err((stage, reason))` — a genuine, caught problem: one of the facets
+///   this function actually measures for real
+///   ([`FinalizationError::FacetMismatch`] on `source.digest`,
+///   `dependencies`, or `filesystem.readonly_layers`) disagreed with what the
+///   control plane pinned. That is real drift this gate exists to catch, so
+///   it fails the job via this file's normal `(stage, reason)` convention
+///   rather than being silently downgraded.
+///
+/// ## Honest scope: which facets are measured for real, and why the rest are not
+///
+/// Only the three G0-2-recognized producers are wired here, each reusing a
+/// value this build already materializes:
+///
+/// * `source.digest` — [`materialized_source_tree_hash`] (RFC A1v2) over the
+///   checked-out `src` tree verbatim. Unlike the CLI's analogous
+///   `measure_workspace_source_digest` in `crates/cli/src/cli/commands/build.rs`,
+///   this does NOT need to exclude anything: `expected` here comes from the
+///   claimed JOB (the control plane), never from a file living inside `src`
+///   itself, so there is no self-referential hash-quine risk the way there
+///   would be if `expected` were derived by hashing a tree that also
+///   contained the very digest being computed. If the checked-out repo
+///   happens to commit its own `ato.lock.json`, that file's bytes are simply
+///   ordinary source content from this daemon's point of view.
+/// * `dependencies[]` — measured only in the (common) trivial case where
+///   `expected` itself declares zero dependencies: zero declared and zero
+///   observed is a real, honest measurement, not a placeholder. When
+///   `expected` declares one or more dependencies, this is left UNMEASURED:
+///   no per-dependency derivation/output digest producer exists anywhere in
+///   this codebase today (confirmed by a repo-wide search — the only
+///   occurrences of `derivation_digest`/`output_digest` outside the
+///   contract's own types are in `crates/snapshot/src/contract_fixtures.rs`,
+///   an explicit test fixture).
+/// * `filesystem.readonly_layers` — the content digest of the actual sealed
+///   `rootfs` bytes, the one layer this daemon's `process_job` ever populates
+///   (`runtime`/`dependency`/`app` are always `None` — see `process_job`'s
+///   `BuildLayers` construction). Measured only when `expected` also declares
+///   exactly one readonly layer.
+///
+/// Every OTHER required facet — `source.projection_digest` foremost, since it
+/// is the second facet [`ExecutionObservationV1::finalize`] checks, right
+/// after `source.digest` — has no measurement producer anywhere in this
+/// codebase yet. Because `finalize`'s facet checks run in a fixed order and
+/// stop at the first missing one, this means **in the (currently
+/// unreachable) case where a job carries `execution_contract`, this function
+/// will return `Ok(None)` citing `source.projection_digest`**, regardless of
+/// the three real measurements above. This mirrors
+/// `crates/cli/src/cli/commands/build.rs`'s `attempt_v1_execution_identity`
+/// precisely, and `execution_contract_finalize`'s own module doc.
+fn attempt_v1_execution_identity(
+    expected: &ExecutionContractV1,
+    src: &Path,
+    rootfs: &[u8],
+) -> std::result::Result<Option<ExecutionContractEnvelopeV1>, (String, String)> {
+    let fail = |reason: String| ("execution_identity".to_string(), reason);
+
+    let mut observation = ExecutionObservationV1::new();
+
+    // source.digest — real: hash the checked-out source tree verbatim (see
+    // the doc comment above for why no exclusion is needed here, unlike the
+    // CLI's equivalent).
+    let source_hash = materialized_source_tree_hash(src)
+        .map_err(|error| fail(format!("hash checked-out source tree {}: {error}", src.display())))?;
+    let source_digest = ContentDigest::try_from(source_hash).map_err(|error| {
+        fail(format!(
+            "materialized_source_tree_hash output did not parse as a ContentDigest: {error}"
+        ))
+    })?;
+    observation = observation.measured_source_digest(source_digest);
+
+    // dependencies[] — real only in the trivial zero-dependency case (see doc).
+    if expected.dependencies.is_empty() {
+        observation = observation.measured_dependencies(Vec::new());
+    }
+
+    // filesystem.readonly_layers — real: content digest of the actual sealed
+    // rootfs bytes, only when `expected` declares exactly one such layer.
+    if expected.filesystem.readonly_layers.len() == 1 {
+        let algorithm = expected.filesystem.readonly_layers[0].algorithm();
+        observation =
+            observation.measured_readonly_layers(vec![content_digest_of(rootfs, algorithm)]);
+    }
+
+    match observation.finalize(expected) {
+        Ok(finalized) => Ok(Some(finalized.into_envelope())),
+        Err(FinalizationError::UnmeasuredFacet(_)) => Ok(None),
+        Err(other) => Err(fail(format!(
+            "Capsule v1 execution identity check failed against the control plane's expected \
+             contract: {other}"
+        ))),
+    }
+}
+
+/// A real (not placeholder) content digest of `bytes`, using whichever
+/// algorithm the corresponding expected-contract field declares — a
+/// measurement must match the expected value's own algorithm choice to have
+/// any chance of agreeing with it (`ContentDigest` does not fix one
+/// algorithm the way the opaque `*_digest` facets do). Mirrors
+/// `crates/cli/src/cli/commands/build.rs`'s helper of the same name.
+fn content_digest_of(bytes: &[u8], algorithm: DigestAlgorithm) -> ContentDigest {
+    match algorithm {
+        DigestAlgorithm::Blake3 => {
+            ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())
+        }
+        DigestAlgorithm::Sha256 => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            let digest = hasher.finalize();
+            let mut buffer = [0u8; 32];
+            buffer.copy_from_slice(&digest);
+            ContentDigest::new(DigestAlgorithm::Sha256, buffer)
+        }
+    }
 }
 
 /// ato#1002 `dockerfile_import` producer: validate the job params fail-closed, clone
@@ -2880,6 +3045,7 @@ targets = ["web"]
             recipe_toml: None,
             kind: kind.into(),
             params,
+            execution_contract: None,
         }
     }
 
@@ -4009,5 +4175,194 @@ targets = ["web"]
         assert_eq!(fail.error_code, "source_missing");
         let v = serde_json::to_value(&fail).unwrap();
         assert_eq!(v["pipeline_state"], "failed_internal");
+    }
+
+    // ---- attempt_v1_execution_identity / content_digest_of ----
+    //
+    // `expected` is always hand-built by the TEST (playing the part of a
+    // control plane that already pinned a job's execution contract — no code
+    // under test invents it), and every real measurement the function under
+    // test performs is checked against a genuinely independent computation
+    // (a real tree hash for source.digest, a direct blake3/sha256 call for
+    // the layer digest).
+
+    fn v1_placeholder_opaque_digest() -> capsule::execution_contract::OpaqueContractDigestV1 {
+        capsule::execution_contract::opaque_subcontract_digest(
+            capsule::execution_contract::OpaqueContractDomainV1::SourceProjection,
+            &serde_json::json!({}),
+        )
+        .expect("placeholder opaque digest")
+    }
+
+    /// A minimal but fully valid `ExecutionContractV1`: zero dependencies,
+    /// exactly one readonly layer, and every opaque facet filled with the
+    /// same placeholder digest (none of them are ever measured by the
+    /// function under test, so their exact value never matters — only that
+    /// the contract as a whole is well-formed enough to compute a real
+    /// `execution_id`).
+    fn v1_minimal_contract(
+        source_digest: ContentDigest,
+        readonly_layer: ContentDigest,
+    ) -> ExecutionContractV1 {
+        use capsule::execution_contract::{
+            EXECUTION_CONTRACT_V1_SCHEMA, GuestPath, GuestSurfaceContract, ResolvedArtifactContract,
+            ResolvedFilesystemContract, ResolvedLaunchContract, ResolvedPolicyContract,
+            ResolvedSourceContract, ResolvedTargetContract,
+        };
+        let placeholder = v1_placeholder_opaque_digest();
+        ExecutionContractV1 {
+            schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+            source: ResolvedSourceContract {
+                digest: source_digest,
+                projection_digest: placeholder,
+            },
+            target: ResolvedTargetContract {
+                os: "linux".to_string(),
+                architecture: "x86_64".to_string(),
+                abi: "gnu".to_string(),
+                libc: None,
+                observable_features: BTreeMap::new(),
+            },
+            runtime: ResolvedArtifactContract {
+                kind: "node".to_string(),
+                digest: ContentDigest::new(DigestAlgorithm::Blake3, [2u8; 32]),
+                dynamic_contract_digest: placeholder,
+            },
+            dependencies: Vec::new(),
+            build_outputs: Vec::new(),
+            launch: ResolvedLaunchContract {
+                argv: vec!["sh".to_string(), "-lc".to_string(), "run.sh".to_string()],
+                cwd: GuestPath::parse("/workspace").unwrap(),
+                process_model_digest: placeholder,
+                environment: Vec::new(),
+                environment_policy_digest: placeholder,
+                secret_bindings: Vec::new(),
+            },
+            filesystem: ResolvedFilesystemContract {
+                view_digest: ContentDigest::new(DigestAlgorithm::Blake3, [7u8; 32]),
+                topology_digest: placeholder,
+                readonly_layers: vec![readonly_layer],
+                writable_paths: Vec::new(),
+            },
+            policy: ResolvedPolicyContract {
+                network_digest: placeholder,
+                capability_digest: placeholder,
+                filesystem_digest: placeholder,
+            },
+            guest_surface: GuestSurfaceContract {
+                bind_address: "0.0.0.0".to_string(),
+                protocol: "ato-guest/v1".to_string(),
+                port: None,
+                features: Vec::new(),
+            },
+            external_state: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn attempt_v1_execution_identity_refuses_on_unmeasured_facet_even_when_the_three_real_measurements_match()
+     {
+        let src = tempfile::tempdir().expect("tempdir");
+        std::fs::write(src.path().join("main.js"), b"console.log(1);\n").expect("write source");
+        let source_hash =
+            materialized_source_tree_hash(src.path()).expect("hash checked-out source tree");
+        let source_digest = ContentDigest::try_from(source_hash).expect("parse source digest");
+
+        let rootfs_bytes = b"the-sealed-rootfs-bytes".to_vec();
+        let readonly_layer = content_digest_of(&rootfs_bytes, DigestAlgorithm::Blake3);
+
+        let expected = v1_minimal_contract(source_digest, readonly_layer);
+
+        // The 3 G0-2 facets this function measures all genuinely agree (real
+        // source tree hash, zero dependencies, and the real rootfs layer
+        // digest) — proving those measurements are wired correctly — yet
+        // `.finalize()` still legitimately refuses because
+        // `source.projection_digest` (checked right after `source.digest`)
+        // has no measurement producer. That refusal must surface as
+        // `Ok(None)`, never `Err`: if any of the 3 real measurements were
+        // wrong, this would instead see a `FacetMismatch` surfaced as `Err`.
+        let result = attempt_v1_execution_identity(&expected, src.path(), &rootfs_bytes).expect(
+            "an UnmeasuredFacet refusal must be reported as Ok(None), never Err — if this \
+             instead errors, one of the 3 real measurements disagreed with the fixture",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn attempt_v1_execution_identity_errors_on_a_genuine_source_digest_mismatch() {
+        let src = tempfile::tempdir().expect("tempdir");
+        std::fs::write(src.path().join("main.js"), b"console.log(1);\n").expect("write source");
+
+        // Deliberately wrong: does not match the real tree hash of `src`.
+        let wrong_source_digest = ContentDigest::new(DigestAlgorithm::Sha256, [0xEE; 32]);
+        let rootfs_bytes = b"the-sealed-rootfs-bytes".to_vec();
+        let readonly_layer = content_digest_of(&rootfs_bytes, DigestAlgorithm::Blake3);
+        let expected = v1_minimal_contract(wrong_source_digest, readonly_layer);
+
+        let (stage, reason) = attempt_v1_execution_identity(&expected, src.path(), &rootfs_bytes)
+            .expect_err("a real source.digest mismatch is caught drift and must be surfaced");
+        assert_eq!(stage, "execution_identity");
+        assert!(
+            reason.contains("Capsule v1 execution identity check failed"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn attempt_v1_execution_identity_errors_when_dependencies_are_declared_but_mismatch() {
+        // A NON-empty expected dependency list is left unmeasured by this
+        // function (no per-dependency producer exists) UNLESS something else
+        // fails first. Here the source digest itself is correct, so finalize
+        // reaches (and refuses on) an earlier unmeasured facet regardless —
+        // this test exists to document/pin that a non-empty `dependencies`
+        // never gets a fabricated `vec![]` measurement.
+        let src = tempfile::tempdir().expect("tempdir");
+        std::fs::write(src.path().join("main.js"), b"console.log(1);\n").expect("write source");
+        let source_hash =
+            materialized_source_tree_hash(src.path()).expect("hash checked-out source tree");
+        let source_digest = ContentDigest::try_from(source_hash).expect("parse source digest");
+        let rootfs_bytes = b"bytes".to_vec();
+        let readonly_layer = content_digest_of(&rootfs_bytes, DigestAlgorithm::Blake3);
+        let mut expected = v1_minimal_contract(source_digest, readonly_layer);
+        expected.dependencies = vec![capsule::execution_contract::ResolvedDependencyContract {
+            name: "npm".to_string(),
+            derivation_digest: ContentDigest::new(DigestAlgorithm::Blake3, [3u8; 32]),
+            output_digest: ContentDigest::new(DigestAlgorithm::Blake3, [4u8; 32]),
+        }];
+
+        let result = attempt_v1_execution_identity(&expected, src.path(), &rootfs_bytes)
+            .expect("still a legitimate UnmeasuredFacet refusal, never Err");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn content_digest_of_matches_independent_hashing_for_both_algorithms() {
+        let bytes = b"hello capsule v1";
+
+        let blake3_digest = content_digest_of(bytes, DigestAlgorithm::Blake3);
+        assert_eq!(blake3_digest.algorithm(), DigestAlgorithm::Blake3);
+        assert_eq!(blake3_digest.bytes(), *blake3::hash(bytes).as_bytes());
+
+        let sha256_digest = content_digest_of(bytes, DigestAlgorithm::Sha256);
+        assert_eq!(sha256_digest.algorithm(), DigestAlgorithm::Sha256);
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(bytes);
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(sha256_digest.bytes(), expected);
+    }
+
+    #[test]
+    fn claimed_job_without_execution_contract_field_still_parses() {
+        // Forward-compat: an ato-api that does not send `execution_contract`
+        // yet (every ato-api today) must still parse cleanly.
+        let raw = serde_json::json!({
+            "id": "job_1",
+            "capsule_id": "cap_1",
+            "target_label": "app",
+            "profile": "default",
+        });
+        let job: ClaimedJob = serde_json::from_value(raw).expect("parse without the new field");
+        assert!(job.execution_contract.is_none());
     }
 }

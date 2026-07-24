@@ -1351,7 +1351,7 @@ pub(super) fn start_orchestration_session_in_process(
     })?;
 
     let reporter = Arc::new(make_orchestration_reporter());
-    let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
+    let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root)?;
     let mut prepared = PreparedRunContext {
         authoritative_lock,
         lock_path,
@@ -2375,22 +2375,18 @@ fn auto_state_bindings_for_sample_recipe_manifest(
 /// `has_authoritative_lock = false` and no physical `capsule.lock.json` exists.
 fn try_load_authoritative_lock(
     workspace_root: &Path,
-) -> (Option<ato_lock::AtoLock>, Option<PathBuf>) {
+) -> Result<(Option<ato_lock::AtoLock>, Option<PathBuf>)> {
     let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
     if !lock_path.exists() {
-        return (None, None);
+        return Ok((None, None));
     }
-    match ato_lock::load_unvalidated_from_path(&lock_path) {
-        Ok(lock) => (Some(lock), Some(lock_path)),
-        Err(err) => {
-            tracing::warn!(
-                path = %lock_path.display(),
-                error = %err,
-                "failed to load ato.lock.json — session will proceed without authoritative lock"
-            );
-            (None, None)
-        }
-    }
+    let lock = ato_lock::load_verified_from_path(&lock_path).with_context(|| {
+        format!(
+            "refusing to start session with invalid authoritative lock {}",
+            lock_path.display()
+        )
+    })?;
+    Ok((Some(lock), Some(lock_path)))
 }
 
 /// Output of `prepare_session_execution`. Carries both the prepared target
@@ -2409,7 +2405,7 @@ fn prepare_session_execution(
     raw_manifest: &str,
 ) -> Result<PreparedSessionExecution> {
     let reporter = Arc::new(make_orchestration_reporter());
-    let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root);
+    let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root)?;
     let mut prepared = PreparedRunContext {
         authoritative_lock,
         lock_path,
@@ -3823,6 +3819,22 @@ mod tests {
                 None => unsafe { std::env::remove_var("ATO_DESKTOP_SESSION_ROOT") },
             }
         }
+    }
+
+    #[test]
+    fn invalid_authoritative_lock_fails_closed_before_session_preparation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        fs::write(
+            temp.path().join(ATO_LOCK_FILE_NAME),
+            r#"{"schema_version":1,"lock_id":"blake3:0000000000000000000000000000000000000000000000000000000000000000"}"#,
+        )
+        .expect("write invalid lock");
+
+        let error = try_load_authoritative_lock(temp.path()).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains("refusing to start session with invalid authoritative lock")
+        );
     }
 
     #[test]

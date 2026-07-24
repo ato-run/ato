@@ -2919,6 +2919,8 @@ fn run_shell_command_with_env(
         }
     }
 
+    crate::common::host_shell::sanitize_untrusted_environment(&mut builder);
+
     let output = builder
         .output()
         .with_context(|| format!("Failed to launch shell command in {}", cwd.display()))?;
