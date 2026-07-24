@@ -54,8 +54,7 @@ const METADATA_CACHE_DIR_NAME: &str = "metadata-cache";
 const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
 const ENV_STORE_API_URL: &str = "ATO_STORE_API_URL";
 
-pub const CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock.json";
-pub const LEGACY_CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock";
+pub const LEGACY_CAPSULE_LOCK_JSON_FILE_NAME: &str = "capsule.lock.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LegacyCapsuleLock {
@@ -482,13 +481,13 @@ pub async fn generate_and_write_lockfile(
     let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
-            CAPSULE_LOCK_FILE_NAME, e
+            LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, e
         ))
     })?;
     write_atomic_bytes_with_os_lock(
         &output_path,
         &content,
-        CAPSULE_LOCK_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
         capsule_error_pack,
     )?;
     Ok(output_path)
@@ -616,7 +615,7 @@ pub async fn ensure_lockfile_for_compat_input(
     let content = serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
-            CAPSULE_LOCK_FILE_NAME, e
+            LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, e
         ))
     })?;
     if let Some(parent) = lock_path.parent() {
@@ -631,7 +630,7 @@ pub async fn ensure_lockfile_for_compat_input(
     write_atomic_bytes_with_os_lock(
         &lock_path,
         &content,
-        CAPSULE_LOCK_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
         capsule_error_pack,
     )?;
     write_lockfile_inputs_snapshot(manifest_dir, &manifest_hash, &inputs)?;
@@ -661,7 +660,7 @@ pub fn render_lockfile_for_manifest(
     serde_jcs::to_vec(&lockfile).map_err(|e| {
         CapsuleError::Pack(format!(
             "Failed to serialize {}: {}",
-            CAPSULE_LOCK_FILE_NAME, e
+            LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, e
         ))
     })
 }
@@ -692,7 +691,7 @@ fn verify_lockfile_manifest_hash(lockfile_path: &Path, expected_hash: &str) -> R
             lockfile_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or(CAPSULE_LOCK_FILE_NAME),
+                .unwrap_or(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             expected_hash,
             lockfile.meta.manifest_hash
         )));
@@ -707,7 +706,7 @@ fn read_lockfile(path: &Path) -> Result<LegacyCapsuleLock> {
 }
 
 pub(crate) fn lockfile_output_path(manifest_dir: &Path) -> PathBuf {
-    workspace_derived_dir(manifest_dir).join(CAPSULE_LOCK_FILE_NAME)
+    workspace_derived_dir(manifest_dir).join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
 }
 
 pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
@@ -716,13 +715,12 @@ pub fn resolve_existing_lockfile_path(manifest_dir: &Path) -> Option<PathBuf> {
         return Some(primary);
     }
 
-    let legacy_root = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
-    if legacy_root.exists() {
-        return Some(legacy_root);
-    }
-
-    let legacy = manifest_dir.join(LEGACY_CAPSULE_LOCK_FILE_NAME);
-    legacy.exists().then_some(legacy)
+    // NOTE: the pre-0.3 bare root `capsule.lock` legacy read is retired —
+    // that name is now the canonical lock (spec §5 Amendment, name-collision
+    // note). Legacy compatibility reads are `.ato/derived/capsule.lock.json`
+    // and a root `capsule.lock.json` only.
+    let legacy_root = manifest_dir.join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
+    legacy_root.exists().then_some(legacy_root)
 }
 
 pub fn parse_lockfile_text(raw: &str, path: &Path) -> Result<LegacyCapsuleLock> {
@@ -1106,7 +1104,7 @@ fn build_lock_draft_input(
             text: manifest_text.to_string(),
             selected_target_label: selected_target_label(manifest_raw),
         }),
-        existing_ato_lock_summary: None,
+        existing_capsule_lock_summary: None,
         external_dependency_hints: Vec::new(),
     })
 }
@@ -1423,7 +1421,7 @@ pub fn verify_lockfile_external_dependencies(
         else {
             return Err(CapsuleError::Config(format!(
                 "{} is missing capsule dependency '{}'",
-                CAPSULE_LOCK_FILE_NAME, dependency.alias
+                LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, dependency.alias
             )));
         };
         if locked.source != dependency.source
@@ -1435,7 +1433,7 @@ pub fn verify_lockfile_external_dependencies(
         {
             return Err(CapsuleError::Config(format!(
                 "{} capsule dependency '{}' does not match manifest source '{}'",
-                CAPSULE_LOCK_FILE_NAME, dependency.alias, dependency.source
+                LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, dependency.alias, dependency.source
             )));
         }
     }
@@ -1475,7 +1473,7 @@ pub fn verify_lockfile_against_contracts(
         else {
             return Err(CapsuleError::Config(format!(
                 "{} is missing capsule dependency '{}'",
-                CAPSULE_LOCK_FILE_NAME, provider.alias
+                LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, provider.alias
             )));
         };
         // The bundle-derived view stores `source` / `source_type` /
@@ -1508,7 +1506,7 @@ pub fn verify_lockfile_against_contracts(
         {
             return Err(CapsuleError::Config(format!(
                 "{} capsule dependency '{}' does not match manifest source '{}'",
-                CAPSULE_LOCK_FILE_NAME,
+                LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
                 provider.alias,
                 provider.source.as_deref().unwrap_or("")
             )));

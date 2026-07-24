@@ -133,7 +133,7 @@ pub(crate) async fn execute_multi_service(
 
     // Build the image map. Prefer the lock-resolved digest when present; fall
     // back to resolving the declared image ref via the OCI provider so that
-    // compat-path capsules (capsule.toml without ato.lock.json) work without
+    // compat-path capsules (capsule.toml without capsule.lock) work without
     // a separate `ato lock` step.
     let mut images: HashMap<String, OciImageResolution> = HashMap::new();
     for service in &orch_plan.services {

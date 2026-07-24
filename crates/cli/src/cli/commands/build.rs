@@ -217,7 +217,7 @@ pub fn execute_pack_command_with_injected_manifest(
             Some(manifest_text.to_string())
         } else {
             futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
+                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `capsule.lock`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
             ))?;
             Some(infer_zero_config_manifest(&dir)?)
         }
@@ -2035,7 +2035,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             serde_json::json!({
@@ -2074,7 +2074,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
                 "digestable": false
             }),
         );
-        let lock_path = manifest_dir.join("ato.lock.json");
+        let lock_path = manifest_dir.join("capsule.lock");
         let workspace_root = manifest_dir.clone();
         let runtime_model = capsule::lock_runtime::resolve_lock_runtime_model(&lock, None)
             .expect("resolve test runtime model");

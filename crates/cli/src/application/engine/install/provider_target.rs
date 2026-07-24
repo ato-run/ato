@@ -13,9 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::debug;
 
 use crate::ProviderToolchain;
-use capsule::ato_lock::AtoLock;
+use capsule::capsule_lock::CapsuleLock;
 use capsule::common::paths::ato_runs_dir;
-use capsule::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::input_resolver::CAPSULE_LOCK_FILE_NAME;
 use capsule::python_runtime::{normalized_python_runtime_version, python_selector_env};
 
 mod synthetic;
@@ -1491,10 +1491,10 @@ fn find_bun_binary() -> Result<PathBuf> {
 pub(crate) fn persist_provider_authoritative_lock(
     workspace_root: &Path,
     resolution_metadata_path: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> Result<PathBuf> {
-    let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
-    capsule::ato_lock::write_pretty_to_path(lock, &lock_path)
+    let lock_path = workspace_root.join(CAPSULE_LOCK_FILE_NAME);
+    capsule::capsule_lock::write_pretty_to_path(lock, &lock_path)
         .with_context(|| format!("failed to write {}", lock_path.display()))?;
     record_provider_authoritative_lock_path(resolution_metadata_path, &lock_path)?;
     Ok(lock_path)
@@ -1598,7 +1598,7 @@ mod tests {
         resolve_effective_provider_toolchain, resolve_npm_bin_metadata,
     };
     use crate::ProviderToolchain;
-    use capsule::ato_lock;
+    use capsule::capsule_lock;
     use serde_json::{Value, json};
     use serial_test::serial;
     use std::fs;
@@ -2410,7 +2410,7 @@ Tag: py3-none-any\n";
         .expect("materialize provider workspace");
 
         assert!(
-            workspace.workspace_root.join("ato.lock.json").exists(),
+            workspace.workspace_root.join("capsule.lock").exists(),
             "authoritative lock should be generated"
         );
         assert!(
@@ -2430,9 +2430,10 @@ Tag: py3-none-any\n";
             "resolution metadata file should be generated"
         );
 
-        let lock =
-            ato_lock::load_unvalidated_from_path(&workspace.workspace_root.join("ato.lock.json"))
-                .expect("load provider authoritative lock");
+        let lock = capsule_lock::load_unvalidated_from_path(
+            &workspace.workspace_root.join("capsule.lock"),
+        )
+        .expect("load provider authoritative lock");
         assert_eq!(
             lock.contract.entries["metadata"]["default_target"].as_str(),
             Some("app")

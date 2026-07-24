@@ -644,7 +644,7 @@ fn provider_npm_keep_failed_artifacts_preserves_materialized_workspace() {
         !workspace.join("resolution.json").exists(),
         "multi-bin failure should stop before final resolution metadata is written"
     );
-    assert!(!workspace.join("ato.lock.json").exists());
+    assert!(!workspace.join("capsule.lock").exists());
 
     fs::remove_dir_all(workspace).expect("cleanup retained provider workspace");
 }
@@ -715,7 +715,7 @@ fn provider_npm_keep_failed_artifacts_preserves_resolution_metadata() {
     );
     assert_eq!(metadata["provider"].as_str(), Some("npm"));
     assert!(retained[0].join("package.json").exists());
-    assert!(retained[0].join("ato.lock.json").exists());
+    assert!(retained[0].join("capsule.lock").exists());
 
     fs::remove_dir_all(&retained[0]).expect("cleanup retained provider workspace");
 }

@@ -1,5 +1,5 @@
-//! Layer 2: Contract — manifest, lockfile, and ato.lock.
-pub mod ato_lock;
+//! Layer 2: Contract — manifest, lockfile, and capsule.lock (canonical lock).
+pub mod capsule_lock;
 pub mod capsule_program_contract;
 pub mod execution_contract;
 pub mod execution_contract_finalize;

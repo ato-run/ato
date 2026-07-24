@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::ato_lock::{
-    self, AtoLock, AtoLockValidationError, ValidationMode as CanonicalValidationMode,
+use crate::capsule_lock::{
+    self, CapsuleLock, CapsuleLockValidationError, ValidationMode as CanonicalValidationMode,
 };
 use crate::common::paths::path_contains_workspace_internal_subtree;
 use crate::error::{CapsuleError, Result};
@@ -9,7 +9,12 @@ use crate::lockfile::{self, LegacyCapsuleLock};
 use crate::manifest::{self, LoadedManifest};
 use crate::types::ValidationMode as ManifestValidationMode;
 
-pub const ATO_LOCK_FILE_NAME: &str = "ato.lock.json";
+/// Canonical lock file name (see CAPSULE_V1_EXECUTION_MODEL_SPEC §5).
+pub const CAPSULE_LOCK_FILE_NAME: &str = "capsule.lock";
+/// Deprecated pre-amendment name for the canonical lock. Still accepted as a
+/// read-compatible alias (with a rename warning); writers must never produce
+/// new files under this name.
+pub const DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME: &str = "ato.lock.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExplicitInputKind {
@@ -59,6 +64,7 @@ impl std::fmt::Display for ResolvedInputKind {
 pub enum ResolverAdvisoryCode {
     CanonicalCoexistsWithCompatibility,
     CompatibilityIgnoredByCanonical,
+    DeprecatedCanonicalLockAliasName,
     SourceOnlyBootstrap,
 }
 
@@ -90,7 +96,7 @@ pub struct InputProvenance {
 pub struct ResolvedCanonicalLock {
     pub path: PathBuf,
     pub project_root: PathBuf,
-    pub lock: AtoLock,
+    pub lock: CapsuleLock,
 }
 
 #[derive(Debug, Clone)]
@@ -249,7 +255,9 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
         })?;
 
         match file_name {
-            ATO_LOCK_FILE_NAME => (project_root.to_path_buf(), ExplicitInputKind::CanonicalLock),
+            CAPSULE_LOCK_FILE_NAME | DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME => {
+                (project_root.to_path_buf(), ExplicitInputKind::CanonicalLock)
+            }
             "capsule.toml" => (
                 project_root.to_path_buf(),
                 ExplicitInputKind::CompatibilityManifest,
@@ -257,7 +265,7 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
             _ if resolve_single_script_language(&requested_path).is_some() => {
                 (project_root.to_path_buf(), ExplicitInputKind::SingleScript)
             }
-            lockfile::CAPSULE_LOCK_FILE_NAME | lockfile::LEGACY_CAPSULE_LOCK_FILE_NAME => {
+            lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME => {
                 return Err(legacy_lock_without_manifest_error(&requested_path));
             }
             _ => {
@@ -270,10 +278,7 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
     };
 
     let discovered = DiscoveredArtifacts {
-        canonical_lock_path: project_root
-            .join(ATO_LOCK_FILE_NAME)
-            .exists()
-            .then(|| project_root.join(ATO_LOCK_FILE_NAME)),
+        canonical_lock_path: resolve_canonical_lock_path(&project_root)?,
         compatibility_manifest_path: project_root
             .join("capsule.toml")
             .exists()
@@ -287,6 +292,31 @@ fn discover_input(path: &Path) -> Result<InputDiscovery> {
         project_root,
         discovered,
     })
+}
+
+/// Resolves the canonical lock path at `project_root`, honoring the
+/// deprecated `ato.lock.json` alias (spec §5 Amendment migration table):
+///
+/// * only `capsule.lock`            → canonical input
+/// * only `ato.lock.json`           → deprecated alias, read-compatible
+/// * `capsule.lock` + `ato.lock.json` → fail closed (split-brain)
+pub fn resolve_canonical_lock_path(project_root: &Path) -> Result<Option<PathBuf>> {
+    let canonical = project_root.join(CAPSULE_LOCK_FILE_NAME);
+    let alias = project_root.join(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+    match (canonical.exists(), alias.exists()) {
+        (true, true) => Err(CapsuleError::Config(format!(
+            "Both {canonical_name} and {alias_name} exist at {root}. \
+             {canonical_name} is the canonical lock and {alias_name} is its deprecated \
+             alias; no automatic authority choice is made. Remove one of the two files \
+             (keep {canonical_name}) and retry.",
+            canonical_name = CAPSULE_LOCK_FILE_NAME,
+            alias_name = DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+            root = project_root.display(),
+        ))),
+        (true, false) => Ok(Some(canonical)),
+        (false, true) => Ok(Some(alias)),
+        (false, false) => Ok(None),
+    }
 }
 
 fn is_import_preview_workspace(path: &Path) -> bool {
@@ -314,13 +344,26 @@ fn classify_discovery(
 ) -> Result<(ResolutionSelection, Vec<ResolverAdvisory>)> {
     let mut advisories = Vec::new();
 
-    if discovery.discovered.canonical_lock_path.is_some() {
+    if let Some(canonical_path) = discovery.discovered.canonical_lock_path.as_ref() {
+        if canonical_path.file_name().and_then(|value| value.to_str())
+            == Some(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+        {
+            advisories.push(ResolverAdvisory {
+                code: ResolverAdvisoryCode::DeprecatedCanonicalLockAliasName,
+                message: format!(
+                    "{alias} is a deprecated name for the canonical lock; rename it to {canonical}.",
+                    alias = DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+                    canonical = CAPSULE_LOCK_FILE_NAME,
+                ),
+                paths: vec![canonical_path.clone()],
+            });
+        }
         if let Some(manifest_path) = discovery.discovered.compatibility_manifest_path.as_ref() {
             advisories.push(ResolverAdvisory {
                 code: ResolverAdvisoryCode::CanonicalCoexistsWithCompatibility,
                 message: format!(
                     "{} coexists with compatibility inputs; canonical lock remains authoritative.",
-                    ATO_LOCK_FILE_NAME
+                    CAPSULE_LOCK_FILE_NAME
                 ),
                 paths: vec![manifest_path.clone()],
             });
@@ -333,8 +376,8 @@ fn classify_discovery(
                     lock_path
                         .file_name()
                         .and_then(|value| value.to_str())
-                        .unwrap_or(lockfile::CAPSULE_LOCK_FILE_NAME),
-                    ATO_LOCK_FILE_NAME
+                        .unwrap_or(lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
+                    CAPSULE_LOCK_FILE_NAME
                 ),
                 paths: vec![lock_path.clone()],
             });
@@ -372,14 +415,16 @@ fn materialize_resolution(
                 .canonical_lock_path
                 .clone()
                 .expect("canonical lock path must exist");
-            let mut lock = ato_lock::load_unvalidated_from_path(&path)?;
-            ato_lock::normalize_lock_closure(&mut lock)?;
-            ato_lock::validate_persisted(&lock, options.canonical_validation_mode).map_err(|errors| {
+            let mut lock = capsule_lock::load_unvalidated_from_path(&path)?;
+            capsule_lock::normalize_lock_closure(&mut lock)?;
+            capsule_lock::validate_persisted(&lock, options.canonical_validation_mode).map_err(|errors| {
                 CapsuleError::Config(format!(
-                    "{} is present but invalid at {}: {}. Compatibility inputs will not be used as fallback.",
-                    ATO_LOCK_FILE_NAME,
+                    "{} is present but invalid at {}: {}. Compatibility inputs will not be used as fallback; regenerate the canonical lock (e.g. `ato init`).",
+                    path.file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(CAPSULE_LOCK_FILE_NAME),
                     path.display(),
-                    format_ato_lock_validation_errors(&errors)
+                    format_capsule_lock_validation_errors(&errors)
                 ))
             })?;
 
@@ -473,7 +518,7 @@ fn legacy_lock_without_manifest_error(path: &Path) -> CapsuleError {
         "{} is not an authoritative command-entry input without capsule.toml: {}",
         path.file_name()
             .and_then(|value| value.to_str())
-            .unwrap_or(lockfile::CAPSULE_LOCK_FILE_NAME),
+            .unwrap_or(lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
         path.display()
     ))
 }
@@ -504,7 +549,7 @@ fn single_script_from_discovery(discovery: &InputDiscovery) -> Option<ResolvedSi
     })
 }
 
-fn format_ato_lock_validation_errors(errors: &[AtoLockValidationError]) -> String {
+fn format_capsule_lock_validation_errors(errors: &[CapsuleLockValidationError]) -> String {
     errors
         .iter()
         .map(|error| error.to_string())
@@ -520,10 +565,11 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, ResolvedInputKind,
-        ResolverAdvisoryCode, SingleScriptLanguage, resolve_authoritative_input,
+        CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME, ResolveInputOptions,
+        ResolvedInput, ResolvedInputKind, ResolverAdvisoryCode, SingleScriptLanguage,
+        resolve_authoritative_input,
     };
-    use crate::ato_lock::{AtoLock, recompute_lock_id};
+    use crate::capsule_lock::{CapsuleLock, recompute_lock_id};
 
     struct EnvVarGuard {
         key: &'static str,
@@ -586,7 +632,11 @@ run = "dist""#
     }
 
     fn write_canonical_lock(dir: &Path) {
-        let mut lock = AtoLock::default();
+        write_canonical_lock_as(dir, CAPSULE_LOCK_FILE_NAME);
+    }
+
+    fn write_canonical_lock_as(dir: &Path, file_name: &str) {
+        let mut lock = CapsuleLock::default();
         lock.resolution
             .entries
             .insert("runtime".to_string(), serde_json::json!({"kind": "deno"}));
@@ -595,8 +645,8 @@ run = "dist""#
             serde_json::json!({"driver": "deno", "entrypoint": "main.ts"}),
         );
         recompute_lock_id(&mut lock).expect("recompute lock id");
-        let raw = crate::ato_lock::to_pretty_json(&lock).expect("serialize lock");
-        fs::write(dir.join(ATO_LOCK_FILE_NAME), raw).expect("write canonical lock");
+        let raw = crate::capsule_lock::to_pretty_json(&lock).expect("serialize lock");
+        fs::write(dir.join(file_name), raw).expect("write canonical lock");
     }
 
     #[test]
@@ -628,11 +678,97 @@ run = "dist""#
     }
 
     #[test]
+    fn capsule_lock_only_resolves_canonical_without_alias_advisory() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_lock(dir.path());
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve authoritative input");
+
+        assert_eq!(resolved.kind(), ResolvedInputKind::CanonicalLock);
+        assert_eq!(
+            resolved.provenance().authoritative_path,
+            Some(
+                dir.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(CAPSULE_LOCK_FILE_NAME)
+            )
+        );
+        assert!(!resolved.advisories().iter().any(
+            |advisory| advisory.code == ResolverAdvisoryCode::DeprecatedCanonicalLockAliasName
+        ));
+    }
+
+    #[test]
+    fn deprecated_alias_only_resolves_canonical_with_rename_advisory() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_lock_as(dir.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+
+        let resolved = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect("resolve authoritative input");
+
+        assert_eq!(resolved.kind(), ResolvedInputKind::CanonicalLock);
+        assert_eq!(
+            resolved.provenance().authoritative_path,
+            Some(
+                dir.path()
+                    .canonicalize()
+                    .unwrap()
+                    .join(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+            )
+        );
+        let advisory = resolved
+            .advisories()
+            .iter()
+            .find(|advisory| {
+                advisory.code == ResolverAdvisoryCode::DeprecatedCanonicalLockAliasName
+            })
+            .expect("deprecation advisory must be emitted for the alias name");
+        assert!(advisory.message.contains(CAPSULE_LOCK_FILE_NAME));
+        assert!(
+            advisory
+                .message
+                .contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn canonical_lock_and_alias_coexistence_fails_closed() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_lock(dir.path());
+        write_canonical_lock_as(dir.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+
+        let err = resolve_authoritative_input(dir.path(), ResolveInputOptions::default())
+            .expect_err("coexisting capsule.lock and ato.lock.json must fail closed");
+        let message = err.to_string();
+        assert!(message.contains(CAPSULE_LOCK_FILE_NAME));
+        assert!(message.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME));
+        assert!(message.contains("Remove one"));
+    }
+
+    #[test]
+    fn explicit_alias_path_resolves_canonical_lock() {
+        let dir = tempdir().expect("tempdir");
+        write_canonical_lock_as(dir.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+        let alias_path = dir.path().join(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+
+        let resolved = resolve_authoritative_input(&alias_path, ResolveInputOptions::default())
+            .expect("resolve from explicit alias path");
+
+        assert_eq!(resolved.kind(), ResolvedInputKind::CanonicalLock);
+        assert_eq!(
+            resolved.provenance().explicit_input_kind,
+            super::ExplicitInputKind::CanonicalLock
+        );
+    }
+
+    #[test]
     fn invalid_canonical_lock_does_not_fallback_to_manifest() {
         let dir = tempdir().expect("tempdir");
         write_manifest(dir.path(), "demo");
         fs::write(
-            dir.path().join(ATO_LOCK_FILE_NAME),
+            dir.path().join(CAPSULE_LOCK_FILE_NAME),
             r#"{"schema_version":1}"#,
         )
         .expect("write invalid lock");
@@ -641,7 +777,7 @@ run = "dist""#
             .expect_err("invalid canonical lock must fail");
         let message = err.to_string();
         assert!(message.contains("Compatibility inputs will not be used as fallback"));
-        assert!(message.contains(ATO_LOCK_FILE_NAME));
+        assert!(message.contains(CAPSULE_LOCK_FILE_NAME));
     }
 
     #[test]
@@ -735,7 +871,7 @@ run = "dist""#
         write_legacy_lock(dir.path());
 
         let manifest_path = dir.path().join("capsule.toml");
-        let canonical_path = dir.path().join(ATO_LOCK_FILE_NAME);
+        let canonical_path = dir.path().join(CAPSULE_LOCK_FILE_NAME);
         let legacy_path = dir.path().join("capsule.lock.json");
 
         let from_manifest =

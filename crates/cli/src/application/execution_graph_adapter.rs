@@ -4,7 +4,7 @@
 //! ato-run/ato#74 and partially addresses ato-run/ato#97.
 //!
 //! This adapter is intentionally pure: it takes a manifest TOML value (and
-//! optionally an [`AtoLock`]) and produces an
+//! optionally an [`CapsuleLock`]) and produces an
 //! [`ExecutionGraphBuildInput`] suitable for
 //! [`ExecutionGraphBuilder::build`][builder]. It does **no** I/O, holds **no**
 //! runtime state, and never spawns providers — it is the static counterpart

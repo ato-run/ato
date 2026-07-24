@@ -88,7 +88,7 @@ pub async fn start_external_capsules(
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "{} is missing capsule dependency '{}'",
-                    capsule::lockfile::CAPSULE_LOCK_FILE_NAME,
+                    capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
                     dependency.alias
                 )
             })?;

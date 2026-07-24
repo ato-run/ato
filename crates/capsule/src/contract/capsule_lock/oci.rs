@@ -1,8 +1,9 @@
-//! Typed accessors for OCI resolution facts in `ato.lock.json`.
+//! Typed accessors for OCI resolution facts in the canonical lock
+//! (`capsule.lock`).
 //!
 //! Implements Phase 1 (read) and Phase 2 (write) of OCI lock migration.
 //! Read path: dual-read from main lock with transparent sidecar fallback.
-//! Write path: upsert OCI facts into ato.lock.json resolution section.
+//! Write path: upsert OCI facts into the canonical lock's resolution section.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,7 +11,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::AtoLock;
+use super::CapsuleLock;
 use crate::error::CapsuleError;
 use crate::oci_compose_lock::{self, OciImageLockEntry as SidecarImageLockEntry};
 use crate::types::OciPlatform;
@@ -63,7 +64,7 @@ impl std::fmt::Display for OciLockReadWarning {
                 write!(
                     f,
                     "oci_sidecar_lock_ignored_due_to_main_lock: \
-                     ato.lock.json has resolution.oci_images; \
+                     capsule.lock has resolution.oci_images; \
                      ato.oci.lock.json is ignored"
                 )
             }
@@ -83,7 +84,7 @@ pub enum OciMainLockError {
 }
 
 pub fn oci_images_from_main_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> std::result::Result<Option<BTreeMap<String, OciImageLockEntry>>, OciMainLockError> {
     let Some(oci_images_value) = lock.resolution.entries.get("oci_images") else {
         return Ok(None);
@@ -99,7 +100,7 @@ pub fn oci_images_from_main_lock(
 }
 
 pub fn oci_imports_from_main_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> std::result::Result<Option<BTreeMap<String, OciImportEntry>>, OciMainLockError> {
     let Some(oci_imports_value) = lock.resolution.entries.get("oci_imports") else {
         return Ok(None);
@@ -280,7 +281,7 @@ fn convert_sidecar_import_to_main(
 }
 
 pub fn read_oci_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     project_dir: &Path,
 ) -> std::result::Result<OciLockReadResult, OciMainLockError> {
     let main_images = oci_images_from_main_lock(lock)?;
@@ -352,7 +353,7 @@ pub fn parse_platform_str(s: &str) -> OciPlatform {
 }
 
 pub fn upsert_oci_lock_facts(
-    lock: &mut AtoLock,
+    lock: &mut CapsuleLock,
     images: BTreeMap<String, OciImageLockEntry>,
     imports: BTreeMap<String, OciImportEntry>,
 ) -> std::result::Result<(), OciMainLockError> {
@@ -387,11 +388,20 @@ pub fn write_oci_facts_to_main_lock(
 ) -> Result<(), CapsuleError> {
     use super::{load_unvalidated_from_path, write_pretty_to_path};
 
-    let main_lock_path = project_dir.join("ato.lock.json");
-    let mut lock = if main_lock_path.exists() {
-        load_unvalidated_from_path(&main_lock_path)?
-    } else {
-        AtoLock::default()
+    use crate::routing::input_resolver::{CAPSULE_LOCK_FILE_NAME, resolve_canonical_lock_path};
+
+    // Update the existing canonical lock in place (including one still stored
+    // under the deprecated `ato.lock.json` alias, so no split-brain pair is
+    // created); brand-new locks are only ever written as `capsule.lock`.
+    let (main_lock_path, mut lock) = match resolve_canonical_lock_path(project_dir)? {
+        Some(existing) => {
+            let lock = load_unvalidated_from_path(&existing)?;
+            (existing, lock)
+        }
+        None => (
+            project_dir.join(CAPSULE_LOCK_FILE_NAME),
+            CapsuleLock::default(),
+        ),
     };
 
     upsert_oci_lock_facts(&mut lock, images, imports)
@@ -408,9 +418,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::ato_lock;
-    use crate::ato_lock::AtoLock;
-    use crate::ato_lock::{FeatureName, KnownFeature};
+    use crate::capsule_lock;
+    use crate::capsule_lock::CapsuleLock;
+    use crate::capsule_lock::{FeatureName, KnownFeature};
     use crate::oci_compose_lock::{
         OCI_COMPOSE_LOCK_FILE_NAME, OciComposeLock, OciImageLockEntry as SidecarImageLockEntry,
         OciImportMeta,
@@ -424,8 +434,8 @@ mod tests {
         format!("sha256:{}", hex64(c))
     }
 
-    fn sample_main_lock_with_oci() -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn sample_main_lock_with_oci() -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -499,7 +509,7 @@ mod tests {
     #[test]
     fn dual_read_sidecar_fallback_preserves_execution_identity() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock = AtoLock::default();
+        let main_lock = CapsuleLock::default();
         let sidecar = sample_sidecar_lock();
         write_sidecar_lock(&dir, &sidecar);
 
@@ -548,7 +558,7 @@ mod tests {
     #[test]
     fn main_lock_malformed_does_not_silently_fallback_to_sidecar() {
         let dir = tempfile::tempdir().unwrap();
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution
             .entries
             .insert("oci_images".to_string(), json!("not_an_object"));
@@ -562,7 +572,7 @@ mod tests {
 
     #[test]
     fn cached_digest_reuse_requires_matching_platform() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -578,7 +588,7 @@ mod tests {
         let db = &oci_images_from_main_lock(&lock).unwrap().unwrap()["db"];
         assert_eq!(db.platform, "linux/amd64");
 
-        let mut lock_arm = AtoLock::default();
+        let mut lock_arm = CapsuleLock::default();
         lock_arm.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -598,7 +608,7 @@ mod tests {
 
     #[test]
     fn emulation_policy_drift_requires_relock() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -613,7 +623,7 @@ mod tests {
         );
         let native = &oci_images_from_main_lock(&lock).unwrap().unwrap()["db"];
 
-        let mut lock_emu = AtoLock::default();
+        let mut lock_emu = CapsuleLock::default();
         lock_emu.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -633,7 +643,7 @@ mod tests {
 
     #[test]
     fn resolved_ref_must_be_digest_pull_ref() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -651,7 +661,7 @@ mod tests {
 
     #[test]
     fn resolved_ref_rejects_tag_only_ref() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -674,7 +684,7 @@ mod tests {
 
     #[test]
     fn resolved_ref_rejects_non_sha256_digest() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -694,7 +704,7 @@ mod tests {
 
     #[test]
     fn resolved_ref_rejects_wrong_digest_length() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -714,7 +724,7 @@ mod tests {
 
     #[test]
     fn resolved_ref_digest_must_match_resolved_digest() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -767,7 +777,7 @@ mod tests {
 
     #[test]
     fn oci_import_source_path_rejects_absolute_path() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_imports".to_string(),
             json!({
@@ -785,7 +795,7 @@ mod tests {
 
     #[test]
     fn oci_import_source_path_rejects_parent_component() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_imports".to_string(),
             json!({
@@ -803,7 +813,7 @@ mod tests {
 
     #[test]
     fn oci_import_source_path_allows_dots_in_filenames() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_imports".to_string(),
             json!({
@@ -820,7 +830,7 @@ mod tests {
 
     #[test]
     fn oci_import_source_path_rejects_nested_parent_component() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_imports".to_string(),
             json!({
@@ -837,7 +847,7 @@ mod tests {
 
     #[test]
     fn oci_import_source_path_accepts_project_relative_path() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_imports".to_string(),
             json!({
@@ -855,7 +865,7 @@ mod tests {
 
     #[test]
     fn oci_images_entry_with_import_id_preserves_field() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "oci_images".to_string(),
             json!({
@@ -879,7 +889,7 @@ mod tests {
         let w = OciLockReadWarning::SidecarIgnoredDueToMainLock;
         let s = w.to_string();
         assert!(s.contains("oci_sidecar_lock_ignored_due_to_main_lock"));
-        assert!(s.contains("ato.lock.json"));
+        assert!(s.contains("capsule.lock"));
         assert!(s.contains("ato.oci.lock.json"));
 
         let w2 = OciLockReadWarning::SidecarParseFailed("bad json".to_string());
@@ -933,17 +943,17 @@ mod tests {
     }
 
     #[test]
-    fn main_lock_write_creates_ato_lock_when_missing() {
+    fn main_lock_write_creates_capsule_lock_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
         assert!(!main_lock_path.exists());
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .expect("write_oci_facts_to_main_lock should create lock when missing");
 
-        assert!(main_lock_path.exists(), "ato.lock.json should be created");
+        assert!(main_lock_path.exists(), "capsule.lock should be created");
 
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         let images = oci_images_from_main_lock(&lock)
             .unwrap()
             .expect("oci_images should be present");
@@ -958,21 +968,41 @@ mod tests {
     }
 
     #[test]
+    fn main_lock_write_updates_deprecated_alias_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let alias_lock_path = dir.path().join("ato.lock.json");
+        capsule_lock::write_pretty_to_path(&CapsuleLock::default(), &alias_lock_path).unwrap();
+
+        write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
+            .expect("write_oci_facts_to_main_lock should update alias lock in place");
+
+        assert!(alias_lock_path.exists(), "alias lock must be kept in place");
+        assert!(
+            !dir.path().join("capsule.lock").exists(),
+            "no split-brain capsule.lock must be created next to the alias"
+        );
+
+        let lock = capsule_lock::load_unvalidated_from_path(&alias_lock_path).unwrap();
+        assert!(lock.resolution.entries.contains_key("oci_images"));
+        assert!(lock.resolution.entries.contains_key("oci_imports"));
+    }
+
+    #[test]
     fn main_lock_write_preserves_unrelated_resolution_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
-        let mut preexisting = AtoLock::default();
+        let mut preexisting = CapsuleLock::default();
         preexisting.resolution.entries.insert(
             "runtime".to_string(),
             json!({"kind": "deno", "version": "2.1.3"}),
         );
-        ato_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
+        capsule_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
 
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         assert!(
             lock.resolution.entries.contains_key("runtime"),
             "existing runtime entry must be preserved"
@@ -993,7 +1023,7 @@ mod tests {
     #[test]
     fn main_lock_write_upserts_oci_images() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
         let initial_images = sample_image_entries();
         let initial_imports = sample_import_entries();
@@ -1013,7 +1043,7 @@ mod tests {
         );
         write_oci_facts_to_main_lock(dir.path(), updated_images, sample_import_entries()).unwrap();
 
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         let images = oci_images_from_main_lock(&lock)
             .unwrap()
             .expect("oci_images");
@@ -1039,7 +1069,7 @@ mod tests {
         );
         let imports = BTreeMap::new();
 
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         let err = upsert_oci_lock_facts(&mut lock, images, imports).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("validation"), "got: {msg}");
@@ -1048,7 +1078,7 @@ mod tests {
     #[test]
     fn main_lock_write_is_stable_across_repeated_runs() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
@@ -1068,15 +1098,16 @@ mod tests {
     #[test]
     fn main_lock_write_preserves_lock_id_after_upsert() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
-        let _first = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
+        let _first = capsule_lock::load_unvalidated_from_path(&main_lock_path).expect("first lock");
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
-        let second = ato_lock::load_unvalidated_from_path(&main_lock_path).expect("second lock");
+        let second =
+            capsule_lock::load_unvalidated_from_path(&main_lock_path).expect("second lock");
 
         assert!(second.lock_id.is_some());
         let images = oci_images_from_main_lock(&second)
@@ -1100,7 +1131,7 @@ mod tests {
             },
         );
         let imports = BTreeMap::new();
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         assert!(upsert_oci_lock_facts(&mut lock, images, imports).is_err());
     }
 
@@ -1116,7 +1147,7 @@ mod tests {
                 source_hash: sha('a'),
             },
         );
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         assert!(upsert_oci_lock_facts(&mut lock, images, imports).is_err());
     }
 
@@ -1129,8 +1160,8 @@ mod tests {
 
         write_sidecar_lock(&dir, &sample_sidecar_lock());
 
-        let main_lock_path = dir.path().join("ato.lock.json");
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let main_lock_path = dir.path().join("capsule.lock");
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         let result = read_oci_lock(&lock, dir.path()).unwrap();
 
         assert!(
@@ -1149,15 +1180,15 @@ mod tests {
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
 
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         assert_eq!(
             lock.schema_version,
-            crate::ato_lock::ATO_LOCK_SCHEMA_VERSION
+            crate::capsule_lock::CAPSULE_LOCK_SCHEMA_VERSION
         );
 
-        ato_lock::validate_structural_non_strict(&lock).unwrap();
+        capsule_lock::validate_structural_non_strict(&lock).unwrap();
 
         let images = oci_images_from_main_lock(&lock)
             .unwrap()
@@ -1172,20 +1203,20 @@ mod tests {
     #[test]
     fn write_oci_facts_preserves_existing_contract_and_features() {
         let dir = tempfile::tempdir().unwrap();
-        let main_lock_path = dir.path().join("ato.lock.json");
+        let main_lock_path = dir.path().join("capsule.lock");
 
-        let mut preexisting = AtoLock::default();
+        let mut preexisting = CapsuleLock::default();
         preexisting.features.declared = vec![FeatureName::Known(KnownFeature::ReadOnlyRootFs)];
         preexisting
             .contract
             .entries
             .insert("process".to_string(), json!({"driver": "deno"}));
-        ato_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
+        capsule_lock::write_pretty_to_path(&preexisting, &main_lock_path).unwrap();
 
         write_oci_facts_to_main_lock(dir.path(), sample_image_entries(), sample_import_entries())
             .unwrap();
 
-        let lock = ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let lock = capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
         assert!(lock.contract.entries.contains_key("process"));
         assert_eq!(lock.features.declared.len(), 1);
     }

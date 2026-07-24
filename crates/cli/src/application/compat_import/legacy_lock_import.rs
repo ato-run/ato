@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use capsule::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::capsule_lock::{CapsuleLock, UnresolvedReason, UnresolvedValue};
 use capsule::lockfile::{LegacyCapsuleLock, LockedCapsuleDependency};
 use serde_json::Value;
 
@@ -19,7 +19,7 @@ pub(super) struct LegacyLockImportResult {
 
 pub(super) fn import_legacy_lock(
     input: &CompatibilityCompilerInput<'_>,
-    manifest_draft: &AtoLock,
+    manifest_draft: &CapsuleLock,
     legacy_lock: &LegacyCapsuleLock,
 ) -> LegacyLockImportResult {
     let mut resolution_entries = BTreeMap::new();
@@ -131,7 +131,7 @@ pub(super) fn import_legacy_lock(
 
 fn compare_runtime_hints(
     input: &CompatibilityCompilerInput<'_>,
-    manifest_draft: &AtoLock,
+    manifest_draft: &CapsuleLock,
     runtimes: &capsule::lockfile::RuntimeSection,
     unresolved: &mut Vec<UnresolvedValue>,
     diagnostics: &mut Vec<CompatibilityDiagnostic>,
@@ -191,7 +191,7 @@ fn compare_runtime_hints(
 
 fn compare_dependency_bindings(
     input: &CompatibilityCompilerInput<'_>,
-    manifest_draft: &AtoLock,
+    manifest_draft: &CapsuleLock,
     locked_dependencies: &[LockedCapsuleDependency],
     unresolved: &mut Vec<UnresolvedValue>,
     diagnostics: &mut Vec<CompatibilityDiagnostic>,

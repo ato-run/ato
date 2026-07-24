@@ -46,7 +46,7 @@ struct PreparedCommand {
 /// `None` falls through to [`spawn`] without installing the override.
 pub fn spawn_with_selected_port(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -64,7 +64,7 @@ pub fn spawn_with_selected_port(
 
 pub fn spawn(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -167,7 +167,7 @@ pub fn spawn(
 /// caller controls stdio and spawn timing.
 fn build_orchestration_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -256,7 +256,7 @@ fn resolve_readiness_port(launch_spec: &capsule::launch_spec::LaunchSpec) -> Opt
 /// Returns a `CapsuleProcess` with port-based readiness detection.
 pub fn spawn_background(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -307,7 +307,7 @@ pub fn spawn_background(
 /// behavior (no fake ready), matching the host source executor (#623).
 pub fn spawn_foreground(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -384,7 +384,7 @@ fn run_provisioning(
 
 fn maybe_build_direct_node_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -453,7 +453,7 @@ fn allow_net_hosts_for_resolved_port(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -630,7 +630,7 @@ fn log_runtime_cmd(cmd: &Command, runtime_dir: &Path, entrypoint: &str) {
 
 fn build_host_node_package_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     package_bin: &str,
@@ -674,7 +674,7 @@ fn build_host_node_package_command(
 
 fn build_host_node_entrypoint_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -803,7 +803,7 @@ fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf 
 #[allow(clippy::too_many_arguments)]
 fn build_package_manager_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,

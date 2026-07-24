@@ -1,7 +1,9 @@
 use serde::Serialize;
 
-use crate::ato_lock::closure::normalize_resolution_closure_entries;
-use crate::ato_lock::schema::{AtoLock, ContractSection, LockLaunchSection, ResolutionSection};
+use crate::capsule_lock::closure::normalize_resolution_closure_entries;
+use crate::capsule_lock::schema::{
+    CapsuleLock, ContractSection, LockLaunchSection, ResolutionSection,
+};
 use crate::error::Result;
 use crate::execution_contract::ExecutionContractEnvelopeV1;
 
@@ -56,7 +58,7 @@ pub const CANONICAL_IDENTITY_EXCLUDED_SECTIONS: &[&str] = &[
     "execution_contract",
 ];
 
-pub fn canonical_projection(lock: &AtoLock) -> Result<CanonicalLockProjection> {
+pub fn canonical_projection(lock: &CapsuleLock) -> Result<CanonicalLockProjection> {
     let mut resolution = lock.resolution.clone();
     normalize_resolution_closure_entries(&mut resolution.entries)?;
 
@@ -68,14 +70,14 @@ pub fn canonical_projection(lock: &AtoLock) -> Result<CanonicalLockProjection> {
 }
 
 /// Returns the v1 canonical identity projection that feeds `lock_id`.
-pub fn canonical_identity_projection(lock: &AtoLock) -> Result<CanonicalLockProjection> {
+pub fn canonical_identity_projection(lock: &CapsuleLock) -> Result<CanonicalLockProjection> {
     canonical_projection(lock)
 }
 
 /// Returns the v1 canonical **signature** projection: the identity projection
 /// plus the additive execution sections (`execution_contract`, `launch`). When
 /// both are absent it is byte-identical to the identity projection.
-pub fn canonical_signature_projection(lock: &AtoLock) -> Result<CanonicalSignatureProjection> {
+pub fn canonical_signature_projection(lock: &CapsuleLock) -> Result<CanonicalSignatureProjection> {
     let identity = canonical_projection(lock)?;
     Ok(CanonicalSignatureProjection {
         schema_version: identity.schema_version,

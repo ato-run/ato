@@ -308,7 +308,7 @@ fn detect_setup_plan(project_root: &Path) -> Result<SetupPlan> {
 }
 
 fn detect_lockfile_capsule_dependencies(project_root: &Path) -> Result<Vec<CapsuleDependencyPlan>> {
-    let lock_path = project_root.join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
+    let lock_path = project_root.join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
     if !lock_path.exists() {
         return Ok(Vec::new());
     }
@@ -629,7 +629,8 @@ mod tests {
             targets: HashMap::new(),
         };
         fs::write(
-            temp.path().join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
+            temp.path()
+                .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             serde_json::to_vec_pretty(&lock).expect("serialize lock"),
         )
         .expect("write lock");
@@ -742,7 +743,8 @@ source = "ato/ato-desktop"
             targets: HashMap::new(),
         };
         fs::write(
-            temp.path().join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
+            temp.path()
+                .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             serde_json::to_vec_pretty(&lock).expect("serialize lock"),
         )
         .expect("write lock");

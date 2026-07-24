@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use capsule::ato_lock::{compute_closure_digest, compute_lock_id};
+use capsule::capsule_lock::{compute_closure_digest, compute_lock_id};
 use capsule::input_resolver::{ResolveInputOptions, ResolvedInput, resolve_authoritative_input};
 use capsule::lock_runtime::resolve_lock_runtime_model;
 use capsule::router::{CompatManifestBridge, CompatProjectInput, ExecutionDescriptor};
@@ -84,7 +84,7 @@ fn producer_authoritative_input_from_resolved(
             // Canonical-lock-first contract (see PAS §4.5 + the e2e
             // `e2e_local_registry_private_publish_prefers_canonical_lock_metadata`
             // and unit `test_build_prefers_existing_canonical_lock_input`):
-            // when `ato.lock.json` is the resolved authoritative input,
+            // when `capsule.lock` is the resolved authoritative input,
             // it is the source of truth — `capsule.toml` is treated as
             // a discovery hint at most. We deliberately do NOT diff the
             // lock's `contract.metadata.{name,version}` against the
@@ -101,7 +101,7 @@ fn producer_authoritative_input_from_resolved(
             //
             // Users who genuinely want to rebuild the canonical lock
             // from a freshly edited manifest should invoke
-            // `ato lock --refresh` (or delete `ato.lock.json`) — that
+            // `ato lock --refresh` (or delete `capsule.lock`) — that
             // path falls back through CompatibilityProject /
             // SourceOnly below and is the right place for any
             // "rebuild the lock from source" semantics.
@@ -453,7 +453,7 @@ impl ProducerAuthoritativeInput {
         advisories: Vec<String>,
     ) -> Result<Self> {
         let sanitized_lock = state::sanitize_lock_for_distribution(&materialized.lock);
-        capsule::ato_lock::write_pretty_to_path(&sanitized_lock, &materialized.lock_path)
+        capsule::capsule_lock::write_pretty_to_path(&sanitized_lock, &materialized.lock_path)
             .with_context(|| {
                 format!(
                     "Failed to rewrite sanitized lock for distribution at {}",
@@ -547,7 +547,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub(crate) fn publish_metadata_from_lock(
-    lock: &capsule::ato_lock::AtoLock,
+    lock: &capsule::capsule_lock::CapsuleLock,
 ) -> Option<PublishArtifactMetadata> {
     let delivery = lock.contract.entries.get("delivery")?.as_object()?;
     let mode = delivery
@@ -581,7 +581,7 @@ pub(crate) fn publish_metadata_from_lock(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule::ato_lock::AtoLock;
+    use capsule::capsule_lock::CapsuleLock;
     use serde_json::json;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -596,7 +596,7 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn canonical_lock_is_authoritative_over_diverging_manifest() {
-        // Canonical-lock-first contract: when `ato.lock.json` is present
+        // Canonical-lock-first contract: when `capsule.lock` is present
         // the build/publish pipeline must consume its
         // `contract.metadata.{name,version}` verbatim — no manifest
         // diff, no "Regenerate now? [y/N]" prompt, no auto-regen even
@@ -626,7 +626,7 @@ run = "main.ts"
         )
         .expect("capsule.toml");
 
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "canonical-name", "version": "0.1.0", "default_target": "default"}),
@@ -646,7 +646,7 @@ run = "main.ts"
         lock.resolution
             .entries
             .insert("closure".to_string(), json!({"kind": "metadata_only"}));
-        capsule::ato_lock::write_pretty_to_path(&lock, &dir.path().join("ato.lock.json"))
+        capsule::capsule_lock::write_pretty_to_path(&lock, &dir.path().join("capsule.lock"))
             .expect("write canonical lock");
 
         // assume_yes=false to prove that no prompt fires either
@@ -671,7 +671,7 @@ run = "main.ts"
         // The lock file on disk must be untouched: no regen, no rewrite
         // of metadata.version to track the manifest.
         let post_resolve_lock =
-            capsule::ato_lock::load_unvalidated_from_path(&dir.path().join("ato.lock.json"))
+            capsule::capsule_lock::load_unvalidated_from_path(&dir.path().join("capsule.lock"))
                 .expect("canonical lock must remain readable");
         let metadata = post_resolve_lock
             .contract
@@ -771,7 +771,7 @@ run = "main.ts""#
             .to_string();
         std::fs::write(&manifest_path, &manifest_raw).expect("write manifest");
 
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo", "version": "0.1.0", "default_target": "default"}),
@@ -854,8 +854,8 @@ run = "main.ts""#
         assert!(input.descriptor.lock.attestations.entries.is_empty());
         assert!(input.descriptor.lock.attestations.unresolved.is_empty());
 
-        let generated_lock = capsule::ato_lock::load_unvalidated_from_path(
-            &input._cleanup.run_state_dir.join("ato.lock.json"),
+        let generated_lock = capsule::capsule_lock::load_unvalidated_from_path(
+            &input._cleanup.run_state_dir.join("capsule.lock"),
         )
         .expect("read generated lock");
         assert!(generated_lock.binding.entries.is_empty());
@@ -866,7 +866,7 @@ run = "main.ts""#
 
     #[test]
     fn publish_metadata_from_lock_classifies_source_derived_desktop_delivery() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             serde_json::json!({
@@ -889,7 +889,7 @@ run = "main.ts""#
 
     #[test]
     fn publish_metadata_from_lock_classifies_imported_desktop_delivery() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             serde_json::json!({
@@ -960,7 +960,7 @@ playground = true
         let manifest_path = dir.path().join("generated.capsule.toml");
         std::fs::write(&manifest_path, manifest_raw).expect("write manifest");
 
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo-app", "version": "1.2.3", "default_target": "cli"}),

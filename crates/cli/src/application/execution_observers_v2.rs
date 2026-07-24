@@ -231,7 +231,7 @@ fn build_observation_lockfile_digests(plan: &ManifestData) -> BTreeMap<String, S
             lock_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("ato.lock.json")
+                .unwrap_or("capsule.lock")
                 .to_string(),
             format!("blake3:{}", blake3::hash(&bytes).to_hex()),
         );
@@ -294,7 +294,7 @@ fn read_direct_capsule_dependency_inputs(
             .map(dependency_hash_input_from_locked_dependency)
             .collect::<Vec<_>>(),
         Err(capsule_lock_error) => {
-            let mut lock: capsule::ato_lock::AtoLock =
+            let mut lock: capsule::capsule_lock::CapsuleLock =
                 serde_json::from_slice(&bytes).with_context(|| {
                     format!(
                         "failed to parse dependency identity lock data: {} (capsule.lock parse failed: {capsule_lock_error})",
@@ -1215,19 +1215,19 @@ env_allowlist = ["DATABASE_URL"]
     fn dependency_derivation_hash_changes_when_contract_parameters_change() {
         let workspace = tempfile::tempdir().expect("workspace");
         let mut first_plan = sample_plan(workspace.path().to_path_buf());
-        write_capsule_lock(
+        write_legacy_capsule_lock(
             &workspace
                 .path()
-                .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
+                .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             "appdb",
             "secret-a",
         );
         first_plan.lock_path = workspace
             .path()
-            .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
+            .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
 
         let mut second_plan = sample_plan(workspace.path().to_path_buf());
-        write_capsule_lock(
+        write_legacy_capsule_lock(
             &workspace.path().join("capsule-alt.lock.json"),
             "otherdb",
             "secret-a",
@@ -1260,19 +1260,19 @@ env_allowlist = ["DATABASE_URL"]
     fn dependency_derivation_hash_ignores_contract_credentials() {
         let workspace = tempfile::tempdir().expect("workspace");
         let mut first_plan = sample_plan(workspace.path().to_path_buf());
-        write_capsule_lock(
+        write_legacy_capsule_lock(
             &workspace
                 .path()
-                .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME),
+                .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             "appdb",
             "secret-a",
         );
         first_plan.lock_path = workspace
             .path()
-            .join(capsule::lockfile::CAPSULE_LOCK_FILE_NAME);
+            .join(capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
 
         let mut second_plan = sample_plan(workspace.path().to_path_buf());
-        write_capsule_lock(
+        write_legacy_capsule_lock(
             &workspace.path().join("capsule-rotated.lock.json"),
             "appdb",
             "secret-b",
@@ -1302,41 +1302,41 @@ env_allowlist = ["DATABASE_URL"]
     }
 
     #[test]
-    fn dependency_derivation_hash_reads_locked_dependencies_from_ato_lock() {
+    fn dependency_derivation_hash_reads_locked_dependencies_from_capsule_lock() {
         let workspace = tempfile::tempdir().expect("workspace");
-        let capsule_lock = workspace.path().join("capsule.lock.json");
-        let ato_lock = workspace.path().join("ato.lock.json");
+        let legacy_lock = workspace.path().join("capsule.lock.json");
+        let canonical_lock = workspace.path().join("capsule.lock");
 
-        write_capsule_lock(&capsule_lock, "appdb", "secret-a");
-        write_ato_lock(&ato_lock, "appdb", "secret-a");
+        write_legacy_capsule_lock(&legacy_lock, "appdb", "secret-a");
+        write_canonical_capsule_lock(&canonical_lock, "appdb", "secret-a");
 
-        let mut capsule_plan = sample_plan(workspace.path().to_path_buf());
-        capsule_plan.lock_path = capsule_lock;
-        let mut ato_plan = sample_plan(workspace.path().to_path_buf());
-        ato_plan.lock_path = ato_lock;
+        let mut legacy_plan = sample_plan(workspace.path().to_path_buf());
+        legacy_plan.lock_path = legacy_lock;
+        let mut canonical_plan = sample_plan(workspace.path().to_path_buf());
+        canonical_plan.lock_path = canonical_lock;
 
         let launch_spec =
-            capsule::launch_spec::derive_launch_spec(&capsule_plan).expect("derive launch spec");
-        let capsule_observed = observe_dependencies_v2(
-            &capsule_plan,
+            capsule::launch_spec::derive_launch_spec(&legacy_plan).expect("derive launch spec");
+        let legacy_observed = observe_dependencies_v2(
+            &legacy_plan,
             &launch_spec,
             &RuntimeLaunchContext::empty(),
             None,
             &sample_runtime_identity(),
         )
-        .expect("observe capsule lock dependencies");
-        let ato_observed = observe_dependencies_v2(
-            &ato_plan,
+        .expect("observe legacy lock dependencies");
+        let canonical_observed = observe_dependencies_v2(
+            &canonical_plan,
             &launch_spec,
             &RuntimeLaunchContext::empty(),
             None,
             &sample_runtime_identity(),
         )
-        .expect("observe ato lock dependencies");
+        .expect("observe canonical lock dependencies");
 
         assert_eq!(
-            capsule_observed.derivation_hash.value,
-            ato_observed.derivation_hash.value
+            legacy_observed.derivation_hash.value,
+            canonical_observed.derivation_hash.value
         );
     }
 
@@ -1480,7 +1480,7 @@ run = "main.py"
         }
     }
 
-    fn write_ato_lock(path: &Path, database: &str, password: &str) {
+    fn write_canonical_capsule_lock(path: &Path, database: &str, password: &str) {
         let locked_dependencies = vec![capsule::lockfile::LockedCapsuleDependency {
             name: "db".to_string(),
             source: "capsule://ato/acme-postgres@16".to_string(),
@@ -1502,8 +1502,8 @@ run = "main.py"
             sha256: Some("sha256:beadfeed".to_string()),
             artifact_url: Some("https://example.test/postgres.capsule".to_string()),
         }];
-        let lock = capsule::ato_lock::AtoLock {
-            resolution: capsule::ato_lock::ResolutionSection {
+        let lock = capsule::capsule_lock::CapsuleLock {
+            resolution: capsule::capsule_lock::ResolutionSection {
                 entries: BTreeMap::from([(
                     "locked_dependencies".to_string(),
                     serde_json::to_value(&locked_dependencies)
@@ -1513,11 +1513,14 @@ run = "main.py"
             },
             ..Default::default()
         };
-        std::fs::write(path, serde_json::to_vec(&lock).expect("serialize ato lock"))
-            .expect("write ato lock");
+        std::fs::write(
+            path,
+            serde_json::to_vec(&lock).expect("serialize canonical lock"),
+        )
+        .expect("write canonical lock");
     }
 
-    fn write_capsule_lock(path: &Path, database: &str, password: &str) {
+    fn write_legacy_capsule_lock(path: &Path, database: &str, password: &str) {
         let lock = capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {

@@ -133,7 +133,7 @@
 //! The three `policy.*` digests are on exactly the same footing as the other
 //! opaque facets: their **domain and preimage rule are frozen by v1 now** (no
 //! producer-defined preimage), while their payload *schemas* are defined in a
-//! later PR. G0-2 stores each payload in `ato.lock.json` and re-derives its
+//! later PR. G0-2 stores each payload in `capsule.lock` and re-derives its
 //! digest before launch; a later PR may define/extend a payload schema without
 //! a v1 identity change, but MUST keep the domain constant and preimage rule
 //! above. No in-tree normative preimage spec for the network/capability/
@@ -216,7 +216,7 @@ pub const EXECUTION_CONTRACT_V1_SCHEMA: &str = "ato.execution-contract/v1";
 /// behind the digest is versioned separately from v1 (RFC §4.5 layering): a
 /// later PR MAY define or extend a payload without a v1 identity change, but
 /// MUST keep the domain and preimage rule constant. G0-2 stores each payload
-/// alongside its digest in `ato.lock.json` and re-derives the digest before
+/// alongside its digest in `capsule.lock` and re-derives the digest before
 /// launch.
 ///
 /// The domain is a **typed** value, never a free `&str`: this makes it

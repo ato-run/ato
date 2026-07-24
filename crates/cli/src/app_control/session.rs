@@ -13,13 +13,13 @@ use anyhow::{Context, Result};
 // so `ato-desktop` can read records without depending on `ato-cli`. We
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
-use capsule::ato_lock;
+use capsule::capsule_lock;
 use capsule::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     TrustState, normalize_capsule_handle,
 };
 use capsule::launch_spec::derive_launch_spec;
-use capsule::routing::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::routing::input_resolver::resolve_canonical_lock_path;
 pub(crate) use capsule::state::session::{
     GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
     StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
@@ -2369,24 +2369,33 @@ fn auto_state_bindings_for_sample_recipe_manifest(
     Ok(bindings)
 }
 
-/// Try to load `ato.lock.json` from the workspace root.
+/// Try to load `capsule.lock` (or its deprecated `ato.lock.json` alias) from
+/// the workspace root.
 /// This is the authoritative lock that `ato run` generates via source-inference.
 /// Without it, `guard.rs` rejects Tier1 execution because
 /// `has_authoritative_lock = false` and no physical `capsule.lock.json` exists.
 fn try_load_authoritative_lock(
     workspace_root: &Path,
-) -> (Option<ato_lock::AtoLock>, Option<PathBuf>) {
-    let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
-    if !lock_path.exists() {
-        return (None, None);
-    }
-    match ato_lock::load_unvalidated_from_path(&lock_path) {
+) -> (Option<capsule_lock::CapsuleLock>, Option<PathBuf>) {
+    let lock_path = match resolve_canonical_lock_path(workspace_root) {
+        Ok(Some(path)) => path,
+        Ok(None) => return (None, None),
+        Err(err) => {
+            tracing::warn!(
+                root = %workspace_root.display(),
+                error = %err,
+                "canonical lock resolution failed — session will proceed without authoritative lock"
+            );
+            return (None, None);
+        }
+    };
+    match capsule_lock::load_unvalidated_from_path(&lock_path) {
         Ok(lock) => (Some(lock), Some(lock_path)),
         Err(err) => {
             tracing::warn!(
                 path = %lock_path.display(),
                 error = %err,
-                "failed to load ato.lock.json — session will proceed without authoritative lock"
+                "failed to load canonical lock — session will proceed without authoritative lock"
             );
             (None, None)
         }

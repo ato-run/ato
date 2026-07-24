@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use crate::ato_lock::schema::{AtoLock, LockEnvironmentValue};
+use crate::capsule_lock::schema::{CapsuleLock, LockEnvironmentValue};
 use crate::execution_contract::{ExecutionContractError, OpaqueContractDigestV1};
 use crate::execution_contract_finalize::{environment_value_digest, is_sensitive_env_key};
 
@@ -97,7 +97,7 @@ pub enum LockExecutionError {
 
 /// Verify the embedded execution-contract envelope (if present) by recomputing
 /// `execution_id`. Absent envelope ⇒ `Ok`.
-pub fn verify_execution_envelope(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_execution_envelope(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     if let Some(envelope) = &lock.execution_contract {
         envelope.verify().map_err(LockExecutionError::Envelope)?;
     }
@@ -108,7 +108,7 @@ pub fn verify_execution_envelope(lock: &AtoLock) -> Result<(), LockExecutionErro
 /// `value_digest`, rejecting secret names, and — when the envelope is present —
 /// requiring each persisted name to be committed by the execution identity and
 /// cross-checking its digest against the committed value digest.
-pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_environment_values(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     let persisted: &[LockEnvironmentValue] = lock
         .launch
         .as_ref()
@@ -221,7 +221,7 @@ pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionErro
 
 /// Run both read-path checks: envelope `execution_id` re-derivation and env
 /// value digest re-derivation. Reject (fail closed) on the first failure.
-pub fn verify_lock_execution(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_lock_execution(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     verify_execution_envelope(lock)?;
     verify_environment_values(lock)?;
     Ok(())
@@ -232,7 +232,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ato_lock::schema::{LockEnvironmentValue, LockLaunchSection};
+    use crate::capsule_lock::schema::{LockEnvironmentValue, LockLaunchSection};
     use crate::execution_contract::{
         ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentValuePayloadV1,
         EnvironmentVariableContract, ExecutionContractEnvelopeV1, ExecutionContractV1, ExecutionId,
@@ -349,11 +349,11 @@ mod tests {
     fn lock_with(
         execution_contract: Option<ExecutionContractEnvelopeV1>,
         launch: Option<LockLaunchSection>,
-    ) -> AtoLock {
-        AtoLock {
+    ) -> CapsuleLock {
+        CapsuleLock {
             execution_contract,
             launch,
-            ..AtoLock::default()
+            ..CapsuleLock::default()
         }
     }
 
@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn absent_sections_verify_ok() {
-        let lock = AtoLock::default();
+        let lock = CapsuleLock::default();
         assert!(verify_lock_execution(&lock).is_ok());
     }
 
@@ -498,9 +498,9 @@ mod tests {
         // excluded from lock identity (absent from CanonicalLockProjection), so
         // an existing lock's lock_id must not change when they are added or
         // removed.
-        use crate::ato_lock::{compute_lock_id, recompute_lock_id, validate_persisted_strict};
+        use crate::capsule_lock::{compute_lock_id, recompute_lock_id, validate_persisted_strict};
 
-        let mut base = AtoLock::default();
+        let mut base = CapsuleLock::default();
         base.resolution.entries.insert(
             "runtime".to_string(),
             json!({"kind": "deno", "version": "2.1.3"}),
@@ -539,21 +539,21 @@ mod tests {
 
     // ---- Blocker 1: signature binds execution content; lock_id does not ----
 
-    fn base_lock() -> AtoLock {
-        let mut base = AtoLock::default();
+    fn base_lock() -> CapsuleLock {
+        let mut base = CapsuleLock::default();
         base.resolution
             .entries
             .insert("runtime".to_string(), json!({"kind": "deno"}));
         base.contract
             .entries
             .insert("process".to_string(), json!({"entrypoint": "main.ts"}));
-        crate::ato_lock::recompute_lock_id(&mut base).expect("recompute base lock_id");
+        crate::capsule_lock::recompute_lock_id(&mut base).expect("recompute base lock_id");
         base
     }
 
     #[test]
     fn signature_payload_binds_execution_sections_while_lock_id_stays_stable() {
-        use crate::ato_lock::{
+        use crate::capsule_lock::{
             canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
         };
 
@@ -616,12 +616,12 @@ mod tests {
         envelope.execution_id = ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap();
         let mut lock = base_lock();
         lock.execution_contract = Some(envelope);
-        crate::ato_lock::recompute_lock_id(&mut lock).unwrap();
+        crate::capsule_lock::recompute_lock_id(&mut lock).unwrap();
         // Serialize WITHOUT the write-path verification so a tampered artifact can
         // reach the reader; the read path must reject it.
         let raw = serde_json::to_string(&lock).unwrap();
         let error =
-            crate::ato_lock::load_verified_from_str(&raw).expect_err("tampered id must reject");
+            crate::capsule_lock::load_verified_from_str(&raw).expect_err("tampered id must reject");
         assert!(error.to_string().contains("execution verification failed"));
     }
 
@@ -638,7 +638,7 @@ mod tests {
             good,
         ));
         let error =
-            crate::ato_lock::to_pretty_json(&lock).expect_err("tampered payload must reject");
+            crate::capsule_lock::to_pretty_json(&lock).expect_err("tampered payload must reject");
         assert!(error.to_string().contains("execution verification failed"));
     }
 
