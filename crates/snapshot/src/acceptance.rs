@@ -60,7 +60,9 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use capsule::execution_contract::ExecutionId;
+use capsule::execution_contract::{
+    ExecutionContractEnvelopeV1, ExecutionContractError, ExecutionId,
+};
 use capsule::snapshot_manifest::{
     AcceptanceStatus, CapturePolicyV1, SanitizationAttestationV1, SecretScanAttestationV1,
     SnapshotCatalogRecord, SnapshotId, SnapshotManifestV1,
@@ -113,11 +115,14 @@ pub struct DisposableSessionHandle {
 /// This replaces the earlier caller-supplied `bool`: a bool is a *calling
 /// convention* a PR-2 caller could get wrong (pass `false` and wrongly proceed),
 /// exactly the failure class the `VerifiedExecutionId` fix closed. The proof has
-/// **no** public constructor, no `From<bool>` / `new`, and is not `Deserialize`:
-/// it can only be minted by a future (#1090) verified-Execution-Contract analysis
-/// that fails closed when the workload requires External State. In #1102 there is
-/// deliberately **no** production constructor, so production callers cannot build
-/// it yet — the running-capture path is closed until #1090 lands.
+/// **no** struct-literal constructor (its `execution_id` field is private), no
+/// `From<bool>` / `new`, and is not `Deserialize`: the single sanctioned
+/// production path is [`VerifiedRunningSnapshotEligibility::analyze_execution_contract`]
+/// (#1090), which verifies the Execution Contract and fails closed when the live
+/// workload requires External State. There is deliberately no constructor that
+/// takes a raw [`ExecutionId`] alone, a bare bool alone, or an unverified
+/// contract — so a caller structurally cannot drive an ineligible workload into
+/// running capture.
 ///
 /// The proof also **binds** the verified [`ExecutionId`] it was proven against
 /// (its single, private field). `accept` reads that identity to seed the receipt
@@ -150,6 +155,72 @@ impl VerifiedRunningSnapshotEligibility {
         &self.execution_id
     }
 
+    /// The sanctioned **production** constructor (#1090): mint a running-capture
+    /// eligibility proof from a verified Execution Contract, in a **single,
+    /// indivisible** step that both proves identity and analyzes the
+    /// External-State requirement.
+    ///
+    /// This is deliberately the *only* production way to obtain a
+    /// [`VerifiedRunningSnapshotEligibility`]. It takes a proof-carrying
+    /// [`ExecutionContractEnvelopeV1`] — never a raw [`ExecutionId`], never a bare
+    /// bool, never an *unverified* bare [`ExecutionContractV1`](capsule::execution_contract::ExecutionContractV1)
+    /// — and in one call:
+    ///
+    /// 1. **Verifies the Execution Contract** — [`ExecutionContractEnvelopeV1::verified_execution_id`]
+    ///    recomputes the canonical hash of the embedded contract and fails closed
+    ///    (returning [`AcceptanceFailure::ExecutionContractVerificationFailed`]) if
+    ///    it disagrees with the stored `execution_id`. The proof is *recomputed*
+    ///    here, not trusted.
+    /// 2. **Analyzes the restore-time-binding requirement** of that same verified
+    ///    contract via [`crate::external_state::requires_restore_time_bindings_for_live_workload`]
+    ///    — declared External State **or** declared restore-time secret bindings.
+    /// 3. **Fails closed** with [`AcceptanceFailure::ExternalStateRequiresWorkloadIdle`]
+    ///    when the live workload requires External State or restore-time secret
+    ///    bindings — a `running` capture of such a Capsule is ineligible (RFC §8.3);
+    ///    it must use `workload_idle` (#1093), never a secret-bearing running
+    ///    fallback.
+    /// 4. On success, **binds the proof's `execution_id` from the SAME verified
+    ///    contract** — the id proven in step 1, not any caller-supplied value — so
+    ///    the eligibility can only ever accept candidates of the exact identity it
+    ///    was analyzed against.
+    ///
+    /// Because the id is bound from the *verified* contract and the analysis reads
+    /// that *same* contract, there is no seam between "which contract was proven"
+    /// and "which contract was analyzed": a caller cannot verify one contract and
+    /// smuggle a different id or a different external-state shape.
+    ///
+    /// There is no bare-bool (or raw-id) constructor path — the only production
+    /// constructor takes a verified envelope:
+    ///
+    /// ```compile_fail
+    /// use snapshot::acceptance::VerifiedRunningSnapshotEligibility;
+    /// // A bare bool is not a `&ExecutionContractEnvelopeV1`: this is a type error,
+    /// // so an ineligible workload cannot be waved through with `false`.
+    /// let _ = VerifiedRunningSnapshotEligibility::analyze_execution_contract(false);
+    /// ```
+    pub fn analyze_execution_contract(
+        envelope: &ExecutionContractEnvelopeV1,
+    ) -> Result<Self, AcceptanceFailure> {
+        // (1) Verify the Execution Contract: recompute the canonical hash and
+        // match it against the stored id, fail closed on any disagreement. This
+        // yields a proof-carrying VerifiedExecutionId over the embedded contract.
+        let verified = envelope
+            .verified_execution_id()
+            .map_err(AcceptanceFailure::ExecutionContractVerificationFailed)?;
+        // (2)+(3) Analyze the SAME verified contract's restore-time-binding
+        // requirement and fail CLOSED when a live workload requires External State
+        // OR declared restore-time secret bindings.
+        if crate::external_state::requires_restore_time_bindings_for_live_workload(
+            &envelope.execution_contract,
+        ) {
+            return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
+        }
+        // (4) Bind the proof id from the SAME verified contract.
+        Ok(Self {
+            execution_id: verified.as_execution_id().clone(),
+        })
+    }
+
     /// TEST-ONLY: mint a proof unconditionally for the given verified Execution
     /// Identity, standing in for #1090's analysis when exercising the accept path.
     #[cfg(test)]
@@ -159,14 +230,14 @@ impl VerifiedRunningSnapshotEligibility {
 
     /// TEST-ONLY stand-in for the #1090 verified-Execution-Contract analysis that
     /// will be the *only* real constructor. Fails **closed** when the live
-    /// workload requires External State (RFC §8.3); otherwise mints the proof
-    /// bound to the verified Execution Identity.
+    /// workload requires External State or restore-time secret bindings (RFC §8.3);
+    /// otherwise mints the proof bound to the verified Execution Identity.
     #[cfg(test)]
     pub(crate) fn analyze_for_test(
-        external_state_required_by_live_workload: bool,
+        restore_time_bindings_required_by_live_workload: bool,
         execution_id: ExecutionId,
     ) -> Result<Self, AcceptanceFailure> {
-        if external_state_required_by_live_workload {
+        if restore_time_bindings_required_by_live_workload {
             return Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle);
         }
         Ok(Self { execution_id })
@@ -330,7 +401,16 @@ pub struct AcceptanceAttemptReceiptV1 {
 /// The secret-scan attestation is exactly that: an *attestation that a scan ran*
 /// with a redacted verdict. It is **never** a proof of absence of secrets (RFC
 /// §8 / §17.3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Schema enforced at deserialize.** `schema` is the wire-version discriminator,
+/// so it is checked *at deserialize* via a custom [`Deserialize`] that runs
+/// [`AcceptanceReceiptV1::validate`] (below) — a generic
+/// `serde_json::from_str::<AcceptanceReceiptV1>()` of a wrong/unknown schema (or an
+/// otherwise-inconsistent receipt) is **rejected**, never silently read as v1. The
+/// tolerant (no `deny_unknown_fields`) decode is preserved by routing through a
+/// private [`AcceptanceReceiptWireV1`] twin; only the schema/consumer-boundary
+/// invariants are added on top.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AcceptanceReceiptV1 {
     /// Always [`ACCEPTANCE_RECEIPT_V1_SCHEMA`].
     pub schema: String,
@@ -356,6 +436,55 @@ pub struct AcceptanceReceiptV1 {
     /// Redacted secret-scan attestation of the accepted candidate. `None` when
     /// nothing was accepted. Attestation only — never proof of absence.
     pub secret_scan_attestation: Option<SecretScanAttestationV1>,
+}
+
+/// The private wire twin of [`AcceptanceReceiptV1`]: a tolerant (no
+/// `deny_unknown_fields`, preserving the deliberate envelope-style tolerance) raw
+/// decode. It exists **only** as the input to [`AcceptanceReceiptV1`]'s custom
+/// [`Deserialize`], which runs the consumer-boundary [`AcceptanceReceiptV1::validate`]
+/// (schema discriminator + verifier + capture policy + accept/reject shape) before
+/// yielding a public receipt. A generic consumer therefore cannot obtain an
+/// `AcceptanceReceiptV1` whose `schema` was never checked.
+#[derive(Deserialize)]
+struct AcceptanceReceiptWireV1 {
+    schema: String,
+    verifier_identity: String,
+    verifier_version: String,
+    execution_id: Option<ExecutionId>,
+    capture_policy: CapturePolicyV1,
+    maximum_attempts: u32,
+    attempts: Vec<AcceptanceAttemptReceiptV1>,
+    outcome: AcceptanceOutcome,
+    accepted_snapshot_id: Option<SnapshotId>,
+    sanitization_attestation: Option<SanitizationAttestationV1>,
+    secret_scan_attestation: Option<SecretScanAttestationV1>,
+}
+
+impl<'de> Deserialize<'de> for AcceptanceReceiptV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AcceptanceReceiptWireV1::deserialize(deserializer)?;
+        let receipt = Self {
+            schema: wire.schema,
+            verifier_identity: wire.verifier_identity,
+            verifier_version: wire.verifier_version,
+            execution_id: wire.execution_id,
+            capture_policy: wire.capture_policy,
+            maximum_attempts: wire.maximum_attempts,
+            attempts: wire.attempts,
+            outcome: wire.outcome,
+            accepted_snapshot_id: wire.accepted_snapshot_id,
+            sanitization_attestation: wire.sanitization_attestation,
+            secret_scan_attestation: wire.secret_scan_attestation,
+        };
+        // Wire-version dispatch + consumer boundary: the schema discriminator (and
+        // the rest of the integrity check) is enforced HERE, so a wrong/unknown
+        // schema can never be read as v1 through the raw path.
+        receipt.validate().map_err(serde::de::Error::custom)?;
+        Ok(receipt)
+    }
 }
 
 /// Why a deserialized [`AcceptanceReceiptV1`] failed its consumer-boundary
@@ -398,8 +527,9 @@ impl AcceptanceReceiptV1 {
     /// deserialize, but `schema` / `verifier_identity` / `verifier_version` are
     /// free `String`s and the cross-field invariants (accepted ⇒ snapshot id +
     /// attestations + final-attempt agreement; rejected ⇒ none of those; attempts
-    /// monotonic and bounded) are not expressible in the type. A consumer MUST
-    /// call `validate` before trusting a receipt it did not itself produce; a
+    /// monotonic and bounded) are not expressible in the type. This is run
+    /// automatically by the custom [`Deserialize`] (so a raw
+    /// `serde_json::from_str` cannot bypass it), and remains callable directly; a
     /// receipt with an attacker-chosen schema, an untrusted verifier, or an
     /// inconsistent accept/reject shape fails closed here.
     pub fn validate(&self) -> Result<(), AcceptanceReceiptValidationError> {
@@ -477,9 +607,19 @@ impl AcceptanceReceiptV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AcceptanceFailure {
     /// The live workload requires External State, so a `running` capture is
-    /// ineligible. Minted only by the #1090 eligibility analysis (RFC §8.3).
+    /// ineligible. Raised by the #1090 eligibility analysis (RFC §8.3).
     #[error("running Snapshot is ineligible because the live workload requires External State")]
     ExternalStateRequiresWorkloadIdle,
+    /// The Execution Contract failed verification: its stored `execution_id` did
+    /// not match the canonical hash of the embedded contract, so no eligibility
+    /// proof can be minted from it (fail closed — #1090). Carries the underlying
+    /// [`ExecutionContractError`] as its `#[source]` so diagnostics reflect the real
+    /// cause (invalid schema / non-canonical / id mismatch) while the public message
+    /// stays general; fail-closed semantics are unchanged.
+    #[error(
+        "Execution Contract verification failed: stored execution_id is not the canonical hash"
+    )]
+    ExecutionContractVerificationFailed(#[source] ExecutionContractError),
     /// The candidate's own `capture_policy` is not `running`.
     #[error("unsupported capture policy: this acceptance path accepts `running` candidates only")]
     UnsupportedCapturePolicy,
@@ -1789,6 +1929,129 @@ mod tests {
         );
     }
 
+    // --- #1090: the production constructor mints eligibility from a verified
+    // contract and BINDS the proof id to that same verified contract ---
+    #[test]
+    fn production_constructor_binds_eligibility_to_the_verified_contract() {
+        // A contract with NO External State AND NO restore-time secret bindings is
+        // eligible for a running capture — both must be cleared (secret values are
+        // External State; a secret-bearing running capture has no fallback).
+        let contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
+            contract
+        };
+        let bound_id = contract
+            .compute_execution_id()
+            .expect("valid contract hashes");
+        let envelope = crate::contract_fixtures::envelope_for(contract);
+
+        let eligibility = VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope)
+            .expect("external-state-free contract is eligible");
+
+        // The proof is bound to the verified contract's id: a candidate carrying
+        // exactly that id is accepted, and the receipt is bound to that id — proof
+        // the constructor sourced the id from the SAME verified contract.
+        let mut lifecycle =
+            FakeLifecycle::with_manifest(manifest_with_execution_id(bound_id.clone()));
+        lifecycle.outcomes = vec![VerificationOutcome::Exited(0)];
+        let run = RunningSnapshotAcceptance::accept(
+            &mut lifecycle,
+            eligibility,
+            &config(1),
+            &AcceptanceCancellation::default(),
+            &SystemClock,
+        )
+        .expect("no internal fault");
+        assert!(run.is_accepted());
+        assert_eq!(run.receipt.execution_id.as_ref(), Some(&bound_id));
+    }
+
+    // --- Blocker 1 (#1090): the production constructor's 4 eligibility quadrants
+    // over the REAL analyze_execution_contract path — External State and/or
+    // restore-time secret bindings both make a running capture ineligible ---
+    #[test]
+    fn production_constructor_eligibility_four_quadrants() {
+        // Build an envelope from a mutated sample contract (re-hashing the stored
+        // id so verification passes), then assert eligibility.
+        let envelope_of = |external: bool, secret: bool| {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            if !external {
+                contract.external_state.clear();
+            }
+            if !secret {
+                contract.launch.secret_bindings.clear();
+            }
+            crate::contract_fixtures::envelope_for(contract)
+        };
+        let ineligible = |external: bool, secret: bool| {
+            matches!(
+                VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope_of(
+                    external, secret
+                )),
+                Err(AcceptanceFailure::ExternalStateRequiresWorkloadIdle)
+            )
+        };
+
+        // external present & no secret -> reject.
+        assert!(ineligible(true, false));
+        // no external & secret present -> reject.
+        assert!(ineligible(false, true));
+        // both present -> reject.
+        assert!(ineligible(true, true));
+        // both empty -> eligible (proof minted, bound to the verified id).
+        let eligible_contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
+            contract
+        };
+        let bound_id = eligible_contract
+            .compute_execution_id()
+            .expect("valid contract hashes");
+        let proof = VerifiedRunningSnapshotEligibility::analyze_execution_contract(
+            &crate::contract_fixtures::envelope_for(eligible_contract),
+        )
+        .expect("external-state-free, secret-free contract is eligible");
+        assert_eq!(proof.execution_id(), &bound_id);
+    }
+
+    // --- Blocker 1 / #1090: the production constructor rejects an UNVERIFIED
+    // contract (a tampered stored id) before analyzing or binding anything, and the
+    // failure preserves the underlying ExecutionContractError as its source ---
+    #[test]
+    fn production_constructor_fails_closed_on_unverified_contract() {
+        let contract = {
+            let mut contract = crate::contract_fixtures::sample_execution_contract();
+            contract.external_state.clear();
+            contract.launch.secret_bindings.clear();
+            contract
+        };
+        let mut envelope = crate::contract_fixtures::envelope_for(contract);
+        // Tamper the stored id so it no longer equals the contract's canonical
+        // hash: verification (recompute+match) must fail closed.
+        envelope.execution_id =
+            ExecutionId::new(format!("blake3:{}", "e".repeat(64))).expect("valid id shape");
+        let error =
+            VerifiedRunningSnapshotEligibility::analyze_execution_contract(&envelope).unwrap_err();
+        // The public message stays general, but the real cause (an id mismatch) is
+        // preserved as the error `#[source]`.
+        let source = std::error::Error::source(&error).expect("verification failure has a source");
+        assert!(
+            source
+                .downcast_ref::<ExecutionContractError>()
+                .is_some_and(|inner| {
+                    matches!(inner, ExecutionContractError::ExecutionIdMismatch { .. })
+                }),
+            "source must be the underlying ExecutionContractError id mismatch"
+        );
+        assert!(matches!(
+            error,
+            AcceptanceFailure::ExecutionContractVerificationFailed(_)
+        ));
+    }
+
     // --- AC: the secret scan is recorded as an ATTESTATION, not proof of absence ---
     #[test]
     fn receipt_records_secret_scan_as_attestation_not_proof() {
@@ -1912,6 +2175,26 @@ mod tests {
         // A malformed snapshot id is rejected at deserialize (typed SnapshotId).
         let bad_id = json.replace("blake3:", "not-a-digest:");
         assert!(serde_json::from_str::<AcceptanceReceiptV1>(&bad_id).is_err());
+    }
+
+    // --- Major 3: the schema discriminator is enforced AT deserialize (wire-version
+    // dispatch), so a wrong/unknown schema is never silently read as v1 ---
+    #[test]
+    fn receipt_wrong_schema_is_rejected_at_deserialize() {
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+        let receipt = run(&mut lifecycle, &config(1)).receipt;
+        let json = serde_json::to_string(&receipt).unwrap();
+        // A valid receipt round-trips through the validated Deserialize boundary.
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&json).is_ok());
+
+        // A wrong/unknown schema is REJECTED at deserialize — not read as v1.
+        let wrong = json.replace(ACCEPTANCE_RECEIPT_V1_SCHEMA, "attacker.receipt/v999");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&wrong).is_err());
+
+        // An untrusted verifier is likewise rejected at deserialize, closing the
+        // raw-path bypass of the consumer boundary.
+        let untrusted = json.replace(DISPOSABLE_RESTORE_VERIFIER_IDENTITY, "attacker.verifier");
+        assert!(serde_json::from_str::<AcceptanceReceiptV1>(&untrusted).is_err());
     }
 
     // --- Capture-policy gate: a non-`running` candidate is rejected explicitly ---
