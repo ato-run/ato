@@ -11,6 +11,7 @@
 
 use std::path::Path;
 
+use capsule::snapshot_manifest::SnapshotCompatibilityContractV1;
 use capsulefs::CasStore;
 
 use crate::backend::{
@@ -83,6 +84,12 @@ impl SnapshotBackend for QemuBackend {
         }
     }
 
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContractV1, SnapshotError> {
+        Err(self.unsupported())
+    }
+
     fn build_ready_state(
         &self,
         _input: BuildReadyStateInput<'_>,
@@ -134,6 +141,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: crate::manifest::ReadyStateLayers::default(),
             hotset_profile: Default::default(),
@@ -151,6 +159,10 @@ mod tests {
         };
         assert!(matches!(
             b.inspect(&store, &m),
+            Err(SnapshotError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            b.snapshot_compatibility_contract(),
             Err(SnapshotError::Unsupported { .. })
         ));
     }

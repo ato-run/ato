@@ -45,6 +45,10 @@ pub struct ReadyStateManifest {
     /// Declared execution id facet, if known (opaque digest string).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// Explicit schema of `execution_id`. Hash prefixes are algorithms, not
+    /// schema discriminators; `None` therefore means legacy even for BLAKE3 ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity_schema: Option<String>,
     /// Capsule-authored target presentation requirement copied from the lock/build
     /// input. A concrete descriptor and rotatable access data are session state,
     /// never artifact state.
@@ -117,6 +121,26 @@ impl ReadyStateManifest {
     /// Total bytes across all present layers.
     pub fn total_layer_bytes(&self) -> u64 {
         self.layers.iter().map(|(_, m)| m.total_len).sum()
+    }
+
+    /// Returns the typed Capsule-v1 execution id only when the artifact carries
+    /// the explicit v1 schema. A BLAKE3 prefix alone always remains legacy.
+    pub fn v1_execution_id(
+        &self,
+    ) -> Result<Option<capsule::execution_contract::ExecutionId>, String> {
+        match self.execution_identity_schema.as_deref() {
+            None => Ok(None),
+            Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA) => {
+                let value = self.execution_id.clone().ok_or_else(|| {
+                    "v1 execution identity schema is present but execution_id is missing"
+                        .to_string()
+                })?;
+                capsule::execution_contract::ExecutionId::new(value)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            }
+            Some(other) => Err(format!("unsupported execution identity schema {other:?}")),
+        }
     }
 }
 
@@ -432,6 +456,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: ReadyStateLayers {
                 rootfs: Some(rootfs),

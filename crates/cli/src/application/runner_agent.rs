@@ -4187,10 +4187,11 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{RestoreVerification, restore_and_expose, teardown};
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
-        load_and_verify_manifest_with_surface_capabilities, parse_restore_snapshot_command,
+        load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
+        parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -4566,10 +4567,42 @@ async fn handle_restore_snapshot_lease(
     // degrades to the eager File path — logging why — on a host that cannot
     // serve page faults, so a flag set on a wrong box costs latency, not leases.
     let uffd_preview = crate::application::ready_state::flags::runner_uffd_preview_enabled();
+    // Explicit Capsule v1 lease (`execution_identity_schema` present): load +
+    // authenticate the fetched Snapshot manifest/envelope sidecar against the
+    // ALREADY-verified legacy manifest — the same envelope boundary the local
+    // publication store uses. A legacy lease (no v1 metadata) falls back to
+    // the runner-lease gate (opaque `execution_id` + this host's real backend
+    // facts) `restore_and_expose` already applies.
+    let v1_artifact = match load_verified_v1_artifact(&paths, &manifest, &cmd) {
+        Ok(v1) => v1,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    let verification = match v1_artifact {
+        Some(v1) => RestoreVerification::V1 {
+            manifest: Box::new(v1.manifest),
+            envelope: Box::new(v1.envelope),
+        },
+        None => RestoreVerification::RunnerLease {
+            expected_execution_id: cmd.execution_id.clone(),
+        },
+    };
     let receipt = match restore_and_expose(
         backend.as_ref(),
         &store,
         manifest,
+        verification,
         overlay_root,
         None,
         uffd_preview,

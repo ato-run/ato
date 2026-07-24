@@ -401,6 +401,11 @@ async fn smoke_pipeline(
             artifact_manifest_hash: hash.clone(),
             capsule_manifest_hash: sealed.manifest.capsule_manifest_hash.clone(),
             execution_id: sealed.manifest.execution_id.clone().unwrap_or_default(),
+            execution_identity_schema: None,
+            snapshot_manifest_schema: None,
+            snapshot_manifest_id: None,
+            artifact_envelope_schema: None,
+            artifact_envelope_id: None,
             runner_class_id: sealed
                 .manifest
                 .runner_class_id

@@ -24,3 +24,7 @@ serde_json = "1"
 toml = "0.8"
 ureq = { version = "2.12.1", features = ["json"] }
 blake3 = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

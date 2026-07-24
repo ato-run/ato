@@ -31,6 +31,7 @@
 
 pub mod acceptance;
 pub mod agent_channel;
+pub mod artifact_envelope;
 mod backend;
 pub mod bench;
 pub mod compose_plan;
@@ -59,6 +60,11 @@ mod uffd;
 #[allow(dead_code)]
 mod uffd_page_server;
 
+pub use artifact_envelope::{
+    ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactAcceptance,
+    ArtifactAcceptanceStatus, ArtifactEnvelopeError, ArtifactEnvelopeV1,
+    SNAPSHOT_MANIFEST_V1_FILENAME,
+};
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
     BuildReadyStateReceipt, DeviceProfile, FilesystemModel, GpuMode, IsolationBoundary,
