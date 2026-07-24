@@ -163,6 +163,20 @@ before implementation starts.
 > source-existing path must be rejected — those bytes are excluded from the
 > projection, and accepting them would put a reference in the identity that
 > the hashed tree does not contain.
+>
+> **r11 (2026-07-25), amendment — review round 3:** §2.0's normative
+> signature still showed `derive_capsule_program_contract(pinned_root:
+> &Path)` after r10 introduced the proof-carrying boundary, so the document
+> that Phase 1's second-language implementation and future producer wiring
+> read as the API contract disagreed with the implementation. §2.0 now fixes
+> the parameter as `&VerifiedPinnedSourceMaterialization` and, more
+> importantly, states which minting paths are normative: the earned
+> archive-extraction path is the only public one, a bare-path assertion is
+> explicitly NOT a public contract (test scaffolding only), and the future
+> materializer seam is described rather than declared as unused scaffolding.
+> §2.0 also records that staging is the derivation function's own
+> responsibility, so a caller cannot opt out of the isolation §1 step 1b
+> requires.
 
 ## Context
 
@@ -390,17 +404,54 @@ DOES change the digest (ordinary source).
 
 ### 2. Manifest intent
 
-#### 2.0 One entrypoint, one root (Major 1)
+#### 2.0 One entrypoint, one proof-carrying root (Major 1; signature fixed in r11)
 
 ```rust
 pub fn derive_capsule_program_contract(
-    pinned_root: &Path,
+    pinned: &VerifiedPinnedSourceMaterialization,
 ) -> Result<CapsuleProgramContractV1, CapsuleProgramError>
 ```
 
-The manifest is read from `<pinned_root>/capsule.toml` inside this function.
-There is no public surface taking `raw_manifest: &str` and `source_root:
-&Path` independently — a producer cannot pair source A with manifest B.
+The manifest is read from the pinned root's `capsule.toml` inside this
+function. There is no public surface taking `raw_manifest: &str` and
+`source_root: &Path` independently — a producer cannot pair source A with
+manifest B.
+
+**The parameter is a proof, not a path (normative).** A bare `&Path` would
+let any caller feed a local working tree into the identity pipeline, which
+§1 forbids. The proof type therefore has a private field, no public
+constructor, and exactly one **earned** public minting path:
+
+```text
+Public, production:
+  VerifiedPinnedSourceMaterialization::from_source_archive(archive)
+    Extracts a content-addressed `.tar.zst` into a process-private directory
+    the value owns. The bytes are immutable and named by their own hash and
+    the destination is fresh, so the proof is earned by construction.
+
+NOT a public contract:
+  A bare-path assertion ("trust me, this directory is pinned") MUST NOT be
+  reachable from outside the implementation crate. Such a constructor may
+  exist only as test scaffolding (crate-internal, test-only). Exposing it
+  publicly would move the compile-time guarantee one method outward and
+  restore exactly the hole the proof type exists to close — a caller could
+  self-attest an arbitrary directory and derive an identity whose claimed
+  provenance is unverified.
+
+Future:
+  When a source resolver / CAS materializer that yields an EXTRACTED tree
+  exists, it gets its own crate-internal minting seam taking that
+  materializer's capability type. No such producer exists today, so none is
+  declared — an unused capability type would be indistinguishable from the
+  assertion it is meant to replace.
+```
+
+**Staging is this function's responsibility**, not the caller's: it runs the
+§1 order (admissibility gate over the original tree, then the process-private
+staging copy) and resolves the manifest, the strict adapter's
+`SourceExistingPath` checks, and the projection exclusively inside that copy.
+A conforming implementation therefore never re-reads the pinned root after
+the gate, and callers cannot opt out of the isolation.
 
 #### 2.0.1 Conformance with the existing v0.3 normalizer (Major 2)
 

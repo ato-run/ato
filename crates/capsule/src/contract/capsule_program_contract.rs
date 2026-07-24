@@ -3954,12 +3954,12 @@ image = "ghcr.io/example/app:1"
 port = 8080
 "#;
 
-    /// The Phase-0 minting path: the test asserts the tempdir IS a pinned
-    /// materialization, exactly as a caller holding `source_materialize` output
-    /// would.
+    /// The test-only mint: this test builds the tree it then attests to, so the
+    /// pinnedness obligation is discharged here rather than asserted about
+    /// someone else's directory. No caller outside this crate's unit tests can
+    /// reach it — the public mint is `from_source_archive`.
     fn pinned(root: &std::path::Path) -> VerifiedPinnedSourceMaterialization {
-        VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
-            .expect("pinned materialization")
+        VerifiedPinnedSourceMaterialization::for_test(root).expect("pinned materialization")
     }
 
     #[test]

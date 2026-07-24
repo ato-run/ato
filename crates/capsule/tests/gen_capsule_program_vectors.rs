@@ -30,6 +30,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use capsule::blob::materialize_source_archive;
 use capsule::capsule_program_contract::{
     CAPSULE_PROGRAM_V1_SCHEMA, CapsuleProgramContractV1, CapsuleProgramEnvelopeV1,
 };
@@ -40,6 +41,7 @@ use capsule::program_source_projection::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
 fn fixture_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/capsule_program_contract")
@@ -472,10 +474,18 @@ fn projected_file_set(root: &Path) -> Vec<String> {
 /// Runs the real projection over a committed fixture tree and returns
 /// (projected file set, `sha256:<hex>` digest).
 ///
+/// Same production pipeline as the checker: freeze the tree with
+/// `materialize_source_archive`, then mint the proof by extracting that
+/// content-addressed archive. The recorded value is therefore what a producer
+/// on the public API observes, not what a self-attested directory would give.
+///
 /// Keep in sync with the identical function in `capsule_program_vectors.rs`.
 fn project_source_vector(root: &Path) -> (Vec<String>, String) {
-    let pinned = VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
-        .expect("committed fixture tree is a pinned materialization");
+    let archive_dir = TempDir::new().expect("archive output directory");
+    let archive = archive_dir.path().join("source.tar.zst");
+    materialize_source_archive(root, &archive).expect("committed fixture tree materializes");
+    let pinned = VerifiedPinnedSourceMaterialization::from_source_archive(&archive)
+        .expect("the content-addressed archive extracts to a pinned materialization");
     let projected = StagedCapsuleSource::stage(&pinned)
         .expect("fixture tree stages")
         .into_projected()

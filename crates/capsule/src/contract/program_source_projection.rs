@@ -17,17 +17,14 @@
 //! the type system by [`VerifiedPinnedSourceMaterialization`], which every
 //! derivation API takes instead of a bare `&Path`.
 //!
-//! There are two minting paths, and only two:
-//!
-//! * [`VerifiedPinnedSourceMaterialization::from_source_archive`] — the earned
-//!   one. It extracts a content-addressed `.tar.zst`
-//!   ([`materialize_source_archive`](crate::foundation::blob::materialize_source_archive)'s
-//!   output) into a process-private directory the returned value owns, so the
-//!   proof holds *by construction*.
-//! * [`VerifiedPinnedSourceMaterialization::assert_pinned_materialization`] —
-//!   the escape hatch, for a caller that already holds a materializer's
-//!   extracted output tree. The caller states the obligation; this crate only
-//!   rejects inputs that provably are not one.
+//! There is exactly ONE public minting path:
+//! [`VerifiedPinnedSourceMaterialization::from_source_archive`], which extracts
+//! a content-addressed `.tar.zst`
+//! ([`materialize_source_archive`](crate::foundation::blob::materialize_source_archive)'s
+//! output) into a process-private directory the returned value owns, so the
+//! proof holds *by construction*. No API lets a caller self-attest a directory
+//! it already has: the shape-checking constructor is `#[cfg(test)] pub(crate)`,
+//! reachable only from this crate's own unit tests.
 //!
 //! # One tree per derivation
 //!
@@ -101,37 +98,53 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 // Proof-carrying input boundary
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A proof-carrying wrapper over a filesystem root asserted to be a **pinned
-/// source materialization** (ADR-014 §1): an immutable archive /
-/// `source_materialize` output, extracted and validated.
+/// A proof-carrying wrapper over a filesystem root that IS a **pinned source
+/// materialization** (ADR-014 §1): an immutable archive / `source_materialize`
+/// output, extracted and validated.
 ///
 /// It cannot be minted from a bare `PathBuf`: the fields are private and there
 /// is no public constructor — no `new`, no `From<PathBuf>`, no `TryFrom<&Path>`,
-/// no `Deserialize`. Phase 0 has exactly two public minting paths:
+/// no `Deserialize`. Phase 0 has exactly ONE public minting path,
+/// [`VerifiedPinnedSourceMaterialization::from_source_archive`], which mints the
+/// proof **by construction** from a content-addressed source archive: the
+/// archive bytes are immutable and named by their own hash, and the extraction
+/// target is a fresh process-private directory the returned value owns, so
+/// nothing about the resulting root is asserted. There is deliberately no
+/// public constructor that takes a directory and believes the caller: such an
+/// API would move the guarantee out of the type and into a convention, and the
+/// claim this type carries — "these bytes came from a content-addressed
+/// materializer" — is exactly what a caller assertion cannot establish.
 ///
-/// * [`VerifiedPinnedSourceMaterialization::from_source_archive`] mints the
-///   proof **by construction** from a content-addressed source archive: the
-///   archive bytes are immutable and named by their own hash, and the
-///   extraction target is a fresh process-private directory the returned value
-///   owns, so nothing about the resulting root is asserted.
-/// * [`VerifiedPinnedSourceMaterialization::assert_pinned_materialization`] is
-///   the escape hatch for a caller that already holds a materializer's
-///   extracted output tree; it records a caller assertion and only rejects
-///   inputs that provably are not a pinned materialization.
+/// The shape-checking constructor `for_test` exists only under `#[cfg(test)]`
+/// and only as `pub(crate)`: it is reachable from this crate's unit tests, and
+/// from nothing else — not from this crate's `tests/` integration crates, and
+/// not from any downstream crate. The compile-fail proof below is that
+/// statement executed by the compiler.
 ///
 /// The staging copy taken during derivation mints the same
 /// by-construction proof internally (a process-private directory no other
 /// process holds a path to), which is why every read after the admissibility
 /// gate is provably from a pinned tree.
 ///
+/// # The materializer seam
+///
+/// A source resolver / CAS materializer that yields an already-**extracted**
+/// pinned tree would not need to be re-archived to be admitted: it would get
+/// its own crate-internal minting seam, taking that materializer's own
+/// capability type (a value only the materializer can produce) rather than a
+/// `&Path`. No such producer exists in this repo today —
+/// [`materialize_source_archive`](crate::foundation::blob::materialize_source_archive)
+/// emits the archive and its A1v2 hashes but never extracts — so no such seam
+/// is declared here. Declaring one before its producer exists would be an
+/// unproven capability type: a second self-attestation wearing a different
+/// name.
+///
 /// The wrapper mirrors
-/// [`VerifiedExecutionId`](crate::execution_contract::VerifiedExecutionId), with
-/// one honest difference on the *asserted* path: pinnedness of a tree handed in
-/// from outside is a property of the producer of the bytes and cannot be
-/// recomputed from the bytes, so `assert_pinned_materialization` records a
-/// precondition rather than re-deriving a hash. What both paths enforce, fail
-/// closed, is the shape a pinned materialization must have — an existing
-/// directory with no root-level `.git`.
+/// [`VerifiedExecutionId`](crate::execution_contract::VerifiedExecutionId): the
+/// value is minted by the operation that establishes the property, never by a
+/// caller stating it. What every minting path enforces, fail closed, is the
+/// shape a pinned materialization must have — an existing directory with no
+/// root-level `.git`.
 ///
 /// A local working tree is inadmissible in Phase 0 (ADR-014 §1 / Consequences:
 /// "Phase 0 refuses dirty working trees"). Admitting one needs its own
@@ -160,7 +173,7 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// let _proof: VerifiedPinnedSourceMaterialization = root.into();
 /// ```
 ///
-/// and a bare path cannot stand in for the proof at the derivation entrypoint:
+/// a bare path cannot stand in for the proof at the derivation entrypoint:
 ///
 /// ```compile_fail
 /// use std::path::Path;
@@ -169,6 +182,22 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// // A &Path is not a &VerifiedPinnedSourceMaterialization: type error.
 /// let _ = derive_capsule_program_contract(Path::new("/tmp/pinned"));
 /// ```
+///
+/// and — the guarantee this type actually carries — a consumer of this crate
+/// cannot self-attest an arbitrary directory into the proof. The only public
+/// mint is `from_source_archive`; the shape-checking constructor is
+/// `#[cfg(test)] pub(crate)`, so outside this crate's unit tests it does not
+/// exist. This doctest compiles as a downstream crate, which is why it proves
+/// the closure rather than restating it:
+///
+/// ```compile_fail
+/// use std::path::Path;
+/// use capsule::program_source_projection::VerifiedPinnedSourceMaterialization;
+///
+/// // `for_test` is `#[cfg(test)] pub(crate)`: no such associated function is
+/// // visible here, so there is no path from a directory to the proof.
+/// let _proof = VerifiedPinnedSourceMaterialization::for_test(Path::new("/tmp/pinned"));
+/// ```
 #[derive(Debug, Clone)]
 pub struct VerifiedPinnedSourceMaterialization {
     root: PathBuf,
@@ -176,8 +205,8 @@ pub struct VerifiedPinnedSourceMaterialization {
     /// ([`Self::from_source_archive`]): the extracted directory must outlive
     /// every handle to the proof, so the `TempDir` is kept behind an `Arc` that
     /// `Clone` shares — the last surviving handle removes the directory. The
-    /// asserted path leaves this `None`: that root belongs to the caller and
-    /// this value must never delete it.
+    /// test-only `for_test` path leaves this `None`: that root belongs to the
+    /// test and this value must never delete it.
     ///
     /// Never read — the field exists for its `Drop`, which is precisely the
     /// point: the extracted tree must not disappear while a handle to the proof
@@ -215,16 +244,20 @@ impl VerifiedPinnedSourceMaterialization {
     /// * therefore the resulting root **is** a pinned materialization — the
     ///   defining "immutable, produced by a materializer, nobody else writes
     ///   it" property is established by this function rather than promised by
-    ///   the caller. Contrast
-    ///   [`Self::assert_pinned_materialization`], which is the escape hatch for
-    ///   a caller that already extracted a materializer's output itself and can
-    ///   only *state* that property.
+    ///   the caller.
+    ///
+    /// This is the type's only public constructor, and the cost of that is
+    /// deliberate: a caller holding an already-extracted tree must archive it
+    /// (`materialize_source_archive`) to be admitted. Paying one archive+extract
+    /// round trip is the price of the proof being earned; see the type's
+    /// "materializer seam" note for the shape the cheaper path must take when a
+    /// producer that yields an extracted pinned tree exists.
     ///
     /// The extractor is the trust boundary for hostile archive bytes; see
     /// `extract_source_archive` for the entry-kind / path / cap whitelist it
     /// enforces before a single byte is written. After extraction the root goes
-    /// through the same `ensure_pinned_materialization_shape` checks the
-    /// asserted path runs, so both minting paths converge on one invariant.
+    /// through `ensure_pinned_materialization_shape`, the same fail-closed shape
+    /// gate re-run at staging time, so the invariant is one function, not two.
     pub fn from_source_archive(archive_tar_zst: &Path) -> Result<Self, CapsuleProgramError> {
         let extracted = TempDir::new().map_err(|source| {
             CapsuleProgramError::SourceProjection(format!(
@@ -242,20 +275,19 @@ impl VerifiedPinnedSourceMaterialization {
         })
     }
 
-    /// Mint the proof by **caller assertion**: `root` IS a pinned source
-    /// materialization — the extracted output of a content-addressed
-    /// materializer (`source_materialize`) or an equivalent immutable archive
-    /// extraction that no other writer holds open.
+    /// Wrap `root` after the shape gate alone, WITHOUT establishing that it came
+    /// from a content-addressed materializer — i.e. the proof is asserted, not
+    /// earned.
     ///
-    /// Prefer [`Self::from_source_archive`] whenever the archive itself is at
-    /// hand: it establishes the same property by construction instead of taking
-    /// the caller's word for it. This constructor stays for callers that
-    /// already hold a materializer's *extracted* output tree — a builder that
-    /// unpacked the archive itself, a CAS materializer handing over the
-    /// directory it just populated — where re-extracting would be pure waste.
+    /// It is `#[cfg(test)] pub(crate)` because that is the only context in which
+    /// asserting the claim is legitimate: a unit test constructs the tree it
+    /// then attests to, so the assertion is discharged by the test itself. It is
+    /// invisible to this crate's `tests/` integration crates (separate crates,
+    /// public API only) and to every downstream crate, which is what keeps
+    /// [`Self::from_source_archive`] the only mint any caller can reach.
     ///
-    /// The caller discharges the obligation ADR-014 §1 places on the input; this
-    /// constructor only rejects inputs that provably are NOT one:
+    /// It runs the same shape gate the earned path runs, so a test tree that is
+    /// provably NOT a pinned materialization is refused here too:
     ///
     /// * a missing root, or a root that is not a directory (a symlinked root is
     ///   refused too — it is not the tree it points at);
@@ -267,7 +299,8 @@ impl VerifiedPinnedSourceMaterialization {
     ///   index/pack bytes into the identity. Note that A1v2 rejects a NESTED
     ///   `.git` (submodule signal) and a root `.gitmodules`, but not the root's
     ///   own `.git` — this closes exactly that hole.
-    pub fn assert_pinned_materialization(root: &Path) -> Result<Self, CapsuleProgramError> {
+    #[cfg(test)]
+    pub(crate) fn for_test(root: &Path) -> Result<Self, CapsuleProgramError> {
         ensure_pinned_materialization_shape(root)?;
         Ok(Self {
             root: root.to_path_buf(),
@@ -940,9 +973,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// The test-only mint. Legitimate here because each test builds the tree it
+    /// attests to; `for_test` is unreachable from any other crate, so this
+    /// shortcut cannot leak into a caller.
     fn pinned(root: &Path) -> VerifiedPinnedSourceMaterialization {
-        VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
-            .expect("pinned materialization")
+        VerifiedPinnedSourceMaterialization::for_test(root).expect("pinned materialization")
     }
 
     fn project(root: &Path) -> Result<ProgramSourceContract, CapsuleProgramError> {
@@ -1249,9 +1284,7 @@ mod tests {
         write_file(checkout.path(), ".git/HEAD", b"ref: refs/heads/main\n");
         write_file(checkout.path(), ".git/config", b"[core]\n");
 
-        let err =
-            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(checkout.path())
-                .unwrap_err();
+        let err = VerifiedPinnedSourceMaterialization::for_test(checkout.path()).unwrap_err();
         let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
             panic!("expected NotPinnedMaterialization, got {err:?}");
         };
@@ -1266,7 +1299,7 @@ mod tests {
             b"gitdir: /elsewhere/.git/worktrees/x\n",
         );
         assert!(matches!(
-            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(gitfile.path()),
+            VerifiedPinnedSourceMaterialization::for_test(gitfile.path()),
             Err(CapsuleProgramError::NotPinnedMaterialization(_))
         ));
     }
@@ -1290,17 +1323,13 @@ mod tests {
     fn missing_or_non_directory_root_is_not_a_pinned_materialization() {
         let tmp = TempDir::new().unwrap();
         assert!(matches!(
-            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(
-                &tmp.path().join("absent")
-            ),
+            VerifiedPinnedSourceMaterialization::for_test(&tmp.path().join("absent")),
             Err(CapsuleProgramError::NotPinnedMaterialization(_))
         ));
 
         write_file(tmp.path(), "file.txt", b"x\n");
         assert!(matches!(
-            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(
-                &tmp.path().join("file.txt")
-            ),
+            VerifiedPinnedSourceMaterialization::for_test(&tmp.path().join("file.txt")),
             Err(CapsuleProgramError::NotPinnedMaterialization(_))
         ));
     }
@@ -1394,10 +1423,12 @@ mod tests {
         name[..raw.len()].copy_from_slice(raw);
     }
 
-    /// THE load-bearing test: the two minting paths must produce the same
-    /// program source digest for the same tree. If they ever diverge, the
-    /// by-construction proof would be minting a *different* program identity
-    /// than the assertion it replaces.
+    /// THE load-bearing test: the earned mint and the test-only mint must
+    /// produce the same program source digest over the same tree. The archive
+    /// round trip is an isolation mechanism, not a projection change — if the
+    /// two ever diverged, `from_source_archive` would be minting a *different*
+    /// program identity, and the recorded source vectors (which now go through
+    /// the archive) would silently be pinning something else.
     #[test]
     fn archive_minted_and_asserted_roots_derive_the_same_digest() {
         let tree = TempDir::new().unwrap();
@@ -1622,7 +1653,7 @@ mod tests {
 
         // Same verdict as the assertion path over the same tree.
         assert!(matches!(
-            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(tree.path()),
+            VerifiedPinnedSourceMaterialization::for_test(tree.path()),
             Err(CapsuleProgramError::NotPinnedMaterialization(_))
         ));
     }

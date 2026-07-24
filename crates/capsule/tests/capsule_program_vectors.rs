@@ -44,6 +44,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use capsule::blob::materialize_source_archive;
 use capsule::capsule_program_contract::{
     CAPSULE_PROGRAM_V1_SCHEMA, CapsuleProgramContractV1, CapsuleProgramEnvelopeV1,
     CapsuleProgramError, CapsuleProgramId, ProgramSourceContract, ProgramSourceDigest,
@@ -56,6 +57,7 @@ use capsule::program_source_projection::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use tempfile::TempDir;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -481,14 +483,24 @@ fn projected_file_set(root: &Path) -> Vec<String> {
 }
 
 /// Runs the real projection over a committed fixture tree and returns
-/// (projected file set, `sha256:<hex>` digest). The fixture tree is only read:
-/// the derivation excludes the control files from its own staging copy.
+/// (projected file set, `sha256:<hex>` digest).
+///
+/// The fixture tree goes through the production pipeline exactly as a producer
+/// would: `materialize_source_archive` freezes it into a content-addressed
+/// `.tar.zst`, and `from_source_archive` extracts that archive into a
+/// process-private root it owns. This crate is a separate compilation unit that
+/// sees only `capsule`'s public API — the same surface a downstream producer
+/// has — so there is no way to hand the projection a directory and assert it is
+/// pinned. The committed fixture tree itself is only read.
 ///
 /// Keep in sync with the identical function in
 /// `gen_capsule_program_vectors.rs`.
 fn project_source_vector(root: &Path) -> (Vec<String>, String) {
-    let pinned = VerifiedPinnedSourceMaterialization::assert_pinned_materialization(root)
-        .expect("committed fixture tree is a pinned materialization");
+    let archive_dir = TempDir::new().expect("archive output directory");
+    let archive = archive_dir.path().join("source.tar.zst");
+    materialize_source_archive(root, &archive).expect("committed fixture tree materializes");
+    let pinned = VerifiedPinnedSourceMaterialization::from_source_archive(&archive)
+        .expect("the content-addressed archive extracts to a pinned materialization");
     let projected = StagedCapsuleSource::stage(&pinned)
         .expect("fixture tree stages")
         .into_projected()
