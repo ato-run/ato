@@ -84,7 +84,7 @@ before implementation starts.
 > vectors added, including execution_id byte-identity across parent-claim
 > addition.
 >
-> **r7 (2026-07-24), this revision:** makes Rule 4's completeness claim
+> **r7 (2026-07-24):** makes Rule 4's completeness claim
 > true. (1) The structured targets (`targets.wasm` / `targets.source` /
 > `targets.oci`) and `TargetsConfig`'s own global fields (`source_digest`,
 > `health_check`, `env`, `preference`) were unclassified — they are now
@@ -122,6 +122,21 @@ before implementation starts.
 > spellings → the SAME IR, not a rejection; unprefixed `source_digest`
 > stays rejected because the existing validator already rejects it).
 > Status moved to `accepted`; no further review round required.
+>
+> **r9 (2026-07-24), amendment:** follows the `capsule.lock` rename
+> amendment in `CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §5 (canonical lock file
+> `ato.lock.json` → `capsule.lock`; `AtoLock` → `CapsuleLock`; module
+> `ato_lock` → `capsule_lock`; old `lockfile::CapsuleLock` →
+> `LegacyCapsuleLock`). The source projection's control files generalize
+> from a hardcoded pair to `CapsuleControlFiles { manifest, lock:
+> Option<PathBuf> }`: the canonical lock path is RESOLVED first
+> (capsule.lock preferred; ato.lock.json as deprecated read alias;
+> coexistence of both at the selected root rejects before derivation) and
+> only that one resolved path is excluded. The lock file name never enters
+> any preimage, so `capsule_program_id`, `lock_id`, `execution_id`, and
+> signature payloads are identical across the rename — pinned by new
+> fixtures (no-lock / capsule.lock / deprecated-alias ⇒ identical digest
+> and id; coexistence ⇒ reject).
 
 ## Context
 
@@ -238,36 +253,56 @@ Snapshot / Session selection: VerifiedExecutionId only (unchanged)
 `source_materialize` output, extracted and validated). Local working trees
 are inadmissible in Phase 0.
 
-**Control files — exact path rule, no content sniffing** (r5): the pinned
-materialization has a **selected capsule root**. Exactly two paths are
-control files:
+**Control files — exact path rule, no content sniffing** (r5; generalized in
+r9 for the `capsule.lock` rename): the pinned materialization has a
+**selected capsule root**. The control files are the manifest plus the
+**selected canonical lock path** — resolved first, then excluded:
+
+```rust
+struct CapsuleControlFiles {
+    manifest: PathBuf,      // <selected-root>/capsule.toml
+    lock: Option<PathBuf>,  // the ONE selected canonical lock path, if any
+}
+```
+
+Lock-path selection at the selected root (mirrors the canonical-lock
+migration rules in `CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §5 Amendment):
 
 ```text
-<selected-root>/capsule.toml     excluded from the source digest; becomes manifest intent
-<selected-root>/ato.lock.json    excluded from the source digest
+<selected-root>/capsule.lock exists only      → lock = capsule.lock
+<selected-root>/ato.lock.json exists only     → lock = ato.lock.json
+                                                (deprecated alias, warn)
+both exist                                    → REJECT before derivation
+                                                (split-brain; never excluded
+                                                both, never chose silently)
+neither exists                                → lock = None
 ```
 
 **Every other path is ordinary source and is hashed — regardless of its file
 name or content.** A fully valid Capsule manifest at
-`examples/capsule.toml` or a lock at `fixtures/ato.lock.json` is test data
-bytes, nothing more. There is no "manifest-shaped TOML" predicate and no
-nested-Capsule rejection scan: bytes are never sniffed to guess intent, so
-the projection is a pure function of (tree, selected root). A
-multi-Capsule repository is handled by materializing each Capsule with its
-own selected root — each derivation sees its own two control files and
-everything else (including sibling Capsules' manifests) as ordinary source.
+`examples/capsule.toml` or a lock at `fixtures/capsule.lock` /
+`fixtures/ato.lock.json` is test data bytes, nothing more. There is no
+"manifest-shaped TOML" predicate and no nested-Capsule rejection scan:
+bytes are never sniffed to guess intent, so the projection is a pure
+function of (tree, selected root). A multi-Capsule repository is handled by
+materializing each Capsule with its own selected root — each derivation
+sees its own control files and everything else (including sibling Capsules'
+manifests) as ordinary source.
 
 **Order (normative)**:
 
 ```text
-1. A1v2 admissibility over the ORIGINAL tree, in full — including both
+1. A1v2 admissibility over the ORIGINAL tree, in full — including the
    control files. A control file that is a symlink, FIFO, or device fails
    closed here; exclusion never hides it from admissibility.
 2. Verify <selected-root>/capsule.toml exists and parses per §2.
-3. Exclude exactly the two control-file paths. Nothing else.
-4. Materialize the projected tree preserving bytes AND the executable bit
+3. Resolve CapsuleControlFiles (above); coexistence of capsule.lock and
+   ato.lock.json at the selected root rejects here.
+4. Exclude exactly the resolved control-file paths (manifest + the selected
+   lock path, if any). Nothing else.
+5. Materialize the projected tree preserving bytes AND the executable bit
    (A1 file identity includes the executable bit).
-5. materialized_source_tree_hash(projected_root) — existing, frozen,
+6. materialized_source_tree_hash(projected_root) — existing, frozen,
    unmodified.
 ```
 
@@ -290,10 +325,14 @@ pub struct ProgramSourceContract {
 }
 ```
 
-**Self-reference invariant (MUST + tests)**: the digest is identical with and
-without `<selected-root>/ato.lock.json` present (including one populated
-with `program_identity`); a nested `fixtures/ato.lock.json` DOES change the
-digest.
+**Self-reference invariant (MUST + tests)**: the digest is identical across
+all three of {no lock, `<selected-root>/capsule.lock` present,
+`<selected-root>/ato.lock.json` present} (including a lock populated with
+`program_identity`) — the canonical lock file name never reaches the
+preimage, so `capsule_program_id` is identical across the rename migration.
+Coexistence of both lock names at the selected root rejects before
+derivation. A nested `fixtures/capsule.lock` or `fixtures/ato.lock.json`
+DOES change the digest (ordinary source).
 
 ### 2. Manifest intent
 
@@ -627,7 +666,7 @@ Derivation proof           NOT provided in Phase 0 — nothing proves this
 `capsule_program_id: Option<CapsuleProgramId>`. The pairwise check lives in
 the Program module (`verify_program_parent(&VerifiedCapsuleProgramId,
 &ExecutionContractEnvelopeV1)` — `ParentMissing` / `ParentMismatch`
-distinct); `ato_lock/execution.rs::verify_lock_program_identity` interprets
+distinct); `capsule_lock/execution.rs::verify_lock_program_identity` interprets
 the lock's states and mints the verified id exactly once.
 
 **Complete lock state matrix (Major-1 fix — the orphan claim is its own
@@ -651,7 +690,9 @@ now.
 
 ### 6–8. Lock integration, trust boundary, validation policy (unchanged from r3/r4)
 
-`AtoLock.program_identity: Option<CapsuleProgramEnvelopeV1>`;
+`CapsuleLock.program_identity: Option<CapsuleProgramEnvelopeV1>` (the lock
+type formerly named `AtoLock` — renamed per the `capsule.lock` amendment in
+`CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §5);
 `CanonicalLockProjection` untouched (`lock_id` unaffected);
 `CanonicalSignatureProjection` gains the field. `verify_execution_boundary`
 → `verify_lock_trust_boundary` composing both verifications at the three
@@ -727,7 +768,10 @@ manifest/   capsule.toml text → expected ProgramManifestIntentV1 JSON
                         (§2.0.1 — catches drift between the two parsers)
 
 source/     fixture tree → projected file set → expected source digest
-            (root control files excluded; nested fixtures/ato.lock.json and
+            (resolved control files excluded; no-lock vs capsule.lock vs
+             deprecated ato.lock.json => IDENTICAL digest; both lock names
+             coexisting => reject before derivation; nested fixtures/capsule.lock,
+             fixtures/ato.lock.json and
              examples/capsule.toml INCLUDED and digest-affecting — exact-path
              rule, no sniffing; control-file-shaped symlink rejected by the
              pre-filter A1 pass; executable-bit flip changes digest;
@@ -855,13 +899,13 @@ schema versions) or any classification row requires a new
 - `execution_contract.rs`: additive non-identity
   `capsule_program_id: Option<CapsuleProgramId>` on
   `ExecutionContractEnvelopeV1`.
-- `ato_lock/schema.rs`: `program_identity:
-  Option<CapsuleProgramEnvelopeV1>` on `AtoLock`.
-- `ato_lock/canonicalize.rs`: `program_identity` in
+- `capsule_lock/schema.rs` (renamed from `ato_lock/`): `program_identity:
+  Option<CapsuleProgramEnvelopeV1>` on `CapsuleLock`.
+- `capsule_lock/canonicalize.rs`: `program_identity` in
   `CanonicalSignatureProjection` only.
-- `ato_lock/execution.rs`: `verify_lock_program_identity` (the four-state
+- `capsule_lock/execution.rs`: `verify_lock_program_identity` (the four-state
   matrix of §5, incl. the orphan-claim rejection; verified id minted once).
-- `ato_lock/mod.rs`: rename `verify_execution_boundary` →
+- `capsule_lock/mod.rs`: rename `verify_execution_boundary` →
   `verify_lock_trust_boundary`; compose both; call sites unchanged.
 - **Fixtures**: the suites of §9, including the nested-boundary and
   conformance vectors.
@@ -879,7 +923,7 @@ schema versions) or any classification row requires a new
   suite, source-projection suite (fixed-point, nested-lock-included,
   examples/capsule.toml-included, executable-bit, symlink control file),
   compile-fail doctests.
-- `ato_lock` tests: the tamper × chokepoint matrix, now four scenarios ×
+- `capsule_lock` tests: the tamper × chokepoint matrix, now four scenarios ×
   three chokepoints (tampered id, `ParentMissing`, `ParentMismatch`,
   `ParentEnvelopeMissing` — the orphan claim); `lock_id` byte-identity
   with/without `program_identity`; signature changes when it is added;
