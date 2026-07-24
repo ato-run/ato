@@ -70,6 +70,10 @@ use snapshot::{
     SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe, no_secret_scan,
 };
 
+/// Submission Wizard PR-2 (slice 1) — the pure, KVM-free HOLD-phase orchestration
+/// (hold → capture → #1088 accept). Driven by injected seams; unreachable in prod
+/// (the interactive_capture kind is never advertised on the claim). See its doc.
+mod hold_phase;
 mod upload;
 /// Submission Wizard PR-0 wire contract — serde/TOML types + tests only, nothing
 /// wired into the claim/dispatch loop yet (see the module doc).
@@ -2350,6 +2354,55 @@ fn process_job(
     })
 }
 
+/// Submission Wizard PR-2 (slice 1) — the `interactive_capture` lane skeleton.
+/// Shares [`produce_build`] with the seal lane (materialize + rootfs +
+/// execution_id), then — instead of the auto-seal tail — would enter the
+/// builder-resident HOLD phase ([`crate::hold_phase::HoldPhase`]) with the
+/// Firecracker-concrete capture action against a live held guest.
+///
+/// This slice keeps the LIVE parts deferred (external state stays deferred,
+/// warm-cache-only): the real `ExecutionContractEnvelopeV1` eligibility
+/// (`VerifiedRunningSnapshotEligibility::analyze_execution_contract`, wired into
+/// `produce_build` in a later PR-2 slice) and the live boot-to-hold session are
+/// not constructed here. Consistent with #1090's fail-closed External-State
+/// exclusion, the lane FAILS CLOSED after the shared build — no production
+/// eligibility proof and no capture are minted in this slice.
+///
+/// Because `claim()` never advertises `interactive_capture`, this is unreachable
+/// in prod: the fail-closed return is a guard, not a reachable stub. The HOLD
+/// orchestration itself is fully exercised by `hold_phase`'s KVM-free unit tests.
+fn process_interactive_capture_job(
+    cfg: &Config,
+    _backend: &FirecrackerBackend,
+    job: &ClaimedJob,
+) -> std::result::Result<(), (String, String)> {
+    let jobdir = cfg.work.join(&job.id);
+    let _ = std::fs::remove_dir_all(&jobdir);
+
+    // Shared with the seal lane: materialize the server-resolved source, build the
+    // bootable rootfs, and compute the Execution Identity.
+    let produced = produce_build(cfg, job, &jobdir)?;
+    eprintln!(
+        "[builder] interactive_capture {} produced build (execution {})",
+        job.id, produced.execution_id
+    );
+
+    // External state stays DEFERRED (warm-cache-only slice): the real
+    // `analyze_execution_contract` eligibility over a finalized
+    // `ExecutionContractEnvelopeV1` and the live boot-to-hold session are a later
+    // PR-2 slice. Fail closed here (mirrors #1090's exclusion) rather than mint a
+    // non-production eligibility or drive an unverified live capture.
+    Err((
+        "hold".to_string(),
+        "interactive_capture hold session is not finalized in this slice: the live \
+         boot-to-hold + Firecracker-concrete capture path, the api control/quiesce \
+         transport, and the real ExecutionContractEnvelopeV1 eligibility land in a \
+         later PR-2 slice (verified on real hardware). External state stays deferred \
+         -> fail closed."
+            .to_string(),
+    ))
+}
+
 fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
     let jobs = claim(cfg)?;
     for job in &jobs {
@@ -2374,6 +2427,35 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
                         job.id, fail.pipeline_state, fail.error_code, fail.error_detail
                     );
                     ack_source_materialize_failed(cfg, &job.id, &fail)?;
+                }
+            }
+            continue;
+        }
+        // Submission Wizard PR-2 (slice 1): the `interactive_capture` lane is a
+        // sibling of `source_materialize` — it shares `produce_build` (materialize
+        // + rootfs + execution_id) but replaces the auto-seal tail with the
+        // builder-resident HOLD phase (`crate::hold_phase`).
+        //
+        // UNREACHABLE in prod: `claim()` never advertises this kind (see its
+        // `supported_kinds`), and the api enqueues none / returns 503, so the
+        // server never hands a builder an `interactive_capture` job. It exists for
+        // structure + the unit harness (`hold_phase`'s tests). The live
+        // boot-to-health → hold session wiring (Firecracker-concrete capture on a
+        // live held guest + api control/quiesce transport + real
+        // `ExecutionContractEnvelopeV1` eligibility) lands in a later PR-2 slice,
+        // verified on real hardware. Do NOT advertise the kind; do NOT change the
+        // DB or api here.
+        if job.kind == wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE {
+            match process_interactive_capture_job(cfg, backend, job) {
+                Ok(()) => {
+                    eprintln!("[builder] interactive_capture {} -> held", job.id);
+                }
+                Err((stage, reason)) => {
+                    eprintln!(
+                        "[builder] interactive_capture {} -> {stage}: {reason}",
+                        job.id
+                    );
+                    ack_failed(cfg, &job.id, &stage, &reason)?;
                 }
             }
             continue;

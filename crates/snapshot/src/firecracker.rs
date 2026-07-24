@@ -1581,6 +1581,115 @@ impl Drop for FcProcess {
     }
 }
 
+/// Firecracker-concrete capture primitives (ato-wizard PR-2). These decompose the
+/// inline pause→snapshot/create→resume that `build_ready_state` performs into
+/// callable pieces so the interactive submission-wizard HOLD path can drive the
+/// SAME concrete IO against a *live, held* guest without a new `SnapshotBackend`
+/// trait method (USER DECISION: Firecracker-concrete hold path).
+impl FirecrackerBackend {
+    /// Pause → `PUT /snapshot/create` → read of a live guest, factored out of
+    /// [`Self::build_ready_state`] so the identical primitive is reusable by the
+    /// interactive HOLD path. Pauses the guest, takes a `Full` snapshot to
+    /// `vmstate_path` / `mem_path`, and returns the sealed `(vmstate, mem)` bytes.
+    ///
+    /// It does **not** resume or tear down `fc`: the caller owns the guest
+    /// lifecycle. `build_ready_state` drops `fc` (→ killed+reaped) right after;
+    /// the HOLD path resumes it via [`Self::resume_vm`], keeping the source alive
+    /// (see [`Self::capture_running_candidate`]).
+    fn pause_snapshot_create(
+        &self,
+        fc: &FcProcess,
+        vmstate_path: &Path,
+        mem_path: &Path,
+    ) -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
+        fc.api(
+            self,
+            "PATCH",
+            "/vm",
+            Some(&json!({"state":"Paused"}).to_string()),
+        )?;
+        fc.api(
+            self,
+            "PUT",
+            "/snapshot/create",
+            Some(
+                &json!({
+                    "snapshot_type":"Full",
+                    "snapshot_path": vmstate_path.to_string_lossy(),
+                    "mem_file_path": mem_path.to_string_lossy()
+                })
+                .to_string(),
+            ),
+        )?;
+        let vmstate = std::fs::read(vmstate_path)
+            .map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
+        let mem =
+            std::fs::read(mem_path).map_err(|e| self.backend_err(format!("read mem: {e}")))?;
+        Ok((vmstate, mem))
+    }
+
+    /// Resume a paused guest (`PATCH /vm {"state":"Resumed"}`), keeping `fc`
+    /// alive. Used only by the interactive HOLD path
+    /// ([`Self::capture_running_candidate`]) to bring the *source* VM back after a
+    /// running capture; the auto-seal build path never resumes (it drops `fc`).
+    // Wired into build_ready_state's interactive HOLD branch in a later PR-2 slice
+    // (live-VM IO, verified on real hardware).
+    #[allow(dead_code)]
+    fn resume_vm(&self, fc: &FcProcess) -> Result<(), SnapshotError> {
+        fc.api(
+            self,
+            "PATCH",
+            "/vm",
+            Some(&json!({"state":"Resumed"}).to_string()),
+        )
+    }
+
+    /// Firecracker-concrete RUNNING capture for the submission-wizard HOLD phase
+    /// (ADR-001/007/012): with the live held guest already `pause_permitted` by the
+    /// quiesce handshake, take an immutable candidate ([`Self::pause_snapshot_create`])
+    /// then **resume the source guest** ([`Self::resume_vm`]), leaving `fc` ALIVE so
+    /// the held session keeps serving and can be re-captured. This is the concrete
+    /// capture-action the pure `HoldPhase` orchestration
+    /// (`snapshot-builder::hold_phase`) drives on the real path — honoring the
+    /// Firecracker-concrete hold path WITHOUT a new backend trait method.
+    ///
+    /// On resume failure the candidate bytes are still returned with
+    /// `source_lost = true` (ADR-012 `accepting_source_lost`): the capture
+    /// succeeded, only the live source could not be brought back.
+    ///
+    /// This is live-VM IO and is **not** KVM-free-testable; it is verified on real
+    /// hardware in a follow-up. The KVM-free coverage lives in the pure HoldPhase
+    /// orchestration tests, which drive an equivalent fake capture-action seam.
+    // Real HOLD-path consumer (boot-to-health → hold session) lands in a later
+    // PR-2 slice.
+    #[allow(dead_code)]
+    fn capture_running_candidate(
+        &self,
+        fc: &FcProcess,
+        vmstate_path: &Path,
+        mem_path: &Path,
+    ) -> Result<RunningCaptureBytes, SnapshotError> {
+        let (vmstate, mem) = self.pause_snapshot_create(fc, vmstate_path, mem_path)?;
+        let source_lost = self.resume_vm(fc).is_err();
+        Ok(RunningCaptureBytes {
+            vmstate,
+            mem,
+            source_lost,
+        })
+    }
+}
+
+/// Bytes of one running capture plus whether the source guest was lost on resume
+/// (ADR-012). Produced by [`FirecrackerBackend::capture_running_candidate`] on the
+/// interactive submission-wizard HOLD path; consumed by the later-slice HOLD
+/// wiring (real-VM verified).
+#[allow(dead_code)]
+struct RunningCaptureBytes {
+    vmstate: Vec<u8>,
+    mem: Vec<u8>,
+    source_lost: bool,
+}
+
 impl SnapshotBackend for FirecrackerBackend {
     fn id(&self) -> &str {
         FIRECRACKER_BACKEND_ID
@@ -1868,35 +1977,12 @@ impl SnapshotBackend for FirecrackerBackend {
                 }
                 Ok(())
             })?;
-            bench::time(
-                "build.snapshot_create",
-                || -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
-                    fc.api(
-                        self,
-                        "PATCH",
-                        "/vm",
-                        Some(&json!({"state":"Paused"}).to_string()),
-                    )?;
-                    fc.api(
-                        self,
-                        "PUT",
-                        "/snapshot/create",
-                        Some(
-                            &json!({
-                                "snapshot_type":"Full",
-                                "snapshot_path": vmstate_path.to_string_lossy(),
-                                "mem_file_path": mem_path.to_string_lossy()
-                            })
-                            .to_string(),
-                        ),
-                    )?;
-                    let vmstate = std::fs::read(&vmstate_path)
-                        .map_err(|e| self.backend_err(format!("read vmstate: {e}")))?;
-                    let mem = std::fs::read(&mem_path)
-                        .map_err(|e| self.backend_err(format!("read mem: {e}")))?;
-                    Ok((vmstate, mem))
-                },
-            )
+            bench::time("build.snapshot_create", || {
+                // Firecracker-concrete pause → snapshot/create → read, factored into
+                // a callable primitive reused by the interactive HOLD path (PR-2).
+                // The auto-seal build path never resumes: `fc` drops below.
+                self.pause_snapshot_create(&fc, &vmstate_path, &mem_path)
+            })
             // fc drops here → killed+reaped
         })();
         self.net_down();

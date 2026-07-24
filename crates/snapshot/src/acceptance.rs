@@ -223,8 +223,15 @@ impl VerifiedRunningSnapshotEligibility {
 
     /// TEST-ONLY: mint a proof unconditionally for the given verified Execution
     /// Identity, standing in for #1090's analysis when exercising the accept path.
-    #[cfg(test)]
-    pub(crate) fn for_test(execution_id: ExecutionId) -> Self {
+    ///
+    /// Gated behind `cfg(test)` for this crate's own unit tests **and** the
+    /// non-default `test-support` cargo feature so sibling crates (notably the
+    /// `snapshot-builder` HoldPhase harness, PR-2) can seed `accept()` in their
+    /// own KVM-free tests without a production eligibility constructor. The
+    /// feature is never enabled by a normal `cargo build`, so this stays out of
+    /// every shipped/library build (dev-dependency-only activation).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(execution_id: ExecutionId) -> Self {
         Self { execution_id }
     }
 
@@ -232,8 +239,12 @@ impl VerifiedRunningSnapshotEligibility {
     /// will be the *only* real constructor. Fails **closed** when the live
     /// workload requires External State or restore-time secret bindings (RFC §8.3);
     /// otherwise mints the proof bound to the verified Execution Identity.
-    #[cfg(test)]
-    pub(crate) fn analyze_for_test(
+    ///
+    /// Same `cfg(any(test, feature = "test-support"))` gate as [`Self::for_test`]:
+    /// available to this crate's tests and to sibling test harnesses that opt in
+    /// to the `test-support` feature, never to a normal build.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn analyze_for_test(
         restore_time_bindings_required_by_live_workload: bool,
         execution_id: ExecutionId,
     ) -> Result<Self, AcceptanceFailure> {

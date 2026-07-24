@@ -24,3 +24,12 @@ serde_json = "1"
 toml = "0.8"
 ureq = { version = "2.12.1", features = ["json"] }
 blake3 = "1"
+
+[dev-dependencies]
+# Re-declare `snapshot` with the non-default `test-support` feature so the
+# HoldPhase unit tests (crate::hold_phase) can mint a
+# `VerifiedRunningSnapshotEligibility` via `for_test`/`analyze_for_test` to seed
+# the #1088 `accept()` path without a production eligibility constructor. This
+# activation is dev-only: a normal `cargo build -p snapshot-builder` does not
+# pull the feature, so no shipped path gains a non-production constructor.
+snapshot = { path = "../snapshot", features = ["test-support"] }

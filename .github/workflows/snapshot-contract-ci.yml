@@ -17,6 +17,11 @@ on:
     paths:
       # The snapshot crate itself...
       - "crates/snapshot/**"
+      # ...its `snapshot-builder` consumer (ato-wizard PR-2: the HOLD-phase
+      # orchestration + interactive_capture lane ride here, and it otherwise had
+      # NO nightly test/clippy gate — the workspace rust-ci only runs on PRs to
+      # main/dev, and this gate previously path-filtered crates/snapshot only).
+      - "crates/snapshot-builder/**"
       # ...and the crates it depends on: a change to capsule / capsulefs /
       # protocol can break the acceptance API without touching crates/snapshot,
       # so the gate must fire on those too (verified against
@@ -33,6 +38,7 @@ on:
     branches: [main, dev, nightly]
     paths:
       - "crates/snapshot/**"
+      - "crates/snapshot-builder/**"
       - "crates/capsule/**"
       - "crates/capsulefs/**"
       - "crates/protocol/**"
@@ -74,3 +80,12 @@ jobs:
       # (a raw struct literal must fail on its private `execution_id` field).
       - run: cargo test -p snapshot --doc
       - run: cargo clippy -p snapshot --all-targets -- -D warnings
+      # ato-wizard PR-2: the `snapshot-builder` daemon (HOLD-phase orchestration +
+      # wizard wire + interactive_capture lane) rides no other nightly gate, so
+      # run its own fmt / test / clippy here. `cargo test -p snapshot-builder`
+      # activates snapshot's dev-only `test-support` feature (the HoldPhase tests
+      # seed #1088 `accept()` via `for_test`/`analyze_for_test`); all tests are
+      # KVM-free.
+      - run: cargo fmt -p snapshot-builder -- --check
+      - run: cargo test -p snapshot-builder
+      - run: cargo clippy -p snapshot-builder --all-targets -- -D warnings
