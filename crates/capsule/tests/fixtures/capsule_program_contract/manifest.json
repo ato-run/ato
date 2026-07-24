@@ -1,0 +1,194 @@
+{
+  "schema": "ato.capsule-program/v1",
+  "description": "Shared cross-language test vectors for the ato.capsule-program/v1 canonical form (ADR-014 §9: contract/ + manifest/ suites). Consumed by crates/capsule/tests/capsule_program_vectors.rs and reusable verbatim by a second-language implementation (Phase 1).",
+  "domain_separator_utf8": "ato.capsule-program/v1",
+  "capsule_program_id_formula": "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))",
+  "jcs": "RFC 8785 (JSON Canonicalization Scheme)",
+  "manifest_suite_pipeline": "Each manifest/vectors/*.toml is written to an otherwise-empty source root (plus the side files listed in the harness setup: model-sha256-* and reject-engine-path materialize model.gguf), loaded with the ordinary v0.3 normalizer (load_manifest, strict validation), then adapted with program_intent_from_v03. expect=intent vectors must equal their expected_file JSON exactly; vectors sharing one expected_file are equivalent authored spellings of the same declaration. expect=error vectors must fail (at either pipeline stage) with a message containing error_substring.",
+  "source_projection_suite": "Deliberately absent here: source-projection vectors (ADR-014 §9 source/) live as tempdir-built unit tests in crates/capsule/src/contract/program_source_projection.rs because committed symlink/executable-bit fixtures are not portable across platforms and VCS checkouts.",
+  "contract_baseline": "baseline",
+  "contract_vectors": [
+    {
+      "name": "baseline",
+      "file": "contract/vectors/baseline.json",
+      "kind": "contract",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:eaf5c32fa4a5c4fe83b6c1bad10d556ca82cde5b948f40a26323ebe7b9b81c4f",
+      "canonical_file": "contract/expected/baseline.canonical.json"
+    },
+    {
+      "name": "field-order",
+      "file": "contract/vectors/field-order.json",
+      "kind": "contract",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:eaf5c32fa4a5c4fe83b6c1bad10d556ca82cde5b948f40a26323ebe7b9b81c4f",
+      "relation": "equals-baseline",
+      "canonical_file": "contract/expected/baseline.canonical.json",
+      "notes": "same contract with every object's keys reverse-sorted; JCS erases key order, so canonical bytes and id equal the baseline's exactly"
+    },
+    {
+      "name": "mutate-source-digest",
+      "file": "contract/vectors/mutate-source-digest.json",
+      "kind": "contract",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:41d774c49c317afc31f0f99702e66b3995e31d4064ab871d6a427cd734147202",
+      "relation": "differs-from-baseline",
+      "notes": "one hex digit of the pinned A1 source digest differs; the id must change"
+    },
+    {
+      "name": "mutate-intent",
+      "file": "contract/vectors/mutate-intent.json",
+      "kind": "contract",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:337401790040ec7bb51e387faf0cffcc7d32f9943c586010bc482641180e53b7",
+      "relation": "differs-from-baseline",
+      "notes": "manifest_intent.capsule_type differs; declaration intent is identity-bearing"
+    },
+    {
+      "name": "invalid-unknown-top-level",
+      "file": "contract/vectors/invalid-unknown-top-level.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown top-level identity-bearing field fails closed (deny_unknown_fields)"
+    },
+    {
+      "name": "invalid-unknown-intent-field",
+      "file": "contract/vectors/invalid-unknown-intent-field.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "unknown field inside manifest_intent fails closed — non-identity manifest data (e.g. name) must never deserialize into the intent"
+    },
+    {
+      "name": "invalid-schema-string",
+      "file": "contract/vectors/invalid-schema-string.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "contract schema version mismatch fails validate() closed"
+    },
+    {
+      "name": "invalid-source-digest-blake3",
+      "file": "contract/vectors/invalid-source-digest-blake3.json",
+      "kind": "contract",
+      "expect": "error",
+      "notes": "a blake3-spelled ProgramSourceDigest is rejected on typed parse: the A1 source tree hash is sha256-only"
+    },
+    {
+      "name": "envelope-non-identity-a",
+      "file": "contract/vectors/envelope-non-identity-a.json",
+      "kind": "envelope",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:eaf5c32fa4a5c4fe83b6c1bad10d556ca82cde5b948f40a26323ebe7b9b81c4f",
+      "relation": "equals-baseline",
+      "notes": "envelope metadata (generated_at/provenance/diagnostics) is non-identity"
+    },
+    {
+      "name": "envelope-non-identity-b",
+      "file": "contract/vectors/envelope-non-identity-b.json",
+      "kind": "envelope",
+      "expect": "capsule_program_id",
+      "capsule_program_id": "blake3:eaf5c32fa4a5c4fe83b6c1bad10d556ca82cde5b948f40a26323ebe7b9b81c4f",
+      "relation": "equals-baseline",
+      "notes": "same contract as envelope-non-identity-a with different generated_at/provenance/diagnostics and a tolerated unknown envelope field; verify() passes and the verified id is identical"
+    },
+    {
+      "name": "envelope-id-mismatch",
+      "file": "contract/vectors/envelope-id-mismatch.json",
+      "kind": "envelope",
+      "expect": "error",
+      "notes": "stored capsule_program_id disagrees with the canonical hash of program_contract; readers fail closed"
+    }
+  ],
+  "manifest_vectors": [
+    {
+      "name": "baseline-oci",
+      "file": "manifest/vectors/baseline-oci.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/baseline-oci.intent.json",
+      "notes": "the BASE-style app manifest: one named OCI target"
+    },
+    {
+      "name": "equivalent-metadata-change",
+      "file": "manifest/vectors/equivalent-metadata-change.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/baseline-oci.intent.json",
+      "notes": "differs from baseline-oci only in name/version/[metadata]/[routing]/[pool] (non-identity + excluded sections): shares baseline-oci's expected intent file"
+    },
+    {
+      "name": "source-run-alias",
+      "file": "manifest/vectors/source-run-alias.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/source-run.intent.json",
+      "notes": "aliases (target run=, service command=) plus authored explicit-default sections ([snapshot] mode=none, empty [network]/[pack]): canonicalizes into the same IR as the canonical spelling"
+    },
+    {
+      "name": "source-run-canonical",
+      "file": "manifest/vectors/source-run-canonical.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/source-run.intent.json",
+      "notes": "the canonical spelling of the same declaration as source-run-alias"
+    },
+    {
+      "name": "web-root-entrypoint",
+      "file": "manifest/vectors/web-root-entrypoint.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/web-root-entrypoint.intent.json",
+      "notes": "web static target with working_dir = \".\": the IR pins the canonical Root spelling {\"source_relative\": \".\"}"
+    },
+    {
+      "name": "model-sha256-bare",
+      "file": "manifest/vectors/model-sha256-bare.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/model-sha256.intent.json",
+      "notes": "bare-hex model_sha256 authoring spelling; model is a SourceExistingPath (the harness materializes model.gguf)"
+    },
+    {
+      "name": "model-sha256-prefixed",
+      "file": "manifest/vectors/model-sha256-prefixed.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/model-sha256.intent.json",
+      "notes": "sha256:-prefixed model_sha256 authoring spelling; normalizes into the same IR (bare lowercase hex) as model-sha256-bare"
+    },
+    {
+      "name": "wasm-world-default",
+      "file": "manifest/vectors/wasm-world-default.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/wasm-world-default.intent.json",
+      "notes": "structured [targets.wasm] with world authored absent: the IR pins the default-expanded \"wasi:cli/command\""
+    },
+    {
+      "name": "oci-user",
+      "file": "manifest/vectors/oci-user.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/oci-user.intent.json",
+      "notes": "user = \"1000:1000\" is a valid ContainerUserSpec and stays visible in the IR"
+    },
+    {
+      "name": "reject-workspace",
+      "file": "manifest/vectors/reject-workspace.toml",
+      "expect": "error",
+      "error_substring": "does not support field 'workspace'",
+      "notes": "workspace manifests fail Program Identity issuance closed (ADR-014 Phase 0)"
+    },
+    {
+      "name": "reject-engine-path",
+      "file": "manifest/vectors/reject-engine-path.toml",
+      "expect": "error",
+      "error_substring": "does not support field 'engine_path'",
+      "notes": "engine_path names a host-local binary; it can never be part of a portable declaration (Rule 3)"
+    },
+    {
+      "name": "reject-unknown-top-level",
+      "file": "manifest/vectors/reject-unknown-top-level.toml",
+      "expect": "error",
+      "error_substring": "unknown field `description`",
+      "notes": "the tolerant model parser silently drops unknown top-level keys; the strict identity gate rejects them instead of hashing around dropped authoring"
+    },
+    {
+      "name": "reject-source-digest-bare",
+      "file": "manifest/vectors/reject-source-digest-bare.toml",
+      "expect": "error",
+      "error_substring": "source_digest must start with 'sha256:'",
+      "notes": "targets.source_digest requires the sha256: prefix (existing validator); the bare spelling is rejected before the adapter runs"
+    }
+  ]
+}

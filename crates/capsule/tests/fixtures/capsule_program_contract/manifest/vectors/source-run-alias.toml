@@ -1,0 +1,21 @@
+schema_version = "0.3"
+name = "source-run"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "source"
+driver = "node"
+run = "node server.js"
+port = 8082
+
+[services.main]
+command = "node server.js"
+
+[snapshot]
+mode = "none"
+
+[network]
+
+[pack]
