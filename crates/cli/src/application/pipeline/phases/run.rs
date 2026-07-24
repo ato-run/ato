@@ -3761,7 +3761,13 @@ where
         let rs_manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(&rs_raw)?)?;
         let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
-        if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+        // No caller yet supplies a verified Capsule v1 execution identity here
+        // (that requires loading + verifying an `ato.lock`'s
+        // `execution_contract` envelope, not yet wired into `ato run`) — the
+        // legacy `capsule_manifest_hash` lookup is unchanged.
+        if let Some(plan) =
+            ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root, None)?
+        {
             // Phase 8a-RunGate (#912): the binding-preview decision (names only, never
             // values). D2 routes a binding-required capsule through the post-restore
             // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
@@ -3825,7 +3831,15 @@ where
                     ready_state::bindings::BindingGuardMode::VerifyOnly,
                 )?;
             }
-            let backend = ready_state::backend::select_backend()?;
+            // A v1 exact-execution_id lookup already selected (and proved
+            // compatible) a backend during candidate selection; reuse it
+            // rather than re-running (and potentially re-choosing
+            // differently from) `select_backend` here. The legacy path
+            // (`selected_backend: None`) is unchanged.
+            let backend = match plan.selected_backend {
+                Some(selected) => selected,
+                None => ready_state::backend::select_backend()?,
+            };
             // L2 (#912): placement capability gate. A binding-required preview must
             // fail closed BEFORE restore if this backend/host cannot deliver bindings
             // (no vsock / not firecracker / not x86_64) — never silently fall back.
@@ -3846,8 +3860,16 @@ where
             // reaped/quarantined by the canonical startup sweep
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
             // separate sweep is wired here.
-            let store =
-                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            //
+            // A v1 candidate's CAS lives at ITS OWN immutable artifact
+            // directory (`<root>/snapshots/<execution_id>/<snapshot_id>/cas`),
+            // never the legacy `capsule_manifest_hash`-keyed one — open by
+            // exact artifact directory whenever this plan resolved one.
+            let store = if plan.v1_manifest.is_some() {
+                ready_state::store::open_store_at_artifact_dir(&plan.artifact_dir)?
+            } else {
+                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?
+            };
             // U10 (#877): opt-in mem_backend selection diagnostics — record what a
             // selector WOULD choose, then restore via File EXACTLY as before. Pure
             // observation; no behavior change.
@@ -3948,10 +3970,23 @@ where
             } else {
                 false
             };
+            // A v1 candidate carries its own authenticated identity/envelope —
+            // verify against it. Otherwise (the ordinary `ato build` → `ato
+            // run` local flow) there is no cross-host lease to verify
+            // against; restore proceeds straight through (`backend.restore`
+            // still enforces its own fail-closed runner-class gate).
+            let verification = match (plan.v1_manifest, plan.v1_envelope) {
+                (Some(manifest), Some(envelope)) => ready_state::restore::RestoreVerification::V1 {
+                    manifest: Box::new(manifest),
+                    envelope: Box::new(envelope),
+                },
+                _ => ready_state::restore::RestoreVerification::LegacyLocal,
+            };
             let receipt = ready_state::restore::restore_and_expose(
                 backend.as_ref(),
                 &store,
                 plan.manifest,
+                verification,
                 overlay,
                 plan.host_runner_class,
                 uffd_preview,
