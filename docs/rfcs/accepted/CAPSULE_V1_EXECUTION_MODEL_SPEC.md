@@ -344,9 +344,18 @@ gate before returning sealed metadata.
 > capsule.toml       authored declaration
 > capsule.lock       canonicalized / resolved / authenticated lock
 > capsule.lock.json  OLD compatibility lock (unchanged; legacy-only, never
->                    promoted — the original reason ato.lock.json was chosen
->                    as a distinct name, which capsule.lock also preserves)
+>                    promoted)
 > ```
+>
+> **Name-collision note (normative):** the OLDEST pre-0.3 legacy lock name
+> was itself `capsule.lock` (`LEGACY_CAPSULE_LOCK_FILE_NAME`), still read at
+> the manifest root by `resolve_existing_lockfile_path` before this
+> amendment. That read path is **retired in the same change**: `capsule.lock`
+> is canonical-only from this amendment onward. Legacy compatibility reads
+> remain only for `.ato/derived/capsule.lock.json` and a root
+> `capsule.lock.json`. A root `capsule.lock` that fails canonical-lock
+> parsing is a hard error with a regenerate hint — never content-sniffed
+> into the legacy parser.
 >
 > `capsule.lock` is UTF-8 canonical JSON. The absence of a `.json` suffix
 > does not imply format auto-detection; the format is fixed by this spec and

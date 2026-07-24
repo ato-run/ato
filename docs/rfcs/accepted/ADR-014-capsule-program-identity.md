@@ -136,7 +136,10 @@ before implementation starts.
 > any preimage, so `capsule_program_id`, `lock_id`, `execution_id`, and
 > signature payloads are identical across the rename — pinned by new
 > fixtures (no-lock / capsule.lock / deprecated-alias ⇒ identical digest
-> and id; coexistence ⇒ reject).
+> and id; coexistence ⇒ reject). Collision note: the OLDEST pre-0.3 legacy
+> lock name was itself `capsule.lock`; its read path is retired in the same
+> change (see the spec amendment), so no content sniffing is ever needed to
+> tell canonical from ancient-legacy at the root.
 
 ## Context
 
