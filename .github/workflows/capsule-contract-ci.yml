@@ -48,13 +48,52 @@ jobs:
       # `execution_contract` matches both the core module and the G0-2
       # `execution_contract_finalize` finalization gate (substring filter).
       - run: cargo test -p capsule --lib execution_contract
-      # G0-2 lock integration (envelope D2 / lock_id exclusion D4 / env value D5).
-      - run: cargo test -p capsule --lib ato_lock
-      # G0-3 ato.snapshot-manifest/v1 identity + compatibility + selection (#1087).
-      - run: cargo test -p capsule --lib snapshot_manifest
+      # Filtered `cargo test` invocations exit 0 when the filter matches NOTHING
+      # (libtest has no --fail-if-no-tests; that flag is nextest-only). A module
+      # rename would therefore silently disable a gate here — as `ato_lock`
+      # -> `capsule_lock` (CAPSULE_V1_EXECUTION_MODEL_SPEC §5 amendment) would
+      # have. Every filtered module gate runs through this guard, which fails
+      # when a filter matches zero tests.
+      #
+      #   capsule_lock              G0-2 lock integration (D2 envelope / D4
+      #                             lock_id exclusion / D5 env value)
+      #   snapshot_manifest         G0-3 ato.snapshot-manifest/v1 (#1087)
+      #   capsule_program_contract  ADR-014 identity core + IR + entrypoint
+      #   program_manifest_input    ADR-014 strict v0.3 gate + adapter
+      #   program_source_projection ADR-014 control files + A1-before-filter
+      - name: capsule module gates (fail closed on an empty filter)
+        run: |
+          set -euo pipefail
+          for filter in capsule_lock snapshot_manifest capsule_program_contract \
+                        program_manifest_input program_source_projection; do
+            echo "::group::cargo test -p capsule --lib $filter"
+            out=$(cargo test -p capsule --lib "$filter" 2>&1)
+            echo "$out"
+            echo "::endgroup::"
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' <<<"$out"; then
+              echo "::error::filter '$filter' matched no tests (stale module name?)"
+              exit 1
+            fi
+          done
       - run: cargo test -p capsule --test execution_contract_vectors
-      # Enforce the compile_fail guards on the VerifiedExecutionId seam — a raw
-      # ExecutionId must never wrap into a VerifiedExecutionId. Lib/vector tests
-      # do not run doctests, so run them explicitly (pinned toolchain).
-      - run: cargo test -p capsule --doc -- VerifiedExecutionId
+      - run: cargo test -p capsule --test capsule_program_vectors
+      # Enforce the compile_fail guards on the proof-carrying id seams: a raw
+      # ExecutionId must never wrap into a VerifiedExecutionId, and a raw
+      # CapsuleProgramId never into a VerifiedCapsuleProgramId (ADR-014 §4).
+      # Lib/vector tests do not run doctests, so run them explicitly — behind
+      # the same empty-filter guard, since a renamed type would otherwise
+      # silently retire the compile_fail proofs.
+      - name: proof-carrying id doctests (fail closed on an empty filter)
+        run: |
+          set -euo pipefail
+          for filter in VerifiedExecutionId CapsuleProgram; do
+            echo "::group::cargo test -p capsule --doc -- $filter"
+            out=$(cargo test -p capsule --doc -- "$filter" 2>&1)
+            echo "$out"
+            echo "::endgroup::"
+            if ! grep -qE 'test result: ok\. [1-9][0-9]* passed' <<<"$out"; then
+              echo "::error::doctest filter '$filter' matched no tests (renamed type?)"
+              exit 1
+            fi
+          done
       - run: cargo clippy -p capsule --all-targets -- -D warnings

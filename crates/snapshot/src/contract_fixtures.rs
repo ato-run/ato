@@ -164,6 +164,7 @@ pub(crate) fn envelope_for(contract: ExecutionContractV1) -> ExecutionContractEn
     ExecutionContractEnvelopeV1 {
         execution_contract: contract,
         execution_id,
+        capsule_program_id: None,
         resolved_refs: Default::default(),
         generated_at: None,
         provenance: serde_json::Value::Null,
