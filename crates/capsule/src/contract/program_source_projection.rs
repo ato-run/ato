@@ -17,6 +17,18 @@
 //! the type system by [`VerifiedPinnedSourceMaterialization`], which every
 //! derivation API takes instead of a bare `&Path`.
 //!
+//! There are two minting paths, and only two:
+//!
+//! * [`VerifiedPinnedSourceMaterialization::from_source_archive`] — the earned
+//!   one. It extracts a content-addressed `.tar.zst`
+//!   ([`materialize_source_archive`](crate::foundation::blob::materialize_source_archive)'s
+//!   output) into a process-private directory the returned value owns, so the
+//!   proof holds *by construction*.
+//! * [`VerifiedPinnedSourceMaterialization::assert_pinned_materialization`] —
+//!   the escape hatch, for a caller that already holds a materializer's
+//!   extracted output tree. The caller states the obligation; this crate only
+//!   rejects inputs that provably are not one.
+//!
 //! # One tree per derivation
 //!
 //! A pinned root is immutable *by contract*, not by enforcement: nothing stops
@@ -58,8 +70,11 @@
 //! `program_identity`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
+use tar::EntryType;
 use tempfile::TempDir;
 
 use crate::capsule_program_contract::{
@@ -70,7 +85,10 @@ use crate::common::lock_presence::{
     CAPSULE_LOCK_FILE_NAME, CanonicalLockSelectionError, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
     LexicalEntryState, lexical_entry_state, select_canonical_lock_path,
 };
-use crate::foundation::blob::source_tree::materialized_source_tree_hash;
+use crate::foundation::blob::source_archive::{MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES};
+use crate::foundation::blob::source_tree::{
+    MAX_FILE_COUNT, MAX_FILE_SIZE_BYTES, materialized_source_tree_hash,
+};
 
 /// The Capsule manifest file name at the selected root.
 const CAPSULE_MANIFEST_FILE_NAME: &str = "capsule.toml";
@@ -87,21 +105,32 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// source materialization** (ADR-014 §1): an immutable archive /
 /// `source_materialize` output, extracted and validated.
 ///
-/// It cannot be minted from a bare `PathBuf`: the field is private and there is
-/// no public constructor — no `new`, no `From<PathBuf>`, no `TryFrom<&Path>`,
-/// no `Deserialize`. The **only** public minting path in Phase 0 is
-/// [`VerifiedPinnedSourceMaterialization::assert_pinned_materialization`],
-/// where the caller explicitly states the obligation it is discharging; the
-/// staging copy taken during derivation mints the same proof by construction
-/// (a process-private directory no other process holds a path to), which is why
-/// every read after the admissibility gate is provably from a pinned tree.
+/// It cannot be minted from a bare `PathBuf`: the fields are private and there
+/// is no public constructor — no `new`, no `From<PathBuf>`, no `TryFrom<&Path>`,
+/// no `Deserialize`. Phase 0 has exactly two public minting paths:
+///
+/// * [`VerifiedPinnedSourceMaterialization::from_source_archive`] mints the
+///   proof **by construction** from a content-addressed source archive: the
+///   archive bytes are immutable and named by their own hash, and the
+///   extraction target is a fresh process-private directory the returned value
+///   owns, so nothing about the resulting root is asserted.
+/// * [`VerifiedPinnedSourceMaterialization::assert_pinned_materialization`] is
+///   the escape hatch for a caller that already holds a materializer's
+///   extracted output tree; it records a caller assertion and only rejects
+///   inputs that provably are not a pinned materialization.
+///
+/// The staging copy taken during derivation mints the same
+/// by-construction proof internally (a process-private directory no other
+/// process holds a path to), which is why every read after the admissibility
+/// gate is provably from a pinned tree.
 ///
 /// The wrapper mirrors
 /// [`VerifiedExecutionId`](crate::execution_contract::VerifiedExecutionId), with
-/// one honest difference: pinnedness is a property of the *producer* of the
-/// bytes and cannot be recomputed from the bytes, so this type records an
-/// asserted precondition rather than re-deriving a hash. What it does enforce,
-/// fail closed, is the shape a pinned materialization must have — an existing
+/// one honest difference on the *asserted* path: pinnedness of a tree handed in
+/// from outside is a property of the producer of the bytes and cannot be
+/// recomputed from the bytes, so `assert_pinned_materialization` records a
+/// precondition rather than re-deriving a hash. What both paths enforce, fail
+/// closed, is the shape a pinned materialization must have — an existing
 /// directory with no root-level `.git`.
 ///
 /// A local working tree is inadmissible in Phase 0 (ADR-014 §1 / Consequences:
@@ -140,16 +169,90 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// // A &Path is not a &VerifiedPinnedSourceMaterialization: type error.
 /// let _ = derive_capsule_program_contract(Path::new("/tmp/pinned"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct VerifiedPinnedSourceMaterialization {
     root: PathBuf,
+    /// Ownership guard for a root this value extracted itself
+    /// ([`Self::from_source_archive`]): the extracted directory must outlive
+    /// every handle to the proof, so the `TempDir` is kept behind an `Arc` that
+    /// `Clone` shares — the last surviving handle removes the directory. The
+    /// asserted path leaves this `None`: that root belongs to the caller and
+    /// this value must never delete it.
+    ///
+    /// Never read — the field exists for its `Drop`, which is precisely the
+    /// point: the extracted tree must not disappear while a handle to the proof
+    /// is alive, and must disappear when the last one is gone.
+    #[allow(dead_code)]
+    owned_root: Option<Arc<TempDir>>,
 }
 
+/// Identity is the pinned root, not the ownership guard: two proofs naming the
+/// same root are the same proof regardless of which one is responsible for
+/// cleaning it up (and two archive-minted proofs always have distinct roots,
+/// because each owns a freshly created private directory).
+impl PartialEq for VerifiedPinnedSourceMaterialization {
+    fn eq(&self, other: &Self) -> bool {
+        self.root == other.root
+    }
+}
+
+impl Eq for VerifiedPinnedSourceMaterialization {}
+
 impl VerifiedPinnedSourceMaterialization {
+    /// Mint the proof **by construction**, by extracting a content-addressed
+    /// source archive (`materialize_source_archive`'s `.tar.zst`) into a
+    /// process-private directory this value owns.
+    ///
+    /// Why this *earns* the proof instead of asserting it:
+    ///
+    /// * the archive bytes are **immutable and content-addressed** — the
+    ///   `.tar.zst` is named by `source_archive_hash` over its exact bytes, so
+    ///   the input is a frozen artifact, not a tree someone can still be
+    ///   writing to;
+    /// * the extraction target is a **fresh private temp directory** created
+    ///   here, whose path no other writer holds, and which this value keeps
+    ///   alive for its whole lifetime (see `owned_root`);
+    /// * therefore the resulting root **is** a pinned materialization — the
+    ///   defining "immutable, produced by a materializer, nobody else writes
+    ///   it" property is established by this function rather than promised by
+    ///   the caller. Contrast
+    ///   [`Self::assert_pinned_materialization`], which is the escape hatch for
+    ///   a caller that already extracted a materializer's output itself and can
+    ///   only *state* that property.
+    ///
+    /// The extractor is the trust boundary for hostile archive bytes; see
+    /// `extract_source_archive` for the entry-kind / path / cap whitelist it
+    /// enforces before a single byte is written. After extraction the root goes
+    /// through the same `ensure_pinned_materialization_shape` checks the
+    /// asserted path runs, so both minting paths converge on one invariant.
+    pub fn from_source_archive(archive_tar_zst: &Path) -> Result<Self, CapsuleProgramError> {
+        let extracted = TempDir::new().map_err(|source| {
+            CapsuleProgramError::SourceProjection(format!(
+                "failed to create the source-archive extraction directory: {source}"
+            ))
+        })?;
+        let root = extracted.path().to_path_buf();
+        // A failure here drops `extracted`, which removes any partially written
+        // tree: a rejected archive leaves nothing behind.
+        extract_source_archive(archive_tar_zst, &root)?;
+        ensure_pinned_materialization_shape(&root)?;
+        Ok(Self {
+            root,
+            owned_root: Some(Arc::new(extracted)),
+        })
+    }
+
     /// Mint the proof by **caller assertion**: `root` IS a pinned source
     /// materialization — the extracted output of a content-addressed
     /// materializer (`source_materialize`) or an equivalent immutable archive
     /// extraction that no other writer holds open.
+    ///
+    /// Prefer [`Self::from_source_archive`] whenever the archive itself is at
+    /// hand: it establishes the same property by construction instead of taking
+    /// the caller's word for it. This constructor stays for callers that
+    /// already hold a materializer's *extracted* output tree — a builder that
+    /// unpacked the archive itself, a CAS materializer handing over the
+    /// directory it just populated — where re-extracting would be pure waste.
     ///
     /// The caller discharges the obligation ADR-014 §1 places on the input; this
     /// constructor only rejects inputs that provably are NOT one:
@@ -168,6 +271,7 @@ impl VerifiedPinnedSourceMaterialization {
         ensure_pinned_materialization_shape(root)?;
         Ok(Self {
             root: root.to_path_buf(),
+            owned_root: None,
         })
     }
 
@@ -214,6 +318,317 @@ fn ensure_pinned_materialization_shape(root: &Path) -> Result<(), CapsuleProgram
             )))
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Source-archive extraction (the by-construction minting path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A rejection of the archive itself — the input cannot yield a pinned
+/// materialization, so it fails as [`CapsuleProgramError::NotPinnedMaterialization`]
+/// rather than as a projection error over an already-admitted tree.
+fn not_a_source_archive(archive: &Path, reason: impl AsRef<str>) -> CapsuleProgramError {
+    CapsuleProgramError::NotPinnedMaterialization(format!(
+        "{} is not a usable content-addressed source archive: {}",
+        archive.display(),
+        reason.as_ref(),
+    ))
+}
+
+/// Decompress `archive_tar_zst` into an in-memory `tar` stream, bounded by the
+/// production archive caps.
+///
+/// The caps are `source_archive`'s public `MAX_COMPRESSED_BYTES` /
+/// `MAX_UNCOMPRESSED_BYTES`. `source_archive::ArchiveCaps` itself is private —
+/// deliberately, so no API can lower the production thresholds — but
+/// `ArchiveCaps::PRODUCTION` is built from exactly these two public constants
+/// (pinned by `source_archive`'s `production_caps_are_100mib_and_250mib` test),
+/// so reading them directly applies the production caps without reaching into a
+/// private type.
+///
+/// The compressed cap is checked from the file's own length *before* any
+/// decompression, and the decompressed stream is read through a
+/// `take(cap + 1)` so a zstd bomb cannot allocate past the cap: the extra byte
+/// is what distinguishes "exactly at the cap" from "over it". Buffering the
+/// whole `tar` mirrors `materialize_source_archive`, which builds it in memory
+/// under the same bound.
+fn decode_source_archive(archive_tar_zst: &Path) -> Result<Vec<u8>, CapsuleProgramError> {
+    let metadata = match fs::metadata(archive_tar_zst) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                "the file does not exist",
+            ));
+        }
+        Err(source) => {
+            return Err(projection_io(
+                "inspect the source archive",
+                archive_tar_zst,
+                source,
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Err(not_a_source_archive(
+            archive_tar_zst,
+            "the path is not a regular file",
+        ));
+    }
+    if metadata.len() > MAX_COMPRESSED_BYTES {
+        return Err(not_a_source_archive(
+            archive_tar_zst,
+            format!(
+                "compressed size {} exceeds the {MAX_COMPRESSED_BYTES}-byte cap",
+                metadata.len()
+            ),
+        ));
+    }
+
+    let file = fs::File::open(archive_tar_zst)
+        .map_err(|source| projection_io("open the source archive", archive_tar_zst, source))?;
+    let decoder = zstd::Decoder::new(file).map_err(|source| {
+        not_a_source_archive(archive_tar_zst, format!("zstd decode failed: {source}"))
+    })?;
+    let mut tar_bytes = Vec::new();
+    decoder
+        .take(MAX_UNCOMPRESSED_BYTES.saturating_add(1))
+        .read_to_end(&mut tar_bytes)
+        .map_err(|source| {
+            not_a_source_archive(archive_tar_zst, format!("zstd decode failed: {source}"))
+        })?;
+    if tar_bytes.len() as u64 > MAX_UNCOMPRESSED_BYTES {
+        return Err(not_a_source_archive(
+            archive_tar_zst,
+            format!("uncompressed size exceeds the {MAX_UNCOMPRESSED_BYTES}-byte cap"),
+        ));
+    }
+    Ok(tar_bytes)
+}
+
+/// Validate one archive entry path into a relative path safe to join onto the
+/// extraction root, or say why it is not.
+///
+/// Only [`Component::Normal`] is accepted. That single rule covers absolute
+/// paths (`RootDir`), Windows drive prefixes (`Prefix`), `..` traversal
+/// (`ParentDir`), and `.` (`CurDir`), and it is deliberately stricter than
+/// `tar`'s own `Entry::unpack_in`, which *silently strips* leading `/` and `.`
+/// components and *silently skips* a `..` entry by returning `Ok(false)` rather
+/// than an error. Silently rewriting a hostile path is not a proof; the archive
+/// is refused instead.
+fn safe_archive_entry_path(raw: &Path) -> Result<PathBuf, String> {
+    let mut safe = PathBuf::new();
+    for component in raw.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!("entry path {} is absolute", raw.display()));
+            }
+            Component::ParentDir => {
+                return Err(format!(
+                    "entry path {} contains a `..` traversal component",
+                    raw.display()
+                ));
+            }
+            Component::CurDir => {
+                return Err(format!(
+                    "entry path {} contains a `.` component",
+                    raw.display()
+                ));
+            }
+        }
+    }
+    if safe.as_os_str().is_empty() {
+        return Err("entry path is empty".to_string());
+    }
+    Ok(safe)
+}
+
+/// Extract a content-addressed `.tar.zst` into `dest`, an empty directory this
+/// process owns.
+///
+/// This is the trust boundary for hostile archive bytes, so it whitelists
+/// rather than sanitizes and fails the whole archive on the first violation
+/// (the caller drops `dest`, so a rejected archive leaves nothing behind):
+///
+/// * **entry kind** — only `Regular` and `Directory` are extracted. Symlink,
+///   hardlink, character/block device, FIFO, GNU sparse, pax global-header,
+///   `Continuous`, and any unknown type byte are rejected. No symlink is ever
+///   created, so no later entry can be redirected through one; no device or
+///   FIFO node is ever created, so extraction cannot produce a node A1v2 would
+///   have to reject later. A `Regular`/`Directory` entry that also carries a
+///   link-name field is malformed and rejected too.
+/// * **path** — [`safe_archive_entry_path`] admits `Component::Normal` only,
+///   so absolute paths, `..`, `.`, and drive prefixes are rejected rather than
+///   stripped.
+/// * **containment** — the joined target is re-checked with
+///   `starts_with(dest)`. With `Normal`-only components this is already
+///   lexically guaranteed and stays true on disk because no symlink is ever
+///   created inside `dest`; the check is a cheap belt to that argument's
+///   braces.
+/// * **no overwrite** — regular files are created with `create_new`, so two
+///   entries claiming one path is a rejection instead of a silent
+///   last-writer-wins.
+/// * **caps** — the production per-file (`MAX_FILE_SIZE_BYTES`), file-count
+///   (`MAX_FILE_COUNT`), and aggregate (`MAX_UNCOMPRESSED_BYTES`) caps, the
+///   same constants `materialize_source_archive` enforces on the way in.
+/// * **declared size** — the bytes actually copied must equal the header's
+///   declared size, so a truncated member is a rejection, not a short file.
+///
+/// Permission bits are normalized exactly the way the archive builder writes
+/// them (`0o755` when the owner-execute bit is set, else `0o644`), which is the
+/// only permission state A1 folds into the tree identity — so a round trip
+/// through the archive preserves the digest.
+fn extract_source_archive(archive_tar_zst: &Path, dest: &Path) -> Result<(), CapsuleProgramError> {
+    let tar_bytes = decode_source_archive(archive_tar_zst)?;
+    let mut archive = tar::Archive::new(tar_bytes.as_slice());
+    let entries = archive.entries().map_err(|source| {
+        not_a_source_archive(
+            archive_tar_zst,
+            format!("tar stream is unreadable: {source}"),
+        )
+    })?;
+
+    let mut file_count: usize = 0;
+    let mut total_bytes: u64 = 0;
+    for entry in entries {
+        let mut entry = entry.map_err(|source| {
+            not_a_source_archive(
+                archive_tar_zst,
+                format!("tar entry is unreadable: {source}"),
+            )
+        })?;
+
+        let entry_type = entry.header().entry_type();
+        let mode = entry.header().mode().map_err(|source| {
+            not_a_source_archive(
+                archive_tar_zst,
+                format!("tar entry has an unreadable mode field: {source}"),
+            )
+        })?;
+        let declared_size = entry.size();
+        let has_link_name = entry.link_name_bytes().is_some();
+        let raw_path = entry
+            .path()
+            .map_err(|source| {
+                not_a_source_archive(
+                    archive_tar_zst,
+                    format!("tar entry has an unreadable path: {source}"),
+                )
+            })?
+            .into_owned();
+
+        if !matches!(entry_type, EntryType::Regular | EntryType::Directory) {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                format!(
+                    "entry {} has type {:?}; only regular files and directories may be extracted",
+                    raw_path.display(),
+                    entry_type
+                ),
+            ));
+        }
+        if has_link_name {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                format!("entry {} carries a link name", raw_path.display()),
+            ));
+        }
+
+        let relative = safe_archive_entry_path(&raw_path)
+            .map_err(|reason| not_a_source_archive(archive_tar_zst, reason))?;
+        let target = dest.join(&relative);
+        if !target.starts_with(dest) {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                format!("entry {} escapes the extraction root", raw_path.display()),
+            ));
+        }
+
+        match entry_type {
+            EntryType::Directory => {
+                fs::create_dir_all(&target)
+                    .map_err(|source| projection_io("create directory", &target, source))?;
+            }
+            _ => {
+                if declared_size > MAX_FILE_SIZE_BYTES {
+                    return Err(not_a_source_archive(
+                        archive_tar_zst,
+                        format!(
+                            "entry {} is {declared_size} bytes, over the \
+                             {MAX_FILE_SIZE_BYTES}-byte per-file cap",
+                            raw_path.display()
+                        ),
+                    ));
+                }
+                file_count += 1;
+                if file_count > MAX_FILE_COUNT {
+                    return Err(not_a_source_archive(
+                        archive_tar_zst,
+                        format!("archive holds more than {MAX_FILE_COUNT} files"),
+                    ));
+                }
+                total_bytes = total_bytes.saturating_add(declared_size);
+                if total_bytes > MAX_UNCOMPRESSED_BYTES {
+                    return Err(not_a_source_archive(
+                        archive_tar_zst,
+                        format!("extracted content exceeds the {MAX_UNCOMPRESSED_BYTES}-byte cap"),
+                    ));
+                }
+
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|source| projection_io("create directory", parent, source))?;
+                }
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(|source| {
+                        if source.kind() == io::ErrorKind::AlreadyExists {
+                            not_a_source_archive(
+                                archive_tar_zst,
+                                format!("entry {} is declared twice", raw_path.display()),
+                            )
+                        } else {
+                            projection_io("create file", &target, source)
+                        }
+                    })?;
+                let copied = io::copy(&mut entry, &mut file)
+                    .map_err(|source| projection_io("write file", &target, source))?;
+                if copied != declared_size {
+                    return Err(not_a_source_archive(
+                        archive_tar_zst,
+                        format!(
+                            "entry {} declared {declared_size} bytes but yielded {copied}",
+                            raw_path.display()
+                        ),
+                    ));
+                }
+                drop(file);
+                set_extracted_file_mode(&target, mode)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Normalize an extracted file's permissions to the two states the archive
+/// builder emits and A1 folds into the tree identity.
+#[cfg(unix)]
+fn set_extracted_file_mode(path: &Path, mode: u32) -> Result<(), CapsuleProgramError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let normalized = if mode & 0o100 != 0 { 0o755 } else { 0o644 };
+    fs::set_permissions(path, fs::Permissions::from_mode(normalized))
+        .map_err(|source| projection_io("set permissions on", path, source))
+}
+
+/// Without POSIX permissions A1 treats every file as non-executable, so there
+/// is nothing to normalize.
+#[cfg(not(unix))]
+fn set_extracted_file_mode(_path: &Path, _mode: u32) -> Result<(), CapsuleProgramError> {
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -916,6 +1331,346 @@ mod tests {
             staged_digest.digest, mutated_digest.digest,
             "the staged derivation must reflect the tree as gated, not as mutated"
         );
+    }
+
+    // ── archive-minted proof (`from_source_archive`) ─────────────────────
+
+    use crate::foundation::blob::source_archive::materialize_source_archive;
+    use tar::{Builder, Header};
+
+    /// Freeze `tree` with the real materializer and return the archive path
+    /// (kept alive by the returned `TempDir`).
+    fn materialize(tree: &Path) -> (TempDir, PathBuf) {
+        let out_dir = TempDir::new().unwrap();
+        let archive = out_dir.path().join("source.tar.zst");
+        materialize_source_archive(tree, &archive).expect("materialize source archive");
+        (out_dir, archive)
+    }
+
+    /// Write a `.tar.zst` from hand-crafted headers, bypassing
+    /// `materialize_source_archive` entirely — the only way to produce entry
+    /// classes the deterministic builder can never emit. `Builder::append`
+    /// writes the header verbatim (it does not re-derive the path or the
+    /// checksum), so a header whose name field was poked in directly survives
+    /// into the archive.
+    fn write_crafted_archive(out: &Path, entries: Vec<(Header, Vec<u8>)>) {
+        let mut builder = Builder::new(Vec::new());
+        for (mut header, data) in entries {
+            header.set_cksum();
+            builder.append(&header, data.as_slice()).unwrap();
+        }
+        let tar_bytes = builder.into_inner().unwrap();
+        let compressed = zstd::encode_all(tar_bytes.as_slice(), 3).unwrap();
+        fs::write(out, compressed).unwrap();
+    }
+
+    /// A benign regular-file entry, so a rejection is provably about the
+    /// hostile entry beside it and not about an empty archive.
+    fn benign_entry() -> (Header, Vec<u8>) {
+        let body = b"[capsule]\nname = \"demo\"\n".to_vec();
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(body.len() as u64);
+        header.set_path(CAPSULE_MANIFEST_FILE_NAME).unwrap();
+        (header, body)
+    }
+
+    fn regular_header(size: u64) -> Header {
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(size);
+        header
+    }
+
+    /// Poke raw bytes into the GNU header's name field. `Header::set_path`
+    /// refuses `..` outright ("paths in archives must not have `..`"), so a
+    /// traversal entry can only be built by writing the name field directly —
+    /// which is exactly what a hostile producer does.
+    fn set_raw_name(header: &mut Header, raw: &[u8]) {
+        let name = &mut header.as_gnu_mut().expect("gnu header").name;
+        name.fill(0);
+        name[..raw.len()].copy_from_slice(raw);
+    }
+
+    /// THE load-bearing test: the two minting paths must produce the same
+    /// program source digest for the same tree. If they ever diverge, the
+    /// by-construction proof would be minting a *different* program identity
+    /// than the assertion it replaces.
+    #[test]
+    fn archive_minted_and_asserted_roots_derive_the_same_digest() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        write_file(tree.path(), CAPSULE_LOCK_FILE_NAME, LOCK_BODY);
+        write_file(tree.path(), "bin/run", b"#!/bin/sh\necho hi\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                tree.path().join("bin/run"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let (_archive_dir, archive) = materialize(tree.path());
+
+        let from_archive = project_program_source(
+            &VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap(),
+        )
+        .unwrap();
+        let from_assertion = project(tree.path()).unwrap();
+
+        assert_eq!(
+            from_archive.digest, from_assertion.digest,
+            "extracting the content-addressed archive must yield the same \
+             ProgramSourceProjectionV1 digest as asserting over the original tree"
+        );
+        assert_eq!(from_archive, from_assertion);
+    }
+
+    /// The extracted root is owned by the value: alive for as long as any
+    /// handle exists, removed when the last one drops.
+    #[test]
+    fn archive_minted_root_outlives_the_call_and_dies_with_the_last_handle() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        let (_archive_dir, archive) = materialize(tree.path());
+
+        let proof = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap();
+        let root = proof.root().to_path_buf();
+        assert!(root.is_dir(), "the extracted root outlives the constructor");
+        assert!(root.join(CAPSULE_MANIFEST_FILE_NAME).is_file());
+        assert!(root.join("src/main.py").is_file());
+
+        let cloned = proof.clone();
+        assert_eq!(proof, cloned, "equality compares roots, not guards");
+        drop(proof);
+        assert!(
+            root.is_dir(),
+            "a cloned handle must keep the extracted root alive"
+        );
+
+        drop(cloned);
+        assert!(
+            !root.exists(),
+            "the extracted root is removed with the last handle"
+        );
+    }
+
+    /// An absolute entry path is refused, not silently re-rooted. `tar`'s own
+    /// `unpack_in` strips the leading `/` and writes the file inside `dst`;
+    /// this extractor rejects the archive instead. Verified by pointing the
+    /// entry at a path in a test-owned sandbox and asserting nothing appears
+    /// there.
+    #[test]
+    fn absolute_entry_path_is_rejected_and_writes_nothing_outside() {
+        let sandbox = TempDir::new().unwrap();
+        let escape_target = sandbox.path().join("escaped-absolute.txt");
+        let dest = sandbox.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let archive = sandbox.path().join("hostile-absolute.tar.zst");
+
+        let body = b"pwned\n".to_vec();
+        let mut header = regular_header(body.len() as u64);
+        header.set_path_absolute(&escape_target).unwrap();
+        write_crafted_archive(&archive, vec![benign_entry(), (header, body)]);
+
+        let err = extract_source_archive(&archive, &dest).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains("is absolute"), "{message}");
+        assert!(
+            !escape_target.exists(),
+            "an absolute entry must never be written outside the extraction root"
+        );
+
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(&archive),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+    }
+
+    /// A `..` traversal entry is refused, not silently skipped. `tar`'s
+    /// `unpack_in` returns `Ok(false)` for one — a skip the caller can miss.
+    #[test]
+    fn parent_dir_traversal_entry_is_rejected_and_writes_nothing_outside() {
+        let sandbox = TempDir::new().unwrap();
+        let dest = sandbox.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let escape_target = sandbox.path().join("escaped-traversal.txt");
+        let archive = sandbox.path().join("hostile-traversal.tar.zst");
+
+        let body = b"pwned\n".to_vec();
+        let mut header = regular_header(body.len() as u64);
+        // `set_path` would return "paths in archives must not have `..`", so
+        // the name field is written directly.
+        assert!(header.set_path("../escaped-traversal.txt").is_err());
+        set_raw_name(&mut header, b"../escaped-traversal.txt");
+        write_crafted_archive(&archive, vec![benign_entry(), (header, body)]);
+
+        let err = extract_source_archive(&archive, &dest).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains("`..` traversal"), "{message}");
+        assert!(
+            !escape_target.exists(),
+            "a `..` entry must never be written outside the extraction root"
+        );
+
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(&archive),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+    }
+
+    /// A symlink entry is rejected by the extractor. A1v2 would reject an
+    /// in-tree symlink later anyway, but the extractor must not create the
+    /// link in the first place — a symlink on disk is a redirect a *subsequent*
+    /// entry in the same archive could be written through.
+    #[test]
+    fn symlink_entry_is_rejected_before_any_link_is_created() {
+        let sandbox = TempDir::new().unwrap();
+        let dest = sandbox.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let archive = sandbox.path().join("hostile-symlink.tar.zst");
+
+        let mut header = Header::new_gnu();
+        header.set_entry_type(EntryType::Symlink);
+        header.set_mode(0o777);
+        header.set_size(0);
+        header.set_path("link.txt").unwrap();
+        header.set_link_name("/etc/passwd").unwrap();
+        write_crafted_archive(&archive, vec![benign_entry(), (header, Vec::new())]);
+
+        let err = extract_source_archive(&archive, &dest).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains("Symlink"), "{message}");
+        assert!(
+            fs::symlink_metadata(dest.join("link.txt")).is_err(),
+            "no symlink may be created before the archive is rejected"
+        );
+
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(&archive),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+    }
+
+    /// The rest of the non-extractable entry classes, one archive each.
+    #[test]
+    fn hardlink_device_and_fifo_entries_are_rejected() {
+        for (label, entry_type, link_name) in [
+            ("hardlink", EntryType::Link, Some("capsule.toml")),
+            ("fifo", EntryType::Fifo, None),
+            ("char device", EntryType::Char, None),
+            ("block device", EntryType::Block, None),
+            ("gnu sparse", EntryType::GNUSparse, None),
+            ("pax global header", EntryType::XGlobalHeader, None),
+            ("continuous", EntryType::Continuous, None),
+        ] {
+            let sandbox = TempDir::new().unwrap();
+            let dest = sandbox.path().join("dest");
+            fs::create_dir(&dest).unwrap();
+            let archive = sandbox.path().join("hostile.tar.zst");
+
+            let mut header = Header::new_gnu();
+            header.set_entry_type(entry_type);
+            header.set_mode(0o644);
+            header.set_size(0);
+            header.set_path("hostile-node").unwrap();
+            if let Some(link_name) = link_name {
+                header.set_link_name(link_name).unwrap();
+            }
+            write_crafted_archive(&archive, vec![benign_entry(), (header, Vec::new())]);
+
+            let Err(err) = extract_source_archive(&archive, &dest) else {
+                panic!("{label} entry must be rejected");
+            };
+            assert!(
+                matches!(err, CapsuleProgramError::NotPinnedMaterialization(_)),
+                "{label}: got {err:?}"
+            );
+            assert!(
+                fs::symlink_metadata(dest.join("hostile-node")).is_err(),
+                "{label}: no node may be created before the archive is rejected"
+            );
+        }
+    }
+
+    /// Invariant convergence: an archive whose extracted tree carries a
+    /// root-level `.git` is rejected by the same shape check the assertion
+    /// path runs.
+    #[test]
+    fn archive_extracting_to_a_root_level_git_is_rejected() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        write_file(tree.path(), ".git/HEAD", b"ref: refs/heads/main\n");
+        write_file(tree.path(), ".git/config", b"[core]\n");
+        let (_archive_dir, archive) = materialize(tree.path());
+
+        let err = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains(GIT_METADATA_DIR_NAME), "{message}");
+
+        // Same verdict as the assertion path over the same tree.
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::assert_pinned_materialization(tree.path()),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+    }
+
+    #[test]
+    fn missing_or_non_archive_input_is_rejected_cleanly() {
+        let sandbox = TempDir::new().unwrap();
+
+        let missing = sandbox.path().join("absent.tar.zst");
+        let err = VerifiedPinnedSourceMaterialization::from_source_archive(&missing).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains("does not exist"), "{message}");
+
+        // Not zstd at all.
+        let garbage = sandbox.path().join("garbage.tar.zst");
+        fs::write(&garbage, b"this is not a zstd frame\n").unwrap();
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(&garbage),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+
+        // Valid zstd, but the payload is not a tar stream.
+        let not_tar = sandbox.path().join("not-tar.tar.zst");
+        fs::write(&not_tar, zstd::encode_all(&b"plain text"[..], 3).unwrap()).unwrap();
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(&not_tar),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+
+        // A directory is not an archive.
+        assert!(matches!(
+            VerifiedPinnedSourceMaterialization::from_source_archive(sandbox.path()),
+            Err(CapsuleProgramError::NotPinnedMaterialization(_))
+        ));
+
+        // An archive that extracts to a tree with no root manifest still mints
+        // the pinned proof (that is the projection's job to reject, not the
+        // input boundary's) — but it must fail at derivation.
+        let no_manifest = TempDir::new().unwrap();
+        write_file(no_manifest.path(), "src/main.py", b"print('hi')\n");
+        let (_dir, archive) = materialize(no_manifest.path());
+        let proof = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap();
+        assert!(matches!(
+            project_program_source(&proof),
+            Err(CapsuleProgramError::SourceProjection(_))
+        ));
     }
 
     /// Control-file exclusion is by removal from the staging copy; the file set
