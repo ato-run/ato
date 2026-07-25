@@ -198,6 +198,26 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// // visible here, so there is no path from a directory to the proof.
 /// let _proof = VerifiedPinnedSourceMaterialization::for_test(Path::new("/tmp/pinned"));
 /// ```
+///
+/// Holding the proof does not hand out a writable path to the pinned tree
+/// either. Process-private is not the same as unwritable: the value's own
+/// holder runs in that process, so an accessor returning the root would let it
+/// rewrite `capsule.toml` — or hand the `PathBuf` to a thread — between the
+/// A1v2 admissibility pass and the staging copy, which is exactly the window
+/// staging exists to close. `root` is `pub(crate)`, so no consumer of this
+/// crate can obtain the path:
+///
+/// ```compile_fail
+/// use std::path::Path;
+/// use capsule::program_source_projection::VerifiedPinnedSourceMaterialization;
+///
+/// // `root` is `pub(crate)`: not visible here, so a downstream holder of the
+/// // proof has no way to reach — and therefore no way to write — the tree the
+/// // proof attests to.
+/// fn pinned_root(proof: &VerifiedPinnedSourceMaterialization) -> &Path {
+///     proof.root()
+/// }
+/// ```
 #[derive(Debug, Clone)]
 pub struct VerifiedPinnedSourceMaterialization {
     root: PathBuf,
@@ -309,9 +329,13 @@ impl VerifiedPinnedSourceMaterialization {
     }
 
     /// The pinned root. Reading it directly re-opens the mutation window the
-    /// staging copy exists to close — inside this crate, derive from
-    /// [`StagedCapsuleSource`] instead.
-    pub fn root(&self) -> &Path {
+    /// staging copy exists to close, so it is `pub(crate)`: the only caller is
+    /// [`StagedCapsuleSource::stage`], which reads it once to run the A1v2 gate
+    /// and take the copy. No consumer of this crate can reach it — a holder of
+    /// the proof must derive from [`StagedCapsuleSource`], which owns a tree
+    /// nobody else has a path to. The compile-fail proof on the type is that
+    /// statement executed by the compiler.
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 }
@@ -808,7 +832,14 @@ impl StagedCapsuleSource {
 
     /// The staging root. Manifest loading and every `SourceExistingPath`
     /// existence check resolve against this path.
-    pub fn root(&self) -> &Path {
+    ///
+    /// `pub(crate)` for the same reason as
+    /// [`VerifiedPinnedSourceMaterialization::root`]: the staging tree is the
+    /// one tree the digest is taken over, so a caller holding its path could
+    /// write into it between the manifest read and
+    /// [`ProjectedCapsuleSource::source_contract`]. The only caller is
+    /// `derive_capsule_program_contract`, which is in this crate.
+    pub(crate) fn root(&self) -> &Path {
         self.staging.path()
     }
 
@@ -860,10 +891,28 @@ pub struct ProjectedCapsuleSource {
 }
 
 impl ProjectedCapsuleSource {
-    /// The projected root. `SourceExistingPath` checks that must see exactly
-    /// what the digest covers resolve against this path.
-    pub fn root(&self) -> &Path {
-        self.staging.path()
+    /// The projected file set: every regular file in the projected tree as a
+    /// `/`-joined path relative to the projected root, sorted lexicographically.
+    /// This is exactly the file set [`Self::source_contract`]'s digest covers,
+    /// and it is what a cross-implementation vector harness needs from the
+    /// projection.
+    ///
+    /// It returns the paths rather than the root deliberately. The root is a
+    /// live directory: handing it out would let the caller add, remove, or
+    /// rewrite a file between this call and `source_contract`, so the enumerated
+    /// set and the digest could describe different trees — the two values the
+    /// vectors pin *together*. Names are the projection's own bytes, so there is
+    /// no path back to the tree.
+    ///
+    /// A non-UTF-8 name, a symlink, or a special node here is not transliterated
+    /// or skipped: A1v2 admissibility and `copy_tree` already rejected all three
+    /// before staging, so encountering one means the tree changed afterwards and
+    /// this fails closed.
+    pub fn projected_file_paths(&self) -> Result<Vec<String>, CapsuleProgramError> {
+        let mut paths = Vec::new();
+        collect_projected_files(self.staging.path(), "", &mut paths)?;
+        paths.sort();
+        Ok(paths)
     }
 
     /// Step 6: the frozen A1 digest over the projected root.
@@ -919,6 +968,52 @@ fn copy_tree(source_dir: &Path, dest_dir: &Path) -> Result<(), CapsuleProgramErr
         } else {
             return Err(CapsuleProgramError::SourceProjection(format!(
                 "unexpected {} at {} during staging (tree changed after the \
+                 admissibility pass)",
+                node_kind(file_type),
+                path.display(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Appends every regular file under `dir` to `out` as a `/`-joined path
+/// relative to the projected root, `prefix` being that relative path of `dir`
+/// itself (empty at the root). Order is imposed by the caller's sort, not by
+/// `read_dir`, whose order is unspecified.
+fn collect_projected_files(
+    dir: &Path,
+    prefix: &str,
+    out: &mut Vec<String>,
+) -> Result<(), CapsuleProgramError> {
+    let entries =
+        fs::read_dir(dir).map_err(|source| projection_io("read directory", dir, source))?;
+    for entry in entries {
+        let entry = entry.map_err(|source| projection_io("read directory", dir, source))?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(CapsuleProgramError::SourceProjection(format!(
+                "non-UTF-8 path component at {} in the projected tree (tree changed \
+                 after the admissibility pass)",
+                path.display(),
+            )));
+        };
+        let relative = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let file_type = fs::symlink_metadata(&path)
+            .map_err(|source| projection_io("inspect entry", &path, source))?
+            .file_type();
+        if file_type.is_dir() {
+            collect_projected_files(&path, &relative, out)?;
+        } else if file_type.is_file() {
+            out.push(relative);
+        } else {
+            return Err(CapsuleProgramError::SourceProjection(format!(
+                "unexpected {} at {} in the projected tree (tree changed after the \
                  admissibility pass)",
                 node_kind(file_type),
                 path.display(),
@@ -1707,6 +1802,13 @@ mod tests {
     /// Control-file exclusion is by removal from the staging copy; the file set
     /// that reaches the digest is exactly "everything but the resolved control
     /// files".
+    ///
+    /// Asserted through the public [`ProjectedCapsuleSource::projected_file_paths`]
+    /// rather than by joining paths onto a projected root, because that set —
+    /// not a directory handle — is what the projection now exposes. Equality
+    /// against the full expected vector also pins what per-path `exists()`
+    /// checks could not: that nothing *else* survived, and that nested
+    /// control-file NAMES are ordinary source.
     #[test]
     fn projected_tree_contains_everything_but_the_control_files() {
         let tmp = TempDir::new().unwrap();
@@ -1717,12 +1819,14 @@ mod tests {
             .unwrap()
             .into_projected()
             .unwrap();
-        let root = projected.root();
 
-        assert!(!root.join(CAPSULE_MANIFEST_FILE_NAME).exists());
-        assert!(!root.join(CAPSULE_LOCK_FILE_NAME).exists());
-        assert!(root.join("src/main.py").is_file());
-        assert!(root.join("fixtures/ato.lock.json").is_file());
-        assert!(root.join("examples/capsule.toml").is_file());
+        assert_eq!(
+            projected.projected_file_paths().unwrap(),
+            vec![
+                "examples/capsule.toml".to_string(),
+                "fixtures/ato.lock.json".to_string(),
+                "src/main.py".to_string(),
+            ],
+        );
     }
 }

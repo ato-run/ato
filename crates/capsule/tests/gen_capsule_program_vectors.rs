@@ -442,42 +442,16 @@ const SOURCE_VECTORS: [SourceVectorSpec; 5] = [
     ),
 ];
 
-/// Every regular file under `root` as a `/`-joined path relative to `root`,
-/// sorted lexicographically. This is the projected file set a second
-/// implementation must reproduce before it can reproduce the digest.
-///
-/// Keep in sync with the identical function in `capsule_program_vectors.rs`.
-fn projected_file_set(root: &Path) -> Vec<String> {
-    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
-        for entry in fs::read_dir(dir).expect("read projected directory") {
-            let entry = entry.expect("projected directory entry");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let relative = if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if entry.path().is_dir() {
-                walk(&entry.path(), &relative, out);
-            } else {
-                out.push(relative);
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    walk(root, "", &mut out);
-    out.sort();
-    out
-}
-
 /// Runs the real projection over a committed fixture tree and returns
 /// (projected file set, `sha256:<hex>` digest).
 ///
 /// Same production pipeline as the checker: freeze the tree with
 /// `materialize_source_archive`, then mint the proof by extracting that
-/// content-addressed archive. The recorded value is therefore what a producer
-/// on the public API observes, not what a self-attested directory would give.
+/// content-addressed archive, and read the recorded file set from
+/// `projected_file_paths` (the `/`-joined, lexicographically sorted relative
+/// paths) rather than by walking a projected root the harness could mutate. The
+/// recorded value is therefore what a producer on the public API observes, not
+/// what a self-attested directory would give.
 ///
 /// Keep in sync with the identical function in `capsule_program_vectors.rs`.
 fn project_source_vector(root: &Path) -> (Vec<String>, String) {
@@ -490,7 +464,9 @@ fn project_source_vector(root: &Path) -> (Vec<String>, String) {
         .expect("fixture tree stages")
         .into_projected()
         .expect("control files are excluded");
-    let files = projected_file_set(projected.root());
+    let files = projected
+        .projected_file_paths()
+        .expect("projected tree enumerates");
     let digest = projected
         .source_contract()
         .expect("projected tree hashes")
@@ -1135,17 +1111,21 @@ fn regenerate_shared_vectors() {
                                   containing error_substring."
             .to_string(),
         source_projection_suite: "Each source/vectors/<name>/ directory is a committed, \
-                                  regular-files-only fixture tree. Assert it is a pinned source \
-                                  materialization, run the ProgramSourceProjectionV1 derivation \
-                                  over it (A1v2 admissibility, staging copy, resolve the control \
-                                  files at the selected root, exclude exactly those paths), and \
-                                  compare: the remaining files must equal projected_files (paths \
-                                  relative to the vector root, '/'-joined, lexicographically \
-                                  sorted) and the A1 tree hash of that projection must equal \
-                                  source_digest. relation is measured against source_baseline. \
-                                  Symlink and executable-bit scenarios are deliberately NOT \
-                                  committed here (they do not survive every platform/VCS \
-                                  checkout) — see README.md for the unit tests that cover them."
+                                  regular-files-only fixture tree. Freeze it with \
+                                  materialize_source_archive into a content-addressed .tar.zst \
+                                  and mint the pinned source materialization by extracting that \
+                                  archive with from_source_archive (the only public mint; no \
+                                  directory is self-attested), run the ProgramSourceProjectionV1 \
+                                  derivation over the extracted root (A1v2 admissibility, \
+                                  staging copy, resolve the control files at the selected root, \
+                                  exclude exactly those paths), and compare: the remaining files \
+                                  must equal projected_files (paths relative to the vector root, \
+                                  '/'-joined, lexicographically sorted) and the A1 tree hash of \
+                                  that projection must equal source_digest. relation is measured \
+                                  against source_baseline. Symlink and executable-bit scenarios \
+                                  are deliberately NOT committed here (they do not survive every \
+                                  platform/VCS checkout) — see README.md for the unit tests that \
+                                  cover them."
             .to_string(),
         contract_baseline: "baseline".to_string(),
         source_baseline: "baseline".to_string(),

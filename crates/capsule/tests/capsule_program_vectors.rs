@@ -452,36 +452,6 @@ fn cross_suite_capsule_program_id_is_deterministic() {
 /// projection may never contain any of them at its root, whatever the vector.
 const ROOT_CONTROL_FILE_NAMES: [&str; 3] = ["capsule.toml", "capsule.lock", "ato.lock.json"];
 
-/// Every regular file under `root` as a `/`-joined path relative to `root`,
-/// sorted lexicographically. This is the projected file set a second
-/// implementation must reproduce before it can reproduce the digest.
-///
-/// Keep in sync with the identical function in
-/// `gen_capsule_program_vectors.rs`.
-fn projected_file_set(root: &Path) -> Vec<String> {
-    fn walk(dir: &Path, prefix: &str, out: &mut Vec<String>) {
-        for entry in fs::read_dir(dir).expect("read projected directory") {
-            let entry = entry.expect("projected directory entry");
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let relative = if prefix.is_empty() {
-                name
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if entry.path().is_dir() {
-                walk(&entry.path(), &relative, out);
-            } else {
-                out.push(relative);
-            }
-        }
-    }
-
-    let mut out = Vec::new();
-    walk(root, "", &mut out);
-    out.sort();
-    out
-}
-
 /// Runs the real projection over a committed fixture tree and returns
 /// (projected file set, `sha256:<hex>` digest).
 ///
@@ -491,7 +461,10 @@ fn projected_file_set(root: &Path) -> Vec<String> {
 /// process-private root it owns. This crate is a separate compilation unit that
 /// sees only `capsule`'s public API — the same surface a downstream producer
 /// has — so there is no way to hand the projection a directory and assert it is
-/// pinned. The committed fixture tree itself is only read.
+/// pinned, and no way to reach the projected tree between enumerating it and
+/// hashing it: `projected_file_paths` returns the `/`-joined, lexicographically
+/// sorted relative paths, never a root. The committed fixture tree itself is
+/// only read.
 ///
 /// Keep in sync with the identical function in
 /// `gen_capsule_program_vectors.rs`.
@@ -505,7 +478,9 @@ fn project_source_vector(root: &Path) -> (Vec<String>, String) {
         .expect("fixture tree stages")
         .into_projected()
         .expect("control files are excluded");
-    let files = projected_file_set(projected.root());
+    let files = projected
+        .projected_file_paths()
+        .expect("projected tree enumerates");
     let digest = projected
         .source_contract()
         .expect("projected tree hashes")
