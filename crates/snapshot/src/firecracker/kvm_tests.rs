@@ -1899,7 +1899,10 @@ fn fc_kvm_hold_survives_capture_and_keeps_serving() {
     assert!(addr.ends_with(":8080"), "workload_addr = {addr}");
 
     let first = held.capture_candidate().expect("first capture");
-    assert!(!first.source_lost, "the source guest must resume after a capture");
+    assert!(
+        !first.source_lost,
+        "the source guest must resume after a capture"
+    );
     assert!(first.receipt.no_secret_proof.is_clean());
     assert!(first.receipt.manifest.layers.memory.is_some());
 

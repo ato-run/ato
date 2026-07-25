@@ -1825,7 +1825,6 @@ impl FirecrackerBackend {
         Ok((fc, vsock_uds))
     }
 
-
     /// Boot `input` and HOLD the guest live for interactive capture (RFC §8.3
     /// `running`).
     ///
@@ -1893,8 +1892,8 @@ impl FirecrackerBackend {
 
         // No supervisor ⇒ no durable state volumes to prepare (the refusal above
         // is what guarantees that), so the hold has no volume locks to hold.
-        let network_ports =
-            network_ports(&input.restore_contract, port).map_err(|error| self.backend_err(error))?;
+        let network_ports = network_ports(&input.restore_contract, port)
+            .map_err(|error| self.backend_err(error))?;
         self.net_up(&network_ports)?;
 
         let boot = self.boot_to_seal_point(
@@ -2423,7 +2422,9 @@ impl SnapshotBackend for FirecrackerBackend {
             // bearing capsule outright.
             if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
                 let uds = vsock_uds.as_ref().ok_or_else(|| {
-                    self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                    self.backend_err(
+                        "supervisor build: vsock uds missing (unreachable: gated above)",
+                    )
                 })?;
                 self.supervisor_stop_and_revoke(uds, drive)?;
                 self.wait_workload_down(port, Duration::from_secs(10))?;
