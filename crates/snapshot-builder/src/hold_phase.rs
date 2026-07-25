@@ -49,6 +49,13 @@
 //! non-test binary constructs a [`HoldPhase`] yet. The orchestration is exercised
 //! in full by this module's own KVM-free unit tests. The allow is intentionally
 //! module-scoped (not crate-wide) and removed when the live wiring lands.
+//!
+//! Slice 2 filled in the seam that needs no guest: [`ControlSource`] now has a
+//! production implementation ([`crate::wizard_api::ApiControlSource`], control
+//! poll + lease renew over the api). [`CaptureAction`] and [`EligibilitySource`]
+//! still have none — those need `crates/snapshot`'s pause/snapshot/resume path
+//! and a finalized `ExecutionContractEnvelopeV1`, neither of which is reachable
+//! from here yet.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -67,14 +74,40 @@ use crate::wizard_wire::{
 /// [`ExtendPolicy`] seam.
 pub const DEFAULT_HOLD_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// A control-poll fault that ENDS the hold locally, WITHOUT a terminal ack.
+///
+/// Every fault on this channel resolves the same way (SSOT §3.8): a `409 fenced`
+/// means the claim/lease is already dead server-side, and lease expiry is
+/// SERVER-OWNED — the sweep moves the attempt to `expired` and an
+/// expired-lease ack is unsendable (FENCING-4 would `409` it). A malformed
+/// control response, or a transport failure the client could not recover from
+/// inside the lease window, leaves the lease in doubt, and a builder that
+/// cannot prove its lease is alive must not assert a job-terminal state either.
+/// So the rule is uniform and fail-closed: tear down locally, ack nothing, let
+/// the server sweep own the terminal state — see
+/// [`HoldTermination::TornDownWithoutAck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFault {
+    /// Diagnostic detail. Never carries the lease token (the api client's error
+    /// types cannot hold it — see `crate::wizard_api`).
+    pub message: String,
+}
+
 /// The control-poll source (SSOT §3.3). Yields a [`ControlResponse`] carrying the
 /// directive (`hold | capture | discard`), the authoritative `server_capture_epoch`
 /// (adopted as the observed command cursor), and — critically — `pause_permitted`
-/// (ADR-007 causality). In prod this is the builder's control-poll HTTP client;
-/// tests script a fixed sequence.
+/// (ADR-007 causality). In prod this is
+/// [`crate::wizard_api::ApiControlSource`]; tests script a fixed sequence.
 pub trait ControlSource {
     /// Poll the control channel, reporting the highest epoch observed so far.
-    fn poll(&mut self, observed_capture_epoch: u64) -> ControlResponse;
+    ///
+    /// Fallible on purpose: the production implementation is a network call
+    /// against a leased claim, and there is no honest `ControlResponse` to
+    /// invent for a fenced or malformed answer — a synthesized `discard` would
+    /// send a `discarded` ack on a dead lease, and a synthesized `hold` would
+    /// spin until the TTL and then ack. Both are lies; [`ControlFault`] is the
+    /// truth.
+    fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault>;
 }
 
 /// The Firecracker-concrete capture seam. In prod this pauses the live held guest,
@@ -172,23 +205,36 @@ pub enum HoldTermination {
         /// Diagnostic detail.
         failure_reason: String,
     },
+    /// The control channel faulted ([`ControlFault`]): the hold is over and the
+    /// builder sends **NO** terminal ack. See the fault's doc for why every
+    /// fault on that channel resolves this way.
+    TornDownWithoutAck {
+        /// Diagnostic detail — logged locally, never sent anywhere.
+        failure_reason: String,
+    },
 }
 
 impl HoldTermination {
-    /// Project to the ONLY legal wizard job-terminal reasons (SSOT §3.8).
+    /// Project to the ONLY legal wizard job-terminal reasons (SSOT §3.8), or
+    /// `None` when this outcome must send **no ack at all**.
+    ///
     /// `accepted` ends this slice's attempt as an orderly end (there is no
     /// job-terminal "accepted" reason: acceptance is a per-candidate endpoint in
-    /// the full flow, §3.7).
-    pub fn terminal_ack_reason(&self) -> TerminalAckReason {
+    /// the full flow, §3.7). The `None` arm is not an omission: §3.8 has no
+    /// `lease_expired` reason because expiry is server-owned, so "torn down with
+    /// a dead/doubtful lease" has no legal ack — the type says so rather than
+    /// leaving a caller to remember it.
+    pub fn terminal_ack_reason(&self) -> Option<TerminalAckReason> {
         match self {
             HoldTermination::Accepted { .. } | HoldTermination::AttemptEnded => {
-                TerminalAckReason::AttemptEnded
+                Some(TerminalAckReason::AttemptEnded)
             }
-            HoldTermination::Discarded => TerminalAckReason::Discarded,
+            HoldTermination::Discarded => Some(TerminalAckReason::Discarded),
             HoldTermination::AcceptanceFailedSourceLost { .. } => {
-                TerminalAckReason::AcceptanceFailedSourceLost
+                Some(TerminalAckReason::AcceptanceFailedSourceLost)
             }
-            HoldTermination::FailedClosed { .. } => TerminalAckReason::BuildFailed,
+            HoldTermination::FailedClosed { .. } => Some(TerminalAckReason::BuildFailed),
+            HoldTermination::TornDownWithoutAck { .. } => None,
         }
     }
 
@@ -307,7 +353,17 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                 }
             }
 
-            let response = self.control.poll(observed_epoch);
+            // A control fault ends the hold LOCALLY with no ack (see
+            // `ControlFault`): the lease is dead or in doubt, so there is no
+            // job-terminal claim this builder is entitled to make.
+            let response = match self.control.poll(observed_epoch) {
+                Ok(response) => response,
+                Err(fault) => {
+                    return Ok(HoldTermination::TornDownWithoutAck {
+                        failure_reason: fault.message,
+                    });
+                }
+            };
             // Adopt the authoritative server epoch as the observed command cursor
             // (ADR-008 / ControlResponse rules): monotonic, never part of fencing.
             observed_epoch = observed_epoch.max(response.server_capture_epoch);
@@ -636,14 +692,35 @@ mod tests {
     }
 
     impl ControlSource for ScriptedControl {
-        fn poll(&mut self, _observed_capture_epoch: u64) -> ControlResponse {
+        fn poll(&mut self, _observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
             self.polls += 1;
             if let Some(clock) = &self.clock {
                 clock.advance(self.advance_per_poll);
             }
             let i = self.idx.min(self.responses.len() - 1);
             self.idx += 1;
-            self.responses[i].clone()
+            Ok(self.responses[i].clone())
+        }
+    }
+
+    /// A control source that serves `head` and then faults — the production
+    /// shape of a lease that died mid-hold (`409 fenced`) or a control response
+    /// that failed its own contract.
+    struct FaultingControl {
+        head: Vec<ControlResponse>,
+        idx: usize,
+    }
+
+    impl ControlSource for FaultingControl {
+        fn poll(&mut self, _observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
+            let next = self.head.get(self.idx).cloned();
+            self.idx += 1;
+            match next {
+                Some(response) => Ok(response),
+                None => Err(ControlFault {
+                    message: "fenced: claim is no longer active".to_string(),
+                }),
+            }
         }
     }
 
@@ -730,7 +807,7 @@ mod tests {
             job_id: "job_hold".to_string(),
             submission_attempt_id: "subatt_hold".to_string(),
             worker_claim_id: "claim_hold".to_string(),
-            lease_token: "tok".to_string(),
+            lease_token: crate::wizard_wire::LeaseToken::new("tok".to_string()),
         }
     }
 
@@ -833,7 +910,7 @@ mod tests {
         );
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AttemptEnded,
+            Some(TerminalAckReason::AttemptEnded),
             "accepted ends the attempt (no job-terminal `accepted` reason)"
         );
         match outcome {
@@ -882,7 +959,7 @@ mod tests {
         assert!(matches!(outcome, HoldTermination::AttemptEnded));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AttemptEnded
+            Some(TerminalAckReason::AttemptEnded)
         );
     }
 
@@ -910,7 +987,46 @@ mod tests {
 
         assert_eq!(cap.calls, 0);
         assert!(matches!(outcome, HoldTermination::Discarded));
-        assert_eq!(outcome.terminal_ack_reason(), TerminalAckReason::Discarded);
+        assert_eq!(
+            outcome.terminal_ack_reason(),
+            Some(TerminalAckReason::Discarded)
+        );
+    }
+
+    // ── control fault → torn down LOCALLY, no terminal ack (§3.8) ───────────
+    #[test]
+    fn control_fault_tears_down_without_a_terminal_ack() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // One good hold, then the claim is fenced out from under the builder.
+        let mut control = FaultingControl {
+            head: vec![hold(true)],
+            idx: 0,
+        };
+        let mut cap = ScriptedCapture::ok("cand_never", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 0, "a fenced claim never captures");
+        assert!(
+            matches!(outcome, HoldTermination::TornDownWithoutAck { .. }),
+            "got {outcome:?}"
+        );
+        // The whole point: lease expiry is server-owned, so there is NO legal
+        // terminal ack to send here (§3.8 has no `lease_expired` reason).
+        assert_eq!(outcome.terminal_ack_reason(), None);
     }
 
     // ── (iv) acceptance failure + source available → back to holding ────────
@@ -977,7 +1093,7 @@ mod tests {
         ));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AcceptanceFailedSourceLost
+            Some(TerminalAckReason::AcceptanceFailedSourceLost)
         );
         assert_eq!(
             outcome.failure_stage(),
@@ -1061,7 +1177,7 @@ mod tests {
         assert!(matches!(outcome, HoldTermination::FailedClosed { .. }));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::BuildFailed
+            Some(TerminalAckReason::BuildFailed)
         );
     }
 

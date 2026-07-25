@@ -81,6 +81,11 @@ use snapshot::{
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
 mod hold_phase;
 mod upload;
+/// Submission Wizard PR-2 (slice 2) — the builder-lane api client: the
+/// FENCING-4 transport split, the lease-renew driver, and the production
+/// control-poll [`ControlSource`](hold_phase::ControlSource). Transport only;
+/// no live guest. See its doc.
+mod wizard_api;
 /// Submission Wizard PR-0 wire contract — serde/TOML types + tests only, nothing
 /// wired into the claim/dispatch loop yet (see the module doc).
 mod wizard_wire;
@@ -224,10 +229,90 @@ struct ClaimedJob {
     /// doc comment for what happens once one is present.
     #[serde(default)]
     execution_contract: Option<ExecutionContractV1>,
+    // ── Submission Wizard §3.1 claim extension (interactive_capture only) ──
+    //
+    // The api emits these five fields on (and only on) a claimed
+    // `interactive_capture` job. All five are `#[serde(default)]` optionals, so
+    // every OTHER kind parses byte-identically to before — a recipe/import/
+    // materialize claim simply leaves them `None`. They are assembled
+    // ALL-OR-NOTHING by `interactive_capture_claim`; the individual fields are
+    // never read directly, because a half-present set is a contract skew, not a
+    // half-usable fencing tuple.
+    /// Required LITERAL when present: the `WireContractVersion` deserializer
+    /// rejects any other value, so a version skew fails closed AT PARSE, before
+    /// any wizard semantics run.
+    #[serde(default)]
+    wire_contract_version: Option<wizard_wire::WireContractVersion>,
+    #[serde(default)]
+    submission_attempt_id: Option<String>,
+    #[serde(default)]
+    worker_claim_id: Option<String>,
+    /// A [`wizard_wire::LeaseToken`], NOT a `String`: `ClaimedJob` derives
+    /// `Debug`, and a bare secret here would print on any `{:?}` of a claimed
+    /// job.
+    #[serde(default)]
+    lease_token: Option<wizard_wire::LeaseToken>,
+    #[serde(default)]
+    lease_expires_at: Option<String>,
 }
 
 fn default_job_kind() -> String {
     "recipe".into()
+}
+
+impl ClaimedJob {
+    /// Submission Wizard §3.1: assemble the interactive-capture claim extension
+    /// ALL-OR-NOTHING, mirroring [`upload::ArtifactStore::from_parts`]' gate — a
+    /// PARTIAL set is a server/daemon contract skew and must fail closed, never
+    /// produce a fencing tuple with a guessed member. The error names the
+    /// MISSING keys only; it never echoes a value (one of them is the secret).
+    fn interactive_capture_claim(
+        &self,
+    ) -> std::result::Result<wizard_wire::InteractiveCaptureClaimExt, String> {
+        let missing: Vec<&str> = [
+            (
+                "wire_contract_version",
+                self.wire_contract_version.is_none(),
+            ),
+            (
+                "submission_attempt_id",
+                self.submission_attempt_id.is_none(),
+            ),
+            ("worker_claim_id", self.worker_claim_id.is_none()),
+            ("lease_token", self.lease_token.is_none()),
+            ("lease_expires_at", self.lease_expires_at.is_none()),
+        ]
+        .iter()
+        .filter(|(_, absent)| *absent)
+        .map(|(key, _)| *key)
+        .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "interactive_capture claim is missing its wire §3.1 extension (missing: {})",
+                missing.join(", ")
+            ));
+        }
+        Ok(wizard_wire::InteractiveCaptureClaimExt {
+            wire_contract_version: self.wire_contract_version.unwrap(),
+            submission_attempt_id: self.submission_attempt_id.clone().unwrap(),
+            worker_claim_id: self.worker_claim_id.clone().unwrap(),
+            lease_token: self.lease_token.clone().unwrap(),
+            lease_expires_at: self.lease_expires_at.clone().unwrap(),
+        })
+    }
+
+    /// The FENCING-4 tuple this claim is fenced under (§1.1): `job_id` from the
+    /// claim itself plus the three §3.1 extension members. Every builder request
+    /// after claim carries it.
+    fn fencing4(&self) -> std::result::Result<wizard_wire::Fencing4, String> {
+        let ext = self.interactive_capture_claim()?;
+        Ok(wizard_wire::Fencing4 {
+            job_id: self.id.clone(),
+            submission_attempt_id: ext.submission_attempt_id,
+            worker_claim_id: ext.worker_claim_id,
+            lease_token: ext.lease_token,
+        })
+    }
 }
 
 /// The narrow v1 target/profile gate: a job may only build when it requests the
@@ -398,16 +483,34 @@ fn warmup_from_env() -> std::result::Result<WarmupRecipe, String> {
     Ok(w)
 }
 
+/// The lanes this builder advertises on the claim — the server hands a job ONLY
+/// if its kind is listed here (an older ato-api ignores the field and keeps
+/// handing recipe jobs exactly as before). `source_materialize`
+/// (SOURCE_MATERIALIZATION_SPEC) is a non-sealing lane on the SAME claim/ack
+/// lease machinery: it emits a frozen source archive + A1v2 identity, not a
+/// snapshot artifact (dispatched in `run_once`, not `produce_build`).
+///
+/// **`interactive_capture` is deliberately ABSENT** and stays absent until the
+/// VM half of that lane exists (boot-and-hold, pause/snapshot/resume on a live
+/// guest, a production `ExecutionContractEnvelopeV1` eligibility proof). This
+/// list is the master switch for the whole submission-wizard lane: while the
+/// kind is unadvertised the api never hands this builder such a job, so the
+/// wizard code paths are unreachable in prod. Pinned by a unit test.
+const SUPPORTED_JOB_KINDS: &[&str] = &[
+    "recipe",
+    "dockerfile_import",
+    "oci_image_import",
+    "compose_import",
+    "source_materialize",
+];
+
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
-        // ato#1002: advertise every lane this builder handles — the server hands a job
-        // ONLY if its kind is listed here (an older ato-api ignores the field and keeps
-        // handing recipe jobs exactly as before). `source_materialize`
-        // (SOURCE_MATERIALIZATION_SPEC) is a non-sealing lane on the SAME claim/ack lease
-        // machinery: it emits a frozen source archive + A1v2 identity, not a snapshot
-        // artifact (dispatched in `run_once`, not `produce_build`).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": ["recipe", "dockerfile_import", "oci_image_import", "compose_import", "source_materialize"] }))
+        // ato#1002: advertise every lane this builder handles (see
+        // SUPPORTED_JOB_KINDS for what is on the list and what is deliberately
+        // off it).
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": SUPPORTED_JOB_KINDS }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -2545,6 +2648,18 @@ fn process_interactive_capture_job(
     _backend: &FirecrackerBackend,
     job: &ClaimedJob,
 ) -> std::result::Result<(), (String, String)> {
+    // §3.1 FIRST: without the claim extension there is no FENCING-4 tuple, so
+    // every subsequent call on this lane — including the terminal ack — would be
+    // a 409. Fail closed at `claim_kind` before spending a build on a job that
+    // could never be reported on.
+    let fencing = job
+        .fencing4()
+        .map_err(|why| ("claim_kind".to_string(), why))?;
+    eprintln!(
+        "[builder] interactive_capture {} claimed under attempt {} / claim {}",
+        job.id, fencing.submission_attempt_id, fencing.worker_claim_id
+    );
+
     let jobdir = cfg.work.join(&job.id);
     let _ = std::fs::remove_dir_all(&jobdir);
 
@@ -2561,15 +2676,29 @@ fn process_interactive_capture_job(
     // `ExecutionContractEnvelopeV1` and the live boot-to-hold session are a later
     // PR-2 slice. Fail closed here (mirrors #1090's exclusion) rather than mint a
     // non-production eligibility or drive an unverified live capture.
+    // Stage names the §2 wire stage (`holding`), not a builder-local word: the
+    // §3.8 ack's optional `failure_stage` refinement is parsed straight out of
+    // this string, so a name outside the enum silently drops the diagnostic.
     Err((
-        "hold".to_string(),
+        "holding".to_string(),
         "interactive_capture hold session is not finalized in this slice: the live \
-         boot-to-hold + Firecracker-concrete capture path, the api control/quiesce \
-         transport, and the real ExecutionContractEnvelopeV1 eligibility land in a \
-         later PR-2 slice (verified on real hardware). External state stays deferred \
+         boot-to-hold + Firecracker-concrete capture path and the real \
+         ExecutionContractEnvelopeV1 eligibility land in a later PR-2 slice (verified \
+         on real hardware). The api control/quiesce transport exists (crate::wizard_api) \
+         but there is no live guest for it to drive. External state stays deferred \
          -> fail closed."
             .to_string(),
     ))
+}
+
+/// The §3.8 terminal ack for an `interactive_capture` job, over the production
+/// transport. Built per call (it is a failure path, not a hot loop).
+fn wizard_api_client(cfg: &Config) -> wizard_api::HttpWizardApi<wizard_api::UreqTransport> {
+    wizard_api::HttpWizardApi::new(
+        cfg.api_url.clone(),
+        cfg.token.clone(),
+        wizard_api::UreqTransport::new(),
+    )
 }
 
 fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
@@ -2624,7 +2753,32 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
                         "[builder] interactive_capture {} -> {stage}: {reason}",
                         job.id
                     );
-                    ack_failed(cfg, &job.id, &stage, &reason)?;
+                    // §3.8: this kind's terminal ack is the RESTRICTED wizard
+                    // payload, NOT the legacy `ack_failed` body. The legacy body
+                    // carries `status` (a strict-mode reject for an
+                    // interactive_capture job) and none of FENCING-4 (a 409 even
+                    // if the schema passed), so the legacy call could never have
+                    // landed. Failing before `holding` is exactly `build_failed`.
+                    match job.fencing4() {
+                        Ok(fencing) => {
+                            wizard_api::ack_interactive_build_failure(
+                                &wizard_api_client(cfg),
+                                &cfg.agent_id,
+                                &fencing,
+                                &stage,
+                                &reason,
+                            )
+                            .map_err(|e| anyhow!("interactive_capture terminal ack: {e}"))?;
+                        }
+                        // No §3.1 extension ⇒ no fencing tuple ⇒ NO ack is
+                        // sendable at all (the api would 409 it). Leave the
+                        // attempt to the server-owned lease sweep rather than
+                        // fall back to a body this kind rejects.
+                        Err(why) => eprintln!(
+                            "[builder] interactive_capture {} has no fencing tuple, sending no ack: {why}",
+                            job.id
+                        ),
+                    }
                 }
             }
             continue;
@@ -2762,6 +2916,119 @@ targets = ["web"]
         // ato#1002: an OLDER ato-api without kind/params parses as the recipe lane.
         assert_eq!(resp.jobs[0].kind, "recipe");
         assert!(resp.jobs[0].params.is_none());
+    }
+
+    #[test]
+    fn a_non_wizard_claim_carries_no_wire_extension() {
+        // §3.1 is additive: every EXISTING kind parses exactly as before and
+        // simply has no fencing tuple.
+        let body = serde_json::json!({
+            "jobs": [{
+                "id": "job_2", "capsule_id": "cap_2",
+                "source": { "github_owner": "acme", "github_repo": "app", "commit_sha": "b".repeat(40), "subdirectory": null },
+                "target_label": "web", "profile": "default"
+            }]
+        });
+        let resp: ClaimResponse = serde_json::from_value(body).unwrap();
+        let job = &resp.jobs[0];
+        assert_eq!(job.kind, "recipe");
+        let why = job
+            .fencing4()
+            .expect_err("no wizard extension, no fencing tuple");
+        for key in [
+            "wire_contract_version",
+            "submission_attempt_id",
+            "worker_claim_id",
+            "lease_token",
+            "lease_expires_at",
+        ] {
+            assert!(why.contains(key), "{why}");
+        }
+    }
+
+    /// The §3.1 claim object the api emits for an `interactive_capture` job.
+    fn interactive_claim_job() -> serde_json::Value {
+        serde_json::json!({
+            "id": "job_w", "capsule_id": "cap_w",
+            "kind": "interactive_capture",
+            "target_label": "web", "profile": "default",
+            "wire_contract_version": "ato.submission-wizard-wire/v1",
+            "submission_attempt_id": "subatt_01J1XY",
+            "worker_claim_id": "claim_01J1XZ",
+            "lease_token": "b64u-opaque-token",
+            "lease_expires_at": "2026-07-22T09:15:00.000Z"
+        })
+    }
+
+    #[test]
+    fn parses_an_interactive_capture_claim_into_its_fencing_tuple() {
+        let resp: ClaimResponse =
+            serde_json::from_value(serde_json::json!({ "jobs": [interactive_claim_job()] }))
+                .unwrap();
+        let job = &resp.jobs[0];
+        assert_eq!(job.kind, wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE);
+        // An interactive job has no server-resolved source in the claim shape
+        // above; what it DOES carry is the §3.1 extension.
+        let ext = job.interactive_capture_claim().expect("§3.1 extension");
+        assert_eq!(ext.lease_expires_at, "2026-07-22T09:15:00.000Z");
+        let fencing = job.fencing4().expect("fencing tuple");
+        assert_eq!(
+            fencing.job_id, "job_w",
+            "job_id comes from the claim itself"
+        );
+        assert_eq!(fencing.submission_attempt_id, "subatt_01J1XY");
+        assert_eq!(fencing.worker_claim_id, "claim_01J1XZ");
+        assert_eq!(fencing.lease_token.expose(), "b64u-opaque-token");
+        // The token cannot reach a log through a `{:?}` of the claimed job.
+        assert!(!format!("{job:?}").contains("b64u-opaque-token"));
+    }
+
+    #[test]
+    fn a_partial_wizard_claim_extension_fails_closed() {
+        // A half-present set is a contract skew, never a half-usable fencing
+        // tuple — the request would 409 and the failure would be undebuggable.
+        for dropped in ["submission_attempt_id", "worker_claim_id", "lease_token"] {
+            let mut job = interactive_claim_job();
+            job.as_object_mut().unwrap().remove(dropped);
+            let resp: ClaimResponse =
+                serde_json::from_value(serde_json::json!({ "jobs": [job] })).unwrap();
+            let why = resp.jobs[0].fencing4().expect_err("partial extension");
+            assert!(why.contains(dropped), "{why}");
+        }
+    }
+
+    #[test]
+    fn a_skewed_wire_contract_version_fails_closed_at_claim_parse() {
+        // The literal is the fail-closed version gate: it rejects at PARSE, so
+        // no wizard semantics ever run against a skewed contract.
+        let mut job = interactive_claim_job();
+        job["wire_contract_version"] = serde_json::json!("ato.submission-wizard-wire/v2");
+        assert!(
+            serde_json::from_value::<ClaimResponse>(serde_json::json!({ "jobs": [job] })).is_err()
+        );
+    }
+
+    #[test]
+    fn interactive_capture_is_not_advertised_in_supported_kinds() {
+        // The master switch for this whole lane. It stays OFF until the VM half
+        // (boot-and-hold + pause/snapshot/resume + a production eligibility
+        // proof) exists: the api hands a builder an interactive job only if the
+        // builder asked for the kind.
+        assert!(
+            !SUPPORTED_JOB_KINDS.contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
+            "interactive_capture must stay absent from supported_kinds: {SUPPORTED_JOB_KINDS:?}"
+        );
+        // …and the five lanes that ARE advertised stay advertised.
+        assert_eq!(
+            SUPPORTED_JOB_KINDS,
+            [
+                "recipe",
+                "dockerfile_import",
+                "oci_image_import",
+                "compose_import",
+                "source_materialize"
+            ]
+        );
     }
 
     #[test]
@@ -3132,6 +3399,13 @@ targets = ["web"]
             kind: kind.into(),
             params,
             execution_contract: None,
+            // §3.1: absent for every non-wizard kind — which is every kind this
+            // helper builds.
+            wire_contract_version: None,
+            submission_attempt_id: None,
+            worker_claim_id: None,
+            lease_token: None,
+            lease_expires_at: None,
         }
     }
 

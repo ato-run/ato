@@ -9,16 +9,21 @@
 //! `src/services/submission_wizard/wire.ts`; both sides test against the exact
 //! snake_case wire names in the spec's §9 seam checklist.
 //!
-//! PR-0 explicitly wires NOTHING:
-//! - `"interactive_capture"` is NOT added to the claim loop's `supported_kinds`
-//!   and no enqueue accepts it; `"holding"` cannot be persisted (DB CHECK
-//!   unchanged server-side).
-//! - No polling loop, no hold/quiesce/capture execution, no new ack path is
-//!   taken at runtime; nothing in this module is called outside its tests.
-//! - The TOML declaration schema is NOT consulted by any build path.
+//! What is wired, as of PR-2 slice 2:
+//! - `"interactive_capture"` is STILL NOT in the claim loop's
+//!   `SUPPORTED_JOB_KINDS`, so the api never hands this builder such a job and
+//!   nothing below runs in prod against a live hold. That list is the lane's
+//!   master switch and stays off until the VM half exists.
+//! - The §3.1 claim extension IS attached to the live `ClaimedJob`
+//!   (`#[serde(default)]`, so every other kind parses unchanged), and the §3.2
+//!   /§3.3/§3.4/§3.5/§3.6/§3.7/§3.8 bodies ARE the request/response types of
+//!   `crate::wizard_api` — no wire shape is redeclared there.
+//! - Still unwired: the hold/quiesce/capture EXECUTION (no live guest), and the
+//!   TOML declaration schema (§7), which no build path consults.
 //!
-//! The module-level `dead_code` allow below exists because of exactly that:
-//! PR-1 wires the claim/control loop and removes it.
+//! The module-level `dead_code` allow below covers the shapes that still have
+//! no caller (the §4 verify-session and §5 quiesce types are api-internal
+//! mirrors, kept here so the Rust side can seam-test the exact encoding).
 
 #![allow(dead_code)]
 
@@ -276,6 +281,47 @@ pub enum TerminalAckReason {
 // FENCING-4 + per-endpoint epoch rules (spec §1)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The `lease_token` (§1.1, D2) as a type that **cannot leak through a derived
+/// `Debug`**. The token is the one builder-held secret of the wizard lane, and
+/// the concrete leak path is not a deliberate `println!` — it is a `{:?}` of
+/// some struct that happens to carry it (a claimed job, a fencing tuple, an
+/// error context). A bare `String` field makes that leak the DEFAULT for every
+/// future struct; this newtype makes it impossible, and funnels every legitimate
+/// use through the single, greppable [`LeaseToken::expose`] call site (only the
+/// [`LEASE_TOKEN_HEADER`] value ever needs it).
+///
+/// `#[serde(transparent)]` keeps the wire byte-identical: the token still
+/// serializes as a bare JSON string in the one message that mints it (§3.1), and
+/// still never appears in any request body (the strict bodies have no such key).
+///
+/// `PartialEq` here is the ordinary derived comparison: the builder never
+/// compares tokens (it only echoes its own). The constant-time comparison
+/// against a stored HASH is the SERVER's rule, on the server's side.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LeaseToken(String);
+
+impl LeaseToken {
+    pub fn new(token: String) -> Self {
+        LeaseToken(token)
+    }
+
+    /// The ONLY way to read the secret. Legitimate callers: the
+    /// [`LEASE_TOKEN_HEADER`] value on a builder request. Nothing else.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Redacted — see the type doc. Deliberately hand-written, never derived, and
+/// deliberately WITHOUT a `Display` impl (a `Display` would make `{}` of the
+/// token compile, which is exactly the accident this type exists to prevent).
+impl std::fmt::Debug for LeaseToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LeaseToken(<redacted>)")
+    }
+}
+
 /// **FENCING-4** (§1.1): the 4-tuple every builder-originated request after
 /// claim — control poll, lease renew, progress, hold-ready, candidate report,
 /// candidate acceptance, terminal ack — MUST carry. The server compares all
@@ -297,6 +343,10 @@ pub enum TerminalAckReason {
 ///   a query param and never a body field (strict bodies reject the key);
 /// - `submission_attempt_id` + `worker_claim_id`: top-level body fields on
 ///   POSTs, query params on the control-poll GET.
+///
+/// `Debug` is safe to derive ONLY because `lease_token` is a [`LeaseToken`],
+/// which redacts itself.
+#[derive(Debug, Clone)]
 pub struct Fencing4 {
     /// `job_` — issued at enqueue (existing convention). Path-only.
     pub job_id: String,
@@ -319,7 +369,7 @@ pub struct Fencing4 {
     /// here). Builders must never log it, never put it in URLs or request
     /// bodies — it travels ONLY in the [`LEASE_TOKEN_HEADER`] header, and its
     /// only JSON appearance is the claim response that mints it (§3.1).
-    pub lease_token: String,
+    pub lease_token: LeaseToken,
 }
 
 /// §1.2 SERVER rule for the control poll (route enforcement is PR-1; PR-0 pins
@@ -423,8 +473,9 @@ pub struct InteractiveCaptureClaimExt {
     pub submission_attempt_id: String,
     /// Fresh per claim generation; echoed in FENCING-4.
     pub worker_claim_id: String,
-    /// Opaque secret (see [`Fencing4::lease_token`]).
-    pub lease_token: String,
+    /// Opaque secret (see [`Fencing4::lease_token`]). A [`LeaseToken`], so a
+    /// `{:?}` of a claimed job can never print it.
+    pub lease_token: LeaseToken,
     /// ISO-8601 UTC lease deadline; the builder must renew before this.
     pub lease_expires_at: String,
 }
@@ -1684,7 +1735,7 @@ mod tests {
         assert_eq!(ext.wire_contract_version, WireContractVersion);
         assert_eq!(ext.submission_attempt_id, "subatt_01J1XY");
         assert_eq!(ext.worker_claim_id, "claim_01J1XZ");
-        assert_eq!(ext.lease_token, "b64u-opaque-token");
+        assert_eq!(ext.lease_token.expose(), "b64u-opaque-token");
         assert_eq!(ext.lease_expires_at, "2026-07-22T09:15:00.000Z");
         // Serialization carries exactly the five §3.1 extension fields, with
         // the version literal.
@@ -1700,6 +1751,30 @@ mod tests {
             ]
         );
         assert_eq!(v["wire_contract_version"], json!(WIRE_CONTRACT_VERSION));
+    }
+
+    #[test]
+    fn lease_token_never_renders_through_debug() {
+        // D2: the token must never reach a log line. The realistic leak is a
+        // `{:?}` of a struct that happens to carry it — so the type itself
+        // redacts, and every struct that embeds it inherits that.
+        let ext: InteractiveCaptureClaimExt = serde_json::from_value(claim_job_example()).unwrap();
+        assert!(!format!("{ext:?}").contains("b64u-opaque-token"));
+        assert!(format!("{:?}", ext.lease_token).contains("<redacted>"));
+
+        let fencing = Fencing4 {
+            job_id: "job_x".to_string(),
+            submission_attempt_id: ext.submission_attempt_id.clone(),
+            worker_claim_id: ext.worker_claim_id.clone(),
+            lease_token: ext.lease_token.clone(),
+        };
+        assert!(!format!("{fencing:?}").contains("b64u-opaque-token"));
+        // …while the WIRE encoding is unchanged: the claim response (§3.1) is
+        // still the one message carrying the bare token string.
+        assert_eq!(
+            serde_json::to_value(&ext).unwrap()["lease_token"],
+            json!("b64u-opaque-token")
+        );
     }
 
     #[test]
