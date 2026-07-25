@@ -18,7 +18,6 @@
 //! sidecar; the build call itself fails so the caller can act on it.
 
 use std::path::Path;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use capsule::execution_contract::{ExecutionContractEnvelopeV1, ExecutionId};
@@ -247,34 +246,11 @@ pub(crate) fn seal(
     Ok(receipt)
 }
 
-/// Bounds for the disposable-restore acceptance loop when the caller does not
-/// override them: exactly ONE attempt.
-///
-/// The RFC's "fresh capture per attempt" retry model assumes each attempt
-/// re-boots the guest to recapture memory/vmstate; at this layer `seal`
-/// already receives its [`BuildLayers`] pre-captured from a single boot (the
-/// backend's OWN internal boot/capture happened inside the ONE
-/// `build_ready_state` call above), so a real per-attempt recapture is not
-/// available here without re-architecting the caller's build pipeline. Rather
-/// than fabricate a "retry" that silently reruns the SAME candidate, this
-/// bounds the run to the one real attempt the sealed layers actually support.
-/// A future PR that threads a re-bootable capture closure through can widen
-/// `maximum_attempts` without changing this function's contract.
-pub(crate) fn default_acceptance_config(seal_at_argv: Vec<String>) -> AcceptanceConfig {
-    AcceptanceConfig {
-        seal_at_argv,
-        verification_timeout: DEFAULT_VERIFICATION_TIMEOUT,
-        total_deadline: DEFAULT_TOTAL_DEADLINE,
-        maximum_attempts: 1,
-    }
-}
-
-/// Per-attempt verification budget when `[seal_at]` names no `timeout_seconds`.
-const DEFAULT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
-/// Whole-run deadline when `[seal_at]` names no `timeout_seconds`. The excess
-/// over [`DEFAULT_VERIFICATION_TIMEOUT`] is the budget for the NON-verification
-/// work of one attempt (candidate capture, disposable create/restore, teardown).
-const DEFAULT_TOTAL_DEADLINE: Duration = Duration::from_secs(60);
+/// The acceptance bounds, shared with the interactive hold that runs the SAME
+/// authored `seal_at.command` — see
+/// [`snapshot::acceptance::default_acceptance_config`] for why there is one
+/// attempt, and why this lives in `snapshot` rather than in either caller.
+pub(crate) use snapshot::acceptance::default_acceptance_config;
 
 /// Build the Capsule v1 Snapshot request for a CONFIRMED Execution Identity out
 /// of the manifest's `[seal_at]` table (RFC §6/§6.3).
@@ -284,30 +260,19 @@ const DEFAULT_TOTAL_DEADLINE: Duration = Duration::from_secs(60);
 /// acceptance loop only ever accepts on an OBSERVED exit 0 of a real argv), so
 /// the caller stays on its legacy-only path byte-for-byte.
 ///
-/// `timeout_seconds` maps onto [`AcceptanceConfig::verification_timeout`] — the
-/// per-attempt bound on the verification program, which is exactly what §6.1
-/// names. `total_deadline` is widened to keep the same non-verification headroom
-/// [`default_acceptance_config`] allots (its `total_deadline` minus its
-/// `verification_timeout`), so an authored timeout can actually be spent instead
-/// of being truncated by a fixed 60 s run deadline. `maximum_attempts` is NOT
-/// touched: the single-attempt policy is a property of the caller's
-/// single-boot capture pipeline (see [`default_acceptance_config`]'s doc), not
-/// something the manifest may widen. When `timeout_seconds` is absent the
-/// request carries no config at all, so `seal` uses the default verbatim.
+/// An authored `timeout_seconds` is applied by the shared
+/// [`snapshot::acceptance::acceptance_config_for_seal_at`] — the same derivation
+/// the interactive hold uses, so one capsule gets one budget whichever path
+/// seals it. When `timeout_seconds` is absent the request carries no config at
+/// all, so `seal` uses the default verbatim.
 pub(crate) fn v1_seal_request<'a>(
     manifest: &CapsuleManifest,
     execution_contract_envelope: &'a ExecutionContractEnvelopeV1,
 ) -> Option<V1SealRequest<'a>> {
     let seal_at = manifest.seal_at.as_ref()?;
-    let acceptance_config = seal_at.timeout_seconds.map(|seconds| {
-        let verification_timeout = Duration::from_secs(u64::from(seconds));
-        AcceptanceConfig {
-            verification_timeout,
-            total_deadline: verification_timeout
-                + DEFAULT_TOTAL_DEADLINE.saturating_sub(DEFAULT_VERIFICATION_TIMEOUT),
-            ..default_acceptance_config(seal_at.command.clone())
-        }
-    });
+    let acceptance_config = seal_at
+        .timeout_seconds
+        .map(|_| snapshot::acceptance::acceptance_config_for_seal_at(seal_at));
     Some(V1SealRequest {
         execution_contract_envelope,
         // Exact argv, cloned element-for-element: argument boundaries (including
@@ -391,6 +356,14 @@ fn seal_v1_via_disposable_acceptance(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::time::Duration;
+
+    // Named here rather than in the parent: the production code above builds no
+    // contract of its own, so importing these at module scope would be an unused
+    // import in every non-test build. (`ContentDigest`/`DigestAlgorithm` were
+    // missing outright — this module did not compile under `cargo test`.)
+    use capsule::execution_contract::{ContentDigest, DigestAlgorithm};
+
     use super::*;
 
     fn parse(extra: &str) -> CapsuleManifest {

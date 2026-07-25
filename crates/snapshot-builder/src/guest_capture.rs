@@ -64,10 +64,6 @@ pub struct GuestCaptureAction<'a> {
     captured: CapturedCandidateCell,
 }
 
-/// These have no caller yet: the job-loop wiring that boots the hold and fronts
-/// it with an ingress is the next slice, and the lane stays OFF until then
-/// (`interactive_capture` is not advertised on the claim).
-#[allow(dead_code)]
 impl<'a> GuestCaptureAction<'a> {
     pub fn new(guest: HeldGuest<'a>, ctx: CaptureContext, captured: CapturedCandidateCell) -> Self {
         Self {
@@ -75,11 +71,6 @@ impl<'a> GuestCaptureAction<'a> {
             ctx,
             captured,
         }
-    }
-
-    /// The address a host-side proxy fronts to reach the held workload.
-    pub fn workload_addr(&self) -> String {
-        self.guest.workload_addr()
     }
 
     /// Tear the hold down. Consumes the action, so no capture can follow.
@@ -204,19 +195,20 @@ impl CaptureAction for GuestCaptureAction<'_> {
 ///
 /// Reading before any capture is a hard error, not an empty default: it would
 /// mean acceptance ran with nothing to verify.
-#[allow(dead_code)]
-pub struct HeldCandidateSource {
+pub struct HeldCandidateSource<'a> {
     captured: CapturedCandidateCell,
-    /// The backend, to derive the v1 sidecar for whatever was captured.
-    backend: &'static snapshot::FirecrackerBackend,
+    /// The backend, to derive the v1 sidecar for whatever was captured. Borrowed
+    /// for the hold rather than `'static`: the backend a job runs on carries
+    /// that job's boot timeout (`with_boot_timeout`), so it is a per-job value
+    /// and leaking one per hold would leak the job's config with it.
+    backend: &'a dyn snapshot::SnapshotBackend,
     execution_id: capsule::execution_contract::ExecutionId,
 }
 
-#[allow(dead_code)]
-impl HeldCandidateSource {
+impl<'a> HeldCandidateSource<'a> {
     pub fn new(
         captured: CapturedCandidateCell,
-        backend: &'static snapshot::FirecrackerBackend,
+        backend: &'a dyn snapshot::SnapshotBackend,
         execution_id: capsule::execution_contract::ExecutionId,
     ) -> Self {
         Self {
@@ -234,7 +226,7 @@ impl HeldCandidateSource {
     }
 }
 
-impl snapshot::disposable_lifecycle::CandidateSource for HeldCandidateSource {
+impl snapshot::disposable_lifecycle::CandidateSource for HeldCandidateSource<'_> {
     fn legacy_manifest(&self) -> Result<snapshot::ReadyStateManifest, String> {
         Ok(self.receipt()?.manifest)
     }
@@ -321,13 +313,12 @@ mod tests {
     fn reading_the_candidate_before_any_capture_fails() {
         use snapshot::disposable_lifecycle::CandidateSource;
         let cell: CapturedCandidateCell = Rc::new(RefCell::new(None));
-        // A leaked backend satisfies the 'static bound without a live VM; no
-        // method on it is reached on this path.
-        let backend: &'static snapshot::FirecrackerBackend =
-            Box::leak(Box::new(snapshot::FirecrackerBackend::new()));
+        // A real backend, but no live VM: this path returns before any method on
+        // it is reached.
+        let backend = snapshot::FirecrackerBackend::new();
         let source = HeldCandidateSource::new(
             Rc::clone(&cell),
-            backend,
+            &backend,
             capsule::execution_contract::ExecutionId::new(format!("blake3:{}", "a".repeat(64)))
                 .expect("id"),
         );

@@ -32,9 +32,12 @@
 //!   snapshot-builder --agent-id builder-1 [--once]
 //! ```
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use capsule::engine::execution_graph::{
@@ -584,12 +587,9 @@ fn warmup_from_env() -> std::result::Result<WarmupRecipe, String> {
 /// lease machinery: it emits a frozen source archive + A1v2 identity, not a
 /// snapshot artifact (dispatched in `run_once`, not `produce_build`).
 ///
-/// **`interactive_capture` is deliberately ABSENT** and stays absent until the
-/// VM half of that lane exists (boot-and-hold, pause/snapshot/resume on a live
-/// guest, a production `ExecutionContractEnvelopeV1` eligibility proof). This
-/// list is the master switch for the whole submission-wizard lane: while the
-/// kind is unadvertised the api never hands this builder such a job, so the
-/// wizard code paths are unreachable in prod. Pinned by a unit test.
+/// **`interactive_capture` is deliberately ABSENT from this list** — it is added
+/// per-daemon by [`supported_job_kinds`] when a hold slot is configured, and a
+/// builder with no slot therefore never receives one. Pinned by a unit test.
 /// The kinds every builder can always take.
 const SUPPORTED_JOB_KINDS: &[&str] = &[
     "recipe",
@@ -971,6 +971,16 @@ struct ProducedBuild {
     /// stacks need a larger budget than the env default); other lanes leave it
     /// `None` and inherit the backend env/default. Clamped in the backend.
     boot_timeout_s: Option<u32>,
+    /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
+    /// validated at produce time.
+    ///
+    /// Read only by the interactive HOLD, which cannot accept a candidate
+    /// without it: acceptance is defined as "this argv exited 0 against a
+    /// disposable restore", so a capsule that authors none has nothing that
+    /// could accept. The auto-seal lane ignores it (it seals on the legacy
+    /// contract), and the import lanes have no capsule.toml to author it in, so
+    /// they leave it `None`.
+    seal_at: Option<capsule::types::SealAtConfig>,
 }
 
 /// ato#1002 producer dispatch: `kind` selects the steps 1-3 branch. An unknown kind
@@ -1050,6 +1060,15 @@ fn produce_recipe_build(
     // P0: the author's `[snapshot]` first-screen warmup recipe. Validated before
     // any rootfs work so a bad path fails fast with a pointed error.
     let warmup = warmup_from_manifest(&manifest).map_err(|e| fail("warmup", e))?;
+    // The author's `[seal_at]` acceptance program, validated by the SAME
+    // function the manifest layer uses so both reject the same argv. Validated
+    // here (not where it is consumed) for the same reason as the warmup: an
+    // authoring typo should fail before a rootfs is built, not after a guest is
+    // held and the author has been operating it.
+    let seal_at = manifest.seal_at.clone();
+    if let Some(seal_at) = seal_at.as_ref() {
+        capsule::types::validate_seal_at(seal_at).map_err(|e| fail("manifest", e))?;
+    }
     // v1.2 PR 3d-2: secret capsules dispatch to the supervisor derivation when this
     // builder is opted in (each prerequisite fail-closed with an actionable reason);
     // no-secret capsules keep the v1 derivation untouched.
@@ -1188,6 +1207,9 @@ fn produce_recipe_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        // The authored acceptance program, validated above. Only the interactive
+        // HOLD reads it.
+        seal_at,
         // P0 Ready-State warmup — the author's `[snapshot]` recipe rides the
         // sealed artifact. An empty `warmup_paths` (the default when no
         // `[snapshot]` table is present) leaves `stable_*` as `None`, so the
@@ -1552,6 +1574,8 @@ fn produce_import_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        // No capsule.toml, so no authored `[seal_at]` to read.
+        seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
         // warmup via env (empty by default ⇒ the v1 healthcheck-only seal).
         warmup_paths: warmup.warmup_paths,
@@ -1670,6 +1694,8 @@ fn produce_oci_image_import(
         oci_import_receipt: Some(oci_import_receipt),
         compose_import_receipt: None,
         boot_timeout_s: None,
+        // No capsule.toml, so no authored `[seal_at]` to read.
+        seal_at: None,
         warmup_paths: warmup.warmup_paths,
         stable_successes: warmup.stable_successes,
         stable_interval_ms: warmup.stable_interval_ms,
@@ -1769,6 +1795,8 @@ fn produce_compose_import(
         oci_import_receipt: None,
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
+        // No capsule.toml, so no authored `[seal_at]` to read.
+        seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
         // an import lane like the others — operator env opt-in, empty default.
         warmup_paths: warmup.warmup_paths,
@@ -2797,29 +2825,66 @@ fn process_job(
 /// silently drops the diagnostic and leaves admins a bare `build_failed`.
 const INTERACTIVE_HOLD_REFUSAL_STAGE: &str = "holding";
 
-/// Submission Wizard PR-2 (slice 1) — the `interactive_capture` lane skeleton.
-/// Shares [`produce_build`] with the seal lane (materialize + rootfs +
-/// execution_id), then — instead of the auto-seal tail — would enter the
-/// builder-resident HOLD phase ([`crate::hold_phase::HoldPhase`]) with the
-/// Firecracker-concrete capture action against a live held guest.
+/// How often the hold polls the control channel for the author's directive.
 ///
-/// This slice keeps the LIVE parts deferred (external state stays deferred,
-/// warm-cache-only): the real `ExecutionContractEnvelopeV1` eligibility
-/// (`VerifiedRunningSnapshotEligibility::analyze_execution_contract`, wired into
-/// `produce_build` in a later PR-2 slice) and the live boot-to-hold session are
-/// not constructed here. Consistent with #1090's fail-closed External-State
-/// exclusion, the lane FAILS CLOSED after the shared build — no production
-/// eligibility proof and no capture are minted in this slice.
+/// This is the latency the author feels between pressing Capture and the builder
+/// acting on it, so it is deliberately far shorter than the claim loop's own
+/// `--poll-secs` (which paces an unattended daemon looking for work). It is also
+/// what has to fit inside ato-api's fail-closed drain deadline for a quiesce
+/// (30 s): the epoch is only actionable once the proxy has acked, so the hold
+/// needs several polls inside that window, not one.
+const HOLD_CONTROL_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// §3.4 — coarse progress, best-effort by contract.
 ///
-/// Because `claim()` never advertises `interactive_capture`, this is unreachable
-/// in prod: the fail-closed return is a guard, not a reachable stub. The HOLD
-/// orchestration itself is fully exercised by `hold_phase`'s KVM-free unit tests.
+/// A failure here is logged and never fails the job: the wire makes this
+/// message advisory (it does not enforce monotonic advance, and no state
+/// transition hangs off it), and the very next call on this lane is a fenced one
+/// that will discover a dead claim properly. Failing a build because a progress
+/// ping was lost would be strictly worse for the author than a stale stage
+/// label.
+fn report_hold_progress(
+    api: &dyn wizard_api::WizardApi,
+    fencing: &wizard_wire::Fencing4,
+    stage: wizard_wire::WizardStage,
+) {
+    if let Err(error) = api.report_progress(fencing, stage) {
+        eprintln!("[builder] wizard progress {stage:?} not recorded: {error}");
+    }
+}
+
+/// Submission Wizard PR-2 — the `interactive_capture` lane, end to end.
+///
+/// Shares the RECIPE build with the seal lane (materialize + manifest + rootfs +
+/// declared execution identity) and then, instead of the auto-seal tail, keeps
+/// the guest ALIVE: it fronts the live workload with a local relay the operator's
+/// registered ingress origin proxies to, tells ato-api the hold is ready (§3.5),
+/// and hands the whole thing to [`hold_phase::HoldPhase`] — which polls for the
+/// author's directive, captures on their command, verifies each candidate by
+/// disposable restore (#1088), and reports both (§3.6/§3.7).
+///
+/// The order below is the whole contract of this function, and each step exists
+/// because the next one cannot be honest without it:
+///
+/// ```text
+/// produce_recipe_build   the same build a sealed artifact gets
+///   -> boot_and_hold     boot to the seal point, DO NOT pause (RFC §8.3 running)
+///   -> HoldIngress       carry bytes from the registered slot port to the guest
+///   -> hold-ready §3.5   ato-api derives the preview upstream from its OWN registry
+///   -> HoldPhase::run    hold -> capture -> accept, with §3.6/§3.7 inside
+///   -> terminal ack §3.8 exactly one of the legal reasons, or none at all
+/// ```
+///
+/// Everything after the build runs with the guest up, so every early return from
+/// here on tears it down (the relay first, then the guest — a relay outliving its
+/// guest would accept connections it can only fail).
 fn process_interactive_capture_job(
     cfg: &Config,
-    _backend: &FirecrackerBackend,
+    backend: &FirecrackerBackend,
     job: &ClaimedJob,
     fencing: &wizard_wire::Fencing4,
 ) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
     // The FENCING-4 tuple is parsed by the CALLER, before any build work: a job
     // with no §3.1 extension has no ack that could be sent (every call on this
     // lane would 409), so it must never reach a build in the first place — and
@@ -2829,32 +2894,381 @@ fn process_interactive_capture_job(
         job.id, fencing.submission_attempt_id, fencing.worker_claim_id
     );
 
+    // The configured slot is what makes this kind advertised at all
+    // ([`supported_job_kinds`]), so a claimed hold without one is a contract
+    // skew — the api handed out a kind this daemon never offered — not a
+    // degraded mode to muddle through. Refuse before spending a build.
+    let slot = cfg.hold_slot.as_ref().ok_or_else(|| {
+        fail(
+            INTERACTIVE_HOLD_REFUSAL_STAGE,
+            "this builder has no hold slot configured, so it never advertised \
+             `interactive_capture` and cannot make a held guest reachable"
+                .to_string(),
+        )
+    })?;
+
+    let api = wizard_api_client(cfg);
+    report_hold_progress(&api, fencing, wizard_wire::WizardStage::Build);
+
     let jobdir = cfg.work.join(&job.id);
     let _ = std::fs::remove_dir_all(&jobdir);
 
-    // Shared with the seal lane: materialize the server-resolved source, build the
-    // bootable rootfs, and compute the Execution Identity.
-    let produced = produce_build(cfg, job, &jobdir)?;
+    // The RECIPE producer directly, NOT `produce_build`: that dispatches on
+    // `job.kind`, which is `interactive_capture` here and would fail the job
+    // closed at `claim_kind`. The api enqueues this lane with no `params` and a
+    // server-resolved pinned source + approved recipe manifest (the same inputs
+    // a recipe job gets), so the recipe branch is not a default — it is the one
+    // producer whose inputs this kind actually carries.
+    let produced = produce_recipe_build(cfg, job, &jobdir)?;
     eprintln!(
         "[builder] interactive_capture {} produced build (execution {})",
         job.id, produced.execution_id
     );
 
-    // External state stays DEFERRED (warm-cache-only slice): the real
-    // `analyze_execution_contract` eligibility over a finalized
-    // `ExecutionContractEnvelopeV1` and the live boot-to-hold session are a later
-    // PR-2 slice. Fail closed here (mirrors #1090's exclusion) rather than mint a
-    // non-production eligibility or drive an unverified live capture.
-    Err((
-        INTERACTIVE_HOLD_REFUSAL_STAGE.to_string(),
-        "interactive_capture hold session is not finalized in this slice: the live \
-         boot-to-hold + Firecracker-concrete capture path and the real \
-         ExecutionContractEnvelopeV1 eligibility land in a later PR-2 slice (verified \
-         on real hardware). The api control/quiesce transport exists (crate::wizard_api) \
-         but there is no live guest for it to drive. External state stays deferred \
-         -> fail closed."
-            .to_string(),
-    ))
+    // Acceptance is DEFINED as "the authored `seal_at.command` exited 0 against
+    // a disposable restore" (RFC §6.3/§8.1). A capsule that authors none has
+    // nothing that could accept a candidate, so the hold could only ever end at
+    // its TTL with the author's work discarded. Refuse up front, where the
+    // reason can name the fix.
+    let seal_at = produced.seal_at.clone().ok_or_else(|| {
+        fail(
+            "manifest",
+            "an interactive capture needs the capsule to declare a `[seal_at]` \
+             command: it is what decides whether a candidate is accepted, and \
+             Ato never accepts one on anything but that command's exit 0"
+                .to_string(),
+        )
+    })?;
+    let acceptance_config = snapshot::acceptance::acceptance_config_for_seal_at(&seal_at);
+
+    // The Capsule v1 identity the control plane pinned on this claim. It is what
+    // the eligibility proof is minted from and what `accept` binds every
+    // candidate to, so the v1 sidecar for a captured candidate must carry THIS
+    // id — not the legacy declared identity in the sealed manifest, which is a
+    // different identity in a different space. A mismatch would fail acceptance
+    // closed (`ExecutionIdentityMismatch`); passing it explicitly is what makes
+    // the two agree by construction.
+    let execution_id = job
+        .execution_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            fail(
+                INTERACTIVE_HOLD_REFUSAL_STAGE,
+                "the claim carries no execution_id, so no candidate could be \
+                 bound to a verified identity"
+                    .to_string(),
+            )
+        })
+        .and_then(|id| {
+            capsule::execution_contract::ExecutionId::new(id.to_string()).map_err(|error| {
+                fail(
+                    INTERACTIVE_HOLD_REFUSAL_STAGE,
+                    format!("the claim's execution_id is not a canonical id: {error}"),
+                )
+            })
+        })?;
+
+    let store =
+        CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
+    // Same per-job boot budget the seal lane applies, for the same boot.
+    let job_backend = backend.with_boot_timeout(produced.boot_timeout_s.map(u64::from));
+
+    report_hold_progress(&api, fencing, wizard_wire::WizardStage::Launch);
+    // The boot half of `build_ready_state`, stopping at the seal point: the
+    // workload is up and healthy and NOTHING has paused it. A capsule with a
+    // supervisor (bindings and/or durable state volumes) is refused in here —
+    // §8.3 puts it on the `workload_idle` side, and that is a separate lifecycle.
+    let guest = job_backend
+        .boot_and_hold(BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
+            runner_class: None,
+            surface_requirement: produced.surface_requirement.clone(),
+            layers: BuildLayers {
+                rootfs: produced.rootfs,
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![produced.port],
+                healthcheck: Some(produced.healthcheck.clone()),
+                expected_ready_ms: Some(8000),
+                warmup_paths: produced.warmup_paths.clone(),
+                stable_successes: produced.stable_successes,
+                stable_interval_ms: produced.stable_interval_ms,
+                content_ready_path: produced.content_ready_path.clone(),
+                endpoints: produced.endpoints.clone(),
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: vec![],
+            execution_id: Some(produced.execution_id.clone()),
+            supervisor: produced.supervisor.clone(),
+        })
+        .map_err(|e| fail("launch", e.to_string()))?;
+
+    let outcome = run_hold_session(
+        cfg,
+        &api,
+        job,
+        fencing,
+        slot,
+        HoldSession {
+            guest,
+            backend: &job_backend,
+            store: &store,
+            jobdir: &jobdir,
+            guest_port: produced.port,
+            execution_id,
+            acceptance_config,
+        },
+    );
+    // The job directory is left on disk exactly as `process_job` leaves its
+    // own: the sealed bytes are already in the artifact store, and what remains
+    // is diagnostics for the hold that just ended. It is wiped at the START of
+    // the next job under this id, so the policy is one place, not two.
+    outcome
+}
+
+/// Everything a hold owns while it runs. Grouped so the session and its teardown
+/// are one scope: the guest is live for all of it, and every exit path here has
+/// to bring it down.
+struct HoldSession<'a> {
+    guest: snapshot::HeldGuest<'a>,
+    backend: &'a FirecrackerBackend,
+    store: &'a CasStore,
+    jobdir: &'a Path,
+    guest_port: u16,
+    execution_id: capsule::execution_contract::ExecutionId,
+    acceptance_config: snapshot::acceptance::AcceptanceConfig,
+}
+
+/// Front the held guest, announce it, and drive [`hold_phase::HoldPhase`] to a
+/// terminal outcome — then tear the session down whatever happened.
+///
+/// Split from the build half so the teardown has exactly one home: everything in
+/// here runs with a live VM and a bound port, and a `?` that skipped the release
+/// would strand both until the daemon restarts.
+fn run_hold_session(
+    cfg: &Config,
+    api: &dyn wizard_api::WizardApi,
+    job: &ClaimedJob,
+    fencing: &wizard_wire::Fencing4,
+    slot: &HoldSlotConfig,
+    session: HoldSession<'_>,
+) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let HoldSession {
+        guest,
+        backend,
+        store,
+        jobdir,
+        guest_port,
+        execution_id,
+        acceptance_config,
+    } = session;
+
+    // The relay is started BEFORE `hold-ready`: the api mints a preview binding
+    // for the registered origin the moment it is told, and an origin whose local
+    // port is not yet listening would 502 for the author at exactly the moment
+    // the wizard first shows them their app. `HoldIngress::start` probes the
+    // guest once for the same reason.
+    let workload_addr = guest.workload_addr();
+    let ingress = match hold_ingress::HoldIngress::start(slot.proxy_listen, &workload_addr) {
+        Ok(ingress) => ingress,
+        Err(error) => {
+            guest.release();
+            return Err(fail(
+                INTERACTIVE_HOLD_REFUSAL_STAGE,
+                format!("front the held guest at {} : {error}", slot.proxy_listen),
+            ));
+        }
+    };
+    eprintln!(
+        "[builder] interactive_capture {} holding: {} -> {workload_addr}",
+        job.id,
+        ingress.listen_addr()
+    );
+
+    let outcome = drive_hold(
+        cfg,
+        api,
+        job,
+        fencing,
+        slot,
+        guest,
+        backend,
+        store,
+        jobdir,
+        guest_port,
+        execution_id,
+        acceptance_config,
+    );
+    // Relay first: it must not accept a connection into a guest that is going
+    // away. Both also tear down on `Drop`, so this is about ORDER, not about
+    // whether it happens.
+    ingress.stop();
+    outcome
+}
+
+/// Assemble the hold's seams and run it. The guest is consumed by the capture
+/// action, which releases it on the way out.
+#[allow(clippy::too_many_arguments)]
+fn drive_hold(
+    cfg: &Config,
+    api: &dyn wizard_api::WizardApi,
+    job: &ClaimedJob,
+    fencing: &wizard_wire::Fencing4,
+    slot: &HoldSlotConfig,
+    guest: snapshot::HeldGuest<'_>,
+    backend: &FirecrackerBackend,
+    store: &CasStore,
+    jobdir: &Path,
+    guest_port: u16,
+    execution_id: capsule::execution_contract::ExecutionId,
+    acceptance_config: snapshot::acceptance::AcceptanceConfig,
+) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+
+    // §3.5 — the app is up. ADR-004: this carries NO upstream address; the api
+    // looks `(builder_id, slot_id)` up in its OWN registry of ingress slots and
+    // derives the preview host from that, so a builder can never point the proxy
+    // anywhere. An unregistered pair fails closed here with no binding minted.
+    let hold_ready = wizard_wire::HoldReadyRequest {
+        submission_attempt_id: fencing.submission_attempt_id.clone(),
+        worker_claim_id: fencing.worker_claim_id.clone(),
+        builder_id: slot.builder_id.clone(),
+        slot_id: slot.slot_id.clone(),
+        // The job id IS this builder's session identity for the held app: it is
+        // already unique per claim and it is what every local artifact of this
+        // hold is filed under, so an audit trail that names it points at
+        // something real.
+        session_id: job.id.clone(),
+        guest_port,
+    };
+    hold_ready
+        .validate()
+        .map_err(|e| fail(INTERACTIVE_HOLD_REFUSAL_STAGE, e))?;
+    if let Err(error) = api.report_hold_ready(fencing, &hold_ready) {
+        guest.release();
+        return Err(fail(
+            INTERACTIVE_HOLD_REFUSAL_STAGE,
+            format!("hold-ready: {error}"),
+        ));
+    }
+    report_hold_progress(api, fencing, wizard_wire::WizardStage::Holding);
+
+    // The cell where each capture publishes what it sealed, and the verifier
+    // reads it back. One writer, one reader, one thread — see its type doc for
+    // why this is the seam rather than a second lifecycle implementation.
+    let captured: guest_capture::CapturedCandidateCell = Rc::new(RefCell::new(None));
+    let mut capture = guest_capture::GuestCaptureAction::new(
+        guest,
+        guest_capture::CaptureContext {
+            job_id: job.id.clone(),
+            jobdir: jobdir.to_path_buf(),
+        },
+        Rc::clone(&captured),
+    );
+    let mut eligibility = claim_eligibility::ClaimContractEligibility::from_claim(
+        job.execution_contract.as_ref(),
+        job.execution_id.as_deref(),
+    );
+    // USER DECISION (SSOT §5): the hold ends at its TTL rather than extending
+    // itself. An extend is an explicit act, and nothing in this loop is entitled
+    // to perform one on the author's behalf.
+    let mut extend = hold_phase::NoExtend;
+    let mut lifecycle = snapshot::disposable_lifecycle::BackendDisposableLifecycle {
+        backend,
+        store,
+        candidate: guest_capture::HeldCandidateSource::new(
+            Rc::clone(&captured),
+            backend,
+            execution_id,
+        ),
+        // Beside the CAS the candidate was sealed into, so the disposable
+        // overlay is removed with the job directory even if a teardown is lost.
+        overlay_root: jobdir.join("acceptance-overlay"),
+        session: None,
+        last_candidate: None,
+    };
+
+    let wall_clock = wizard_api::SystemWallClock;
+    let lease = match wizard_api::LeaseRenewDriver::new(
+        api,
+        &wall_clock,
+        job.lease_expires_at.as_deref().unwrap_or_default(),
+    ) {
+        Ok(lease) => lease,
+        Err(lost) => {
+            capture.release();
+            // A lease that is already unusable at hold entry sends NO ack — the
+            // same rule every lease loss on this lane follows (§3.8 has no
+            // reason for it; expiry is server-owned).
+            eprintln!(
+                "[builder] interactive_capture {} lease unusable at hold entry, sending no ack: {lost}",
+                job.id
+            );
+            return Ok(());
+        }
+    };
+    let mut control =
+        wizard_api::ApiControlSource::new(api, fencing, lease, HOLD_CONTROL_POLL_INTERVAL);
+    let cancellation = snapshot::acceptance::AcceptanceCancellation::default();
+    let clock = snapshot::acceptance::SystemClock;
+
+    let termination = {
+        let mut phase = hold_phase::HoldPhase::new(
+            &mut control,
+            &mut capture,
+            &mut eligibility,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancellation,
+            fencing.clone(),
+            acceptance_config,
+            hold_phase::DEFAULT_HOLD_TTL,
+        );
+        phase.run()
+    };
+    // The guest goes down before the ack: the attempt is over either way, and
+    // holding a VM (and this builder's only build slot) open across a network
+    // call to say so would be pure cost.
+    capture.release();
+
+    let termination = match termination {
+        Ok(termination) => termination,
+        // A receipt-less internal fault. It is NOT a rejection, so it must not
+        // be acked as one; report it as the build failure it is.
+        Err(fatal) => return Err(fail("acceptance", fatal.to_string())),
+    };
+    eprintln!(
+        "[builder] interactive_capture {} hold ended: {termination:?}",
+        job.id
+    );
+    // §3.8 — exactly one legal terminal reason, or (for a torn-down hold) none
+    // at all. The projection lives on `HoldTermination`, so this cannot pick a
+    // reason the wire does not have.
+    //
+    // A FAILED ack is logged and left there, deliberately. Returning an error
+    // here would hand the caller a job it acks as `build_failed` — a second,
+    // CONTRADICTORY terminal claim about a hold that already ended (discarded,
+    // or attempt_ended after an accepted candidate). One unsent ack that the
+    // server sweep resolves is strictly better than two acks that disagree.
+    if let Err(error) = wizard_api::ack_hold_termination(api, &cfg.agent_id, fencing, &termination)
+    {
+        eprintln!(
+            "[builder] interactive_capture {} terminal ack was not accepted, \
+             leaving the attempt to the server sweep: {error}",
+            job.id
+        );
+    }
+    Ok(())
 }
 
 /// The §3.8 terminal ack for an `interactive_capture` job, over the production
@@ -2947,20 +3361,15 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
             }
             continue;
         }
-        // Submission Wizard PR-2 (slice 1): the `interactive_capture` lane is a
-        // sibling of `source_materialize` — it shares `produce_build` (materialize
-        // + rootfs + execution_id) but replaces the auto-seal tail with the
-        // builder-resident HOLD phase (`crate::hold_phase`).
+        // Submission Wizard PR-2: the `interactive_capture` lane is a sibling of
+        // `source_materialize` — it shares the RECIPE build (materialize +
+        // rootfs + execution_id) but replaces the auto-seal tail with the
+        // builder-resident HOLD phase (`crate::hold_phase`), so the author
+        // operates their live app and picks the moment to capture.
         //
-        // UNREACHABLE in prod: `claim()` never advertises this kind (see its
-        // `supported_kinds`), and the api enqueues none / returns 503, so the
-        // server never hands a builder an `interactive_capture` job. It exists for
-        // structure + the unit harness (`hold_phase`'s tests). The live
-        // boot-to-health → hold session wiring (Firecracker-concrete capture on a
-        // live held guest + api control/quiesce transport + real
-        // `ExecutionContractEnvelopeV1` eligibility) lands in a later PR-2 slice,
-        // verified on real hardware. Do NOT advertise the kind; do NOT change the
-        // DB or api here.
+        // Reached only on a builder the operator configured with a hold slot:
+        // `claim()` advertises this kind only then ([`supported_job_kinds`]), so
+        // an unconfigured daemon is never handed one.
         if job.kind == wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE {
             dispatch_interactive_capture_job(
                 &wizard_api_client(cfg),
@@ -3145,6 +3554,41 @@ targets = ["web"]
             "lease_token": "b64u-opaque-token",
             "lease_expires_at": "2026-07-22T09:15:00.000Z"
         })
+    }
+
+    /// A hold claimed by a daemon with NO slot is refused before any build.
+    ///
+    /// This is the other half of the lane switch. The kind is only advertised
+    /// with a slot, so receiving one without a slot means the api handed out a
+    /// kind this daemon never offered — a contract skew. Building anyway would
+    /// spend the whole materialize + rootfs + boot pipeline on a hold that could
+    /// never be made reachable, and the author would watch it fail at
+    /// `hold-ready`; the refusal is reported at `holding` so the §3.8 ack's
+    /// `failure_stage` refinement survives.
+    #[test]
+    fn a_hold_claimed_without_a_configured_slot_is_refused_before_any_build() {
+        let mut cfg = test_cfg();
+        cfg.hold_slot = None;
+        // A work dir that does not exist: if this ever reached the build it
+        // would fail there instead, and the assertion below would name a
+        // different stage.
+        cfg.work = std::env::temp_dir().join("interactive-no-slot-must-not-build");
+        let resp: ClaimResponse =
+            serde_json::from_value(serde_json::json!({ "jobs": [interactive_claim_job()] }))
+                .unwrap();
+        let job = &resp.jobs[0];
+        let fencing = job.fencing4().expect("fencing tuple");
+        let backend = FirecrackerBackend::new();
+
+        let (stage, reason) =
+            process_interactive_capture_job(&cfg, &backend, job, &fencing).expect_err("refused");
+
+        assert_eq!(stage, INTERACTIVE_HOLD_REFUSAL_STAGE);
+        assert!(reason.contains("no hold slot"), "{reason}");
+        assert!(
+            !cfg.work.exists(),
+            "the refusal must come before the job directory is prepared"
+        );
     }
 
     #[test]
