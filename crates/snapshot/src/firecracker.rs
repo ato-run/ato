@@ -1842,18 +1842,32 @@ impl FirecrackerBackend {
         input: BuildReadyStateInput<'a>,
     ) -> Result<HeldGuest<'a>, SnapshotError> {
         // RFC §8.3, fail closed BEFORE any work: a live capture of a capsule that
-        // needs restore-time bindings is exactly what `workload_idle` exists to
-        // prevent. `workload_idle` is a separate lifecycle (#1093), so until it
-        // lands this is a refusal, never a fallback.
+        // needs External State or restore-time bindings is exactly what
+        // `workload_idle` exists to prevent. `workload_idle` is a separate
+        // lifecycle (#1093), so until it lands this is a refusal, never a fallback.
+        //
+        // BOTH halves of `SupervisorBindings` gate this, because they are
+        // independent: `binding_names` is the placeholder/secret channel, while
+        // `state_volumes` is durable per-owner storage attached as drives. A
+        // ZERO-binding supervisor WITH state volumes is a real, supported build
+        // (ato#1002 D4), and admitting it here would boot the hold with `&[]`
+        // state drives — the workload would come up against storage that simply
+        // is not attached. Durable state is restore-time state by v1.6's rule, so
+        // §8.3 puts it on the `workload_idle` side too.
         if let Some(sup) = &input.supervisor
-            && !sup.binding_names.is_empty()
+            && (!sup.binding_names.is_empty() || !sup.state_volumes.is_empty())
         {
-            return Err(self.backend_err(
+            let needs = if sup.binding_names.is_empty() {
+                "durable state volumes"
+            } else {
+                "supervisor bindings"
+            };
+            return Err(self.backend_err(format!(
                 "interactive hold requires the `running` capture policy, but this capsule \
-                 declares supervisor bindings and therefore needs `workload_idle` \
-                 (stop the workload and revoke placeholders before capture). Refusing \
-                 rather than sealing binding material into a running capture.",
-            ));
+                 declares {needs} and therefore needs `workload_idle` (stop the workload \
+                 and revoke placeholders before capture). Refusing rather than capturing a \
+                 workload whose restore-time state is not attached."
+            )));
         }
         crate::seal::preflight_gate(
             &input.layers.rootfs,
@@ -3763,6 +3777,68 @@ mod tests {
         );
         // Refused BEFORE any work: nothing stored, and the slot lock is free for
         // the next build (a leaked lock would wedge the whole builder).
+        assert!(
+            store.list_chunks().unwrap().is_empty(),
+            "a refused hold must persist nothing in CAS"
+        );
+        assert!(
+            !backend.lock_path().exists(),
+            "a refused hold must not leave the slot lock behind"
+        );
+    }
+
+    /// A capsule with durable state volumes but ZERO bindings is refused too.
+    ///
+    /// The two `SupervisorBindings` fields are independent, and a zero-binding
+    /// supervisor build is a real, supported case (ato#1002 D4). Gating only on
+    /// `binding_names` would admit it — and the hold attaches no state drives, so
+    /// the workload would come up against storage that is not there. Durable
+    /// state is restore-time state, so §8.3 puts this on the `workload_idle` side.
+    #[test]
+    fn hold_refuses_durable_state_volumes_even_with_zero_bindings() {
+        use crate::manifest::{RestoreContract, SanitizerContract};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FirecrackerBackend::new();
+        let input = BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: "blake3:hold-volumes".to_string(),
+            runner_class: None,
+            surface_requirement: None,
+            layers: BuildLayers {
+                rootfs: b"rootfs".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![8080],
+                healthcheck: Some("/health".to_string()),
+                ..Default::default()
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: None,
+            supervisor: Some(SupervisorBindings {
+                // ZERO bindings — the field the first refusal keys on is empty.
+                binding_names: Vec::new(),
+                state_volumes: vec![crate::state_volume::DurableVolumeSpec {
+                    state_name: "data".to_string(),
+                    size_mb: 64,
+                }],
+                state_owner_scope: Some("owner/capsule".to_string()),
+            }),
+        };
+        let Err(err) = backend.boot_and_hold(input) else {
+            panic!("a capsule with durable state volumes must never reach a live hold");
+        };
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("durable state volumes"),
+            "the refusal must name what the capsule actually declares: {text}"
+        );
         assert!(
             store.list_chunks().unwrap().is_empty(),
             "a refused hold must persist nothing in CAS"
