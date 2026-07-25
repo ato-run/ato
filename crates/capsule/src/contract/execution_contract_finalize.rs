@@ -1132,6 +1132,116 @@ mod tests {
         );
     }
 
+    /// **EVERY** measured field is load-bearing: dropping any one of them, from
+    /// an otherwise-complete observation, refuses the mint.
+    ///
+    /// This is the exhaustive form of the guarantee, and it is exhaustive by
+    /// CONSTRUCTION rather than by a hand-maintained list: the destructuring
+    /// below binds every field of `ExecutionObservationV1` with no `..` rest
+    /// pattern, so adding a facet to the observation **fails to compile here**
+    /// until it is given a case. A hand-written list is exactly how a new facet
+    /// would quietly acquire an implicit default — the one thing minting must
+    /// never do.
+    #[test]
+    fn every_unmeasured_facet_refuses_the_mint_and_none_has_an_implicit_default() {
+        let fx = fixtures();
+
+        // Compile-time completeness gate. If this stops compiling, a facet was
+        // added: give it a case below rather than widening the pattern.
+        let ExecutionObservationV1 {
+            source_digest: _,
+            source_projection_payload: _,
+            target: _,
+            runtime_kind: _,
+            runtime_digest: _,
+            runtime_dynamic_payload: _,
+            dependencies: _,
+            build_outputs: _,
+            launch_argv: _,
+            launch_cwd: _,
+            process_model_payload: _,
+            environment: _,
+            environment_policy_payload: _,
+            secret_bindings: _,
+            filesystem_view_digest: _,
+            filesystem_topology_payload: _,
+            filesystem_readonly_layers: _,
+            filesystem_writable_paths: _,
+            policy_network_payload: _,
+            policy_capability_payload: _,
+            policy_filesystem_payload: _,
+            guest_surface: _,
+            external_state: _,
+        } = full_observation(&fx);
+
+        type DropFacet = fn(&mut ExecutionObservationV1);
+        let cases: &[(&str, DropFacet)] = &[
+            ("source.digest", |o| o.source_digest = None),
+            ("source.projection_digest", |o| {
+                o.source_projection_payload = None
+            }),
+            ("target", |o| o.target = None),
+            ("runtime.kind", |o| o.runtime_kind = None),
+            ("runtime.digest", |o| o.runtime_digest = None),
+            ("runtime.dynamic_contract_digest", |o| {
+                o.runtime_dynamic_payload = None
+            }),
+            ("dependencies", |o| o.dependencies = None),
+            ("build_outputs", |o| o.build_outputs = None),
+            ("launch.argv", |o| o.launch_argv = None),
+            ("launch.cwd", |o| o.launch_cwd = None),
+            ("launch.process_model_digest", |o| {
+                o.process_model_payload = None
+            }),
+            ("launch.environment", |o| o.environment = None),
+            ("launch.environment_policy_digest", |o| {
+                o.environment_policy_payload = None
+            }),
+            ("launch.secret_bindings", |o| o.secret_bindings = None),
+            ("filesystem.view_digest", |o| {
+                o.filesystem_view_digest = None
+            }),
+            ("filesystem.topology_digest", |o| {
+                o.filesystem_topology_payload = None
+            }),
+            ("filesystem.readonly_layers", |o| {
+                o.filesystem_readonly_layers = None
+            }),
+            ("filesystem.writable_paths", |o| {
+                o.filesystem_writable_paths = None
+            }),
+            ("policy.network_digest", |o| o.policy_network_payload = None),
+            ("policy.capability_digest", |o| {
+                o.policy_capability_payload = None
+            }),
+            ("policy.filesystem_digest", |o| {
+                o.policy_filesystem_payload = None
+            }),
+            ("guest_surface", |o| o.guest_surface = None),
+            ("external_state", |o| o.external_state = None),
+        ];
+
+        for (facet, drop) in cases {
+            let mut observation = full_observation(&fx);
+            drop(&mut observation);
+            let refusal = observation
+                .into_contract()
+                .expect_err("a facet with no measurement must never be filled in with a default");
+            assert_eq!(
+                refusal,
+                FinalizationError::UnmeasuredFacet(facet),
+                "dropping {facet} must refuse, naming that facet"
+            );
+            // And the gate refuses it too — an incomplete observation can never
+            // be promoted to a complete contract by going through `finalize`
+            // with an expected contract standing by to supply the gap.
+            assert!(matches!(
+                observation.finalize(&expected_contract(&fx)),
+                Err(FinalizationError::UnmeasuredFacet(_))
+            ));
+        }
+    }
+
     /// A measured value whose NAME is secret-bearing never becomes a committed
     /// non-secret value, on the mint path too.
     ///
