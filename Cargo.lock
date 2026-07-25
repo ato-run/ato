@@ -6537,9 +6537,7 @@ dependencies = [
  "protocol",
  "serde",
  "serde_json",
- "sha2",
  "snapshot",
- "tempfile",
  "toml 0.8.23",
  "ureq",
 ]

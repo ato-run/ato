@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use capsule::CapsuleReporter;
-use capsule::ato_lock::AtoLock;
+use capsule::capsule_lock::CapsuleLock;
 use capsule::dependency_contracts::{
     DependencyLock, DependencyLockInput, ResolvedProviderManifest, verify_and_lock,
 };
@@ -17,7 +17,7 @@ use capsule::execution_identity::EnvOrigin;
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::execution_plan::guard::ExecutorKind;
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
+    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, LegacyCapsuleLock, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
 use capsule::types::{
@@ -73,12 +73,12 @@ pub(crate) trait ConsumerRunProgress {
 pub(crate) struct CompatibilityLegacyLockContext {
     pub(crate) manifest_path: PathBuf,
     pub(crate) path: PathBuf,
-    pub(crate) lock: CapsuleLock,
+    pub(crate) lock: LegacyCapsuleLock,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunAuthoritativeInput {
-    pub(crate) lock: AtoLock,
+    pub(crate) lock: CapsuleLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) workspace_root: PathBuf,
     pub(crate) materialization_root: PathBuf,
@@ -97,7 +97,7 @@ pub(crate) struct RunExecutionOverride {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
-    pub(crate) authoritative_lock: Option<AtoLock>,
+    pub(crate) authoritative_lock: Option<CapsuleLock>,
     pub(crate) lock_path: Option<PathBuf>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
@@ -963,7 +963,7 @@ fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<Depende
 pub(crate) async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
     plan: &capsule::router::ManifestData,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
 ) -> Result<DependencyContractGuard> {
     let consumer =
         router::CompatManifestBridge::from_manifest_value(prepared.bridge_manifest.as_toml())
@@ -1378,7 +1378,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             let bytes = std::fs::read(&lock_path).with_context(|| {
                 format!("failed to read auto-generated lock {}", lock_path.display())
             })?;
-            let lock: capsule::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+            let lock: capsule::lockfile::LegacyCapsuleLock = serde_json::from_slice(&bytes)
                 .with_context(|| {
                     format!(
                         "failed to parse auto-generated lock {}",
@@ -2094,7 +2094,7 @@ where
             prepared.compatibility_legacy_lock.as_ref().ok_or_else(|| {
                 AtoExecutionError::lock_incomplete(
                     "external capsule dependencies require capsule.lock.json",
-                    Some(CAPSULE_LOCK_FILE_NAME),
+                    Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
                 )
             })?;
         // PR-4a: bundle-derived primary, legacy parity in debug.
@@ -3748,7 +3748,7 @@ where
         // `decision.plan.manifest` is the derived/normalized ExecutionPlan manifest:
         // it drops the top-level `[snapshot]` section (→ never Ready-State-eligible)
         // and canonicalizes differently (→ a different `capsule_manifest_hash` than
-        // the seal). And `decision.plan.manifest_path` is the resolved `ato.lock.json`,
+        // the seal). And `decision.plan.manifest_path` is the resolved `capsule.lock`,
         // not the capsule manifest. Either made `ato run` silently cold-path past
         // every sealed artifact. Read the raw `capsule.toml` from the source dir
         // (`manifest_dir`) — the same bytes the build sealed; fall back to the plan
@@ -5935,7 +5935,7 @@ mod tests {
         resolve_sandbox_grants, sandbox_session_data_env, sandbox_session_data_env_dir,
         unavailable_service_message, validate_sandbox_grants_best_effort,
     };
-    use capsule::ato_lock::AtoLock;
+    use capsule::capsule_lock::CapsuleLock;
     use capsule::types::{CapsuleManifest, ParamValue};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
@@ -6734,7 +6734,7 @@ image = "ghcr.io/example/app:latest"
     #[test]
     fn prepared_run_context_with_bridge_manifest_retains_authority() {
         let prepared = PreparedRunContext {
-            authoritative_lock: Some(AtoLock::default()),
+            authoritative_lock: Some(CapsuleLock::default()),
             lock_path: None,
             workspace_root: PathBuf::from("."),
             effective_state: Some(

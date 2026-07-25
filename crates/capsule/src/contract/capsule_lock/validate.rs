@@ -1,11 +1,11 @@
-use crate::ato_lock::closure::{normalize_closure_value, validate_closure_value};
+use crate::capsule_lock::closure::{normalize_closure_value, validate_closure_value};
 use chrono::DateTime;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::ato_lock::hash::compute_lock_id;
-use crate::ato_lock::schema::{
-    ATO_LOCK_SCHEMA_VERSION, AtoLock, DeliveryEnvironment, FeatureName, KnownFeature,
+use crate::capsule_lock::hash::compute_lock_id;
+use crate::capsule_lock::schema::{
+    CAPSULE_LOCK_SCHEMA_VERSION, CapsuleLock, DeliveryEnvironment, FeatureName, KnownFeature,
     LockSignature, UnresolvedReason, UnresolvedValue, parse_delivery_environment_value,
 };
 
@@ -16,12 +16,12 @@ pub enum ValidationMode {
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub enum AtoLockValidationError {
+pub enum CapsuleLockValidationError {
     #[error("schema_version must be {expected}, got {actual}")]
     InvalidSchemaVersion { expected: u32, actual: u32 },
     #[error("generated_at must be RFC3339, got '{0}'")]
     InvalidGeneratedAt(String),
-    #[error("lock_id is required for persisted ato.lock artifacts")]
+    #[error("lock_id is required for persisted capsule.lock artifacts")]
     MissingLockId,
     #[error("{0}")]
     MalformedLockId(String),
@@ -56,14 +56,14 @@ pub enum AtoLockValidationError {
 /// persisted artifact boundary and therefore does not require lock_id to exist
 /// or match the canonical projection.
 pub fn validate_structural(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     mode: ValidationMode,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     let mut errors = Vec::new();
 
-    if lock.schema_version != ATO_LOCK_SCHEMA_VERSION {
-        errors.push(AtoLockValidationError::InvalidSchemaVersion {
-            expected: ATO_LOCK_SCHEMA_VERSION,
+    if lock.schema_version != CAPSULE_LOCK_SCHEMA_VERSION {
+        errors.push(CapsuleLockValidationError::InvalidSchemaVersion {
+            expected: CAPSULE_LOCK_SCHEMA_VERSION,
             actual: lock.schema_version,
         });
     }
@@ -71,7 +71,7 @@ pub fn validate_structural(
     if let Some(generated_at) = &lock.generated_at
         && DateTime::parse_from_rfc3339(generated_at).is_err()
     {
-        errors.push(AtoLockValidationError::InvalidGeneratedAt(
+        errors.push(CapsuleLockValidationError::InvalidGeneratedAt(
             generated_at.clone(),
         ));
     }
@@ -115,27 +115,27 @@ pub fn validate_structural(
 /// tampered/secret D5 payload still passes here. Any lock that may carry an
 /// execution section MUST instead be read through the trusted entrypoints
 /// `load_verified_from_str` / `load_verified_from_path` (in the parent
-/// `ato_lock` module), which run this identity validation AND then re-derive the
+/// `capsule_lock` module), which run this identity validation AND then re-derive the
 /// execution section fail-closed.
 ///
-/// Call this only when validating a durable ato.lock artifact's identity or when
+/// Call this only when validating a durable capsule.lock artifact's identity or when
 /// preparing to serialize one. Draft lock values produced by later
 /// resolver/importer stages should use structural validation until lock_id has
 /// been recomputed.
 pub fn validate_persisted(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     mode: ValidationMode,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     let mut errors = match validate_structural(lock, mode) {
         Ok(()) => Vec::new(),
         Err(errors) => errors,
     };
 
     match &lock.lock_id {
-        None => errors.push(AtoLockValidationError::MissingLockId),
+        None => errors.push(CapsuleLockValidationError::MissingLockId),
         Some(lock_id) => {
             if let Err(message) = lock_id.validate_format() {
-                errors.push(AtoLockValidationError::MalformedLockId(message));
+                errors.push(CapsuleLockValidationError::MalformedLockId(message));
             }
         }
     }
@@ -143,13 +143,13 @@ pub fn validate_persisted(
     if let Some(lock_id) = &lock.lock_id {
         match compute_lock_id(lock) {
             Ok(expected) if expected != *lock_id => {
-                errors.push(AtoLockValidationError::LockIdMismatch {
+                errors.push(CapsuleLockValidationError::LockIdMismatch {
                     expected: expected.as_str().to_string(),
                     actual: lock_id.as_str().to_string(),
                 });
             }
             Ok(_) => {}
-            Err(err) => errors.push(AtoLockValidationError::MalformedLockId(err.to_string())),
+            Err(err) => errors.push(CapsuleLockValidationError::MalformedLockId(err.to_string())),
         }
     }
 
@@ -163,12 +163,12 @@ pub fn validate_persisted(
 fn validate_declared_features(
     features: &[FeatureName],
     mode: ValidationMode,
-    errors: &mut Vec<AtoLockValidationError>,
+    errors: &mut Vec<CapsuleLockValidationError>,
 ) {
     for feature in features {
         match feature {
             FeatureName::Unknown(value) if matches!(mode, ValidationMode::Strict) => {
-                errors.push(AtoLockValidationError::UnknownDeclaredFeature(
+                errors.push(CapsuleLockValidationError::UnknownDeclaredFeature(
                     value.clone(),
                 ));
             }
@@ -180,18 +180,18 @@ fn validate_declared_features(
 fn validate_required_features(
     features: &[FeatureName],
     mode: ValidationMode,
-    errors: &mut Vec<AtoLockValidationError>,
+    errors: &mut Vec<CapsuleLockValidationError>,
 ) {
     for feature in features {
         match feature {
             FeatureName::Unknown(value) => {
                 let _ = mode;
-                errors.push(AtoLockValidationError::UnknownRequiredFeature(
+                errors.push(CapsuleLockValidationError::UnknownRequiredFeature(
                     value.clone(),
                 ));
             }
             FeatureName::Known(feature) if !is_supported_feature(*feature) => {
-                errors.push(AtoLockValidationError::UnsupportedRequiredFeature(
+                errors.push(CapsuleLockValidationError::UnsupportedRequiredFeature(
                     feature.as_str().to_string(),
                 ));
             }
@@ -200,19 +200,19 @@ fn validate_required_features(
     }
 }
 
-fn validate_unresolved(unresolved: &UnresolvedValue, errors: &mut Vec<AtoLockValidationError>) {
+fn validate_unresolved(unresolved: &UnresolvedValue, errors: &mut Vec<CapsuleLockValidationError>) {
     // Unknown unresolved reasons and malformed ambiguity markers are treated as
     // structural invalidity even in non-strict mode. non-strict is intended to
     // relax forward-compatible feature handling, not to accept malformed state.
     if let UnresolvedReason::Unknown(value) = &unresolved.reason {
-        errors.push(AtoLockValidationError::UnknownUnresolvedReason(
+        errors.push(CapsuleLockValidationError::UnknownUnresolvedReason(
             value.clone(),
         ));
     }
 
     if matches!(unresolved.reason, UnresolvedReason::Ambiguity) && unresolved.candidates.is_empty()
     {
-        errors.push(AtoLockValidationError::AmbiguityRequiresCandidates);
+        errors.push(CapsuleLockValidationError::AmbiguityRequiresCandidates);
     }
 
     if unresolved
@@ -220,17 +220,17 @@ fn validate_unresolved(unresolved: &UnresolvedValue, errors: &mut Vec<AtoLockVal
         .iter()
         .any(|candidate| candidate.trim().is_empty())
     {
-        errors.push(AtoLockValidationError::InvalidUnresolvedCandidates);
+        errors.push(CapsuleLockValidationError::InvalidUnresolvedCandidates);
     }
 }
 
-fn validate_signature(signature: &LockSignature, errors: &mut Vec<AtoLockValidationError>) {
+fn validate_signature(signature: &LockSignature, errors: &mut Vec<CapsuleLockValidationError>) {
     if signature.kind.trim().is_empty() {
-        errors.push(AtoLockValidationError::EmptySignatureKind);
+        errors.push(CapsuleLockValidationError::EmptySignatureKind);
     }
 }
 
-fn validate_resolution_closure(lock: &AtoLock, errors: &mut Vec<AtoLockValidationError>) {
+fn validate_resolution_closure(lock: &CapsuleLock, errors: &mut Vec<CapsuleLockValidationError>) {
     let Some(closure) = lock.resolution.entries.get("closure") else {
         return;
     };
@@ -239,12 +239,12 @@ fn validate_resolution_closure(lock: &AtoLock, errors: &mut Vec<AtoLockValidatio
         errors.extend(
             closure_errors
                 .into_iter()
-                .map(AtoLockValidationError::InvalidClosure),
+                .map(CapsuleLockValidationError::InvalidClosure),
         );
     }
 }
 
-fn validate_contract_delivery(lock: &AtoLock, errors: &mut Vec<AtoLockValidationError>) {
+fn validate_contract_delivery(lock: &CapsuleLock, errors: &mut Vec<CapsuleLockValidationError>) {
     let Some(delivery) = lock.contract.entries.get("delivery") else {
         return;
     };
@@ -253,12 +253,15 @@ fn validate_contract_delivery(lock: &AtoLock, errors: &mut Vec<AtoLockValidation
         errors.extend(
             delivery_errors
                 .into_iter()
-                .map(AtoLockValidationError::InvalidDelivery),
+                .map(CapsuleLockValidationError::InvalidDelivery),
         );
     }
 }
 
-fn validate_delivery_value(lock: &AtoLock, value: &Value) -> std::result::Result<(), Vec<String>> {
+fn validate_delivery_value(
+    lock: &CapsuleLock,
+    value: &Value,
+) -> std::result::Result<(), Vec<String>> {
     let mut errors = Vec::new();
     let Some(object) = value.as_object() else {
         return Err(vec!["contract.delivery must be an object".to_string()]);
@@ -507,10 +510,10 @@ fn is_supported_feature(_feature: KnownFeature) -> bool {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{AtoLock, ValidationMode, validate_structural};
+    use super::{CapsuleLock, ValidationMode, validate_structural};
 
-    fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.contract
             .entries
             .insert("delivery".to_string(), delivery);

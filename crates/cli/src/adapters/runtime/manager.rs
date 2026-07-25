@@ -9,8 +9,8 @@ use anyhow::{Context, Result, bail};
 use capsule::bootstrap::{BootstrapBoundary, BootstrapSubjectKind};
 use capsule::common::paths::runtime_cache_dir;
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, RuntimeArtifact, RuntimeEntry, ToolArtifact,
-    parse_lockfile_text, resolve_existing_lockfile_path,
+    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, LegacyCapsuleLock, RuntimeArtifact, RuntimeEntry,
+    ToolArtifact, parse_lockfile_text, resolve_existing_lockfile_path,
 };
 use capsule::packers::runtime_fetcher::RuntimeFetcher;
 use capsule::router::ManifestData;
@@ -18,7 +18,7 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 
 pub struct RuntimeManager {
-    lockfile: CapsuleLock,
+    lockfile: LegacyCapsuleLock,
     target_triple: String,
     platform_key: String,
     cache_root: PathBuf,
@@ -27,13 +27,13 @@ pub struct RuntimeManager {
 impl RuntimeManager {
     pub fn for_plan(plan: &ManifestData) -> Result<Self> {
         let lockfile_path = resolve_existing_lockfile_path(&plan.manifest_dir)
-            .unwrap_or_else(|| plan.manifest_dir.join(CAPSULE_LOCK_FILE_NAME));
+            .unwrap_or_else(|| plan.manifest_dir.join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME));
         let lockfile_raw = match fs::read_to_string(&lockfile_path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 bail!(
                     "Missing {} in capsule payload ({}). Rebuild and republish this capsule with the latest ato-cli.",
-                    CAPSULE_LOCK_FILE_NAME,
+                    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
                     lockfile_path.display()
                 );
             }
@@ -42,7 +42,7 @@ impl RuntimeManager {
                     .with_context(|| format!("Failed to read {}", lockfile_path.display()));
             }
         };
-        let lockfile: CapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
+        let lockfile: LegacyCapsuleLock = parse_lockfile_text(&lockfile_raw, &lockfile_path)
             .with_context(|| format!("Failed to parse {}", lockfile_path.display()))?;
         let (target_triple, platform_key) = current_platform_keys()?;
         let cache_root = runtime_cache_dir()?;
@@ -269,7 +269,7 @@ pub fn ensure_deno_binary_for_file_server(plan: &ManifestData) -> Result<PathBuf
     match RuntimeManager::for_plan(plan) {
         Ok(manager) => manager.ensure_deno_binary_for_plan(plan),
         Err(e) => {
-            if e.to_string().contains(CAPSULE_LOCK_FILE_NAME) {
+            if e.to_string().contains(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME) {
                 let version = capsule::packers::lockfile::DEFAULT_DENO_VERSION;
                 block_on_runtime_fetch(
                     async move { RuntimeFetcher::new()?.ensure_deno(version).await },
@@ -283,11 +283,11 @@ pub fn ensure_deno_binary_for_file_server(plan: &ManifestData) -> Result<PathBuf
 
 pub fn ensure_deno_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Result<PathBuf> {
     let version = required_runtime_tool_version(plan, "deno")?;
     if authoritative_lock.is_some() {
-        // For source runs (authoritative AtoLock present), use RuntimeFetcher directly
+        // For source runs (authoritative CapsuleLock present), use RuntimeFetcher directly
         // since there is no capsule.lock.json. Deno is used as the Node.js compat runtime,
         // so no explicit version is required — fall back to the well-known default.
         let version_str =
@@ -310,7 +310,7 @@ pub fn ensure_python_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_python_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Result<PathBuf> {
     let version = required_runtime_tool_version(plan, "python")?
         .or(required_runtime_version(plan, &["python"])?);
@@ -341,7 +341,7 @@ pub fn ensure_node_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_node_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Result<PathBuf> {
     let version =
         required_runtime_tool_version(plan, "node")?.or(required_runtime_version(plan, &["node"])?);
@@ -372,7 +372,7 @@ pub fn ensure_uv_binary(plan: &ManifestData) -> Result<PathBuf> {
 
 pub fn ensure_uv_binary_with_authority(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Result<PathBuf> {
     if authoritative_lock.is_some() {
         let version = required_runtime_tool_version(plan, "uv")?;

@@ -40,10 +40,11 @@ use capsule::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule::execution_plan::guard::ExecutorKind;
 use capsule::input_resolver::{
-    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
+    CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME, ResolveInputOptions,
+    ResolvedInput, resolve_authoritative_input,
 };
 use capsule::lifecycle::LifecycleEvent;
-use capsule::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME;
 use capsule::types::CapsuleManifest;
 use capsule::{CapsuleReporter, router};
 
@@ -367,8 +368,9 @@ async fn copy_source_files(
         }
 
         if file_name == "capsule.toml"
+            || file_name == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             || file_name == CAPSULE_LOCK_FILE_NAME
-            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
+            || file_name == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             || file_name == "config.json"
         {
             continue;
@@ -426,8 +428,9 @@ fn check_has_source_files(dir: &Path) -> bool {
         let path = entry.path();
 
         if file_name == "capsule.toml"
+            || file_name == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             || file_name == CAPSULE_LOCK_FILE_NAME
-            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
+            || file_name == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             || file_name == "config.json"
             || file_name == "signature.json"
         {
@@ -1320,7 +1323,9 @@ async fn normalize_run_target_after_install(
 
     if target_path.is_dir()
         || target_path.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
-        || target_path.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+        || target_path.file_name().and_then(|value| value.to_str()) == Some(CAPSULE_LOCK_FILE_NAME)
+        || target_path.file_name().and_then(|value| value.to_str())
+            == Some(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
         || target_path
             .extension()
             .and_then(|value| value.to_str())
@@ -1647,7 +1652,7 @@ mod tests {
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
     use crate::reporters::CliReporter;
-    use capsule::ato_lock::{self, AtoLock};
+    use capsule::capsule_lock::{self, CapsuleLock};
     use capsule::execution_plan::guard::ExecutorKind;
     use capsule::lifecycle::LifecycleEvent;
     use capsule::router::{self, ExecutionProfile, ManifestData};
@@ -2039,8 +2044,8 @@ run = "node server.js""#,
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_run_target_accepts_direct_canonical_lock_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let lock_path = tmp.path().join("ato.lock.json");
-        let mut lock = AtoLock::default();
+        let lock_path = tmp.path().join("capsule.lock");
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "node", "cmd": ["index.js"]}),
@@ -2063,7 +2068,7 @@ run = "node server.js""#,
             "closure".to_string(),
             json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
-        ato_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
+        capsule_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
 
         let args = RunArgs {
             target: lock_path.clone(),
@@ -2242,13 +2247,13 @@ run = "main.py""#,
             .authoritative_input
             .as_ref()
             .expect("provider authoritative input");
-        let persisted_lock_path = workspace_root.join("ato.lock.json");
+        let persisted_lock_path = workspace_root.join("capsule.lock");
         assert!(
             persisted_lock_path.exists(),
-            "persisted provider ato.lock.json missing"
+            "persisted provider capsule.lock missing"
         );
 
-        let persisted_lock = ato_lock::load_unvalidated_from_path(&persisted_lock_path)
+        let persisted_lock = capsule_lock::load_unvalidated_from_path(&persisted_lock_path)
             .expect("load persisted provider lock");
         assert!(persisted_lock.lock_id.is_some());
         assert_eq!(

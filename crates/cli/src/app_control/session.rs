@@ -13,13 +13,13 @@ use anyhow::{Context, Result};
 // so `ato-desktop` can read records without depending on `ato-cli`. We
 // re-export at `pub(crate)` so the rest of this crate continues to see
 // these names without prefix.
-use capsule::ato_lock;
+use capsule::capsule_lock;
 use capsule::handle::{
     CanonicalHandle, CapsuleDisplayStrategy, CapsuleRuntimeDescriptor, ResolvedSnapshot,
     TrustState, normalize_capsule_handle,
 };
 use capsule::launch_spec::derive_launch_spec;
-use capsule::routing::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::routing::input_resolver::resolve_canonical_lock_path;
 pub(crate) use capsule::state::session::{
     GuestSessionDisplay, MaterializedLaunchRecord, ServiceBackgroundDisplay,
     StoredDependencyContracts, StoredDependencyProvider, StoredOrchestrationService,
@@ -2369,18 +2369,26 @@ fn auto_state_bindings_for_sample_recipe_manifest(
     Ok(bindings)
 }
 
-/// Try to load `ato.lock.json` from the workspace root.
+/// Try to load `capsule.lock` (or its deprecated `ato.lock.json` alias) from
+/// the workspace root.
 /// This is the authoritative lock that `ato run` generates via source-inference.
 /// Without it, `guard.rs` rejects Tier1 execution because
 /// `has_authoritative_lock = false` and no physical `capsule.lock.json` exists.
 fn try_load_authoritative_lock(
     workspace_root: &Path,
-) -> Result<(Option<ato_lock::AtoLock>, Option<PathBuf>)> {
-    let lock_path = workspace_root.join(ATO_LOCK_FILE_NAME);
-    if !lock_path.exists() {
+) -> Result<(Option<capsule_lock::CapsuleLock>, Option<PathBuf>)> {
+    // Canonical-vs-alias selection and the fail-closed presence rules come from
+    // the shared resolver (capsule.lock preferred; ato.lock.json a deprecated
+    // alias; coexistence, a non-regular node, or any non-NotFound metadata
+    // error is an error, never a silent absence).
+    let Some(lock_path) = resolve_canonical_lock_path(workspace_root)? else {
         return Ok((None, None));
-    }
-    let lock = ato_lock::load_verified_from_path(&lock_path).with_context(|| {
+    };
+    // Trust boundary: load_verified_from_path re-derives the embedded execution
+    // section and the program-identity parent claim. An invalid authoritative
+    // lock must abort the session rather than degrade it to "no lock", which
+    // would silently drop the Tier1 guard.
+    let lock = capsule_lock::load_verified_from_path(&lock_path).with_context(|| {
         format!(
             "refusing to start session with invalid authoritative lock {}",
             lock_path.display()
@@ -3770,6 +3778,9 @@ pub(super) fn restore_stdout(_saved: i32) -> Result<()> {
 mod tests {
     use super::*;
     use capsule::handle::normalize_capsule_handle;
+    use capsule::input_resolver::{
+        CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+    };
     use serial_test::serial;
 
     /// Env guard for tests that mutate `HOME`/`ATO_HOME`/`ATO_DESKTOP_SESSION_ROOT`.
@@ -3821,11 +3832,27 @@ mod tests {
         }
     }
 
+    /// A persisted-valid canonical lock written under `file_name` — the
+    /// canonical `capsule.lock` unless a test is exercising the deprecated
+    /// `ato.lock.json` read alias.
+    fn write_valid_lock_as(root: &std::path::Path, file_name: &str) {
+        let mut lock = capsule_lock::CapsuleLock::default();
+        lock.resolution
+            .entries
+            .insert("runtime".to_string(), serde_json::json!({"kind": "node"}));
+        lock.contract.entries.insert(
+            "process".to_string(),
+            serde_json::json!({"entrypoint": "server.js"}),
+        );
+        capsule_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
+        capsule_lock::write_pretty_to_path(&lock, &root.join(file_name)).expect("write lock");
+    }
+
     #[test]
     fn invalid_authoritative_lock_fails_closed_before_session_preparation() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(
-            temp.path().join(ATO_LOCK_FILE_NAME),
+            temp.path().join(CAPSULE_LOCK_FILE_NAME),
             r#"{"schema_version":1,"lock_id":"blake3:0000000000000000000000000000000000000000000000000000000000000000"}"#,
         )
         .expect("write invalid lock");
@@ -3834,6 +3861,37 @@ mod tests {
         assert!(
             format!("{error:#}")
                 .contains("refusing to start session with invalid authoritative lock")
+        );
+    }
+
+    #[test]
+    fn authoritative_lock_is_still_read_from_the_deprecated_alias_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_valid_lock_as(temp.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+
+        let (lock, lock_path) =
+            try_load_authoritative_lock(temp.path()).expect("deprecated alias stays readable");
+        assert!(lock.is_some());
+        assert_eq!(
+            lock_path.expect("alias lock path"),
+            temp.path().join(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn coexisting_canonical_and_alias_lock_names_fail_closed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_valid_lock_as(temp.path(), CAPSULE_LOCK_FILE_NAME);
+        write_valid_lock_as(temp.path(), DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME);
+
+        // Split-brain: no automatic authority choice is made, and the refusal
+        // must not degrade into "no lock" (which would silently drop the Tier1
+        // guard on exactly the ambiguous workspace it exists to catch).
+        let error = try_load_authoritative_lock(temp.path())
+            .expect_err("coexisting lock names must fail closed");
+        assert!(
+            format!("{error:#}").contains("Both capsule.lock and ato.lock.json exist"),
+            "{error:#}"
         );
     }
 
