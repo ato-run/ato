@@ -1192,7 +1192,11 @@ fn produce_import_build(
         pixel_rfb_port: params.pixel_rfb_port,
         image_tag: format!("ato-import-{tag_suffix}"),
         out_ext4: &ext4,
-        size_mib: cfg.rootfs_size_mib,
+        // An explicit per-job override wins (capped in the parser); otherwise the
+        // builder config default. Single-image lane — no compose floor.
+        size_mib: params
+            .rootfs_size_mib
+            .map_or(cfg.rootfs_size_mib, u64::from),
     };
     let outcome = run_dockerfile_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
@@ -1323,7 +1327,11 @@ fn produce_oci_image_import(
         volume_policy: params.volumes,
         host_bind_relay: params.host_bind_relay,
         out_ext4: &ext4,
-        size_mib: cfg.rootfs_size_mib,
+        // An explicit per-job override wins (capped in the parser); otherwise the
+        // builder config default. Single-image lane — no compose floor.
+        size_mib: params
+            .rootfs_size_mib
+            .map_or(cfg.rootfs_size_mib, u64::from),
     };
     let outcome = run_oci_image_import(&SystemImportCommandRunner, &req)
         .map_err(|e| fail("rootfs_build", e))?;
@@ -1526,6 +1534,12 @@ struct DockerfileImportParams {
     /// carries the surface requirement and the sealed manifest carries the
     /// explicit `app_http` + `pixel_rfb` restore endpoints.
     pixel_rfb_port: Option<u16>,
+    /// Optional per-job ext4 rootfs size override (MiB, capped by
+    /// [`MAX_ROOTFS_SIZE_MIB`]). `None` = the builder config default
+    /// (`--rootfs-size-mib`). A large built image (Stirling-PDF extracts to
+    /// ~2–3 GiB) needs more than the 1024 default or the pack fails ENOSPC.
+    /// No compose-style floor applies — this lane packs a single image.
+    rootfs_size_mib: Option<u32>,
 }
 
 impl Default for DockerfileImportParams {
@@ -1538,6 +1552,7 @@ impl Default for DockerfileImportParams {
             ephemeral_mounts: Vec::new(),
             host_bind_relay: false,
             pixel_rfb_port: None,
+            rootfs_size_mib: None,
         }
     }
 }
@@ -1545,7 +1560,8 @@ impl Default for DockerfileImportParams {
 /// Strict, fail-closed parse of `dockerfile_import` params — the same bounds the
 /// ato-api enqueue validation enforces (ato#1002): `dockerfile_path` relative, no
 /// `..` component, ≤200 chars (default `"Dockerfile"`); `port_override` an integer
-/// in 1..65535; `readiness_http_path` starting `/`, ≤200 chars, single-line.
+/// in 1..65535; `readiness_http_path` starting `/`, ≤200 chars, single-line;
+/// `rootfs_size_mib` shares the import lanes' 1..=[`MAX_ROOTFS_SIZE_MIB`] cap.
 /// Unknown keys and non-object params are rejected; absent/null params mean all
 /// defaults.
 ///
@@ -1619,6 +1635,7 @@ fn parse_import_params(
                         .ok_or("params.pixel_rfb_port must be an integer in 1..=65535")?,
                 );
             }
+            "rootfs_size_mib" => out.rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
             other => {
                 return Err(format!(
                     "unknown dockerfile_import param {other:?} (rejected fail-closed)"
@@ -1919,6 +1936,12 @@ struct OciImageImportParams {
     /// otherwise.
     volumes: snapshot::docker_import::VolumePolicy,
     host_bind_relay: bool,
+    /// Optional per-job ext4 rootfs size override (MiB, capped by
+    /// [`MAX_ROOTFS_SIZE_MIB`]). `None` = the builder config default
+    /// (`--rootfs-size-mib`). A large registry image needs more than the 1024
+    /// default or the pack fails ENOSPC. No compose-style floor applies — this
+    /// lane packs a single image.
+    rootfs_size_mib: Option<u32>,
 }
 
 /// ato#1028: `ephemeral_mounts` opts image-declared VOLUMEs into guest tmpfs
@@ -1972,7 +1995,8 @@ fn parse_ephemeral_mounts(
 /// validated ([`validate_image_ref`]); `platform` must be `linux/amd64` (v1);
 /// `port_override` / `readiness_http_path` share the dockerfile_import validators;
 /// `ephemeral_mounts` maps to the VOLUME policy; `host_bind_relay` is a strict
-/// bool. Unknown keys, non-object params, and absent/null params (no `image`)
+/// bool; `rootfs_size_mib` shares the import lanes' 1..=[`MAX_ROOTFS_SIZE_MIB`]
+/// cap. Unknown keys, non-object params, and absent/null params (no `image`)
 /// are rejected.
 fn parse_oci_import_params(
     params: Option<&serde_json::Value>,
@@ -1989,6 +2013,7 @@ fn parse_oci_import_params(
     let mut readiness_http_path = None;
     let mut volumes = snapshot::docker_import::VolumePolicy::Reject;
     let mut host_bind_relay = false;
+    let mut rootfs_size_mib = None;
     for (key, val) in obj {
         match key.as_str() {
             "image" => {
@@ -2016,6 +2041,7 @@ fn parse_oci_import_params(
                     .as_bool()
                     .ok_or("params.host_bind_relay must be a boolean")?;
             }
+            "rootfs_size_mib" => rootfs_size_mib = Some(parse_rootfs_size_mib(val)?),
             other => {
                 return Err(format!(
                     "unknown oci_image_import param {other:?} (rejected fail-closed)"
@@ -2031,6 +2057,7 @@ fn parse_oci_import_params(
         readiness_http_path,
         volumes,
         host_bind_relay,
+        rootfs_size_mib,
     })
 }
 
@@ -2065,10 +2092,13 @@ const MAX_COMPOSE_YAML_BYTES: usize = 128 * 1024;
 /// service stack (e.g. Blinko: blinko + postgres) does not fail ENOSPC.
 const COMPOSE_ROOTFS_FLOOR_MIB: u64 = 4096;
 
-/// The maximum per-job rootfs override (MiB). A big image (Stirling-PDF, etc.)
-/// needs a larger ext4 than the floor, but an unbounded value would let one job
-/// exhaust the builder disk + blow up restore memory — so the override is capped
-/// fail-closed. `None`/absent keeps the floor default.
+/// The maximum per-job rootfs override (MiB), shared by every import lane
+/// (`dockerfile_import`, `oci_image_import`, `compose_import`) — one bound, one
+/// parser. A big image (Stirling-PDF, etc.) needs a larger ext4 than the lane
+/// default, but an unbounded value would let one job exhaust the builder disk +
+/// blow up restore memory — so the override is capped fail-closed.
+/// `None`/absent keeps the lane default (the compose floor for `compose_import`,
+/// the builder config `--rootfs-size-mib` for the single-image lanes).
 const MAX_ROOTFS_SIZE_MIB: u32 = 8192;
 
 /// The maximum per-job readiness `boot_timeout` override (seconds). A heavy
@@ -2857,6 +2887,75 @@ targets = ["web"]
             parse_compose_import_params(Some(&serde_json::json!({ "compose_yaml": huge })))
                 .is_err()
         );
+    }
+
+    /// The per-job rootfs override is ONE bound and ONE parser shared by the
+    /// single-image import lanes (the compose lane's own coverage is above):
+    /// `dockerfile_import` and `oci_image_import` accept the same range and
+    /// reject the same shapes fail-closed. Absent ⇒ `None` ⇒ the builder config
+    /// default at the call site (no compose floor — these pack one image).
+    #[test]
+    fn single_image_import_lanes_share_the_rootfs_size_mib_bound() {
+        // Absent ⇒ None on both lanes.
+        assert!(parse_import_params(None).unwrap().rootfs_size_mib.is_none());
+        assert!(
+            parse_oci_import_params(Some(&serde_json::json!({ "image": "redis:7" })))
+                .unwrap()
+                .rootfs_size_mib
+                .is_none()
+        );
+        // Accepted across the whole 1..=MAX range, boundaries included.
+        for good in [1u64, 1024, 4096, MAX_ROOTFS_SIZE_MIB as u64] {
+            assert_eq!(
+                parse_import_params(Some(&serde_json::json!({ "rootfs_size_mib": good })))
+                    .unwrap()
+                    .rootfs_size_mib,
+                Some(good as u32),
+                "dockerfile_import must accept rootfs_size_mib={good}"
+            );
+            assert_eq!(
+                parse_oci_import_params(Some(&serde_json::json!({
+                    "image": "redis:7",
+                    "rootfs_size_mib": good,
+                })))
+                .unwrap()
+                .rootfs_size_mib,
+                Some(good as u32),
+                "oci_image_import must accept rootfs_size_mib={good}"
+            );
+        }
+        // Rejected fail-closed: zero, over-cap, negative, fractional, string,
+        // bool, null — nothing is silently coerced or ignored. The needle is the
+        // PARSER's own message, not the unknown-key message (which interpolates
+        // the key name and would pass even on an unwired lane).
+        let needle =
+            format!("params.rootfs_size_mib must be an integer in 1..={MAX_ROOTFS_SIZE_MIB}");
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(MAX_ROOTFS_SIZE_MIB as u64 + 1),
+            serde_json::json!(-1),
+            serde_json::json!(1024.5),
+            serde_json::json!("1024"),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ] {
+            let err =
+                parse_import_params(Some(&serde_json::json!({ "rootfs_size_mib": bad.clone() })))
+                    .unwrap_err();
+            assert!(
+                err.contains(&needle),
+                "dockerfile_import rootfs_size_mib={bad} must reject: {err}"
+            );
+            let err = parse_oci_import_params(Some(&serde_json::json!({
+                "image": "redis:7",
+                "rootfs_size_mib": bad.clone(),
+            })))
+            .unwrap_err();
+            assert!(
+                err.contains(&needle),
+                "oci_image_import rootfs_size_mib={bad} must reject: {err}"
+            );
+        }
     }
 
     #[test]
