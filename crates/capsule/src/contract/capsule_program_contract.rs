@@ -1386,8 +1386,8 @@ absent_key_deserializers! {
         placeholder, polymorphism, port, prepare, prestart_command, producer,
         profile, profiles, provider, provision, publish, quantization,
         readiness_probe, reproducibility, requirements, run_command, runner_class,
-        runtime, runtime_version, schema_id, scope, secrets_required, service_target,
-        sharing, shell_kind, side_effects, signals, size_bytes, size_mb,
+        runtime, runtime_version, schema_id, scope, seal_at, secrets_required,
+        service_target, sharing, shell_kind, side_effects, signals, size_bytes, size_mb,
         snapshot, source, source_digest, source_layout, stable_interval_ms,
         stable_successes, startup_timeout, state, stop, storage, store,
         surface, target, targets, tcp_connect, timeout, timeout_seconds,
@@ -1403,7 +1403,7 @@ absent_key_deserializers! {
     }
     present_non_empty_list {
         aliases, allow_env, allow_from, allowed_binaries, args, artifacts,
-        build_env, choices, cmd, config_schema, dependencies, depends_on,
+        build_env, choices, cmd, command, config_schema, dependencies, depends_on,
         egress_allow, egress_id_allow, engines, env_allowlist, exclude,
         exclude_libs, expose, external_dependencies, host_capabilities,
         implements, include, lockfiles, model_repo_include, needs, outputs,
@@ -1423,8 +1423,10 @@ absent_key_deserializers! {
 }
 
 /// The normalized authored manifest intent (ADR-014 §2). Top-level coverage
-/// is the complete §2.1 classification: the 31 identity-bearing sections are
-/// explicit fields; the 9 non-identity sections (`schema_version`, `name`,
+/// is the complete §2.1 classification: the 32 identity-bearing sections are
+/// explicit fields (`seal_at` postdates the ADR's table and is classified the
+/// same as `snapshot` — authored seal/restore lifecycle intent, see
+/// [`NormalizedSealAtIntent`]); the 9 non-identity sections (`schema_version`, `name`,
 /// `version`, `metadata`, `distribution`, `state_owner_scope`,
 /// `service_binding_scope`, `routing`, `pool`) have NO field here (they live
 /// on the envelope's provenance where applicable); `workspace` is unsupported
@@ -1587,6 +1589,12 @@ pub struct ProgramManifestIntentV1 {
         deserialize_with = "present_not_null::snapshot"
     )]
     pub snapshot: Option<NormalizedSnapshotIntent>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::seal_at"
+    )]
+    pub seal_at: Option<NormalizedSealAtIntent>,
     #[serde(
         default,
         skip_serializing_if = "UniqueBTreeMap::is_empty",
@@ -3331,6 +3339,33 @@ pub struct NormalizedSnapshotIntent {
     pub content_ready_path: Option<HttpRequestTarget>,
 }
 
+/// `[seal_at]` — authored Snapshot acceptance verification intent (declaration
+/// semantics, §0: revising it is a new declaration).
+///
+/// Same identity category as `snapshot` (§2.1): both are authored seal/restore
+/// lifecycle intent, not a runtime observation. Per the §2.2 Rule 4 matrix the
+/// argv is [`OpaqueCommand`] (an authored command with no path interpretation —
+/// the same row `targets.<label>.cmd` and `readiness_probe.exec` sit on) and the
+/// timeout is a plain scalar, so no string in this section is hashed
+/// unclassified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizedSealAtIntent {
+    /// Argv: ORDER-SENSITIVE, preserved as authored (RFC §6.1 — argument
+    /// boundaries are exact). Required: an absent or empty `command` is not a
+    /// `seal_at` declaration, so `[]` fails closed rather than normalizing to
+    /// the absent spelling.
+    #[serde(deserialize_with = "present_non_empty_list::command")]
+    pub command: Vec<OpaqueCommand>,
+    /// Omitted when the author left the bound to the acceptance-loop default.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::timeout_seconds"
+    )]
+    pub timeout_seconds: Option<u32>,
+}
+
 /// `[secrets.<name>]` — a required secret as a ref, never a value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3925,6 +3960,7 @@ pub(in crate::contract) fn test_capsule_program_contract(seed: u8) -> CapsulePro
             host_capabilities: Vec::new(),
             ingress: None,
             snapshot: None,
+            seal_at: None,
             secrets: UniqueBTreeMap::new(),
             bindings: UniqueBTreeMap::new(),
             external: UniqueBTreeMap::new(),

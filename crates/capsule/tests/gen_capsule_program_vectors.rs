@@ -323,6 +323,30 @@ port = 8080
     )
 }
 
+/// `[seal_at]` — the Capsule v1 Snapshot acceptance program (spec §6/§6.3),
+/// identity-bearing like `snapshot`. Pins the §6.1 exact-argv rule in the IR: an
+/// explicitly selected shell (`sh -lc …`) rather than an implicit one, an
+/// argument that CONTAINS a space staying one element, and a trailing EMPTY
+/// argument surviving.
+const SEAL_AT_TOML: &str = r#"schema_version = "0.3"
+name = "seal-at"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+port = 8080
+
+[snapshot]
+mode = "warm"
+
+[seal_at]
+command = ["sh", "-lc", "curl -fsS http://127.0.0.1:8080/ready", "--label", ""]
+timeout_seconds = 120
+"#;
+
 const OCI_USER_TOML: &str = r#"schema_version = "0.3"
 name = "oci-user"
 version = "0.1.0"
@@ -961,6 +985,15 @@ fn regenerate_shared_vectors() {
             OCI_USER_TOML.to_string(),
             "oci-user",
             "user = \"1000:1000\" is a valid ContainerUserSpec and stays visible in the IR",
+        ),
+        (
+            "seal-at",
+            SEAL_AT_TOML.to_string(),
+            "seal-at",
+            "[seal_at] is identity-bearing authored verification intent (same category as \
+             [snapshot]): the argv is hashed as OpaqueCommand elements with argument \
+             boundaries exact — an explicitly selected shell, a space-containing argument \
+             kept as ONE element, and a trailing empty argument preserved",
         ),
     ];
 
