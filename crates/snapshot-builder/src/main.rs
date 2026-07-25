@@ -77,6 +77,10 @@ use snapshot::{
     no_secret_scan,
 };
 
+/// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
+/// from the contract the control plane pinned on the claim. Its module doc states
+/// exactly which guarantee that is, and which it deliberately is not.
+mod claim_eligibility;
 /// Submission Wizard PR-2 (slice 3) — the production [`CaptureAction`]: pause,
 /// snapshot, resume and seal a candidate from a live held guest, then persist and
 /// upload it through the same path a built artifact takes.
@@ -226,14 +230,29 @@ struct ClaimedJob {
     /// any use ([`parse_import_params`]).
     #[serde(default)]
     params: Option<serde_json::Value>,
-    /// Capsule v1 (`ato.execution-contract/v1`) expected contract, if the
-    /// control plane pinned one for this job. `#[serde(default)]` so an
-    /// ato-api that does not send this field yet (every ato-api today)
-    /// parses exactly as before — this is a forward-compatible, additive
-    /// field with no real sender yet; see `attempt_v1_execution_identity`'s
-    /// doc comment for what happens once one is present.
+    /// Capsule v1 (`ato.execution-contract/v1`) expected contract, when the
+    /// control plane pinned one for this job.
+    ///
+    /// ato-api DOES send this (with `execution_id` and
+    /// `execution_identity_schema` below) whenever the job has a row in
+    /// `capsule_snapshot_job_execution_contracts` — migration 0123. All three
+    /// stay `#[serde(default)]` because a job enqueued without a pinned
+    /// identity, or an installation that has not applied 0123, legitimately has
+    /// none, and must parse exactly as before.
     #[serde(default)]
     execution_contract: Option<ExecutionContractV1>,
+    /// The canonical hash of `execution_contract`, as the control plane stored
+    /// it. Carried separately (rather than recomputed) so the builder can VERIFY
+    /// the pair agrees instead of trusting either alone — see
+    /// [`crate::claim_eligibility`]. Read once the hold lane is wired into the
+    /// job loop; parsed now so the claim shape is already correct.
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_id: Option<String>,
+    /// The identity schema tag the contract was stored under.
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_identity_schema: Option<String>,
     // ── Submission Wizard §3.1 claim extension (interactive_capture only) ──
     //
     // The api emits these five fields on (and only on) a claimed
@@ -3713,6 +3732,8 @@ targets = ["web"]
             kind: kind.into(),
             params,
             execution_contract: None,
+            execution_id: None,
+            execution_identity_schema: None,
             // §3.1: absent for every non-wizard kind — which is every kind this
             // helper builds.
             wire_contract_version: None,
@@ -4866,6 +4887,48 @@ targets = ["web"]
             &serde_json::json!({}),
         )
         .expect("placeholder opaque digest")
+    }
+
+    /// Eligibility is minted only when the pinned contract and the pinned
+    /// `execution_id` actually agree.
+    ///
+    /// This is the whole strength of the declaration-based gate: the builder does
+    /// not trust either half alone, it recomputes the canonical hash. A contract
+    /// swapped under a stale id — or an id swapped under a contract — must not
+    /// mint a proof that then lets a live workload be captured.
+    #[test]
+    fn eligibility_needs_the_contract_and_its_id_to_agree() {
+        use crate::claim_eligibility::ClaimContractEligibility;
+        use crate::hold_phase::EligibilitySource;
+
+        let source_digest = content_digest_of(b"src", DigestAlgorithm::Blake3);
+        let readonly_layer = content_digest_of(b"rootfs", DigestAlgorithm::Blake3);
+        let contract = v1_minimal_contract(source_digest, readonly_layer);
+        let real_id = contract
+            .compute_execution_id()
+            .expect("a well-formed contract hashes");
+
+        // Agreeing pair ⇒ a proof (this contract declares no External State).
+        let mut ok =
+            ClaimContractEligibility::from_claim(Some(&contract), Some(&real_id.to_string()));
+        assert!(
+            ok.eligibility().is_ok(),
+            "an agreeing contract/id pair with no External State must be eligible"
+        );
+
+        // Same contract, a DIFFERENT well-formed id ⇒ refused.
+        let other_id = format!("blake3:{}", "b".repeat(64));
+        assert_ne!(other_id, real_id.to_string());
+        let mut mismatched = ClaimContractEligibility::from_claim(Some(&contract), Some(&other_id));
+        assert!(
+            mismatched.eligibility().is_err(),
+            "a contract must never be eligible under an id that is not its own hash"
+        );
+
+        // A malformed id is refused too — never coerced into an `ExecutionId`.
+        let mut malformed =
+            ClaimContractEligibility::from_claim(Some(&contract), Some("not-a-blake3-id"));
+        assert!(malformed.eligibility().is_err());
     }
 
     /// A minimal but fully valid `ExecutionContractV1`: zero dependencies,
