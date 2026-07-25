@@ -1629,6 +1629,8 @@ pub struct HeldGuest<'a> {
     /// its slot for as long as the guest is up.
     _lock: BuildLock,
     _state_volume_locks: Option<crate::state_volume::VolumeLockGuard>,
+    /// Set by `teardown` so `release` + `Drop` do not tear down twice.
+    torn_down: bool,
 }
 
 impl<'a> HeldGuest<'a> {
@@ -1651,45 +1653,72 @@ impl<'a> HeldGuest<'a> {
     /// disposable-restore validation does not end the hold, and the author can
     /// bring the app to a different state and capture again.
     ///
-    /// `source_lost` on the returned value reports the ADR-012 distinction: the
-    /// candidate is sealed either way, but a source that could not be resumed
-    /// means this hold cannot serve another capture.
-    pub fn capture_candidate(&mut self) -> Result<HeldCapture, SnapshotError> {
-        let fc = self.fc.as_ref().ok_or_else(|| {
-            self.backend
-                .backend_err("capture on a released hold: the guest is already gone")
+    /// `source_lost` reports the ADR-012 distinction on BOTH outcomes: the guest
+    /// either came back and this hold can capture again, or it did not and the
+    /// hold is finished. That one bit is what decides "return to holding" vs "end
+    /// the attempt" downstream, so the error carries it too — losing it on a
+    /// failure would offer the author a retry against a dead VM.
+    pub fn capture_candidate(&mut self) -> Result<HeldCandidate, HeldCaptureFailure> {
+        let fc = self.fc.as_ref().ok_or_else(|| HeldCaptureFailure {
+            error: self
+                .backend
+                .backend_err("capture on a released hold: the guest is already gone"),
+            // Nothing to resume — the guest is already gone for good.
+            source_lost: true,
         })?;
         let captured = bench::time("hold.capture_running_candidate", || {
             self.backend
                 .capture_running_candidate(fc, &self.vmstate_path, &self.mem_path)
+        })
+        .map_err(|f| HeldCaptureFailure {
+            error: f.error,
+            source_lost: f.source_lost,
         })?;
-        let receipt = self.backend.seal_ready_state(
-            &self.input,
-            &self.build_dir,
-            self.rootfs_blob.clone(),
-            &captured.vmstate,
-            &captured.mem,
-            // A `running` hold never delivers placeholders (they are refused at
-            // `boot_and_hold`), so there is no supervisor drive and therefore no
-            // placeholder-hygiene receipt to record.
-            None,
-        )?;
-        Ok(HeldCapture {
+        // The bytes are already taken and the guest already resumed (or not), so
+        // a sealing failure must NOT swallow `source_lost`.
+        let source_lost = captured.source_lost;
+        let receipt = self
+            .backend
+            .seal_ready_state(
+                &self.input,
+                &self.build_dir,
+                self.rootfs_blob.clone(),
+                &captured.vmstate,
+                &captured.mem,
+                // A `running` hold never delivers placeholders (a supervisor
+                // capsule is refused at `boot_and_hold`), so there is no
+                // supervisor drive and no placeholder-hygiene receipt to record.
+                None,
+            )
+            .map_err(|error| HeldCaptureFailure { error, source_lost })?;
+        Ok(HeldCandidate {
             receipt,
-            source_lost: captured.source_lost,
+            source_lost,
         })
     }
 
     /// Tear the hold down: kill the guest, bring the network down, clean scratch.
     ///
-    /// Errors are returned rather than swallowed; `Drop` still runs the same
-    /// teardown if this is never called.
-    pub fn release(mut self) -> Result<(), SnapshotError> {
+    /// Teardown is best-effort by construction — killing an already-dead process,
+    /// tearing down a network that is already gone, and removing scratch that may
+    /// not exist are all expected to be no-ops rather than failures — so this
+    /// reports nothing. `Drop` runs exactly the same teardown if it is never
+    /// called; `release` exists to make the moment explicit and to stop the guest
+    /// before the caller does anything else.
+    pub fn release(mut self) {
+        // `teardown` is idempotent, so the `Drop` that follows this call is a
+        // no-op. (`mem::forget` would be wrong here: it would also skip
+        // `BuildLock`'s drop and wedge the slot lock forever.)
         self.teardown();
-        Ok(())
     }
 
+    /// Idempotent: `release` calls it explicitly and `Drop` calls it again, and
+    /// tearing a network down twice would just be dead `ip link del` work.
     fn teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        self.torn_down = true;
         // Dropping `FcProcess` kills and reaps the guest.
         self.fc = None;
         self.backend.net_down();
@@ -1708,13 +1737,43 @@ impl Drop for HeldGuest<'_> {
 }
 
 /// One immutable candidate captured from a live [`HeldGuest`].
-pub struct HeldCapture {
+pub struct HeldCandidate {
     /// The sealed candidate — the same shape a built Ready-State has.
     pub receipt: BuildReadyStateReceipt,
     /// ADR-012: false when the source guest resumed and the hold can capture
     /// again; true when it could not, which is terminal for this hold.
     pub source_lost: bool,
 }
+
+/// A capture that did not produce a candidate.
+///
+/// Carries `source_lost` for the same reason [`HeldCandidate`] does: whether the
+/// hold can be retried is decided by whether the GUEST survived, which is
+/// independent of why the capture failed. A failure that dropped this bit would
+/// let a caller offer "save again" against a guest that is gone.
+pub struct HeldCaptureFailure {
+    /// What went wrong — snapshotting, or sealing the bytes it produced.
+    pub error: SnapshotError,
+    /// ADR-012: true when the source guest could not be resumed.
+    pub source_lost: bool,
+}
+
+impl std::fmt::Debug for HeldCaptureFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeldCaptureFailure")
+            .field("error", &self.error)
+            .field("source_lost", &self.source_lost)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for HeldCaptureFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (source_lost={})", self.error, self.source_lost)
+    }
+}
+
+impl std::error::Error for HeldCaptureFailure {}
 
 impl FirecrackerBackend {
     /// Boot a prepared build to its SEAL POINT and hand the guest back **alive**.
@@ -1854,20 +1913,24 @@ impl FirecrackerBackend {
         // state drives — the workload would come up against storage that simply
         // is not attached. Durable state is restore-time state by v1.6's rule, so
         // §8.3 puts it on the `workload_idle` side too.
-        if let Some(sup) = &input.supervisor
-            && (!sup.binding_names.is_empty() || !sup.state_volumes.is_empty())
-        {
-            let needs = if sup.binding_names.is_empty() {
-                "durable state volumes"
-            } else {
-                "supervisor bindings"
-            };
-            return Err(self.backend_err(format!(
+        // The predicate is `supervisor.is_some()`, not a field enumeration. A
+        // supervisor capsule with neither bindings nor volumes still diverges
+        // from `build_ready_state` in ways this path does not reproduce: the
+        // build hard-refuses any supervisor when `!vsock_enabled()`, and it
+        // passes `Some(drive)` into the boot so the page-hygiene kernel cmdline
+        // is ON and the manifest carries a `SupervisorBuildReceipt`. A hold that
+        // admitted it would seal a candidate of the SAME capsule under a
+        // different cmdline and with that receipt missing. Enumerating fields
+        // here would keep re-opening that gap every time a field is added —
+        // which is exactly how the `state_volumes` hole got in.
+        if input.supervisor.is_some() {
+            return Err(self.backend_err(
                 "interactive hold requires the `running` capture policy, but this capsule \
-                 declares {needs} and therefore needs `workload_idle` (stop the workload \
-                 and revoke placeholders before capture). Refusing rather than capturing a \
-                 workload whose restore-time state is not attached."
-            )));
+                 has a supervisor (bindings and/or durable state volumes) and therefore \
+                 needs `workload_idle`: the workload is stopped and its placeholders \
+                 revoked before capture. Refusing rather than capturing a workload whose \
+                 restore-time state is not attached.",
+            ));
         }
         crate::seal::preflight_gate(
             &input.layers.rootfs,
@@ -1943,6 +2006,7 @@ impl FirecrackerBackend {
             port,
             _lock: lock,
             _state_volume_locks: None,
+            torn_down: false,
         })
     }
 
@@ -2151,20 +2215,34 @@ impl FirecrackerBackend {
     /// orchestration tests, which drive an equivalent fake capture-action seam.
     // Real HOLD-path consumer (boot-to-health → hold session) lands in a later
     // PR-2 slice.
-    #[allow(dead_code)]
     fn capture_running_candidate(
         &self,
         fc: &FcProcess,
         vmstate_path: &Path,
         mem_path: &Path,
-    ) -> Result<RunningCaptureBytes, SnapshotError> {
-        let (vmstate, mem) = self.pause_snapshot_create(fc, vmstate_path, mem_path)?;
-        let source_lost = self.resume_vm(fc).is_err();
-        Ok(RunningCaptureBytes {
-            vmstate,
-            mem,
-            source_lost,
-        })
+    ) -> Result<RunningCaptureBytes, RunningCaptureFailure> {
+        // `pause_snapshot_create` pauses FIRST and only then does its fallible
+        // work (snapshot/create, then two file reads). A bare `?` here would
+        // short-circuit past the resume and strand the guest PAUSED forever —
+        // and a full builder disk making `PUT /snapshot/create` return EAGAIN is
+        // a failure this file has actually observed. RFC §8.2 says a failed
+        // capture is not terminal: the author adjusts the app and saves again.
+        // That is only true if the guest is running again, so resume on BOTH
+        // paths and report whether it worked.
+        match self.pause_snapshot_create(fc, vmstate_path, mem_path) {
+            Ok((vmstate, mem)) => {
+                let source_lost = self.resume_vm(fc).is_err();
+                Ok(RunningCaptureBytes {
+                    vmstate,
+                    mem,
+                    source_lost,
+                })
+            }
+            Err(error) => {
+                let source_lost = self.resume_vm(fc).is_err();
+                Err(RunningCaptureFailure { error, source_lost })
+            }
+        }
     }
 }
 
@@ -2172,6 +2250,11 @@ impl FirecrackerBackend {
 /// (ADR-012). Produced by [`FirecrackerBackend::capture_running_candidate`] on the
 /// interactive submission-wizard HOLD path; consumed by the later-slice HOLD
 /// wiring (real-VM verified).
+struct RunningCaptureFailure {
+    error: SnapshotError,
+    source_lost: bool,
+}
+
 #[allow(dead_code)]
 struct RunningCaptureBytes {
     vmstate: Vec<u8>,
@@ -3737,7 +3820,10 @@ mod tests {
         use crate::manifest::{RestoreContract, SanitizerContract};
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("cas")).unwrap();
-        let backend = FirecrackerBackend::new();
+        let backend = FirecrackerBackend::with_config(FirecrackerConfig {
+            work_root: dir.path().join("work"),
+            ..FirecrackerConfig::default()
+        });
         let input = BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash: "blake3:hold-idle".to_string(),
@@ -3799,7 +3885,10 @@ mod tests {
         use crate::manifest::{RestoreContract, SanitizerContract};
         let dir = tempfile::tempdir().unwrap();
         let store = CasStore::open(dir.path().join("cas")).unwrap();
-        let backend = FirecrackerBackend::new();
+        let backend = FirecrackerBackend::with_config(FirecrackerConfig {
+            work_root: dir.path().join("work"),
+            ..FirecrackerConfig::default()
+        });
         let input = BuildReadyStateInput {
             store: &store,
             capsule_manifest_hash: "blake3:hold-volumes".to_string(),
@@ -3836,8 +3925,8 @@ mod tests {
         };
         let text = format!("{err:?}");
         assert!(
-            text.contains("durable state volumes"),
-            "the refusal must name what the capsule actually declares: {text}"
+            text.contains("workload_idle"),
+            "a supervisor capsule must be refused whatever it declares: {text}"
         );
         assert!(
             store.list_chunks().unwrap().is_empty(),

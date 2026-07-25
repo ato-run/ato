@@ -78,7 +78,8 @@ pub use compose_plan::{
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::{
-    FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCapture, HeldGuest,
+    FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCandidate,
+    HeldCaptureFailure, HeldGuest,
 };
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
