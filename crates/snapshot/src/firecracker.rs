@@ -1732,6 +1732,22 @@ impl<'a> HeldGuest<'a> {
         format!("{}:{}", self.backend.reachable_host(), self.port)
     }
 
+    /// The pid of **this hold's** guest VMM, or `None` once it has been torn down.
+    ///
+    /// Test-only, and it exists because the leak assertion needs the process this
+    /// hold started. A machine-wide `pgrep -x firecracker` cannot tell it apart
+    /// from an unrelated VM already running on the box (the staging runner and the
+    /// snapshot builder share a host), so a test that takes the first pgrep hit
+    /// can watch someone else's guest — and report "reaped" for it while the
+    /// dropped hold leaks its own. `FcProcess` stays private; only the pid leaves.
+    #[cfg(test)]
+    pub(crate) fn vmm_pid(&self) -> Option<u32> {
+        self.fc
+            .as_ref()
+            .and_then(|fc| fc.child.as_ref())
+            .map(|c| c.id())
+    }
+
     /// Capture an immutable candidate from the LIVE guest and **keep it running**.
     ///
     /// Pause → `snapshot/create` → resume, then the identical seal + scan +
