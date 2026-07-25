@@ -3,10 +3,10 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
+use super::prompt::{BrowserOpenOs, browser_open_command};
 use super::publisher::PublisherMeResponse;
 use super::shared_env_lock as env_lock;
 use super::storage::TokenStorageLocation;
-use super::prompt::{BrowserOpenOs, browser_open_command};
 use super::store::{
     EXTERNAL_BROWSER_LOGIN_HARDENING_EVIDENCE, EXTERNAL_BROWSER_LOGIN_HARDENING_LANDED,
     browser_launch_failed_event, compute_poll_timing, desktop_login_completed_event,
@@ -753,7 +753,9 @@ fn desktop_login_completed_event_never_carries_a_token() {
     // convenience": the completion event may carry only a publisher handle and
     // a storage-location label.
     let event = desktop_login_completed_event(Some("koh"), "age_file");
-    let object = event.as_object().expect("completion event is a JSON object");
+    let object = event
+        .as_object()
+        .expect("completion event is a JSON object");
     assert_eq!(
         object.len(),
         3,
