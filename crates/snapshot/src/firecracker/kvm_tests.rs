@@ -1871,3 +1871,179 @@ fn fc_kvm_binding_negative_paths() {
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
 }
+
+/// True when the workload accepts a connection AND answers HTTP at `addr`.
+///
+/// Deliberately stronger than a TCP connect: a resumed VMM whose app is wedged
+/// still accepts.
+fn probe_serving(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(sock) = addr.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    for _ in 0..50 {
+        if let Ok(mut s) = std::net::TcpStream::connect_timeout(&sock, Duration::from_millis(500)) {
+            let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+            if s.write_all(b"GET /health HTTP/1.0\r\n\r\n").is_ok() {
+                let mut buf = [0u8; 16];
+                if let Ok(n) = s.read(&mut buf)
+                    && n > 0
+                {
+                    return true;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// PIDs of every running firecracker process, for leak assertions.
+fn firecracker_pids() -> Vec<u32> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-x")
+        .arg("firecracker")
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+// ── interactive HOLD (submission wizard PR-2, RFC §8.3 `running`) ────────────
+//
+// These prove the property the whole hold lane rests on and that no unit test
+// can reach without hardware: the guest is STILL SERVING after a capture.
+
+/// A held guest answers health, survives a capture, and answers health again.
+///
+/// This is the difference between `build_ready_state` (pause, seal, kill) and a
+/// hold: the author must be able to keep operating the app after Ato has taken a
+/// candidate, so `capture_running_candidate`'s resume has to actually work.
+#[test]
+#[ignore]
+fn fc_kvm_hold_survives_capture_and_keeps_serving() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+
+    // The address a host-side proxy would front, reachable because the boot path
+    // just health-probed it.
+    let addr = held.workload_addr();
+    assert!(addr.ends_with(":8080"), "workload_addr = {addr}");
+
+    let first = held.capture_candidate().expect("first capture");
+    assert!(
+        !first.source_lost,
+        "the source guest must resume after a capture"
+    );
+    assert!(first.receipt.no_secret_proof.is_clean());
+    assert!(first.receipt.manifest.layers.memory.is_some());
+
+    // RFC §8.2: a hold may capture more than once — a failed validation does not
+    // end the session, the author adjusts the app and saves again.
+    let Ok(second) = held.capture_candidate() else {
+        panic!("second capture failed");
+    };
+    assert!(!second.source_lost);
+    assert!(
+        probe_serving(&addr),
+        "the workload must still answer after a SECOND capture"
+    );
+    assert!(second.receipt.manifest.layers.memory.is_some());
+
+    held.release();
+}
+
+/// A candidate captured from a live guest restores and serves.
+///
+/// The candidate is what users will actually launch from, so "it sealed" is not
+/// enough — it has to come back up.
+#[test]
+#[ignore]
+fn fc_kvm_hold_candidate_restores_and_serves() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+    let Ok(candidate) = held.capture_candidate() else {
+        panic!("capture failed");
+    };
+    held.release();
+
+    let r = b
+        .restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: candidate.receipt.manifest.clone(),
+            overlay_root: dir.path().join("ov"),
+            host_runner_class: None,
+            uffd_preview: false,
+        })
+        .expect("restore the held candidate");
+    assert_eq!(r.session.guest_port, Some(8080));
+    assert!(r.session.restored_bytes > 0);
+    let overlay = r.session.overlay_root.clone();
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
+/// Dropping a hold without calling `release` still kills the guest.
+///
+/// A forgotten hold must never leave a VM (or its slot lock) behind — the whole
+/// point of owning the process in the handle.
+#[test]
+#[ignore]
+fn fc_kvm_hold_drop_tears_the_guest_down() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let vmm_pid = {
+        // Bound so the hold stays alive until the end of this scope, where the
+        // implicit drop is exactly what the test is about.
+        let _held = b
+            .boot_and_hold(build_input(&store, rootfs, vec![]))
+            .expect("boot and hold");
+        // Probing the workload address after the drop would prove nothing: the
+        // teardown also runs `net_down()`, so the route to the guest disappears
+        // and a connect fails with ENETUNREACH whether or not the VMM was reaped.
+        // Watch the PROCESS instead — that is the thing that must not leak.
+        firecracker_pids()
+            .into_iter()
+            .next()
+            .expect("a held guest must have a running firecracker process")
+        // dropped here without release()
+    };
+
+    let mut reaped = false;
+    for _ in 0..50 {
+        if !firecracker_pids().contains(&vmm_pid) {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(reaped, "a dropped hold leaked firecracker pid {vmm_pid}");
+
+    // And the slot lock is free again, so the next hold can take it. An empty
+    // rootfs must fail for its OWN reason — a "backend busy" here would mean the
+    // lock leaked, which is precisely what this asserts is not happening.
+    let Err(err) = b.boot_and_hold(build_input(&store, Vec::new(), vec![])) else {
+        panic!("an empty rootfs must not boot");
+    };
+    let text = format!("{err:?}");
+    assert!(
+        !text.contains("backend busy"),
+        "a dropped hold leaked its slot lock: {text}"
+    );
+}

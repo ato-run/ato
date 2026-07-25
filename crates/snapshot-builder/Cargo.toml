@@ -23,6 +23,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 ureq = { version = "2.12.1", features = ["json"] }
+# Submission-wizard lease driver only: `lease_expires_at` (§3.1/§3.2) is an
+# ISO-8601 UTC wall-clock instant, and the renew cadence is derived from it.
+# Reused from the workspace (cli/capsule/desktop/nacelle already depend on the
+# same 0.4) rather than hand-rolling a civil-date parser.
+chrono = { version = "0.4", default-features = true }
 blake3 = "1"
 sha2 = "0.10"
 
