@@ -1505,6 +1505,10 @@ pub fn materialize_source(
 /// one. Same identity validation, full-SHA pin, and lexical+canonical containment as the
 /// recipe lane — it reuses the same [`git_checkout_pinned`] + [`contained_source_root`]
 /// helpers, only passing `require_manifest = false`.
+///
+/// The returned root carries no `.git` ([`remove_checkout_git_metadata`]): the archive
+/// this feeds must hash reproducibly and, under ADR-014 §1, a working tree is not a
+/// pinned source materialization.
 pub fn checkout_source_tree(
     owner: &str,
     repo: &str,
@@ -1543,6 +1547,9 @@ fn validate_source_identity(owner: &str, repo: &str, commit: &str) -> Result<(),
 /// git steps shared by [`materialize_source`] (recipe lane) and [`checkout_source_tree`]
 /// (source_materialize lane); callers validate the identity (`validate_source_identity`)
 /// and any subdir before calling, and resolve/contain the source root afterward.
+///
+/// The checkout's own `.git` is removed before returning ([`remove_checkout_git_metadata`]),
+/// so what every caller receives is a materialized source tree, never a working tree.
 fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
@@ -1568,7 +1575,57 @@ fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Re
         Some(dest),
     )?;
     run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
-    Ok(())
+    remove_checkout_git_metadata(dest)
+}
+
+/// Delete the `.git` that [`git_checkout_pinned`]'s `git init` created, turning the
+/// checkout into a plain materialized source tree. Fail-closed: an IO error here is an
+/// error, never a silently retained working tree.
+///
+/// Removing it is required, not hygiene:
+///
+/// * `.git` content is **not reproducible** — `.git/index` records per-file stat data
+///   (inode, mtime), so two checkouts of the same commit on the same host differ. A1v2
+///   (`materialized_source_tree_hash`) hashes a ROOT `.git` as an ordinary directory
+///   (only a NESTED one is a submodule signal), so leaving it made an identity-bearing
+///   value — `ExecutionContractV1.source.digest`, and the `source_materialize` job's
+///   reported tree hash — depend on when and where the checkout ran. The subdir case hid
+///   this; `subdirectory` is optional, so the no-subdir case is reachable by design.
+/// * ADR-014 §1 refuses a root-level `.git` of ANY node type as a pinned source
+///   materialization, so a `.tar.zst` frozen from such a tree can never yield a
+///   `capsule_program_id`.
+/// * The recipe lane `cp -a`s this tree into the rootfs build context, so `.git` would
+///   also bloat the image and ship repo metadata into the guest.
+///
+/// Only the ROOT entry is removed. A NESTED `.git` stays: A1v2 rejects it as a submodule
+/// / embedded-repo signal, and stripping it would hide that. A `--depth 1` fetch +
+/// `checkout` without `--recurse-submodules` never creates one — a gitlink materializes
+/// as an empty directory — so this is a fail-closed invariant, not a case to clean up.
+///
+/// Same shape as the CLI's GitHub import path, which already removes `.git` after its
+/// own pinned checkout before hashing (`crates/cli/src/cli/dispatch/import_cmd.rs`), and
+/// what `capsule::source_identity::materialized_tree_hash` has always demanded of its
+/// callers ("callers must remove `.git` metadata before invoking this function").
+///
+/// **Cache invalidation:** a no-subdir source archived or hashed before this change gets
+/// a DIFFERENT A1v2 digest afterwards. Those digests were never reproducible in the first
+/// place — that is the defect — so a digest change here is the fix landing, not drift.
+fn remove_checkout_git_metadata(dest: &Path) -> Result<(), String> {
+    let git = dest.join(".git");
+    let meta = match std::fs::symlink_metadata(&git) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("inspect {}: {e}", git.display())),
+    };
+    // `git init` writes a directory; a gitfile/symlink `.git` is not something this
+    // helper's own checkout produces, but ADR-014 rejects every node type, so remove
+    // whatever is there rather than leaving a shape the gate would refuse.
+    if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(&git)
+    } else {
+        std::fs::remove_file(&git)
+    }
+    .map_err(|e| format!("remove checkout git metadata {}: {e}", git.display()))
 }
 
 /// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout.
@@ -2170,6 +2227,132 @@ readiness_probe = { http_get = "/health" }
                 .unwrap_err()
                 .contains("..")
         );
+    }
+
+    /// Commit a `git init`ed tree with pinned identity/dates and no ambient config, so
+    /// the only thing that can differ between two such repos is `.git`'s own
+    /// machine-dependent state (chiefly `.git/index`'s per-file stat data).
+    fn commit_local_repo(dir: &Path, files: &[(&str, &str)]) {
+        for (rel, body) in files {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create source parent dir");
+            }
+            std::fs::write(&path, body).expect("write source file");
+        }
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                // Isolate from the developer's global/system config (signing, hooks,
+                // autocrlf, default branch) so both repos are built identically.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "ato")
+                .env("GIT_AUTHOR_EMAIL", "ato@example.invalid")
+                .env("GIT_COMMITTER_NAME", "ato")
+                .env("GIT_COMMITTER_EMAIL", "ato@example.invalid")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+0000")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+0000")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "pinned"]);
+    }
+
+    #[test]
+    fn pinned_checkouts_of_identical_content_hash_identically() {
+        // The regression this closes: `git_checkout_pinned` used to leave its own `.git`
+        // in the tree callers receive, and A1v2 hashes a ROOT `.git` as an ordinary
+        // directory — so `materialized_source_tree_hash`, an identity-bearing value
+        // (`ExecutionContractV1.source.digest`, the source_materialize ack), differed
+        // between two checkouts of byte-identical source.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let files = [
+            ("capsule.toml", "name = \"demo\"\n"),
+            ("app.py", "print('hi')\n"),
+            ("static/index.html", "<h1>hi</h1>\n"),
+        ];
+        commit_local_repo(a.path(), &files);
+        commit_local_repo(b.path(), &files);
+        assert!(a.path().join(".git").is_dir() && b.path().join(".git").is_dir());
+
+        remove_checkout_git_metadata(a.path()).unwrap();
+        remove_checkout_git_metadata(b.path()).unwrap();
+
+        let ha = capsule::blob::materialized_source_tree_hash(a.path()).unwrap();
+        let hb = capsule::blob::materialized_source_tree_hash(b.path()).unwrap();
+        assert_eq!(
+            ha, hb,
+            "two checkouts of the same content must yield the same A1v2 tree hash"
+        );
+        assert!(ha.starts_with("sha256:"), "{ha}");
+    }
+
+    #[test]
+    fn root_git_metadata_removal_is_what_makes_the_hash_agree() {
+        // The same proof without git: two trees whose SOURCE bytes match but whose root
+        // `.git` differs (as real ones always do — `.git/index` carries per-file stat
+        // data) hash DIFFERENTLY before the removal and identically after, so the
+        // regression test above cannot pass vacuously.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for (dir, index_bytes) in [(a.path(), "stat-data-a"), (b.path(), "stat-data-b")] {
+            std::fs::write(dir.join("app.py"), "print('hi')\n").unwrap();
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            std::fs::write(dir.join(".git").join("index"), index_bytes).unwrap();
+            std::fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        let before_a = capsule::blob::materialized_source_tree_hash(a.path()).unwrap();
+        let before_b = capsule::blob::materialized_source_tree_hash(b.path()).unwrap();
+        assert_ne!(
+            before_a, before_b,
+            "a retained root .git must be what perturbs the hash"
+        );
+
+        remove_checkout_git_metadata(a.path()).unwrap();
+        remove_checkout_git_metadata(b.path()).unwrap();
+        assert_eq!(
+            capsule::blob::materialized_source_tree_hash(a.path()).unwrap(),
+            capsule::blob::materialized_source_tree_hash(b.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_root_carries_no_git_metadata_with_or_without_a_subdir() {
+        // Both source roots `contained_source_root` can return must be `.git`-free: the
+        // checkout root itself (no subdir — reachable for any capsule at the repo root)
+        // and a subdir root. A NESTED `.git` is left alone: A1v2 rejects it as a
+        // submodule signal and removing it would hide that.
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join("app").join("vendor").join(".git")).unwrap();
+        std::fs::write(root.join("app").join("capsule.toml"), b"x").unwrap();
+
+        remove_checkout_git_metadata(root).unwrap();
+
+        let no_subdir = contained_source_root(root, None, false).unwrap();
+        assert!(!no_subdir.join(".git").exists());
+        let subdir = contained_source_root(root, Some("app"), true).unwrap();
+        assert!(!subdir.join(".git").exists());
+        assert!(
+            subdir.join("vendor").join(".git").is_dir(),
+            "a nested .git is a submodule signal A1v2 must still see"
+        );
+
+        // Idempotent + absent-is-fine: re-running on a tree with no `.git` is not an error.
+        remove_checkout_git_metadata(root).unwrap();
     }
 
     #[test]
