@@ -1871,3 +1871,115 @@ fn fc_kvm_binding_negative_paths() {
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
 }
+
+// ── interactive HOLD (submission wizard PR-2, RFC §8.3 `running`) ────────────
+//
+// These prove the property the whole hold lane rests on and that no unit test
+// can reach without hardware: the guest is STILL SERVING after a capture.
+
+/// A held guest answers health, survives a capture, and answers health again.
+///
+/// This is the difference between `build_ready_state` (pause, seal, kill) and a
+/// hold: the author must be able to keep operating the app after Ato has taken a
+/// candidate, so `capture_running_candidate`'s resume has to actually work.
+#[test]
+#[ignore]
+fn fc_kvm_hold_survives_capture_and_keeps_serving() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+
+    // The address a host-side proxy would front, reachable because the boot path
+    // just health-probed it.
+    let addr = held.workload_addr();
+    assert!(addr.ends_with(":8080"), "workload_addr = {addr}");
+
+    let first = held.capture_candidate().expect("first capture");
+    assert!(!first.source_lost, "the source guest must resume after a capture");
+    assert!(first.receipt.no_secret_proof.is_clean());
+    assert!(first.receipt.manifest.layers.memory.is_some());
+
+    // RFC §8.2: a hold may capture more than once — a failed validation does not
+    // end the session, the author adjusts the app and saves again.
+    let second = held.capture_candidate().expect("second capture");
+    assert!(!second.source_lost);
+    assert!(second.receipt.manifest.layers.memory.is_some());
+
+    held.release().expect("release");
+}
+
+/// A candidate captured from a live guest restores and serves.
+///
+/// The candidate is what users will actually launch from, so "it sealed" is not
+/// enough — it has to come back up.
+#[test]
+#[ignore]
+fn fc_kvm_hold_candidate_restores_and_serves() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+    let candidate = held.capture_candidate().expect("capture");
+    held.release().expect("release");
+
+    let r = b
+        .restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: candidate.receipt.manifest.clone(),
+            overlay_root: dir.path().join("ov"),
+            host_runner_class: None,
+            uffd_preview: false,
+        })
+        .expect("restore the held candidate");
+    assert_eq!(r.session.guest_port, Some(8080));
+    assert!(r.session.restored_bytes > 0);
+    let overlay = r.session.overlay_root.clone();
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
+/// Dropping a hold without calling `release` still kills the guest.
+///
+/// A forgotten hold must never leave a VM (or its slot lock) behind — the whole
+/// point of owning the process in the handle.
+#[test]
+#[ignore]
+fn fc_kvm_hold_drop_tears_the_guest_down() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let addr = {
+        let held = b
+            .boot_and_hold(build_input(&store, rootfs, vec![]))
+            .expect("boot and hold");
+        held.workload_addr()
+        // dropped here without release()
+    };
+
+    // The workload socket must stop accepting once the guest is reaped.
+    let sock: std::net::SocketAddr = addr.parse().expect("addr");
+    let mut still_up = false;
+    for _ in 0..40 {
+        if std::net::TcpStream::connect_timeout(&sock, Duration::from_millis(200)).is_ok() {
+            still_up = true;
+            std::thread::sleep(Duration::from_millis(100));
+        } else {
+            still_up = false;
+            break;
+        }
+    }
+    assert!(!still_up, "a dropped hold left the guest serving on {addr}");
+
+    // And the lock is free again, so the next hold/build can take the slot.
+    b.boot_and_hold(build_input(&store, Vec::new(), vec![]))
+        .err()
+        .expect("an empty rootfs must fail, but NOT because the lock is still held");
+}
