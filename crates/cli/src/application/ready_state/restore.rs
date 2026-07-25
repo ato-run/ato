@@ -257,9 +257,11 @@ mod tests {
             .build_ready_state(BuildReadyStateInput {
                 store: &store,
                 capsule_manifest_hash: "blake3:capsule".to_string(),
-                runner_class: Some(capsule::foundation::install_lifecycle::RunnerClassId::from_hash(
-                    compatibility.runner_restore_contract.clone(),
-                )),
+                runner_class: Some(
+                    capsule::foundation::install_lifecycle::RunnerClassId::from_hash(
+                        compatibility.runner_restore_contract.clone(),
+                    ),
+                ),
                 surface_requirement: None,
                 layers: BuildLayers {
                     rootfs: b"rootfs".to_vec(),
@@ -309,8 +311,9 @@ mod tests {
         use capsule::execution_contract::ExecutionId;
         use capsule::snapshot_manifest::{
             RestoreContractV1, SNAPSHOT_MANIFEST_V1_SCHEMA, SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA,
-            SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA, SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA,
-            SanitizationAttestationV1, SecretScanAttestationV1, SnapshotCaptureProvenance,
+            SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA,
+            SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA, SanitizationAttestationV1,
+            SecretScanAttestationV1, SnapshotCaptureProvenance,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -389,19 +392,20 @@ mod tests {
 
         // A tampered envelope (locally "promoted" acceptance) is rejected.
         let mut tampered_envelope = envelope.clone();
-        tampered_envelope.acceptance.status =
-            snapshot::ArtifactAcceptanceStatus::Quarantined;
-        assert!(
-            verify_v1_candidate(&backend, &legacy, &candidate, &tampered_envelope).is_err()
-        );
+        tampered_envelope.acceptance.status = snapshot::ArtifactAcceptanceStatus::Quarantined;
+        assert!(verify_v1_candidate(&backend, &legacy, &candidate, &tampered_envelope).is_err());
 
         // A candidate whose execution_id disagrees with the legacy manifest's
         // opaque id is rejected even with a self-consistent envelope.
         let mut other_identity = candidate.clone();
-        other_identity.execution_id = ExecutionId::new(format!("blake3:{}", "b".repeat(64))).unwrap();
+        other_identity.execution_id =
+            ExecutionId::new(format!("blake3:{}", "b".repeat(64))).unwrap();
         let other_envelope = ArtifactEnvelopeV1::accepted(&legacy, &other_identity).unwrap();
         let error =
             verify_v1_candidate(&backend, &legacy, &other_identity, &other_envelope).unwrap_err();
-        assert!(error.to_string().contains("execution_id mismatch"), "{error}");
+        assert!(
+            error.to_string().contains("execution_id mismatch"),
+            "{error}"
+        );
     }
 }

@@ -1032,7 +1032,7 @@ pub(crate) fn load_verified_v1_artifact(
         || command.snapshot_manifest_id.as_deref() != Some(snapshot_id.as_str())
     {
         return Err(err(
-            "lease/Snapshot v1 manifest schema or id mismatch".to_string(),
+            "lease/Snapshot v1 manifest schema or id mismatch".to_string()
         ));
     }
     let envelope_bytes = std::fs::read(&paths.artifact_envelope_v1_json).map_err(|error| {

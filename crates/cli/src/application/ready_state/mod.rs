@@ -147,7 +147,10 @@ impl std::fmt::Debug for ReadyStateRunPlan {
             .field("v1_manifest", &self.v1_manifest)
             .field("v1_envelope", &self.v1_envelope)
             .field("artifact_dir", &self.artifact_dir)
-            .field("selected_backend", &self.selected_backend.as_ref().map(|b| b.id().to_string()))
+            .field(
+                "selected_backend",
+                &self.selected_backend.as_ref().map(|b| b.id().to_string()),
+            )
             .field("state_root", &self.state_root)
             .field("capsule_manifest_hash", &self.capsule_manifest_hash)
             .field("sanitize_after_restore", &self.sanitize_after_restore)

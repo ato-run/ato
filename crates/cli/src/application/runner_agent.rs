@@ -4187,7 +4187,9 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{RestoreVerification, restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{
+        RestoreVerification, restore_and_expose, teardown,
+    };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
         load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
