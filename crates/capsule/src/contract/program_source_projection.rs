@@ -17,6 +17,18 @@
 //! the type system by [`VerifiedPinnedSourceMaterialization`], which every
 //! derivation API takes instead of a bare `&Path`.
 //!
+//! Neither root a derivation reads is a path a caller may hold: the staging
+//! copy is process-private always, and the pinned root is process-private
+//! whenever the proof was minted from an archive (the value owns the extraction
+//! directory). Withholding the accessors is only half of that — `Debug` and
+//! error text disclose a path just as effectively — so
+//! [`VerifiedPinnedSourceMaterialization`] redacts its `Debug`, the staged and
+//! projected values have none, and every message leaving this module names
+//! paths RELATIVE to the root they live under (`relativize_roots`). The one
+//! absolute path that stays is the archive passed to
+//! [`VerifiedPinnedSourceMaterialization::from_source_archive`] — the caller's
+//! own input, which it already holds.
+//!
 //! There is exactly ONE public minting path:
 //! [`VerifiedPinnedSourceMaterialization::from_source_archive`], which extracts
 //! a content-addressed `.tar.zst`
@@ -66,6 +78,7 @@
 //! lock-file rename migration and across lock rewrites that embed
 //! `program_identity`.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
@@ -93,6 +106,12 @@ const CAPSULE_MANIFEST_FILE_NAME: &str = "capsule.toml";
 /// A Git checkout's own metadata directory. Its presence at the selected root
 /// means the input is a working tree, which ADR-014 §1 refuses in Phase 0.
 const GIT_METADATA_DIR_NAME: &str = ".git";
+
+/// How a caller-visible message names the tree root itself when the offending
+/// path IS the root. Both roots a derivation reads are process-private — the
+/// staging copy always, the pinned root whenever the proof was minted from an
+/// archive — so no message may carry either absolute path.
+const SOURCE_ROOT_LABEL: &str = "<source root>";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Proof-carrying input boundary
@@ -218,7 +237,15 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 ///     proof.root()
 /// }
 /// ```
-#[derive(Debug, Clone)]
+///
+/// Method visibility alone does not close that boundary: an observability
+/// surface hands out the same path without an accessor. A derived `Debug`
+/// prints private fields, so it would disclose `root` — and the `TempDir`
+/// guard's own `Debug` would disclose it a second time; the hand-written
+/// [`fmt::Debug`] impl below discloses neither. Error text is the other such
+/// surface, which is why nothing this module returns names an absolute path
+/// inside a pinned or staged tree (see [`relativize_roots`]).
+#[derive(Clone)]
 pub struct VerifiedPinnedSourceMaterialization {
     root: PathBuf,
     /// Ownership guard for a root this value extracted itself
@@ -233,6 +260,21 @@ pub struct VerifiedPinnedSourceMaterialization {
     /// is alive, and must disappear when the last one is gone.
     #[allow(dead_code)]
     owned_root: Option<Arc<TempDir>>,
+}
+
+/// Redacted, not derived: `#[derive(Debug)]` prints private fields, so it would
+/// hand any holder — including a downstream one — the writable root that
+/// [`VerifiedPinnedSourceMaterialization::root`] withholds, and the `TempDir`
+/// guard would print it again. Nothing observable here identifies the tree;
+/// `finish_non_exhaustive` says so rather than implying the struct has one
+/// field.
+impl fmt::Debug for VerifiedPinnedSourceMaterialization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VerifiedPinnedSourceMaterialization")
+            .field("root", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Identity is the pinned root, not the ownership guard: two proofs naming the
@@ -278,6 +320,11 @@ impl VerifiedPinnedSourceMaterialization {
     /// enforces before a single byte is written. After extraction the root goes
     /// through `ensure_pinned_materialization_shape`, the same fail-closed shape
     /// gate re-run at staging time, so the invariant is one function, not two.
+    ///
+    /// The extraction root never reaches a rejection message: it is this
+    /// value's process-private directory, so every path an error names is
+    /// relative to it (`archive_tar_zst` itself stays absolute — it is the
+    /// caller's own input).
     pub fn from_source_archive(archive_tar_zst: &Path) -> Result<Self, CapsuleProgramError> {
         let extracted = TempDir::new().map_err(|source| {
             CapsuleProgramError::SourceProjection(format!(
@@ -287,8 +334,9 @@ impl VerifiedPinnedSourceMaterialization {
         let root = extracted.path().to_path_buf();
         // A failure here drops `extracted`, which removes any partially written
         // tree: a rejected archive leaves nothing behind.
-        extract_source_archive(archive_tar_zst, &root)?;
-        ensure_pinned_materialization_shape(&root)?;
+        extract_source_archive(archive_tar_zst, &root)
+            .and_then(|()| ensure_pinned_materialization_shape(&root))
+            .map_err(|error| relativize_roots(error, &[&root]))?;
         Ok(Self {
             root,
             owned_root: Some(Arc::new(extracted)),
@@ -343,35 +391,43 @@ impl VerifiedPinnedSourceMaterialization {
 /// Fail-closed shape checks for a pinned materialization root. Cheap enough
 /// (two `symlink_metadata` calls) to run both when the proof is minted and
 /// again when it is used, so a tree that changed in between still fails closed.
+///
+/// `root` is never named in a message: an archive-minted proof's root is the
+/// process-private extraction directory, so printing it would disclose a
+/// writable path and tell the caller nothing it can act on.
 fn ensure_pinned_materialization_shape(root: &Path) -> Result<(), CapsuleProgramError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.file_type().is_dir() => {}
         Ok(_) => {
             return Err(CapsuleProgramError::NotPinnedMaterialization(format!(
-                "{} is not a directory",
-                root.display()
+                "{SOURCE_ROOT_LABEL} is not a directory"
             )));
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             return Err(CapsuleProgramError::NotPinnedMaterialization(format!(
-                "{} does not exist",
-                root.display()
+                "{SOURCE_ROOT_LABEL} does not exist"
             )));
         }
-        Err(source) => return Err(projection_io("inspect the pinned root", root, source)),
+        Err(source) => {
+            return Err(CapsuleProgramError::SourceProjection(format!(
+                "failed to inspect {SOURCE_ROOT_LABEL}: {source}"
+            )));
+        }
     }
 
     let git = root.join(GIT_METADATA_DIR_NAME);
-    let git_state =
-        lexical_entry_state(&git).map_err(|source| projection_io("inspect", &git, source))?;
+    let git_state = lexical_entry_state(&git).map_err(|source| {
+        CapsuleProgramError::SourceProjection(format!(
+            "failed to inspect {GIT_METADATA_DIR_NAME}: {source}"
+        ))
+    })?;
     match git_state {
         LexicalEntryState::Absent => Ok(()),
         LexicalEntryState::PresentRegularFile | LexicalEntryState::PresentInvalidNode(_) => {
             Err(CapsuleProgramError::NotPinnedMaterialization(format!(
-                "{} contains a root-level {GIT_METADATA_DIR_NAME}: a Git checkout is a working \
-                 tree, and ADR-014 §1 admits only a pinned source materialization (immutable \
-                 archive / source_materialize output) in Phase 0",
-                root.display(),
+                "{SOURCE_ROOT_LABEL} contains a root-level {GIT_METADATA_DIR_NAME}: a Git \
+                 checkout is a working tree, and ADR-014 §1 admits only a pinned source \
+                 materialization (immutable archive / source_materialize output) in Phase 0"
             )))
         }
     }
@@ -695,6 +751,14 @@ fn set_extracted_file_mode(_path: &Path, _mode: u32) -> Result<(), CapsuleProgra
 /// The control files of a selected capsule root (ADR-014 §1): the manifest
 /// plus the ONE selected canonical lock path, if any. These are the only
 /// paths the projection excludes.
+///
+/// The fields are absolute paths under the root they were resolved from, and
+/// the derived `Debug` prints them — which is safe only because no value a
+/// consumer of this crate can obtain carries a process-private root. The one
+/// resolved over the staging copy lives inside [`StagedCapsuleSource`], which
+/// exposes no accessor for it; every other value comes from
+/// [`resolve_capsule_control_files`] over a root the caller supplied and
+/// already holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapsuleControlFiles {
     pub manifest: PathBuf,
@@ -717,8 +781,18 @@ pub struct CapsuleControlFiles {
 ///
 /// In the derivation flow this runs against the staging copy, after the A1v2
 /// pass (step 1) has already rejected symlinks and special nodes in the
-/// original tree.
+/// original tree. That is also why every rejection here is relativized against
+/// `selected_root`: in the derivation flow the root is the process-private
+/// staging copy, and a caller shown `<staging>/capsule.toml` would be shown a
+/// path it can write to and cannot act on.
 pub fn resolve_capsule_control_files(
+    selected_root: &Path,
+) -> Result<CapsuleControlFiles, CapsuleProgramError> {
+    resolve_control_files_in(selected_root)
+        .map_err(|error| relativize_roots(error, &[selected_root]))
+}
+
+fn resolve_control_files_in(
     selected_root: &Path,
 ) -> Result<CapsuleControlFiles, CapsuleProgramError> {
     let manifest = selected_root.join(CAPSULE_MANIFEST_FILE_NAME);
@@ -781,9 +855,13 @@ fn lock_selection_error(error: CanonicalLockSelectionError) -> CapsuleProgramErr
 /// with [`Self::into_projected`] removes exactly the resolved control files;
 /// the remaining tree IS the `ProgramSourceProjectionV1`. The staging directory
 /// is removed when the value is dropped, so nothing escapes but the digest.
+///
+/// Deliberately has no `Debug`: both roots it holds are process-private, and a
+/// derived one would print them straight out of the private fields.
 pub struct StagedCapsuleSource {
-    /// The pinned root this copy was taken from — used only to attribute error
-    /// messages to a path the caller recognizes.
+    /// The pinned root this copy was taken from — kept only so
+    /// [`Self::relativize`] can strip it out of a message that some frozen
+    /// layer below built from an absolute path.
     origin: PathBuf,
     staging: TempDir,
     control_files: CapsuleControlFiles,
@@ -803,25 +881,29 @@ impl StagedCapsuleSource {
 
         // Step 1: A1v2 admissibility over the ORIGINAL tree, control files
         // included. The hash is discarded — this is the gate, not the digest.
-        materialized_source_tree_hash(origin).map_err(|source| {
-            CapsuleProgramError::SourceProjection(format!(
-                "A1v2 admissibility rejected the source tree at {}: {source}",
-                origin.display(),
-            ))
-        })?;
+        // A1's own message embeds the offending path absolutely; relativizing
+        // below is what keeps the pinned root out of it.
+        materialized_source_tree_hash(origin)
+            .map_err(|source| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "A1v2 admissibility rejected the pinned source tree: {source}"
+                ))
+            })
+            .map_err(|error| relativize_roots(error, &[origin]))?;
 
         let staging = TempDir::new().map_err(|source| {
             CapsuleProgramError::SourceProjection(format!(
                 "failed to create the staging directory: {source}"
             ))
         })?;
-        copy_tree(origin, staging.path())?;
+        copy_tree(origin, staging.path())
+            .map_err(|error| relativize_roots(error, &[origin, staging.path()]))?;
 
         // Steps 2–3, resolved in the copy: from here on the original tree is
         // never read again, so nothing an outside process does to it can reach
-        // the manifest intent or the digest.
-        let control_files = resolve_capsule_control_files(staging.path())
-            .map_err(|error| attribute_to_origin(error, staging.path(), origin))?;
+        // the manifest intent or the digest. `resolve_capsule_control_files`
+        // already relativizes against the root it was given — the staging copy.
+        let control_files = resolve_capsule_control_files(staging.path())?;
 
         Ok(Self {
             origin: origin.to_path_buf(),
@@ -844,18 +926,23 @@ impl StagedCapsuleSource {
     }
 
     /// `<staging>/capsule.toml` — the only manifest a derivation may read.
-    pub fn manifest_path(&self) -> &Path {
+    ///
+    /// `pub(crate)` for the same reason as [`Self::root`]: this is an absolute
+    /// path into the staging tree, so handing it to a consumer of this crate
+    /// would hand it a file it can rewrite between the manifest read and the
+    /// digest.
+    pub(crate) fn manifest_path(&self) -> &Path {
         &self.control_files.manifest
     }
 
-    pub fn control_files(&self) -> &CapsuleControlFiles {
-        &self.control_files
-    }
-
-    /// Rewrites a staging path in `error` back to the pinned root, so a caller
-    /// is never shown a process-private temporary path.
-    pub fn attribute_to_origin(&self, error: CapsuleProgramError) -> CapsuleProgramError {
-        attribute_to_origin(error, self.staging.path(), &self.origin)
+    /// Strips both process-private roots out of `error`, leaving every path it
+    /// names relative to the tree it lives in. Applied by
+    /// `derive_capsule_program_contract` to the layers that read the staging
+    /// tree through a path — manifest loading and the strict adapter's
+    /// `SourceExistingPath` checks — because those build their messages from
+    /// the absolute path they were handed.
+    pub(crate) fn relativize(&self, error: CapsuleProgramError) -> CapsuleProgramError {
+        relativize_roots(error, &[self.staging.path(), &self.origin])
     }
 
     /// Step 4–5: remove exactly the resolved control files. What remains is the
@@ -869,10 +956,9 @@ impl StagedCapsuleSource {
         } = self;
         let remove = |path: &Path| -> Result<(), CapsuleProgramError> {
             fs::remove_file(path).map_err(|source| {
-                attribute_to_origin(
+                relativize_roots(
                     projection_io("exclude control file", path, source),
-                    staging.path(),
-                    &origin,
+                    &[staging.path(), &origin],
                 )
             })
         };
@@ -886,6 +972,9 @@ impl StagedCapsuleSource {
 
 /// The staging tree with the control files removed: the
 /// `ProgramSourceProjectionV1` itself.
+///
+/// Deliberately has no `Debug`, for the same reason as [`StagedCapsuleSource`]:
+/// the only field is the process-private staging directory.
 pub struct ProjectedCapsuleSource {
     staging: TempDir,
 }
@@ -910,18 +999,21 @@ impl ProjectedCapsuleSource {
     /// this fails closed.
     pub fn projected_file_paths(&self) -> Result<Vec<String>, CapsuleProgramError> {
         let mut paths = Vec::new();
-        collect_projected_files(self.staging.path(), "", &mut paths)?;
+        collect_projected_files(self.staging.path(), "", &mut paths)
+            .map_err(|error| relativize_roots(error, &[self.staging.path()]))?;
         paths.sort();
         Ok(paths)
     }
 
     /// Step 6: the frozen A1 digest over the projected root.
     pub fn source_contract(&self) -> Result<ProgramSourceContract, CapsuleProgramError> {
-        let blob_hash = materialized_source_tree_hash(self.staging.path()).map_err(|source| {
-            CapsuleProgramError::SourceProjection(format!(
-                "failed to hash the projected source tree: {source}"
-            ))
-        })?;
+        let blob_hash = materialized_source_tree_hash(self.staging.path())
+            .map_err(|source| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "failed to hash the projected source tree: {source}"
+                ))
+            })
+            .map_err(|error| relativize_roots(error, &[self.staging.path()]))?;
         Ok(ProgramSourceContract {
             digest: ProgramSourceDigest::parse(&blob_hash)?,
             projection_schema: ProgramSourceProjectionSchemaV1,
@@ -1040,24 +1132,57 @@ fn projection_io(action: &str, path: &Path, source: std::io::Error) -> CapsulePr
     ))
 }
 
-/// Maps a staging path back onto the pinned root inside an error message. The
-/// staging directory is an implementation detail; a caller must be able to act
-/// on the path it supplied.
-fn attribute_to_origin(
-    error: CapsuleProgramError,
-    staging: &Path,
-    origin: &Path,
-) -> CapsuleProgramError {
-    let (Some(staging), Some(origin)) = (staging.to_str(), origin.to_str()) else {
-        return error;
+/// Rewrites every absolute path under one of `roots` into a path relative to
+/// that root, so no caller-visible message names a directory the caller could
+/// write to.
+///
+/// This replaces the earlier "rewrite the staging path back to the pinned root"
+/// mapping, which was not enough: for an archive-minted proof the pinned root
+/// IS a process-private extraction directory this crate owns, so attributing a
+/// message to it discloses exactly the path
+/// [`VerifiedPinnedSourceMaterialization::root`] withholds — and names
+/// something the caller cannot act on anyway. A path relative to the root is
+/// what the caller's own input (archive entry, source tree) is expressed in.
+///
+/// Textual rather than structural because the offending path is usually
+/// embedded by a layer below this one — A1v2 admissibility names the entry it
+/// rejected, `load_manifest` names the file it failed to parse — and those
+/// messages are frozen `String`s by the time they arrive. Longest-form first:
+/// `<root>/` collapses to the relative remainder, and only a bare `<root>` left
+/// over becomes [`SOURCE_ROOT_LABEL`].
+///
+/// Variants carrying no path (ids, schema, field names) are returned untouched.
+fn relativize_roots(error: CapsuleProgramError, roots: &[&Path]) -> CapsuleProgramError {
+    let rewrite = |message: String| -> String {
+        roots.iter().fold(message, |message, root| {
+            let Some(root) = root.to_str() else {
+                return message;
+            };
+            message
+                .replace(&format!("{root}{}", std::path::MAIN_SEPARATOR), "")
+                .replace(root, SOURCE_ROOT_LABEL)
+        })
     };
     match error {
         CapsuleProgramError::SourceProjection(message) => {
-            CapsuleProgramError::SourceProjection(message.replace(staging, origin))
+            CapsuleProgramError::SourceProjection(rewrite(message))
         }
         CapsuleProgramError::ManifestLoad(message) => {
-            CapsuleProgramError::ManifestLoad(message.replace(staging, origin))
+            CapsuleProgramError::ManifestLoad(rewrite(message))
         }
+        CapsuleProgramError::NotPinnedMaterialization(message) => {
+            CapsuleProgramError::NotPinnedMaterialization(rewrite(message))
+        }
+        CapsuleProgramError::ManifestInput(message) => {
+            CapsuleProgramError::ManifestInput(rewrite(message))
+        }
+        CapsuleProgramError::Canonicalization(message) => {
+            CapsuleProgramError::Canonicalization(rewrite(message))
+        }
+        CapsuleProgramError::InvalidValue { field, reason } => CapsuleProgramError::InvalidValue {
+            field,
+            reason: rewrite(reason),
+        },
         other => other,
     }
 }
@@ -1158,9 +1283,10 @@ mod tests {
             message.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME),
             "{message}"
         );
-        // The message names the caller's root, not the staging copy.
+        // The message names the two lock spellings relative to the root, and
+        // neither the staging copy nor the pinned root itself.
         assert!(
-            message.contains(&tmp.path().display().to_string()),
+            !message.contains(&tmp.path().display().to_string()),
             "{message}"
         );
     }
@@ -1350,8 +1476,10 @@ mod tests {
         };
         assert!(message.contains(CAPSULE_MANIFEST_FILE_NAME), "{message}");
         assert!(message.contains("does not exist"), "{message}");
+        // The manifest is named relative to the root, never as the absolute
+        // path of the staging copy or of the pinned tree behind it.
         assert!(
-            message.contains(&tmp.path().display().to_string()),
+            !message.contains(&tmp.path().display().to_string()),
             "{message}"
         );
     }
@@ -1797,6 +1925,153 @@ mod tests {
             project_program_source(&proof),
             Err(CapsuleProgramError::SourceProjection(_))
         ));
+    }
+
+    // ── observability boundary (Debug + error text) ──────────────────────
+
+    /// `Debug` is an accessor by another name: a derived one prints the private
+    /// `root` field, and the `TempDir` guard's own `Debug` prints it a second
+    /// time, so narrowing [`VerifiedPinnedSourceMaterialization::root`] to
+    /// `pub(crate)` alone would leave the writable path in reach of every
+    /// holder. Asserted for both mints, since only the archive-minted one owns
+    /// its root but both must redact.
+    #[test]
+    fn debug_discloses_neither_the_pinned_root_nor_the_ownership_guard() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        let (_archive_dir, archive) = materialize(tree.path());
+
+        let earned = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap();
+        let earned_root = earned.root().display().to_string();
+        let rendered = format!("{earned:?}");
+        assert!(
+            !rendered.contains(&earned_root),
+            "the extracted root must not be observable: {rendered}"
+        );
+        // The `TempDir` guard prints the same path through its own `Debug`, so
+        // the whole field must be withheld, not just renamed.
+        assert!(!rendered.contains("TempDir"), "{rendered}");
+        assert!(!rendered.contains("owned_root"), "{rendered}");
+        // Non-vacuous: the value still identifies itself.
+        assert!(
+            rendered.contains("VerifiedPinnedSourceMaterialization"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+
+        let asserted = pinned(tree.path());
+        let rendered = format!("{asserted:?}");
+        assert!(
+            !rendered.contains(&tree.path().display().to_string()),
+            "{rendered}"
+        );
+    }
+
+    /// Redacting `Debug` must not change what the value IS: `Clone`/`PartialEq`
+    /// still compare the pinned root, which is what
+    /// `archive_minted_root_outlives_the_call_and_dies_with_the_last_handle`
+    /// relies on.
+    #[test]
+    fn redacted_debug_leaves_clone_and_equality_unchanged() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        let proof = pinned(tree.path());
+
+        assert_eq!(proof, proof.clone());
+
+        let other = TempDir::new().unwrap();
+        write_base_tree(other.path());
+        assert_ne!(proof, pinned(other.path()));
+    }
+
+    /// A missing manifest, derived from an ARCHIVE-minted proof: the root the
+    /// message would have named is the extraction directory this crate owns, so
+    /// naming it disclosed a writable path AND told the caller nothing.
+    #[test]
+    fn missing_manifest_from_an_archive_minted_proof_names_a_relative_path() {
+        let tree = TempDir::new().unwrap();
+        write_file(tree.path(), "src/main.py", b"print('hi')\n");
+        let (_archive_dir, archive) = materialize(tree.path());
+        let proof = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap();
+        let private_root = proof.root().display().to_string();
+
+        let err = project_program_source(&proof).unwrap_err();
+        let CapsuleProgramError::SourceProjection(message) = &err else {
+            panic!("expected SourceProjection, got {err:?}");
+        };
+        assert!(
+            !message.contains(&private_root),
+            "the process-private extraction root must not reach the message: {message}"
+        );
+        // Non-vacuous: redaction that dropped the path entirely would leave the
+        // message unactionable and would still satisfy the assertion above.
+        assert!(
+            message.contains("required manifest capsule.toml does not exist"),
+            "{message}"
+        );
+    }
+
+    /// Lock coexistence, same proof shape: the rejection names both spellings
+    /// relative to the root.
+    #[test]
+    fn lock_coexistence_from_an_archive_minted_proof_names_relative_paths() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        write_file(tree.path(), CAPSULE_LOCK_FILE_NAME, LOCK_BODY);
+        write_file(
+            tree.path(),
+            DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+            LOCK_BODY,
+        );
+        let (_archive_dir, archive) = materialize(tree.path());
+        let proof = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap();
+        let private_root = proof.root().display().to_string();
+
+        let err = project_program_source(&proof).unwrap_err();
+        let CapsuleProgramError::SourceProjection(message) = &err else {
+            panic!("expected SourceProjection, got {err:?}");
+        };
+        assert!(!message.contains(&private_root), "{message}");
+        assert!(message.contains(CAPSULE_LOCK_FILE_NAME), "{message}");
+        assert!(
+            message.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME),
+            "{message}"
+        );
+    }
+
+    /// An archive whose extracted tree carries a root-level `.git` is rejected
+    /// inside `from_source_archive`, where the only root in scope is the
+    /// extraction directory. The archive path itself is the caller's own input
+    /// and stays absolute — that is the diagnostic the caller can act on.
+    #[test]
+    fn archive_rejections_name_the_archive_but_never_the_extraction_root() {
+        let tree = TempDir::new().unwrap();
+        write_base_tree(tree.path());
+        write_file(tree.path(), ".git/HEAD", b"ref: refs/heads/main\n");
+        let (_archive_dir, archive) = materialize(tree.path());
+
+        let err = VerifiedPinnedSourceMaterialization::from_source_archive(&archive).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(message.contains(GIT_METADATA_DIR_NAME), "{message}");
+        // The extraction root is gone with the rejected proof, so it cannot be
+        // compared directly; no temp-dir path may appear at all.
+        assert!(
+            !message.contains(std::env::temp_dir().to_str().unwrap()),
+            "{message}"
+        );
+
+        // The caller's own archive path is kept, and only that one.
+        let missing = archive.parent().unwrap().join("absent.tar.zst");
+        let err = VerifiedPinnedSourceMaterialization::from_source_archive(&missing).unwrap_err();
+        let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
+            panic!("expected NotPinnedMaterialization, got {err:?}");
+        };
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "the archive the caller passed stays absolute: {message}"
+        );
     }
 
     /// Control-file exclusion is by removal from the staging copy; the file set

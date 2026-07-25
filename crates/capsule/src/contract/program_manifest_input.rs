@@ -1340,7 +1340,7 @@ fn existing_path(
             format!("'{value}' is not a regular file or directory of the expected kind"),
         ));
     }
-    reject_control_file(field, value, &joined, selected_root.control_files)?;
+    reject_control_file(field, value, &joined, selected_root)?;
     Ok(SourceExistingPath(relative))
 }
 
@@ -1355,8 +1355,9 @@ fn reject_control_file(
     field: &'static str,
     value: &str,
     joined: &Path,
-    control_files: &CapsuleControlFiles,
+    selected_root: SelectedSourceRoot<'_>,
 ) -> Result<(), CapsuleProgramError> {
+    let control_files = selected_root.control_files;
     // A path that cannot be resolved is never assumed to differ from a
     // control file.
     let resolve = |path: &Path| -> Result<PathBuf, CapsuleProgramError> {
@@ -1376,12 +1377,17 @@ fn reject_control_file(
         if resolved != resolve(candidate)? {
             continue;
         }
-        // Named by file name, never by absolute path: in the derivation flow
-        // the selected root is a process-private staging copy.
+        // Named relative to the selected root, never absolutely: in the
+        // derivation flow that root is a process-private staging copy, so an
+        // absolute path would both disclose a writable directory and name
+        // something the caller cannot act on. Every fallback is a leaf name or
+        // a fixed label — no branch can yield an absolute path.
         let name = candidate
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| candidate.display().to_string());
+            .strip_prefix(selected_root.root)
+            .ok()
+            .or_else(|| candidate.file_name().map(Path::new))
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "the capsule control file".to_string());
         return Err(invalid_value(
             field,
             format!(

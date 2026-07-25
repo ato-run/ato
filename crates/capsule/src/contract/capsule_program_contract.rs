@@ -3823,16 +3823,20 @@ pub fn derive_capsule_program_contract(
     let staged = StagedCapsuleSource::stage(pinned)?;
 
     // The manifest comes from the staging copy, so the bytes parsed here are
-    // the bytes the digest below was taken over.
-    let loaded =
-        crate::contract::manifest::load_manifest(staged.manifest_path()).map_err(|error| {
-            staged.attribute_to_origin(CapsuleProgramError::ManifestLoad(error.to_string()))
-        })?;
+    // the bytes the digest below was taken over. Both layers are handed an
+    // absolute staging path and build their messages from it — `load_manifest`
+    // embeds the manifest path, the strict adapter resolves every
+    // `SourceExistingPath` against the root — so both are relativized: the
+    // staging copy is process-private, and so is the pinned root behind it
+    // whenever the proof was archive-minted.
+    let loaded = crate::contract::manifest::load_manifest(staged.manifest_path())
+        .map_err(|error| staged.relativize(CapsuleProgramError::ManifestLoad(error.to_string())))?;
     let manifest_intent = crate::contract::program_manifest_input::program_intent_from_v03(
         &loaded.model,
         &loaded.raw_text,
         staged.root(),
-    )?;
+    )
+    .map_err(|error| staged.relativize(error))?;
 
     // Steps 4-6: exclude exactly the resolved control files, then hash.
     let source = staged.into_projected()?.source_contract()?;
@@ -3962,6 +3966,24 @@ port = 8080
         VerifiedPinnedSourceMaterialization::for_test(root).expect("pinned materialization")
     }
 
+    /// The EARNED mint, over a tree frozen by the real materializer. Used by the
+    /// error-text tests because it is the case the `for_test` mint cannot model:
+    /// the pinned root is the extraction directory this crate owns, so an
+    /// absolute path in a message is a process-private path the caller can
+    /// neither act on nor be trusted with. The returned `TempDir` keeps the
+    /// archive alive.
+    fn archive_pinned(
+        tree: &std::path::Path,
+    ) -> (tempfile::TempDir, VerifiedPinnedSourceMaterialization) {
+        let archive_dir = tempfile::tempdir().expect("archive dir");
+        let archive = archive_dir.path().join("source.tar.zst");
+        crate::foundation::blob::materialize_source_archive(tree, &archive)
+            .expect("materialize source archive");
+        let pinned = VerifiedPinnedSourceMaterialization::from_source_archive(&archive)
+            .expect("archive extracts to a pinned materialization");
+        (archive_dir, pinned)
+    }
+
     #[test]
     fn derive_entrypoint_is_deterministic_and_lock_file_immune() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -4017,19 +4039,117 @@ port = 8080
         ));
     }
 
-    /// A malformed manifest fails at load time, and the message names the
-    /// caller's root — never the process-private staging copy it was read from.
+    /// A malformed manifest fails at load time. `load_manifest` builds its own
+    /// message from the absolute path it was handed — the staging copy — so the
+    /// entrypoint relativizes it: the manifest is named `capsule.toml`, and
+    /// neither the staging copy nor the pinned root behind it appears.
+    ///
+    /// Derived from an ARCHIVE-minted proof, because that is the case where
+    /// even "attribute it back to the pinned root" would still be disclosing a
+    /// process-private directory.
     #[test]
-    fn derive_entrypoint_reports_manifest_errors_against_the_pinned_root() {
-        let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join("capsule.toml"), b"not = [valid").expect("manifest");
+    fn derive_entrypoint_reports_manifest_load_errors_relative_to_the_root() {
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tree.path().join("capsule.toml"), b"not = [valid").expect("manifest");
+        let (_archive_dir, proof) = archive_pinned(tree.path());
+        let private_root = proof.root().display().to_string();
 
-        let error = derive_capsule_program_contract(&pinned(root.path())).unwrap_err();
+        let error = derive_capsule_program_contract(&proof).unwrap_err();
         let CapsuleProgramError::ManifestLoad(message) = &error else {
             panic!("expected ManifestLoad, got {error:?}");
         };
         assert!(
-            message.contains(&root.path().display().to_string()),
+            !message.contains(&private_root),
+            "the extraction root must not reach the message: {message}"
+        );
+        assert!(
+            !message.contains(&tree.path().display().to_string()),
+            "{message}"
+        );
+        // Non-vacuous: the message still names the file that failed to parse.
+        assert!(message.contains("capsule.toml"), "{message}");
+    }
+
+    /// A `SourceExistingPath` rejection from the strict adapter. The adapter
+    /// resolves every such path against the staging root, so its rejection is
+    /// relativized by the same seam — while still naming the offending path in
+    /// the spelling the author wrote.
+    #[test]
+    fn derive_entrypoint_reports_source_existing_path_rejections_relative_to_the_root() {
+        let model_manifest = |path: &str| {
+            format!(
+                r#"
+schema_version = "0.3"
+name = "gate-fixture"
+version = "0.1.0"
+type = "app"
+default_target = "chat"
+
+[targets.chat]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_version = "b9754"
+model = "{path}"
+"#
+            )
+        };
+
+        // (a) the model names a control file the projection excludes.
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tree.path().join("capsule.toml"),
+            model_manifest("capsule.toml"),
+        )
+        .expect("manifest");
+        let (_archive_dir, proof) = archive_pinned(tree.path());
+        let private_root = proof.root().display().to_string();
+
+        let error = derive_capsule_program_contract(&proof).unwrap_err();
+        let CapsuleProgramError::InvalidValue { field, reason } = &error else {
+            panic!("expected InvalidValue, got {error:?}");
+        };
+        assert_eq!(*field, "targets.*.model");
+        assert!(!reason.contains(&private_root), "{reason}");
+        // Non-vacuous: both the authored path and the control file it collided
+        // with are named, relative to the root.
+        assert!(reason.contains("'capsule.toml'"), "{reason}");
+        assert!(reason.contains("control file"), "{reason}");
+
+        // (b) the model names a path that is not in the tree at all.
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            tree.path().join("capsule.toml"),
+            model_manifest("models/absent.gguf"),
+        )
+        .expect("manifest");
+        let (_archive_dir, proof) = archive_pinned(tree.path());
+        let private_root = proof.root().display().to_string();
+
+        let error = derive_capsule_program_contract(&proof).unwrap_err();
+        let CapsuleProgramError::InvalidValue { field, reason } = &error else {
+            panic!("expected InvalidValue, got {error:?}");
+        };
+        assert_eq!(*field, "targets.*.model");
+        assert!(!reason.contains(&private_root), "{reason}");
+        assert!(reason.contains("'models/absent.gguf'"), "{reason}");
+    }
+
+    /// The projection layer's own rejection, through the entrypoint and from an
+    /// archive-minted proof: no absolute path, and the manifest still named.
+    #[test]
+    fn derive_entrypoint_reports_missing_manifest_relative_to_the_root() {
+        let tree = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tree.path().join("app.py"), b"print('hi')\n").expect("source");
+        let (_archive_dir, proof) = archive_pinned(tree.path());
+        let private_root = proof.root().display().to_string();
+
+        let error = derive_capsule_program_contract(&proof).unwrap_err();
+        let CapsuleProgramError::SourceProjection(message) = &error else {
+            panic!("expected SourceProjection, got {error:?}");
+        };
+        assert!(!message.contains(&private_root), "{message}");
+        assert!(
+            message.contains("required manifest capsule.toml does not exist"),
             "{message}"
         );
     }
