@@ -2012,8 +2012,21 @@ mod tests {
 
     #[test]
     fn resolve_host_command_path_absolutizes_existing_relative_commands() {
-        let resolved =
-            resolve_host_command_path(Path::new("tests/fixtures/native-shell-capsule"), "run.sh");
+        // Anchor the workspace on an ABSOLUTE path (the crate root) rather than a
+        // process-CWD-relative one. `resolve_host_command_path` probes
+        // `working_dir.join(command).exists()`, so a relative `working_dir`
+        // resolves against the process-global CWD — which other tests in this
+        // crate mutate via `set_current_dir` (the publish / install / preflight
+        // RAII chdir guards). Under libtest's parallel scheduler that made this
+        // test flake: when a sibling had chdir'd elsewhere, the fixture join
+        // missed, the command fell through un-canonicalized, and `is_absolute()`
+        // failed. An absolute working_dir removes the CWD dependence entirely
+        // while still exercising the relative-command → canonicalized-absolute
+        // branch (the `command` below is still relative to `working_dir`).
+        let working_dir =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native-shell-capsule");
+
+        let resolved = resolve_host_command_path(&working_dir, "run.sh");
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
