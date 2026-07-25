@@ -1596,6 +1596,114 @@ impl Drop for FcProcess {
 /// SAME concrete IO against a *live, held* guest without a new `SnapshotBackend`
 /// trait method (USER DECISION: Firecracker-concrete hold path).
 impl FirecrackerBackend {
+    /// Boot a prepared build to its SEAL POINT and hand the guest back **alive**.
+    ///
+    /// This is the boot half of [`Self::build_ready_state`], extracted verbatim so
+    /// the auto-seal build and the interactive HOLD (PR-2) cannot drift: both reach
+    /// the seal point through this one path. It configures the machine, attaches the
+    /// rootfs / durable-state / vsock devices, starts the instance, delivers
+    /// supervisor placeholders when the capsule has any, waits for health, and warms
+    /// the first-screen paths.
+    ///
+    /// It deliberately stops THERE. It does not stop/revoke the workload, does not
+    /// pause, does not snapshot, and does not tear anything down — the returned
+    /// [`FcProcess`] is live, and whoever holds it owns the guest's lifetime
+    /// (dropping it kills and reaps the guest). The returned UDS path is the vsock
+    /// channel, needed by the caller only when the capsule has placeholders.
+    ///
+    /// Callers must have already run the preflight gate, acquired the build lock,
+    /// stored the rootfs, prepared the state volumes, and brought the network up;
+    /// this method does none of that.
+    #[allow(clippy::too_many_arguments)]
+    fn boot_to_seal_point(
+        &self,
+        input: &BuildReadyStateInput<'_>,
+        build_dir: &Path,
+        rootfs_path: &Path,
+        state_drive_paths: &[PathBuf],
+        supervisor_drive: Option<&SupervisorDrive>,
+        port: u16,
+        path: &str,
+    ) -> Result<(FcProcess, Option<PathBuf>), SnapshotError> {
+        let fc = bench::time("build.start_fc", || {
+            self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
+        })?;
+        self.configure_boot(
+            &fc,
+            &self.config.kernel_path,
+            rootfs_path,
+            self.config.rootfs_read_only,
+            // v1.2 PR 3d: supervisor builds get the page-hygiene cmdline so freed
+            // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
+            supervisor_drive.is_some(),
+        )?;
+        // v1.6 (ato#983) Slice 2: attach each durable state volume as a
+        // writable, non-root drive BEFORE boot/snapshot — Firecracker records
+        // the whole device set (incl. these) into the snapshot it takes below,
+        // so restore's `PUT /snapshot/load` recreates them without any new
+        // `PUT /drives` call (mirrors how the rootfs drive itself works).
+        self.configure_state_drives(&fc, state_drive_paths)?;
+        // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
+        // guest-agent binding channel is captured in the snapshot. The uds_path is
+        // baked into the snapshot (FC forbids overriding it at load), so it is a
+        // deterministic per-capsule path both build and restore compute.
+        let vsock_uds = if vsock_enabled() {
+            let uds = vsock_uds_path(&input.capsule_manifest_hash);
+            if let Some(d) = uds.parent() {
+                std::fs::create_dir_all(d)
+                    .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+            }
+            let _ = std::fs::remove_file(&uds);
+            fc.api(
+                self,
+                "PUT",
+                "/vsock",
+                Some(&json!({ "guest_cid": 3, "uds_path": uds.to_string_lossy() }).to_string()),
+            )?;
+            Some(uds)
+        } else {
+            None
+        };
+        bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
+            fc.api(
+                self,
+                "PUT",
+                "/actions",
+                Some(&json!({"action_type":"InstanceStart"}).to_string()),
+            )?;
+            // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
+            // workload only at bound-ready — deliver the placeholder leases
+            // first, THEN health. A ZERO-binding supervisor build (dockerfile
+            // import, ato#1002 D4) skips delivery entirely: the agent is
+            // vacuously bound-ready and started the workload at boot (ato#1001),
+            // so the health wait below is reached directly.
+            if let Some(drive) = supervisor_drive.filter(|d| d.has_placeholders()) {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err(
+                        "supervisor build: vsock uds missing (unreachable: gated above)",
+                    )
+                })?;
+                self.supervisor_deliver_placeholders(uds, drive)?;
+            }
+            self.wait_health(port, path)?; // secret-free seal point (placeholder-only for supervisor builds)
+            // Warm the user-facing first-screen paths into guest memory BEFORE
+            // the Pause+Snapshot, so the sealed image already carries template
+            // rendering / JIT / DB-init / First-Frame-prep — the user's first
+            // request then hits warm pages instead of redoing that work after
+            // resume. Skipped for the required-binding supervisor carve-out:
+            // its workload is stopped + revoked before the seal (in the caller)
+            // and the equivalent first-screen work is driven via the guest-agent
+            // bound-ready transition at restore time, so warming here would be
+            // wasted I/O against a workload about to be torn down.
+            let warmup_cap = !supervisor_drive.is_some_and(|d| d.has_placeholders());
+            if warmup_cap {
+                self.warmup_paths(port, &input.restore_contract)?;
+            }
+            Ok(())
+        })?;
+        Ok((fc, vsock_uds))
+    }
+
     /// Pause → `PUT /snapshot/create` → read of a live guest, factored out of
     /// [`Self::build_ready_state`] so the identical primitive is reusable by the
     /// interactive HOLD path. Pauses the guest, takes a `Full` snapshot to
@@ -1808,6 +1916,9 @@ impl SnapshotBackend for FirecrackerBackend {
         &self,
         input: BuildReadyStateInput<'_>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
+        // NOTE: the boot half of this lives in `boot_to_seal_point` (an inherent
+        // method), which hands the guest back ALIVE. The auto-seal path below
+        // pauses and drops it; the interactive HOLD path (PR-2) keeps it running.
         // PREFLIGHT GATE (fail closed BEFORE any store / stable-rootfs write / boot):
         // a declared marker in rootfs/runtime/dependency/app, or a provider/env
         // secret in app/dependency, rejects the build before secret-bearing rootfs
@@ -1920,112 +2031,44 @@ impl SnapshotBackend for FirecrackerBackend {
             .map_err(|error| self.backend_err(error))?;
         self.net_up(&network_ports)?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
-            let fc = bench::time("build.start_fc", || {
-                self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
-            })?;
-            self.configure_boot(
-                &fc,
-                &self.config.kernel_path,
+            // The guest is booted to its seal point by the shared primitive and
+            // handed back ALIVE; this path then stops+revokes (supervisor only)
+            // and pauses it, and `fc` drops at the end of this closure.
+            let (fc, vsock_uds) = self.boot_to_seal_point(
+                &input,
+                &build_dir,
                 &rootfs_path,
-                self.config.rootfs_read_only,
-                // v1.2 PR 3d: supervisor builds get the page-hygiene cmdline so freed
-                // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
-                supervisor_drive.is_some(),
+                &state_drive_paths,
+                supervisor_drive.as_ref(),
+                port,
+                &path,
             )?;
-            // v1.6 (ato#983) Slice 2: attach each durable state volume as a
-            // writable, non-root drive BEFORE boot/snapshot — Firecracker records
-            // the whole device set (incl. these) into the snapshot it takes below,
-            // so restore's `PUT /snapshot/load` recreates them without any new
-            // `PUT /drives` call (mirrors how the rootfs drive itself works).
-            self.configure_state_drives(&fc, &state_drive_paths)?;
-            // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
-            // guest-agent binding channel is captured in the snapshot. The uds_path is
-            // baked into the snapshot (FC forbids overriding it at load), so it is a
-            // deterministic per-capsule path both build and restore compute.
-            let vsock_uds = if vsock_enabled() {
-                let uds = vsock_uds_path(&input.capsule_manifest_hash);
-                if let Some(d) = uds.parent() {
-                    std::fs::create_dir_all(d)
-                        .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
-                }
-                let _ = std::fs::remove_file(&uds);
-                fc.api(
-                    self,
-                    "PUT",
-                    "/vsock",
-                    Some(
-                        &json!({
-                            "guest_cid": 3, "uds_path": uds.to_string_lossy()
-                        })
-                        .to_string(),
-                    ),
-                )?;
-                Some(uds)
-            } else {
-                None
-            };
-            bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
-                fc.api(
-                    self,
-                    "PUT",
-                    "/actions",
-                    Some(&json!({"action_type":"InstanceStart"}).to_string()),
-                )?;
-                // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
-                // workload only at bound-ready — deliver the placeholder leases
-                // first, THEN health. A ZERO-binding supervisor build (dockerfile
-                // import, ato#1002 D4) skips delivery entirely: the agent is
-                // vacuously bound-ready and started the workload at boot (ato#1001),
-                // so the health wait below is reached directly.
-                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
-                    let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err(
-                            "supervisor build: vsock uds missing (unreachable: gated above)",
-                        )
-                    })?;
-                    self.supervisor_deliver_placeholders(uds, drive)?;
-                }
-                self.wait_health(port, &path)?; // secret-free seal point (placeholder-only for supervisor builds)
-                // Warm the user-facing first-screen paths into guest memory BEFORE
-                // the Pause+Snapshot, so the sealed image already carries template
-                // rendering / JIT / DB-init / First-Frame-prep — the user's first
-                // request then hits warm pages instead of redoing that work after
-                // resume. Skipped for the required-binding supervisor carve-out:
-                // its workload is stopped + revoked before the seal (below) and the
-                // equivalent first-screen work is driven via the guest-agent
-                // bound-ready transition at restore time, so warming here would be
-                // wasted I/O against a workload about to be torn down.
-                let warmup_cap = !supervisor_drive
-                    .as_ref()
-                    .is_some_and(|d| d.has_placeholders());
-                if warmup_cap {
-                    self.warmup_paths(port, &input.restore_contract)?;
-                }
-                // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
-                // pause/snapshot, so the seal carries no running workload and no
-                // binding material in guest tmpfs (contract order: stop, then revoke).
-                // Then VERIFY the listener is gone — acks alone are not proof (a
-                // wrapper-shell kill once left the orphaned app serving).
-                //
-                // ato#1002 D4: the ZERO-binding supervisor build SKIPS stop+revoke
-                // and seals with the workload RUNNING — there is no placeholder to
-                // scrub (nothing was delivered, so the seal is secret-free by
-                // construction), and a workload-down seal could never start again
-                // after restore: nothing is ever delivered to a zero-binding
-                // session, so no bound-ready transition would relaunch it. Its
-                // seal contract is exactly v1.0 no-binding: boot, healthcheck
-                // answers — see `restore_uses_agent_probe` for the restore side.
-                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
-                    let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err(
-                            "supervisor build: vsock uds missing (unreachable: gated above)",
-                        )
-                    })?;
-                    self.supervisor_stop_and_revoke(uds, drive)?;
-                    self.wait_workload_down(port, Duration::from_secs(10))?;
-                }
-                Ok(())
-            })?;
+            // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
+            // pause/snapshot, so the seal carries no running workload and no
+            // binding material in guest tmpfs (contract order: stop, then revoke).
+            // Then VERIFY the listener is gone — acks alone are not proof (a
+            // wrapper-shell kill once left the orphaned app serving).
+            //
+            // ato#1002 D4: the ZERO-binding supervisor build SKIPS stop+revoke
+            // and seals with the workload RUNNING — there is no placeholder to
+            // scrub (nothing was delivered, so the seal is secret-free by
+            // construction), and a workload-down seal could never start again
+            // after restore: nothing is ever delivered to a zero-binding
+            // session, so no bound-ready transition would relaunch it. Its
+            // seal contract is exactly v1.0 no-binding: boot, healthcheck
+            // answers — see `restore_uses_agent_probe` for the restore side.
+            //
+            // This step is what makes the AUTO-SEAL build differ from the
+            // interactive HOLD (RFC §8.3 `running`): a hold keeps the workload
+            // up, so it never runs this and instead refuses a placeholder-
+            // bearing capsule outright.
+            if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err("supervisor build: vsock uds missing (unreachable: gated above)")
+                })?;
+                self.supervisor_stop_and_revoke(uds, drive)?;
+                self.wait_workload_down(port, Duration::from_secs(10))?;
+            }
             bench::time("build.snapshot_create", || {
                 // Firecracker-concrete pause → snapshot/create → read, factored into
                 // a callable primitive reused by the interactive HOLD path (PR-2).
