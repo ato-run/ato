@@ -4216,7 +4216,9 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{RestoreVerification, restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{
+        RestoreVerification, restore_and_expose, teardown,
+    };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
         load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
@@ -8744,13 +8746,22 @@ mod tests {
         );
 
         // The sound invariant: by the time stop_proxy confirmed the stop, the
-        // accept loop's future was already dropped — proven by the sentinel having
-        // fired. A short timeout turns a fire-and-forget regression into a clean
-        // failure instead of a hang.
-        let gone = tokio::time::timeout(Duration::from_secs(5), gone_rx).await;
+        // accept loop's future was ALREADY dropped — proven by the sentinel having
+        // fired.
+        //
+        // This must be a NON-BLOCKING `try_recv`, not an awaited timeout. Awaiting
+        // (even briefly) only proves the future drops *eventually*, which a
+        // fire-and-forget `abort()` also satisfies — the runtime drops an aborted
+        // task's future moments later regardless. Verified: replacing stop_proxy's
+        // `timeout(grace, handle).await` with a non-awaiting stub still passed an
+        // awaited assertion here, so the awaited form did not test the ordering
+        // this test is named for. `try_recv` does: it can only succeed if the drop
+        // happened before stop_proxy returned.
+        let mut gone_rx = gone_rx;
         assert!(
-            matches!(gone, Ok(Ok(()))),
-            "stop_proxy must await the abort so the accept loop is provably gone",
+            matches!(gone_rx.try_recv(), Ok(())),
+            "stop_proxy must await the abort so the accept loop is provably gone \
+             BEFORE it returns — the sentinel had not fired yet",
         );
         drop(upstream);
     }
