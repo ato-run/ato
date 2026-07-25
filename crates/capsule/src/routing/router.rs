@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::debug;
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::lock_runtime::{self, ResolvedLockRuntimeModel};
 use crate::manifest;
 use crate::orchestration;
@@ -108,7 +108,7 @@ impl CompatManifestBridge {
         })
     }
 
-    pub fn from_lock(lock: &AtoLock, runtime_model: &ResolvedLockRuntimeModel) -> Result<Self> {
+    pub fn from_lock(lock: &CapsuleLock, runtime_model: &ResolvedLockRuntimeModel) -> Result<Self> {
         Self::from_manifest_value(&lock_routing::synthesize_manifest_from_lock(
             lock,
             runtime_model,
@@ -295,7 +295,7 @@ pub struct ExecutionDescriptor {
     // Transitional source-location metadata; build/publish semantic authority must not depend on these.
     pub manifest_path: PathBuf,
     pub manifest_dir: PathBuf,
-    pub lock: AtoLock,
+    pub lock: CapsuleLock,
     pub lock_path: PathBuf,
     pub workspace_root: PathBuf,
     pub profile: ExecutionProfile,
@@ -459,7 +459,7 @@ pub fn execution_descriptor_from_manifest_parts(
         compat_manifest: CompatManifestBridge::from_manifest_value(&manifest).ok(),
         manifest_path,
         manifest_dir: workspace_root.clone(),
-        lock: AtoLock::default(),
+        lock: CapsuleLock::default(),
         lock_path: PathBuf::new(),
         workspace_root,
         profile,
@@ -523,7 +523,7 @@ fn fold_top_level_runtime_tools(manifest: &mut toml::Value, selected_target: &st
 
 pub fn route_lock(
     lock_path: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     workspace_root: &Path,
     profile: ExecutionProfile,
     target_label: Option<&str>,
@@ -540,7 +540,7 @@ pub fn route_lock(
 
 pub fn route_lock_with_state_overrides(
     lock_path: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     workspace_root: &Path,
     profile: ExecutionProfile,
     target_label: Option<&str>,
@@ -1524,7 +1524,7 @@ mod tests {
     use super::{
         CompatManifestBridge, ExecutionProfile, route_manifest, route_manifest_with_state_overrides,
     };
-    use crate::ato_lock::AtoLock;
+    use crate::capsule_lock::CapsuleLock;
     use crate::lock_runtime::resolve_lock_runtime_model;
     use crate::types::Mount;
     use serde_json::json;
@@ -1691,7 +1691,7 @@ target = "db"
 
     #[test]
     fn lock_bridge_aliases_selected_multi_target_service_to_main() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "tool", "version": "1.0.0", "default_target": "default"}),

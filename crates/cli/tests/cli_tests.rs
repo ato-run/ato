@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use assert_cmd::Command;
-use capsule::ato_lock::{
-    AtoLock, UnresolvedReason, UnresolvedValue, recompute_lock_id, to_pretty_json,
+use capsule::capsule_lock::{
+    CapsuleLock, UnresolvedReason, UnresolvedValue, recompute_lock_id, to_pretty_json,
 };
 use predicates::prelude::*;
 use tempfile::tempdir;
@@ -135,8 +135,12 @@ fn inspect_diagnostics_json(target: &Path) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("inspect diagnostics json")
 }
 
-fn write_canonical_ato_lock(dir: &Path) {
-    let mut lock = AtoLock::default();
+fn write_canonical_capsule_lock(dir: &Path) {
+    write_canonical_capsule_lock_as(dir, "capsule.lock");
+}
+
+fn write_canonical_capsule_lock_as(dir: &Path, file_name: &str) {
+    let mut lock = CapsuleLock::default();
     lock.resolution.entries.insert(
         "runtime".to_string(),
         serde_json::json!({"kind": "web", "driver": "static"}),
@@ -175,7 +179,7 @@ fn write_canonical_ato_lock(dir: &Path) {
     );
     recompute_lock_id(&mut lock).expect("recompute lock id");
     fs::write(
-        dir.join("ato.lock.json"),
+        dir.join(file_name),
         to_pretty_json(&lock).expect("serialize canonical lock"),
     )
     .expect("write canonical lock");
@@ -190,7 +194,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
     )
     .expect("write observed lockfile");
 
-    let mut lock = AtoLock::default();
+    let mut lock = CapsuleLock::default();
     lock.contract.entries.insert(
         "metadata".to_string(),
         serde_json::json!({
@@ -291,7 +295,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
     });
     recompute_lock_id(&mut lock).expect("recompute inspect lock id");
     fs::write(
-        dir.join("ato.lock.json"),
+        dir.join("capsule.lock"),
         to_pretty_json(&lock).expect("serialize inspect lock"),
     )
     .expect("write inspect lock");
@@ -351,7 +355,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
         serde_json::to_string_pretty(&serde_json::json!({
             "schema_version": "1",
             "input_kind": "canonical_lock",
-            "lock_path": dir.join("ato.lock.json"),
+            "lock_path": dir.join("capsule.lock"),
             "provenance_path": dir.join(".ato/source-inference/provenance.json"),
             "binding_seed_path": dir.join(".ato/binding/seed.json"),
             "lock_id": lock.lock_id.as_ref().map(|value| value.as_str()),
@@ -387,7 +391,7 @@ fn write_inspect_lock_workspace(dir: &Path) {
         dir.join(".ato/binding/seed.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "schema_version": "1",
-            "lock_path": dir.join("ato.lock.json"),
+            "lock_path": dir.join("capsule.lock"),
             "provenance_cache_path": dir.join(".ato/source-inference/provenance-cache.json"),
             "lock_id": lock.lock_id.as_ref().map(|value| value.as_str()),
             "entries": {},
@@ -616,7 +620,7 @@ fn test_cli_help() {
 fn test_validate_prefers_canonical_lock_over_manifest() {
     let tmp = tempdir().unwrap();
     write_static_publish_project(tmp.path(), "validate-demo", "0.1.0");
-    write_canonical_ato_lock(tmp.path());
+    write_canonical_capsule_lock(tmp.path());
 
     let output = Command::cargo_bin("ato")
         .unwrap()
@@ -631,7 +635,7 @@ fn test_validate_prefers_canonical_lock_over_manifest() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let canonical_lock_path = fs::canonicalize(tmp.path().join("ato.lock.json")).unwrap();
+    let canonical_lock_path = fs::canonicalize(tmp.path().join("capsule.lock")).unwrap();
     assert_eq!(value["authoritative_input"], "canonical_lock");
     assert_eq!(
         value["canonical_lock_path"],
@@ -641,10 +645,78 @@ fn test_validate_prefers_canonical_lock_over_manifest() {
 }
 
 #[test]
+fn test_validate_resolves_deprecated_alias_lock_name_with_rename_warning() {
+    let tmp = tempdir().unwrap();
+    write_static_publish_project(tmp.path(), "validate-demo", "0.1.0");
+    // Canonical lock stored under the deprecated pre-amendment name.
+    write_canonical_capsule_lock_as(tmp.path(), "ato.lock.json");
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["validate", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let alias_lock_path = fs::canonicalize(tmp.path().join("ato.lock.json")).unwrap();
+    assert_eq!(value["authoritative_input"], "canonical_lock");
+    assert_eq!(
+        value["canonical_lock_path"],
+        alias_lock_path.display().to_string()
+    );
+    let warnings = value["warnings"].as_array().expect("warnings array");
+    assert!(
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .map(|text| text.contains("deprecated") && text.contains("capsule.lock"))
+                .unwrap_or(false)
+        }),
+        "expected alias deprecation warning, got: {warnings:?}"
+    );
+}
+
+#[test]
+fn test_validate_fails_closed_when_canonical_lock_and_alias_coexist() {
+    let tmp = tempdir().unwrap();
+    write_static_publish_project(tmp.path(), "validate-demo", "0.1.0");
+    write_canonical_capsule_lock(tmp.path());
+    write_canonical_capsule_lock_as(tmp.path(), "ato.lock.json");
+
+    let output = Command::cargo_bin("ato")
+        .unwrap()
+        .current_dir(tmp.path())
+        .args(["validate", ".", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !output.status.success(),
+        "coexisting capsule.lock and ato.lock.json must fail closed"
+    );
+    // In --json mode the structured error envelope goes to stdout.
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("Both capsule.lock and ato.lock.json exist"),
+        "output={combined}"
+    );
+}
+
+#[test]
 fn test_build_prefers_existing_canonical_lock_input() {
     let tmp = tempdir().unwrap();
     write_static_publish_project(tmp.path(), "build-demo", "0.1.0");
-    write_canonical_ato_lock(tmp.path());
+    write_canonical_capsule_lock(tmp.path());
     let output = Command::cargo_bin("ato")
         .unwrap()
         .current_dir(tmp.path())
@@ -805,7 +877,7 @@ fn test_inspect_preview_surface_reports_durable_and_ephemeral_paths() {
             .map(|entry| {
                 entry
                     .replace('\\', "/")
-                    .contains(".ato/runs/source-inference/<attempt>/ato.lock.json")
+                    .contains(".ato/runs/source-inference/<attempt>/capsule.lock")
             })
             .unwrap_or(false)
     }));
@@ -926,7 +998,7 @@ fn test_inspect_remediation_surface_prefers_lock_paths() {
 #[test]
 fn test_init_rejects_existing_canonical_lock_input() {
     let tmp = tempdir().unwrap();
-    write_canonical_ato_lock(tmp.path());
+    write_canonical_capsule_lock(tmp.path());
 
     let output = Command::cargo_bin("ato")
         .unwrap()
@@ -937,7 +1009,7 @@ fn test_init_rejects_existing_canonical_lock_input() {
 
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("ato.lock.json already exists"),
+        String::from_utf8_lossy(&output.stderr).contains("capsule.lock already exists"),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -971,7 +1043,7 @@ fn test_init_materializes_durable_workspace_state_from_cli() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(tmp.path().join("ato.lock.json").exists());
+    assert!(tmp.path().join("capsule.lock").exists());
     assert!(
         tmp.path()
             .join(".ato/source-inference/provenance.json")
@@ -986,8 +1058,8 @@ fn test_init_materializes_durable_workspace_state_from_cli() {
     assert!(tmp.path().join(".ato/policy/bundle.json").exists());
     assert!(tmp.path().join(".ato/attestations/store.json").exists());
 
-    let lock: AtoLock =
-        serde_json::from_str(&fs::read_to_string(tmp.path().join("ato.lock.json")).unwrap())
+    let lock: CapsuleLock =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("capsule.lock")).unwrap())
             .unwrap();
     assert!(lock.binding.entries.is_empty());
     assert!(lock.attestations.entries.is_empty());
@@ -1302,7 +1374,7 @@ fn test_init_help_describes_durable_baseline_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "Materialize a durable ato.lock.json baseline for a local workspace",
+            "Materialize a durable capsule.lock baseline for a local workspace",
         ))
         .stdout(predicate::str::contains("--legacy <LEGACY>").not())
         .stdout(predicate::str::contains("--yes"))
@@ -1347,8 +1419,8 @@ fn test_init_materializes_durable_baseline_for_next_project_without_writing_mani
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("Created"), "stdout={stdout}");
-    assert!(stdout.contains("ato.lock.json"), "stdout={stdout}");
-    assert!(tmp.path().join("ato.lock.json").exists());
+    assert!(stdout.contains("capsule.lock"), "stdout={stdout}");
+    assert!(tmp.path().join("capsule.lock").exists());
     assert!(
         tmp.path()
             .join(".ato/source-inference/provenance.json")

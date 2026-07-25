@@ -492,12 +492,12 @@ fn toml_string_array(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule::ato_lock::AtoLock;
+    use capsule::capsule_lock::CapsuleLock;
     use serde_json::json;
 
     #[test]
     fn manifest_projection_prefers_run_command_from_static_inference() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo-node", "version": "1.2.3", "capsule_type": "app"}),
@@ -546,7 +546,7 @@ mod tests {
 
     #[test]
     fn manifest_projection_uses_run_field_for_entrypoint_when_no_run_command() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "py-app", "version": "0.1.0", "capsule_type": "app"}),

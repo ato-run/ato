@@ -10,7 +10,7 @@ use crate::execution_plan::model::{
     ExecutionDriver, ExecutionPlan, ExecutionRuntime, ExecutionTier,
 };
 use crate::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, lockfile_output_path, resolve_existing_lockfile_path,
+    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, lockfile_output_path, resolve_existing_lockfile_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +107,7 @@ pub fn evaluate_for_mode_with_authority(
     {
         return Err(AtoExecutionError::lock_incomplete(
             "capsule.lock.json is required for Tier1 execution",
-            Some(CAPSULE_LOCK_FILE_NAME),
+            Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
         ));
     }
 
@@ -257,7 +257,7 @@ fn is_desktop_native_delivery_runtime(
         return false;
     }
 
-    let lock_path = manifest_dir.join(CAPSULE_LOCK_FILE_NAME);
+    let lock_path = manifest_dir.join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
     let Ok(bytes) = std::fs::read(&lock_path) else {
         return false;
     };
@@ -435,7 +435,8 @@ mod tests {
     #[test]
     fn node_tier1_does_not_require_sandbox_when_locks_exist() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("capsule.lock"), "").expect("write capsule.lock");
+        std::fs::write(tmp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME), "")
+            .expect("write legacy capsule.lock.json");
         std::fs::write(tmp.path().join("package-lock.json"), "{}").expect("write package-lock");
 
         let plan = sample_plan(ExecutionRuntime::Source, ExecutionDriver::Node);
@@ -471,7 +472,7 @@ mod tests {
     fn desktop_native_delivery_runtime_skips_source_native_opt_in_requirement() {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(
-            tmp.path().join(CAPSULE_LOCK_FILE_NAME),
+            tmp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             r#"{
     "contract": {
         "delivery": {
@@ -496,7 +497,8 @@ mod tests {
     #[test]
     fn node_requires_package_lock_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("capsule.lock"), "").expect("write capsule.lock");
+        std::fs::write(tmp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME), "")
+            .expect("write legacy capsule.lock.json");
         std::fs::write(tmp.path().join("source").join("package-lock.json"), "{}").unwrap_or_else(
             |_| {
                 std::fs::create_dir_all(tmp.path().join("source")).expect("create source");
@@ -513,7 +515,8 @@ mod tests {
     #[test]
     fn node_accepts_yarn_lock_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("capsule.lock"), "").expect("write capsule.lock");
+        std::fs::write(tmp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME), "")
+            .expect("write legacy capsule.lock.json");
         std::fs::write(
             tmp.path().join("source").join("yarn.lock"),
             "# yarn lockfile v1\n",
@@ -595,7 +598,8 @@ mod tests {
     #[test]
     fn web_node_requires_package_lock() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join("capsule.lock"), "").expect("write capsule.lock");
+        std::fs::write(tmp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME), "")
+            .expect("write legacy capsule.lock.json");
         let plan = sample_plan(ExecutionRuntime::Web, ExecutionDriver::Node);
         let err = evaluate(&plan, tmp.path(), "strict", false, false).expect_err("must reject");
         assert_eq!(err.code, "ATO_ERR_PROVISIONING_LOCK_INCOMPLETE");

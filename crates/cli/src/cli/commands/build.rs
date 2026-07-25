@@ -6,9 +6,11 @@ use capsule::execution_plan::error::AtoExecutionError;
 use capsule::router::{
     CompatManifestBridge, CompatProjectInput, ExecutionDescriptor, RuntimeDecision, RuntimeKind,
 };
+use capsule::routing::input_resolver::resolve_canonical_lock_path;
 use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::ffi::OsStr;
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -219,7 +221,7 @@ pub fn execute_pack_command_with_injected_manifest(
             Some(manifest_text.to_string())
         } else {
             futures::executor::block_on(reporter.warn(
-                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `ato.lock.json`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
+                "No `capsule.toml` found. Using defaults. Run `ato init` to materialize `capsule.lock`, or `ato build --init` to create an inferred compatibility `capsule.toml`.".to_string(),
             ))?;
             Some(infer_zero_config_manifest(&dir)?)
         }
@@ -707,13 +709,18 @@ fn seal_ready_state_if_enabled(
 /// Attempt to confirm this build's Capsule v1 Execution Identity
 /// (`ato.execution-contract/v1`) against an already-locked, already-verified
 /// expected contract: the D2 `execution_contract` envelope in this
-/// workspace's `ato.lock.json`, if one exists. This function only ever READS
-/// that lock — it never derives, invents, or self-attests an "expected"
-/// contract; the only sanctioned source of one is a persisted lock a
-/// producer already wrote and this call re-verifies fail-closed.
+/// workspace's canonical lock (`capsule.lock`, or its deprecated
+/// `ato.lock.json` read alias), if one exists. Which of the two names is
+/// authoritative is decided by
+/// [`capsule::routing::input_resolver::resolve_canonical_lock_path`], never by
+/// this function. It only ever READS that lock — it never derives, invents, or
+/// self-attests an "expected" contract; the only sanctioned source of one is a
+/// persisted lock a producer already wrote and this call re-verifies
+/// fail-closed.
 ///
 /// Returns:
-/// * `Ok(None)` — nothing to confirm. Either no `ato.lock.json` exists, the
+/// * `Ok(None)` — nothing to confirm. Either the workspace has no canonical
+///   lock at all, the
 ///   lock carries no D2 `execution_contract` yet, or the RFC §4.6 strict gate
 ///   legitimately refused because some required facet has no measurement
 ///   producer anywhere in this codebase yet
@@ -725,7 +732,10 @@ fn seal_ready_state_if_enabled(
 ///   satisfied. Not reachable with any producer coverage that exists in this
 ///   codebase today (see "Honest scope"), but this is the success path a
 ///   future producer PR unlocks without any further change here.
-/// * `Err(_)` — a genuine, caught problem: the lock itself failed
+/// * `Err(_)` — a genuine, caught problem: the workspace has no single
+///   authoritative lock (both `capsule.lock` and its deprecated alias exist, a
+///   non-regular node occupies a lock name, or a lock name is unreadable), the
+///   lock itself failed
 ///   verification (tampered `execution_id` / bad `lock_id`), or one of the
 ///   facets this function actually measures for real
 ///   ([`FinalizationError::FacetMismatch`] on `source.digest`,
@@ -786,11 +796,17 @@ fn attempt_v1_execution_identity(
     workspace_root: &Path,
     layers: &snapshot::BuildLayers,
 ) -> Result<Option<ExecutionContractEnvelopeV1>> {
-    let lock_path = workspace_root.join("ato.lock.json");
-    if !lock_path.is_file() {
+    // Canonical-vs-alias selection and the fail-closed presence rules belong to
+    // the shared resolver (`capsule.lock` preferred; `ato.lock.json` a
+    // deprecated read alias; coexistence, a non-regular node under a lock name,
+    // and any non-`NotFound` metadata error are errors). Only the resolver's
+    // `Ok(None)` — no lock at either name — means "nothing to confirm"; a
+    // resolver Err must propagate, never collapse into `Ok(None)`, because
+    // that would turn a fail-closed refusal into a silent skip of this gate.
+    let Some(lock_path) = resolve_canonical_lock_path(workspace_root)? else {
         return Ok(None);
-    }
-    let lock = capsule::ato_lock::load_verified_from_path(&lock_path)
+    };
+    let lock = capsule::capsule_lock::load_verified_from_path(&lock_path)
         .with_context(|| format!("verify {}", lock_path.display()))?;
     let Some(expected_envelope) = lock.execution_contract.as_ref() else {
         return Ok(None);
@@ -801,10 +817,10 @@ fn attempt_v1_execution_identity(
 
     // source.digest — real: hash the workspace as materialized right now (see
     // the doc comment above for the post-install-lifecycle caveat), EXCLUDING
-    // `ato.lock.json` itself (see `measure_workspace_source_digest`'s doc for
-    // why: hashing a tree that contains its own lock file is a hash-quine and
-    // can never stably confirm).
-    let source_digest = measure_workspace_source_digest(workspace_root)?;
+    // the resolved canonical lock itself (see `measure_workspace_source_digest`'s
+    // doc for why: hashing a tree that contains its own lock file is a
+    // hash-quine and can never stably confirm).
+    let source_digest = measure_workspace_source_digest(workspace_root, Some(&lock_path))?;
     observation = observation.measured_source_digest(source_digest);
 
     // dependencies[] — real only in the trivial zero-dependency case (see doc).
@@ -832,10 +848,12 @@ fn attempt_v1_execution_identity(
 
 /// Measure `source.digest` for `workspace_root`: the RFC-A1v2
 /// [`capsule::blob::materialized_source_tree_hash`] of the workspace,
-/// EXCLUDING the top-level `ato.lock.json` entry.
+/// EXCLUDING the top-level entry named by `canonical_lock_path` — the lock
+/// the resolver actually selected for this workspace, not a hardcoded name.
+/// `None` (the workspace has no canonical lock) excludes nothing.
 ///
-/// The exclusion is not optional polish — it fixes a real hash-quine.
-/// `ato.lock.json` lives directly inside `workspace_root` (right next to
+/// The exclusion is not optional polish — it fixes a real hash-quine. The
+/// canonical lock lives directly inside `workspace_root` (right next to
 /// `capsule.toml`), the same directory this measures as "source". If a
 /// future lock-writer embedded `source.digest` in that same file WITHOUT
 /// excluding the file from its own hash input, no value could ever be
@@ -843,23 +861,37 @@ fn attempt_v1_execution_identity(
 /// embedded digest changes the file's bytes, which changes the tree hash,
 /// which no longer matches the newly-embedded value, indefinitely — the same
 /// class of problem as hashing a directory that contains its own checksum
-/// file). Excluding `ato.lock.json` itself breaks the cycle; this mirrors why
+/// file). Excluding the lock itself breaks the cycle; this mirrors why
 /// content-addressed systems conventionally exclude their own metadata
 /// (e.g. `.git`) from what they hash as tree content.
+///
+/// The excluded name is threaded in from the resolved path rather than fixed
+/// here because spec §5 gives the lock two admissible names (`capsule.lock`
+/// and its deprecated `ato.lock.json` alias): excluding a constant would
+/// reintroduce exactly this quine for every workspace holding the other name.
 ///
 /// Implementation note: [`capsule::blob::materialized_source_tree_hash`] has
 /// no exclude-list parameter (by design — RFC A1's frozen algorithm takes a
 /// bare root path), so this copies `workspace_root` into a scratch directory
-/// minus `ato.lock.json`, then hashes the copy. Every other file is preserved
+/// minus that one entry, then hashes the copy. Every other file is preserved
 /// verbatim, including permissions bits (the A1 hash commits the executable
 /// bit) and symlinks (preserved as real symlinks so the SAME admissibility
 /// walk that would reject a symlink in `workspace_root` itself still rejects
 /// it here — silently dropping symlinks during the copy would make this
 /// measurement quietly accept a tree the frozen algorithm is specified to
 /// refuse).
-fn measure_workspace_source_digest(workspace_root: &Path) -> Result<ContentDigest> {
+fn measure_workspace_source_digest(
+    workspace_root: &Path,
+    canonical_lock_path: Option<&Path>,
+) -> Result<ContentDigest> {
+    let excluded_top_level_entry = canonical_lock_path.and_then(|path| path.file_name());
     let scratch = tempfile::tempdir().context("create scratch directory for source hashing")?;
-    copy_source_tree_excluding_top_level_lock(workspace_root, scratch.path(), true)?;
+    copy_source_tree_excluding_top_level_lock(
+        workspace_root,
+        scratch.path(),
+        true,
+        excluded_top_level_entry,
+    )?;
     let source_hash = capsule::blob::materialized_source_tree_hash(scratch.path())
         .with_context(|| format!("hash workspace source tree at {}", workspace_root.display()))?;
     ContentDigest::try_from(source_hash)
@@ -867,16 +899,21 @@ fn measure_workspace_source_digest(workspace_root: &Path) -> Result<ContentDiges
 }
 
 /// Recursively mirrors `src` into the already-created, empty directory `dst`,
-/// skipping the `ato.lock.json` entry when `is_root` (i.e. only at the top
+/// skipping `excluded_top_level_entry` when `is_root` (i.e. only at the top
 /// level — a nested file that happens to share that name is ordinary source
-/// content, not this workspace's own lock). See
+/// content, not this workspace's own lock). `None` skips nothing. See
 /// [`measure_workspace_source_digest`] for why this exclusion exists.
-fn copy_source_tree_excluding_top_level_lock(src: &Path, dst: &Path, is_root: bool) -> Result<()> {
+fn copy_source_tree_excluding_top_level_lock(
+    src: &Path,
+    dst: &Path,
+    is_root: bool,
+    excluded_top_level_entry: Option<&OsStr>,
+) -> Result<()> {
     for entry in fs::read_dir(src).with_context(|| format!("read directory {}", src.display()))? {
         let entry =
             entry.with_context(|| format!("read directory entry under {}", src.display()))?;
         let file_name = entry.file_name();
-        if is_root && file_name == "ato.lock.json" {
+        if is_root && excluded_top_level_entry == Some(file_name.as_os_str()) {
             continue;
         }
         let from = entry.path();
@@ -886,7 +923,7 @@ fn copy_source_tree_excluding_top_level_lock(src: &Path, dst: &Path, is_root: bo
             .with_context(|| format!("stat {}", from.display()))?;
         if file_type.is_dir() {
             fs::create_dir(&to).with_context(|| format!("create directory {}", to.display()))?;
-            copy_source_tree_excluding_top_level_lock(&from, &to, false)?;
+            copy_source_tree_excluding_top_level_lock(&from, &to, false, excluded_top_level_entry)?;
         } else if file_type.is_symlink() {
             #[cfg(unix)]
             {
@@ -1775,14 +1812,18 @@ mod tests {
     use super::{
         attempt_v1_execution_identity, build_decision_from_manifest_text, content_digest_of,
         execute_pack_command, execute_pack_command_with_injected_manifest,
-        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
+        measure_workspace_source_digest, plan_v03_build_provision_command,
+        run_v03_build_lifecycle_steps,
     };
     use capsule::execution_contract::{
         ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, ExecutionContractEnvelopeV1,
-        ExecutionContractV1, ExecutionId, GuestPath, GuestSurfaceContract,
-        OpaqueContractDomainV1, ResolvedArtifactContract, ResolvedFilesystemContract,
-        ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract,
-        ResolvedTargetContract, opaque_subcontract_digest,
+        ExecutionContractV1, ExecutionId, GuestPath, GuestSurfaceContract, OpaqueContractDomainV1,
+        ResolvedArtifactContract, ResolvedFilesystemContract, ResolvedLaunchContract,
+        ResolvedPolicyContract, ResolvedSourceContract, ResolvedTargetContract,
+        opaque_subcontract_digest,
+    };
+    use capsule::input_resolver::{
+        CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
     };
     use capsule::router::{ExecutionProfile, ManifestData};
     use capsule::types::ValidationMode;
@@ -2317,7 +2358,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         targets.insert("default".to_string(), toml::Value::Table(target));
         manifest.insert("targets".to_string(), toml::Value::Table(targets));
 
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             serde_json::json!({
@@ -2356,7 +2397,7 @@ args = ["--force", "--sign", "-", "MyApp.app"]
                 "digestable": false
             }),
         );
-        let lock_path = manifest_dir.join("ato.lock.json");
+        let lock_path = manifest_dir.join("capsule.lock");
         let workspace_root = manifest_dir.clone();
         let runtime_model = capsule::lock_runtime::resolve_lock_runtime_model(&lock, None)
             .expect("resolve test runtime model");
@@ -2392,8 +2433,11 @@ args = ["--force", "--sign", "-", "MyApp.app"]
     // a direct blake3/sha256 call for the layer digest).
 
     fn placeholder_opaque_digest() -> capsule::execution_contract::OpaqueContractDigestV1 {
-        opaque_subcontract_digest(OpaqueContractDomainV1::SourceProjection, &serde_json::json!({}))
-            .expect("placeholder opaque digest")
+        opaque_subcontract_digest(
+            OpaqueContractDomainV1::SourceProjection,
+            &serde_json::json!({}),
+        )
+        .expect("placeholder opaque digest")
     }
 
     /// A minimal but fully valid `ExecutionContractV1`: zero dependencies,
@@ -2401,8 +2445,11 @@ args = ["--force", "--sign", "-", "MyApp.app"]
     /// placeholder digest (none of them are ever measured by the function
     /// under test, so their exact value never matters to these tests — only
     /// that the contract as a whole is well-formed enough to compute a real
-    /// `execution_id` and pass `ato_lock` persisted validation).
-    fn minimal_contract(source_digest: ContentDigest, readonly_layer: ContentDigest) -> ExecutionContractV1 {
+    /// `execution_id` and pass `capsule_lock` persisted validation).
+    fn minimal_contract(
+        source_digest: ContentDigest,
+        readonly_layer: ContentDigest,
+    ) -> ExecutionContractV1 {
         let placeholder = placeholder_opaque_digest();
         ExecutionContractV1 {
             schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
@@ -2454,10 +2501,16 @@ args = ["--force", "--sign", "-", "MyApp.app"]
     }
 
     fn envelope_of(contract: ExecutionContractV1) -> ExecutionContractEnvelopeV1 {
-        let execution_id = contract.compute_execution_id().expect("compute execution_id");
+        let execution_id = contract
+            .compute_execution_id()
+            .expect("compute execution_id");
         ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id,
+            // No ADR-014 parent-association claim: this fixture is a bare
+            // execution envelope, matching `FinalizedExecutionIdentityV1::
+            // into_envelope`'s own default.
+            capsule_program_id: None,
             resolved_refs: Default::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -2466,14 +2519,20 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         }
     }
 
-    /// Writes a real, persisted-valid `ato.lock.json` (recomputed `lock_id`,
+    /// Writes a real, persisted-valid canonical lock (recomputed `lock_id`,
     /// full write-path verification via `write_pretty_to_path`) carrying the
-    /// given D2 `execution_contract`. Mirrors `capsule::ato_lock`'s own test
-    /// fixtures (`base_lock`/`lock_with` in `ato_lock::execution`'s tests).
-    fn write_lock_with_contract(workspace: &std::path::Path, envelope: ExecutionContractEnvelopeV1) {
-        let mut lock = capsule::ato_lock::AtoLock {
+    /// given D2 `execution_contract`, under `file_name` — the canonical
+    /// `capsule.lock` unless a test is deliberately exercising the deprecated
+    /// `ato.lock.json` read alias. Mirrors `capsule::capsule_lock`'s own test
+    /// fixtures (`base_lock`/`lock_with` in `capsule_lock::execution`'s tests).
+    fn write_lock_with_contract_as(
+        workspace: &std::path::Path,
+        envelope: ExecutionContractEnvelopeV1,
+        file_name: &str,
+    ) {
+        let mut lock = capsule::capsule_lock::CapsuleLock {
             execution_contract: Some(envelope),
-            ..capsule::ato_lock::AtoLock::default()
+            ..capsule::capsule_lock::CapsuleLock::default()
         };
         lock.resolution
             .entries
@@ -2482,9 +2541,17 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             "process".to_string(),
             serde_json::json!({"entrypoint": "server.js"}),
         );
-        capsule::ato_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
-        capsule::ato_lock::write_pretty_to_path(&lock, &workspace.join("ato.lock.json"))
-            .expect("write ato.lock.json");
+        capsule::capsule_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
+        capsule::capsule_lock::write_pretty_to_path(&lock, &workspace.join(file_name))
+            .expect("write canonical lock");
+    }
+
+    /// [`write_lock_with_contract_as`] under the canonical `capsule.lock` name.
+    fn write_lock_with_contract(
+        workspace: &std::path::Path,
+        envelope: ExecutionContractEnvelopeV1,
+    ) {
+        write_lock_with_contract_as(workspace, envelope, CAPSULE_LOCK_FILE_NAME);
     }
 
     fn empty_build_layers(rootfs: Vec<u8>) -> snapshot::BuildLayers {
@@ -2503,14 +2570,14 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         let tmp = tempfile::tempdir().expect("tempdir");
         let layers = empty_build_layers(b"artifact-bytes".to_vec());
         let result = attempt_v1_execution_identity(tmp.path(), &layers)
-            .expect("no ato.lock.json must not be an error");
+            .expect("no canonical lock must not be an error");
         assert!(result.is_none());
     }
 
     #[test]
     fn attempt_v1_execution_identity_returns_none_when_lock_has_no_execution_contract() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.resolution
             .entries
             .insert("runtime".to_string(), serde_json::json!({"kind": "node"}));
@@ -2518,9 +2585,12 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             "process".to_string(),
             serde_json::json!({"entrypoint": "server.js"}),
         );
-        capsule::ato_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
-        capsule::ato_lock::write_pretty_to_path(&lock, &tmp.path().join("ato.lock.json"))
-            .expect("write ato.lock.json");
+        capsule::capsule_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
+        capsule::capsule_lock::write_pretty_to_path(
+            &lock,
+            &tmp.path().join(CAPSULE_LOCK_FILE_NAME),
+        )
+        .expect("write capsule.lock");
 
         let layers = empty_build_layers(b"artifact-bytes".to_vec());
         let result = attempt_v1_execution_identity(tmp.path(), &layers)
@@ -2583,7 +2653,9 @@ args = ["--force", "--sign", "-", "MyApp.app"]
             "a real source.digest mismatch is caught drift and must be surfaced, not swallowed",
         );
         assert!(
-            error.to_string().contains("Capsule v1 execution identity check failed"),
+            error
+                .to_string()
+                .contains("Capsule v1 execution identity check failed"),
             "{error}"
         );
     }
@@ -2604,22 +2676,132 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         // reject this rather than trust it.
         envelope.execution_id =
             ExecutionId::new(format!("blake3:{}", "0".repeat(64))).expect("valid-shaped id");
-        let mut lock = capsule::ato_lock::AtoLock {
+        let mut lock = capsule::capsule_lock::CapsuleLock {
             execution_contract: Some(envelope),
-            ..capsule::ato_lock::AtoLock::default()
+            ..capsule::capsule_lock::CapsuleLock::default()
         };
-        capsule::ato_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
+        capsule::capsule_lock::recompute_lock_id(&mut lock).expect("recompute lock_id");
         // Bypass `write_pretty_to_path`'s own write-time verification (which
         // would itself refuse to persist a tampered artifact) so the tampered
-        // lock reaches disk — mirroring how `ato_lock`'s own read-path tests
+        // lock reaches disk — mirroring how `capsule_lock`'s own read-path tests
         // (`load_verified_rejects_tampered_execution_id`) probe this boundary.
         let raw = serde_json::to_string(&lock).expect("serialize tampered lock");
-        std::fs::write(tmp.path().join("ato.lock.json"), raw).expect("write tampered lock");
+        std::fs::write(tmp.path().join(CAPSULE_LOCK_FILE_NAME), raw).expect("write tampered lock");
 
         let layers = empty_build_layers(b"bytes".to_vec());
         let error = attempt_v1_execution_identity(tmp.path(), &layers)
             .expect_err("a tampered lock must fail verification, not be silently trusted");
         assert!(error.to_string().contains("verify"), "{error}");
+    }
+
+    #[test]
+    fn attempt_v1_execution_identity_reads_a_lock_stored_under_the_deprecated_alias_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.js"), b"console.log(1);\n")
+            .expect("write source file");
+
+        // Deliberately wrong: does not match the real tree hash of `tmp`.
+        let wrong_source_digest = ContentDigest::new(DigestAlgorithm::Sha256, [0xEE; 32]);
+        let rootfs_bytes = b"the-sealed-rootfs-bytes".to_vec();
+        let readonly_layer = content_digest_of(&rootfs_bytes, DigestAlgorithm::Blake3);
+        let contract = minimal_contract(wrong_source_digest, readonly_layer);
+        write_lock_with_contract_as(
+            tmp.path(),
+            envelope_of(contract),
+            DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+        );
+
+        let layers = empty_build_layers(rootfs_bytes);
+
+        // The alias is a read-compatible name for the canonical lock, so this
+        // lock IS the expectation this build is confirmed against. A missing
+        // lock would instead be `Ok(None)`, so surfacing the mismatch proves
+        // the alias was resolved and read rather than skipped.
+        let error = attempt_v1_execution_identity(tmp.path(), &layers)
+            .expect_err("a lock under the deprecated alias name must still be read and enforced");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("Capsule v1 execution identity check failed"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn attempt_v1_execution_identity_fails_closed_when_both_lock_names_coexist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("main.js"), b"console.log(1);\n")
+            .expect("write source file");
+        let source_hash = capsule::blob::materialized_source_tree_hash(tmp.path())
+            .expect("hash workspace source tree");
+        let source_digest = ContentDigest::try_from(source_hash).expect("parse source digest");
+        let rootfs_bytes = b"the-sealed-rootfs-bytes".to_vec();
+        let readonly_layer = content_digest_of(&rootfs_bytes, DigestAlgorithm::Blake3);
+        let contract = minimal_contract(source_digest, readonly_layer);
+        write_lock_with_contract_as(
+            tmp.path(),
+            envelope_of(contract.clone()),
+            CAPSULE_LOCK_FILE_NAME,
+        );
+        write_lock_with_contract_as(
+            tmp.path(),
+            envelope_of(contract),
+            DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+        );
+
+        let layers = empty_build_layers(rootfs_bytes);
+
+        // Both names occupied is split-brain: no automatic authority choice is
+        // made. The resolver's refusal must reach the caller as an error —
+        // downgrading it to `Ok(None)` ("nothing to confirm") would silently
+        // skip this gate on exactly the ambiguous tree it exists to catch.
+        let error = attempt_v1_execution_identity(tmp.path(), &layers)
+            .expect_err("coexisting lock names must fail closed, never resolve to Ok(None)");
+        assert!(
+            format!("{error:#}").contains("Both capsule.lock and ato.lock.json exist"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn measure_workspace_source_digest_excludes_whichever_lock_name_resolved() {
+        // The hash-quine fix must key on the RESOLVED lock name, not a
+        // constant: after the spec §5 rename a workspace may legitimately hold
+        // either name, and hashing a tree that contains its own lock can never
+        // stably confirm.
+        for lock_name in [
+            CAPSULE_LOCK_FILE_NAME,
+            DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+        ] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            std::fs::write(tmp.path().join("main.js"), b"console.log(1);\n")
+                .expect("write source file");
+            std::fs::create_dir(tmp.path().join("nested")).expect("create nested dir");
+            // A nested file sharing the lock name is ordinary source content,
+            // so it must stay in the digest.
+            std::fs::write(tmp.path().join("nested").join(lock_name), b"not-a-lock\n")
+                .expect("write nested namesake");
+
+            let lock_free_hash = capsule::blob::materialized_source_tree_hash(tmp.path())
+                .expect("hash lock-free workspace");
+            let expected = ContentDigest::try_from(lock_free_hash).expect("parse lock-free digest");
+
+            let lock_path = tmp.path().join(lock_name);
+            std::fs::write(&lock_path, b"{\"schema_version\":1}\n").expect("write lock file");
+
+            let measured = measure_workspace_source_digest(tmp.path(), Some(&lock_path))
+                .expect("measure source digest");
+            assert_eq!(measured, expected, "lock_name={lock_name}");
+
+            // With nothing resolved, nothing is excluded — the same tree now
+            // hashes differently, proving the exclusion is what did the work.
+            let unexcluded = measure_workspace_source_digest(tmp.path(), None)
+                .expect("measure source digest without exclusion");
+            assert_ne!(unexcluded, expected, "lock_name={lock_name}");
+        }
     }
 
     #[test]

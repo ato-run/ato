@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::execution_plan::error::AtoExecutionError;
 use crate::python_runtime::extend_python_selector_env;
 use crate::types::{NetworkConfig, OciImageResolution, ReadinessProbe, ResolvedTargetRuntime};
@@ -17,7 +17,7 @@ pub struct LockCompilerOverlay {
 }
 
 fn oci_image_resolution_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     target_label: &str,
 ) -> Result<Option<OciImageResolution>, AtoExecutionError> {
     let Some(oci_images) = lock.resolution.entries.get("oci_images") else {
@@ -50,7 +50,7 @@ fn oci_image_resolution_from_lock(
 /// This does **not** call `ensure_execution_ready`, so it works for pure-OCI service capsules
 /// that have no `contract.process` entry.
 pub fn resolve_oci_image_for_target(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     target_label: &str,
 ) -> Result<Option<OciImageResolution>, AtoExecutionError> {
     oci_image_resolution_from_lock(lock, target_label)
@@ -83,7 +83,7 @@ pub struct ResolvedLockRuntimeModel {
 }
 
 pub fn resolve_lock_runtime_model(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     explicit_target_label: Option<&str>,
 ) -> Result<ResolvedLockRuntimeModel, AtoExecutionError> {
     ensure_execution_ready(lock)?;
@@ -117,7 +117,7 @@ pub fn resolve_lock_runtime_model(
     })
 }
 
-fn ensure_execution_ready(lock: &AtoLock) -> Result<(), AtoExecutionError> {
+fn ensure_execution_ready(lock: &CapsuleLock) -> Result<(), AtoExecutionError> {
     if !lock.contract.entries.contains_key("process") {
         return Err(AtoExecutionError::ambiguous_entrypoint(
             "lock-derived execution requires contract.process to be resolved",
@@ -150,7 +150,7 @@ fn ensure_execution_ready(lock: &AtoLock) -> Result<(), AtoExecutionError> {
     Ok(())
 }
 
-fn metadata_from_lock(lock: &AtoLock) -> LockContractMetadata {
+fn metadata_from_lock(lock: &CapsuleLock) -> LockContractMetadata {
     let metadata = lock.contract.entries.get("metadata");
     LockContractMetadata {
         name: metadata
@@ -173,7 +173,7 @@ fn metadata_from_lock(lock: &AtoLock) -> LockContractMetadata {
 }
 
 fn selected_target_label(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     explicit_target_label: Option<&str>,
     metadata: &LockContractMetadata,
 ) -> Result<String, AtoExecutionError> {
@@ -227,7 +227,7 @@ fn selected_target_label(
 }
 
 fn build_services(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     targets: &[Value],
     selected_target_label: &str,
 ) -> Result<Vec<LockServiceUnit>, AtoExecutionError> {
@@ -257,7 +257,7 @@ fn build_services(
 }
 
 fn synthesized_service(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     targets: &[Value],
     selected_target_label: &str,
 ) -> Result<LockServiceUnit, AtoExecutionError> {
@@ -280,7 +280,7 @@ fn synthesized_service(
 }
 
 fn service_from_workload(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     workload: &Value,
     targets: &[Value],
     selected_target_label: &str,
@@ -446,7 +446,7 @@ fn runtime_from_target(
     })
 }
 
-fn resolved_targets(lock: &AtoLock) -> Result<&[Value], AtoExecutionError> {
+fn resolved_targets(lock: &CapsuleLock) -> Result<&[Value], AtoExecutionError> {
     lock.resolution
         .entries
         .get("resolved_targets")
@@ -461,7 +461,7 @@ fn resolved_targets(lock: &AtoLock) -> Result<&[Value], AtoExecutionError> {
         })
 }
 
-fn network_from_lock(lock: &AtoLock, metadata: &LockContractMetadata) -> Option<NetworkConfig> {
+fn network_from_lock(lock: &CapsuleLock, metadata: &LockContractMetadata) -> Option<NetworkConfig> {
     if metadata
         .capsule_type
         .as_deref()
@@ -528,7 +528,7 @@ fn is_python_target_runtime(
     })
 }
 
-fn explicit_candidates(lock: &AtoLock) -> Vec<String> {
+fn explicit_candidates(lock: &CapsuleLock) -> Vec<String> {
     lock.contract
         .unresolved
         .iter()
@@ -542,8 +542,8 @@ mod tests {
 
     use super::*;
 
-    fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn sample_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo", "version": "0.1.0", "default_target": "web"}),
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn build_services_picks_explicit_target_from_multi_target_lock() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo", "version": "0.1.0", "default_target": "app"}),

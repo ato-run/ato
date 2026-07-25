@@ -332,11 +332,61 @@ explicit schema and `execution_id`; a bare ID is insufficient. They recompute
 the contract ID, observe their own output bytes, and run the same finalization
 gate before returning sealed metadata.
 
-## 5. `ato.lock.json`
+## 5. The canonical lock — `capsule.lock`
 
-`ato.lock.json` is not a sixth domain concept and is not hashed as an opaque
-file. It is the serialization boundary for a resolved Execution Identity plus
-non-identity metadata.
+> **Amendment (2026-07-24): canonical file name.** This section originally
+> fixed the canonical lock file name as `ato.lock.json`. That name reads as
+> Ato-global tool state, while the artifact is the Capsule-specific canonical
+> lock derived from one `capsule.toml`. The canonical name is now
+> **`capsule.lock`**, restoring the authored/derived pairing:
+>
+> ```text
+> capsule.toml       authored declaration
+> capsule.lock       canonicalized / resolved / authenticated lock
+> capsule.lock.json  OLD compatibility lock (unchanged; legacy-only, never
+>                    promoted)
+> ```
+>
+> **Name-collision note (normative):** the OLDEST pre-0.3 legacy lock name
+> was itself `capsule.lock` (`LEGACY_CAPSULE_LOCK_FILE_NAME`), still read at
+> the manifest root by `resolve_existing_lockfile_path` before this
+> amendment. That read path is **retired in the same change**: `capsule.lock`
+> is canonical-only from this amendment onward. Legacy compatibility reads
+> remain only for `.ato/derived/capsule.lock.json` and a root
+> `capsule.lock.json`. A root `capsule.lock` that fails canonical-lock
+> parsing is a hard error with a regenerate hint — never content-sniffed
+> into the legacy parser.
+>
+> `capsule.lock` is UTF-8 canonical JSON. The absence of a `.json` suffix
+> does not imply format auto-detection; the format is fixed by this spec and
+> discriminated internally by `schema_version`.
+>
+> **Migration (normative):**
+>
+> ```text
+> capsule.lock exists                    → canonical input
+> only ato.lock.json exists              → deprecated canonical alias:
+>                                          read-compatible, rename warning
+> capsule.lock AND ato.lock.json exist   → fail closed (no automatic
+>                                          authority choice; split-brain must
+>                                          be resolved by the author)
+> capsule.lock.json exists               → legacy compatibility lock only
+> ```
+>
+> Writers emit **only** `capsule.lock` from this amendment onward; new
+> `ato.lock.json` files MUST NOT be produced. The rename changes no
+> identity: `lock_id`, `execution_id`, `capsule_program_id`, and signature
+> payloads are file-name-independent, and a lock's bytes are identical under
+> either file name. Internal code renames accompany this amendment
+> (`AtoLock` → `CapsuleLock`, module `ato_lock` → `capsule_lock`,
+> `ATO_LOCK_FILE_NAME` → `CAPSULE_LOCK_FILE_NAME`; the pre-existing legacy
+> `lockfile::CapsuleLock` type is renamed `LegacyCapsuleLock` first to free
+> the name). References to `ato.lock.json` elsewhere in this document and in
+> other accepted documents are historical and mean the canonical lock.
+
+The canonical lock is not a sixth domain concept and is not hashed as an
+opaque file. It is the serialization boundary for a resolved Execution
+Identity plus non-identity metadata.
 
 Conceptually:
 

@@ -77,7 +77,7 @@ fn build_pypi_workspace(
     workspace_root: &std::path::Path,
     target: &ProviderTargetRef,
     requested_toolchain: ProviderToolchain,
-) -> Result<(PathBuf, AtoLock)> {
+) -> Result<(PathBuf, CapsuleLock)> {
     let package_ref = parse_pypi_requirement_ref(&target.ref_string)?;
     let effective_toolchain =
         resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
@@ -154,7 +154,7 @@ fn build_npm_workspace(
     workspace_root: &std::path::Path,
     target: &ProviderTargetRef,
     requested_toolchain: ProviderToolchain,
-) -> Result<(PathBuf, AtoLock)> {
+) -> Result<(PathBuf, CapsuleLock)> {
     let package_ref = parse_npm_package_ref(&target.ref_string)?;
     let effective_toolchain =
         resolve_effective_provider_toolchain(target.provider, requested_toolchain)?;
@@ -238,8 +238,8 @@ fn build_provider_authoritative_lock(
     runtime_version: &str,
     runtime_tools: Option<serde_json::Value>,
     allow_hosts: &[String],
-) -> AtoLock {
-    let mut lock = AtoLock::default();
+) -> CapsuleLock {
+    let mut lock = CapsuleLock::default();
     lock.contract.entries.insert(
         "metadata".to_string(),
         json!({

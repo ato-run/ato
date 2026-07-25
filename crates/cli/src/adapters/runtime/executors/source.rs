@@ -91,7 +91,7 @@ fn logged_log_path(mode: &ExecuteMode) -> Option<PathBuf> {
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     effective_state: Option<&EffectiveLockState>,
     nacelle_override: Option<PathBuf>,
     _reporter: std::sync::Arc<CliReporter>,
@@ -152,7 +152,7 @@ pub fn execute(
 
 pub fn execute_host(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     _reporter: std::sync::Arc<CliReporter>,
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
@@ -561,7 +561,7 @@ enum ManagedRuntimeKind {
 
 fn resolve_host_managed_runtime_binary(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     runtime: ManagedRuntimeKind,
 ) -> Result<PathBuf> {
     match runtime {
@@ -592,14 +592,14 @@ fn executable_extensions() -> Vec<String> {
 #[allow(dead_code)]
 pub fn should_launch_desktop_native_with_host_open(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> bool {
     desktop_native_open_bundle_path(plan, authoritative_lock).is_some()
 }
 
 fn desktop_native_open_bundle_path(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -626,7 +626,7 @@ fn desktop_native_open_bundle_path_from_runtime_lock(manifest_dir: &Path) -> Opt
 #[cfg(target_os = "macos")]
 fn desktop_native_open_bundle_path_from_authoritative_lock(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Option<PathBuf> {
     let mut root = serde_json::Map::new();
     let mut contract = serde_json::Map::new();
@@ -3024,7 +3024,7 @@ mod tests {
             "desktop",
         );
 
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             json!({

@@ -46,13 +46,16 @@ pub use foundation::types;
 
 // ── Layer 2: Contract ─────────────────────────────────────────────────────
 pub mod contract;
-pub use contract::ato_lock;
+pub use contract::capsule_lock;
+pub use contract::capsule_program_contract;
 pub use contract::execution_contract;
 pub use contract::execution_contract_finalize;
 pub use contract::lock_runtime;
 pub use contract::lockfile;
 pub use contract::manifest;
 pub use contract::oci_compose_lock;
+pub use contract::program_manifest_input;
+pub use contract::program_source_projection;
 pub use contract::snapshot_manifest;
 pub use contract::tools;
 

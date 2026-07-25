@@ -9,7 +9,7 @@ mod validate;
 use std::fs;
 use std::path::Path;
 
-/// ato.lock v1 foundation module.
+/// capsule.lock v1 foundation module.
 ///
 /// v1 intentionally uses one Rust model for both serde and in-memory draft
 /// handling, while keeping canonical lock identity in a separate projection.
@@ -26,7 +26,8 @@ pub use closure::{
     normalize_lock_closure, normalize_resolution_closure_entries, validate_closure_value,
 };
 pub use execution::{
-    LockExecutionError, verify_environment_values, verify_execution_envelope, verify_lock_execution,
+    LockExecutionError, verify_environment_values, verify_execution_envelope,
+    verify_lock_execution, verify_lock_program_identity,
 };
 pub use hash::{
     canonical_document_bytes, canonical_projection_bytes, canonical_signature_payload_bytes,
@@ -39,57 +40,67 @@ pub use oci::{
     upsert_oci_lock_facts, write_oci_facts_to_main_lock,
 };
 pub use schema::{
-    ATO_LOCK_SCHEMA_VERSION, AtoLock, AttestationsSection, BindingSection, ContractSection,
+    AttestationsSection, BindingSection, CAPSULE_LOCK_SCHEMA_VERSION, CapsuleLock, ContractSection,
     DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck, DeliveryRepair, DeliveryService,
     FeatureName, KnownFeature, LockEnvironmentValue, LockFeatures, LockId, LockLaunchSection,
     LockSignature, PolicySection, ResolutionSection, UnresolvedReason, UnresolvedValue,
     delivery_environment, parse_delivery_environment_value,
 };
 pub use validate::{
-    AtoLockValidationError, ValidationMode, validate_persisted, validate_structural,
+    CapsuleLockValidationError, ValidationMode, validate_persisted, validate_structural,
 };
 
 use crate::error::{CapsuleError, Result};
 
-/// Parses ato.lock JSON without applying any validation.
-pub fn load_unvalidated_from_str(raw: &str) -> Result<AtoLock> {
+/// Parses capsule.lock JSON without applying any validation.
+pub fn load_unvalidated_from_str(raw: &str) -> Result<CapsuleLock> {
     serde_json::from_str(raw)
-        .map_err(|err| CapsuleError::Config(format!("Failed to parse ato.lock.json: {err}")))
+        .map_err(|err| CapsuleError::Config(format!("Failed to parse capsule.lock: {err}")))
 }
 
-/// Reads ato.lock JSON from disk without applying any validation.
-pub fn load_unvalidated_from_path(path: &Path) -> Result<AtoLock> {
+/// Reads capsule.lock JSON from disk without applying any validation.
+pub fn load_unvalidated_from_path(path: &Path) -> Result<CapsuleLock> {
     let raw = fs::read_to_string(path)
         .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
     load_unvalidated_from_str(&raw)
 }
 
-/// Fail-closed re-derivation of any embedded execution section carried by a
-/// persisted lock (D2 `execution_contract` envelope + D5 `launch.environment`).
+/// Fail-closed re-derivation of every trusted section carried by a persisted
+/// lock: the embedded execution section (D2 `execution_contract` envelope + D5
+/// `launch.environment`) and the ADR-014 Capsule Program identity states
+/// (`program_identity` envelope + the execution envelope's parent claim, the
+/// §5 four-state matrix).
 ///
 /// This is the standard-path chokepoint the read/write boundary runs so a
-/// tampered `execution_id` or a bad D5 value payload can never pass strict
-/// validation or be persisted. Launch-time re-read / OCI wiring is deferred to a
-/// later PR; only the persisted read/write boundary is enforced here.
-fn verify_execution_boundary(lock: &AtoLock) -> Result<()> {
+/// tampered `execution_id`, a bad D5 value payload, a tampered
+/// `capsule_program_id`, or an inconsistent/orphan parent claim can never pass
+/// strict validation or be persisted. Launch-time re-read / OCI wiring is
+/// deferred to a later PR; only the persisted read/write boundary is enforced
+/// here.
+fn verify_lock_trust_boundary(lock: &CapsuleLock) -> Result<()> {
     verify_lock_execution(lock).map_err(|err| {
-        CapsuleError::Config(format!("ato.lock execution verification failed: {err}"))
+        CapsuleError::Config(format!("capsule.lock execution verification failed: {err}"))
+    })?;
+    verify_lock_program_identity(lock).map_err(|err| {
+        CapsuleError::Config(format!(
+            "capsule.lock program identity verification failed: {err}"
+        ))
     })
 }
 
 /// Loads a persisted lock from JSON and verifies it fully: strict persisted
 /// validation PLUS re-derivation of any embedded execution section. This is the
 /// sanctioned entry for a persisted lock carrying an execution section.
-pub fn load_verified_from_str(raw: &str) -> Result<AtoLock> {
+pub fn load_verified_from_str(raw: &str) -> Result<CapsuleLock> {
     let lock = load_unvalidated_from_str(raw)?;
     validate_persisted_strict(&lock).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&lock)?;
+    verify_lock_trust_boundary(&lock)?;
     Ok(lock)
 }
 
 /// Reads a persisted lock from disk and verifies it fully (see
 /// [`load_verified_from_str`]).
-pub fn load_verified_from_path(path: &Path) -> Result<AtoLock> {
+pub fn load_verified_from_path(path: &Path) -> Result<CapsuleLock> {
     let raw = fs::read_to_string(path)
         .map_err(|err| CapsuleError::Config(format!("Failed to read {}: {err}", path.display())))?;
     load_verified_from_str(&raw)
@@ -106,52 +117,52 @@ pub fn load_verified_from_path(path: &Path) -> Result<AtoLock> {
 /// Any lock that may carry an `execution_contract` MUST be read through the
 /// trusted entrypoints [`load_verified_from_str`] / [`load_verified_from_path`],
 /// which run this strict identity validation AND then re-derive the execution
-/// section fail-closed (`verify_execution_boundary`). Call this directly only
+/// section fail-closed (`verify_lock_trust_boundary`). Call this directly only
 /// for identity-only checks where execution trust is irrelevant.
 pub fn validate_persisted_strict(
-    lock: &AtoLock,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+    lock: &CapsuleLock,
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     validate_persisted(lock, ValidationMode::Strict)
 }
 
 /// Validates a persisted lock under non-strict mode.
 pub fn validate_persisted_non_strict(
-    lock: &AtoLock,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+    lock: &CapsuleLock,
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     validate_persisted(lock, ValidationMode::NonStrict)
 }
 
 /// Validates a draft or persisted lock structurally under strict mode.
 pub fn validate_structural_strict(
-    lock: &AtoLock,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+    lock: &CapsuleLock,
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     validate_structural(lock, ValidationMode::Strict)
 }
 
 /// Validates a draft or persisted lock structurally under non-strict mode.
 pub fn validate_structural_non_strict(
-    lock: &AtoLock,
-) -> std::result::Result<(), Vec<AtoLockValidationError>> {
+    lock: &CapsuleLock,
+) -> std::result::Result<(), Vec<CapsuleLockValidationError>> {
     validate_structural(lock, ValidationMode::NonStrict)
 }
 
-/// Pretty-serializes a durable ato.lock artifact.
+/// Pretty-serializes a durable capsule.lock artifact.
 ///
 /// This preserves generated_at as stored on the model and does not normalize
 /// its textual representation beyond RFC3339 validation. lock_id is recomputed
 /// before serialization and persisted validation must pass.
-pub fn to_pretty_json(lock: &AtoLock) -> Result<String> {
+pub fn to_pretty_json(lock: &CapsuleLock) -> Result<String> {
     let mut persisted = lock.clone();
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&persisted)?;
+    verify_lock_trust_boundary(&persisted)?;
     serde_json::to_string_pretty(&persisted)
-        .map_err(|err| CapsuleError::Config(format!("Failed to serialize ato.lock.json: {err}")))
+        .map_err(|err| CapsuleError::Config(format!("Failed to serialize capsule.lock: {err}")))
 }
 
-/// Writes a durable pretty ato.lock artifact after recomputing lock_id.
-pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
+/// Writes a durable pretty capsule.lock artifact after recomputing lock_id.
+pub fn write_pretty_to_path(lock: &CapsuleLock, path: &Path) -> Result<()> {
     let raw = to_pretty_json(lock)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
@@ -165,30 +176,31 @@ pub fn write_pretty_to_path(lock: &AtoLock, path: &Path) -> Result<()> {
         .map_err(|err| CapsuleError::Config(format!("Failed to write {}: {err}", path.display())))
 }
 
-/// Returns canonical persisted bytes for a durable ato.lock artifact.
-pub fn write_canonical_to_vec(lock: &AtoLock) -> Result<Vec<u8>> {
+/// Returns canonical persisted bytes for a durable capsule.lock artifact.
+pub fn write_canonical_to_vec(lock: &CapsuleLock) -> Result<Vec<u8>> {
     let mut persisted = lock.clone();
     normalize_lock_closure(&mut persisted)?;
     recompute_lock_id(&mut persisted)?;
     validate_persisted_strict(&persisted).map_err(validation_errors_to_capsule_error)?;
-    verify_execution_boundary(&persisted)?;
-    serde_jcs::to_vec(&persisted)
-        .map_err(|err| CapsuleError::Config(format!("Failed to canonicalize ato.lock JSON: {err}")))
+    verify_lock_trust_boundary(&persisted)?;
+    serde_jcs::to_vec(&persisted).map_err(|err| {
+        CapsuleError::Config(format!("Failed to canonicalize capsule.lock JSON: {err}"))
+    })
 }
 
 /// Verifies that an existing persisted lock_id matches the canonical projection.
-pub fn verify_lock_id(lock: &AtoLock) -> Result<()> {
+pub fn verify_lock_id(lock: &CapsuleLock) -> Result<()> {
     validate_persisted_strict(lock).map_err(validation_errors_to_capsule_error)?;
     Ok(())
 }
 
-fn validation_errors_to_capsule_error(errors: Vec<AtoLockValidationError>) -> CapsuleError {
+fn validation_errors_to_capsule_error(errors: Vec<CapsuleLockValidationError>) -> CapsuleError {
     let message = errors
         .into_iter()
         .map(|error| error.to_string())
         .collect::<Vec<_>>()
         .join("; ");
-    CapsuleError::Config(format!("ato.lock validation failed: {message}"))
+    CapsuleError::Config(format!("capsule.lock validation failed: {message}"))
 }
 
 #[cfg(test)]
@@ -198,20 +210,20 @@ mod tests {
     use serde_json::json;
     use tempfile::NamedTempFile;
 
-    use super::validate::AtoLockValidationError;
+    use super::validate::CapsuleLockValidationError;
     use super::{
-        ATO_LOCK_SCHEMA_VERSION, AtoLock, CANONICAL_IDENTITY_EXCLUDED_SECTIONS, FeatureName,
-        KnownFeature, LockId, LockSignature, UnresolvedReason, UnresolvedValue,
+        CANONICAL_IDENTITY_EXCLUDED_SECTIONS, CAPSULE_LOCK_SCHEMA_VERSION, CapsuleLock,
+        FeatureName, KnownFeature, LockId, LockSignature, UnresolvedReason, UnresolvedValue,
         canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
         delivery_environment, is_canonical_identity_section, load_unvalidated_from_path,
         load_unvalidated_from_str, recompute_lock_id, to_pretty_json, validate_persisted_strict,
         validate_structural_non_strict, validate_structural_strict, write_pretty_to_path,
     };
 
-    fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock {
+    fn sample_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock {
             generated_at: Some("2026-03-25T00:00:00Z".to_string()),
-            ..AtoLock::default()
+            ..CapsuleLock::default()
         };
         lock.features.declared = vec![FeatureName::Known(KnownFeature::Identity)];
         lock.resolution.entries.insert(
@@ -238,7 +250,7 @@ mod tests {
         lock
     }
 
-    fn persisted_sample_lock() -> AtoLock {
+    fn persisted_sample_lock() -> CapsuleLock {
         let mut lock = sample_lock();
         recompute_lock_id(&mut lock).expect("compute lock_id");
         lock
@@ -312,7 +324,7 @@ mod tests {
         let lock = persisted_sample_lock();
         let pretty = to_pretty_json(&lock).expect("pretty json");
         let parsed = load_unvalidated_from_str(&pretty).expect("parse lock");
-        assert_eq!(parsed.schema_version, ATO_LOCK_SCHEMA_VERSION);
+        assert_eq!(parsed.schema_version, CAPSULE_LOCK_SCHEMA_VERSION);
         assert!(validate_persisted_strict(&parsed).is_ok());
     }
 
@@ -417,7 +429,7 @@ mod tests {
         assert!(
             missing_errors
                 .iter()
-                .any(|error| matches!(error, AtoLockValidationError::MissingLockId))
+                .any(|error| matches!(error, CapsuleLockValidationError::MissingLockId))
         );
 
         let mut malformed = sample_lock();
@@ -425,8 +437,8 @@ mod tests {
         let malformed_errors =
             validate_persisted_strict(&malformed).expect_err("malformed lock_id must fail");
         assert!(malformed_errors.iter().any(|error| {
-            matches!(error, AtoLockValidationError::MalformedLockId(_))
-                || matches!(error, AtoLockValidationError::LockIdMismatch { .. })
+            matches!(error, CapsuleLockValidationError::MalformedLockId(_))
+                || matches!(error, CapsuleLockValidationError::LockIdMismatch { .. })
         }));
     }
 
@@ -438,7 +450,7 @@ mod tests {
         let errors = validate_persisted_strict(&unknown_required)
             .expect_err("unknown required feature must fail");
         assert!(errors.iter().any(|error| {
-            matches!(error, AtoLockValidationError::UnknownRequiredFeature(value) if value == "future_gate")
+            matches!(error, CapsuleLockValidationError::UnknownRequiredFeature(value) if value == "future_gate")
         }));
 
         let mut unknown_declared = persisted_sample_lock();
@@ -446,7 +458,7 @@ mod tests {
         let strict_errors = validate_structural_strict(&unknown_declared)
             .expect_err("strict declared unknown feature must fail");
         assert!(strict_errors.iter().any(|error| {
-            matches!(error, AtoLockValidationError::UnknownDeclaredFeature(value) if value == "preview_only")
+            matches!(error, CapsuleLockValidationError::UnknownDeclaredFeature(value) if value == "preview_only")
         }));
         assert!(validate_structural_non_strict(&unknown_declared).is_ok());
 
@@ -456,7 +468,7 @@ mod tests {
         let unsupported_errors = validate_persisted_strict(&recognized_but_unimplemented)
             .expect_err("recognized but unsupported required feature must fail");
         assert!(unsupported_errors.iter().any(|error| {
-            matches!(error, AtoLockValidationError::UnsupportedRequiredFeature(value) if value == "identity")
+            matches!(error, CapsuleLockValidationError::UnsupportedRequiredFeature(value) if value == "identity")
         }));
     }
 
@@ -472,7 +484,7 @@ mod tests {
         let errors =
             validate_structural_strict(&lock).expect_err("unknown unresolved reason must fail");
         assert!(errors.iter().any(|error| {
-            matches!(error, AtoLockValidationError::UnknownUnresolvedReason(value) if value == "future_reason")
+            matches!(error, CapsuleLockValidationError::UnknownUnresolvedReason(value) if value == "future_reason")
         }));
 
         let mut ambiguity = persisted_sample_lock();
@@ -484,16 +496,15 @@ mod tests {
         }];
         let ambiguity_errors = validate_structural_strict(&ambiguity)
             .expect_err("ambiguity without candidates must fail");
-        assert!(
-            ambiguity_errors
-                .iter()
-                .any(|error| matches!(error, AtoLockValidationError::AmbiguityRequiresCandidates))
-        );
+        assert!(ambiguity_errors.iter().any(|error| matches!(
+            error,
+            CapsuleLockValidationError::AmbiguityRequiresCandidates
+        )));
 
         let non_strict_unknown = validate_structural_non_strict(&lock)
             .expect_err("unknown unresolved reason remains structurally invalid");
         assert!(non_strict_unknown.iter().any(|error| {
-            matches!(error, AtoLockValidationError::UnknownUnresolvedReason(value) if value == "future_reason")
+            matches!(error, CapsuleLockValidationError::UnknownUnresolvedReason(value) if value == "future_reason")
         }));
     }
 
@@ -519,7 +530,7 @@ mod tests {
 
     #[test]
     fn closure_normalization_keeps_lock_id_stable_across_legacy_and_normalized_shapes() {
-        let mut legacy = AtoLock::default();
+        let mut legacy = CapsuleLock::default();
         legacy.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "dist", "driver": "static"}),

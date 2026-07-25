@@ -6,12 +6,13 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
+use crate::capsule_program_contract::CapsuleProgramEnvelopeV1;
 use crate::execution_contract::{EnvironmentValuePayloadV1, ExecutionContractEnvelopeV1};
 
-pub const ATO_LOCK_SCHEMA_VERSION: u32 = 1;
+pub const CAPSULE_LOCK_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AtoLock {
+pub struct CapsuleLock {
     pub schema_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lock_id: Option<LockId>,
@@ -36,7 +37,7 @@ pub struct AtoLock {
     /// Optional, additive top-level section. It carries per-variable normalized
     /// value payloads whose `value_digest` (domain `ato.environment-value/v1`)
     /// is re-derived and checked on read. Secret values never appear here.
-    /// Excluded from `lock_id` (not part of [`crate::ato_lock::CanonicalLockProjection`]),
+    /// Excluded from `lock_id` (not part of [`crate::capsule_lock::CanonicalLockProjection`]),
     /// so adding/removing it never changes an existing lock's identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch: Option<LockLaunchSection>,
@@ -50,12 +51,22 @@ pub struct AtoLock {
     /// mismatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_contract: Option<ExecutionContractEnvelopeV1>,
+    /// ADR-014 — the optional [`CapsuleProgramEnvelopeV1`] (declaration
+    /// contract + `capsule_program_id`).
+    ///
+    /// Optional, additive top-level field: excluded from `lock_id` (not part
+    /// of the canonical identity projection) but covered by the lock signature
+    /// ([`crate::capsule_lock::CanonicalSignatureProjection`]). The trust
+    /// boundary re-derives `capsule_program_id` and checks the execution
+    /// envelope's parent claim fail-closed on every read/write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_identity: Option<CapsuleProgramEnvelopeV1>,
 }
 
-impl Default for AtoLock {
+impl Default for CapsuleLock {
     fn default() -> Self {
         Self {
-            schema_version: ATO_LOCK_SCHEMA_VERSION,
+            schema_version: CAPSULE_LOCK_SCHEMA_VERSION,
             lock_id: None,
             generated_at: None,
             features: LockFeatures::default(),
@@ -67,6 +78,7 @@ impl Default for AtoLock {
             signatures: Vec::new(),
             launch: None,
             execution_contract: None,
+            program_identity: None,
         }
     }
 }
@@ -306,7 +318,7 @@ pub fn parse_delivery_environment_value(value: &Value) -> Result<DeliveryEnviron
         .map_err(|err| format!("contract.delivery.install.environment is invalid: {err}"))
 }
 
-pub fn delivery_environment(lock: &AtoLock) -> Result<Option<DeliveryEnvironment>, String> {
+pub fn delivery_environment(lock: &CapsuleLock) -> Result<Option<DeliveryEnvironment>, String> {
     let Some(delivery) = lock.contract.entries.get("delivery") else {
         return Ok(None);
     };

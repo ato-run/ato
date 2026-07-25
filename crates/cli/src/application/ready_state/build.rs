@@ -33,12 +33,14 @@ use capsulefs::{BlobManifest, CasStore};
 use snapshot::acceptance::{
     AcceptanceBudget, AcceptanceCancellation, AcceptanceConfig, AcceptanceDisposition,
     CandidateSnapshot, DisposableAcceptanceLifecycle, DisposableSessionHandle,
-    RunningSnapshotAcceptance, SystemClock, VerificationOutcome, VerifiedRunningSnapshotEligibility,
+    RunningSnapshotAcceptance, SystemClock, VerificationOutcome,
+    VerifiedRunningSnapshotEligibility,
 };
 use snapshot::{
-    ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt, ReadyStateManifest,
-    RestoreContract, RestoreReadyStateInput, RestoredSession, SanitizerContract, SanitizerLayer,
-    SanitizerStep, SnapshotBackend, WarmupRecipe, ensure_gpu_not_in_snapshot,
+    ArtifactEnvelopeV1, BuildLayers, BuildReadyStateInput, BuildReadyStateReceipt,
+    ReadyStateManifest, RestoreContract, RestoreReadyStateInput, RestoredSession,
+    SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackend, WarmupRecipe,
+    ensure_gpu_not_in_snapshot,
 };
 
 use super::store;
@@ -329,7 +331,9 @@ fn seal_v1_via_disposable_acceptance(
         .last_candidate
         .take()
         .context("acceptance run accepted without a captured candidate")?;
-    let accepted_id = accepted.snapshot_id().context("derive accepted snapshot_id")?;
+    let accepted_id = accepted
+        .snapshot_id()
+        .context("derive accepted snapshot_id")?;
     if accepted_id != record.snapshot_id {
         anyhow::bail!("accepted candidate snapshot_id does not match the acceptance receipt");
     }
@@ -579,7 +583,9 @@ impl DisposableAcceptanceLifecycle for BackendDisposableLifecycle<'_> {
         session: DisposableSessionHandle,
     ) -> Result<(), String> {
         if let Some(restored) = self.session.take() {
-            self.backend.stop(restored).map_err(|error| error.to_string())?;
+            self.backend
+                .stop(restored)
+                .map_err(|error| error.to_string())?;
         }
         let overlay = self.overlay_root.join(&session.opaque_id);
         let _ = std::fs::remove_dir_all(overlay);
@@ -834,9 +840,11 @@ content_ready_path=\"/\"\n",
             ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract,
             ResolvedTargetContract, opaque_subcontract_digest,
         };
-        let placeholder =
-            opaque_subcontract_digest(OpaqueContractDomainV1::SourceProjection, &serde_json::json!({}))
-                .unwrap();
+        let placeholder = opaque_subcontract_digest(
+            OpaqueContractDomainV1::SourceProjection,
+            &serde_json::json!({}),
+        )
+        .unwrap();
         let digest = |fill: u8| ContentDigest::new(DigestAlgorithm::Blake3, [fill; 32]);
         let contract = ExecutionContractV1 {
             schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
@@ -889,6 +897,10 @@ content_ready_path=\"/\"\n",
         ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id,
+            // No ADR-014 parent-association claim: this fixture is a bare
+            // execution envelope, matching `FinalizedExecutionIdentityV1::
+            // into_envelope`'s own default.
+            capsule_program_id: None,
             resolved_refs: Default::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -982,10 +994,7 @@ content_ready_path=\"/\"\n",
             }),
         )
         .unwrap_err();
-        assert!(
-            err.to_string().contains("was not accepted"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("was not accepted"), "{err}");
         // The legacy artifact itself still sealed (the receipt is returned by
         // `build_ready_state` regardless), but no v1 sidecar exists.
         assert!(
