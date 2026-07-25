@@ -4216,7 +4216,9 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{RestoreVerification, restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{
+        RestoreVerification, restore_and_expose, teardown,
+    };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
         load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
@@ -8659,6 +8661,20 @@ mod tests {
         );
     }
 
+    /// Fires its oneshot when dropped. Moved into a spawned task, it lets a test
+    /// observe that the task's *future* was actually dropped — a race-free signal
+    /// that the task (and everything it owned, e.g. a `TcpListener`) is gone,
+    /// with no dependence on probing a port number.
+    struct SendOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for SendOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn proxy_abort_must_be_awaited_before_clean_stop() {
         // Live upstream so a forwarded connection would have somewhere to go.
@@ -8674,25 +8690,78 @@ mod tests {
             }
         });
 
-        // Bring the proxy up on its own ephemeral port, binding the listener
-        // ONCE and serving that live socket — the earlier version bound a probe
-        // socket only to learn a free port, dropped it, then rebound the same
-        // number, an ephemeral-port TOCTOU another test could win. See
-        // start_root_proxy_ephemeral.
-        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
+        // A live proxy whose accept-loop future carries a drop sentinel. This is
+        // the same shape as `serve_root_proxy` (accept → copy_bidirectional), but
+        // the sentinel gives us a race-free way to observe the future's drop. The
+        // earlier version instead connected to the freed listen port and asserted
+        // the connect FAILED — unsound on a shared machine, where a stranger can
+        // grab the just-released ephemeral port in the window before the probe and
+        // flip the assert. We assert the actual invariant (the accept loop is
+        // gone) rather than "nothing happens to listen on this port number".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy listener");
+        let upstream_addr = format!("127.0.0.1:{upstream_port}");
+        // Prove the proxy is actually live before we stop it.
+        tokio::net::TcpStream::connect(&upstream_addr)
+            .await
+            .expect("upstream is accepting");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (gone_tx, gone_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Install the drop sentinel and announce the loop is live BEFORE any
+            // abort can land. On a current-thread runtime `stop_proxy`'s abort can
+            // otherwise fire before this task is ever polled, dropping the captured
+            // `gone_tx` WITHOUT the sentinel — the join still reports cancelled, so
+            // the leak would masquerade as a clean stop. The handshake (mirroring
+            // `cleanup_ack_reports_proxy_stopped_false_...`) guarantees the sentinel
+            // is armed and the loop parked at `accept` first.
+            let _alive = SendOnDrop(Some(gone_tx));
+            let _ = started_tx.send(());
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    break;
+                };
+                let upstream_addr = upstream_addr.clone();
+                tokio::spawn(async move {
+                    let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await
+                    else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+                });
+            }
+        });
+        started_rx.await.expect("proxy accept loop started");
 
-        // stop_proxy AWAITS the aborted task, so by the time it returns true the
-        // listener has been dropped and the port refuses connections WITHOUT any
-        // retry/poll loop. If abort were treated as fire-and-forget, this
-        // immediate connect could still succeed — the whole point of the fix.
+        // stop_proxy ABORTS then AWAITS the JoinHandle, so it returns true only
+        // once the task future has resolved — and awaiting a cancelled task drops
+        // its future. If abort were treated as fire-and-forget, stop_proxy could
+        // return before the future dropped. That is the exact regression this test
+        // guards.
         let stopped = stop_proxy(Some(handle)).await;
         assert!(
             stopped,
             "a cleanly cancelled proxy task is a confirmed stop"
         );
+
+        // The sound invariant: by the time stop_proxy confirmed the stop, the
+        // accept loop's future was ALREADY dropped — proven by the sentinel having
+        // fired.
+        //
+        // This must be a NON-BLOCKING `try_recv`, not an awaited timeout. Awaiting
+        // (even briefly) only proves the future drops *eventually*, which a
+        // fire-and-forget `abort()` also satisfies — the runtime drops an aborted
+        // task's future moments later regardless. Verified: replacing stop_proxy's
+        // `timeout(grace, handle).await` with a non-awaiting stub still passed an
+        // awaited assertion here, so the awaited form did not test the ordering
+        // this test is named for. `try_recv` does: it can only succeed if the drop
+        // happened before stop_proxy returned.
+        let mut gone_rx = gone_rx;
         assert!(
-            tokio::net::TcpStream::connect(&listen).await.is_err(),
-            "once stop_proxy confirms termination the listen port must be released",
+            matches!(gone_rx.try_recv(), Ok(())),
+            "stop_proxy must await the abort so the accept loop is provably gone \
+             BEFORE it returns — the sentinel had not fired yet",
         );
         drop(upstream);
     }
