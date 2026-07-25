@@ -28,3 +28,10 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Re-declare `snapshot` with the non-default `test-support` feature so the
+# HoldPhase unit tests (crate::hold_phase) can mint a
+# `VerifiedRunningSnapshotEligibility` via `for_test`/`analyze_for_test` to seed
+# the #1088 `accept()` path without a production eligibility constructor. This
+# activation is dev-only: a normal `cargo build -p snapshot-builder` does not
+# pull the feature, so no shipped path gains a non-production constructor.
+snapshot = { path = "../snapshot", features = ["test-support"] }

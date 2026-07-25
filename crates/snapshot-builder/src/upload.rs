@@ -475,8 +475,14 @@ mod tests {
         let r = FakeRunner::new(vec![ok()]);
         pack_artifact(&r, Path::new("/work/job_legacy")).unwrap();
         let command = r.calls().into_iter().next().unwrap();
-        assert!(!command.contains(SNAPSHOT_MANIFEST_V1_FILENAME), "{command}");
-        assert!(!command.contains(ARTIFACT_ENVELOPE_V1_FILENAME), "{command}");
+        assert!(
+            !command.contains(SNAPSHOT_MANIFEST_V1_FILENAME),
+            "{command}"
+        );
+        assert!(
+            !command.contains(ARTIFACT_ENVELOPE_V1_FILENAME),
+            "{command}"
+        );
     }
 
     #[test]
