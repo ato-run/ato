@@ -1,0 +1,4 @@
+Welcome to the Ato preview of FileBrowser Quantum.
+
+Try the editor: open this file and change it. Your edits are ephemeral —
+they vanish when the preview run stops.
