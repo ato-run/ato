@@ -895,27 +895,107 @@ impl FirecrackerBackend {
     /// already reports as `supports_uffd_mem_backend`, so the flag can never
     /// disagree with what the runner advertises. (U0 built that probe and noted
     /// "no restore path uses it yet"; this is that path.)
-    fn uffd_preview_mode(&self, store: &CasStore) -> Option<UffdMode> {
+    fn uffd_preview_mode(
+        &self,
+        store: &CasStore,
+        memory: &BlobManifest,
+        supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+    ) -> Option<UffdMode> {
+        let caps = self.probe();
+        Self::uffd_preview_mode_for(
+            caps.supports_uffd_mem_backend,
+            caps.uffd_reason.as_deref(),
+            store,
+            memory,
+            supervisor_build,
+        )
+    }
+
+    /// The preview gate as data-in / decision-out, so the rule is testable
+    /// without a UFFD-capable host (the KVM smokes that exercise the real thing
+    /// are all `#[ignore]`d).
+    ///
+    /// Two preconditions, both failing toward File — File is the safe backend
+    /// and UFFD is only ever the optimization:
+    ///
+    /// 1. the host can serve page faults at all, and
+    /// 2. **this snapshot's memory image is actually resident in the local CAS.**
+    ///
+    /// (2) is the placement contract [`crate::mem_backend_selector::decide_mem_backend`]
+    /// states as "memory image not in local CAS → File", and that
+    /// [`RestoreReadyStateInput::uffd_preview`] documents. It is the same rule
+    /// this gate had been asserting without checking.
+    ///
+    /// Local residency is a **precondition** for choosing UFFD, never
+    /// a disqualifier: `PageSource::Cas` resolves every guest fault out of the
+    /// local CAS, and in production it is built with `remote: None` (remote
+    /// read-through needs an explicit `ATO_FC_UFFD_REMOTE`), so a chunk that is
+    /// not on disk when the guest touches that page has nowhere to come from.
+    ///
+    /// Checking the CAS is *openable* does not establish (2) — `CasStore::open`
+    /// `create_dir_all`s the layout, so it succeeds on an empty store and fails
+    /// only on permissions/ENOSPC. The residency question has to be asked of the
+    /// memory blob itself.
+    ///
+    /// Why the failure modes are not symmetric, and why this is worth a gate:
+    /// under File a missing chunk fails in `rehydrate_atomic` BEFORE
+    /// `PUT /snapshot/load`, so the lease dies with a clean `MissingChunk` and
+    /// nothing boots. Under UFFD the same missing chunk is not observed until the
+    /// guest faults on that page — after the VM is running and the session has
+    /// been handed out — where it surfaces as a page-server serve error and a
+    /// fail-closed abort. Same root cause, far worse blast radius, so the cheap
+    /// pre-boot stat() sweep buys a strictly better failure.
+    fn uffd_preview_mode_for(
+        host_supports_uffd: bool,
+        uffd_reason: Option<&str>,
+        store: &CasStore,
+        memory: &BlobManifest,
+        supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+    ) -> Option<UffdMode> {
         let refuse = |reason: String| {
             eprintln!(
-                "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this host cannot serve \
-                 demand-paged memory ({reason}); restoring via the eager File path instead."
+                "UFFD preview: ATO_RUNNER_UFFD_PREVIEW is set but this restore cannot be \
+                 demand-paged ({reason}); restoring via the eager File path instead."
             );
             None
         };
-        let caps = self.probe();
-        if !caps.supports_uffd_mem_backend {
+        // Precondition (0), and the selector's HIGHEST-precedence rule: a
+        // binding-required artifact is never UFFD until Phase 8 BindingLease
+        // (`decide_mem_backend`: "capsule requires bindings → File"). The runner
+        // lane never evaluates that selector — `ATO_RUNNER_UFFD_PREVIEW` flows
+        // straight from the env var into `RestoreReadyStateInput` — so without
+        // this check the flag alone was enough to demand-page a supervisor
+        // artifact, which is exactly what the selector forbids. Enforcing it
+        // here rather than at the call site means no lane can bypass it.
+        if declares_required_bindings(supervisor_build) {
             return refuse(
-                caps.uffd_reason
-                    .unwrap_or_else(|| "uffd mem_backend unsupported".to_string()),
+                "capsule requires bindings; UFFD is no-binding-only until Phase 8 BindingLease"
+                    .to_string(),
+            );
+        }
+        if !host_supports_uffd {
+            return refuse(
+                uffd_reason
+                    .unwrap_or("uffd mem_backend unsupported")
+                    .to_string(),
             );
         }
         // `PageSource::Cas` serves every guest fault straight out of the local
         // CAS; if it cannot be opened the guest faults on memory nobody can supply.
-        match CasStore::open(store.root()) {
-            Ok(_) => Some(UffdMode::Cas),
-            Err(e) => refuse(format!("local CAS unavailable: {e}")),
+        let local = match CasStore::open(store.root()) {
+            Ok(local) => local,
+            Err(e) => return refuse(format!("local CAS unavailable: {e}")),
+        };
+        // ...and openable is not the same as populated: demand paging has no
+        // fetch path once the guest is live, so require the bytes up front.
+        if !local.has_all_chunks(memory) {
+            return refuse(format!(
+                "memory image {} is not fully resident in the local CAS at {}",
+                memory.id().hex(),
+                local.root().display()
+            ));
         }
+        Some(UffdMode::Cas)
     }
 
     /// The root-reachable address of a guest port: the guest IP directly
@@ -1445,6 +1525,16 @@ impl SupervisorDrive {
 /// ever bound), so it takes the ordinary health wait, exactly like a no-binding
 /// artifact.
 fn restore_uses_agent_probe(
+    supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+) -> bool {
+    declares_required_bindings(supervisor_build)
+}
+
+/// Does this artifact require bindings? Shared by the agent-probe selection
+/// above and the UFFD refusal in [`FirecrackerBackend::uffd_preview_mode_for`]
+/// so the two cannot drift apart — they are the same question about the same
+/// receipt, asked for different reasons.
+fn declares_required_bindings(
     supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
 ) -> bool {
     supervisor_build.is_some_and(|s| !s.binding_names.is_empty())
@@ -2567,14 +2657,10 @@ impl SnapshotBackend for FirecrackerBackend {
         store: &CasStore,
         manifest: &ReadyStateManifest,
     ) -> Result<SnapshotInspection, SnapshotError> {
-        let mut all = true;
-        for (_, blob) in manifest.layers.iter() {
-            for c in &blob.chunks {
-                if !store.has_chunk(&c.hash) {
-                    all = false;
-                }
-            }
-        }
+        let all = manifest
+            .layers
+            .iter()
+            .all(|(_, blob)| store.has_all_chunks(blob));
         Ok(SnapshotInspection {
             manifest_id: manifest.id(),
             backend_kind: manifest.snapshot_backend.kind.clone(),
@@ -2740,7 +2826,11 @@ impl SnapshotBackend for FirecrackerBackend {
             // fell back to File would assert nothing. It takes effect only when the
             // product flag is off.
             let uffd = if input.uffd_preview {
-                self.uffd_preview_mode(input.store)
+                self.uffd_preview_mode(
+                    input.store,
+                    memory,
+                    input.manifest.supervisor_build.as_ref(),
+                )
             } else {
                 uffd_mode()
             };
@@ -4165,6 +4255,122 @@ mod tests {
             "unknown token ⇒ File (fail safe to default)"
         );
         set(prev.as_deref());
+    }
+
+    /// The UFFD preview gate must treat local-CAS residency of THIS snapshot's
+    /// memory image as a PRECONDITION, not merely "the CAS directory opens".
+    ///
+    /// `CasStore::open` `create_dir_all`s the layout, so it succeeds on an empty
+    /// store — an openable CAS proves nothing about whether the memory chunks
+    /// are actually there. That matters because demand paging has no fetch path
+    /// once the guest is live (production builds `PageSource::cas` with
+    /// `remote: None`; read-through needs an explicit `ATO_FC_UFFD_REMOTE`), so a
+    /// missing chunk that the File path would have caught pre-boot in
+    /// `rehydrate_atomic` instead surfaces as a post-boot page-fault abort, after
+    /// the session has been handed out. Fail toward File.
+    ///
+    /// Covers the partial-residency case too: a first-chunk probe reports a
+    /// half-fetched image as local, so the gate sweeps the whole chunk list.
+    #[test]
+    fn uffd_preview_requires_a_resident_memory_image_not_just_an_openable_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let cas_root = dir.path().join("cas");
+        let store = CasStore::open(&cas_root).unwrap();
+        // 8 distinct 8-byte pages ⇒ 8 distinct chunks (distinct bytes ⇒ no dedup).
+        let payload: Vec<u8> = (0..64u8).collect();
+        let memory = store_blob(
+            &store,
+            LayerKind::Memory,
+            &payload,
+            ChunkingKind::PageAligned { page_size: 8 },
+        )
+        .unwrap();
+        assert!(
+            memory.chunks.len() > 1,
+            "test needs a multi-chunk memory image to cover partial residency"
+        );
+
+        let mode =
+            |s: &CasStore| FirecrackerBackend::uffd_preview_mode_for(true, None, s, &memory, None);
+
+        // Fully resident on a capable host ⇒ UFFD. The common local-CAS-hit path
+        // must NOT regress: this gate only ever subtracts UFFD, never adds it.
+        assert_eq!(
+            mode(&store),
+            Some(UffdMode::Cas),
+            "a fully resident memory image on a capable host must still choose UFFD"
+        );
+
+        // An incapable host still refuses regardless of residency (unchanged).
+        assert_eq!(
+            FirecrackerBackend::uffd_preview_mode_for(
+                false,
+                Some("no userfaultfd"),
+                &store,
+                &memory,
+                None
+            ),
+            None,
+            "an incapable host must fall back to File"
+        );
+
+        // A binding-required artifact is refused even when everything else is
+        // perfect: capable host, fully resident memory. This is the selector's
+        // highest-precedence rule ("capsule requires bindings → File"), which the
+        // runner lane never evaluated — `ATO_RUNNER_UFFD_PREVIEW` reaches
+        // `RestoreReadyStateInput` straight from the env var, so before this gate
+        // the flag alone could demand-page a supervisor artifact.
+        let bound = crate::manifest::SupervisorBuildReceipt {
+            binding_names: vec!["openai_api_key".into()],
+            page_hygiene_boot_args: true,
+            placeholder_absent_from_seal: Some(true),
+            state_volumes: vec![],
+            state_owner_scope: None,
+        };
+        assert_eq!(
+            FirecrackerBackend::uffd_preview_mode_for(true, None, &store, &memory, Some(&bound)),
+            None,
+            "a binding-required artifact must never be demand-paged before Phase 8"
+        );
+        // ...while a ZERO-binding supervisor artifact (dockerfile import) is not
+        // binding-required, so it keeps UFFD — the gate subtracts only what the
+        // selector forbids, it does not blanket-refuse every supervisor build.
+        let unbound = crate::manifest::SupervisorBuildReceipt {
+            binding_names: vec![],
+            ..bound.clone()
+        };
+        assert_eq!(
+            FirecrackerBackend::uffd_preview_mode_for(true, None, &store, &memory, Some(&unbound)),
+            Some(UffdMode::Cas),
+            "a zero-binding supervisor artifact must still be eligible for UFFD"
+        );
+
+        // An empty-but-openable CAS — the exact shape the openability check accepts.
+        let empty_root = dir.path().join("empty-cas");
+        let empty = CasStore::open(&empty_root).unwrap();
+        assert!(
+            CasStore::open(&empty_root).is_ok(),
+            "an empty CAS still opens — openable must never imply resident"
+        );
+        assert_eq!(
+            mode(&empty),
+            None,
+            "an openable but empty CAS must fall back to File"
+        );
+
+        // PARTIAL residency: chunk 0 present, a later chunk gone. A first-chunk
+        // probe would call this local; the whole-blob sweep must not.
+        let last = memory.chunks.last().unwrap().hash.clone();
+        std::fs::remove_file(cas_root.join("blobs").join("blake3").join(last.hex())).unwrap();
+        assert!(
+            store.has_chunk(&memory.chunks[0].hash),
+            "first chunk is still present — this is the partial case, not an empty one"
+        );
+        assert_eq!(
+            mode(&store),
+            None,
+            "a partially resident memory image must fall back to File"
+        );
     }
 
     #[test]

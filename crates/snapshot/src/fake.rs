@@ -223,14 +223,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
         store: &CasStore,
         manifest: &ReadyStateManifest,
     ) -> Result<SnapshotInspection, SnapshotError> {
-        let mut all_present = true;
-        for (_, blob) in manifest.layers.iter() {
-            for chunk in &blob.chunks {
-                if !store.has_chunk(&chunk.hash) {
-                    all_present = false;
-                }
-            }
-        }
+        let all_present = manifest
+            .layers
+            .iter()
+            .all(|(_, blob)| store.has_all_chunks(blob));
         Ok(SnapshotInspection {
             manifest_id: manifest.id(),
             backend_kind: manifest.snapshot_backend.kind.clone(),
