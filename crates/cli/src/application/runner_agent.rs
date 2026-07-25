@@ -4594,9 +4594,12 @@ async fn handle_restore_snapshot_lease(
     // P1 Ready-State optimization: the snapshot backend's UFFD demand-paging
     // path skips the ~512MB eager rehydrate on the restore critical path. The
     // operator opts in per-runner (`ATO_RUNNER_UFFD_PREVIEW=1`); the backend
-    // gates the request on host capability (userfaultfd + local CAS) and
-    // degrades to the eager File path — logging why — on a host that cannot
-    // serve page faults, so a flag set on a wrong box costs latency, not leases.
+    // (`FirecrackerBackend::uffd_preview_mode_for`) gates the request on THREE
+    // things — no required bindings, host capability (userfaultfd), and the
+    // memory image being FULLY resident in the local CAS (`has_all_chunks`,
+    // #1127) — and degrades to the eager File path, logging why, whenever any of
+    // them fails. So a flag set on a wrong box costs latency, not leases, and a
+    // binding-required artifact is never demand-paged before Phase 8.
     let uffd_preview = crate::application::ready_state::flags::runner_uffd_preview_enabled();
     // Explicit Capsule v1 lease (`execution_identity_schema` present): load +
     // authenticate the fetched Snapshot manifest/envelope sidecar against the

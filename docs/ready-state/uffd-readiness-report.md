@@ -61,9 +61,31 @@ A UFFD change may promote only when ALL hold:
 3. **KVM smokes green when run one-per-invocation** via
    `scripts/ready-state/run-uffd-kvm-smokes.sh` (U7). The **combined** `fc_kvm_uffd`
    suite flakes under host pressure and is **NOT** a release gate.
-4. **Fail-closed proven on the product path** (U13): CAS miss/corrupt → `Err`, no
-   orphan VM/tap/firecracker; corrupt/mismatched hotset profile → ignored, never
-   corrupts guest memory.
+
+   ⚠️ **This is a MANUAL check on a KVM host, not CI.** Every `fc_kvm_*` test is
+   `#[ignore]`d, no workflow runs ignored tests, and `rust-ci.yml` only fires on
+   `main`/`dev` PRs — so a `nightly` PR touching UFFD reaches none of them. Gates 3
+   and 4 are only met by someone running the script above and recording the receipt
+   lines (`### U…`) with a date and a commit sha. An unrecorded gate is an unmet
+   gate. (Until this change the script's `ALL` list predated U11–U13 and did not
+   even contain the preview tests gate 4 names.)
+4. **Fail-closed proven on the product path** (U13) — **two halves, two mechanisms**
+   (see the U13 table in
+   [`uffd-productization-roadmap.md`](./uffd-productization-roadmap.md)):
+   - CAS **miss** → refused pre-boot by the residency gate (`has_all_chunks`,
+     #1127); the restore proceeds on File and dies in `rehydrate_atomic` with
+     `MissingChunk`. Nothing boots, so there is nothing to orphan.
+     (`fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot`)
+   - CAS **corrupt** → passes residency (`has_chunk` is a `stat`), demand-pages for
+     real, and is caught by the page server's hash-verified `read_range` → `Err`, no
+     orphan VM/tap/firecracker.
+     (`fc_kvm_uffd_preview_corrupt_cas_fails_closed`)
+   - corrupt/mismatched hotset profile → ignored, never corrupts guest memory.
+
+   A test claiming this gate must assert **which** mechanism fired — the page-server
+   abort / `LoadSnapshot` failure for corrupt, `MissingChunk` + no page-server socket
+   for miss. Bare `is_err()` is satisfied identically by the File fallback and so
+   proves nothing about demand paging.
 5. **No-binding-only** enforced end-to-end (the binding guard + the selector).
 
 ## Known limitations
@@ -72,7 +94,14 @@ A UFFD change may promote only when ALL hold:
 - **Remote read-through is preview/spike-level** — off by default, not auto-selected;
   real network CAS + locality/timeout policy is **P4**.
 - **Corrupt-CAS fail-closed is safe but slow** (~15 s `LoadSnapshot` timeout) — the
-  page-server cannot serve the corrupt first fault. Acceptable (Err + clean), not fast.
+  page-server cannot serve the corrupt first fault, which happens inside
+  `PUT /snapshot/load` (`resume_vm: true`), i.e. strictly before `wait_health_until`
+  can poll the page server's failure flag and abort fast. Acceptable (Err + clean),
+  not fast. The two corrupt-CAS smokes assert the failure is the page-server abort
+  or the `LoadSnapshot` call — never `"guest never became healthy"` — so a
+  regression into a full health-wait burn is caught by error shape, plus a 90 s
+  absolute ceiling to catch an unbounded hang.
+  (CAS **miss** is not slow — it never boots; see gate 4.)
 - **Host coverage is x86_64 + kernel `userfaultfd`** (U0 probe is truthful elsewhere).
 - The auto-selector is **preview-gated** (U15); it is a dry-run/opt-in, not a default.
 
