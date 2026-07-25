@@ -665,7 +665,7 @@ fn classify_exit_status(status: std::process::ExitStatus) -> VerificationOutcome
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn parse(extra: &str) -> CapsuleManifest {
@@ -883,7 +883,8 @@ content_ready_path=\"/\"\n",
 
     /// A minimal, self-consistent `ExecutionContractV1` + envelope for tests
     /// that only need a VERIFIED execution identity, not a realistic contract.
-    fn test_execution_envelope(seed: u8) -> ExecutionContractEnvelopeV1 {
+    /// Shared crate-wide so no second copy of this fixture is needed.
+    pub(crate) fn test_execution_envelope(seed: u8) -> ExecutionContractEnvelopeV1 {
         use capsule::execution_contract::{
             EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentVariableContract, ExecutionContractV1,
             GuestPath, GuestSurfaceContract, OpaqueContractDomainV1, ResolvedArtifactContract,

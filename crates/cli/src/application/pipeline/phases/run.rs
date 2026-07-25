@@ -3424,6 +3424,32 @@ fn resolve_dep_template_inner(value: &str, graph: &RunningGraph) -> String {
     result
 }
 
+/// Refuse an unverified cold launch of a Capsule v1 lock.
+///
+/// `CAPSULE_V1_EXECUTION_MODEL_SPEC` §10.2 routes `ato run` to cold
+/// reconstruction only when no compatible Snapshot was selected, and §11 makes
+/// that path conditional on reconstructing the resolved execution contract and
+/// matching every identity-bearing output digest — any mismatch MUST fail
+/// closed rather than launch under the stored `execution_id`. No launch
+/// adapter in this build produces that reconstruction evidence, so the only
+/// spec-conforming outcome here is §10.2's deployment-policy "forbid": refuse.
+/// A lock without an `execution_contract` is not a v1 identity and keeps
+/// today's legacy cold behaviour unchanged.
+fn ensure_cold_launch_allowed(lock: Option<&CapsuleLock>) -> Result<()> {
+    let Some(envelope) = lock.and_then(|lock| lock.execution_contract.as_ref()) else {
+        return Ok(());
+    };
+    Err(anyhow!(
+        "refusing to cold-launch Capsule v1 execution identity {}: no compatible Snapshot was \
+         selected, and this build cannot reconstruct and verify the locked execution contract's \
+         identity-bearing digests. Verified cold reconstruction is required before a locked \
+         execution identity may run without a Snapshot \
+         (CAPSULE_V1_EXECUTION_MODEL_SPEC §10.2, §11); routing it through the legacy unverified \
+         cold path would launch unverified outputs under the stored execution_id",
+        envelope.execution_id
+    ))
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -4221,6 +4247,12 @@ where
             return Ok(());
         }
     }
+
+    // Cold-path fork: every Ready-State restore above returns, so reaching here
+    // means no compatible Snapshot was selected and the launch would proceed on
+    // the legacy cold path. A lock carrying a Capsule v1 execution contract may
+    // not take it unverified (spec §10.2/§11).
+    ensure_cold_launch_allowed(prepared.authoritative_lock.as_ref())?;
 
     let run_command_uses_specialized_executor = decision
         .plan
@@ -6729,6 +6761,39 @@ image = "ghcr.io/example/app:latest"
         let message = error.to_string();
         assert!(message.contains("dep 'db' state.dir is owned by ato session pid 4242"));
         assert!(message.contains("capsule://github.com/Koh0920/ato-postgres@65b3ee5"));
+    }
+
+    #[test]
+    fn cold_launch_is_refused_for_a_lock_carrying_an_execution_contract() {
+        let envelope = crate::application::ready_state::build::tests::test_execution_envelope(0x11);
+        let execution_id = envelope.execution_id.to_string();
+        let lock = CapsuleLock {
+            execution_contract: Some(envelope),
+            ..CapsuleLock::default()
+        };
+
+        let error = super::ensure_cold_launch_allowed(Some(&lock))
+            .expect_err("a Capsule v1 lock must not take the unverified cold path");
+        let message = error.to_string();
+        assert!(message.contains("refusing to cold-launch"), "{message}");
+        assert!(message.contains(&execution_id), "{message}");
+        assert!(
+            message.contains("no compatible Snapshot was selected"),
+            "{message}"
+        );
+        assert!(message.contains("reconstruct and verify"), "{message}");
+        assert!(message.contains("§10.2, §11"), "{message}");
+    }
+
+    #[test]
+    fn cold_launch_is_unaffected_without_an_execution_contract() {
+        // Today's behaviour: no v1 identity in the lock (and no lock at all)
+        // both stay on the legacy cold path exactly as before.
+        let lock = CapsuleLock::default();
+        assert!(lock.execution_contract.is_none());
+        super::ensure_cold_launch_allowed(Some(&lock))
+            .expect("a lock without a v1 execution contract must not be gated");
+        super::ensure_cold_launch_allowed(None).expect("no lock must not be gated");
     }
 
     #[test]
