@@ -112,6 +112,27 @@ const LEASE_RENEW_MIN_RETRY: Duration = Duration::from_secs(1);
 /// seam, so the fake clock drives it in tests without real time passing.
 const CONTROL_POLL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
+/// How long a run of TRANSIENT control-poll blips is retried, captured ONCE at
+/// the top of [`ApiControlSource::poll`] as `now + min(this, lease_remaining())`.
+///
+/// It CANNOT be the live lease deadline. The renew rides the same poll (§3.3),
+/// and every successful renew pushes the lease deadline out — so a retry bounded
+/// by that deadline is bounded by a thing the loop keeps extending. The one case
+/// that matters is precisely when `/lease/renew` stays healthy while `/control`
+/// does not (a builder/api version skew, or a control route the deployed api
+/// answers with a persistent 5xx): the lease renews indefinitely and a
+/// deadline-bounded retry never returns. Capturing the window on ENTRY makes the
+/// bound immune to the renew.
+///
+/// The `min(_, lease_remaining())` keeps the original guarantee — a retry never
+/// outlives the lease it rides on — while this fixed ceiling caps the OTHER
+/// direction: a control channel unhealthy for a full minute while the lease
+/// keeps renewing is not a blip, so the hold ends and releases the held guest
+/// and the builder slot instead of holding them for the whole (renewing) lease.
+/// A minute is many `CONTROL_POLL_RETRY_BACKOFF`s — ample to ride out an api
+/// redeploy, which refuses connections for seconds — and well under a lease TTL.
+const CONTROL_POLL_RETRY_WINDOW: Duration = Duration::from_secs(60);
+
 /// The builder's own failure-reason budget: 1800 **UTF-16 code units** against
 /// the api's 2000 — the same unit on both sides, which is the whole point (see
 /// [`truncate`]). This is THE budget for the whole daemon — the legacy failed /
@@ -276,6 +297,39 @@ impl WizardApiError {
     /// locally, and send NO terminal ack (§3.8 — lease expiry is server-owned).
     pub fn is_fenced(&self) -> bool {
         matches!(self, WizardApiError::Fenced { .. })
+    }
+
+    /// `true` ⇒ waiting and re-issuing the SAME request could plausibly succeed,
+    /// so the builder-lane retry loops ([`ApiControlSource::poll`],
+    /// [`LeaseRenewDriver::tick`]) may back off and try again inside their
+    /// window. `false` ⇒ the failure is DETERMINISTIC — the next identical
+    /// request fails identically — so a retry only burns the lease window and
+    /// floods the log; the caller must fail closed at once instead.
+    ///
+    /// Only two shapes are genuinely transient:
+    /// - [`WizardApiError::Transport`] — DNS/connect/reset/timeout, e.g. an api
+    ///   mid-redeploy refusing connections for a few seconds.
+    /// - a `5xx` [`WizardApiError::Status`] — a server-side error the edge or api
+    ///   may recover from.
+    ///
+    /// Everything else is deterministic:
+    /// - [`WizardApiError::Fenced`] — the claim is dead server-side (also caught
+    ///   earlier by [`Self::is_fenced`]); a retry is another `409`.
+    /// - [`WizardApiError::Contract`] — a body/response that breaks the wire
+    ///   contract on THIS side (§1): builder ↔ api version skew, not a blip.
+    /// - a `4xx` [`WizardApiError::Status`] — the deployed api does not have this
+    ///   route (404/405) or rejected the request (4xx). `429` is the one 4xx that
+    ///   is conventionally retryable, but a single-caller leased claim never
+    ///   receives it; folding it in with the other 4xx is the fail-closed-safe
+    ///   choice (the hold tears down and the server sweep owns the outcome),
+    ///   whereas treating an unknown 4xx as retryable is what risks the loop
+    ///   never terminating.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            WizardApiError::Transport { .. } => true,
+            WizardApiError::Status { code, .. } => (500..600).contains(code),
+            WizardApiError::Fenced { .. } | WizardApiError::Contract { .. } => false,
+        }
     }
 
     pub fn endpoint(&self) -> &str {
@@ -1147,6 +1201,18 @@ impl<'a, C: WallClock> LeaseRenewDriver<'a, C> {
             Err(err) if err.is_fenced() => Err(LeaseLost::Fenced {
                 message: err.to_string(),
             }),
+            // A non-fenced but DETERMINISTIC renew failure — a `200` whose body
+            // does not match the §3.2 wire contract, or a 4xx from a skewed api —
+            // cannot be cleared by waiting: deferring it to a backoff just burns
+            // the rest of the lease window on a call that answers identically. The
+            // lease is then unprovable, so it is lost NOW, fail closed with no ack
+            // (§3.8) — `LeaseLost::Contract` is exactly "the lease could not be
+            // kept because the exchange broke the contract".
+            Err(err) if !err.is_retryable() => Err(LeaseLost::Contract {
+                message: err.to_string(),
+            }),
+            // A transient blip (5xx / transport): defer to a shorter retry inside
+            // the window. The deadline check at the top is what bounds it.
             Err(err) => {
                 let backoff =
                     (self.renew_interval / LEASE_RENEW_RETRY_DIVISOR).max(LEASE_RENEW_MIN_RETRY);
@@ -1222,38 +1288,66 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
             self.lease.clock().sleep(self.poll_interval);
         }
         self.polls += 1;
+        // The retry window for a TRANSIENT blip, captured ONCE here — before the
+        // loop can renew the lease. It must not be the live lease deadline: the
+        // `tick` below renews on cadence, and every success pushes that deadline
+        // out, so a retry bounded by it is bounded by a thing the loop keeps
+        // extending — and a `/control` that fails deterministically while
+        // `/lease/renew` stays healthy would then spin forever. `min` with the
+        // lease keeps the "never retry past the lease" guarantee; the fixed
+        // ceiling ([`CONTROL_POLL_RETRY_WINDOW`]) caps a persistently-unhealthy
+        // control channel so the held guest and builder slot are released.
+        let retry_deadline = self.lease.clock().now_utc()
+            + CONTROL_POLL_RETRY_WINDOW.min(self.lease.lease_remaining());
         let mut attempt: u32 = 1;
         let response = loop {
             // Lease first — and again before every retry: a dead lease makes the
             // poll itself a 409, and the hold must end on the lease's terms (no
-            // ack), not on a directive. Re-ticking is also what BOUNDS the retry
-            // below: a further attempt is only legitimate while the lease is
-            // still provably alive, and `tick` fails closed the moment the
-            // observed deadline passes.
+            // ack), not on a directive. `tick` renews on cadence and fails closed
+            // the moment the observed deadline passes with no successful renew —
+            // the bound for the case where `/lease/renew` ALSO fails.
             self.lease.tick(self.fencing)?;
             match self.api.poll_control(self.fencing, observed_capture_epoch) {
                 Ok(response) => break response,
                 // A fenced poll is definitive: the claim is already dead
                 // server-side, so there is nothing to retry into.
                 Err(err) if err.is_fenced() => return Err(err.into()),
-                // Every other failure — a 5xx from the edge, a reset connection,
-                // a timeout — is a blip that must not cost the author their
-                // session while the lease is alive. There is deliberately NO
-                // attempt count: an api mid-redeploy refuses connections for
-                // seconds and answers each attempt in a millisecond, so a count
-                // would be spent before the outage was, on a lease with minutes
-                // left. The bound is the `tick` above, and the backoff below is
-                // what keeps the bound from being a spin.
+                // A DETERMINISTIC non-fenced fault — a control body this builder
+                // cannot parse or that fails its refinements (`Contract`,
+                // §1.2/§3.3), or a 4xx from an api that does not have this route
+                // (version skew) — answers identically on every retry while the
+                // lease renews on, so a retry loop never exits. Fail closed at
+                // once, per `ControlFault`'s contract: a malformed control
+                // response leaves the lease in doubt — tear down locally, ack
+                // nothing.
+                Err(err) if !err.is_retryable() => return Err(err.into()),
+                // A transient blip — a 5xx from the edge, a reset connection, a
+                // timeout — must not cost the author their live session. There is
+                // deliberately NO attempt count: an api mid-redeploy refuses
+                // connections for seconds and answers each attempt in a
+                // millisecond, so a count would be spent before the outage was.
+                // The bound is the entry-captured `retry_deadline` (which no renew
+                // can extend); the backoff keeps it from being a spin.
                 Err(err) => {
+                    let now = self.lease.clock().now_utc();
+                    if now >= retry_deadline {
+                        // The window is spent — a control channel unhealthy this
+                        // whole time while the lease kept renewing is not a blip.
+                        // Fail closed on it rather than renew the lease forever.
+                        return Err(err.into());
+                    }
                     eprintln!(
                         "[builder] wizard control poll failed (attempt {attempt}), retrying \
                          inside the lease window: {err}"
                     );
                     attempt += 1;
-                    // Never wait PAST the deadline that bounds us: sleeping the
-                    // full backoff on a lease with 200ms left would just delay
-                    // the fail-closed tick by the difference.
-                    let backoff = CONTROL_POLL_RETRY_BACKOFF.min(self.lease.lease_remaining());
+                    // Never wait PAST either bound — the lease (`tick`, above) or
+                    // the entry-captured retry window: sleeping the full backoff
+                    // on a window with 200ms left would just delay the fail-closed
+                    // return by the difference.
+                    let backoff = CONTROL_POLL_RETRY_BACKOFF
+                        .min(self.lease.lease_remaining())
+                        .min(retry_deadline.duration_since(now).unwrap_or(Duration::ZERO));
                     self.lease.clock().sleep(backoff);
                 }
             }
@@ -2436,6 +2530,22 @@ mod tests {
                 })
                 .collect()
         }
+
+        /// `n` DETERMINISTIC control faults of the shape a builder/api version
+        /// skew produces: a `200` whose body this builder cannot parse, or a
+        /// refinement/epoch breach — all [`WizardApiError::Contract`]. Unlike a
+        /// refused connection these answer identically on every retry, so a loop
+        /// that treats them as a transient blip never exits.
+        fn contract_polls(n: usize) -> Vec<Result<ControlResponse, WizardApiError>> {
+            (0..n)
+                .map(|_| {
+                    Err(WizardApiError::Contract {
+                        endpoint: "control poll".to_string(),
+                        message: "response did not match the wire contract".to_string(),
+                    })
+                })
+                .collect()
+        }
     }
 
     fn renewed(iso: &str) -> Result<LeaseRenewResponse, WizardApiError> {
@@ -2877,6 +2987,141 @@ mod tests {
             clock.now_utc(),
             parse_utc_instant("2026-07-22T09:10:20.000Z").expect("deadline"),
             "the retry never waits past the deadline that bounds it"
+        );
+    }
+
+    #[test]
+    fn a_deterministic_control_fault_is_terminal_even_while_the_lease_renews() {
+        // The version-skew hang (#1111 review). `/control` fails DETERMINISTICALLY
+        // — a body this builder cannot parse, a `capture` with no candidate, an
+        // epoch behind observed — all `Contract`. Meanwhile `/lease/renew` is a
+        // DIFFERENT, healthy route: it answers, and every success pushes the lease
+        // deadline further out. A retry loop bounded by that rolling deadline can
+        // therefore never exit — the very bound it relies on is extended by the
+        // renew riding the same poll.
+        //
+        // Short 6s lease that renews an HOUR out, so the renew provably fires and
+        // moves the deadline while control keeps faulting. Before the fix the loop
+        // renews (the clock passes the original 09:10:06 deadline yet keeps going)
+        // and drains every scripted control, then panics `unscripted control poll`
+        // — a bounded stand-in for an unbounded spin. After the fix a `Contract`
+        // is terminal on the FIRST answer: one control call, no renew, fail closed.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![
+                renewed("2026-07-22T10:10:02.000Z"),
+                renewed("2026-07-22T11:10:02.000Z"),
+                renewed("2026-07-22T12:10:02.000Z"),
+            ],
+            ScriptedApi::contract_polls(8),
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:10:06.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+
+        let fault = source
+            .poll(0)
+            .expect_err("a deterministic contract fault ends the hold, it is not retried");
+        assert!(
+            fault.message.contains("wire contract"),
+            "the fault surfaces the version skew: {}",
+            fault.message
+        );
+        assert_eq!(
+            api.control_calls(),
+            1,
+            "a contract fault is terminal on the first answer, never retried into a spin"
+        );
+        assert_eq!(
+            api.renew_calls(),
+            0,
+            "failing closed at once means the poll never even reaches a renew"
+        );
+    }
+
+    #[test]
+    fn a_persistent_transient_control_fault_is_bounded_while_the_lease_renews() {
+        // The residual hang the `Contract`-terminal fix alone would miss: a
+        // RETRYABLE fault (5xx / dropped connection) that simply never clears,
+        // while `/lease/renew` stays healthy and keeps the lease alive. Bounding
+        // the retry by the LIVE lease deadline would spin forever here too (renew
+        // moves it out every pass). The fix bounds the retry by a window captured
+        // ONCE on entry — `min(RETRY_WINDOW, lease_remaining_at_entry)` — which no
+        // renew can extend.
+        //
+        // Entry lease has 6s left, so the retry window is 6s. The renew fires at
+        // 09:10:02 and pushes the deadline an hour out (the lease is provably alive
+        // for an hour), yet the poll still fails closed at 09:10:06 — the entry
+        // window, not the renewed lease. Before the fix the loop rode the renewed
+        // deadline and drained every scripted poll, then panicked `unscripted`.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![
+                renewed("2026-07-22T10:10:02.000Z"),
+                renewed("2026-07-22T11:10:02.000Z"),
+                renewed("2026-07-22T12:10:02.000Z"),
+            ],
+            ScriptedApi::refused_polls(8),
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:10:06.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+
+        let fault = source
+            .poll(0)
+            .expect_err("the entry-captured retry window is spent, so the hold ends fail-closed");
+        assert!(
+            fault.message.contains("transport"),
+            "the fault surfaces the transient failure it gave up on: {}",
+            fault.message
+        );
+        assert_eq!(
+            api.renew_calls(),
+            1,
+            "the lease was actively renewed (deadline pushed an hour out) yet the retry still ended"
+        );
+        // Attempts at 09:10:00/02/04, then the 09:10:06 attempt is past the 6s
+        // window captured at entry — four calls, not the eight scripted, and not a
+        // spin against the hour-long renewed lease.
+        assert_eq!(api.control_calls(), 4);
+        assert_eq!(
+            clock.now_utc(),
+            parse_utc_instant("2026-07-22T09:10:06.000Z").expect("window"),
+            "the retry ends at the entry window, never at the renewed lease deadline"
+        );
+    }
+
+    #[test]
+    fn a_renew_that_breaks_the_wire_contract_is_lost_at_once_not_deferred() {
+        // Minor (#1111 review): a renew that answers `200` with a body this
+        // builder cannot parse is a `Contract` fault — deterministic version skew,
+        // the exact case `a_2xx_that_does_not_match_the_wire_contract_is_a_contract_fault`
+        // pins. Folding it in with a transport blip defers it to a backoff that
+        // burns the rest of the lease window on a call that answers identically.
+        // It must surface as a lost lease at once (no ack, §3.8). One renewal is
+        // scripted: before the fix `tick` returns Ok (deferred) and this
+        // `expect_err` fails; after, it is `LeaseLost::Contract` on the first try.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![Err(WizardApiError::Contract {
+                endpoint: "lease renew".to_string(),
+                message: "response did not match the wire contract".to_string(),
+            })],
+            vec![],
+        );
+        let mut driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        clock.advance(Duration::from_secs(100));
+        let lost = driver
+            .tick(&fencing())
+            .expect_err("a contract fault on renew is terminal, not deferred to a backoff");
+        assert!(matches!(lost, LeaseLost::Contract { .. }), "got {lost:?}");
+        assert_eq!(
+            api.renew_calls(),
+            1,
+            "surfaced on the first answer, not retried"
         );
     }
 
