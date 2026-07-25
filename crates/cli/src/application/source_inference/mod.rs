@@ -4354,7 +4354,7 @@ fn process_value_from_leip_cmd(cmd: &[String]) -> Value {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
     use capsule::capsule_lock::{self, CapsuleLock};
     use capsule::input_resolver::{
@@ -4365,11 +4365,16 @@ mod tests {
 
     use super::*;
 
+    /// Delegates to the crate-wide env lock (`crate::tests::env_lock`) instead
+    /// of a module-private mutex. These tests spawn `uv`/`deno` by bare name, so
+    /// they depend on the process-global `PATH`; tests in *other* modules mutate
+    /// `PATH` under the crate-wide lock (`runtime_setup`'s podman probe,
+    /// `node_compat`'s prepend test). A module-private lock would not exclude
+    /// those, so a concurrent `PATH` clobber could make a `uv`/`deno` spawn fail
+    /// with ENOENT ("No such file or directory") mid-test. Sharing the one
+    /// documented lock closes that race.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
+        crate::tests::env_lock().lock().expect("env lock")
     }
 
     struct EnvVarGuard {
@@ -4731,6 +4736,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_typescript_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `deno` by bare
+        // name (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("deno")
             .arg("--version")
             .output()
@@ -4762,6 +4772,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_javascript_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `deno` by bare
+        // name (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("deno")
             .arg("--version")
             .output()
@@ -4793,6 +4808,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_python_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `uv` by bare name
+        // (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("uv")
             .arg("--version")
             .output()
