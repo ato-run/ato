@@ -411,6 +411,23 @@ fn expected_intent_files_pin_the_headline_spellings() {
         expected("oci-user")["targets"]["targets"]["app"]["user"],
         serde_json::json!("1000:1000")
     );
+
+    // seal-at: the authored acceptance argv is identity-bearing and reaches the
+    // IR with argument boundaries exact (spec §6.1) — an explicitly selected
+    // shell, a space-containing argument as ONE element, a trailing empty
+    // argument preserved — alongside its positive bounded timeout.
+    let seal_at = &expected("seal-at")["seal_at"];
+    assert_eq!(
+        seal_at["command"],
+        serde_json::json!([
+            "sh",
+            "-lc",
+            "curl -fsS http://127.0.0.1:8080/ready",
+            "--label",
+            ""
+        ])
+    );
+    assert_eq!(seal_at["timeout_seconds"], serde_json::json!(120));
 }
 
 /// Cross-suite determinism: the baseline-oci manifest vector's derived intent,

@@ -4,7 +4,7 @@
 //! Two layers with strictly separated jobs (ADR-014 §2.0.1):
 //!
 //! * [`ProgramManifestV03Input`] is the STRUCTURAL GATE over the raw
-//!   `capsule.toml` text. Its only job is *rejection*: every one of the 41
+//!   `capsule.toml` text. Its only job is *rejection*: every one of the 42
 //!   `CapsuleManifest` top-level fields is explicit, `deny_unknown_fields`
 //!   applies at the top level and on every nested struct of an
 //!   identity-bearing section, and serde aliases mirror the real authoring
@@ -60,15 +60,15 @@ use crate::capsule_program_contract::{
     NormalizedNetworkIntent, NormalizedPackIntent, NormalizedParamValueIntent,
     NormalizedPlatformArtifactIntent, NormalizedPolymorphismIntent, NormalizedReadinessProbeIntent,
     NormalizedReadyProbeIntent, NormalizedRequirementsIntent, NormalizedRuntimeExportIntent,
-    NormalizedSecretIntent, NormalizedSecurityCapabilitiesIntent, NormalizedServiceIntent,
-    NormalizedServiceNetworkIntent, NormalizedServiceStateBindingIntent, NormalizedSignalsIntent,
-    NormalizedSnapshotIntent, NormalizedStateIntent, NormalizedStateOwnerIntent,
-    NormalizedStorageIntent, NormalizedStorageVolumeIntent, NormalizedSurfaceIntent,
-    NormalizedTargetIntent, NormalizedTargetsIntent, NormalizedToolDependencyIntent,
-    NormalizedTransparencyIntent, NormalizedValueSchemaIntent, OpaqueAuthoredString, OpaqueCommand,
-    ProbePortReference, ProgramIdentifier, ProgramManifestIntentV1, RemoteArtifactRef,
-    Sha256DigestPin, SourceExistingPath, SourceRelativeFuturePath, SourceRelativePath,
-    TcpProbeTarget, UniqueBTreeMap, WitWorldRef,
+    NormalizedSealAtIntent, NormalizedSecretIntent, NormalizedSecurityCapabilitiesIntent,
+    NormalizedServiceIntent, NormalizedServiceNetworkIntent, NormalizedServiceStateBindingIntent,
+    NormalizedSignalsIntent, NormalizedSnapshotIntent, NormalizedStateIntent,
+    NormalizedStateOwnerIntent, NormalizedStorageIntent, NormalizedStorageVolumeIntent,
+    NormalizedSurfaceIntent, NormalizedTargetIntent, NormalizedTargetsIntent,
+    NormalizedToolDependencyIntent, NormalizedTransparencyIntent, NormalizedValueSchemaIntent,
+    OpaqueAuthoredString, OpaqueCommand, ProbePortReference, ProgramIdentifier,
+    ProgramManifestIntentV1, RemoteArtifactRef, Sha256DigestPin, SourceExistingPath,
+    SourceRelativeFuturePath, SourceRelativePath, TcpProbeTarget, UniqueBTreeMap, WitWorldRef,
 };
 use crate::execution_contract::GuestPath;
 use crate::program_source_projection::{CapsuleControlFiles, resolve_capsule_control_files};
@@ -78,7 +78,7 @@ use crate::types::{
     ContractSpec, DependencySpec, ExternalCapabilitySpec, ExternalCapsuleDependency,
     ExternalInjectionSpec, GeneratedBindingSpec, HostCapabilitySpec, IngressConfig, NamedTarget,
     NetworkConfig, OciTarget, ParamValue, ReadinessProbe, ReadyProbe, RuntimeExportSpec,
-    RuntimeType, SecretSpec, ServiceSpec, ShellKind, SnapshotConfig, SourceTarget,
+    RuntimeType, SealAtConfig, SecretSpec, ServiceSpec, ShellKind, SnapshotConfig, SourceTarget,
     StateRequirement, TargetsConfig, ToolDependencySpec, WasmTarget,
 };
 
@@ -86,7 +86,7 @@ use crate::types::{
 // Strict input gate (ADR-014 §2.0.1) — key sets only, values lenient
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Strict structural gate over raw `capsule.toml` text. All 41
+/// Strict structural gate over raw `capsule.toml` text. All 42
 /// `CapsuleManifest` top-level fields are explicit; unknown top-level keys
 /// fail closed. Values are never interpreted here — the post-normalization
 /// model is the sole source of meaning (§2.0.1).
@@ -172,6 +172,8 @@ pub struct ProgramManifestV03Input {
     pub ingress: Option<IngressV03Input>,
     #[serde(default)]
     pub snapshot: Option<SnapshotV03Input>,
+    #[serde(default)]
+    pub seal_at: Option<SealAtV03Input>,
     #[serde(default)]
     pub secrets: BTreeMap<String, SecretV03Input>,
     #[serde(default)]
@@ -1106,6 +1108,18 @@ pub struct SnapshotV03Input {
     pub content_ready_path: Option<toml::Value>,
 }
 
+/// `[seal_at]` — the Capsule v1 Snapshot acceptance program (RFC §6.3). Both
+/// keys are identity-bearing authored verification intent, so the key set is
+/// gated strictly here; the values' meaning belongs to the model (§2.0.1).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SealAtV03Input {
+    #[serde(default)]
+    pub command: Option<toml::Value>,
+    #[serde(default)]
+    pub timeout_seconds: Option<toml::Value>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretV03Input {
@@ -1674,6 +1688,10 @@ pub fn program_intent_from_v03(
         },
         snapshot: match &model.snapshot {
             Some(snapshot) => snapshot_intent(snapshot)?,
+            None => None,
+        },
+        seal_at: match &model.seal_at {
+            Some(seal_at) => Some(seal_at_intent(seal_at)?),
             None => None,
         },
         secrets: model
@@ -3141,6 +3159,29 @@ fn snapshot_intent(
     })
 }
 
+/// `[seal_at]` → IR. Never `omit_if_default`: `command` is required, so the
+/// section can never serialize to the absent spelling, and a declared
+/// verification program must stay visible in the identity.
+fn seal_at_intent(seal_at: &SealAtConfig) -> Result<NormalizedSealAtIntent, CapsuleProgramError> {
+    // The SAME rule set the v0.3 validator applies (§2.0.1: the strict input
+    // rejects only what the normalizer also rejects), so the adapter can never
+    // emit an IR the reader's `command` deserializer would refuse — e.g. an
+    // empty argv, which is not a canonical spelling of anything.
+    crate::types::ready_state::validate_seal_at(seal_at)
+        .map_err(|reason| invalid_value("seal_at", reason))?;
+    Ok(NormalizedSealAtIntent {
+        // Every element, including an empty one, is preserved in order: an
+        // authored `["prog", "--flag", ""]` means something different from
+        // `["prog", "--flag"]` (RFC §6.1 exact argument boundaries).
+        command: seal_at
+            .command
+            .iter()
+            .map(|argument| command("seal_at.command", argument))
+            .collect::<Result<_, _>>()?,
+        timeout_seconds: seal_at.timeout_seconds,
+    })
+}
+
 fn secret_intent(spec: &SecretSpec) -> Result<NormalizedSecretIntent, CapsuleProgramError> {
     Ok(NormalizedSecretIntent {
         required: spec.required,
@@ -4172,5 +4213,96 @@ readiness_probe = { http_get = "/", port = "8081" }
         let first = intent(BASE, root.path());
         first.validate().expect("adapter output is canonical");
         assert_eq!(ir_json(&first), ir_json(&intent(BASE, root.path())));
+    }
+
+    // ── [seal_at] (RFC §6.3) as identity-bearing intent ───────────────────
+
+    /// A `[seal_at]` manifest must still OBTAIN a Program Identity. The strict
+    /// input's `deny_unknown_fields` is a fail-closed trap for any authoring
+    /// surface that is not modelled here: without the `seal_at` field, every
+    /// manifest using the section would lose its `capsule_program_id`.
+    #[test]
+    fn seal_at_reaches_the_ir_as_identity_bearing_intent() {
+        let manifest = format!(
+            "{BASE}\n[seal_at]\ncommand = [\"sh\", \"-lc\", \"curl -fsS /ready\", \"--label\", \
+             \"\"]\ntimeout_seconds = 120\n"
+        );
+        let ir = intent(&manifest, tmp().path());
+        let seal_at = ir.seal_at.as_ref().expect("seal_at is modelled");
+        // Exact argv, order and boundaries preserved (RFC §6.1): the
+        // space-containing argument stays ONE element and the empty trailing
+        // argument survives.
+        let argv: Vec<&str> = seal_at
+            .command
+            .iter()
+            .map(|argument| argument.as_str())
+            .collect();
+        assert_eq!(
+            argv,
+            ["sh", "-lc", "curl -fsS /ready", "--label", ""],
+            "argv must be hashed exactly as authored"
+        );
+        assert_eq!(seal_at.timeout_seconds, Some(120));
+        ir.validate().expect("adapter output is canonical");
+
+        // Identity-bearing: changing the declared verification program changes
+        // the IR (and therefore the capsule_program_id).
+        let other = format!("{BASE}\n[seal_at]\ncommand = [\"./verify.sh\"]\n");
+        assert_ne!(
+            ir_json(&ir),
+            ir_json(&intent(&other, tmp().path())),
+            "the authored acceptance program is part of the declaration"
+        );
+    }
+
+    #[test]
+    fn absent_seal_at_leaves_the_ir_untouched() {
+        let root = tmp();
+        let ir = intent(BASE, root.path());
+        assert!(ir.seal_at.is_none());
+        assert!(
+            !ir_json(&ir).contains("seal_at"),
+            "an absent section must not appear in the canonical form"
+        );
+    }
+
+    #[test]
+    fn unknown_key_inside_seal_at_is_rejected_naming_the_key() {
+        let manifest = format!("{BASE}\n[seal_at]\ncommand = [\"verify\"]\nretries = 3\n");
+        match intent_err(&manifest, tmp().path()) {
+            CapsuleProgramError::ManifestInput(message) => {
+                assert!(message.contains("retries"), "{message}");
+            }
+            other => panic!("expected ManifestInput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn seal_at_empty_argv_fails_closed_in_both_directions() {
+        // Producer side: the adapter refuses to emit an argv it could not read
+        // back (it applies the same rule set the v0.3 validator does).
+        let manifest = format!("{BASE}\n[seal_at]\ncommand = []\n");
+        assert!(
+            matches!(
+                intent_err(&manifest, tmp().path()),
+                CapsuleProgramError::InvalidValue {
+                    field: "seal_at",
+                    ..
+                }
+            ),
+            "an empty acceptance argv is not a canonical declaration"
+        );
+
+        // Reader side: an explicit `[]` in a received IR is rejected naming the
+        // key, not silently treated as "absent".
+        let mut value = serde_json::to_value(intent(
+            &format!("{BASE}\n[seal_at]\ncommand = [\"verify\"]\n"),
+            tmp().path(),
+        ))
+        .expect("intent serializes");
+        value["seal_at"]["command"] = serde_json::json!([]);
+        let error = serde_json::from_value::<ProgramManifestIntentV1>(value)
+            .expect_err("explicit empty argv must fail closed");
+        assert!(error.to_string().contains("command"), "{error}");
     }
 }

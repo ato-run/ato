@@ -142,8 +142,10 @@ pub(crate) fn declared_secret_markers(m: &CapsuleManifest) -> Vec<String> {
 
 /// An explicit request to additionally mint a Capsule v1 Snapshot for the same
 /// immutable layers `seal` is about to build. `None` at the call site keeps
-/// `ato build` byte-for-byte legacy-only (today's product surface has no
-/// caller that supplies this yet — see the crate's porting notes).
+/// `ato build` byte-for-byte legacy-only.
+///
+/// `ato build` constructs one through [`v1_seal_request`] — i.e. only when the
+/// manifest declares `[seal_at]` AND a v1 Execution Identity was confirmed.
 pub(crate) struct V1SealRequest<'a> {
     /// The verified Execution Contract this Snapshot is subordinate to.
     /// Required (not a bare [`ExecutionId`]) because the running-capture
@@ -270,10 +272,59 @@ pub(crate) fn seal(
 pub(crate) fn default_acceptance_config(seal_at_argv: Vec<String>) -> AcceptanceConfig {
     AcceptanceConfig {
         seal_at_argv,
-        verification_timeout: Duration::from_secs(30),
-        total_deadline: Duration::from_secs(60),
+        verification_timeout: DEFAULT_VERIFICATION_TIMEOUT,
+        total_deadline: DEFAULT_TOTAL_DEADLINE,
         maximum_attempts: 1,
     }
+}
+
+/// Per-attempt verification budget when `[seal_at]` names no `timeout_seconds`.
+const DEFAULT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-run deadline when `[seal_at]` names no `timeout_seconds`. The excess
+/// over [`DEFAULT_VERIFICATION_TIMEOUT`] is the budget for the NON-verification
+/// work of one attempt (candidate capture, disposable create/restore, teardown).
+const DEFAULT_TOTAL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Build the Capsule v1 Snapshot request for a CONFIRMED Execution Identity out
+/// of the manifest's `[seal_at]` table (RFC §6/§6.3).
+///
+/// `None` when the manifest declares no `[seal_at]`: with no authored
+/// acceptance command there is nothing that could accept a candidate (the
+/// acceptance loop only ever accepts on an OBSERVED exit 0 of a real argv), so
+/// the caller stays on its legacy-only path byte-for-byte.
+///
+/// `timeout_seconds` maps onto [`AcceptanceConfig::verification_timeout`] — the
+/// per-attempt bound on the verification program, which is exactly what §6.1
+/// names. `total_deadline` is widened to keep the same non-verification headroom
+/// [`default_acceptance_config`] allots (its `total_deadline` minus its
+/// `verification_timeout`), so an authored timeout can actually be spent instead
+/// of being truncated by a fixed 60 s run deadline. `maximum_attempts` is NOT
+/// touched: the single-attempt policy is a property of the caller's
+/// single-boot capture pipeline (see [`default_acceptance_config`]'s doc), not
+/// something the manifest may widen. When `timeout_seconds` is absent the
+/// request carries no config at all, so `seal` uses the default verbatim.
+pub(crate) fn v1_seal_request<'a>(
+    manifest: &CapsuleManifest,
+    execution_contract_envelope: &'a ExecutionContractEnvelopeV1,
+) -> Option<V1SealRequest<'a>> {
+    let seal_at = manifest.seal_at.as_ref()?;
+    let acceptance_config = seal_at.timeout_seconds.map(|seconds| {
+        let verification_timeout = Duration::from_secs(u64::from(seconds));
+        AcceptanceConfig {
+            verification_timeout,
+            total_deadline: verification_timeout
+                + DEFAULT_TOTAL_DEADLINE.saturating_sub(DEFAULT_VERIFICATION_TIMEOUT),
+            ..default_acceptance_config(seal_at.command.clone())
+        }
+    });
+    Some(V1SealRequest {
+        execution_contract_envelope,
+        // Exact argv, cloned element-for-element: argument boundaries (including
+        // an argument that contains a space, and an empty argument) are the
+        // authored command's meaning (RFC §6.1), never re-split or re-joined.
+        seal_at_argv: seal_at.command.clone(),
+        acceptance_config,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1002,5 +1053,105 @@ content_ready_path=\"/\"\n",
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    // ── [seal_at] → V1SealRequest (the `ato build` wiring) ────────────────
+
+    #[test]
+    fn seal_at_declares_the_v1_request_with_the_exact_authored_argv() {
+        let envelope = test_execution_envelope(3);
+        // An argument containing a space and an empty argument: both are part of
+        // the authored command's meaning (RFC §6.1) and must survive verbatim,
+        // never re-split, re-joined, or dropped.
+        let m = parse(
+            "[snapshot]\nmode=\"warm\"\n\n[seal_at]\ncommand = [\"sh\", \"-lc\", \
+             \"curl -fsS http://127.0.0.1:8080/ready\", \"--label\", \"\"]\n",
+        );
+        let request = v1_seal_request(&m, &envelope).expect("[seal_at] yields a v1 request");
+        assert_eq!(
+            request.seal_at_argv,
+            [
+                "sh",
+                "-lc",
+                "curl -fsS http://127.0.0.1:8080/ready",
+                "--label",
+                "",
+            ]
+        );
+        assert_eq!(
+            request.execution_contract_envelope.execution_id,
+            envelope.execution_id
+        );
+        // No authored timeout ⇒ no override at all, so `seal` uses
+        // `default_acceptance_config` verbatim (single attempt included).
+        assert!(request.acceptance_config.is_none());
+    }
+
+    #[test]
+    fn absent_seal_at_yields_no_v1_request() {
+        let envelope = test_execution_envelope(4);
+        let m = parse("[snapshot]\nmode=\"warm\"\n");
+        assert!(
+            v1_seal_request(&m, &envelope).is_none(),
+            "a manifest without [seal_at] must behave exactly as before"
+        );
+    }
+
+    #[test]
+    fn seal_at_timeout_maps_onto_the_verification_budget_only() {
+        let envelope = test_execution_envelope(5);
+        let m = parse(
+            "[snapshot]\nmode=\"warm\"\n\n[seal_at]\ncommand = [\"verify\"]\ntimeout_seconds = 120\n",
+        );
+        let config = v1_seal_request(&m, &envelope)
+            .expect("request")
+            .acceptance_config
+            .expect("an authored timeout overrides the default bounds");
+        assert_eq!(config.seal_at_argv, ["verify"]);
+        assert_eq!(config.verification_timeout, Duration::from_secs(120));
+        // The run deadline keeps the default's non-verification headroom
+        // (60s total - 30s verification = 30s) so the authored 120s can
+        // actually be spent instead of being truncated at 60s.
+        assert_eq!(config.total_deadline, Duration::from_secs(150));
+        // The single-attempt policy belongs to the caller's single-boot capture
+        // pipeline; the manifest must not be able to widen it.
+        assert_eq!(
+            config.maximum_attempts,
+            default_acceptance_config(Vec::new()).maximum_attempts
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn seal_at_from_the_manifest_drives_a_real_acceptance_run() {
+        // End-to-end through `seal`: the argv the MANIFEST declared is what the
+        // acceptance loop actually spawns, so minting a v1 Snapshot is reachable
+        // from authoring alone.
+        let dir = tempfile::tempdir().unwrap();
+        let backend = snapshot::FakeSnapshotBackend::new();
+        let m = parse(
+            "[snapshot]\nmode=\"warm\"\n\n[seal_at]\ncommand = [\"true\"]\ntimeout_seconds = 5\n",
+        );
+        let layers = BuildLayers {
+            rootfs: b"rootfs".to_vec(),
+            runtime: None,
+            dependency: None,
+            app: Some(b"app".to_vec()),
+            vmstate: vec![0u8; 64],
+            memory: vec![1u8; 4096],
+        };
+        let envelope = test_execution_envelope(6);
+        let request = v1_seal_request(&m, &envelope).expect("request");
+        seal(
+            dir.path(),
+            "blake3:seal-at".to_string(),
+            &m,
+            layers,
+            &backend,
+            Some(request),
+        )
+        .unwrap();
+        let snapshots = store::load_v1_snapshots(dir.path(), &envelope.execution_id).unwrap();
+        assert_eq!(snapshots.len(), 1);
     }
 }
