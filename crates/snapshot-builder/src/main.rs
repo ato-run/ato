@@ -72,10 +72,15 @@ use snapshot::rootfs_builder::{
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
-    BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe, no_secret_scan,
+    BuildLayers, BuildReadyStateInput, FirecrackerBackend, ReadyStateManifest, RestoreContract,
+    RestoreReadyStateInput, SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe,
+    no_secret_scan,
 };
 
+/// Submission Wizard PR-2 (slice 3) — the production [`CaptureAction`]: pause,
+/// snapshot, resume and seal a candidate from a live held guest, then persist and
+/// upload it through the same path a built artifact takes.
+mod guest_capture;
 /// Submission Wizard PR-2 (slice 1) — the pure, KVM-free HOLD-phase orchestration
 /// (hold → capture → #1088 accept). Driven by injected seams; unreachable in prod
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
@@ -674,6 +679,58 @@ fn ack_source_materialize_failed(
 /// breaking runner-side verification against `capsule_snapshots.execution_id`. Until the
 /// Ready-State build path stamps the true declared execution id into the manifest, a
 /// missing value **fails closed** here (`failure_stage = artifact_metadata`).
+/// Persist a sealed manifest beside its CAS and return the location the registry
+/// records for it.
+///
+/// `cas://<job_id>/<hash>` names `<work>/<job_id>/{manifest.json, cas/}`: a runner
+/// restores by loading `manifest.json`, verifying `manifest.id() == hash`
+/// (fail-closed), then restoring from the co-located CAS. With the artifact store
+/// configured (ato#1002 Snapshot Serving v1), the pair is packed into one
+/// `artifact.tar.gz` and uploaded BEFORE anything is acked, and the returned
+/// location names the remote store instead. Upload failure is a failure of the
+/// whole step — never sealed-without-bytes. Absent config keeps the local
+/// `cas://` location, no packing, no upload.
+///
+/// Shared by the auto-seal build and by the interactive HOLD's capture seam, so a
+/// held candidate is persisted, scanned and located by exactly the same code as a
+/// built artifact.
+fn persist_and_locate_artifact(
+    manifest: &ReadyStateManifest,
+    jobdir: &Path,
+    job_id: &str,
+    artifact_manifest_hash: &str,
+) -> std::result::Result<String, (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let manifest_json = serde_json::to_vec_pretty(manifest).map_err(|e| {
+        fail(
+            "artifact_metadata",
+            format!("serialize sealed manifest: {e}"),
+        )
+    })?;
+    // The manifest carries no layer bytes — only hashes, contracts and sizes — so
+    // a canary hit here means something leaked into metadata.
+    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
+        return Err(fail(
+            "no_secret_scan",
+            "sealed manifest json failed the no-secret scan".into(),
+        ));
+    }
+    std::fs::write(jobdir.join("manifest.json"), &manifest_json)
+        .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
+
+    match upload::ArtifactStore::from_env().map_err(|e| fail("artifact_upload", e))? {
+        Some(store) => store
+            .pack_and_upload(
+                &upload::SystemImportCommandRunner,
+                jobdir,
+                job_id,
+                artifact_manifest_hash,
+            )
+            .map_err(|e| fail("artifact_upload", e)),
+        None => Ok(upload::cas_location(job_id, artifact_manifest_hash)),
+    }
+}
+
 fn sealed_identity(
     execution_id: Option<&str>,
     runner_class_id: Option<String>,
@@ -2587,49 +2644,14 @@ fn process_job(
         manifest_out.execution_id.as_deref(),
         manifest_out.runner_class_id.as_ref().map(|c| c.to_string()),
     )?;
-    let artifact_location = upload::cas_location(&job.id, &artifact_manifest_hash);
 
-    // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
-    // names <work>/<job_id>/{manifest.json, cas/}, and a runner restores by loading
-    // manifest.json, verifying `manifest.id() == artifact_manifest_hash` (fail-closed),
-    // then restoring from the co-located CAS. The manifest is derived entirely from
-    // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
-    // it carries no layer bytes and no secrets.
-    let manifest_json = serde_json::to_vec_pretty(&manifest_out).map_err(|e| {
-        fail(
-            "artifact_metadata",
-            format!("serialize sealed manifest: {e}"),
-        )
-    })?;
-    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
-        return Err(fail(
-            "no_secret_scan",
-            "sealed manifest json failed the no-secret scan".into(),
-        ));
-    }
-    std::fs::write(jobdir.join("manifest.json"), &manifest_json)
-        .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
-
-    // 8. ato#1002 Snapshot Serving v1: with the artifact store configured (all
-    // four ATO_ARTIFACT_S3_* vars — validated all-or-nothing at startup),
-    // package {manifest.json, cas/} into one artifact.tar.gz and upload it
-    // BEFORE the sealed ack; the registered location then names the remote
-    // store ("r2://<bucket>/<job_id>/<artifact_manifest_hash>"). Upload failure
-    // ⇒ failed ack at artifact_upload — never sealed-without-bytes. Absent
-    // config keeps v1 byte-identical: the same-host cas:// location above, no
-    // packing, no upload.
+    // 7-8. Persist the sealed manifest beside the CAS and (when the artifact
+    // store is configured) pack + upload it, yielding the location the registry
+    // records. Shared with the interactive HOLD's capture seam so a held
+    // candidate is persisted and located by exactly the same code as a built
+    // artifact — see `persist_and_locate_artifact`.
     let artifact_location =
-        match upload::ArtifactStore::from_env().map_err(|e| fail("artifact_upload", e))? {
-            Some(store) => store
-                .pack_and_upload(
-                    &upload::SystemImportCommandRunner,
-                    &jobdir,
-                    &job.id,
-                    &artifact_manifest_hash,
-                )
-                .map_err(|e| fail("artifact_upload", e))?,
-            None => artifact_location,
-        };
+        persist_and_locate_artifact(&manifest_out, &jobdir, &job.id, &artifact_manifest_hash)?;
 
     Ok(Artifact {
         capsule_manifest_hash: produced.capsule_manifest_hash,
