@@ -116,6 +116,51 @@ impl<'de> Deserialize<'de> for WireContractVersion {
     }
 }
 
+/// A `wire_contract_version` as it arrives on ONE job of a CLAIM BATCH (§3.1).
+///
+/// [`WireContractVersion`] rejects a skewed value at parse, which is exactly
+/// right for a wizard message: the whole body belongs to one attempt, so a
+/// version skew must fail the body. A claim response is not that shape — it is a
+/// batch of jobs of several kinds parsed as ONE document, so a required-literal
+/// field there gives a single skewed wizard job the power to fail the parse of
+/// the healthy recipe / import jobs beside it, dropping work that has nothing to
+/// do with the wizard.
+///
+/// This type keeps the gate and SCOPES it to the job it gates: any string
+/// deserializes here, and the literal is enforced by [`Self::supported`], which
+/// the job's own claim-extension assembly calls before any wizard semantics run.
+/// A skewed job therefore still fails closed — it simply fails alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimedWireContractVersion {
+    /// Exactly [`WIRE_CONTRACT_VERSION`].
+    Supported(WireContractVersion),
+    /// Any other value. Carried so the diagnostic can name it, never honoured.
+    Skewed(String),
+}
+
+impl<'de> Deserialize<'de> for ClaimedWireContractVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == WIRE_CONTRACT_VERSION {
+            Ok(ClaimedWireContractVersion::Supported(WireContractVersion))
+        } else {
+            Ok(ClaimedWireContractVersion::Skewed(value))
+        }
+    }
+}
+
+impl ClaimedWireContractVersion {
+    /// The fail-closed version gate, applied to the one job that carries it.
+    pub fn supported(&self) -> Result<WireContractVersion, String> {
+        match self {
+            ClaimedWireContractVersion::Supported(version) => Ok(*version),
+            ClaimedWireContractVersion::Skewed(value) => Err(format!(
+                "wire_contract_version mismatch: expected {WIRE_CONTRACT_VERSION:?}, got {value:?} (fail-closed version gate)"
+            )),
+        }
+    }
+}
+
 /// Required-literal field type for `receipt_schema` (§3.7, D3). Serializes to
 /// exactly [`ACCEPTANCE_RECEIPT_SCHEMA`]; any other value fails at parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

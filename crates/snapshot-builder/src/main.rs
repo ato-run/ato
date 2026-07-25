@@ -238,11 +238,15 @@ struct ClaimedJob {
     // ALL-OR-NOTHING by `interactive_capture_claim`; the individual fields are
     // never read directly, because a half-present set is a contract skew, not a
     // half-usable fencing tuple.
-    /// Required LITERAL when present: the `WireContractVersion` deserializer
-    /// rejects any other value, so a version skew fails closed AT PARSE, before
-    /// any wizard semantics run.
+    /// Required LITERAL when present — but the gate is JOB-SCOPED, not
+    /// batch-scoped: a claim response is one document carrying several jobs of
+    /// several kinds, so a deserializer that rejected a skewed value outright
+    /// would fail the whole batch and drop the healthy recipe / import jobs
+    /// beside it. [`wizard_wire::ClaimedWireContractVersion`] parses any string
+    /// and fails closed in `interactive_capture_claim` below, so a version skew
+    /// still runs NO wizard semantics — it just costs only its own job.
     #[serde(default)]
-    wire_contract_version: Option<wizard_wire::WireContractVersion>,
+    wire_contract_version: Option<wizard_wire::ClaimedWireContractVersion>,
     #[serde(default)]
     submission_attempt_id: Option<String>,
     #[serde(default)]
@@ -292,8 +296,16 @@ impl ClaimedJob {
                 missing.join(", ")
             ));
         }
+        // The §3.1 version gate, applied HERE rather than at batch parse (see the
+        // field's doc): a skewed contract yields no claim extension, so no wizard
+        // semantics run for this job — and its siblings in the batch are untouched.
+        let wire_contract_version = self
+            .wire_contract_version
+            .as_ref()
+            .expect("presence checked above")
+            .supported()?;
         Ok(wizard_wire::InteractiveCaptureClaimExt {
-            wire_contract_version: self.wire_contract_version.unwrap(),
+            wire_contract_version,
             submission_attempt_id: self.submission_attempt_id.clone().unwrap(),
             worker_claim_id: self.worker_claim_id.clone().unwrap(),
             lease_token: self.lease_token.clone().unwrap(),
@@ -3153,14 +3165,36 @@ targets = ["web"]
     }
 
     #[test]
-    fn a_skewed_wire_contract_version_fails_closed_at_claim_parse() {
-        // The literal is the fail-closed version gate: it rejects at PARSE, so
-        // no wizard semantics ever run against a skewed contract.
-        let mut job = interactive_claim_job();
-        job["wire_contract_version"] = serde_json::json!("ato.submission-wizard-wire/v2");
+    fn a_skewed_wire_contract_version_fails_closed_for_its_own_job_only() {
+        // The literal is the fail-closed version gate: a skewed contract yields
+        // NO fencing tuple, so no wizard semantics ever run against it. What it
+        // must NOT do is take the batch down with it — a claim response is one
+        // document carrying several jobs of several kinds, and a wizard version
+        // skew has nothing to do with the recipe job claimed beside it.
+        let mut skewed = interactive_claim_job();
+        skewed["wire_contract_version"] = serde_json::json!("ato.submission-wizard-wire/v2");
+        let healthy = serde_json::json!({
+            "id": "job_recipe", "capsule_id": "cap_r",
+            "source": { "github_owner": "acme", "github_repo": "app", "commit_sha": "c".repeat(40), "subdirectory": null },
+            "target_label": "web", "profile": "default"
+        });
+        let resp: ClaimResponse =
+            serde_json::from_value(serde_json::json!({ "jobs": [skewed, healthy] }))
+                .expect("one skewed wizard job never fails the whole batch");
+
+        let why = resp.jobs[0]
+            .fencing4()
+            .expect_err("a skewed contract version has no fencing tuple");
+        assert!(why.contains("wire_contract_version mismatch"), "{why}");
         assert!(
-            serde_json::from_value::<ClaimResponse>(serde_json::json!({ "jobs": [job] })).is_err()
+            why.contains("ato.submission-wizard-wire/v2"),
+            "the diagnostic names the skewed value: {why}"
         );
+
+        // The healthy sibling survived and is still claimable on its own lane.
+        assert_eq!(resp.jobs.len(), 2);
+        assert_eq!(resp.jobs[1].id, "job_recipe");
+        assert_eq!(resp.jobs[1].kind, "recipe");
     }
 
     #[test]

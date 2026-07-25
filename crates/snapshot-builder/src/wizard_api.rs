@@ -60,7 +60,7 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::hold_phase::{ControlFault, ControlSource, HoldTermination};
+use crate::hold_phase::{ControlFault, ControlSource, HoldTermination, LeaseKeepalive};
 use crate::wizard_wire::{
     CandidateAcceptanceRequest, CandidateAcceptanceResponse, CandidateReportRequest,
     CandidateReportResponse, ControlDirective, ControlQuery, ControlResponse, ERROR_CODE_FENCED,
@@ -91,8 +91,7 @@ const LEASE_RENEW_RETRY_DIVISOR: u32 = 3;
 /// the retry path into a busy loop against the api.
 const LEASE_RENEW_MIN_RETRY: Duration = Duration::from_secs(1);
 
-/// How many times ONE control poll may be attempted before the hold is torn
-/// down ([`ApiControlSource::poll`]).
+/// Backoff between control-poll retries ([`ApiControlSource::poll`]).
 ///
 /// A single `502` from the edge — or one reset connection — must NOT destroy a
 /// live author session: by the time the poll runs the lease has just been
@@ -103,10 +102,19 @@ const LEASE_RENEW_MIN_RETRY: Duration = Duration::from_secs(1);
 /// the window rather than failing on the first blip; what BOUNDS both is the
 /// same thing — the lease deadline, re-checked before every attempt, so a retry
 /// only ever proceeds while the lease is provably alive.
-const CONTROL_POLL_ATTEMPTS: u32 = 3;
+///
+/// It is a DEADLINE and not an attempt count on purpose. An api that is being
+/// redeployed refuses connections for seconds, and each refusal comes back in
+/// about a millisecond: a count of three would burn the whole budget in
+/// milliseconds and tear down a hold whose lease still had minutes on it — the
+/// exact failure this retry exists to prevent. The backoff is what keeps the
+/// deadline bound from becoming a spin; it is slept through the [`WallClock`]
+/// seam, so the fake clock drives it in tests without real time passing.
+const CONTROL_POLL_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// The builder's own failure-reason budget: 1800 chars against the api's 2000
-/// UTF-16 bound. This is THE budget for the whole daemon — the legacy failed /
+/// The builder's own failure-reason budget: 1800 **UTF-16 code units** against
+/// the api's 2000 — the same unit on both sides, which is the whole point (see
+/// [`truncate`]). This is THE budget for the whole daemon — the legacy failed /
 /// source-materialize acks in `main.rs` truncate through
 /// [`truncate_failure_reason`] rather than re-spelling `1800` inline, so the
 /// bound cannot drift on one lane and not another.
@@ -587,8 +595,34 @@ fn url_component_safe(endpoint: &str, name: &str, value: &str) -> Result<(), Wiz
     Ok(())
 }
 
+/// Truncate to at most `budget` **UTF-16 code units**, never splitting a scalar.
+///
+/// The unit matters: every length bound on this wire is counted in UTF-16 code
+/// units (zod's `.max()` measures `String.length`), so a truncator counting
+/// `chars()` measures a DIFFERENT quantity than the validator that follows it. A
+/// diagnostic whose first 1800 scalars include 201 astral ones (emoji in a
+/// Node/Vite log) is 2001+ code units after a `chars()` truncation — over the
+/// api's 2000 bound, so `validate()` refuses the body and the terminal ack is
+/// never sent AT ALL, leaving the job to the server sweep with no diagnostic.
+/// Truncating in the validator's own unit closes that gap; a scalar is never cut
+/// in half, so the result is always valid UTF-8 and at most `budget` units.
 fn truncate(value: &str, budget: usize) -> String {
-    value.chars().take(budget).collect()
+    // Fast path: pure ASCII (every build diagnostic that ever hit this before)
+    // has one code unit per byte, so no per-char walk is needed to know it fits.
+    if value.len() <= budget && value.is_ascii() {
+        return value.to_string();
+    }
+    let mut truncated = String::new();
+    let mut units = 0usize;
+    for scalar in value.chars() {
+        let width = scalar.len_utf16();
+        if units + width > budget {
+            break;
+        }
+        units += width;
+        truncated.push(scalar);
+    }
+    truncated
 }
 
 /// Truncate a diagnostic to the builder's [`FAILURE_REASON_BUDGET`]. Shared with
@@ -739,6 +773,16 @@ impl<T: HttpTransport> WizardApi for HttpWizardApi<T> {
         let body = CandidateAcceptanceRequest {
             submission_attempt_id: fencing.submission_attempt_id.clone(),
             worker_claim_id: fencing.worker_claim_id.clone(),
+            // §3.7 bounds `failure_reason` exactly as §3.8 does (≤ 2000 UTF-16
+            // code units, builder truncates at 1800), so it is truncated here for
+            // the same reason the §3.8 ack builders truncate: a rejection
+            // diagnostic is unbounded acceptance output, and letting it overrun
+            // turns the report into a LOCAL Contract error — the api never hears
+            // that the candidate was rejected at all.
+            failure_reason: request
+                .failure_reason
+                .as_deref()
+                .map(truncate_failure_reason),
             ..request.clone()
         };
         body.validate()
@@ -894,6 +938,17 @@ pub fn ack_hold_termination(
 /// its own TTL; this driver uses the clock the deadline is expressed in.
 pub trait WallClock {
     fn now_utc(&self) -> SystemTime;
+
+    /// Wait `duration` before the caller looks at [`Self::now_utc`] again.
+    ///
+    /// Waiting belongs on the clock seam rather than on a bare
+    /// `std::thread::sleep`: a backoff is a statement about the SAME time the
+    /// deadline is expressed in, and a fake clock that advances instead of
+    /// sleeping is what lets the deadline-bounded retry loops below be tested
+    /// without spending real minutes.
+    fn sleep(&self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
 }
 
 pub struct SystemWallClock;
@@ -970,6 +1025,15 @@ impl From<LeaseLost> for ControlFault {
 /// than one lease window (the hold TTL is 30 minutes; the api's lease TTL is
 /// minutes). Without this a real hold is fenced out mid-session and every
 /// subsequent call — including its terminal ack — is a `409`.
+///
+/// The driver renews only when [`Self::tick`] is called, so what makes the claim
+/// above TRUE is that every long-running step of the hold drives a tick, not
+/// just the control poll. [`ApiControlSource`] ticks on each poll AND exposes
+/// the same tick as [`ControlSource::keepalive`], which
+/// [`crate::hold_phase::HoldPhase`] hands to the capture action and to every
+/// productive phase of the acceptance run — the two stretches (a pause + seal +
+/// upload, and a disposable restore + verify) that each run for minutes without
+/// a poll in between and would otherwise outlive the lease.
 pub struct LeaseRenewDriver<'a, C: WallClock> {
     api: &'a dyn WizardApi,
     clock: &'a C,
@@ -1018,6 +1082,24 @@ impl<'a, C: WallClock> LeaseRenewDriver<'a, C> {
     /// Successful renews so far (diagnostics + tests).
     pub fn renews(&self) -> u64 {
         self.renews
+    }
+
+    /// How long the observed lease still has, saturating to zero once the
+    /// deadline has passed (at which point the next [`Self::tick`] fails closed).
+    ///
+    /// This is the ONE bound a retry on this lane is allowed to use: the lease is
+    /// the only thing that makes a further api call legitimate.
+    pub fn lease_remaining(&self) -> Duration {
+        self.lease_deadline
+            .duration_since(self.clock.now_utc())
+            .unwrap_or(Duration::ZERO)
+    }
+
+    /// The wall clock this driver measures the deadline against — shared with
+    /// [`ApiControlSource`] so a retry backoff waits on the same clock the
+    /// deadline is expressed in rather than inventing a second notion of time.
+    pub fn clock(&self) -> &C {
+        self.clock
     }
 
     fn adopt(&mut self, lease_expires_at: &str) -> Result<(), LeaseLost> {
@@ -1090,6 +1172,11 @@ impl<'a, C: WallClock> LeaseRenewDriver<'a, C> {
 /// background thread racing a pause/capture) and makes the safety property
 /// automatic: a builder that has stopped polling has also stopped renewing, so a
 /// wedged builder loses its lease instead of holding a preview binding open.
+///
+/// The two stretches that run for minutes WITHOUT a poll — the capture itself
+/// and the acceptance run — drive the same renew through
+/// [`ControlSource::keepalive`] instead. Same driver, same deadline, same
+/// fail-closed verdict; the only difference is that no directive is consumed.
 pub struct ApiControlSource<'a, C: WallClock> {
     api: &'a dyn WizardApi,
     fencing: &'a Fencing4,
@@ -1132,7 +1219,7 @@ impl<'a, C: WallClock> ApiControlSource<'a, C> {
 impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
     fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
         if self.polls > 0 && !self.poll_interval.is_zero() {
-            std::thread::sleep(self.poll_interval);
+            self.lease.clock().sleep(self.poll_interval);
         }
         self.polls += 1;
         let mut attempt: u32 = 1;
@@ -1146,26 +1233,28 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
             self.lease.tick(self.fencing)?;
             match self.api.poll_control(self.fencing, observed_capture_epoch) {
                 Ok(response) => break response,
-                // A fenced poll is definitive (the claim is already dead
-                // server-side, so there is nothing to retry into), and an
-                // exhausted budget is the fail-closed end of the line. Every
-                // other failure — a 5xx from the edge, a reset connection, a
-                // timeout — is a blip that must not cost the author their
-                // session while the lease is alive.
-                Err(err) if err.is_fenced() || attempt >= CONTROL_POLL_ATTEMPTS => {
-                    return Err(err.into());
-                }
+                // A fenced poll is definitive: the claim is already dead
+                // server-side, so there is nothing to retry into.
+                Err(err) if err.is_fenced() => return Err(err.into()),
+                // Every other failure — a 5xx from the edge, a reset connection,
+                // a timeout — is a blip that must not cost the author their
+                // session while the lease is alive. There is deliberately NO
+                // attempt count: an api mid-redeploy refuses connections for
+                // seconds and answers each attempt in a millisecond, so a count
+                // would be spent before the outage was, on a lease with minutes
+                // left. The bound is the `tick` above, and the backoff below is
+                // what keeps the bound from being a spin.
                 Err(err) => {
                     eprintln!(
-                        "[builder] wizard control poll failed (attempt {attempt}/{CONTROL_POLL_ATTEMPTS}), \
-                         retrying inside the lease window: {err}"
+                        "[builder] wizard control poll failed (attempt {attempt}), retrying \
+                         inside the lease window: {err}"
                     );
                     attempt += 1;
-                    // Reuse the hold loop's own pacing as the retry backoff
-                    // (ZERO in tests) rather than inventing a second cadence.
-                    if !self.poll_interval.is_zero() {
-                        std::thread::sleep(self.poll_interval);
-                    }
+                    // Never wait PAST the deadline that bounds us: sleeping the
+                    // full backoff on a lease with 200ms left would just delay
+                    // the fail-closed tick by the difference.
+                    let backoff = CONTROL_POLL_RETRY_BACKOFF.min(self.lease.lease_remaining());
+                    self.lease.clock().sleep(backoff);
                 }
             }
         };
@@ -1173,6 +1262,20 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
             self.last_capture_command = Some(command);
         }
         Ok(response)
+    }
+}
+
+/// Drive the lease WITHOUT polling the control channel — see [`LeaseKeepalive`]
+/// for why the hold needs one.
+///
+/// This is exactly the tick the poll already does, exposed on its own so the
+/// stretches that run for minutes between polls (capture, acceptance) keep the
+/// same lease alive through the same driver, with the same fail-closed verdict.
+/// It deliberately does NOT poll: a keepalive must not consume a directive that
+/// the hold loop is not in a position to act on.
+impl<C: WallClock> LeaseKeepalive for ApiControlSource<'_, C> {
+    fn keepalive(&mut self) -> Result<(), ControlFault> {
+        self.lease.tick(self.fencing).map_err(Into::into)
     }
 }
 
@@ -2014,6 +2117,64 @@ mod tests {
     }
 
     #[test]
+    fn a_diagnostic_is_truncated_in_the_unit_the_wire_bound_is_counted_in() {
+        // The truncator and the validator have to measure the SAME thing. The
+        // bound is 2000 UTF-16 code units (zod counts `String.length`), so a
+        // truncator counting scalars keeps 1800 astral emoji — 3600 code units,
+        // over the bound. `validate()` then refuses the body and the terminal ack
+        // is never sent AT ALL: the job sits in `holding` until the server sweep
+        // and the author's failure has no diagnostic anywhere. Emoji in a
+        // Node/Vite build log is the ordinary case, not a contrived one.
+        let api = client(RecordingTransport::always_ok(json!({}), 1));
+        let astral = "🙂".repeat(FAILURE_REASON_BUDGET);
+        assert_eq!(astral.chars().count(), FAILURE_REASON_BUDGET);
+        ack_interactive_build_failure(&api, "builder-1", &fencing(), "holding", &astral)
+            .expect("the ack still leaves");
+        let body = body_json(&api.transport.requests()[0]);
+        let sent = body["failure_reason"].as_str().expect("string");
+        assert_eq!(
+            sent.encode_utf16().count(),
+            FAILURE_REASON_BUDGET,
+            "the budget is spent in code units, the unit the api measures"
+        );
+        // …and never mid-scalar: the result is still the emoji, just fewer.
+        assert_eq!(sent, "🙂".repeat(FAILURE_REASON_BUDGET / 2));
+    }
+
+    #[test]
+    fn a_rejected_acceptance_truncates_its_diagnostic_like_the_terminal_ack_does() {
+        // §3.7 bounds `failure_reason` exactly as §3.8 does. Untruncated, an
+        // acceptance rejection carrying a real verification log fails its own
+        // `validate()` — a LOCAL error, so the api is never told the candidate was
+        // rejected and the attempt waits on the sweep instead.
+        let api = client(RecordingTransport::always_ok(
+            json!({ "candidate_id": "cand_01J1Z0", "status": "rejected" }),
+            1,
+        ));
+        let flood = "e".repeat(FAILURE_REASON_BUDGET + 700);
+        api.report_candidate_acceptance(
+            &fencing(),
+            &command(),
+            &CandidateAcceptanceRequest {
+                status: AcceptanceStatus::Rejected,
+                acceptance_receipt: None,
+                failure_reason: Some(flood),
+                ..acceptance()
+            },
+        )
+        .expect("the rejection report still leaves");
+        let body = body_json(&api.transport.requests()[0]);
+        assert_eq!(
+            body["failure_reason"]
+                .as_str()
+                .expect("string")
+                .encode_utf16()
+                .count(),
+            FAILURE_REASON_BUDGET
+        );
+    }
+
+    #[test]
     fn a_server_error_body_is_bounded_before_it_becomes_a_local_error() {
         // An error body is non-secret server output, but it is still unbounded
         // REMOTE input: an api that answered a 500 with a megabyte of HTML would
@@ -2082,8 +2243,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             for (status, body) in responses {
                 let (mut stream, _) = listener.accept().expect("accept");
-                let mut request = [0u8; 4096];
-                let _ = stream.read(&mut request);
+                read_whole_request(&mut stream);
                 let head = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
                      content-length: {}\r\nconnection: close\r\n\r\n",
@@ -2091,9 +2251,47 @@ mod tests {
                 );
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
             }
         });
         (base, server)
+    }
+
+    /// Read one WHOLE HTTP/1.1 request — the head, then exactly `content-length`
+    /// more bytes — before the fixture answers.
+    ///
+    /// Not pedantry: closing a socket whose receive buffer still holds unread
+    /// bytes sends an RST, and an RST discards the response already queued on
+    /// that socket. The client then fails reading the STATUS LINE instead of
+    /// seeing the scripted status, so the outcome depends on how the request
+    /// happened to be split into packets — a deterministic test that fails
+    /// occasionally under load. Draining the request first makes the close a
+    /// clean FIN.
+    fn read_whole_request(stream: &mut std::net::TcpStream) {
+        let mut request: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            if let Some(head_end) = request
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|at| at + 4)
+            {
+                let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
+                let body_len: usize = head
+                    .split("content-length:")
+                    .nth(1)
+                    .and_then(|rest| rest.split("\r\n").next())
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= head_end + body_len {
+                    return;
+                }
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(read) => request.extend_from_slice(&chunk[..read]),
+            }
+        }
     }
 
     #[test]
@@ -2158,12 +2356,14 @@ mod tests {
     /// the clock the driver is tested on).
     struct FakeWallClock {
         now: Mutex<SystemTime>,
+        slept: Mutex<Duration>,
     }
 
     impl FakeWallClock {
         fn at(iso: &str) -> Self {
             FakeWallClock {
                 now: Mutex::new(parse_utc_instant(iso).expect("fixture instant")),
+                slept: Mutex::new(Duration::ZERO),
             }
         }
 
@@ -2171,11 +2371,22 @@ mod tests {
             let mut now = self.now.lock().unwrap();
             *now += by;
         }
+
+        fn slept(&self) -> Duration {
+            *self.slept.lock().unwrap()
+        }
     }
 
     impl WallClock for FakeWallClock {
         fn now_utc(&self) -> SystemTime {
             *self.now.lock().unwrap()
+        }
+
+        /// Time passes without being spent: a backoff bounded by a wall-clock
+        /// deadline is only testable if the fake advances instead of blocking.
+        fn sleep(&self, duration: Duration) {
+            *self.slept.lock().unwrap() += duration;
+            self.advance(duration);
         }
     }
 
@@ -2185,6 +2396,7 @@ mod tests {
         renewals: Mutex<VecDeque<Result<LeaseRenewResponse, WizardApiError>>>,
         renew_calls: Mutex<u32>,
         controls: Mutex<VecDeque<Result<ControlResponse, WizardApiError>>>,
+        control_calls: Mutex<u32>,
         acks: Mutex<Vec<WizardTerminalAck>>,
     }
 
@@ -2197,12 +2409,32 @@ mod tests {
                 renewals: Mutex::new(renewals.into()),
                 renew_calls: Mutex::new(0),
                 controls: Mutex::new(controls.into()),
+                control_calls: Mutex::new(0),
                 acks: Mutex::new(Vec::new()),
             }
         }
 
         fn renew_calls(&self) -> u32 {
             *self.renew_calls.lock().unwrap()
+        }
+
+        fn control_calls(&self) -> u32 {
+            *self.control_calls.lock().unwrap()
+        }
+
+        /// `n` transport failures of the same shape an api mid-redeploy produces:
+        /// the connection is refused, and the refusal comes back in about a
+        /// millisecond — which is exactly why a retry budget counted in ATTEMPTS
+        /// is spent long before the outage is.
+        fn refused_polls(n: usize) -> Vec<Result<ControlResponse, WizardApiError>> {
+            (0..n)
+                .map(|_| {
+                    Err(WizardApiError::Transport {
+                        endpoint: "control poll".to_string(),
+                        message: "connection refused".to_string(),
+                    })
+                })
+                .collect()
         }
     }
 
@@ -2227,6 +2459,7 @@ mod tests {
             _fencing: &Fencing4,
             _observed_capture_epoch: u64,
         ) -> Result<ControlResponse, WizardApiError> {
+            *self.control_calls.lock().unwrap() += 1;
             self.controls
                 .lock()
                 .unwrap()
@@ -2577,29 +2810,74 @@ mod tests {
     }
 
     #[test]
-    fn a_control_poll_that_keeps_failing_still_fails_closed() {
-        // The retry is BOUNDED. An api that never answers must not leave a hold
-        // spinning on a lease it can no longer prove — after the budget the hold
-        // ends the fail-closed way (torn down, no ack).
+    fn a_control_poll_retry_is_bounded_by_the_lease_not_by_an_attempt_count() {
+        // The concrete outage: ato-api is redeployed and refuses connections for
+        // ten seconds. Every attempt comes back in about a millisecond, so ANY
+        // bound counted in attempts is spent in milliseconds — while the lease
+        // provably has minutes left, and the author has a live guest and a
+        // half-hour of Step 4 setup riding on it. Only the lease deadline is
+        // allowed to end a hold.
         let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
-        let api = ScriptedApi::new(
-            vec![],
-            (0..CONTROL_POLL_ATTEMPTS)
-                .map(|_| {
-                    Err(WizardApiError::Status {
-                        endpoint: "control poll".to_string(),
-                        code: 502,
-                        body: "bad gateway".to_string(),
-                    })
-                })
-                .collect(),
-        );
+        let mut controls = ScriptedApi::refused_polls(5);
+        controls.push(Ok(control("capture", 4, Some("cand_01J1Z0"))));
+        let api = ScriptedApi::new(vec![], controls);
         let f = fencing();
         let driver =
             LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
         let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
-        let fault = source.poll(0).expect_err("the budget is exhausted");
-        assert!(fault.message.contains("status 502"), "{}", fault.message);
+
+        let response = source
+            .poll(0)
+            .expect("a ten-second outage inside a live lease window keeps the hold");
+        assert_eq!(response.directive, ControlDirective::Capture);
+        assert_eq!(
+            api.control_calls(),
+            6,
+            "every attempt the lease window allowed was actually spent"
+        );
+        // The retry waits between attempts instead of spinning the api.
+        assert_eq!(clock.slept(), CONTROL_POLL_RETRY_BACKOFF * 5);
+    }
+
+    #[test]
+    fn a_control_poll_that_keeps_failing_still_fails_closed_at_the_lease_deadline() {
+        // The other half: unbounded retrying would be its own bug. An api that
+        // never answers must not leave a hold running on a lease it can no longer
+        // prove — once the observed deadline passes the hold ends the fail-closed
+        // way (torn down, no ack), and the bound is the LEASE, not a count.
+        //
+        // A 20s lease keeps the arithmetic legible: the poll is retried every 2s
+        // and the renew (also refused) defers on its own cadence, so the hold
+        // ends at 09:10:20 and not before.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            (0..64)
+                .map(|_| {
+                    Err(WizardApiError::Transport {
+                        endpoint: "lease renew".to_string(),
+                        message: "connection refused".to_string(),
+                    })
+                })
+                .collect(),
+            ScriptedApi::refused_polls(64),
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:10:20.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+
+        let fault = source
+            .poll(0)
+            .expect_err("the lease deadline is fail-closed");
+        assert!(fault.message.contains("lease expired"), "{}", fault.message);
+        // 20s of lease at a 2s backoff — far more than the three attempts a
+        // count-bounded retry would have allowed, and still bounded.
+        assert_eq!(api.control_calls(), 10);
+        assert_eq!(
+            clock.now_utc(),
+            parse_utc_instant("2026-07-22T09:10:20.000Z").expect("deadline"),
+            "the retry never waits past the deadline that bounds it"
+        );
     }
 
     #[test]
