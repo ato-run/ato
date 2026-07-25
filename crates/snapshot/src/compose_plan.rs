@@ -276,8 +276,21 @@ impl ImportedServiceGraph {
 /// Pure and deterministic: same input (in any key order) → same graph. Returns
 /// a human-readable error string on any unsupported or unsafe construct.
 pub fn compose_to_graph(yaml: &str) -> Result<ImportedServiceGraph, String> {
-    let doc: Value =
+    let mut doc: Value =
         serde_yaml::from_str(yaml).map_err(|e| format!("failed to parse compose YAML: {e}"))?;
+    // Resolve YAML merge keys (`<<: *anchor`) before anything inspects the
+    // document. Anchors + merges are ordinary YAML that Compose files use
+    // heavily (typically `x-shared: &defaults` reused across services); leaving
+    // them unresolved made `<<` surface as an "unsupported compose key", which
+    // is both wrong and misleading — the author never wrote a `<<` key.
+    //
+    // This does NOT widen the gate: merging only splices the anchor's keys into
+    // the mapping, and every resulting key still goes through the same
+    // allowlist in `validate_service_keys`. A merge that pulls in an
+    // unsupported key (say `cap_add`) is rejected exactly as if it had been
+    // written inline.
+    doc.apply_merge()
+        .map_err(|e| format!("failed to resolve YAML merge keys (`<<`) in compose: {e}"))?;
     let top = doc
         .as_mapping()
         .ok_or_else(|| "compose file must be a YAML mapping at the top level".to_string())?;
@@ -994,6 +1007,69 @@ services:
         let web = g.services.iter().find(|s| s.name == "web").unwrap();
         assert_eq!(migrate.kind, ServiceKind::RunOnce);
         assert_eq!(web.kind, ServiceKind::Service);
+    }
+
+    #[test]
+    fn yaml_merge_keys_are_resolved_not_reported_as_a_compose_key() {
+        // Anchors + `<<` are ordinary YAML that Compose authors lean on. The
+        // author never wrote a `<<` key, so rejecting one is both wrong and
+        // unactionable.
+        let yaml = r#"
+x-shared: &shared
+  image: nginx
+  environment:
+    - REDIS_HOST=redis
+services:
+  web:
+    <<: *shared
+    ports: ["8000:8000"]
+"#;
+        let g = compose_to_graph(yaml).expect("merge keys resolve");
+        let web = g.services.iter().find(|s| s.name == "web").expect("web");
+        // The merged-in keys are really there, not silently dropped.
+        assert_eq!(web.image_ref, "nginx");
+        assert!(
+            web.env.iter().any(|(k, _)| k == "REDIS_HOST"),
+            "{:?}",
+            web.env
+        );
+    }
+
+    #[test]
+    fn a_merge_cannot_smuggle_an_unsupported_key_past_the_gate() {
+        // Resolving `<<` must not widen the allowlist: a key pulled in from an
+        // anchor is rejected exactly as if it had been written inline.
+        let yaml = r#"
+x-shared: &shared
+  image: nginx
+  cap_add: ["SYS_ADMIN"]
+services:
+  web:
+    <<: *shared
+    ports: ["8000:8000"]
+"#;
+        let err = compose_to_graph(yaml).unwrap_err();
+        assert!(err.contains("cap_add"), "{err}");
+
+        // Same for a `build:` inherited through an anchor — the shape the
+        // real-world posio compose has (x-app: &default-app with build:).
+        let yaml = r#"
+x-app: &default-app
+  build:
+    context: "."
+  depends_on:
+    - "redis"
+services:
+  redis:
+    image: "redis:7.2.4-bookworm"
+  web:
+    <<: *default-app
+    ports: ["8000:8000"]
+"#;
+        let err = compose_to_graph(yaml).unwrap_err();
+        assert!(err.contains("`build`"), "{err}");
+        // The diagnosis names the real blocker, never the merge key.
+        assert!(!err.contains("`<<`"), "{err}");
     }
 
     #[test]
