@@ -47,10 +47,27 @@ on an unstable receipt or a flaky suite), then the CLI-preview slices, then U16.
 | U10 | #877 | **P0** | CLI diagnostics only | receipt prints `mem_backend_would_select` + reason; **zero behavior change** (still restores via File) |
 | U11 | #878 | P2 | local UFFD preview command | `ato run --experimental-uffd`: no-binding + local-CAS only; unsupported host fail-closed; default unchanged |
 | U12 | #879 | P3 | hotset profile persistence | profiles keyed by `capsule_manifest_hash` + `runner_class_id` + **memory_image_hash**; a mismatched profile is never applied (test proves no guest-memory corruption) |
-| U13 | #880 | — | failure hardening (product path) | page-server crash → teardown; CAS miss/corrupt → fail-closed; timeout → teardown; no orphan VM/tap/overlay/pid in the product path |
+| U13 | #880 | — | failure hardening (product path) | page-server crash → teardown; CAS **miss** and CAS **corrupt** → fail-closed **by different mechanisms** (see below); timeout → teardown; no orphan VM/tap/overlay/pid in the product path |
 | U14 | #881 | P1 | placement contract dry-run | UFFD selectability computed from `BackendCapabilities` + `RunnerClass` and recorded; **no auto-selection**; no behavior change |
 | U15 | #882 | P2/P5 | opt-in auto-selection preview | only behind an explicit preview flag does the selector choose File/UFFD; no-binding only; prefer local CAS + hotset; **remote off by default** |
 | U16 | #883 | — | product readiness report | documented "when to enable UFFD"; a dev/main release gate; the go/no-go before Phase 8 |
+
+### U13's two halves are NOT one mechanism (post-#1127)
+
+"CAS miss/corrupt → fail-closed" reads as one property and is two, and they stopped
+failing the same way when #1127 gave `uffd_preview_mode` a real residency gate.
+Anything claiming to prove U13 must say which half it covers:
+
+| half | what happens on the preview lane | where it fails | test |
+|---|---|---|---|
+| **miss** (a chunk is absent) | `uffd_preview_mode` sweeps `CasStore::has_all_chunks`, REFUSES UFFD and falls back to File | pre-boot, in `rehydrate_atomic` → `CapsuleFsError::MissingChunk`. No page server, no userfaultfd, no VMM started | `fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot` (KVM) + `uffd_preview_requires_a_resident_memory_image_not_just_an_openable_cas` (CI, gate decision only) |
+| **corrupt** (a chunk is present with wrong bytes) | passes residency (`has_chunk` is a `stat`), so the preview really demand-pages | post-boot, in the page server's hash-verified `read_range` → fail-closed abort, or the `LoadSnapshot` the first bad fault stalls (~15 s) | `fc_kvm_uffd_preview_corrupt_cas_fails_closed`, `fc_kvm_uffd_corrupt_cas_chunk_fails_closed` (both KVM) |
+
+The miss half is therefore now enforced **pre-boot** — strictly better than the
+post-boot page-fault abort it used to mean, since the session is never handed out —
+and a corrupt-contents fixture is the ONLY one that still reaches the serve path. A
+missing-chunk fixture inside a corrupt-CAS test would produce a green test with no
+UFFD in it at all.
 
 ## Hard blockers before any product default (carried from the plan)
 

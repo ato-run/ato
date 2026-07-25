@@ -24,6 +24,14 @@
 #     - fc_kvm_uffd_hotset_prefetch_cuts_demand_faults  (U4)
 #     - fc_kvm_uffd_corrupt_cas_chunk_fails_closed      (U5)
 #     - fc_kvm_uffd_remote_readthrough_reaches_health   (U6)
+#     - fc_kvm_uffd_preview_input_reaches_health        (U11)
+#     - fc_kvm_uffd_hotset_persistence_round_trip       (U12)
+#     - fc_kvm_uffd_preview_corrupt_cas_fails_closed    (U13, integrity half)
+#     - fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot
+#                                                       (U13, availability half)
+#   The U11-U13 entries were missing from `ALL` until now: this list was written
+#   at U7 (#874), before those tests existed, so the ONLY runner anyone is told to
+#   use never ran the very tests the readiness report cites as release gate 4.
 #   flaky-under-pressure (do NOT release-gate): the COMBINED
 #     `cargo test -p snapshot fc_kvm_uffd -- --ignored --test-threads=1` run.
 #
@@ -53,6 +61,10 @@ ALL=(
   fc_kvm_uffd_hotset_prefetch_cuts_demand_faults
   fc_kvm_uffd_corrupt_cas_chunk_fails_closed
   fc_kvm_uffd_remote_readthrough_reaches_health
+  fc_kvm_uffd_preview_input_reaches_health
+  fc_kvm_uffd_hotset_persistence_round_trip
+  fc_kvm_uffd_preview_corrupt_cas_fails_closed
+  fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot
 )
 TESTS=("$@"); [ ${#TESTS[@]} -eq 0 ] && TESTS=("${ALL[@]}")
 
@@ -68,7 +80,7 @@ for t in "${TESTS[@]}"; do
       ATO_FC_ROOTFS_READONLY="$ATO_FC_ROOTFS_READONLY" ATO_FC_WORK="$ATO_FC_WORK" \
       ATO_FC_BOOT_TIMEOUT_S="$ATO_FC_BOOT_TIMEOUT_S" \
       cargo test -p snapshot "$t" -- --ignored --test-threads=1 --nocapture 2>&1 \
-      | grep -aE "### U[0-9].*RECEIPT|### U[0-9].*COMPARE|### U[0-9].*read-through|### U5 fail-closed|test result:"; then
+      | grep -aE "### U[0-9]+|test result:"; then
     pass=$((pass+1))
   else
     fail=$((fail+1)); echo "!! $t FAILED"

@@ -154,8 +154,18 @@ jobs:
           rc=0
           while IFS= read -r p; do
             [ -n "$p" ] || continue
-            echo "::group::cargo test -p $p"
-            cargo test -p "$p" --no-fail-fast || rc=1
+            # capsule's artifact/ingest provisioning tests are behind a
+            # non-default feature. Without it the whole module compiles out —
+            # including the sha256 mismatch guard (`test_hash_verification_failure`)
+            # and the fetcher cache tests — so CI proved nothing about either.
+            # They only bind 127.0.0.1, no external network.
+            feats=""
+            if [ "$p" = "capsule" ]; then
+              feats="--features provisioning-tests"
+            fi
+            echo "::group::cargo test -p $p $feats"
+            # shellcheck disable=SC2086 # deliberate word splitting for $feats
+            cargo test -p "$p" $feats --no-fail-fast || rc=1
             echo "::endgroup::"
           done < pkgs.txt
           exit $rc
