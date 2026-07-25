@@ -2012,11 +2012,34 @@ mod tests {
 
     #[test]
     fn resolve_host_command_path_absolutizes_existing_relative_commands() {
-        let resolved =
-            resolve_host_command_path(Path::new("tests/fixtures/native-shell-capsule"), "run.sh");
+        // Anchor the workspace on an ABSOLUTE path (the crate root) rather than a
+        // process-CWD-relative one. `resolve_host_command_path` probes
+        // `working_dir.join(command).exists()`, so a relative `working_dir`
+        // resolves against the process-global CWD — which other tests in this
+        // crate mutate via `set_current_dir` (the publish / install / preflight
+        // RAII chdir guards). Under libtest's parallel scheduler that made this
+        // test flake: when a sibling had chdir'd elsewhere, the fixture join
+        // missed, the command fell through un-canonicalized, and `is_absolute()`
+        // failed. An absolute working_dir removes the CWD dependence entirely.
+        //
+        // It is deliberately absolute but NOT canonical (note the `..` segment):
+        // an already-canonical absolute dir would make `working_dir.join(cmd)`
+        // absolute on its own, so `is_absolute()` would still hold even if
+        // `fs::canonicalize` were deleted — i.e. the canonicalization branch
+        // would silently lose its only coverage. Routing through `..` keeps that
+        // step load-bearing: without it the `..` survives into the result and
+        // the final assertion fails.
+        let working_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/../fixtures/native-shell-capsule");
+
+        let resolved = resolve_host_command_path(&working_dir, "run.sh");
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
+        assert!(
+            !resolved.components().any(|c| c.as_os_str() == ".."),
+            "resolved path must be canonicalized, not just absolute: {resolved:?}"
+        );
     }
 
     #[test]
