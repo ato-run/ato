@@ -2337,7 +2337,20 @@ pub async fn start_root_proxy_to(
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy listener on {listen}"))?;
-    let handle = tokio::spawn(async move {
+    Ok(serve_root_proxy(listener, upstream_addr))
+}
+
+/// Spawn the accept → forward loop on an ALREADY-BOUND listener. Split out of
+/// [`start_root_proxy_to`] so a caller that must know the bound port up front
+/// can bind `127.0.0.1:0`, read `local_addr()`, and hand the *live* listener
+/// straight in — with no bind → close → rebind gap in which another process
+/// could claim the ephemeral port. (That gap flaked the stop test: it bound a
+/// probe socket to learn a free port, dropped it, then rebound the same number.)
+fn serve_root_proxy(
+    listener: tokio::net::TcpListener,
+    upstream_addr: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             let Ok((mut inbound, _)) = listener.accept().await else {
                 break;
@@ -2350,8 +2363,7 @@ pub async fn start_root_proxy_to(
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
             });
         }
-    });
-    Ok(handle)
+    })
 }
 
 // ── Proxy readiness probe (v1.2 PR 3e-4) ──
@@ -2419,38 +2431,55 @@ pub async fn start_root_proxy_ready(
     probe_path: &str,
     timeout: Duration,
 ) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                Err(anyhow::Error::new(e)
+                    .context(format!("failed to bind proxy listener on {listen}"))),
+                ProxyReadyProbe {
+                    attempts: 0,
+                    wait_ms: 0,
+                    ok: false,
+                },
+            );
+        }
+    };
+    serve_root_proxy_ready(listener, upstream_addr, probe_path, timeout).await
+}
+
+/// Prove readiness THROUGH an ALREADY-BOUND proxy listener before returning its
+/// accept handle. Split out of [`start_root_proxy_ready`] so a caller that must
+/// know the bound port up front can bind `127.0.0.1:0`, read `local_addr()`,
+/// and hand the live listener in — with no bind → close → rebind gap in which
+/// another process could claim the ephemeral port (a TOCTOU that flaked the
+/// proxy-readiness tests: `start_root_proxy_ready`'s internal bind could lose
+/// the pre-selected port and return before the probe loop ran a single attempt).
+async fn serve_root_proxy_ready(
+    listener: tokio::net::TcpListener,
+    upstream_addr: String,
+    probe_path: &str,
+    timeout: Duration,
+) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
     let started = std::time::Instant::now();
     let mut probe = ProxyReadyProbe {
         attempts: 0,
         wait_ms: 0,
         ok: false,
     };
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(l) => l,
+    // The probe connects to the listener's own address; capture it before the
+    // listener is moved into the accept loop.
+    let listen = match listener.local_addr() {
+        Ok(addr) => addr.to_string(),
         Err(e) => {
             probe.wait_ms = started.elapsed().as_millis() as u64;
             return (
-                Err(anyhow::Error::new(e)
-                    .context(format!("failed to bind proxy listener on {listen}"))),
+                Err(anyhow::Error::new(e).context("proxy listener has no local address")),
                 probe,
             );
         }
     };
-    let accept_upstream = upstream_addr.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut inbound, _)) = listener.accept().await else {
-                break;
-            };
-            let upstream_addr = accept_upstream.clone();
-            tokio::spawn(async move {
-                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
-            });
-        }
-    });
+    let handle = serve_root_proxy(listener, upstream_addr);
 
     let path = if probe_path.starts_with('/') {
         probe_path.to_string()
@@ -2467,7 +2496,7 @@ pub async fn start_root_proxy_ready(
         }
         probe.attempts += 1;
         let io_budget = remaining.min(Duration::from_millis(PROXY_READY_ATTEMPT_IO_MS));
-        if probe_once_via(listen, &request, io_budget).await {
+        if probe_once_via(&listen, &request, io_budget).await {
             probe.ok = true;
             break;
         }
@@ -7342,16 +7371,9 @@ mod tests {
             }
         });
 
-        // Proxy on its own ephemeral port: bind via port 0 is not expressible
-        // through start_root_proxy's listen string with assertions, so pick a
-        // free port first.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let listen = listener.local_addr().expect("addr").to_string();
-        drop(listener);
-
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy starts against a live upstream");
+        // Proxy on its own ephemeral port — bind the listener ONCE and serve it
+        // (no bind→drop→rebind window; see start_root_proxy_ephemeral).
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         let response = reqwest::Client::new()
             .get(format!("http://{listen}/anything"))
@@ -7382,13 +7404,50 @@ mod tests {
         );
     }
 
-    /// Pick a free loopback port + return a `listen` string for the proxy (the
-    /// proxy's listen arg is a string; bind-then-drop reserves a free port).
-    fn free_listen() -> String {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let a = l.local_addr().expect("addr").to_string();
-        drop(l);
-        a
+    /// Bring a root proxy up on an OS-chosen loopback port and return its
+    /// accept handle together with the `host:port` it listens on. Binds the
+    /// listener ONCE and serves that live socket — unlike the old
+    /// `free_listen()` + `start_root_proxy` dance it never drops and rebinds the
+    /// port number, so a concurrently-running test cannot claim it in between
+    /// (the ephemeral-port TOCTOU that intermittently failed these proxy tests
+    /// with "Address already in use"). Probes the upstream first, exactly as
+    /// `start_root_proxy_to` does, so a dead upstream is still refused.
+    async fn start_root_proxy_ephemeral(
+        upstream_port: u16,
+    ) -> (tokio::task::JoinHandle<()>, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy listener");
+        let listen = listener.local_addr().expect("addr").to_string();
+        let upstream_addr = format!("127.0.0.1:{upstream_port}");
+        tokio::net::TcpStream::connect(&upstream_addr)
+            .await
+            .expect("upstream is accepting");
+        (serve_root_proxy(listener, upstream_addr), listen)
+    }
+
+    /// Readiness-probing sibling of [`start_root_proxy_ephemeral`]: binds the
+    /// proxy listener to an OS-chosen port ONCE and drives the through-proxy
+    /// readiness probe on that live socket, returning the probe outcome plus the
+    /// `host:port`. Same rationale — no bind→drop→rebind window for another test
+    /// to steal the port, which previously flaked the `_ready` tests before the
+    /// probe loop ran a single attempt.
+    async fn start_root_proxy_ready_ephemeral(
+        upstream_addr: String,
+        probe_path: &str,
+        timeout: Duration,
+    ) -> (
+        (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe),
+        String,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy listener");
+        let listen = listener.local_addr().expect("addr").to_string();
+        (
+            serve_root_proxy_ready(listener, upstream_addr, probe_path, timeout).await,
+            listen,
+        )
     }
 
     /// v1.5 (ato#973): the runner proxy is a raw L4 `copy_bidirectional` pipe, so a
@@ -7429,10 +7488,7 @@ mod tests {
             }
         });
 
-        let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy up");
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut c = tokio::net::TcpStream::connect(&listen)
@@ -7508,10 +7564,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
-        let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy up");
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut c = tokio::net::TcpStream::connect(&listen)
@@ -7633,15 +7686,7 @@ mod tests {
                 let _ = stream.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 2\r\n\r\nok");
             }
         });
-        let listen = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-            let addr = l.local_addr().unwrap().to_string();
-            drop(l);
-            addr
-        };
-
-        let (result, probe) = start_root_proxy_ready(
-            &listen,
+        let ((result, probe), listen) = start_root_proxy_ready_ephemeral(
             format!("127.0.0.1:{upstream_port}"),
             "/health",
             Duration::from_secs(5),
@@ -7689,20 +7734,14 @@ mod tests {
             drop(l);
             p
         };
-        let listen = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-            let addr = l.local_addr().unwrap().to_string();
-            drop(l);
-            addr
-        };
         let started = std::time::Instant::now();
         // 2s (not 500ms): under a loaded/contended CI runner (observed on
         // windows-latest) a too-tight budget can be consumed almost entirely
         // by scheduling delay before this task's first poll, leaving room for
         // only one attempt instead of the several this test wants to prove.
         let budget = Duration::from_secs(2);
-        let (result, probe) =
-            start_root_proxy_ready(&listen, format!("127.0.0.1:{dead_port}"), "/health", budget)
+        let ((result, probe), _listen) =
+            start_root_proxy_ready_ephemeral(format!("127.0.0.1:{dead_port}"), "/health", budget)
                 .await;
         assert!(result.is_err(), "dead upstream must be a typed error");
         assert!(!probe.ok);
@@ -8622,7 +8661,7 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_abort_must_be_awaited_before_clean_stop() {
-        // Live upstream so the proxy comes up (it refuses bring-up otherwise).
+        // Live upstream so a forwarded connection would have somewhere to go.
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let upstream_port = upstream_listener.local_addr().expect("addr").port();
         let upstream = std::thread::spawn(move || {
@@ -8634,13 +8673,13 @@ mod tests {
                 let _ = stream.read(&mut buf);
             }
         });
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let listen = probe.local_addr().expect("addr").to_string();
-        drop(probe);
 
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy starts against a live upstream");
+        // Bring the proxy up on its own ephemeral port, binding the listener
+        // ONCE and serving that live socket — the earlier version bound a probe
+        // socket only to learn a free port, dropped it, then rebound the same
+        // number, an ephemeral-port TOCTOU another test could win. See
+        // start_root_proxy_ephemeral.
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         // stop_proxy AWAITS the aborted task, so by the time it returns true the
         // listener has been dropped and the port refuses connections WITHOUT any
