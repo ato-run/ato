@@ -537,8 +537,10 @@ fn ack_sealed(cfg: &Config, job_id: &str, artifact: &Artifact) -> Result<()> {
 }
 
 fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<()> {
-    // Truncate the reason to a sane length; it is non-secret build output.
-    let reason: String = reason.chars().take(1800).collect();
+    // Truncate the reason to a sane length; it is non-secret build output. The
+    // budget is the daemon's single one (`wizard_api::FAILURE_REASON_BUDGET`),
+    // not a per-ack literal.
+    let reason: String = wizard_api::truncate_failure_reason(reason);
     ureq::post(&format!("{}/v1/capsule-snapshots/jobs/{job_id}/ack", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
         .send_json(ureq::json!({ "agent_id": cfg.agent_id, "status": "failed", "failure_stage": stage, "failure_reason": reason }))
@@ -584,7 +586,7 @@ impl SourceMaterializeFail {
         Self {
             pipeline_state: "failed_internal".to_string(),
             error_code: code.to_string(),
-            error_detail: detail.chars().take(1800).collect(),
+            error_detail: wizard_api::truncate_failure_reason(&detail),
         }
     }
 
@@ -595,7 +597,7 @@ impl SourceMaterializeFail {
         Self {
             pipeline_state: err.pipeline_state().to_string(),
             error_code: err.error_code().to_string(),
-            error_detail: err.to_string().chars().take(1800).collect(),
+            error_detail: wizard_api::truncate_failure_reason(&err.to_string()),
         }
     }
 }
@@ -2626,6 +2628,13 @@ fn process_job(
     })
 }
 
+/// The stage this slice's fail-closed `interactive_capture` refusal is reported
+/// at. It names the §2 WIRE stage (`holding`), never a builder-local word: the
+/// §3.8 ack's optional `failure_stage` refinement is parsed straight out of this
+/// string ([`wizard_api::wizard_failure_stage`]), so a name outside the enum
+/// silently drops the diagnostic and leaves admins a bare `build_failed`.
+const INTERACTIVE_HOLD_REFUSAL_STAGE: &str = "holding";
+
 /// Submission Wizard PR-2 (slice 1) — the `interactive_capture` lane skeleton.
 /// Shares [`produce_build`] with the seal lane (materialize + rootfs +
 /// execution_id), then — instead of the auto-seal tail — would enter the
@@ -2647,14 +2656,12 @@ fn process_interactive_capture_job(
     cfg: &Config,
     _backend: &FirecrackerBackend,
     job: &ClaimedJob,
+    fencing: &wizard_wire::Fencing4,
 ) -> std::result::Result<(), (String, String)> {
-    // §3.1 FIRST: without the claim extension there is no FENCING-4 tuple, so
-    // every subsequent call on this lane — including the terminal ack — would be
-    // a 409. Fail closed at `claim_kind` before spending a build on a job that
-    // could never be reported on.
-    let fencing = job
-        .fencing4()
-        .map_err(|why| ("claim_kind".to_string(), why))?;
+    // The FENCING-4 tuple is parsed by the CALLER, before any build work: a job
+    // with no §3.1 extension has no ack that could be sent (every call on this
+    // lane would 409), so it must never reach a build in the first place — and
+    // a `claim_kind` failure raised here could never leave the process anyway.
     eprintln!(
         "[builder] interactive_capture {} claimed under attempt {} / claim {}",
         job.id, fencing.submission_attempt_id, fencing.worker_claim_id
@@ -2676,11 +2683,8 @@ fn process_interactive_capture_job(
     // `ExecutionContractEnvelopeV1` and the live boot-to-hold session are a later
     // PR-2 slice. Fail closed here (mirrors #1090's exclusion) rather than mint a
     // non-production eligibility or drive an unverified live capture.
-    // Stage names the §2 wire stage (`holding`), not a builder-local word: the
-    // §3.8 ack's optional `failure_stage` refinement is parsed straight out of
-    // this string, so a name outside the enum silently drops the diagnostic.
     Err((
-        "holding".to_string(),
+        INTERACTIVE_HOLD_REFUSAL_STAGE.to_string(),
         "interactive_capture hold session is not finalized in this slice: the live \
          boot-to-hold + Firecracker-concrete capture path and the real \
          ExecutionContractEnvelopeV1 eligibility land in a later PR-2 slice (verified \
@@ -2699,6 +2703,58 @@ fn wizard_api_client(cfg: &Config) -> wizard_api::HttpWizardApi<wizard_api::Ureq
         cfg.token.clone(),
         wizard_api::UreqTransport::new(),
     )
+}
+
+/// Run one claimed `interactive_capture` job and dispose of its outcome on the
+/// §3.8 terminal-ack rules.
+///
+/// Split out of [`run_once`] deliberately: reaching that loop needs a live claim
+/// AND a real build, but the part that must never regress is the ROUTING — which
+/// ack body is sent, when NO ack may be sent at all, and that a job with no
+/// FENCING-4 tuple never reaches a build. Taking the api and the build step as
+/// arguments makes exactly that decision assertable with no sockets and no VM,
+/// the same seam shape `crate::wizard_api` uses for the transport.
+fn dispatch_interactive_capture_job(
+    api: &dyn wizard_api::WizardApi,
+    agent_id: &str,
+    job: &ClaimedJob,
+    build: impl FnOnce(&wizard_wire::Fencing4) -> std::result::Result<(), (String, String)>,
+) -> Result<()> {
+    // §3.1 FIRST, before any build work: without the claim extension there is no
+    // FENCING-4 tuple, so NO ack is sendable at all (the api would 409 it) and
+    // the whole job is unreportable. Leave the attempt to the server-owned lease
+    // sweep rather than spend a build on it or fall back to a body this kind
+    // rejects.
+    let fencing = match job.fencing4() {
+        Ok(fencing) => fencing,
+        Err(why) => {
+            eprintln!(
+                "[builder] interactive_capture {} has no fencing tuple, sending no ack: {why}",
+                job.id
+            );
+            return Ok(());
+        }
+    };
+    match build(&fencing) {
+        Ok(()) => {
+            eprintln!("[builder] interactive_capture {} -> held", job.id);
+            Ok(())
+        }
+        Err((stage, reason)) => {
+            eprintln!(
+                "[builder] interactive_capture {} -> {stage}: {reason}",
+                job.id
+            );
+            // §3.8: this kind's terminal ack is the RESTRICTED wizard payload,
+            // NOT the legacy `ack_failed` body. The legacy body carries `status`
+            // (a strict-mode reject for an interactive_capture job) and none of
+            // FENCING-4 (a 409 even if the schema passed), so the legacy call
+            // could never have landed. Failing before `holding` is exactly
+            // `build_failed`.
+            wizard_api::ack_interactive_build_failure(api, agent_id, &fencing, &stage, &reason)
+                .map_err(|e| anyhow!("interactive_capture terminal ack: {e}"))
+        }
+    }
 }
 
 fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
@@ -2744,43 +2800,12 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
         // verified on real hardware. Do NOT advertise the kind; do NOT change the
         // DB or api here.
         if job.kind == wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE {
-            match process_interactive_capture_job(cfg, backend, job) {
-                Ok(()) => {
-                    eprintln!("[builder] interactive_capture {} -> held", job.id);
-                }
-                Err((stage, reason)) => {
-                    eprintln!(
-                        "[builder] interactive_capture {} -> {stage}: {reason}",
-                        job.id
-                    );
-                    // §3.8: this kind's terminal ack is the RESTRICTED wizard
-                    // payload, NOT the legacy `ack_failed` body. The legacy body
-                    // carries `status` (a strict-mode reject for an
-                    // interactive_capture job) and none of FENCING-4 (a 409 even
-                    // if the schema passed), so the legacy call could never have
-                    // landed. Failing before `holding` is exactly `build_failed`.
-                    match job.fencing4() {
-                        Ok(fencing) => {
-                            wizard_api::ack_interactive_build_failure(
-                                &wizard_api_client(cfg),
-                                &cfg.agent_id,
-                                &fencing,
-                                &stage,
-                                &reason,
-                            )
-                            .map_err(|e| anyhow!("interactive_capture terminal ack: {e}"))?;
-                        }
-                        // No §3.1 extension ⇒ no fencing tuple ⇒ NO ack is
-                        // sendable at all (the api would 409 it). Leave the
-                        // attempt to the server-owned lease sweep rather than
-                        // fall back to a body this kind rejects.
-                        Err(why) => eprintln!(
-                            "[builder] interactive_capture {} has no fencing tuple, sending no ack: {why}",
-                            job.id
-                        ),
-                    }
-                }
-            }
+            dispatch_interactive_capture_job(
+                &wizard_api_client(cfg),
+                &cfg.agent_id,
+                job,
+                |fencing| process_interactive_capture_job(cfg, backend, job, fencing),
+            )?;
             continue;
         }
         match process_job(cfg, backend, job) {
@@ -2995,6 +3020,136 @@ targets = ["web"]
             let why = resp.jobs[0].fencing4().expect_err("partial extension");
             assert!(why.contains(dropped), "{why}");
         }
+    }
+
+    fn claimed(job: serde_json::Value) -> ClaimedJob {
+        let resp: ClaimResponse =
+            serde_json::from_value(serde_json::json!({ "jobs": [job] })).expect("claim parses");
+        resp.jobs.into_iter().next().expect("one job")
+    }
+
+    /// The §3.8 routing is asserted against the REAL api client over the
+    /// recording byte seam (`wizard_api::testing`), not a second hand-rolled
+    /// fake: what must not regress is the BODY that leaves for an
+    /// `interactive_capture` outcome, and a fake ack sink would only prove it
+    /// agrees with itself.
+    fn wizard_test_client(
+        transport: wizard_api::testing::RecordingTransport,
+    ) -> wizard_api::HttpWizardApi<wizard_api::testing::RecordingTransport> {
+        wizard_api::HttpWizardApi::new(
+            "https://api.example".to_string(),
+            "agent-bearer-secret".to_string(),
+            transport,
+        )
+    }
+
+    fn sent_body(request: &wizard_api::HttpRequest) -> serde_json::Value {
+        serde_json::from_str(request.body.as_ref().expect("POST carries a body"))
+            .expect("body is JSON")
+    }
+
+    #[test]
+    fn an_interactive_failure_acks_the_wizard_payload_not_the_legacy_failed_ack() {
+        // The one production path this slice turns on. The legacy `ack_failed`
+        // body carries `status` (a strict-mode reject for this kind) and none of
+        // FENCING-4, so it could never have landed — the routing that picks the
+        // §3.8 payload instead is what has to stay pinned.
+        let job = claimed(interactive_claim_job());
+        let api = wizard_test_client(wizard_api::testing::RecordingTransport::always_ok(
+            serde_json::json!({}),
+            1,
+        ));
+        dispatch_interactive_capture_job(&api, "builder-sugamo-1", &job, |fencing| {
+            // The build step is handed the tuple the CALLER parsed — it never
+            // re-derives (or re-fails on) the claim extension.
+            assert_eq!(fencing.job_id, "job_w");
+            assert_eq!(fencing.submission_attempt_id, "subatt_01J1XY");
+            Err((
+                INTERACTIVE_HOLD_REFUSAL_STAGE.to_string(),
+                "no live guest in this slice".to_string(),
+            ))
+        })
+        .expect("the terminal ack is sent");
+
+        let requests = api.transport().requests();
+        assert_eq!(requests.len(), 1, "exactly one terminal ack");
+        assert!(
+            requests[0]
+                .url
+                .ends_with("/v1/capsule-snapshots/jobs/job_w/ack"),
+            "{}",
+            requests[0].url
+        );
+        let body = sent_body(&requests[0]);
+        assert_eq!(body["reason"], serde_json::json!("build_failed"));
+        // The stage refinement survives the trip: a builder-local stage name
+        // outside the §2 enum would silently drop it and leave an admin a bare
+        // failure.
+        assert_eq!(body["failure_stage"], serde_json::json!("holding"));
+        assert_eq!(
+            body["failure_reason"],
+            serde_json::json!("no live guest in this slice")
+        );
+        // FENCING-4 rides the body; the legacy `status` member does not exist.
+        assert_eq!(
+            body["submission_attempt_id"],
+            serde_json::json!("subatt_01J1XY")
+        );
+        assert_eq!(body["worker_claim_id"], serde_json::json!("claim_01J1XZ"));
+        assert!(
+            body.get("status").is_none(),
+            "never the legacy failed-ack body: {body}"
+        );
+    }
+
+    #[test]
+    fn an_interactive_job_with_no_fencing_tuple_never_builds_and_acks_nothing() {
+        // No §3.1 extension ⇒ no FENCING-4 ⇒ every call on this lane 409s,
+        // including the ack. The job is unreportable, so it must not be built
+        // either — the fail-closed check belongs BEFORE the build, and the
+        // server-owned lease sweep owns the outcome.
+        let mut skewed = interactive_claim_job();
+        skewed
+            .as_object_mut()
+            .expect("object")
+            .remove("lease_token");
+        let job = claimed(skewed);
+        // Any request at all panics this transport (nothing is scripted).
+        let api = wizard_test_client(wizard_api::testing::RecordingTransport::new(vec![]));
+        let mut built = false;
+        dispatch_interactive_capture_job(&api, "builder-sugamo-1", &job, |_| {
+            built = true;
+            Ok(())
+        })
+        .expect("an unreportable job is not a daemon error");
+        assert!(
+            !built,
+            "a job that can never be acked must never spend a build"
+        );
+        assert!(api.transport().requests().is_empty(), "no ack is sendable");
+    }
+
+    #[test]
+    fn a_held_interactive_job_acks_nothing() {
+        // Reaching `holding` is not a terminal state — §3.8 is for terminal
+        // outcomes only, and the hold's own termination has its own projection
+        // (`wizard_api::ack_hold_termination`).
+        let job = claimed(interactive_claim_job());
+        let api = wizard_test_client(wizard_api::testing::RecordingTransport::new(vec![]));
+        dispatch_interactive_capture_job(&api, "builder-sugamo-1", &job, |_| Ok(())).expect("held");
+        assert!(api.transport().requests().is_empty());
+    }
+
+    #[test]
+    fn the_lanes_refusal_stage_names_a_wire_failure_stage() {
+        // The §3.8 `failure_stage` refinement is PARSED out of this string, so a
+        // builder-local word (`hold`) silently drops the diagnostic and the ack
+        // goes out as a bare `build_failed`. Pin the producer, not just the
+        // parser.
+        assert_eq!(
+            wizard_api::wizard_failure_stage(INTERACTIVE_HOLD_REFUSAL_STAGE),
+            Some(wizard_wire::WizardFailureStage::Holding),
+        );
     }
 
     #[test]

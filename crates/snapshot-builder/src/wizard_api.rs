@@ -91,8 +91,25 @@ const LEASE_RENEW_RETRY_DIVISOR: u32 = 3;
 /// the retry path into a busy loop against the api.
 const LEASE_RENEW_MIN_RETRY: Duration = Duration::from_secs(1);
 
-/// The builder's own failure-reason budget, unchanged from the existing failed
-/// ack: 1800 chars against the api's 2000 UTF-16 bound.
+/// How many times ONE control poll may be attempted before the hold is torn
+/// down ([`ApiControlSource::poll`]).
+///
+/// A single `502` from the edge — or one reset connection — must NOT destroy a
+/// live author session: by the time the poll runs the lease has just been
+/// renewed in the same call, so it is provably alive, while the author has spent
+/// minutes in Step 4 bringing the app to the state being captured and a torn
+/// down hold makes them redo the whole build + setup. This mirrors
+/// [`LeaseRenewDriver::tick`], which already retries a non-fenced renew inside
+/// the window rather than failing on the first blip; what BOUNDS both is the
+/// same thing — the lease deadline, re-checked before every attempt, so a retry
+/// only ever proceeds while the lease is provably alive.
+const CONTROL_POLL_ATTEMPTS: u32 = 3;
+
+/// The builder's own failure-reason budget: 1800 chars against the api's 2000
+/// UTF-16 bound. This is THE budget for the whole daemon — the legacy failed /
+/// source-materialize acks in `main.rs` truncate through
+/// [`truncate_failure_reason`] rather than re-spelling `1800` inline, so the
+/// bound cannot drift on one lane and not another.
 const FAILURE_REASON_BUDGET: usize = 1800;
 
 /// Error bodies are non-secret server output, but they are still unbounded
@@ -416,10 +433,26 @@ impl<T: HttpTransport> HttpWizardApi<T> {
         }
     }
 
+    /// The injected byte seam, for the tests that assert on what left the
+    /// process (including `main`'s, which drive the real client). Production
+    /// code never reaches past the semantic seam.
+    #[cfg(test)]
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// `<api>/v1/capsule-snapshots/jobs/<job_id><suffix>` — `job_id` rides the
-    /// PATH and nothing else (§1.1).
-    fn job_url(&self, fencing: &Fencing4, suffix: &str) -> Result<String, WizardApiError> {
-        url_component_safe(suffix, "job_id", &fencing.job_id)?;
+    /// PATH and nothing else (§1.1). `endpoint` is the WIRE-SECTION name for the
+    /// error, never the path fragment: a rejected `job_id` is a fact about the
+    /// call being made, and labelling it `/control` would name a thing no
+    /// operator can look up.
+    fn job_url(
+        &self,
+        endpoint: &str,
+        fencing: &Fencing4,
+        suffix: &str,
+    ) -> Result<String, WizardApiError> {
+        url_component_safe(endpoint, "job_id", &fencing.job_id)?;
         Ok(format!(
             "{}/v1/capsule-snapshots/jobs/{}{suffix}",
             self.api_url, fencing.job_id
@@ -490,7 +523,7 @@ impl<T: HttpTransport> HttpWizardApi<T> {
         })?;
         let request = HttpRequest {
             method: "POST",
-            url: self.job_url(fencing, suffix)?,
+            url: self.job_url(endpoint, fencing, suffix)?,
             headers: self.headers(fencing),
             body: Some(encoded),
         };
@@ -558,6 +591,12 @@ fn truncate(value: &str, budget: usize) -> String {
     value.chars().take(budget).collect()
 }
 
+/// Truncate a diagnostic to the builder's [`FAILURE_REASON_BUDGET`]. Shared with
+/// the legacy (non-wizard) acks in `main.rs`: one budget, one call site shape.
+pub fn truncate_failure_reason(value: &str) -> String {
+    truncate(value, FAILURE_REASON_BUDGET)
+}
+
 impl<T: HttpTransport> WizardApi for HttpWizardApi<T> {
     fn renew_lease(&self, fencing: &Fencing4) -> Result<LeaseRenewResponse, WizardApiError> {
         let body = LeaseRenewRequest {
@@ -605,7 +644,7 @@ impl<T: HttpTransport> WizardApi for HttpWizardApi<T> {
             method: "GET",
             url: format!(
                 "{}?{}",
-                self.job_url(fencing, "/control")?,
+                self.job_url(ENDPOINT, fencing, "/control")?,
                 params.join("&")
             ),
             headers: self.headers(fencing),
@@ -708,8 +747,16 @@ impl<T: HttpTransport> WizardApi for HttpWizardApi<T> {
                 message,
             })?;
         // The candidate in the PATH comes from the control command, never from
-        // caller-supplied data — the epoch is checked against that same pairing.
-        check_candidate_pairing(ENDPOINT, command, &command.candidate_id, body.capture_epoch)?;
+        // caller-supplied data, so there is no id to CROSS-check here (checking
+        // the command against itself would read like a guard while proving
+        // nothing). What is caller-supplied is the epoch, and it must still name
+        // the pairing the control channel delivered (§1.2).
+        candidate_epoch_rule(body.capture_epoch, command.capture_epoch).map_err(|message| {
+            WizardApiError::Contract {
+                endpoint: ENDPOINT.to_string(),
+                message,
+            }
+        })?;
         url_component_safe(ENDPOINT, "candidate_id", &command.candidate_id)?;
         let suffix = format!("/candidates/{}/acceptance", command.candidate_id);
         self.post(ENDPOINT, fencing, &suffix, &body)
@@ -1088,12 +1135,40 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
             std::thread::sleep(self.poll_interval);
         }
         self.polls += 1;
-        // Lease first: a dead lease makes the poll itself a 409, and the hold
-        // must end on the lease's terms (no ack), not on a directive.
-        self.lease.tick(self.fencing)?;
-        let response = self
-            .api
-            .poll_control(self.fencing, observed_capture_epoch)?;
+        let mut attempt: u32 = 1;
+        let response = loop {
+            // Lease first — and again before every retry: a dead lease makes the
+            // poll itself a 409, and the hold must end on the lease's terms (no
+            // ack), not on a directive. Re-ticking is also what BOUNDS the retry
+            // below: a further attempt is only legitimate while the lease is
+            // still provably alive, and `tick` fails closed the moment the
+            // observed deadline passes.
+            self.lease.tick(self.fencing)?;
+            match self.api.poll_control(self.fencing, observed_capture_epoch) {
+                Ok(response) => break response,
+                // A fenced poll is definitive (the claim is already dead
+                // server-side, so there is nothing to retry into), and an
+                // exhausted budget is the fail-closed end of the line. Every
+                // other failure — a 5xx from the edge, a reset connection, a
+                // timeout — is a blip that must not cost the author their
+                // session while the lease is alive.
+                Err(err) if err.is_fenced() || attempt >= CONTROL_POLL_ATTEMPTS => {
+                    return Err(err.into());
+                }
+                Err(err) => {
+                    eprintln!(
+                        "[builder] wizard control poll failed (attempt {attempt}/{CONTROL_POLL_ATTEMPTS}), \
+                         retrying inside the lease window: {err}"
+                    );
+                    attempt += 1;
+                    // Reuse the hold loop's own pacing as the retry backoff
+                    // (ZERO in tests) rather than inventing a second cadence.
+                    if !self.poll_interval.is_zero() {
+                        std::thread::sleep(self.poll_interval);
+                    }
+                }
+            }
+        };
         if let Some(command) = CaptureCommand::from_control(&response) {
             self.last_capture_command = Some(command);
         }
@@ -1101,13 +1176,76 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
     }
 }
 
+/// Test doubles for the byte seam, shared with `main`'s tests.
+///
+/// The §3.8 ack ROUTING (which body is sent for an `interactive_capture`
+/// outcome, and when none may be sent) lives in `main::run_once`, not here, and
+/// pinning it against a second hand-rolled fake would prove only that the fake
+/// agrees with itself. It is asserted against the REAL [`HttpWizardApi`] driving
+/// this transport instead, so the request bytes it produces are the ones under
+/// test.
+#[cfg(test)]
+pub mod testing {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use super::{HttpRequest, HttpResponse, HttpTransport};
+
+    /// Records every request that left the client and replays scripted
+    /// responses — the byte seam this crate previously lacked entirely.
+    pub struct RecordingTransport {
+        script: Mutex<VecDeque<Result<HttpResponse, String>>>,
+        requests: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl RecordingTransport {
+        pub fn new(script: Vec<Result<HttpResponse, String>>) -> Self {
+            RecordingTransport {
+                script: Mutex::new(script.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A transport that answers every call with the same 200 body.
+        pub fn always_ok(body: serde_json::Value, calls: usize) -> Self {
+            RecordingTransport::new(
+                (0..calls)
+                    .map(|_| {
+                        Ok(HttpResponse {
+                            status: 200,
+                            body: body.to_string(),
+                        })
+                    })
+                    .collect(),
+            )
+        }
+
+        pub fn requests(&self) -> Vec<HttpRequest> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl HttpTransport for RecordingTransport {
+        fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
+            self.requests.lock().unwrap().push(request.clone());
+            match self.script.lock().unwrap().pop_front() {
+                Some(scripted) => scripted,
+                None => panic!("unscripted request: {} {}", request.method, request.url),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::sync::Mutex;
 
     use serde_json::{Value, json};
 
+    use super::testing::RecordingTransport;
     use super::*;
     use crate::wizard_wire::{
         ACCEPTANCE_RECEIPT_SCHEMA, AcceptanceReceipt, AcceptanceReceiptSchema, AcceptanceStatus,
@@ -1126,50 +1264,6 @@ mod tests {
             submission_attempt_id: "subatt_01J1XY".to_string(),
             worker_claim_id: "claim_01J1XZ".to_string(),
             lease_token: LeaseToken::new(LEASE_SECRET.to_string()),
-        }
-    }
-
-    /// Records every request that left the client and replays scripted
-    /// responses — the byte seam this crate previously lacked entirely.
-    struct RecordingTransport {
-        script: Mutex<VecDeque<Result<HttpResponse, String>>>,
-        requests: Mutex<Vec<HttpRequest>>,
-    }
-
-    impl RecordingTransport {
-        fn new(script: Vec<Result<HttpResponse, String>>) -> Self {
-            RecordingTransport {
-                script: Mutex::new(script.into()),
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-
-        /// A transport that answers every call with the same 200 body.
-        fn always_ok(body: Value, calls: usize) -> Self {
-            RecordingTransport::new(
-                (0..calls)
-                    .map(|_| {
-                        Ok(HttpResponse {
-                            status: 200,
-                            body: body.to_string(),
-                        })
-                    })
-                    .collect(),
-            )
-        }
-
-        fn requests(&self) -> Vec<HttpRequest> {
-            self.requests.lock().unwrap().clone()
-        }
-    }
-
-    impl HttpTransport for RecordingTransport {
-        fn execute(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
-            self.requests.lock().unwrap().push(request.clone());
-            match self.script.lock().unwrap().pop_front() {
-                Some(scripted) => scripted,
-                None => panic!("unscripted request: {} {}", request.method, request.url),
-            }
         }
     }
 
@@ -1253,6 +1347,52 @@ mod tests {
             "candidate_id": "cand_01J1Z0",
             "pause_permitted": true
         })
+    }
+
+    /// Every builder-lane section paired with its WIRE-SECTION name — the name
+    /// its errors must carry. Used by the checks that must hold for ALL of them
+    /// (the `job_id` path gate), so a new section cannot quietly opt out.
+    #[allow(clippy::type_complexity)]
+    fn interactive_calls() -> Vec<(
+        &'static str,
+        Box<dyn Fn(&HttpWizardApi<RecordingTransport>, &Fencing4) -> Result<(), WizardApiError>>,
+    )> {
+        vec![
+            (
+                "lease renew",
+                Box::new(|api, f| api.renew_lease(f).map(|_| ())),
+            ),
+            (
+                "control poll",
+                Box::new(|api, f| api.poll_control(f, 0).map(|_| ())),
+            ),
+            (
+                "progress",
+                Box::new(|api, f| api.report_progress(f, WizardStage::Holding)),
+            ),
+            (
+                "hold-ready",
+                Box::new(|api, f| api.report_hold_ready(f, &hold_ready())),
+            ),
+            (
+                "candidate report",
+                Box::new(|api, f| {
+                    api.report_candidate(f, &command(), &candidate_report())
+                        .map(|_| ())
+                }),
+            ),
+            (
+                "candidate acceptance",
+                Box::new(|api, f| {
+                    api.report_candidate_acceptance(f, &command(), &acceptance())
+                        .map(|_| ())
+                }),
+            ),
+            (
+                "wizard terminal ack",
+                Box::new(|api, f| api.wizard_terminal_ack(f, &terminal_ack())),
+            ),
+        ]
     }
 
     /// Drive every builder-lane endpoint once against one recording transport.
@@ -1553,6 +1693,96 @@ mod tests {
         assert!(err.to_string().contains("capture_epoch >= 1"));
     }
 
+    #[test]
+    fn a_report_naming_a_candidate_the_control_channel_never_delivered_never_leaves() {
+        // §1.2's OTHER half: epoch ↔ candidate is 1:1, so a report at the right
+        // epoch naming a DIFFERENT candidate is just as fenced server-side as a
+        // superseded epoch. The pre-flight exists to save that round trip.
+        let api = client(RecordingTransport::new(vec![]));
+        let mut impostor = candidate_report();
+        impostor.candidate_id = "cand_SOMEONE_ELSE".to_string();
+        let err = api
+            .report_candidate(&fencing(), &command(), &impostor)
+            .expect_err("a candidate the control channel never delivered");
+        assert!(
+            matches!(err, WizardApiError::Contract { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("cand_SOMEONE_ELSE is not the candidate the control channel delivered"),
+            "{err}"
+        );
+        assert!(
+            api.transport.requests().is_empty(),
+            "nothing left the process"
+        );
+    }
+
+    #[test]
+    fn an_acceptance_for_a_superseded_epoch_never_leaves() {
+        // The acceptance path takes its candidate FROM the command (path-only,
+        // never caller-supplied), so the epoch is the one caller-supplied half
+        // of the pairing — and it is still checked.
+        let api = client(RecordingTransport::new(vec![]));
+        let mut stale = acceptance();
+        stale.capture_epoch = 2; // the command below names epoch 3
+        let err = api
+            .report_candidate_acceptance(&fencing(), &command(), &stale)
+            .expect_err("superseded epoch");
+        assert!(
+            err.to_string().contains("does not match the candidate"),
+            "{err}"
+        );
+        assert_eq!(err.endpoint(), "candidate acceptance");
+        assert!(api.transport.requests().is_empty());
+    }
+
+    // ── request pre-flight validation (§3.5 / §3.7 / §3.8) ──────────────────
+
+    #[test]
+    fn every_request_body_is_validated_before_it_leaves() {
+        // The strict wire types carry refinements the schema cannot express, and
+        // the api enforces every one of them. Sending a body that is knowably
+        // invalid spends a round trip UNDER A LIVE LEASE to be told so — each
+        // section must refuse locally instead.
+        //
+        // §3.5: a port of 0 is not a port.
+        let api = client(RecordingTransport::new(vec![]));
+        let mut portless = hold_ready();
+        portless.guest_port = 0;
+        let err = api
+            .report_hold_ready(&fencing(), &portless)
+            .expect_err("guest_port 1..65535");
+        assert!(err.to_string().contains("guest_port"), "{err}");
+        assert_eq!(err.endpoint(), "hold-ready");
+        assert!(api.transport.requests().is_empty());
+
+        // §3.7: `accepted` and a failure_reason are mutually exclusive — the
+        // pair would assert an acceptance that also failed.
+        let api = client(RecordingTransport::new(vec![]));
+        let mut contradictory = acceptance();
+        contradictory.failure_reason = Some("rejected after all".to_string());
+        let err = api
+            .report_candidate_acceptance(&fencing(), &command(), &contradictory)
+            .expect_err("failure_reason is only legal with rejected");
+        assert!(err.to_string().contains("failure_reason"), "{err}");
+        assert_eq!(err.endpoint(), "candidate acceptance");
+        assert!(api.transport.requests().is_empty());
+
+        // §3.8: the terminal ack identifies the builder; an empty agent_id
+        // leaves an admin a terminal state with no agent to attribute it to.
+        let api = client(RecordingTransport::new(vec![]));
+        let mut anonymous = terminal_ack();
+        anonymous.agent_id = String::new();
+        let err = api
+            .wizard_terminal_ack(&fencing(), &anonymous)
+            .expect_err("agent_id 1..120");
+        assert!(err.to_string().contains("agent_id"), "{err}");
+        assert_eq!(err.endpoint(), "wizard terminal ack");
+        assert!(api.transport.requests().is_empty());
+    }
+
     // ── control response validation + fencing classification ────────────────
 
     #[test]
@@ -1599,6 +1829,46 @@ mod tests {
             .poll_control(&hostile, 0)
             .expect_err("query smuggling is refused");
         assert!(err.to_string().contains("not URL-safe"));
+        assert!(api.transport.requests().is_empty());
+    }
+
+    #[test]
+    fn a_url_unsafe_job_id_never_reaches_the_request_line() {
+        // The claim's `job_id` rides the PATH of EVERY builder-lane call, so a
+        // skewed or hostile id is path traversal / route substitution, not a
+        // query smuggle: `job_1/../../other` pasted unencoded reaches a
+        // different route entirely. Every section is checked, not just the GET.
+        let mut hostile = fencing();
+        hostile.job_id = "job_1/../../other".to_string();
+        for (section, call) in interactive_calls() {
+            let api = client(RecordingTransport::new(vec![]));
+            let err = call(&api, &hostile).expect_err("a traversing job_id fails closed");
+            assert!(
+                err.to_string().contains("job_id is not URL-safe"),
+                "{section}: {err}"
+            );
+            // The error names its WIRE SECTION, never the path fragment it was
+            // building — `/control: job_id is not URL-safe` names nothing an
+            // operator can look up in the contract.
+            assert_eq!(err.endpoint(), section, "got {err}");
+            assert!(
+                api.transport.requests().is_empty(),
+                "{section}: nothing left the process"
+            );
+        }
+    }
+
+    #[test]
+    fn a_job_id_carrying_a_query_separator_fails_closed_too() {
+        // `?`/`&` in the PATH position silently turns the rest of the URL into a
+        // query the api would read as fencing input.
+        let mut hostile = fencing();
+        hostile.job_id = "job_1?worker_claim_id=someone_else".to_string();
+        let api = client(RecordingTransport::new(vec![]));
+        let err = api
+            .renew_lease(&hostile)
+            .expect_err("query smuggling through the path is refused");
+        assert!(err.to_string().contains("job_id is not URL-safe"), "{err}");
         assert!(api.transport.requests().is_empty());
     }
 
@@ -1662,6 +1932,128 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_hold_acks_its_diagnostics_not_a_bare_failure() {
+        // §3.8's optional members are REFINEMENTS of the reason, and they are
+        // the only thing an admin has to tell "ineligible capsule" from "the
+        // source was lost mid-acceptance". A bare `build_failed` with neither is
+        // an unactionable terminal state.
+        let api = client(RecordingTransport::always_ok(json!({}), 1));
+        ack_hold_termination(
+            &api,
+            "builder-1",
+            &fencing(),
+            &HoldTermination::FailedClosed {
+                failure_reason: "capsule requires External State".to_string(),
+            },
+        )
+        .expect("ack sent");
+        let body = body_json(&api.transport.requests()[0]);
+        assert_eq!(body["reason"], json!("build_failed"));
+        assert_eq!(body["failure_stage"], json!("holding"));
+        assert_eq!(
+            body["failure_reason"],
+            json!("capsule requires External State")
+        );
+
+        // ADR-012's terminal branch projects to its OWN reason and stage.
+        let api = client(RecordingTransport::always_ok(json!({}), 1));
+        ack_hold_termination(
+            &api,
+            "builder-1",
+            &fencing(),
+            &HoldTermination::AcceptanceFailedSourceLost {
+                failure_reason: "resume failed after capture".to_string(),
+            },
+        )
+        .expect("ack sent");
+        let body = body_json(&api.transport.requests()[0]);
+        assert_eq!(body["reason"], json!("acceptance_failed_source_lost"));
+        assert_eq!(body["failure_stage"], json!("acceptance"));
+        assert_eq!(body["failure_reason"], json!("resume failed after capture"));
+    }
+
+    #[test]
+    fn a_diagnostic_is_truncated_to_the_builders_failure_reason_budget() {
+        // The api bounds `failure_reason` at 2000 UTF-16 code units and REJECTS
+        // an over-long ack outright — an unbounded build log spliced into the
+        // reason would lose the whole terminal ack, not just the tail.
+        let api = client(RecordingTransport::always_ok(json!({}), 1));
+        let flood = "x".repeat(FAILURE_REASON_BUDGET + 500);
+        ack_interactive_build_failure(&api, "builder-1", &fencing(), "holding", &flood)
+            .expect("ack sent");
+        let body = body_json(&api.transport.requests()[0]);
+        assert_eq!(
+            body["failure_reason"]
+                .as_str()
+                .expect("string")
+                .chars()
+                .count(),
+            FAILURE_REASON_BUDGET
+        );
+
+        // …and the same budget bounds a hold's own diagnostic.
+        let api = client(RecordingTransport::always_ok(json!({}), 1));
+        ack_hold_termination(
+            &api,
+            "builder-1",
+            &fencing(),
+            &HoldTermination::FailedClosed {
+                failure_reason: flood.clone(),
+            },
+        )
+        .expect("ack sent");
+        let body = body_json(&api.transport.requests()[0]);
+        assert_eq!(
+            body["failure_reason"]
+                .as_str()
+                .expect("string")
+                .chars()
+                .count(),
+            FAILURE_REASON_BUDGET
+        );
+    }
+
+    #[test]
+    fn a_server_error_body_is_bounded_before_it_becomes_a_local_error() {
+        // An error body is non-secret server output, but it is still unbounded
+        // REMOTE input: an api that answered a 500 with a megabyte of HTML would
+        // otherwise carry all of it into every log line the error touches.
+        let flood = "e".repeat(ERROR_BODY_BUDGET + 500);
+        let api = client(RecordingTransport::new(vec![Ok(HttpResponse {
+            status: 500,
+            body: flood,
+        })]));
+        let err = api.renew_lease(&fencing()).expect_err("500");
+        let WizardApiError::Status { body, .. } = &err else {
+            panic!("got {err:?}");
+        };
+        assert_eq!(body.chars().count(), ERROR_BODY_BUDGET);
+    }
+
+    #[test]
+    fn a_2xx_that_does_not_match_the_wire_contract_is_a_contract_fault() {
+        // A 200 is not agreement: an api that answered the renew with a body
+        // this side cannot read has skewed the contract, and inventing a
+        // deadline out of it would be exactly the "assume far away" the driver
+        // refuses. It must surface as a CONTRACT fault, not a silent default.
+        let api = client(RecordingTransport::new(vec![Ok(HttpResponse {
+            status: 200,
+            body: json!({ "lease_expires_at": 1234 }).to_string(),
+        })]));
+        let err = api.renew_lease(&fencing()).expect_err("skewed body");
+        assert!(
+            matches!(err, WizardApiError::Contract { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("response did not match the wire contract"),
+            "{err}"
+        );
+        assert_eq!(err.endpoint(), "lease renew");
+    }
+
+    #[test]
     fn the_acceptance_receipt_envelope_reaches_the_wire_intact() {
         let api = client(RecordingTransport::always_ok(
             json!({ "candidate_id": "cand_01J1Z0", "status": "accepted" }),
@@ -1675,6 +2067,89 @@ mod tests {
             json!(ACCEPTANCE_RECEIPT_SCHEMA)
         );
         assert!(body.get("failure_reason").is_none(), "omitted, never null");
+    }
+
+    // ── the production transport ────────────────────────────────────────────
+
+    /// A loopback HTTP server that serves `responses` in order and then stops.
+    /// The only way to exercise [`UreqTransport`] — the production transport
+    /// every other test replaces — including the load-bearing
+    /// `ureq::Error::Status` → `Ok(HttpResponse)` mapping that makes a
+    /// `409 fenced` a classifiable RESPONSE instead of a transport error.
+    fn loopback(responses: Vec<(u16, &'static str)>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let base = format!("http://{}", listener.local_addr().expect("local addr"));
+        let server = std::thread::spawn(move || {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let head = format!(
+                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        (base, server)
+    }
+
+    #[test]
+    fn the_production_transport_makes_a_status_a_response_not_a_transport_error() {
+        // A `409 fenced` MUST reach `classify` with its body intact: ureq
+        // surfaces every non-2xx as `Err(Error::Status)`, and letting that stand
+        // as a transport error would make the fenced envelope unreadable — every
+        // fail-closed decision on this lane depends on telling the two apart.
+        let (base, server) = loopback(vec![
+            (409, r#"{"error":"fenced","message":"claim is not active"}"#),
+            (200, r#"{"lease_expires_at":"2026-07-22T09:20:00.000Z"}"#),
+        ]);
+        let api = HttpWizardApi::new(base, AGENT_TOKEN.to_string(), UreqTransport::new());
+        let fenced = api.renew_lease(&fencing()).expect_err("409 fenced");
+        assert!(fenced.is_fenced(), "got {fenced:?}");
+        assert!(
+            fenced.to_string().contains("claim is not active"),
+            "{fenced}"
+        );
+        let renewed = api.renew_lease(&fencing()).expect("200 over the wire");
+        assert_eq!(renewed.lease_expires_at, "2026-07-22T09:20:00.000Z");
+        server.join().expect("loopback server");
+    }
+
+    #[test]
+    fn the_production_transport_reports_a_real_failure_as_a_transport_error() {
+        // Bind then drop, so the port is guaranteed to refuse rather than
+        // belong to someone else.
+        let dead = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = dead.local_addr().expect("local addr");
+        drop(dead);
+        let api = HttpWizardApi::new(
+            format!("http://{addr}"),
+            AGENT_TOKEN.to_string(),
+            UreqTransport::new(),
+        );
+        let err = api.renew_lease(&fencing()).expect_err("refused");
+        assert!(
+            matches!(err, WizardApiError::Transport { .. }),
+            "got {err:?}"
+        );
+
+        // …and a method this transport cannot send is refused locally rather
+        // than silently downgraded to one it can.
+        let unsupported = UreqTransport::new()
+            .execute(&HttpRequest {
+                method: "PUT",
+                url: format!("http://{addr}/x"),
+                headers: Vec::new(),
+                body: None,
+            })
+            .expect_err("PUT");
+        assert!(
+            unsupported.contains("unsupported method PUT"),
+            "{unsupported}"
+        );
     }
 
     // ── lease renew driver ──────────────────────────────────────────────────
@@ -1864,6 +2339,61 @@ mod tests {
     }
 
     #[test]
+    fn the_cadence_follows_a_renewed_leases_own_ttl_not_the_first_one() {
+        // The distinguishing property: while every window is the same length, a
+        // cadence DERIVED from the observed TTL and a hardcoded constant are
+        // indistinguishable. Renew into a SHORTER window and the next renew has
+        // to move with it — a driver still pacing on the first window's third
+        // would let a shortened lease die un-renewed.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![
+                // Renewed at 09:11:40 into a 60s window (not another 300s one).
+                renewed("2026-07-22T09:12:40.000Z"),
+                renewed("2026-07-22T09:20:00.000Z"),
+            ],
+            vec![],
+        );
+        let mut driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("lease adopted");
+        let f = fencing();
+        clock.advance(Duration::from_secs(100)); // a third of the FIRST window
+        driver.tick(&f).expect("healthy");
+        assert_eq!(driver.renews(), 1);
+        clock.advance(Duration::from_secs(20)); // a third of the NEW window
+        driver.tick(&f).expect("healthy");
+        assert_eq!(
+            driver.renews(),
+            2,
+            "the cadence is re-derived from the renewed lease's own TTL"
+        );
+    }
+
+    #[test]
+    fn the_production_clock_is_the_wall_clock_the_deadline_is_expressed_in() {
+        // `lease_expires_at` is a SERVER wall-clock instant. A driver built on a
+        // process-local monotonic `Instant` would be comparing it against a
+        // clock the api cannot name, so the production clock has to be the wall
+        // clock — and the fake above has to be standing in for the same thing.
+        let observed = SystemWallClock.now_utc();
+        let skew = SystemTime::now()
+            .duration_since(observed)
+            .expect("the production clock is not ahead of the wall clock");
+        assert!(skew < Duration::from_secs(5), "{skew:?}");
+
+        // A lost lease's diagnostic is readable without going through Display
+        // (the hold logs the message, the fault wraps the Display form).
+        let lost = LeaseLost::Expired {
+            message: "the observed lease deadline passed".to_string(),
+        };
+        assert_eq!(lost.message(), "the observed lease deadline passed");
+        assert_eq!(
+            ControlFault::from(lost).message,
+            "lease expired: the observed lease deadline passed"
+        );
+    }
+
+    #[test]
     fn a_fenced_renew_fails_closed_immediately() {
         let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
         let api = ScriptedApi::new(
@@ -1981,6 +2511,95 @@ mod tests {
             })
         );
         assert_eq!(source.polls(), 2);
+    }
+
+    #[test]
+    fn a_transient_control_poll_failure_never_costs_the_author_their_session() {
+        // The scenario this guards: the author is ten minutes into Step 4 (first
+        // run setup done, model loaded) and the lease was renewed seconds ago —
+        // it is provably alive. One 502 from the edge, or one reset connection,
+        // must NOT end the hold: `HoldPhase` turns any ControlFault into
+        // `TornDownWithoutAck`, which destroys the held guest, loses the live
+        // session and cannot even ack (§3.8 expiry is server-owned), leaving the
+        // attempt stuck in `holding` until the server sweep. The renew driver
+        // already retries a non-fenced failure inside the window; the poll on
+        // the SAME channel has to behave the same way.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![],
+            vec![
+                Err(WizardApiError::Status {
+                    endpoint: "control poll".to_string(),
+                    code: 502,
+                    body: "bad gateway".to_string(),
+                }),
+                Err(WizardApiError::Transport {
+                    endpoint: "control poll".to_string(),
+                    message: "connection reset".to_string(),
+                }),
+                Ok(control("capture", 4, Some("cand_01J1Z0"))),
+            ],
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+        let response = source
+            .poll(0)
+            .expect("a blip inside a live lease window does not end the hold");
+        assert_eq!(response.directive, ControlDirective::Capture);
+        assert_eq!(
+            source.last_capture_command().map(|c| c.capture_epoch),
+            Some(4),
+            "the capture command that survived the blip is still remembered"
+        );
+    }
+
+    #[test]
+    fn a_fenced_control_poll_is_not_retried() {
+        // Fenced is definitive — the claim is already dead server-side, so a
+        // retry can only produce another 409. Exactly ONE poll is scripted: a
+        // second attempt panics the fake.
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![],
+            vec![Err(WizardApiError::Fenced {
+                endpoint: "control poll".to_string(),
+                message: "claim is not active".to_string(),
+            })],
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+        let fault = source.poll(0).expect_err("fenced");
+        assert!(fault.message.contains("409 fenced"), "{}", fault.message);
+    }
+
+    #[test]
+    fn a_control_poll_that_keeps_failing_still_fails_closed() {
+        // The retry is BOUNDED. An api that never answers must not leave a hold
+        // spinning on a lease it can no longer prove — after the budget the hold
+        // ends the fail-closed way (torn down, no ack).
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(
+            vec![],
+            (0..CONTROL_POLL_ATTEMPTS)
+                .map(|_| {
+                    Err(WizardApiError::Status {
+                        endpoint: "control poll".to_string(),
+                        code: 502,
+                        body: "bad gateway".to_string(),
+                    })
+                })
+                .collect(),
+        );
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+        let fault = source.poll(0).expect_err("the budget is exhausted");
+        assert!(fault.message.contains("status 502"), "{}", fault.message);
     }
 
     #[test]
