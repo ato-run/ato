@@ -275,7 +275,14 @@ mod tests {
         );
     }
 
+    // These discovery tests never touch ENV_UPLOAD_STRATEGY themselves, but
+    // `resolve_upload_strategy_kind` reads it FIRST (the explicit-override
+    // branch), so they must share the `#[serial]` key with the override tests
+    // above. Without it, cargo's parallel runner lets a discovery test observe
+    // the env var an override test has transiently set and it flakily resolves
+    // to `ExplicitEnvironmentOverride` instead of the discovered/default reason.
     #[test]
+    #[serial]
     fn resolved_selector_uses_registry_capability_discovery_default() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let (base_url, handle) = runtime.block_on(async {
@@ -310,6 +317,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolved_selector_falls_back_when_capabilities_payload_is_inconsistent() {
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let (base_url, handle) = runtime.block_on(async {
@@ -344,6 +352,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
     async fn resolved_selector_is_safe_inside_async_context() {
         let app = Router::new().route(
             "/v1/publish/capabilities",
