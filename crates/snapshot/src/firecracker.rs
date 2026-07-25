@@ -1715,6 +1715,9 @@ pub struct HeldGuest<'a> {
     vmstate_path: PathBuf,
     mem_path: PathBuf,
     port: u16,
+    /// Best-effort build-time screenshot (base64 PNG) captured during boot, held
+    /// until the candidate is sealed and threaded into its `BuildReadyStateReceipt`.
+    screenshot_png_base64: Option<String>,
     /// Held for the whole hold: the build lock is per-slot, and a hold occupies
     /// its slot for as long as the guest is up.
     _lock: BuildLock,
@@ -1779,6 +1782,8 @@ impl<'a> HeldGuest<'a> {
                 // capsule is refused at `boot_and_hold`), so there is no
                 // supervisor drive and no placeholder-hygiene receipt to record.
                 None,
+                // The screenshot captured while booting this held guest.
+                self.screenshot_png_base64.clone(),
             )
             .map_err(|error| HeldCaptureFailure { error, source_lost })?;
         Ok(HeldCandidate {
@@ -1894,7 +1899,13 @@ impl FirecrackerBackend {
         supervisor_drive: Option<&SupervisorDrive>,
         port: u16,
         path: &str,
-    ) -> Result<(FcProcess, Option<PathBuf>), SnapshotError> {
+    ) -> Result<(FcProcess, Option<PathBuf>, Option<String>), SnapshotError> {
+        // Store thumbnail automation: best-effort screenshot of the booted app,
+        // captured once the guest answers healthy (set inside the boot closure
+        // below). `None` on every path where capture isn't possible/safe — see
+        // `crate::screenshot::capture_best_effort` doc comment for the full list;
+        // this NEVER turns a successful build into a failed one.
+        let mut screenshot_png_base64: Option<String> = None;
         let fc = bench::time("build.start_fc", || {
             self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
         })?;
@@ -1956,6 +1967,18 @@ impl FirecrackerBackend {
                 self.supervisor_deliver_placeholders(uds, drive)?;
             }
             self.wait_health(port, path)?; // secret-free seal point (placeholder-only for supervisor builds)
+            // Store thumbnail automation: the guest just proved live/healthy at
+            // this exact address, so this is the one moment build-time capture
+            // can reuse the SAME reachable address the health/warmup probes use
+            // (no separate address-resolution path). Best-effort only: neither
+            // `probe_addr` failing nor the capture itself failing may fail this
+            // build — `capture_best_effort` never returns an `Err`, and any
+            // `probe_addr` error is logged and treated the same as "no browser
+            // found" (`None`).
+            match self.probe_addr(port) {
+                Ok(addr) => screenshot_png_base64 = crate::screenshot::capture_best_effort(addr),
+                Err(e) => eprintln!("[screenshot] skip: could not resolve guest address: {e}"),
+            }
             // Warm the user-facing first-screen paths into guest memory BEFORE
             // the Pause+Snapshot, so the sealed image already carries template
             // rendering / JIT / DB-init / First-Frame-prep — the user's first
@@ -1971,7 +1994,7 @@ impl FirecrackerBackend {
             }
             Ok(())
         })?;
-        Ok((fc, vsock_uds))
+        Ok((fc, vsock_uds, screenshot_png_base64))
     }
 
     /// Boot `input` and HOLD the guest live for interactive capture (RFC §8.3
@@ -2072,7 +2095,7 @@ impl FirecrackerBackend {
             port,
             &health_path,
         );
-        let (fc, _vsock_uds) = match boot {
+        let (fc, _vsock_uds, screenshot_png_base64) = match boot {
             Ok(v) => v,
             Err(e) => {
                 self.emit_build_failure_diagnostics(&build_dir);
@@ -2094,6 +2117,10 @@ impl FirecrackerBackend {
             rootfs_path,
             rootfs_blob,
             port,
+            // Best-effort build-time screenshot captured during boot (before the
+            // guest was handed back live); carried until this hold's candidate is
+            // sealed, when it is threaded into the receipt via `seal_ready_state`.
+            screenshot_png_base64,
             _lock: lock,
             _state_volume_locks: None,
             torn_down: false,
@@ -2116,6 +2143,10 @@ impl FirecrackerBackend {
         vmstate: &[u8],
         mem: &[u8],
         supervisor_drive: Option<&SupervisorDrive>,
+        // Best-effort build-time screenshot (base64 PNG) captured at boot's
+        // health point; carried into the receipt unchanged. `None` when capture
+        // wasn't possible — see `crate::screenshot`.
+        screenshot_png_base64: Option<String>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
         // v1.2 PR 3d: ADVISORY placeholder-hygiene scan (kernel init_on_free-
         // dependent, #947 finding) — the revoked placeholder SHOULD be gone from the
@@ -2227,6 +2258,7 @@ impl FirecrackerBackend {
             manifest,
             sealed_bytes,
             no_secret_proof,
+            screenshot_png_base64,
         })
     }
 
@@ -2575,11 +2607,16 @@ impl SnapshotBackend for FirecrackerBackend {
         let network_ports = network_ports(&input.restore_contract, port)
             .map_err(|error| self.backend_err(error))?;
         self.net_up(&network_ports)?;
+        // The boot primitive captures a best-effort screenshot at the health
+        // point; the boot closure below sets this outer variable, threaded into
+        // the receipt after the seal. Kept as an outer `mut` (rather than a third
+        // closure-return element) so the closure return type stays simple.
+        let mut screenshot_png_base64: Option<String> = None;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
             // The guest is booted to its seal point by the shared primitive and
             // handed back ALIVE; this path then stops+revokes (supervisor only)
             // and pauses it, and `fc` drops at the end of this closure.
-            let (fc, vsock_uds) = self.boot_to_seal_point(
+            let (fc, vsock_uds, shot) = self.boot_to_seal_point(
                 &input,
                 &build_dir,
                 &rootfs_path,
@@ -2588,6 +2625,7 @@ impl SnapshotBackend for FirecrackerBackend {
                 port,
                 &path,
             )?;
+            screenshot_png_base64 = shot;
             // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
             // pause/snapshot, so the seal carries no running workload and no
             // binding material in guest tmpfs (contract order: stop, then revoke).
@@ -2647,6 +2685,7 @@ impl SnapshotBackend for FirecrackerBackend {
             &vmstate,
             &mem,
             supervisor_drive.as_ref(),
+            screenshot_png_base64,
         );
         cleanup_scratch();
         receipt

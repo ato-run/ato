@@ -51,6 +51,9 @@ mod qemu;
 pub mod rootfs_builder;
 mod scan_cache;
 mod scanner;
+// Build-time screenshot capture (store thumbnail automation) — internal to
+// `firecracker.rs`'s `build_ready_state`, no public API of its own.
+mod screenshot;
 mod seal;
 pub mod state_volume;
 pub mod state_volume_persistence;
