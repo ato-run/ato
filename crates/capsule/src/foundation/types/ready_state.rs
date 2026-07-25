@@ -97,6 +97,76 @@ pub struct SnapshotConfig {
     pub content_ready_path: Option<String>,
 }
 
+/// `[seal_at]` — the Capsule-authored Snapshot acceptance program
+/// (`CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §6/§6.3).
+///
+/// `command` is an arbitrary verification program (an HTTP request, an API
+/// workflow, browser automation, a database-init check, …). Ato interprets ONLY
+/// its process result: exit 0 accepts the candidate Snapshot, any other exit
+/// status or a timeout rejects it (§6.3). There is deliberately no Ato-specific
+/// HTTP / gate / readiness-level / publish-at DSL here.
+///
+/// It is evaluated against a **disposable restore** of an immutable candidate,
+/// never against the build guest whose state is sealed (§8.1), so what this
+/// command does cannot enter the accepted Snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealAtConfig {
+    /// Exact argv, executed with no implicit shell; argument boundaries are
+    /// preserved exactly (§6.1). Shell behavior is available only through an
+    /// explicitly selected shell in the argv, e.g. `["sh", "-lc", "…"]`.
+    pub command: Vec<String>,
+
+    /// Per-attempt verification timeout. MUST be positive and bounded by
+    /// platform policy (§6.1) — see [`MAX_SEAL_AT_TIMEOUT_SECONDS`]. `None`
+    /// leaves the bound to the acceptance-loop default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+}
+
+/// Platform-policy ceiling for `seal_at.timeout_seconds` (§6.1: "bounded by
+/// platform policy").
+///
+/// Kept in lockstep with the ceiling this repo already expresses for a per-job
+/// builder timeout — `snapshot::firecracker::MAX_JOB_BOOT_TIMEOUT_S` and
+/// `snapshot-builder`'s `MAX_BOOT_TIMEOUT_S`, both 600 s with the same
+/// rationale: a single build job must not be able to pin the builder
+/// indefinitely. `seal_at` verification runs inside that same build job, so it
+/// inherits that job's ceiling rather than introducing a second policy number.
+pub const MAX_SEAL_AT_TIMEOUT_SECONDS: u32 = 600;
+
+/// Validate an authored `[seal_at]` table per §6.1/§6.3, naming the offender.
+///
+/// Shared by manifest validation and any producer that reads the table
+/// directly, so both reject the same inputs. The argv rules mirror
+/// `snapshot::acceptance`'s `AcceptanceConfig` contract exactly (argv[0] is the
+/// program and must be non-empty; later arguments MAY be empty strings — a real
+/// argv element; no argument may contain a NUL, which no exec boundary carries).
+pub fn validate_seal_at(seal_at: &SealAtConfig) -> Result<(), String> {
+    if seal_at.command.is_empty() {
+        return Err("seal_at.command must be a non-empty argv array".to_string());
+    }
+    if seal_at.command[0].is_empty() {
+        return Err("seal_at.command[0] (the program) must not be empty".to_string());
+    }
+    if let Some(index) = seal_at
+        .command
+        .iter()
+        .position(|argument| argument.contains('\0'))
+    {
+        return Err(format!(
+            "seal_at.command[{index}] must not contain a NUL byte"
+        ));
+    }
+    match seal_at.timeout_seconds {
+        None => Ok(()),
+        Some(seconds) if (1..=MAX_SEAL_AT_TIMEOUT_SECONDS).contains(&seconds) => Ok(()),
+        Some(seconds) => Err(format!(
+            "seal_at.timeout_seconds must be an integer in 1..={MAX_SEAL_AT_TIMEOUT_SECONDS}, \
+             got {seconds}"
+        )),
+    }
+}
+
 /// v1 warmup stability: the first 2xx/3xx of every path is enough.
 pub const DEFAULT_STABLE_SUCCESSES: u32 = 1;
 /// v1 warmup poll interval between stability rounds.

@@ -180,6 +180,13 @@
       "notes": "user = \"1000:1000\" is a valid ContainerUserSpec and stays visible in the IR"
     },
     {
+      "name": "seal-at",
+      "file": "manifest/vectors/seal-at.toml",
+      "expect": "intent",
+      "expected_file": "manifest/expected/seal-at.intent.json",
+      "notes": "[seal_at] is identity-bearing authored verification intent (same category as [snapshot]): the argv is hashed as OpaqueCommand elements with argument boundaries exact — an explicitly selected shell, a space-containing argument kept as ONE element, and a trailing empty argument preserved"
+    },
+    {
       "name": "reject-workspace",
       "file": "manifest/vectors/reject-workspace.toml",
       "expect": "error",

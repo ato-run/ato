@@ -746,3 +746,209 @@ fn probe_paths_accept_origin_form_and_reject_request_line_breakers() {
     let e = validate_probe_paths(&[], Some("health")).unwrap_err();
     assert!(e.contains("content_ready_path"), "{e}");
 }
+
+// ── capsule_manifest_hash stability across the [seal_at] addition ────────────
+
+#[test]
+fn manifest_without_seal_at_keeps_its_canonical_hash() {
+    // `capsule_manifest_hash` = blake3(JCS(manifest)) via
+    // `foundation::install_lifecycle::canonical_hash`, and it keys the legacy
+    // Ready-State artifact directory (`ready-state/<hash>/`) that `ato build`
+    // writes and `ato run` looks up. Adding an optional section must therefore
+    // be invisible to a manifest that does not author it. Both spellings the
+    // product actually hashes are pinned to literals captured BEFORE `seal_at`
+    // existed:
+    //
+    // * the RAW `toml::Value` — what `ato build`/`ato run` hash (they read
+    //   `capsule.toml` bytes, never the typed model), so a new struct field
+    //   cannot reach it at all;
+    // * the TYPED `CapsuleManifest` — the spelling a new field COULD move, and
+    //   the one `skip_serializing_if = "Option::is_none"` protects.
+    use crate::foundation::install_lifecycle::canonical_hash;
+
+    let raw: toml::Value = toml::from_str(BASE).expect("BASE parses as TOML");
+    assert_eq!(
+        canonical_hash(&raw).expect("raw manifest hashes"),
+        "blake3:5dcb85cfec2b3e18014131358cb86c0f9dd1481ba693711f1f4a22ec258ff1ef"
+    );
+
+    let m = parse("");
+    assert!(m.seal_at.is_none(), "BASE authors no [seal_at]");
+    assert_eq!(
+        canonical_hash(&m).expect("typed manifest hashes"),
+        "blake3:869eaba4f56180aedbd2c011586a2ded400075ebee8dd0af051e31787133b65e"
+    );
+
+    // Control: authoring the section DOES move the typed hash, so the two
+    // assertions above are pinning absence rather than a field the serializer
+    // drops unconditionally.
+    let declared = parse("[seal_at]\ncommand = [\"true\"]\n");
+    assert_ne!(
+        canonical_hash(&declared).expect("typed manifest hashes"),
+        canonical_hash(&m).expect("typed manifest hashes")
+    );
+}
+
+// ── [seal_at] (spec §6/§6.1/§6.3) ────────────────────────────────────────────
+
+/// The `[seal_at]` validation messages the manifest validator reports, ignoring
+/// every unrelated rule so each vector isolates the §6.1/§6.3 rule under test.
+fn seal_at_errors(extra: &str) -> Vec<String> {
+    match parse(extra).validate() {
+        Ok(()) => Vec::new(),
+        Err(errors) => errors
+            .iter()
+            .filter_map(|error| match error {
+                crate::foundation::types::ValidationError::InvalidSealAt(message) => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn seal_at_parses_exact_argv_with_optional_timeout() {
+    let m = parse(
+        r#"
+[seal_at]
+command = ["npm", "run", "verify-ready"]
+timeout_seconds = 120
+"#,
+    );
+    let seal_at = m.seal_at.clone().expect("seal_at present");
+    assert_eq!(seal_at.command, ["npm", "run", "verify-ready"]);
+    assert_eq!(seal_at.timeout_seconds, Some(120));
+    assert!(
+        seal_at_errors(
+            "[seal_at]\ncommand = [\"npm\", \"run\", \"verify-ready\"]\ntimeout_seconds = 120\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn seal_at_timeout_is_optional() {
+    let m = parse("[seal_at]\ncommand = [\"./verify.sh\"]\n");
+    let seal_at = m.seal_at.clone().expect("seal_at present");
+    assert_eq!(seal_at.command, ["./verify.sh"]);
+    assert_eq!(seal_at.timeout_seconds, None);
+    assert!(seal_at_errors("[seal_at]\ncommand = [\"./verify.sh\"]\n").is_empty());
+}
+
+#[test]
+fn seal_at_preserves_argument_boundaries_exactly() {
+    // §6.1: an implementation MUST preserve argument boundaries exactly, and
+    // shell behavior is available only through an explicitly selected shell in
+    // the argv. So an argument containing a space stays ONE argument, an empty
+    // argument survives, and `["sh", "-lc", "…"]` is carried verbatim.
+    let m = parse(
+        r#"
+[seal_at]
+command = ["sh", "-lc", "curl -fsS http://127.0.0.1:8080/ready && echo ok", "--label", ""]
+"#,
+    );
+    let seal_at = m.seal_at.clone().expect("seal_at present");
+    assert_eq!(
+        seal_at.command,
+        [
+            "sh",
+            "-lc",
+            "curl -fsS http://127.0.0.1:8080/ready && echo ok",
+            "--label",
+            "",
+        ]
+    );
+    assert!(
+        seal_at_errors("[seal_at]\ncommand = [\"sh\", \"-lc\", \"a b\", \"--label\", \"\"]\n")
+            .is_empty(),
+        "an empty argument in a position >= 1 is valid argv"
+    );
+}
+
+#[test]
+fn seal_at_rejects_an_unusable_argv() {
+    // §6.1/§6.3: the argv must name a program. An empty argv or an empty
+    // argv[0] can never be executed, and a NUL cannot cross an exec boundary.
+    let empty = seal_at_errors("[seal_at]\ncommand = []\n");
+    assert_eq!(empty.len(), 1, "{empty:?}");
+    assert!(empty[0].contains("non-empty argv array"), "{empty:?}");
+
+    let empty_program = seal_at_errors("[seal_at]\ncommand = [\"\", \"--flag\"]\n");
+    assert_eq!(empty_program.len(), 1, "{empty_program:?}");
+    assert!(empty_program[0].contains("command[0]"), "{empty_program:?}");
+
+    let nul = seal_at_errors("[seal_at]\ncommand = [\"verify\", \"bad\\u0000arg\"]\n");
+    assert_eq!(nul.len(), 1, "{nul:?}");
+    assert!(
+        nul[0].contains("command[1]") && nul[0].contains("NUL"),
+        "{nul:?}"
+    );
+}
+
+#[test]
+fn seal_at_timeout_must_be_positive_and_within_platform_policy() {
+    // §6.1: `seal_at.timeout_seconds` MUST be positive and bounded by platform
+    // policy (this repo's existing per-job builder ceiling — see
+    // MAX_SEAL_AT_TIMEOUT_SECONDS).
+    let zero = seal_at_errors("[seal_at]\ncommand = [\"verify\"]\ntimeout_seconds = 0\n");
+    assert_eq!(zero.len(), 1, "{zero:?}");
+    assert!(
+        zero[0].contains("1..=600") && zero[0].contains("got 0"),
+        "{zero:?}"
+    );
+
+    let over = format!(
+        "[seal_at]\ncommand = [\"verify\"]\ntimeout_seconds = {}\n",
+        MAX_SEAL_AT_TIMEOUT_SECONDS + 1
+    );
+    let over = seal_at_errors(&over);
+    assert_eq!(over.len(), 1, "{over:?}");
+    assert!(over[0].contains("1..=600"), "{over:?}");
+
+    // The boundary value itself is accepted.
+    assert!(
+        seal_at_errors(&format!(
+            "[seal_at]\ncommand = [\"verify\"]\ntimeout_seconds = {MAX_SEAL_AT_TIMEOUT_SECONDS}\n"
+        ))
+        .is_empty()
+    );
+
+    // A negative timeout cannot even reach validation: `u32` rejects it at
+    // parse time rather than wrapping into a huge positive bound.
+    assert!(
+        CapsuleManifest::from_toml(&format!(
+            "{BASE}\n[seal_at]\ncommand = [\"verify\"]\ntimeout_seconds = -1\n"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn seal_at_command_is_required() {
+    // The table exists to carry an acceptance program; a `[seal_at]` with no
+    // `command` is not a declaration the acceptance loop could ever act on, so
+    // it fails at parse rather than defaulting to an empty argv.
+    assert!(
+        CapsuleManifest::from_toml(&format!("{BASE}\n[seal_at]\ntimeout_seconds = 30\n")).is_err()
+    );
+}
+
+#[test]
+fn validate_seal_at_is_the_single_shared_rule_set() {
+    // The manifest validator and any direct producer must reject the same
+    // inputs, so the rule set is exercised on the type as well.
+    let ok = SealAtConfig {
+        command: vec!["verify".to_string(), String::new()],
+        timeout_seconds: Some(1),
+    };
+    assert!(validate_seal_at(&ok).is_ok());
+    assert!(
+        validate_seal_at(&SealAtConfig {
+            command: Vec::new(),
+            timeout_seconds: None,
+        })
+        .is_err()
+    );
+}
