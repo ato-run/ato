@@ -795,6 +795,16 @@ pub struct CapsuleManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<super::ready_state::SnapshotConfig>,
 
+    /// Capsule v1 Snapshot acceptance program (`[seal_at]`).
+    ///
+    /// The author-supplied verification argv the disposable-restore acceptance
+    /// loop runs against a candidate Snapshot; exit 0 accepts, anything else
+    /// rejects (`CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §6.3). Absent means no v1
+    /// Snapshot is minted — the build stays on its legacy path. `skip` when
+    /// absent so every existing manifest keeps its `capsule_manifest_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_at: Option<super::ready_state::SealAtConfig>,
+
     /// Required secrets declared as refs (`[secrets.<name>]`), never values.
     ///
     /// Resolved post-restore via the existing secret-injection path. Parse-only

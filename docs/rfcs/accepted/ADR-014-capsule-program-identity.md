@@ -482,22 +482,26 @@ closed); the normalizer's job is *meaning*. A conformance fixture suite
 as known fields; every other key parses as a named target; unknown fields
 *inside* a named target are rejected.
 
-#### 2.1 Complete v0.3 top-level classification (normative — all 41 fields)
+#### 2.1 Complete v0.3 top-level classification (normative — all 42 fields)
 
 Source of truth: `CapsuleManifest`, `foundation/types/manifest.rs:606-829`
 @ `f7ee059b`.
 
-**Identity-bearing** (31): `capsule_type`, `default_target`, `capabilities`,
+**Identity-bearing** (32): `capsule_type`, `default_target`, `capabilities`,
 `requirements`, `execution`, `storage`, `state`, `network`, `model`,
 `transparency`, `build`, `pack`, `isolation`, `polymorphism`, `targets`,
 `platforms`, `exports`, `services`, `dependencies`, `tool_dependencies`,
 `required_env`, `contracts`, `foundation_requirements`, `host_capabilities`,
-`ingress`, `snapshot`, `secrets`, `bindings`, `external`, `context`,
+`ingress`, `snapshot`, `seal_at`, `secrets`, `bindings`, `external`, `context`,
 `generated_bindings`.
 
 Under the declaration definition (§0), `requirements`,
 `foundation_requirements`, `targets`, and `snapshot` are authored intent and
-belong here — see §0's explicit-overturn note. (`generated_bindings`' own
+belong here — see §0's explicit-overturn note. `seal_at` (the Capsule v1
+Snapshot acceptance program, spec §6.3) postdates this table and belongs in
+the identity-bearing set for the same reason as `snapshot`: it declares WHICH
+authored program decides whether a candidate Snapshot may be accepted, not an
+observation of a run, so revising it is a new declaration. (`generated_bindings`' own
 doc comment already anticipates this: the value "is never stored in the
 artifact, receipt, logs, or identity (only this spec is)" —
 manifest.rs:820-828.)
@@ -623,7 +627,7 @@ and `foundation/types/dependency_grammar.rs` @ `f7ee059b`):
 | `WitWorldRef` | `targets.wasm.world` (absent ⇒ `wasi:cli/command` default expanded before hashing) |
 | `ContainerUserSpec` | `targets.<label>.user`; `targets.oci.user` — both canonicalize to the same type |
 | `TemplatedString` | `contracts.*.ready` per variant — `Probe.run` (templated command), `Http.url` (templated HTTP target), `Tcp.target` (templated tcp target), `UnixSocket.path` (templated guest path), `Postgres.host`/`.port`/`.user`/`.database` (per-field templated values); `contracts.*.identity_exports.*`; `contracts.*.runtime_exports.*` — the dependency-grammar `ReadyProbe` is a different type from the target-level `ReadinessProbe` and is never conflated with it |
-| `OpaqueCommand` | `targets.<label>.cmd` (incl. `targets.oci.cmd[]`), `.build_command`, `.install_command`, `.prestart_command`, `.run_command`; `targets.source.args[]`; `readiness_probe.exec`; `build.lifecycle.*` commands; `services.*.entrypoint`; `exports.cli.*.args` |
+| `OpaqueCommand` | `seal_at.command[]`; `targets.<label>.cmd` (incl. `targets.oci.cmd[]`), `.build_command`, `.install_command`, `.prestart_command`, `.run_command`; `targets.source.args[]`; `readiness_probe.exec`; `build.lifecycle.*` commands; `services.*.entrypoint`; `exports.cli.*.args` |
 | `Identifier` | all map keys (`state`, `targets`, `services`, `dependencies`, `env` maps, …); `needs[]`; `default_target`; `targets.preference[]` entries; env variable NAMES (`required_env`, `env_allowlist`, `build_env`, `isolation.allow_env`); `state.*.producer`, `.schema_id`; `contracts.*.target`; enum-valued fields (`state.*.kind`/`.durability`/`.attach`/`.sharing`, `execution.runtime`, signal names) |
 | `OpaqueAuthoredString` (finite enumeration — adding an entry is a schema decision, never a default) | env variable VALUES (`targets.<label>.env.*`, `targets.env.*`, `execution.env.*`, `targets.oci.env.*`, `targets.wasm.config.*`); `targets.<label>.runtime`, `.driver`, `.language`, `.runtime_version`, `.engine_version`, `.engine_variant`, `.source_layout`, `.package_type`; `targets.source.language`, `.version`; version constraints in `dependencies.*` / `tool_dependencies.*`; `state.*.purpose`; probe/contract timeout strings; `runtime_tools` values; `host_capabilities[].reason` |
 

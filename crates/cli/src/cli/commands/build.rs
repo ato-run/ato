@@ -678,23 +678,34 @@ fn seal_ready_state_if_enabled(
         )))?;
     }
 
+    // Minting a Capsule v1 Snapshot requires BOTH halves: a genuinely confirmed
+    // `ExecutionContractEnvelopeV1` (`v1_identity` above — never caller-supplied
+    // or self-attested, see its doc) AND an authored `[seal_at]` acceptance
+    // command (RFC §6.1/§6.3), because the disposable-restore loop accepts a
+    // candidate only on an OBSERVED exit 0 of a real argv — there is nothing to
+    // run without one. With either half missing there is no v1 request, and the
+    // build stays on exactly today's legacy-only path.
+    let v1 = v1_identity
+        .as_ref()
+        .and_then(|envelope| ready_state::build::v1_seal_request(&manifest, envelope));
+    // Never silently ignore authored intent: say so when `[seal_at]` is
+    // declared but the other half is missing.
+    if manifest.seal_at.is_some() && v1.is_none() {
+        futures::executor::block_on(
+            reporter.notify(
+                "READY-STATE: [seal_at] is declared but no Capsule v1 execution identity was \
+             confirmed — no v1 Snapshot will be minted for this build"
+                    .to_string(),
+            ),
+        )?;
+    }
     let receipt = ready_state::build::seal(
         &state_root,
         hash.clone(),
         &manifest,
         layers,
         backend.as_ref(),
-        // `v1_identity` above is a genuinely confirmed `ExecutionContractEnvelopeV1`
-        // when `Some` (never a caller-supplied/self-attested one — see its doc).
-        // But `ready_state::build::seal`'s `V1SealRequest` additionally requires a
-        // `seal_at_argv` (RFC §6.1's disposable-restore acceptance command) to
-        // mint a v1 Snapshot, and no manifest field for `seal_at.command` exists
-        // anywhere in this codebase yet (a repo-wide search finds only doc
-        // comments/struct fields referencing the RFC concept, no TOML parser) —
-        // so there is no real argv to supply even when the identity itself is
-        // confirmed. Minting a v1 Snapshot from `ato build` is therefore still
-        // not wired; only the identity CONFIRMATION step above is new here.
-        None,
+        v1,
     )?;
     futures::executor::block_on(reporter.notify(format!(
         "READY-STATE: sealed {hash} backend={} no_secret_clean={} sealed_bytes={} -> {}",
