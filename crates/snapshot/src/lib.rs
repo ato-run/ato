@@ -77,7 +77,10 @@ pub use compose_plan::{
     ServiceDependency, ServiceMount, compose_to_graph,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
-pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
+pub use firecracker::{
+    FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCandidate,
+    HeldCaptureFailure, HeldGuest,
+};
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,

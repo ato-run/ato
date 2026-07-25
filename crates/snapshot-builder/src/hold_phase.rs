@@ -49,13 +49,21 @@
 //! non-test binary constructs a [`HoldPhase`] yet. The orchestration is exercised
 //! in full by this module's own KVM-free unit tests. The allow is intentionally
 //! module-scoped (not crate-wide) and removed when the live wiring lands.
+//!
+//! Slice 2 filled in the seam that needs no guest: [`ControlSource`] now has a
+//! production implementation ([`crate::wizard_api::ApiControlSource`], control
+//! poll + lease renew over the api). [`CaptureAction`] and [`EligibilitySource`]
+//! still have none — those need `crates/snapshot`'s pause/snapshot/resume path
+//! and a finalized `ExecutionContractEnvelopeV1`, neither of which is reachable
+//! from here yet.
 #![allow(dead_code)]
 
 use std::time::Duration;
 
 use snapshot::acceptance::{
-    AcceptanceConfig, AcceptanceFailure, DisposableAcceptanceLifecycle, FatalInternalError,
-    MonotonicClock, RunningSnapshotAcceptance, VerifiedRunningSnapshotEligibility,
+    AcceptanceBudget, AcceptanceConfig, AcceptanceFailure, CandidateSnapshot,
+    DisposableAcceptanceLifecycle, DisposableSessionHandle, FatalInternalError, MonotonicClock,
+    RunningSnapshotAcceptance, VerificationOutcome, VerifiedRunningSnapshotEligibility,
 };
 
 use crate::wizard_wire::{
@@ -67,14 +75,112 @@ use crate::wizard_wire::{
 /// [`ExtendPolicy`] seam.
 pub const DEFAULT_HOLD_TTL: Duration = Duration::from_secs(30 * 60);
 
+/// A control-poll fault that ENDS the hold locally, WITHOUT a terminal ack.
+///
+/// Every fault on this channel resolves the same way (SSOT §3.8): a `409 fenced`
+/// means the claim/lease is already dead server-side, and lease expiry is
+/// SERVER-OWNED — the sweep moves the attempt to `expired` and an
+/// expired-lease ack is unsendable (FENCING-4 would `409` it). A malformed
+/// control response, or a transport failure the client could not recover from
+/// inside the lease window, leaves the lease in doubt, and a builder that
+/// cannot prove its lease is alive must not assert a job-terminal state either.
+/// So the rule is uniform and fail-closed: tear down locally, ack nothing, let
+/// the server sweep own the terminal state — see
+/// [`HoldTermination::TornDownWithoutAck`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFault {
+    /// Diagnostic detail. Never carries the lease token (the api client's error
+    /// types cannot hold it — see `crate::wizard_api`).
+    pub message: String,
+}
+
 /// The control-poll source (SSOT §3.3). Yields a [`ControlResponse`] carrying the
 /// directive (`hold | capture | discard`), the authoritative `server_capture_epoch`
 /// (adopted as the observed command cursor), and — critically — `pause_permitted`
-/// (ADR-007 causality). In prod this is the builder's control-poll HTTP client;
-/// tests script a fixed sequence.
-pub trait ControlSource {
+/// (ADR-007 causality). In prod this is
+/// [`crate::wizard_api::ApiControlSource`]; tests script a fixed sequence.
+pub trait ControlSource: LeaseKeepalive {
     /// Poll the control channel, reporting the highest epoch observed so far.
-    fn poll(&mut self, observed_capture_epoch: u64) -> ControlResponse;
+    ///
+    /// Fallible on purpose: the production implementation is a network call
+    /// against a leased claim, and there is no honest `ControlResponse` to
+    /// invent for a fenced or malformed answer — a synthesized `discard` would
+    /// send a `discarded` ack on a dead lease, and a synthesized `hold` would
+    /// spin until the TTL and then ack. Both are lies; [`ControlFault`] is the
+    /// truth.
+    fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault>;
+}
+
+/// Keeping the claim's lease alive WITHOUT polling for a directive.
+///
+/// The hold loop renews its lease on the control poll, which is correct while
+/// the loop is polling — and it is not polling for the two stretches that
+/// dominate a real Step 4: the capture (pause + vmstate/memory/disk seal +
+/// upload, tens of seconds to minutes) and the acceptance run (a disposable
+/// restore plus the `seal_at` command, bounded by
+/// `AcceptanceConfig::total_deadline`, which is minutes). Both routinely outlast
+/// what a lease has left when the capture directive arrives — the renew cadence
+/// is a third of the TTL, so the lease can be two thirds spent already. Without a
+/// renew inside them, the loop comes back to a lease that expired while a
+/// candidate was being captured AND accepted, and the fail-closed rule then
+/// throws away both the candidate and the author's session.
+///
+/// So the long steps drive this seam. It is a SUPERTRAIT of [`ControlSource`]
+/// rather than a separate seam because the lease and the control channel are the
+/// same claim: the production [`crate::wizard_api::ApiControlSource`] owns the
+/// one renew driver, and two seams over one driver would be two chances to renew
+/// a lease the server already revoked.
+///
+/// `Err` means the same thing it means on a poll: STOP — fenced, expired, or
+/// unprovable. It is never a hint to be retried by the capture backend.
+pub trait LeaseKeepalive {
+    /// Renew the claim's lease if the cadence says to, and fail closed if the
+    /// lease is gone.
+    fn keepalive(&mut self) -> Result<(), ControlFault>;
+}
+
+/// The hold's lease as handed to a long-running step.
+///
+/// Two jobs beyond forwarding to the control channel, both fail-closed:
+///
+/// - it REMEMBERS the first fault, so [`HoldPhase`] can end the hold on the
+///   lease's terms no matter what the capture backend or the acceptance loop
+///   decided to do with the `Err` it was handed (a backend that swallowed it and
+///   returned a candidate anyway must not get that candidate reported); and
+/// - once lost it stays lost — a later keepalive never "recovers", because the
+///   claim it would be recovering into is already someone else's.
+pub struct HoldLease<'c> {
+    control: &'c mut dyn ControlSource,
+    fault: Option<ControlFault>,
+}
+
+impl<'c> HoldLease<'c> {
+    fn new(control: &'c mut dyn ControlSource) -> Self {
+        HoldLease {
+            control,
+            fault: None,
+        }
+    }
+
+    /// The first lease fault observed, if any.
+    fn fault(&self) -> Option<&ControlFault> {
+        self.fault.as_ref()
+    }
+}
+
+impl LeaseKeepalive for HoldLease<'_> {
+    fn keepalive(&mut self) -> Result<(), ControlFault> {
+        if let Some(fault) = &self.fault {
+            return Err(fault.clone());
+        }
+        match self.control.keepalive() {
+            Ok(()) => Ok(()),
+            Err(fault) => {
+                self.fault = Some(fault.clone());
+                Err(fault)
+            }
+        }
+    }
 }
 
 /// The Firecracker-concrete capture seam. In prod this pauses the live held guest,
@@ -84,7 +190,20 @@ pub trait ControlSource {
 /// [`HeldCapture`] with `source_lost = true` (ADR-012).
 pub trait CaptureAction {
     /// Capture an immutable candidate for `capture_epoch` from the live held guest.
-    fn capture(&mut self, capture_epoch: u64) -> Result<HeldCapture, CaptureError>;
+    ///
+    /// `lease` is the claim's lease, live for the duration of the capture. A
+    /// capture is the longest single step of the hold and runs with no control
+    /// poll in it, so the implementation MUST drive `lease` between its own
+    /// phases (pause, seal, upload) or the lease dies under a candidate that is
+    /// then unreportable. An `Err` from it is terminal for the hold — do not
+    /// retry it, and do not treat a captured candidate as salvageable after one:
+    /// [`HoldPhase`] ends the hold on that fault regardless of what is returned
+    /// here.
+    fn capture(
+        &mut self,
+        capture_epoch: u64,
+        lease: &mut dyn LeaseKeepalive,
+    ) -> Result<HeldCapture, CaptureError>;
 }
 
 /// The eligibility seam (#1090, fail-closed). In prod this analyzes the finalized
@@ -172,23 +291,36 @@ pub enum HoldTermination {
         /// Diagnostic detail.
         failure_reason: String,
     },
+    /// The control channel faulted ([`ControlFault`]): the hold is over and the
+    /// builder sends **NO** terminal ack. See the fault's doc for why every
+    /// fault on that channel resolves this way.
+    TornDownWithoutAck {
+        /// Diagnostic detail — logged locally, never sent anywhere.
+        failure_reason: String,
+    },
 }
 
 impl HoldTermination {
-    /// Project to the ONLY legal wizard job-terminal reasons (SSOT §3.8).
+    /// Project to the ONLY legal wizard job-terminal reasons (SSOT §3.8), or
+    /// `None` when this outcome must send **no ack at all**.
+    ///
     /// `accepted` ends this slice's attempt as an orderly end (there is no
     /// job-terminal "accepted" reason: acceptance is a per-candidate endpoint in
-    /// the full flow, §3.7).
-    pub fn terminal_ack_reason(&self) -> TerminalAckReason {
+    /// the full flow, §3.7). The `None` arm is not an omission: §3.8 has no
+    /// `lease_expired` reason because expiry is server-owned, so "torn down with
+    /// a dead/doubtful lease" has no legal ack — the type says so rather than
+    /// leaving a caller to remember it.
+    pub fn terminal_ack_reason(&self) -> Option<TerminalAckReason> {
         match self {
             HoldTermination::Accepted { .. } | HoldTermination::AttemptEnded => {
-                TerminalAckReason::AttemptEnded
+                Some(TerminalAckReason::AttemptEnded)
             }
-            HoldTermination::Discarded => TerminalAckReason::Discarded,
+            HoldTermination::Discarded => Some(TerminalAckReason::Discarded),
             HoldTermination::AcceptanceFailedSourceLost { .. } => {
-                TerminalAckReason::AcceptanceFailedSourceLost
+                Some(TerminalAckReason::AcceptanceFailedSourceLost)
             }
-            HoldTermination::FailedClosed { .. } => TerminalAckReason::BuildFailed,
+            HoldTermination::FailedClosed { .. } => Some(TerminalAckReason::BuildFailed),
+            HoldTermination::TornDownWithoutAck { .. } => None,
         }
     }
 
@@ -201,6 +333,96 @@ impl HoldTermination {
             HoldTermination::FailedClosed { .. } => Some(WizardFailureStage::Holding),
             _ => None,
         }
+    }
+}
+
+/// The #1088 acceptance lifecycle with the hold's lease kept alive across it.
+///
+/// The acceptance run is the second stretch that outlives a lease window: it is
+/// bounded by `AcceptanceConfig::total_deadline` (minutes) and
+/// [`RunningSnapshotAcceptance::accept`] is one blocking call, so the hold loop
+/// cannot renew around it. Wrapping the lifecycle puts the renew exactly where
+/// the run already pauses between phases, without a background thread and
+/// without touching `snapshot::acceptance`.
+///
+/// Fail-closed shape, and the split matters:
+///
+/// - the PRODUCTIVE phases (capture / create / restore / execute) keepalive
+///   first and REFUSE once the lease is lost — a verification that runs on a
+///   claim this builder no longer holds is work nobody can act on, and its
+///   verdict must never become an ack; while
+/// - the TEARDOWN phases (terminate / destroy) always delegate, untouched. They
+///   release a real microVM and its overlay, they are the one thing that must
+///   still happen when the lease is gone, and a keepalive there could only turn
+///   a clean teardown into a leak.
+struct LeaseKeptLifecycle<'l, 'c, L: DisposableAcceptanceLifecycle + ?Sized> {
+    inner: &'l mut L,
+    lease: &'l mut HoldLease<'c>,
+}
+
+impl<L: DisposableAcceptanceLifecycle + ?Sized> LeaseKeptLifecycle<'_, '_, L> {
+    /// The gate every productive phase runs first. The seam's error type is a
+    /// `String`, so the lease diagnostic travels as the phase's failure — the
+    /// authoritative copy is the one [`HoldLease`] remembered.
+    fn lease_alive(&mut self) -> Result<(), String> {
+        self.lease
+            .keepalive()
+            .map_err(|fault| format!("hold lease lost during acceptance: {}", fault.message))
+    }
+}
+
+impl<L: DisposableAcceptanceLifecycle + ?Sized> DisposableAcceptanceLifecycle
+    for LeaseKeptLifecycle<'_, '_, L>
+{
+    fn capture_candidate(
+        &mut self,
+        attempt: u32,
+        budget: &AcceptanceBudget,
+    ) -> Result<CandidateSnapshot, String> {
+        self.lease_alive()?;
+        self.inner.capture_candidate(attempt, budget)
+    }
+
+    fn create_disposable_session(
+        &mut self,
+        candidate: &CandidateSnapshot,
+        budget: &AcceptanceBudget,
+    ) -> Result<DisposableSessionHandle, String> {
+        self.lease_alive()?;
+        self.inner.create_disposable_session(candidate, budget)
+    }
+
+    fn restore_candidate(
+        &mut self,
+        session: &DisposableSessionHandle,
+        candidate: &CandidateSnapshot,
+        budget: &AcceptanceBudget,
+    ) -> Result<(), String> {
+        self.lease_alive()?;
+        self.inner.restore_candidate(session, candidate, budget)
+    }
+
+    fn execute_exact_argv(
+        &mut self,
+        session: &DisposableSessionHandle,
+        argv: &[String],
+        timeout: Duration,
+        budget: &AcceptanceBudget,
+    ) -> Result<VerificationOutcome, String> {
+        self.lease_alive()?;
+        self.inner
+            .execute_exact_argv(session, argv, timeout, budget)
+    }
+
+    fn terminate_process_tree(&mut self, session: &DisposableSessionHandle) -> Result<(), String> {
+        self.inner.terminate_process_tree(session)
+    }
+
+    fn destroy_disposable_session(
+        &mut self,
+        session: DisposableSessionHandle,
+    ) -> Result<(), String> {
+        self.inner.destroy_disposable_session(session)
     }
 }
 
@@ -265,7 +487,10 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
     ///    newer than the last captured epoch (ADR-008 monotonicity: a stale or
     ///    duplicate command never re-drives capture, e.g. after a source-available
     ///    return to holding).
-    /// 4. On capture, run the capture-action, then #1088 acceptance:
+    /// 4. On capture, run the capture-action, then #1088 acceptance — both with
+    ///    the claim's lease kept alive across them ([`LeaseKeepalive`]), and both
+    ///    ending the hold as [`HoldTermination::TornDownWithoutAck`] the moment
+    ///    the lease is lost, ahead of whatever they themselves returned:
     ///    - accepted → terminal ([`HoldTermination::Accepted`]);
     ///    - acceptance failed + source available → return to holding (re-capture);
     ///    - source lost (capture failure or acceptance failure) → terminal
@@ -307,7 +532,17 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                 }
             }
 
-            let response = self.control.poll(observed_epoch);
+            // A control fault ends the hold LOCALLY with no ack (see
+            // `ControlFault`): the lease is dead or in doubt, so there is no
+            // job-terminal claim this builder is entitled to make.
+            let response = match self.control.poll(observed_epoch) {
+                Ok(response) => response,
+                Err(fault) => {
+                    return Ok(HoldTermination::TornDownWithoutAck {
+                        failure_reason: fault.message,
+                    });
+                }
+            };
             // Adopt the authoritative server epoch as the observed command cursor
             // (ADR-008 / ControlResponse rules): monotonic, never part of fencing.
             observed_epoch = observed_epoch.max(response.server_capture_epoch);
@@ -338,8 +573,25 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         continue;
                     }
 
+                    // The lease, live across BOTH long steps below. Neither polls,
+                    // and together they run for minutes — long enough to outlive
+                    // the lease window the capture directive arrived in — so this
+                    // is what keeps the claim (and therefore the candidate report
+                    // and the terminal ack) alive through them.
+                    let mut lease = HoldLease::new(&mut *self.control);
+
                     // (4) Firecracker-concrete capture for this epoch.
-                    let held = match self.capture.capture(epoch) {
+                    let captured = self.capture.capture(epoch, &mut lease);
+                    // The lease's verdict outranks the capture's. A backend that
+                    // was told the lease is gone and produced a candidate anyway
+                    // has produced one nobody can report: every call that would
+                    // carry it is a 409, and §3.8 has no ack for a dead lease.
+                    if let Some(fault) = lease.fault() {
+                        return Ok(HoldTermination::TornDownWithoutAck {
+                            failure_reason: fault.message.clone(),
+                        });
+                    }
+                    let held = match captured {
                         Ok(held) => held,
                         Err(err) => {
                             // No candidate report (SSOT §3.6). Source alive →
@@ -370,14 +622,31 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         },
                     };
 
-                    // #1088 acceptance via the EXISTING disposable-restore lifecycle.
+                    // #1088 acceptance via the EXISTING disposable-restore
+                    // lifecycle, wrapped so the same lease is renewed between its
+                    // phases (see `LeaseKeptLifecycle`) — the run's own
+                    // `total_deadline` is minutes, which is longer than a lease
+                    // window, so an unwrapped run routinely finishes on a lease
+                    // that died under it.
                     let run = RunningSnapshotAcceptance::accept(
-                        &mut *self.lifecycle,
+                        &mut LeaseKeptLifecycle {
+                            inner: &mut *self.lifecycle,
+                            lease: &mut lease,
+                        },
                         eligibility,
                         &self.acceptance_config,
                         self.cancellation,
                         self.clock,
                     )?;
+                    // Again the lease's verdict first: a run that was refused
+                    // phase-by-phase because the lease died reports as a
+                    // rejection, and a rejection is an ACK — exactly the claim a
+                    // builder with no lease may not make.
+                    if let Some(fault) = lease.fault() {
+                        return Ok(HoldTermination::TornDownWithoutAck {
+                            failure_reason: fault.message.clone(),
+                        });
+                    }
 
                     if run.is_accepted() {
                         return Ok(HoldTermination::Accepted {
@@ -601,12 +870,18 @@ mod tests {
     /// A scripted control-poll source. Returns `responses[i]`, clamping to the last
     /// entry once exhausted (so a trailing `hold` repeats), and optionally advances
     /// a shared clock on each poll (to drive the TTL test without sleeping).
+    ///
+    /// It also counts keepalives and can start failing them after `n` — standing
+    /// in for the real thing a keepalive reports: a lease that was fenced or
+    /// expired while the hold was busy in a step that does not poll.
     struct ScriptedControl {
         responses: Vec<ControlResponse>,
         idx: usize,
         polls: usize,
         clock: Option<FakeClock>,
         advance_per_poll: Duration,
+        keepalives: usize,
+        lose_lease_after: Option<usize>,
     }
 
     impl ScriptedControl {
@@ -617,6 +892,8 @@ mod tests {
                 polls: 0,
                 clock: None,
                 advance_per_poll: Duration::ZERO,
+                keepalives: 0,
+                lose_lease_after: None,
             }
         }
 
@@ -631,27 +908,82 @@ mod tests {
                 polls: 0,
                 clock: Some(clock),
                 advance_per_poll: per_poll,
+                keepalives: 0,
+                lose_lease_after: None,
+            }
+        }
+
+        /// The lease survives `n` keepalives and is gone from the `n+1`th on.
+        fn losing_the_lease_after(mut self, n: usize) -> Self {
+            self.lose_lease_after = Some(n);
+            self
+        }
+    }
+
+    impl LeaseKeepalive for ScriptedControl {
+        fn keepalive(&mut self) -> Result<(), ControlFault> {
+            self.keepalives += 1;
+            match self.lose_lease_after {
+                Some(n) if self.keepalives > n => Err(ControlFault {
+                    message: "lease expired: the observed lease deadline passed".to_string(),
+                }),
+                _ => Ok(()),
             }
         }
     }
 
     impl ControlSource for ScriptedControl {
-        fn poll(&mut self, _observed_capture_epoch: u64) -> ControlResponse {
+        fn poll(&mut self, _observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
             self.polls += 1;
             if let Some(clock) = &self.clock {
                 clock.advance(self.advance_per_poll);
             }
             let i = self.idx.min(self.responses.len() - 1);
             self.idx += 1;
-            self.responses[i].clone()
+            Ok(self.responses[i].clone())
+        }
+    }
+
+    /// A control source that serves `head` and then faults — the production
+    /// shape of a lease that died mid-hold (`409 fenced`) or a control response
+    /// that failed its own contract.
+    struct FaultingControl {
+        head: Vec<ControlResponse>,
+        idx: usize,
+    }
+
+    impl LeaseKeepalive for FaultingControl {
+        fn keepalive(&mut self) -> Result<(), ControlFault> {
+            Ok(())
+        }
+    }
+
+    impl ControlSource for FaultingControl {
+        fn poll(&mut self, _observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
+            let next = self.head.get(self.idx).cloned();
+            self.idx += 1;
+            match next {
+                Some(response) => Ok(response),
+                None => Err(ControlFault {
+                    message: "fenced: claim is no longer active".to_string(),
+                }),
+            }
         }
     }
 
     /// A scripted capture-action: records call count and yields a configured
     /// result. `source_lost` rides the produced [`HeldCapture`].
+    ///
+    /// `lease_drives` stands in for the real backend's pause/seal/upload phases:
+    /// a production capture runs for minutes with no control poll in it, so it
+    /// drives the lease between its own steps. The fake drives it that many times
+    /// and — like a backend that is mid-seal when the answer comes back — keeps
+    /// going after an `Err`, which is precisely why `HoldPhase` may not rely on
+    /// the capture's own return value to notice a dead lease.
     struct ScriptedCapture {
         result: Result<HeldCapture, CaptureError>,
         calls: u32,
+        lease_drives: u32,
     }
 
     impl ScriptedCapture {
@@ -665,13 +997,27 @@ mod tests {
                     source_lost,
                 }),
                 calls: 0,
+                lease_drives: 0,
             }
+        }
+
+        /// A capture long enough to need `n` keepalives — a real one.
+        fn driving_the_lease(mut self, n: u32) -> Self {
+            self.lease_drives = n;
+            self
         }
     }
 
     impl CaptureAction for ScriptedCapture {
-        fn capture(&mut self, _capture_epoch: u64) -> Result<HeldCapture, CaptureError> {
+        fn capture(
+            &mut self,
+            _capture_epoch: u64,
+            lease: &mut dyn LeaseKeepalive,
+        ) -> Result<HeldCapture, CaptureError> {
             self.calls += 1;
+            for _ in 0..self.lease_drives {
+                let _ = lease.keepalive();
+            }
             self.result.clone()
         }
     }
@@ -730,7 +1076,7 @@ mod tests {
             job_id: "job_hold".to_string(),
             submission_attempt_id: "subatt_hold".to_string(),
             worker_claim_id: "claim_hold".to_string(),
-            lease_token: "tok".to_string(),
+            lease_token: crate::wizard_wire::LeaseToken::new("tok".to_string()),
         }
     }
 
@@ -833,7 +1179,7 @@ mod tests {
         );
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AttemptEnded,
+            Some(TerminalAckReason::AttemptEnded),
             "accepted ends the attempt (no job-terminal `accepted` reason)"
         );
         match outcome {
@@ -882,7 +1228,7 @@ mod tests {
         assert!(matches!(outcome, HoldTermination::AttemptEnded));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AttemptEnded
+            Some(TerminalAckReason::AttemptEnded)
         );
     }
 
@@ -910,7 +1256,46 @@ mod tests {
 
         assert_eq!(cap.calls, 0);
         assert!(matches!(outcome, HoldTermination::Discarded));
-        assert_eq!(outcome.terminal_ack_reason(), TerminalAckReason::Discarded);
+        assert_eq!(
+            outcome.terminal_ack_reason(),
+            Some(TerminalAckReason::Discarded)
+        );
+    }
+
+    // ── control fault → torn down LOCALLY, no terminal ack (§3.8) ───────────
+    #[test]
+    fn control_fault_tears_down_without_a_terminal_ack() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // One good hold, then the claim is fenced out from under the builder.
+        let mut control = FaultingControl {
+            head: vec![hold(true)],
+            idx: 0,
+        };
+        let mut cap = ScriptedCapture::ok("cand_never", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 0, "a fenced claim never captures");
+        assert!(
+            matches!(outcome, HoldTermination::TornDownWithoutAck { .. }),
+            "got {outcome:?}"
+        );
+        // The whole point: lease expiry is server-owned, so there is NO legal
+        // terminal ack to send here (§3.8 has no `lease_expired` reason).
+        assert_eq!(outcome.terminal_ack_reason(), None);
     }
 
     // ── (iv) acceptance failure + source available → back to holding ────────
@@ -977,7 +1362,7 @@ mod tests {
         ));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::AcceptanceFailedSourceLost
+            Some(TerminalAckReason::AcceptanceFailedSourceLost)
         );
         assert_eq!(
             outcome.failure_stage(),
@@ -1061,7 +1446,7 @@ mod tests {
         assert!(matches!(outcome, HoldTermination::FailedClosed { .. }));
         assert_eq!(
             outcome.terminal_ack_reason(),
-            TerminalAckReason::BuildFailed
+            Some(TerminalAckReason::BuildFailed)
         );
     }
 
@@ -1111,5 +1496,145 @@ mod tests {
         assert_eq!(extend.remaining, 0, "the one extension was consumed");
         assert_eq!(cap.calls, 0);
         assert!(matches!(outcome, HoldTermination::AttemptEnded));
+    }
+
+    // ── the lease survives the two steps that never poll ────────────────────
+
+    #[test]
+    fn the_lease_is_kept_alive_across_the_capture_and_the_acceptance() {
+        // The property the whole hold depends on. The lease is renewed on the
+        // control poll, and the two longest steps of a real Step 4 do not poll:
+        // the capture (pause + seal + upload) and the acceptance run (a
+        // disposable restore + the seal_at command, bounded by a `total_deadline`
+        // measured in minutes). A capture directive can arrive with two thirds of
+        // the lease window already spent, so a hold that only renews on the poll
+        // comes back from a SUCCESSFUL capture-and-accept to an expired lease —
+        // and then throws the candidate, the §3.6 report and the author's
+        // 30-minute session away.
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_1", true)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false).driving_the_lease(3);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert!(matches!(outcome, HoldTermination::Accepted { .. }));
+        // 3 from the capture + one per PRODUCTIVE acceptance phase (capture
+        // candidate, create session, restore, execute). The teardown phases
+        // deliberately do not keepalive.
+        assert_eq!(
+            control.keepalives, 7,
+            "the capture drove 3 and each productive acceptance phase drove one"
+        );
+    }
+
+    #[test]
+    fn a_lease_lost_during_the_capture_tears_down_without_an_ack() {
+        // Fail-closed, and the capture's own return value does not get a vote: a
+        // backend that was told mid-seal that the lease is gone and finished the
+        // seal anyway has produced a candidate nobody can report — every call
+        // that would carry it is a 409, and §3.8 has no ack for a dead lease.
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // Each poll advances 10 minutes against a 30-minute TTL, so a hold that
+        // did NOT stop on the lease still terminates (as `AttemptEnded`) instead
+        // of looping — the assertion below has to distinguish the two outcomes,
+        // not hang waiting for one.
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(10 * 60),
+            vec![capture(1, "cand_1", true)],
+        )
+        .losing_the_lease_after(1);
+        // Capture drives the lease twice and returns a candidate regardless.
+        let mut cap = ScriptedCapture::ok("cand_1", false).driving_the_lease(2);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(
+            lifecycle.captures, 0,
+            "acceptance never runs on a claim the builder no longer holds"
+        );
+        match &outcome {
+            HoldTermination::TornDownWithoutAck { failure_reason } => {
+                assert!(failure_reason.contains("lease expired"), "{failure_reason}");
+            }
+            other => panic!("expected TornDownWithoutAck, got {other:?}"),
+        }
+        // Expiry is server-owned: there is no ack this builder may send.
+        assert_eq!(outcome.terminal_ack_reason(), None);
+    }
+
+    #[test]
+    fn a_lease_lost_during_the_acceptance_tears_down_without_an_ack() {
+        // Same rule one step later. A run refused phase-by-phase because the
+        // lease died reports as a REJECTION, and a rejection is an ack — exactly
+        // the job-terminal claim a builder that cannot prove its lease may not
+        // make. The lease's verdict has to outrank the run's.
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // The lease survives the capture's single keepalive and is gone by the
+        // time the acceptance run asks. The advancing clock is there for the same
+        // reason as above: a hold that ignored the lease must still terminate, so
+        // the assertion is on WHICH outcome, not on whether one arrives.
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(10 * 60),
+            vec![capture(1, "cand_1", true)],
+        )
+        .losing_the_lease_after(1);
+        let mut cap = ScriptedCapture::ok("cand_1", false).driving_the_lease(1);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 1, "the capture itself completed");
+        assert_eq!(
+            lifecycle.captures, 0,
+            "the productive phases are refused, not merely reported on"
+        );
+        assert_eq!(lifecycle.executes, 0, "the seal_at command never ran");
+        match &outcome {
+            HoldTermination::TornDownWithoutAck { failure_reason } => {
+                assert!(failure_reason.contains("lease expired"), "{failure_reason}");
+            }
+            other => panic!("expected TornDownWithoutAck, got {other:?}"),
+        }
+        assert_eq!(outcome.terminal_ack_reason(), None);
     }
 }

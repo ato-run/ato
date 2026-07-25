@@ -1595,7 +1595,551 @@ impl Drop for FcProcess {
 /// callable pieces so the interactive submission-wizard HOLD path can drive the
 /// SAME concrete IO against a *live, held* guest without a new `SnapshotBackend`
 /// trait method (USER DECISION: Firecracker-concrete hold path).
+/// A build guest that has been booted to its seal point and is **still running**.
+///
+/// This is the interactive HOLD's counterpart to [`FirecrackerBackend::build_ready_state`]:
+/// the auto-seal build pauses its guest once and throws it away, while a hold keeps
+/// the workload live so a human can operate it and pick the moment to capture. The
+/// two share one boot path ([`FirecrackerBackend::boot_to_seal_point`]) so a held
+/// capture cannot drift from a build capture.
+///
+/// **Capture policy.** This type implements RFC §8.3 `running` ONLY: the workload
+/// stays up across a capture. A capsule whose supervisor declares placeholder
+/// bindings needs `workload_idle` (stop the workload and revoke placeholders before
+/// capture) and is refused at [`FirecrackerBackend::boot_and_hold`] — never
+/// downgraded to a secret-bearing running capture.
+///
+/// **Lifetime.** The guest is owned here and killed on `Drop`, so a dropped or
+/// forgotten hold can never leak a running VM. Prefer [`HeldGuest::release`], which
+/// also tears the network down and cleans scratch, and surfaces errors instead of
+/// swallowing them.
+pub struct HeldGuest<'a> {
+    backend: &'a FirecrackerBackend,
+    /// Live guest. Private on purpose — `FcProcess` and the raw Firecracker API
+    /// are not part of this crate's public surface.
+    fc: Option<FcProcess>,
+    input: BuildReadyStateInput<'a>,
+    build_dir: PathBuf,
+    rootfs_path: PathBuf,
+    rootfs_blob: BlobManifest,
+    vmstate_path: PathBuf,
+    mem_path: PathBuf,
+    port: u16,
+    /// Held for the whole hold: the build lock is per-slot, and a hold occupies
+    /// its slot for as long as the guest is up.
+    _lock: BuildLock,
+    _state_volume_locks: Option<crate::state_volume::VolumeLockGuard>,
+    /// Set by `teardown` so `release` + `Drop` do not tear down twice.
+    torn_down: bool,
+}
+
+impl<'a> HeldGuest<'a> {
+    /// The `ip:port` a host-side proxy can dial to reach the live workload.
+    ///
+    /// This is the same address the health probe just succeeded against, so a
+    /// caller that fronts it with a proxy is fronting a workload that answered.
+    pub fn workload_addr(&self) -> String {
+        format!("{}:{}", self.backend.reachable_host(), self.port)
+    }
+
+    /// Capture an immutable candidate from the LIVE guest and **keep it running**.
+    ///
+    /// Pause → `snapshot/create` → resume, then the identical seal + scan +
+    /// manifest assembly the auto-seal build performs, so a candidate is a
+    /// [`BuildReadyStateReceipt`] exactly like a built one — no second artifact
+    /// shape, and no new sealing surface on this crate.
+    ///
+    /// Per RFC §8.2 this may be called MORE THAN ONCE: a candidate that fails its
+    /// disposable-restore validation does not end the hold, and the author can
+    /// bring the app to a different state and capture again.
+    ///
+    /// `source_lost` reports the ADR-012 distinction on BOTH outcomes: the guest
+    /// either came back and this hold can capture again, or it did not and the
+    /// hold is finished. That one bit is what decides "return to holding" vs "end
+    /// the attempt" downstream, so the error carries it too — losing it on a
+    /// failure would offer the author a retry against a dead VM.
+    pub fn capture_candidate(&mut self) -> Result<HeldCandidate, HeldCaptureFailure> {
+        let fc = self.fc.as_ref().ok_or_else(|| HeldCaptureFailure {
+            error: self
+                .backend
+                .backend_err("capture on a released hold: the guest is already gone"),
+            // Nothing to resume — the guest is already gone for good.
+            source_lost: true,
+        })?;
+        let captured = bench::time("hold.capture_running_candidate", || {
+            self.backend
+                .capture_running_candidate(fc, &self.vmstate_path, &self.mem_path)
+        })
+        .map_err(|f| HeldCaptureFailure {
+            error: f.error,
+            source_lost: f.source_lost,
+        })?;
+        // The bytes are already taken and the guest already resumed (or not), so
+        // a sealing failure must NOT swallow `source_lost`.
+        let source_lost = captured.source_lost;
+        let receipt = self
+            .backend
+            .seal_ready_state(
+                &self.input,
+                &self.build_dir,
+                self.rootfs_blob.clone(),
+                &captured.vmstate,
+                &captured.mem,
+                // A `running` hold never delivers placeholders (a supervisor
+                // capsule is refused at `boot_and_hold`), so there is no
+                // supervisor drive and no placeholder-hygiene receipt to record.
+                None,
+            )
+            .map_err(|error| HeldCaptureFailure { error, source_lost })?;
+        Ok(HeldCandidate {
+            receipt,
+            source_lost,
+        })
+    }
+
+    /// Tear the hold down: kill the guest, bring the network down, clean scratch.
+    ///
+    /// Teardown is best-effort by construction — killing an already-dead process,
+    /// tearing down a network that is already gone, and removing scratch that may
+    /// not exist are all expected to be no-ops rather than failures — so this
+    /// reports nothing. `Drop` runs exactly the same teardown if it is never
+    /// called; `release` exists to make the moment explicit and to stop the guest
+    /// before the caller does anything else.
+    pub fn release(mut self) {
+        // `teardown` is idempotent, so the `Drop` that follows this call is a
+        // no-op. (`mem::forget` would be wrong here: it would also skip
+        // `BuildLock`'s drop and wedge the slot lock forever.)
+        self.teardown();
+    }
+
+    /// Idempotent: `release` calls it explicitly and `Drop` calls it again, and
+    /// tearing a network down twice would just be dead `ip link del` work.
+    fn teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        self.torn_down = true;
+        // Dropping `FcProcess` kills and reaps the guest.
+        self.fc = None;
+        self.backend.net_down();
+        if !keep_build_dir_enabled() {
+            let _ = std::fs::remove_dir_all(&self.build_dir);
+            let _ = std::fs::remove_file(&self.rootfs_path);
+        }
+    }
+}
+
+impl Drop for HeldGuest<'_> {
+    fn drop(&mut self) {
+        // A forgotten hold must never leave a VM (and its slot lock) behind.
+        self.teardown();
+    }
+}
+
+/// One immutable candidate captured from a live [`HeldGuest`].
+pub struct HeldCandidate {
+    /// The sealed candidate — the same shape a built Ready-State has.
+    pub receipt: BuildReadyStateReceipt,
+    /// ADR-012: false when the source guest resumed and the hold can capture
+    /// again; true when it could not, which is terminal for this hold.
+    pub source_lost: bool,
+}
+
+/// A capture that did not produce a candidate.
+///
+/// Carries `source_lost` for the same reason [`HeldCandidate`] does: whether the
+/// hold can be retried is decided by whether the GUEST survived, which is
+/// independent of why the capture failed. A failure that dropped this bit would
+/// let a caller offer "save again" against a guest that is gone.
+pub struct HeldCaptureFailure {
+    /// What went wrong — snapshotting, or sealing the bytes it produced.
+    pub error: SnapshotError,
+    /// ADR-012: true when the source guest could not be resumed.
+    pub source_lost: bool,
+}
+
+impl std::fmt::Debug for HeldCaptureFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeldCaptureFailure")
+            .field("error", &self.error)
+            .field("source_lost", &self.source_lost)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for HeldCaptureFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (source_lost={})", self.error, self.source_lost)
+    }
+}
+
+impl std::error::Error for HeldCaptureFailure {}
+
 impl FirecrackerBackend {
+    /// Boot a prepared build to its SEAL POINT and hand the guest back **alive**.
+    ///
+    /// This is the boot half of [`Self::build_ready_state`], extracted verbatim so
+    /// the auto-seal build and the interactive HOLD (PR-2) cannot drift: both reach
+    /// the seal point through this one path. It configures the machine, attaches the
+    /// rootfs / durable-state / vsock devices, starts the instance, delivers
+    /// supervisor placeholders when the capsule has any, waits for health, and warms
+    /// the first-screen paths.
+    ///
+    /// It deliberately stops THERE. It does not stop/revoke the workload, does not
+    /// pause, does not snapshot, and does not tear anything down — the returned
+    /// [`FcProcess`] is live, and whoever holds it owns the guest's lifetime
+    /// (dropping it kills and reaps the guest). The returned UDS path is the vsock
+    /// channel, needed by the caller only when the capsule has placeholders.
+    ///
+    /// Callers must have already run the preflight gate, acquired the build lock,
+    /// stored the rootfs, prepared the state volumes, and brought the network up;
+    /// this method does none of that.
+    #[allow(clippy::too_many_arguments)]
+    fn boot_to_seal_point(
+        &self,
+        input: &BuildReadyStateInput<'_>,
+        build_dir: &Path,
+        rootfs_path: &Path,
+        state_drive_paths: &[PathBuf],
+        supervisor_drive: Option<&SupervisorDrive>,
+        port: u16,
+        path: &str,
+    ) -> Result<(FcProcess, Option<PathBuf>), SnapshotError> {
+        let fc = bench::time("build.start_fc", || {
+            self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
+        })?;
+        self.configure_boot(
+            &fc,
+            &self.config.kernel_path,
+            rootfs_path,
+            self.config.rootfs_read_only,
+            // v1.2 PR 3d: supervisor builds get the page-hygiene cmdline so freed
+            // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
+            supervisor_drive.is_some(),
+        )?;
+        // v1.6 (ato#983) Slice 2: attach each durable state volume as a
+        // writable, non-root drive BEFORE boot/snapshot — Firecracker records
+        // the whole device set (incl. these) into the snapshot it takes below,
+        // so restore's `PUT /snapshot/load` recreates them without any new
+        // `PUT /drives` call (mirrors how the rootfs drive itself works).
+        self.configure_state_drives(&fc, state_drive_paths)?;
+        // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
+        // guest-agent binding channel is captured in the snapshot. The uds_path is
+        // baked into the snapshot (FC forbids overriding it at load), so it is a
+        // deterministic per-capsule path both build and restore compute.
+        let vsock_uds = if vsock_enabled() {
+            let uds = vsock_uds_path(&input.capsule_manifest_hash);
+            if let Some(d) = uds.parent() {
+                std::fs::create_dir_all(d)
+                    .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
+            }
+            let _ = std::fs::remove_file(&uds);
+            fc.api(
+                self,
+                "PUT",
+                "/vsock",
+                Some(&json!({ "guest_cid": 3, "uds_path": uds.to_string_lossy() }).to_string()),
+            )?;
+            Some(uds)
+        } else {
+            None
+        };
+        bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
+            fc.api(
+                self,
+                "PUT",
+                "/actions",
+                Some(&json!({"action_type":"InstanceStart"}).to_string()),
+            )?;
+            // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
+            // workload only at bound-ready — deliver the placeholder leases
+            // first, THEN health. A ZERO-binding supervisor build (dockerfile
+            // import, ato#1002 D4) skips delivery entirely: the agent is
+            // vacuously bound-ready and started the workload at boot (ato#1001),
+            // so the health wait below is reached directly.
+            if let Some(drive) = supervisor_drive.filter(|d| d.has_placeholders()) {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err(
+                        "supervisor build: vsock uds missing (unreachable: gated above)",
+                    )
+                })?;
+                self.supervisor_deliver_placeholders(uds, drive)?;
+            }
+            self.wait_health(port, path)?; // secret-free seal point (placeholder-only for supervisor builds)
+            // Warm the user-facing first-screen paths into guest memory BEFORE
+            // the Pause+Snapshot, so the sealed image already carries template
+            // rendering / JIT / DB-init / First-Frame-prep — the user's first
+            // request then hits warm pages instead of redoing that work after
+            // resume. Skipped for the required-binding supervisor carve-out:
+            // its workload is stopped + revoked before the seal (in the caller)
+            // and the equivalent first-screen work is driven via the guest-agent
+            // bound-ready transition at restore time, so warming here would be
+            // wasted I/O against a workload about to be torn down.
+            let warmup_cap = !supervisor_drive.is_some_and(|d| d.has_placeholders());
+            if warmup_cap {
+                self.warmup_paths(port, &input.restore_contract)?;
+            }
+            Ok(())
+        })?;
+        Ok((fc, vsock_uds))
+    }
+
+    /// Boot `input` and HOLD the guest live for interactive capture (RFC §8.3
+    /// `running`).
+    ///
+    /// Same preparation and same boot path as [`Self::build_ready_state`] — one
+    /// difference, deliberately: nothing pauses or tears the guest down, so the
+    /// workload keeps serving and the caller decides when to capture.
+    ///
+    /// **Refuses a `workload_idle` capsule, fail-closed.** A supervisor that
+    /// declares placeholder bindings needs the workload stopped and the
+    /// placeholders revoked before capture; capturing it live would seal binding
+    /// material into shared bytes. RFC §8.3 forbids downgrading that case to a
+    /// running capture, so it is rejected here rather than quietly weakened.
+    pub fn boot_and_hold<'a>(
+        &'a self,
+        input: BuildReadyStateInput<'a>,
+    ) -> Result<HeldGuest<'a>, SnapshotError> {
+        // RFC §8.3, fail closed BEFORE any work: a live capture of a capsule that
+        // needs External State or restore-time bindings is exactly what
+        // `workload_idle` exists to prevent. `workload_idle` is a separate
+        // lifecycle (#1093), so until it lands this is a refusal, never a fallback.
+        //
+        // BOTH halves of `SupervisorBindings` gate this, because they are
+        // independent: `binding_names` is the placeholder/secret channel, while
+        // `state_volumes` is durable per-owner storage attached as drives. A
+        // ZERO-binding supervisor WITH state volumes is a real, supported build
+        // (ato#1002 D4), and admitting it here would boot the hold with `&[]`
+        // state drives — the workload would come up against storage that simply
+        // is not attached. Durable state is restore-time state by v1.6's rule, so
+        // §8.3 puts it on the `workload_idle` side too.
+        // The predicate is `supervisor.is_some()`, not a field enumeration. A
+        // supervisor capsule with neither bindings nor volumes still diverges
+        // from `build_ready_state` in ways this path does not reproduce: the
+        // build hard-refuses any supervisor when `!vsock_enabled()`, and it
+        // passes `Some(drive)` into the boot so the page-hygiene kernel cmdline
+        // is ON and the manifest carries a `SupervisorBuildReceipt`. A hold that
+        // admitted it would seal a candidate of the SAME capsule under a
+        // different cmdline and with that receipt missing. Enumerating fields
+        // here would keep re-opening that gap every time a field is added —
+        // which is exactly how the `state_volumes` hole got in.
+        if input.supervisor.is_some() {
+            return Err(self.backend_err(
+                "interactive hold requires the `running` capture policy, but this capsule \
+                 has a supervisor (bindings and/or durable state volumes) and therefore \
+                 needs `workload_idle`: the workload is stopped and its placeholders \
+                 revoked before capture. Refusing rather than capturing a workload whose \
+                 restore-time state is not attached.",
+            ));
+        }
+        crate::seal::preflight_gate(
+            &input.layers.rootfs,
+            input.layers.runtime.as_deref(),
+            input.layers.dependency.as_deref(),
+            input.layers.app.as_deref(),
+            &input.declared_secret_markers,
+        )?;
+        self.ensure_available()?;
+        self.acquire_lock("hold")?;
+        let lock = BuildLock {
+            path: self.lock_path(),
+        };
+        std::fs::create_dir_all(&self.config.work_root)
+            .map_err(|e| self.backend_err(e.to_string()))?;
+        let build_dir = self
+            .config
+            .work_root
+            .join(format!("hold-{}", std::process::id()));
+        std::fs::create_dir_all(&build_dir).map_err(|e| self.backend_err(e.to_string()))?;
+
+        let rootfs_blob = bench::time("hold.store_rootfs", || {
+            store_blob(
+                input.store,
+                LayerKind::Rootfs,
+                &input.layers.rootfs,
+                ChunkingKind::ContentDefined,
+            )
+        })?;
+        let rootfs_path = self.cache_path("rootfs", &rootfs_blob, "ext4");
+        if !rootfs_path.exists() {
+            self.write_file(&rootfs_path, &input.layers.rootfs)?;
+        }
+        let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
+        let health_path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
+
+        // No supervisor ⇒ no durable state volumes to prepare (the refusal above
+        // is what guarantees that), so the hold has no volume locks to hold.
+        let network_ports = network_ports(&input.restore_contract, port)
+            .map_err(|error| self.backend_err(error))?;
+        self.net_up(&network_ports)?;
+
+        let boot = self.boot_to_seal_point(
+            &input,
+            &build_dir,
+            &rootfs_path,
+            &[],
+            None,
+            port,
+            &health_path,
+        );
+        let (fc, _vsock_uds) = match boot {
+            Ok(v) => v,
+            Err(e) => {
+                self.emit_build_failure_diagnostics(&build_dir);
+                self.net_down();
+                if !keep_build_dir_enabled() {
+                    let _ = std::fs::remove_dir_all(&build_dir);
+                    let _ = std::fs::remove_file(&rootfs_path);
+                }
+                return Err(e);
+            }
+        };
+        Ok(HeldGuest {
+            backend: self,
+            fc: Some(fc),
+            vmstate_path: build_dir.join("vmstate"),
+            mem_path: build_dir.join("mem"),
+            input,
+            build_dir,
+            rootfs_path,
+            rootfs_blob,
+            port,
+            _lock: lock,
+            _state_volume_locks: None,
+            torn_down: false,
+        })
+    }
+
+    /// Seal a captured `(vmstate, mem)` pair into a [`BuildReadyStateReceipt`].
+    ///
+    /// Shared verbatim by the auto-seal build and by a held capture
+    /// ([`HeldGuest::capture_candidate`]), so a candidate taken from a live guest
+    /// is sealed, scanned and described by exactly the same code as a built one.
+    /// Scratch cleanup is deliberately NOT done here: a build discards its scratch,
+    /// a hold keeps it for the next capture.
+    #[allow(clippy::too_many_arguments)]
+    fn seal_ready_state(
+        &self,
+        input: &BuildReadyStateInput<'_>,
+        build_dir: &Path,
+        rootfs_blob: BlobManifest,
+        vmstate: &[u8],
+        mem: &[u8],
+        supervisor_drive: Option<&SupervisorDrive>,
+    ) -> Result<BuildReadyStateReceipt, SnapshotError> {
+        // v1.2 PR 3d: ADVISORY placeholder-hygiene scan (kernel init_on_free-
+        // dependent, #947 finding) — the revoked placeholder SHOULD be gone from the
+        // snapshot bytes on a hygiene-enabled kernel, but its residue is NOT a
+        // secret leak (the value is a build-scoped random token, discarded below),
+        // so this records honestly instead of gating.
+        let supervisor_receipt = supervisor_drive.map(|drive| {
+            let secrets: Vec<&[u8]> = drive.placeholder_values.iter().map(|v| v.as_bytes()).collect();
+            let absent = crate::no_secret_scan::blob_is_clean(mem, &secrets)
+                && crate::no_secret_scan::blob_is_clean(vmstate, &secrets);
+            eprintln!(
+                "READY-STATE supervisor build: placeholder absent from sealed mem/vmstate = {absent} \
+                 (advisory; requires kernel init_on_free support)"
+            );
+            SupervisorBuildReceipt {
+                binding_names: drive.binding_names.clone(),
+                page_hygiene_boot_args: true,
+                placeholder_absent_from_seal: Some(absent),
+                // v1.6 (ato#983) Slice 2: persist so restore recomputes the SAME
+                // backing-file/lock paths without the caller resupplying them.
+                state_volumes: input.supervisor.as_ref().map(|s| s.state_volumes.clone()).unwrap_or_default(),
+                state_owner_scope: input.supervisor.as_ref().and_then(|s| s.state_owner_scope.clone()),
+            }
+        });
+
+        // ── seal + no-secret scan via the shared orchestration ───────────────
+        // rootfs was already stored above (for the stable drive path) → pass it
+        // as prestored. vmstate/mem are scanned by REFERENCE — no clone of the
+        // ~100s-of-MB images. Declared markers fail closed on every layer;
+        // provider/env block on app/dependency; the large opaque layers are
+        // advisory + content-cached + budgeted.
+        let cache = crate::scan_cache::ScanCache::open(input.store.root());
+        let out = bench::time("build.seal_and_scan", || {
+            crate::seal::seal_and_scan(
+                input.store,
+                crate::seal::SealLayersRef {
+                    rootfs: &input.layers.rootfs,
+                    runtime: input.layers.runtime.as_deref(),
+                    dependency: input.layers.dependency.as_deref(),
+                    app: input.layers.app.as_deref(),
+                    vmstate,
+                    memory: mem,
+                },
+                &input.declared_secret_markers,
+                &cache,
+                crate::seal::advisory_budget_from_env(),
+                Some(rootfs_blob),
+            )
+        });
+        // seal_and_scan fails closed (nothing stored) on declared/blocking hits.
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                // Scratch cleanup belongs to the CALLER: a build discards it here,
+                // while a hold keeps the guest (and its scratch) alive for a retry.
+                self.emit_build_failure_diagnostics(build_dir);
+                return Err(e);
+            }
+        };
+        let advisories = scanner::advisory_summaries_capped(&out.report, 50);
+        let coverage = out.coverage;
+        let sealed_bytes = out.sealed_bytes;
+        let layers = out.layers;
+
+        let mut rec = HotsetRecorder::new();
+        if let Some(m) = &layers.memory {
+            rec.extend_from_manifest(m);
+        }
+        if let Some(r) = &layers.rootfs {
+            rec.extend_from_manifest(r);
+        }
+        let hotset_profile = rec.finish();
+
+        let no_secret_proof = NoSecretProof {
+            scanner_version: scanner::SCANNER_VERSION.to_string(),
+            scanned_layers: layers.iter().map(|(n, _)| n.to_string()).collect(),
+            findings: Vec::new(),
+            advisories,
+            verdict: "clean".to_string(),
+            coverage,
+        };
+        let runner_class_id = Some(
+            input
+                .runner_class
+                .clone()
+                .unwrap_or_else(|| self.runner_facts().id()),
+        );
+        let manifest = ReadyStateManifest {
+            schema: READY_STATE_SCHEMA.to_string(),
+            capsule_manifest_hash: input.capsule_manifest_hash.clone(),
+            has_vsock: vsock_enabled(),
+            runner_class_id,
+            execution_id: input.execution_id.clone(),
+            // `BuildReadyStateInput` does not yet carry a schema tag for the
+            // declared execution id — that wiring is later, separate work.
+            // Until then every sealed manifest is honestly legacy.
+            execution_identity_schema: None,
+            surface_requirement: input.surface_requirement.clone(),
+            layers,
+            hotset_profile,
+            snapshot_backend: self.backend_info(),
+            restore_contract: input.restore_contract.clone(),
+            sanitizer_contract: input.sanitizer_contract.clone(),
+            no_secret_proof: Some(no_secret_proof.clone()),
+            build_receipt_id: None,
+            supervisor_build: supervisor_receipt,
+        };
+        Ok(BuildReadyStateReceipt {
+            manifest,
+            sealed_bytes,
+            no_secret_proof,
+        })
+    }
+
     /// Pause → `PUT /snapshot/create` → read of a live guest, factored out of
     /// [`Self::build_ready_state`] so the identical primitive is reusable by the
     /// interactive HOLD path. Pauses the guest, takes a `Full` snapshot to
@@ -1671,20 +2215,34 @@ impl FirecrackerBackend {
     /// orchestration tests, which drive an equivalent fake capture-action seam.
     // Real HOLD-path consumer (boot-to-health → hold session) lands in a later
     // PR-2 slice.
-    #[allow(dead_code)]
     fn capture_running_candidate(
         &self,
         fc: &FcProcess,
         vmstate_path: &Path,
         mem_path: &Path,
-    ) -> Result<RunningCaptureBytes, SnapshotError> {
-        let (vmstate, mem) = self.pause_snapshot_create(fc, vmstate_path, mem_path)?;
-        let source_lost = self.resume_vm(fc).is_err();
-        Ok(RunningCaptureBytes {
-            vmstate,
-            mem,
-            source_lost,
-        })
+    ) -> Result<RunningCaptureBytes, RunningCaptureFailure> {
+        // `pause_snapshot_create` pauses FIRST and only then does its fallible
+        // work (snapshot/create, then two file reads). A bare `?` here would
+        // short-circuit past the resume and strand the guest PAUSED forever —
+        // and a full builder disk making `PUT /snapshot/create` return EAGAIN is
+        // a failure this file has actually observed. RFC §8.2 says a failed
+        // capture is not terminal: the author adjusts the app and saves again.
+        // That is only true if the guest is running again, so resume on BOTH
+        // paths and report whether it worked.
+        match self.pause_snapshot_create(fc, vmstate_path, mem_path) {
+            Ok((vmstate, mem)) => {
+                let source_lost = self.resume_vm(fc).is_err();
+                Ok(RunningCaptureBytes {
+                    vmstate,
+                    mem,
+                    source_lost,
+                })
+            }
+            Err(error) => {
+                let source_lost = self.resume_vm(fc).is_err();
+                Err(RunningCaptureFailure { error, source_lost })
+            }
+        }
     }
 }
 
@@ -1692,6 +2250,11 @@ impl FirecrackerBackend {
 /// (ADR-012). Produced by [`FirecrackerBackend::capture_running_candidate`] on the
 /// interactive submission-wizard HOLD path; consumed by the later-slice HOLD
 /// wiring (real-VM verified).
+struct RunningCaptureFailure {
+    error: SnapshotError,
+    source_lost: bool,
+}
+
 #[allow(dead_code)]
 struct RunningCaptureBytes {
     vmstate: Vec<u8>,
@@ -1808,6 +2371,9 @@ impl SnapshotBackend for FirecrackerBackend {
         &self,
         input: BuildReadyStateInput<'_>,
     ) -> Result<BuildReadyStateReceipt, SnapshotError> {
+        // NOTE: the boot half of this lives in `boot_to_seal_point` (an inherent
+        // method), which hands the guest back ALIVE. The auto-seal path below
+        // pauses and drops it; the interactive HOLD path (PR-2) keeps it running.
         // PREFLIGHT GATE (fail closed BEFORE any store / stable-rootfs write / boot):
         // a declared marker in rootfs/runtime/dependency/app, or a provider/env
         // secret in app/dependency, rejects the build before secret-bearing rootfs
@@ -1920,112 +2486,46 @@ impl SnapshotBackend for FirecrackerBackend {
             .map_err(|error| self.backend_err(error))?;
         self.net_up(&network_ports)?;
         let snap = (|| -> Result<(Vec<u8>, Vec<u8>), SnapshotError> {
-            let fc = bench::time("build.start_fc", || {
-                self.start_fc(&build_dir.join("api.sock"), &build_dir.join("console.log"))
-            })?;
-            self.configure_boot(
-                &fc,
-                &self.config.kernel_path,
+            // The guest is booted to its seal point by the shared primitive and
+            // handed back ALIVE; this path then stops+revokes (supervisor only)
+            // and pauses it, and `fc` drops at the end of this closure.
+            let (fc, vsock_uds) = self.boot_to_seal_point(
+                &input,
+                &build_dir,
                 &rootfs_path,
-                self.config.rootfs_read_only,
-                // v1.2 PR 3d: supervisor builds get the page-hygiene cmdline so freed
-                // guest pages (incl. the revoked placeholder) are zeroed pre-snapshot.
-                supervisor_drive.is_some(),
+                &state_drive_paths,
+                supervisor_drive.as_ref(),
+                port,
+                &path,
             )?;
-            // v1.6 (ato#983) Slice 2: attach each durable state volume as a
-            // writable, non-root drive BEFORE boot/snapshot — Firecracker records
-            // the whole device set (incl. these) into the snapshot it takes below,
-            // so restore's `PUT /snapshot/load` recreates them without any new
-            // `PUT /drives` call (mirrors how the rootfs drive itself works).
-            self.configure_state_drives(&fc, &state_drive_paths)?;
-            // Phase 8a-HW (#912): attach a vsock device BEFORE boot/snapshot so the
-            // guest-agent binding channel is captured in the snapshot. The uds_path is
-            // baked into the snapshot (FC forbids overriding it at load), so it is a
-            // deterministic per-capsule path both build and restore compute.
-            let vsock_uds = if vsock_enabled() {
-                let uds = vsock_uds_path(&input.capsule_manifest_hash);
-                if let Some(d) = uds.parent() {
-                    std::fs::create_dir_all(d)
-                        .map_err(|e| self.backend_err(format!("vsock dir: {e}")))?;
-                }
-                let _ = std::fs::remove_file(&uds);
-                fc.api(
-                    self,
-                    "PUT",
-                    "/vsock",
-                    Some(
-                        &json!({
-                            "guest_cid": 3, "uds_path": uds.to_string_lossy()
-                        })
-                        .to_string(),
-                    ),
-                )?;
-                Some(uds)
-            } else {
-                None
-            };
-            bench::time("build.boot_to_health", || -> Result<(), SnapshotError> {
-                fc.api(
-                    self,
-                    "PUT",
-                    "/actions",
-                    Some(&json!({"action_type":"InstanceStart"}).to_string()),
-                )?;
-                // v1.2 PR 3d: a supervisor guest with REQUIRED bindings starts its
-                // workload only at bound-ready — deliver the placeholder leases
-                // first, THEN health. A ZERO-binding supervisor build (dockerfile
-                // import, ato#1002 D4) skips delivery entirely: the agent is
-                // vacuously bound-ready and started the workload at boot (ato#1001),
-                // so the health wait below is reached directly.
-                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
-                    let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err(
-                            "supervisor build: vsock uds missing (unreachable: gated above)",
-                        )
-                    })?;
-                    self.supervisor_deliver_placeholders(uds, drive)?;
-                }
-                self.wait_health(port, &path)?; // secret-free seal point (placeholder-only for supervisor builds)
-                // Warm the user-facing first-screen paths into guest memory BEFORE
-                // the Pause+Snapshot, so the sealed image already carries template
-                // rendering / JIT / DB-init / First-Frame-prep — the user's first
-                // request then hits warm pages instead of redoing that work after
-                // resume. Skipped for the required-binding supervisor carve-out:
-                // its workload is stopped + revoked before the seal (below) and the
-                // equivalent first-screen work is driven via the guest-agent
-                // bound-ready transition at restore time, so warming here would be
-                // wasted I/O against a workload about to be torn down.
-                let warmup_cap = !supervisor_drive
-                    .as_ref()
-                    .is_some_and(|d| d.has_placeholders());
-                if warmup_cap {
-                    self.warmup_paths(port, &input.restore_contract)?;
-                }
-                // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
-                // pause/snapshot, so the seal carries no running workload and no
-                // binding material in guest tmpfs (contract order: stop, then revoke).
-                // Then VERIFY the listener is gone — acks alone are not proof (a
-                // wrapper-shell kill once left the orphaned app serving).
-                //
-                // ato#1002 D4: the ZERO-binding supervisor build SKIPS stop+revoke
-                // and seals with the workload RUNNING — there is no placeholder to
-                // scrub (nothing was delivered, so the seal is secret-free by
-                // construction), and a workload-down seal could never start again
-                // after restore: nothing is ever delivered to a zero-binding
-                // session, so no bound-ready transition would relaunch it. Its
-                // seal contract is exactly v1.0 no-binding: boot, healthcheck
-                // answers — see `restore_uses_agent_probe` for the restore side.
-                if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
-                    let uds = vsock_uds.as_ref().ok_or_else(|| {
-                        self.backend_err(
-                            "supervisor build: vsock uds missing (unreachable: gated above)",
-                        )
-                    })?;
-                    self.supervisor_stop_and_revoke(uds, drive)?;
-                    self.wait_workload_down(port, Duration::from_secs(10))?;
-                }
-                Ok(())
-            })?;
+            // v1.2 PR 3d: StopWorkload → Revoke all placeholders BEFORE the
+            // pause/snapshot, so the seal carries no running workload and no
+            // binding material in guest tmpfs (contract order: stop, then revoke).
+            // Then VERIFY the listener is gone — acks alone are not proof (a
+            // wrapper-shell kill once left the orphaned app serving).
+            //
+            // ato#1002 D4: the ZERO-binding supervisor build SKIPS stop+revoke
+            // and seals with the workload RUNNING — there is no placeholder to
+            // scrub (nothing was delivered, so the seal is secret-free by
+            // construction), and a workload-down seal could never start again
+            // after restore: nothing is ever delivered to a zero-binding
+            // session, so no bound-ready transition would relaunch it. Its
+            // seal contract is exactly v1.0 no-binding: boot, healthcheck
+            // answers — see `restore_uses_agent_probe` for the restore side.
+            //
+            // This step is what makes the AUTO-SEAL build differ from the
+            // interactive HOLD (RFC §8.3 `running`): a hold keeps the workload
+            // up, so it never runs this and instead refuses a placeholder-
+            // bearing capsule outright.
+            if let Some(drive) = supervisor_drive.as_ref().filter(|d| d.has_placeholders()) {
+                let uds = vsock_uds.as_ref().ok_or_else(|| {
+                    self.backend_err(
+                        "supervisor build: vsock uds missing (unreachable: gated above)",
+                    )
+                })?;
+                self.supervisor_stop_and_revoke(uds, drive)?;
+                self.wait_workload_down(port, Duration::from_secs(10))?;
+            }
             bench::time("build.snapshot_create", || {
                 // Firecracker-concrete pause → snapshot/create → read, factored into
                 // a callable primitive reused by the interactive HOLD path (PR-2).
@@ -2047,116 +2547,19 @@ impl SnapshotBackend for FirecrackerBackend {
             }
         };
 
-        // v1.2 PR 3d: ADVISORY placeholder-hygiene scan (kernel init_on_free-
-        // dependent, #947 finding) — the revoked placeholder SHOULD be gone from the
-        // snapshot bytes on a hygiene-enabled kernel, but its residue is NOT a
-        // secret leak (the value is a build-scoped random token, discarded below),
-        // so this records honestly instead of gating.
-        let supervisor_receipt = supervisor_drive.as_ref().map(|drive| {
-            let secrets: Vec<&[u8]> = drive.placeholder_values.iter().map(|v| v.as_bytes()).collect();
-            let absent = crate::no_secret_scan::blob_is_clean(&mem, &secrets)
-                && crate::no_secret_scan::blob_is_clean(&vmstate, &secrets);
-            eprintln!(
-                "READY-STATE supervisor build: placeholder absent from sealed mem/vmstate = {absent} \
-                 (advisory; requires kernel init_on_free support)"
-            );
-            SupervisorBuildReceipt {
-                binding_names: drive.binding_names.clone(),
-                page_hygiene_boot_args: true,
-                placeholder_absent_from_seal: Some(absent),
-                // v1.6 (ato#983) Slice 2: persist so restore recomputes the SAME
-                // backing-file/lock paths without the caller resupplying them.
-                state_volumes: input.supervisor.as_ref().map(|s| s.state_volumes.clone()).unwrap_or_default(),
-                state_owner_scope: input.supervisor.as_ref().and_then(|s| s.state_owner_scope.clone()),
-            }
-        });
-
-        // ── seal + no-secret scan via the shared orchestration ───────────────
-        // rootfs was already stored above (for the stable drive path) → pass it
-        // as prestored. vmstate/mem are scanned by REFERENCE — no clone of the
-        // ~100s-of-MB images. Declared markers fail closed on every layer;
-        // provider/env block on app/dependency; the large opaque layers are
-        // advisory + content-cached + budgeted.
-        let cache = crate::scan_cache::ScanCache::open(input.store.root());
-        let out = bench::time("build.seal_and_scan", || {
-            crate::seal::seal_and_scan(
-                input.store,
-                crate::seal::SealLayersRef {
-                    rootfs: &input.layers.rootfs,
-                    runtime: input.layers.runtime.as_deref(),
-                    dependency: input.layers.dependency.as_deref(),
-                    app: input.layers.app.as_deref(),
-                    vmstate: &vmstate,
-                    memory: &mem,
-                },
-                &input.declared_secret_markers,
-                &cache,
-                crate::seal::advisory_budget_from_env(),
-                Some(rootfs_blob),
-            )
-        });
-        // seal_and_scan fails closed (nothing stored) on declared/blocking hits.
-        let out = match out {
-            Ok(o) => o,
-            Err(e) => {
-                self.emit_build_failure_diagnostics(&build_dir);
-                cleanup_scratch();
-                return Err(e);
-            }
-        };
-        let advisories = scanner::advisory_summaries_capped(&out.report, 50);
-        let coverage = out.coverage;
-        let sealed_bytes = out.sealed_bytes;
-        let layers = out.layers;
-
-        let mut rec = HotsetRecorder::new();
-        if let Some(m) = &layers.memory {
-            rec.extend_from_manifest(m);
-        }
-        if let Some(r) = &layers.rootfs {
-            rec.extend_from_manifest(r);
-        }
-        let hotset_profile = rec.finish();
-
-        let no_secret_proof = NoSecretProof {
-            scanner_version: scanner::SCANNER_VERSION.to_string(),
-            scanned_layers: layers.iter().map(|(n, _)| n.to_string()).collect(),
-            findings: Vec::new(),
-            advisories,
-            verdict: "clean".to_string(),
-            coverage,
-        };
-        let runner_class_id = Some(
-            input
-                .runner_class
-                .unwrap_or_else(|| self.runner_facts().id()),
+        // Seal + scan + manifest assembly is shared with the interactive HOLD
+        // (`HeldGuest::capture_candidate`) so a held candidate and a built one are
+        // sealed by exactly the same code and come back in the same shape.
+        let receipt = self.seal_ready_state(
+            &input,
+            &build_dir,
+            rootfs_blob,
+            &vmstate,
+            &mem,
+            supervisor_drive.as_ref(),
         );
-        let manifest = ReadyStateManifest {
-            schema: READY_STATE_SCHEMA.to_string(),
-            capsule_manifest_hash: input.capsule_manifest_hash,
-            has_vsock: vsock_enabled(),
-            runner_class_id,
-            execution_id: input.execution_id.clone(),
-            // `BuildReadyStateInput` does not yet carry a schema tag for the
-            // declared execution id — that wiring is later, separate work.
-            // Until then every sealed manifest is honestly legacy.
-            execution_identity_schema: None,
-            surface_requirement: input.surface_requirement,
-            layers,
-            hotset_profile,
-            snapshot_backend: self.backend_info(),
-            restore_contract: input.restore_contract,
-            sanitizer_contract: input.sanitizer_contract,
-            no_secret_proof: Some(no_secret_proof.clone()),
-            build_receipt_id: None,
-            supervisor_build: supervisor_receipt,
-        };
         cleanup_scratch();
-        Ok(BuildReadyStateReceipt {
-            manifest,
-            sealed_bytes,
-            no_secret_proof,
-        })
+        receipt
     }
 
     fn inspect(
@@ -3400,6 +3803,138 @@ mod tests {
         assert!(
             store.list_chunks().unwrap().is_empty(),
             "rejected build must persist no rootfs in CAS"
+        );
+    }
+
+    // ── interactive HOLD: the `workload_idle` refusal (RFC §8.3) ──────────────
+
+    /// A capsule that declares supervisor bindings cannot be held live.
+    ///
+    /// Its bindings are delivered as placeholders and must be revoked with the
+    /// workload STOPPED before capture (`workload_idle`, #1093). Capturing it
+    /// running would seal binding material into bytes many users restore. The RFC
+    /// forbids falling back to a running capture, so this must be a refusal —
+    /// and it must happen before any boot, store write, or lock.
+    #[test]
+    fn hold_refuses_a_capsule_that_needs_workload_idle() {
+        use crate::manifest::{RestoreContract, SanitizerContract};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FirecrackerBackend::with_config(FirecrackerConfig {
+            work_root: dir.path().join("work"),
+            ..FirecrackerConfig::default()
+        });
+        let input = BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: "blake3:hold-idle".to_string(),
+            runner_class: None,
+            surface_requirement: None,
+            layers: BuildLayers {
+                rootfs: b"rootfs".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![8080],
+                healthcheck: Some("/health".to_string()),
+                ..Default::default()
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: None,
+            supervisor: Some(SupervisorBindings {
+                binding_names: vec!["openai_api_key".into()],
+                ..Default::default()
+            }),
+        };
+        // Matched rather than `unwrap_err`'d on purpose: `HeldGuest` deliberately
+        // has no `Debug` (it owns the live process handle), so the success arm
+        // must be destructured explicitly.
+        let Err(err) = backend.boot_and_hold(input) else {
+            panic!("a binding-declaring capsule must never reach a live hold");
+        };
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("workload_idle"),
+            "the refusal must name the policy the capsule actually needs: {text}"
+        );
+        // Refused BEFORE any work: nothing stored, and the slot lock is free for
+        // the next build (a leaked lock would wedge the whole builder).
+        assert!(
+            store.list_chunks().unwrap().is_empty(),
+            "a refused hold must persist nothing in CAS"
+        );
+        assert!(
+            !backend.lock_path().exists(),
+            "a refused hold must not leave the slot lock behind"
+        );
+    }
+
+    /// A capsule with durable state volumes but ZERO bindings is refused too.
+    ///
+    /// The two `SupervisorBindings` fields are independent, and a zero-binding
+    /// supervisor build is a real, supported case (ato#1002 D4). Gating only on
+    /// `binding_names` would admit it — and the hold attaches no state drives, so
+    /// the workload would come up against storage that is not there. Durable
+    /// state is restore-time state, so §8.3 puts this on the `workload_idle` side.
+    #[test]
+    fn hold_refuses_durable_state_volumes_even_with_zero_bindings() {
+        use crate::manifest::{RestoreContract, SanitizerContract};
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path().join("cas")).unwrap();
+        let backend = FirecrackerBackend::with_config(FirecrackerConfig {
+            work_root: dir.path().join("work"),
+            ..FirecrackerConfig::default()
+        });
+        let input = BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: "blake3:hold-volumes".to_string(),
+            runner_class: None,
+            surface_requirement: None,
+            layers: BuildLayers {
+                rootfs: b"rootfs".to_vec(),
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![8080],
+                healthcheck: Some("/health".to_string()),
+                ..Default::default()
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: None,
+            supervisor: Some(SupervisorBindings {
+                // ZERO bindings — the field the first refusal keys on is empty.
+                binding_names: Vec::new(),
+                state_volumes: vec![crate::state_volume::DurableVolumeSpec {
+                    state_name: "data".to_string(),
+                    size_mb: 64,
+                }],
+                state_owner_scope: Some("owner/capsule".to_string()),
+            }),
+        };
+        let Err(err) = backend.boot_and_hold(input) else {
+            panic!("a capsule with durable state volumes must never reach a live hold");
+        };
+        let text = format!("{err:?}");
+        assert!(
+            text.contains("workload_idle"),
+            "a supervisor capsule must be refused whatever it declares: {text}"
+        );
+        assert!(
+            store.list_chunks().unwrap().is_empty(),
+            "a refused hold must persist nothing in CAS"
+        );
+        assert!(
+            !backend.lock_path().exists(),
+            "a refused hold must not leave the slot lock behind"
         );
     }
 
