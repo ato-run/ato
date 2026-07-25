@@ -971,7 +971,11 @@ fn produce_recipe_build(
 ///   would be if `expected` were derived by hashing a tree that also
 ///   contained the very digest being computed. If the checked-out repo
 ///   happens to commit its own `ato.lock.json`, that file's bytes are simply
-///   ordinary source content from this daemon's point of view.
+///   ordinary source content from this daemon's point of view. The one thing
+///   that DOES have to be excluded — the checkout's own `.git`, which A1v2
+///   hashes as an ordinary directory at the root and whose index is not
+///   reproducible — is already gone: `materialize_source` removes it, so this
+///   digest is stable across checkouts of the same commit.
 /// * `dependencies[]` — measured only in the (common) trivial case where
 ///   `expected` itself declares zero dependencies: zero declared and zero
 ///   observed is a real, honest measurement, not a placeholder. When

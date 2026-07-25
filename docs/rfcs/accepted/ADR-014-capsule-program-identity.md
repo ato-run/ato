@@ -107,6 +107,16 @@ before implementation starts.
 > per-field encodings. (9) The type hierarchy (base value types vs.
 > validation policies) stated explicitly.
 >
+> **r12 (2026-07-25), amendment — post-merge audit:** §1 step 5 gains the
+> portability rule. A1 folds the owner-executable bit into file identity on
+> unix and treats every file as non-executable off-unix (a frozen primitive
+> whose own comment scopes Windows out), so the extractor's off-unix
+> permission no-op meant the same archive derived a DIFFERENT
+> `capsule_program_id` on Windows — the id was a function of (content,
+> platform), contradicting §0. The rule fails closed only where the
+> divergence is real: an archive with no executable entry hashes identically
+> everywhere and stays admissible.
+>
 > **r8 (2026-07-24), accepted:** the review approved the architecture with
 > three targeted type fixes, applied here: (1) `targets.wasm.world` is a
 > WIT world reference (`wasi:cli/command`, `uarc:v1/http-handler` — `:` and
@@ -357,7 +367,12 @@ manifests) as ordinary source.
 4. Exclude exactly the resolved control-file paths (manifest + the selected
    lock path, if any). Nothing else.
 5. Materialize the projected tree preserving bytes AND the executable bit
-   (A1 file identity includes the executable bit).
+   (A1 file identity includes the executable bit). Because A1 file identity
+   includes that bit, an implementation running on a platform whose filesystem
+   cannot represent it MUST refuse any pinned materialization declaring an
+   owner-executable entry — failing closed rather than minting an id that
+   platform alone would produce — while a materialization with no executable
+   entry hashes identically on every platform and MUST still be admitted.
 6. materialized_source_tree_hash(projected_root) — existing, frozen,
    unmodified.
 ```

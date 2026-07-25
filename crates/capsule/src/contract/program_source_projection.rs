@@ -113,6 +113,21 @@ const GIT_METADATA_DIR_NAME: &str = ".git";
 /// archive — so no message may carry either absolute path.
 const SOURCE_ROOT_LABEL: &str = "<source root>";
 
+/// The owner-execute bit. It is the ONLY permission bit A1 folds into the tree
+/// identity (`tree_hash::is_executable`), so it is the only one whose loss can
+/// move `capsule_program_id`.
+const OWNER_EXECUTE_BIT: u32 = 0o100;
+
+/// Whether this platform's filesystem carries [`OWNER_EXECUTE_BIT`] from an
+/// extracted file through to the A1 digest.
+///
+/// `cfg!(unix)` rather than `#[cfg(unix)]`: this is an ordinary value, so
+/// [`classify_extracted_file_mode`] decides portability from data and both of
+/// its branches are exercisable on any host. A `#[cfg(not(unix))]` branch would
+/// never run in a unix CI, which is how the divergence this constant closes
+/// went unnoticed in the first place.
+const PLATFORM_CARRIES_OWNER_EXECUTE_BIT: bool = cfg!(unix);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Proof-carrying input boundary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,6 +185,22 @@ const SOURCE_ROOT_LABEL: &str = "<source root>";
 /// follow-up ADR: a working tree can be mutated *during* the read, so even a
 /// staging copy of one is a torn snapshot rather than a pinned materialization,
 /// and the ADR would have to define what identity such a copy carries.
+///
+/// # Portability boundary
+///
+/// `capsule_program_id` is a function of the archive's content, never of the
+/// host that reads it — so the proof is refused wherever it could only be
+/// minted platform-dependently. A1 folds the owner-executable bit into the
+/// source-tree digest where the filesystem carries it
+/// (`tree_hash::is_executable`) and treats every file as non-executable where
+/// it does not, so on a platform without POSIX permissions — Windows —
+/// [`Self::from_source_archive`] refuses any archive carrying an
+/// owner-executable entry with
+/// [`CapsuleProgramError::NonPortableExecutableBit`] rather than minting an id
+/// unix would not agree with. The refusal is exactly that narrow: an archive
+/// with no executable entry hashes identically on both, so it is admitted
+/// everywhere. On unix nothing changes — every archive that was accepted before
+/// is still accepted, with the same digest.
 ///
 /// A bare path cannot be wrapped (the field is private):
 ///
@@ -519,6 +550,54 @@ fn decode_source_archive(archive_tar_zst: &Path) -> Result<Vec<u8>, CapsuleProgr
     Ok(tar_bytes)
 }
 
+/// What extraction must do with one regular-file entry's declared mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtractedFileMode {
+    /// Extract, normalizing to the two permission states A1 distinguishes.
+    /// `executable` is the bit A1 folds into the digest.
+    Normalize { executable: bool },
+    /// Refuse the whole archive: the entry declares the owner-executable bit
+    /// on a platform that cannot hold it, so the digest taken here would be
+    /// this host's rather than the archive's.
+    RefuseNonPortable,
+}
+
+/// The portability rule as a pure function of the two facts it depends on.
+///
+/// Deliberately NOT written as a `#[cfg]` pair: the off-unix branch would be
+/// dead code in this repo's ubuntu-only contract CI and would ship untested,
+/// which is how the divergence it closes survived review. Taking
+/// `platform_carries_owner_execute` as an argument lets both branches be
+/// decided — and asserted — on any host; the call site supplies
+/// [`PLATFORM_CARRIES_OWNER_EXECUTE_BIT`].
+///
+/// It refuses only where the divergence is real. A tree with no executable
+/// entry hashes identically on every platform, so `declares_owner_execute ==
+/// false` is admitted everywhere, and a platform that carries the bit
+/// normalizes exactly as before.
+fn classify_extracted_file_mode(
+    declares_owner_execute: bool,
+    platform_carries_owner_execute: bool,
+) -> ExtractedFileMode {
+    if declares_owner_execute && !platform_carries_owner_execute {
+        ExtractedFileMode::RefuseNonPortable
+    } else {
+        ExtractedFileMode::Normalize {
+            executable: declares_owner_execute,
+        }
+    }
+}
+
+/// The refusal itself. `entry` is the archive's own relative entry path and
+/// `archive` the caller's own input, so — like every other archive rejection —
+/// no process-private root is named.
+fn non_portable_executable_bit(archive: &Path, entry: &Path) -> CapsuleProgramError {
+    CapsuleProgramError::NonPortableExecutableBit {
+        archive: archive.display().to_string(),
+        entry: entry.display().to_string(),
+    }
+}
+
 /// Validate one archive entry path into a relative path safe to join onto the
 /// extraction root, or say why it is not.
 ///
@@ -587,6 +666,12 @@ fn safe_archive_entry_path(raw: &Path) -> Result<PathBuf, String> {
 ///   same constants `materialize_source_archive` enforces on the way in.
 /// * **declared size** — the bytes actually copied must equal the header's
 ///   declared size, so a truncated member is a rejection, not a short file.
+///
+/// * **portable permissions** — an entry declaring the owner-execute bit is
+///   extracted only where the filesystem carries it
+///   ([`classify_extracted_file_mode`]); elsewhere the archive is refused
+///   rather than extracted into a tree whose A1 digest would be this host's
+///   instead of the archive's.
 ///
 /// Permission bits are normalized exactly the way the archive builder writes
 /// them (`0o755` when the owner-execute bit is set, else `0o644`), which is the
@@ -664,6 +749,17 @@ fn extract_source_archive(archive_tar_zst: &Path, dest: &Path) -> Result<(), Cap
                     .map_err(|source| projection_io("create directory", &target, source))?;
             }
             _ => {
+                // Before a byte is written: an archive this host could only
+                // give a platform-dependent identity is refused, not extracted.
+                let executable = match classify_extracted_file_mode(
+                    mode & OWNER_EXECUTE_BIT != 0,
+                    PLATFORM_CARRIES_OWNER_EXECUTE_BIT,
+                ) {
+                    ExtractedFileMode::Normalize { executable } => executable,
+                    ExtractedFileMode::RefuseNonPortable => {
+                        return Err(non_portable_executable_bit(archive_tar_zst, &raw_path));
+                    }
+                };
                 if declared_size > MAX_FILE_SIZE_BYTES {
                     return Err(not_a_source_archive(
                         archive_tar_zst,
@@ -719,7 +815,7 @@ fn extract_source_archive(archive_tar_zst: &Path, dest: &Path) -> Result<(), Cap
                     ));
                 }
                 drop(file);
-                set_extracted_file_mode(&target, mode)?;
+                set_extracted_file_mode(&target, executable)?;
             }
         }
     }
@@ -729,18 +825,19 @@ fn extract_source_archive(archive_tar_zst: &Path, dest: &Path) -> Result<(), Cap
 /// Normalize an extracted file's permissions to the two states the archive
 /// builder emits and A1 folds into the tree identity.
 #[cfg(unix)]
-fn set_extracted_file_mode(path: &Path, mode: u32) -> Result<(), CapsuleProgramError> {
+fn set_extracted_file_mode(path: &Path, executable: bool) -> Result<(), CapsuleProgramError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let normalized = if mode & 0o100 != 0 { 0o755 } else { 0o644 };
+    let normalized = if executable { 0o755 } else { 0o644 };
     fs::set_permissions(path, fs::Permissions::from_mode(normalized))
         .map_err(|source| projection_io("set permissions on", path, source))
 }
 
-/// Without POSIX permissions A1 treats every file as non-executable, so there
-/// is nothing to normalize.
+/// Without POSIX permissions there is nothing to normalize: `executable` is
+/// always `false` here, because [`classify_extracted_file_mode`] refuses the
+/// archive before this is reached whenever an entry declared the bit.
 #[cfg(not(unix))]
-fn set_extracted_file_mode(_path: &Path, _mode: u32) -> Result<(), CapsuleProgramError> {
+fn set_extracted_file_mode(_path: &Path, _executable: bool) -> Result<(), CapsuleProgramError> {
     Ok(())
 }
 
@@ -1151,7 +1248,10 @@ fn projection_io(action: &str, path: &Path, source: std::io::Error) -> CapsulePr
 /// `<root>/` collapses to the relative remainder, and only a bare `<root>` left
 /// over becomes [`SOURCE_ROOT_LABEL`].
 ///
-/// Variants carrying no path (ids, schema, field names) are returned untouched.
+/// Variants carrying no path (ids, schema, field names) are returned untouched,
+/// as is [`CapsuleProgramError::NonPortableExecutableBit`]: its two paths are
+/// the archive the caller passed and an archive-relative entry name, neither of
+/// which is a root this crate owns.
 fn relativize_roots(error: CapsuleProgramError, roots: &[&Path]) -> CapsuleProgramError {
     let rewrite = |message: String| -> String {
         roots.iter().fold(message, |message, root| {
@@ -2107,6 +2207,115 @@ mod tests {
                 "fixtures/ato.lock.json".to_string(),
                 "src/main.py".to_string(),
             ],
+        );
+    }
+
+    // ── portability of the extracted permission bit ──────────────────────
+
+    /// An executable entry is portable ONLY where the filesystem carries the
+    /// bit. Both verdicts are asserted on whatever host runs the suite,
+    /// because the platform fact is an argument rather than a `#[cfg]` — the
+    /// off-unix arm of a `#[cfg]` pair would never execute in this repo's
+    /// ubuntu-only CI, which is precisely how the divergence shipped.
+    #[test]
+    fn an_executable_entry_is_portable_only_where_the_platform_carries_the_bit() {
+        assert_eq!(
+            classify_extracted_file_mode(true, false),
+            ExtractedFileMode::RefuseNonPortable,
+            "off-unix the bit is dropped, so the digest would be the host's, not the archive's"
+        );
+        assert_eq!(
+            classify_extracted_file_mode(true, true),
+            ExtractedFileMode::Normalize { executable: true },
+            "on unix the bit survives to the A1 digest and must still be applied"
+        );
+        // The constant the extractor actually feeds it agrees with the host.
+        assert_eq!(PLATFORM_CARRIES_OWNER_EXECUTE_BIT, cfg!(unix));
+    }
+
+    /// The permissive half, which is the whole reason the rule is per-entry
+    /// rather than per-platform: a tree with no executable entry hashes
+    /// identically everywhere, so the off-unix branch must admit it.
+    #[test]
+    fn an_archive_with_no_executable_entry_is_accepted_under_the_off_unix_branch() {
+        assert_eq!(
+            classify_extracted_file_mode(false, false),
+            ExtractedFileMode::Normalize { executable: false },
+            "refusing a tree that hashes identically on both platforms would be over-broad"
+        );
+        assert_eq!(
+            classify_extracted_file_mode(false, true),
+            ExtractedFileMode::Normalize { executable: false },
+        );
+    }
+
+    /// Wiring, not just the rule: the extractor consults the predicate with
+    /// the entry's real header mode. On unix that means an executable entry is
+    /// accepted AND lands as `0o755`, so the A1 digest of the extracted tree
+    /// is the one the archive describes.
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_entry_extracts_with_the_bit_applied_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let sandbox = TempDir::new().unwrap();
+        let dest = sandbox.path().join("dest");
+        fs::create_dir(&dest).unwrap();
+        let archive = sandbox.path().join("with-exec.tar.zst");
+
+        let body = b"#!/bin/sh\necho hi\n".to_vec();
+        let mut header = regular_header(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_path("bin/run").unwrap();
+        write_crafted_archive(&archive, vec![benign_entry(), (header, body)]);
+
+        extract_source_archive(&archive, &dest)
+            .expect("unix carries the bit, so nothing to refuse");
+        let mode = fs::metadata(dest.join("bin/run"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "the declared executable bit must reach the extracted tree, got {mode:o}"
+        );
+        // The non-executable entry beside it is normalized the other way.
+        let manifest_mode = fs::metadata(dest.join(CAPSULE_MANIFEST_FILE_NAME))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(manifest_mode & 0o111, 0, "got {manifest_mode:o}");
+    }
+
+    /// The refusal names what the caller can act on — its own archive path and
+    /// the offending entry — and, like every other archive rejection, never a
+    /// process-private root.
+    #[test]
+    fn the_non_portable_refusal_names_the_entry_and_no_private_root() {
+        let private_root = TempDir::new().unwrap();
+        let error =
+            non_portable_executable_bit(Path::new("/caller/source.tar.zst"), Path::new("bin/run"));
+        let CapsuleProgramError::NonPortableExecutableBit { archive, entry } = &error else {
+            panic!("expected NonPortableExecutableBit, got {error:?}");
+        };
+        assert_eq!(archive, "/caller/source.tar.zst");
+        assert_eq!(entry, "bin/run");
+
+        let rendered = error.to_string();
+        assert!(rendered.contains("bin/run"), "{rendered}");
+        assert!(
+            rendered.contains("portable capsule_program_id"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains(&private_root.path().display().to_string()),
+            "{rendered}"
+        );
+        // Relativization leaves it alone: neither path is a root this crate owns.
+        assert_eq!(
+            relativize_roots(error.clone(), &[private_root.path()]),
+            error
         );
     }
 

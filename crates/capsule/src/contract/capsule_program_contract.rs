@@ -154,6 +154,23 @@ pub enum CapsuleProgramError {
     ManifestLoad(String),
     #[error("input is not a pinned source materialization: {0}")]
     NotPinnedMaterialization(String),
+    /// The archive is well formed, but this platform can only give it a
+    /// platform-dependent identity — which is not an identity. A1 folds the
+    /// owner-executable bit into the tree hash where the filesystem carries it
+    /// and treats every file as non-executable where it does not, so the same
+    /// archive would mint one `capsule_program_id` on unix and another here.
+    /// Its own variant rather than a
+    /// [`Self::NotPinnedMaterialization`] string: the input IS a pinned
+    /// materialization, and the condition is a property of the host, so a
+    /// caller must be able to tell it from a malformed archive without
+    /// matching on message text.
+    #[error(
+        "{archive} cannot be given a portable capsule_program_id on this platform: entry \
+         {entry} carries the owner-executable bit, which this platform's filesystem cannot \
+         represent — A1 folds that bit into the source-tree digest, so extracting here would \
+         mint a different id than unix does for the same archive"
+    )]
+    NonPortableExecutableBit { archive: String, entry: String },
 }
 
 fn invalid(field: &'static str, reason: impl Into<String>) -> CapsuleProgramError {
