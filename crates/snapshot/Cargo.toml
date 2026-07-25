@@ -19,6 +19,14 @@ path = "src/lib.rs"
 name = "ready-state-bench"
 path = "src/bin/ready_state_bench.rs"
 
+[features]
+# Exposes the `#[cfg(test)]` eligibility test constructors
+# (`VerifiedRunningSnapshotEligibility::{for_test, analyze_for_test}`) to sibling
+# crates' test harnesses (PR-2: the `snapshot-builder` HoldPhase unit tests).
+# Non-default and dev-dependency-only, so a normal build/library consumer never
+# gains a non-production eligibility constructor.
+test-support = []
+
 [dependencies]
 anyhow = "1.0"
 blake3 = "1.5"
