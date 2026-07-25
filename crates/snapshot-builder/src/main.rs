@@ -147,6 +147,60 @@ struct Config {
     rootfs_size_mib: u64,
     once: bool,
     poll_secs: u64,
+    /// The interactive HOLD's slot, when this daemon is configured to serve one.
+    ///
+    /// `None` ⇒ this builder does not advertise `interactive_capture` at all
+    /// (see [`supported_job_kinds`]). The lane needs a local port to relay from
+    /// AND the operator-registered `(builder_id, slot_id)` that names the https
+    /// origin fronting it — a builder with only some of that could claim a hold
+    /// it cannot make reachable, so all three arrive together or not at all.
+    hold_slot: Option<HoldSlotConfig>,
+}
+
+/// One interactive-hold slot this daemon can serve.
+///
+/// Read by the job-loop arm that boots a hold (next commit); parsed and
+/// validated now because it is what decides whether the lane is advertised at
+/// all, and that decision must be right from startup.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct HoldSlotConfig {
+    /// Matches the `builder_id` the operator registered with ato-api.
+    builder_id: String,
+    /// Matches the `slot_id` the operator registered with ato-api.
+    slot_id: String,
+    /// Where the relay listens — the local port the registered origin proxies to.
+    proxy_listen: std::net::SocketAddr,
+}
+
+/// Parse the three hold-slot flags, all-or-nothing.
+///
+/// A partial set is an operator error, not a degraded mode: a builder that
+/// advertised `interactive_capture` without a registered slot would claim holds
+/// it could never make reachable, and every one of them would burn a full build
+/// before failing at `hold-ready`. So all three or none, checked at startup.
+fn hold_slot_from(flag: &dyn Fn(&str) -> Option<String>) -> Result<Option<HoldSlotConfig>> {
+    let builder_id = flag("--builder-id");
+    let slot_id = flag("--slot-id");
+    let listen = flag("--hold-proxy-listen");
+    match (builder_id, slot_id, listen) {
+        (None, None, None) => Ok(None),
+        (Some(builder_id), Some(slot_id), Some(listen)) => {
+            let proxy_listen = listen.parse::<std::net::SocketAddr>().map_err(|e| {
+                anyhow!("--hold-proxy-listen `{listen}` is not a host:port address: {e}")
+            })?;
+            Ok(Some(HoldSlotConfig {
+                builder_id,
+                slot_id,
+                proxy_listen,
+            }))
+        }
+        _ => Err(anyhow!(
+            "--builder-id, --slot-id and --hold-proxy-listen must be given together \
+             (they are one registration: the slot ato-api knows, and the local port \
+             its public origin proxies to)"
+        )),
+    }
 }
 
 impl Config {
@@ -181,6 +235,7 @@ impl Config {
             poll_secs: flag("--poll-secs")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(15),
+            hold_slot: hold_slot_from(&flag)?,
         })
     }
 }
@@ -535,6 +590,7 @@ fn warmup_from_env() -> std::result::Result<WarmupRecipe, String> {
 /// list is the master switch for the whole submission-wizard lane: while the
 /// kind is unadvertised the api never hands this builder such a job, so the
 /// wizard code paths are unreachable in prod. Pinned by a unit test.
+/// The kinds every builder can always take.
 const SUPPORTED_JOB_KINDS: &[&str] = &[
     "recipe",
     "dockerfile_import",
@@ -543,13 +599,29 @@ const SUPPORTED_JOB_KINDS: &[&str] = &[
     "source_materialize",
 ];
 
+/// What THIS daemon advertises on the claim.
+///
+/// `interactive_capture` is added only when a hold slot is configured. That is
+/// the switch: a builder with no slot cannot make a held guest reachable, so it
+/// must not take holds — claiming one would burn a full build and then fail at
+/// `hold-ready` with `builder_slot_not_registered`. Configuring the slot is an
+/// operator act that pairs with registering its public origin in ato-api, so the
+/// two sides turn on together.
+fn supported_job_kinds(cfg: &Config) -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = SUPPORTED_JOB_KINDS.to_vec();
+    if cfg.hold_slot.is_some() {
+        kinds.push(wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE);
+    }
+    kinds
+}
+
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
         // ato#1002: advertise every lane this builder handles (see
         // SUPPORTED_JOB_KINDS for what is on the list and what is deliberately
         // off it).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": SUPPORTED_JOB_KINDS }))
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": supported_job_kinds(cfg) }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -3276,18 +3348,22 @@ targets = ["web"]
     }
 
     #[test]
-    fn interactive_capture_is_not_advertised_in_supported_kinds() {
-        // The master switch for this whole lane. It stays OFF until the VM half
-        // (boot-and-hold + pause/snapshot/resume + a production eligibility
-        // proof) exists: the api hands a builder an interactive job only if the
-        // builder asked for the kind.
+    fn interactive_capture_is_advertised_only_with_a_configured_hold_slot() {
+        // The master switch for the whole lane, and it is CONFIGURATION, not a
+        // constant: a builder with no hold slot cannot make a held guest
+        // reachable, so it must not take holds. Claiming one would burn a full
+        // build and then fail at `hold-ready` with `builder_slot_not_registered`.
+        // Configuring the slot is the operator act that pairs with registering
+        // its public origin in ato-api, so the two sides turn on together.
+        let mut cfg = test_cfg();
+        cfg.hold_slot = None;
         assert!(
-            !SUPPORTED_JOB_KINDS.contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
-            "interactive_capture must stay absent from supported_kinds: {SUPPORTED_JOB_KINDS:?}"
+            !supported_job_kinds(&cfg).contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
+            "a builder with no hold slot must not advertise the interactive lane"
         );
-        // …and the five lanes that ARE advertised stay advertised.
+        // The five always-on lanes stay exactly as they were.
         assert_eq!(
-            SUPPORTED_JOB_KINDS,
+            supported_job_kinds(&cfg),
             [
                 "recipe",
                 "dockerfile_import",
@@ -3296,6 +3372,44 @@ targets = ["web"]
                 "source_materialize"
             ]
         );
+
+        cfg.hold_slot = Some(HoldSlotConfig {
+            builder_id: "builder-1".into(),
+            slot_id: "slot-3".into(),
+            proxy_listen: "127.0.0.1:8500".parse().expect("addr"),
+        });
+        assert!(
+            supported_job_kinds(&cfg).contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
+            "a configured hold slot must advertise the interactive lane"
+        );
+    }
+
+    #[test]
+    fn a_partial_hold_slot_configuration_is_refused_at_startup() {
+        // Half a registration is an operator error, not a degraded mode.
+        let only_builder = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&only_builder).is_err());
+
+        let missing_listen = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            "--slot-id" => Some("slot-3".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&missing_listen).is_err());
+
+        let bad_listen = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            "--slot-id" => Some("slot-3".to_string()),
+            "--hold-proxy-listen" => Some("not-an-address".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&bad_listen).is_err());
+
+        let none = |_: &str| None;
+        assert!(matches!(hold_slot_from(&none), Ok(None)));
     }
 
     #[test]
@@ -3716,6 +3830,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         }
     }
 
@@ -4397,6 +4512,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         };
         // A real (long, random) token gates: an artifact containing it is dirty.
         let cfg = mk("0123456789abcdef0123456789abcdef");
@@ -4428,6 +4544,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         };
         let cas = std::env::temp_dir().join(format!("compat-planted-token-{}", std::process::id()));
         std::fs::create_dir_all(&cas).unwrap();
