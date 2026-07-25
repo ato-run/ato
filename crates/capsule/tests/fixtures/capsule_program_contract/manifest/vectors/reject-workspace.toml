@@ -1,0 +1,13 @@
+schema_version = "0.3"
+name = "workspace-reject"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[workspace]
+default_app = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+port = 8080

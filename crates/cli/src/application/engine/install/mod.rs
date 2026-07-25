@@ -1714,11 +1714,11 @@ fn materialize_ato_managed_environment(
         return Ok(None);
     }
 
-    let Some(lock) = extract_embedded_ato_lock_from_capsule(bytes)? else {
+    let Some(lock) = extract_embedded_capsule_lock_from_capsule(bytes)? else {
         return Ok(None);
     };
     let Some(environment) =
-        capsule::ato_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
+        capsule::capsule_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
     else {
         return Ok(None);
     };

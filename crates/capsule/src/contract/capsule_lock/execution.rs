@@ -15,15 +15,19 @@
 //!   and cross-checks its digest against the contract's
 //!   `launch.environment[name].value_digest`.
 //!
-//! [`verify_lock_execution`] runs both. Wiring this into the launch re-read
-//! (`session.rs`) and OCI runners is deferred to a later PR; this is the pure
-//! verification the reader calls.
+//! [`verify_lock_execution`] runs both. When a lock also (or instead) carries
+//! the ADR-014 `program_identity` envelope, [`verify_lock_program_identity`]
+//! interprets the four lock states (§5) and verifies the declaration hash and
+//! the execution envelope's parent claim fail-closed. Wiring this into the
+//! launch re-read (`session.rs`) and OCI runners is deferred to a later PR;
+//! this is the pure verification the reader calls.
 
 use std::collections::BTreeSet;
 
 use thiserror::Error;
 
-use crate::ato_lock::schema::{AtoLock, LockEnvironmentValue};
+use crate::capsule_lock::schema::{CapsuleLock, LockEnvironmentValue};
+use crate::capsule_program_contract::{CapsuleProgramLinkError, verify_program_parent};
 use crate::execution_contract::{ExecutionContractError, OpaqueContractDigestV1};
 use crate::execution_contract_finalize::{environment_value_digest, is_sensitive_env_key};
 
@@ -97,7 +101,7 @@ pub enum LockExecutionError {
 
 /// Verify the embedded execution-contract envelope (if present) by recomputing
 /// `execution_id`. Absent envelope ⇒ `Ok`.
-pub fn verify_execution_envelope(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_execution_envelope(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     if let Some(envelope) = &lock.execution_contract {
         envelope.verify().map_err(LockExecutionError::Envelope)?;
     }
@@ -108,7 +112,7 @@ pub fn verify_execution_envelope(lock: &AtoLock) -> Result<(), LockExecutionErro
 /// `value_digest`, rejecting secret names, and — when the envelope is present —
 /// requiring each persisted name to be committed by the execution identity and
 /// cross-checking its digest against the committed value digest.
-pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_environment_values(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     let persisted: &[LockEnvironmentValue] = lock
         .launch
         .as_ref()
@@ -221,10 +225,43 @@ pub fn verify_environment_values(lock: &AtoLock) -> Result<(), LockExecutionErro
 
 /// Run both read-path checks: envelope `execution_id` re-derivation and env
 /// value digest re-derivation. Reject (fail closed) on the first failure.
-pub fn verify_lock_execution(lock: &AtoLock) -> Result<(), LockExecutionError> {
+pub fn verify_lock_execution(lock: &CapsuleLock) -> Result<(), LockExecutionError> {
     verify_execution_envelope(lock)?;
     verify_environment_values(lock)?;
     Ok(())
+}
+
+/// Interpret the lock's Capsule Program identity states — the complete ADR-014
+/// §5 four-state matrix, fail closed:
+///
+/// ```text
+/// program_identity ABSENT + execution claim ABSENT   → Ok (true legacy)
+/// program_identity ABSENT + execution claim PRESENT  → ParentEnvelopeMissing
+/// program_identity PRESENT + execution ABSENT        → program self-verification only
+/// program_identity PRESENT + execution PRESENT       → claim mandatory AND matching
+///                                                      (ParentMissing / ParentMismatch)
+/// ```
+///
+/// The [`VerifiedCapsuleProgramId`](crate::capsule_program_contract::VerifiedCapsuleProgramId)
+/// is minted exactly once here (through the envelope's re-deriving
+/// `verified_capsule_program_id`) and handed to the pairwise
+/// [`verify_program_parent`] check, so the parent claim can only ever be
+/// compared against a hash-checked declaration.
+pub fn verify_lock_program_identity(lock: &CapsuleLock) -> Result<(), CapsuleProgramLinkError> {
+    match (&lock.program_identity, &lock.execution_contract) {
+        (None, Some(execution)) if execution.capsule_program_id.is_some() => {
+            Err(CapsuleProgramLinkError::ParentEnvelopeMissing)
+        }
+        (None, _) => Ok(()),
+        (Some(program), None) => {
+            program.verified_capsule_program_id()?;
+            Ok(())
+        }
+        (Some(program), Some(execution)) => {
+            let verified = program.verified_capsule_program_id()?;
+            verify_program_parent(&verified, execution)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -232,7 +269,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ato_lock::schema::{LockEnvironmentValue, LockLaunchSection};
+    use crate::capsule_lock::schema::{LockEnvironmentValue, LockLaunchSection};
     use crate::execution_contract::{
         ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentValuePayloadV1,
         EnvironmentVariableContract, ExecutionContractEnvelopeV1, ExecutionContractV1, ExecutionId,
@@ -334,6 +371,7 @@ mod tests {
         ExecutionContractEnvelopeV1 {
             execution_contract: contract,
             execution_id,
+            capsule_program_id: None,
             resolved_refs: Default::default(),
             generated_at: None,
             provenance: serde_json::Value::Null,
@@ -349,11 +387,11 @@ mod tests {
     fn lock_with(
         execution_contract: Option<ExecutionContractEnvelopeV1>,
         launch: Option<LockLaunchSection>,
-    ) -> AtoLock {
-        AtoLock {
+    ) -> CapsuleLock {
+        CapsuleLock {
             execution_contract,
             launch,
-            ..AtoLock::default()
+            ..CapsuleLock::default()
         }
     }
 
@@ -373,7 +411,7 @@ mod tests {
 
     #[test]
     fn absent_sections_verify_ok() {
-        let lock = AtoLock::default();
+        let lock = CapsuleLock::default();
         assert!(verify_lock_execution(&lock).is_ok());
     }
 
@@ -498,9 +536,9 @@ mod tests {
         // excluded from lock identity (absent from CanonicalLockProjection), so
         // an existing lock's lock_id must not change when they are added or
         // removed.
-        use crate::ato_lock::{compute_lock_id, recompute_lock_id, validate_persisted_strict};
+        use crate::capsule_lock::{compute_lock_id, recompute_lock_id, validate_persisted_strict};
 
-        let mut base = AtoLock::default();
+        let mut base = CapsuleLock::default();
         base.resolution.entries.insert(
             "runtime".to_string(),
             json!({"kind": "deno", "version": "2.1.3"}),
@@ -539,21 +577,21 @@ mod tests {
 
     // ---- Blocker 1: signature binds execution content; lock_id does not ----
 
-    fn base_lock() -> AtoLock {
-        let mut base = AtoLock::default();
+    fn base_lock() -> CapsuleLock {
+        let mut base = CapsuleLock::default();
         base.resolution
             .entries
             .insert("runtime".to_string(), json!({"kind": "deno"}));
         base.contract
             .entries
             .insert("process".to_string(), json!({"entrypoint": "main.ts"}));
-        crate::ato_lock::recompute_lock_id(&mut base).expect("recompute base lock_id");
+        crate::capsule_lock::recompute_lock_id(&mut base).expect("recompute base lock_id");
         base
     }
 
     #[test]
     fn signature_payload_binds_execution_sections_while_lock_id_stays_stable() {
-        use crate::ato_lock::{
+        use crate::capsule_lock::{
             canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
         };
 
@@ -616,12 +654,12 @@ mod tests {
         envelope.execution_id = ExecutionId::new(format!("blake3:{}", "0".repeat(64))).unwrap();
         let mut lock = base_lock();
         lock.execution_contract = Some(envelope);
-        crate::ato_lock::recompute_lock_id(&mut lock).unwrap();
+        crate::capsule_lock::recompute_lock_id(&mut lock).unwrap();
         // Serialize WITHOUT the write-path verification so a tampered artifact can
         // reach the reader; the read path must reject it.
         let raw = serde_json::to_string(&lock).unwrap();
         let error =
-            crate::ato_lock::load_verified_from_str(&raw).expect_err("tampered id must reject");
+            crate::capsule_lock::load_verified_from_str(&raw).expect_err("tampered id must reject");
         assert!(error.to_string().contains("execution verification failed"));
     }
 
@@ -638,7 +676,7 @@ mod tests {
             good,
         ));
         let error =
-            crate::ato_lock::to_pretty_json(&lock).expect_err("tampered payload must reject");
+            crate::capsule_lock::to_pretty_json(&lock).expect_err("tampered payload must reject");
         assert!(error.to_string().contains("execution verification failed"));
     }
 
@@ -760,6 +798,248 @@ mod tests {
         assert_eq!(
             verify_environment_values(&lock),
             Err(LockExecutionError::NonCanonicalEnvironment)
+        );
+    }
+
+    // ---- ADR-014 §5: program identity states at the lock trust boundary ----
+
+    use crate::capsule_program_contract::{
+        CapsuleProgramEnvelopeV1, CapsuleProgramId, test_capsule_program_envelope,
+    };
+
+    /// An execution envelope built from the shared seeded contract, carrying
+    /// the given parent claim. The committed environment is emptied so the D5
+    /// completeness check permits an absent `launch` section — these tests
+    /// exercise the program-identity states only.
+    fn execution_envelope_claiming(claim: Option<CapsuleProgramId>) -> ExecutionContractEnvelopeV1 {
+        let mut contract = crate::execution_contract::test_execution_contract(0x42);
+        contract.launch.environment = Vec::new();
+        let mut envelope = envelope_of(contract);
+        envelope.capsule_program_id = claim;
+        envelope
+    }
+
+    /// A program envelope whose stored id is a VALID-shape id belonging to a
+    /// DIFFERENT declaration — self-verification must fail.
+    fn tampered_program_envelope() -> CapsuleProgramEnvelopeV1 {
+        let mut program = test_capsule_program_envelope(1);
+        program.capsule_program_id = test_capsule_program_envelope(2).capsule_program_id;
+        program
+    }
+
+    type Chokepoint = (&'static str, fn(&CapsuleLock) -> crate::error::Result<()>);
+
+    /// The three trust-boundary chokepoints, each driven through its public
+    /// entrypoint. `load_verified_from_str` reads bytes serialized WITHOUT the
+    /// write-path verification so a tampered artifact can reach the reader.
+    fn chokepoints() -> [Chokepoint; 3] {
+        [
+            ("load_verified_from_str", |lock| {
+                let raw = serde_json::to_string(lock).expect("serialize lock");
+                crate::capsule_lock::load_verified_from_str(&raw).map(|_| ())
+            }),
+            ("to_pretty_json", |lock| {
+                crate::capsule_lock::to_pretty_json(lock).map(|_| ())
+            }),
+            ("write_canonical_to_vec", |lock| {
+                crate::capsule_lock::write_canonical_to_vec(lock).map(|_| ())
+            }),
+        ]
+    }
+
+    #[test]
+    fn verify_lock_program_identity_covers_the_four_state_matrix() {
+        // program ABSENT + claim ABSENT (execution absent entirely) ⇒ Ok.
+        assert_eq!(verify_lock_program_identity(&base_lock()), Ok(()));
+
+        // program ABSENT + execution present WITHOUT a claim ⇒ Ok (true legacy).
+        let mut unclaimed = base_lock();
+        unclaimed.execution_contract = Some(execution_envelope_claiming(None));
+        assert_eq!(verify_lock_program_identity(&unclaimed), Ok(()));
+
+        // program ABSENT + claim PRESENT ⇒ orphan claim, fail closed.
+        let program = test_capsule_program_envelope(1);
+        let program_id = program.capsule_program_id.clone();
+        let mut orphan = base_lock();
+        orphan.execution_contract = Some(execution_envelope_claiming(Some(program_id.clone())));
+        assert_eq!(
+            verify_lock_program_identity(&orphan),
+            Err(CapsuleProgramLinkError::ParentEnvelopeMissing)
+        );
+
+        // program PRESENT + execution ABSENT ⇒ program self-verification only.
+        let mut draft = base_lock();
+        draft.program_identity = Some(program.clone());
+        assert_eq!(verify_lock_program_identity(&draft), Ok(()));
+
+        let mut tampered = base_lock();
+        tampered.program_identity = Some(tampered_program_envelope());
+        assert!(matches!(
+            verify_lock_program_identity(&tampered),
+            Err(CapsuleProgramLinkError::ProgramEnvelope(_))
+        ));
+
+        // program PRESENT + execution PRESENT ⇒ claim mandatory AND matching.
+        let mut claim_missing = base_lock();
+        claim_missing.program_identity = Some(program.clone());
+        claim_missing.execution_contract = Some(execution_envelope_claiming(None));
+        assert_eq!(
+            verify_lock_program_identity(&claim_missing),
+            Err(CapsuleProgramLinkError::ParentMissing)
+        );
+
+        let other_id = test_capsule_program_envelope(2).capsule_program_id;
+        let mut claim_mismatched = base_lock();
+        claim_mismatched.program_identity = Some(program.clone());
+        claim_mismatched.execution_contract =
+            Some(execution_envelope_claiming(Some(other_id.clone())));
+        assert_eq!(
+            verify_lock_program_identity(&claim_mismatched),
+            Err(CapsuleProgramLinkError::ParentMismatch {
+                claimed: other_id,
+                verified: program_id.clone(),
+            })
+        );
+
+        let mut claim_matching = base_lock();
+        claim_matching.program_identity = Some(program);
+        claim_matching.execution_contract = Some(execution_envelope_claiming(Some(program_id)));
+        assert_eq!(verify_lock_program_identity(&claim_matching), Ok(()));
+    }
+
+    #[test]
+    fn every_chokepoint_rejects_every_invalid_program_identity_state() {
+        let program = test_capsule_program_envelope(1);
+        let program_id = program.capsule_program_id.clone();
+        let other_id = test_capsule_program_envelope(2).capsule_program_id;
+
+        let mut tampered = base_lock();
+        tampered.program_identity = Some(tampered_program_envelope());
+
+        let mut claim_missing = base_lock();
+        claim_missing.program_identity = Some(program.clone());
+        claim_missing.execution_contract = Some(execution_envelope_claiming(None));
+
+        let mut claim_mismatched = base_lock();
+        claim_mismatched.program_identity = Some(program);
+        claim_mismatched.execution_contract = Some(execution_envelope_claiming(Some(other_id)));
+
+        let mut orphan_claim = base_lock();
+        orphan_claim.execution_contract = Some(execution_envelope_claiming(Some(program_id)));
+
+        let scenarios = [
+            ("tampered program id", tampered),
+            ("parent claim missing", claim_missing),
+            ("parent claim mismatched", claim_mismatched),
+            ("orphan parent claim", orphan_claim),
+        ];
+
+        for (scenario, lock) in &scenarios {
+            for (chokepoint, run) in chokepoints() {
+                let error =
+                    run(lock).expect_err(&format!("{scenario} must reject via {chokepoint}"));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("program identity verification failed"),
+                    "{scenario} via {chokepoint}: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_chokepoint_accepts_a_matching_program_identity() {
+        let program = test_capsule_program_envelope(1);
+        let claim = program.capsule_program_id.clone();
+        let mut lock = base_lock();
+        lock.program_identity = Some(program);
+        lock.execution_contract = Some(execution_envelope_claiming(Some(claim)));
+
+        for (chokepoint, run) in chokepoints() {
+            assert!(run(&lock).is_ok(), "matching claim must pass {chokepoint}");
+        }
+    }
+
+    #[test]
+    fn draft_program_identity_without_execution_passes_every_chokepoint() {
+        let mut lock = base_lock();
+        lock.program_identity = Some(test_capsule_program_envelope(1));
+
+        assert_eq!(verify_lock_program_identity(&lock), Ok(()));
+        for (chokepoint, run) in chokepoints() {
+            assert!(run(&lock).is_ok(), "draft state must pass {chokepoint}");
+        }
+    }
+
+    #[test]
+    fn lock_id_is_byte_stable_when_adding_or_removing_program_identity() {
+        use crate::capsule_lock::{compute_lock_id, validate_persisted_strict};
+
+        let base = base_lock();
+        let baseline = compute_lock_id(&base).expect("baseline lock_id");
+
+        let mut with_program = base.clone();
+        with_program.program_identity = Some(test_capsule_program_envelope(1));
+        assert_eq!(
+            baseline,
+            compute_lock_id(&with_program).expect("with-program lock_id")
+        );
+        // The persisted lock still validates (its stored lock_id matches).
+        assert!(validate_persisted_strict(&with_program).is_ok());
+
+        let mut removed = with_program.clone();
+        removed.program_identity = None;
+        assert_eq!(
+            baseline,
+            compute_lock_id(&removed).expect("removed lock_id")
+        );
+    }
+
+    #[test]
+    fn signature_payload_binds_program_identity_while_legacy_bytes_stay_stable() {
+        use crate::capsule_lock::{
+            canonical_projection_bytes, canonical_signature_payload_bytes, compute_lock_id,
+        };
+
+        // A legacy lock (no additive sections) signs over bytes byte-identical
+        // to the identity projection — unchanged by the program_identity field.
+        let base = base_lock();
+        assert_eq!(
+            canonical_signature_payload_bytes(&base).unwrap(),
+            canonical_projection_bytes(&base).unwrap()
+        );
+
+        // A lock carrying the execution sections but NO program_identity signs
+        // over bytes byte-identical to the pre-ADR-014 signature projection
+        // {schema_version, execution_contract, launch, resolution, contract}.
+        let payload = node_env_payload();
+        let digest = environment_value_digest(&payload).unwrap().to_string();
+        let mut with_execution = base.clone();
+        with_execution.execution_contract = Some(sample_envelope());
+        with_execution.launch = Some(env_launch("NODE_ENV", payload, digest));
+        let pre_change_bytes = serde_jcs::to_vec(&json!({
+            "schema_version": &with_execution.schema_version,
+            "execution_contract": &with_execution.execution_contract,
+            "launch": &with_execution.launch,
+            "resolution": &with_execution.resolution,
+            "contract": &with_execution.contract,
+        }))
+        .expect("pre-change signature bytes");
+        assert_eq!(
+            canonical_signature_payload_bytes(&with_execution).unwrap(),
+            pre_change_bytes
+        );
+
+        // Adding program_identity changes the signature bytes while lock_id
+        // stays byte-stable.
+        let baseline = compute_lock_id(&with_execution).unwrap();
+        let mut with_program = with_execution.clone();
+        with_program.program_identity = Some(test_capsule_program_envelope(1));
+        assert_eq!(baseline, compute_lock_id(&with_program).unwrap());
+        assert_ne!(
+            canonical_signature_payload_bytes(&with_execution).unwrap(),
+            canonical_signature_payload_bytes(&with_program).unwrap()
         );
     }
 }

@@ -3,7 +3,7 @@ use capsule::engine::execution_graph::{ExecutionGraphBuilder, ExecutionGraphNode
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::input_resolver::{ResolveInputOptions, ResolvedInput, resolve_authoritative_input};
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, manifest_external_capsule_dependencies,
+    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
 use serde::Serialize;
@@ -94,7 +94,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                         if err.to_string().contains("manifest hash mismatch") {
                             AtoExecutionError::lockfile_tampered(
                                 err.to_string(),
-                                Some(CAPSULE_LOCK_FILE_NAME),
+                                Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
                             )
                         } else {
                             AtoExecutionError::policy_violation(err.to_string())
@@ -163,7 +163,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
                 if !contracts.is_empty() {
                     return Err(AtoExecutionError::lock_incomplete(
                         "external capsule dependencies require capsule.lock.json",
-                        Some(CAPSULE_LOCK_FILE_NAME),
+                        Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
                     )
                     .into());
                 }
@@ -254,7 +254,7 @@ pub fn execute(path: PathBuf, json_output: bool) -> Result<ValidateResult> {
             println!("  Target: {}", target_label);
         }
         if result.lockfile_checked {
-            println!("  {}: verified", CAPSULE_LOCK_FILE_NAME);
+            println!("  {}: verified", LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
         }
         if result.warnings.is_empty() {
             println!("  IPC: no warnings");
@@ -341,7 +341,7 @@ fn debug_assert_provider_node_parity(
 /// consistency check.
 fn debug_assert_provider_aliases_match_lock(
     external_dependencies: &[capsule::types::ExternalCapsuleDependency],
-    lock: &capsule::lockfile::CapsuleLock,
+    lock: &capsule::lockfile::LegacyCapsuleLock,
 ) {
     let input = build_input_from_external_dependencies(external_dependencies, None);
     let graph = ExecutionGraphBuilder::build(input);
@@ -489,8 +489,8 @@ mod tests {
 
     fn empty_lock_with(
         capsule_dependencies: Vec<capsule::lockfile::LockedCapsuleDependency>,
-    ) -> capsule::lockfile::CapsuleLock {
-        capsule::lockfile::CapsuleLock {
+    ) -> capsule::lockfile::LegacyCapsuleLock {
+        capsule::lockfile::LegacyCapsuleLock {
             version: "1".to_string(),
             meta: capsule::lockfile::LockMeta {
                 created_at: "2026-05-09T00:00:00Z".to_string(),

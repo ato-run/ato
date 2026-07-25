@@ -3,8 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule::ato_lock::{self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info};
-use capsule::input_resolver::ATO_LOCK_FILE_NAME;
+use capsule::capsule_lock::{self, CapsuleLock, UnresolvedReason, UnresolvedValue, closure_info};
+use capsule::input_resolver::CAPSULE_LOCK_FILE_NAME;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -71,11 +71,11 @@ pub(crate) fn materialize_workspace_result(
     project_root: &Path,
     mut result: SourceInferenceResult,
 ) -> Result<WorkspaceMaterialization> {
-    ato_lock::recompute_lock_id(&mut result.lock)?;
+    capsule_lock::recompute_lock_id(&mut result.lock)?;
     validate_durable_workspace_lock(&result.lock)?;
 
-    let lock_path = project_root.join(ATO_LOCK_FILE_NAME);
-    ato_lock::write_pretty_to_path(&result.lock, &lock_path)?;
+    let lock_path = project_root.join(CAPSULE_LOCK_FILE_NAME);
+    capsule_lock::write_pretty_to_path(&result.lock, &lock_path)?;
 
     let sidecar_dir = project_root.join(INIT_SOURCE_INFERENCE_DIR);
     fs::create_dir_all(&sidecar_dir)
@@ -116,8 +116,8 @@ pub(crate) fn materialize_workspace_result(
     })
 }
 
-pub(crate) fn validate_durable_workspace_lock(lock: &AtoLock) -> Result<()> {
-    ato_lock::validate_structural(lock, ato_lock::ValidationMode::Strict)
+pub(crate) fn validate_durable_workspace_lock(lock: &CapsuleLock) -> Result<()> {
+    capsule_lock::validate_structural(lock, capsule_lock::ValidationMode::Strict)
         .map_err(|errors| anyhow::anyhow!(format_validation_errors(errors)))?;
 
     if !lock.binding.entries.is_empty() {
@@ -198,7 +198,7 @@ fn write_binding_seed(
     binding_seed_path: &Path,
     lock_path: &Path,
     provenance_cache_path: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> Result<()> {
     if let Some(parent) = binding_seed_path.parent() {
         fs::create_dir_all(parent)
@@ -241,7 +241,7 @@ fn ensure_field_or_unresolved(
     );
 }
 
-fn ensure_closure_completion_or_unresolved(lock: &AtoLock) -> Result<()> {
+fn ensure_closure_completion_or_unresolved(lock: &CapsuleLock) -> Result<()> {
     let Some(closure) = lock.resolution.entries.get("closure") else {
         return Ok(());
     };
@@ -296,7 +296,7 @@ fn has_non_empty_array(value: Option<&Value>) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_unresolved_fields(lock: &AtoLock) -> Vec<CachedUnresolvedField> {
+fn collect_unresolved_fields(lock: &CapsuleLock) -> Vec<CachedUnresolvedField> {
     let mut fields = Vec::new();
     fields.extend(lock.contract.unresolved.iter().map(|value| {
         CachedUnresolvedField {
@@ -380,7 +380,7 @@ fn build_field_index(provenance: &[SourceInferenceProvenance]) -> Vec<CachedFiel
     ordered
 }
 
-fn format_validation_errors(errors: Vec<ato_lock::AtoLockValidationError>) -> String {
+fn format_validation_errors(errors: Vec<capsule_lock::CapsuleLockValidationError>) -> String {
     errors
         .into_iter()
         .map(|error| error.to_string())
@@ -400,7 +400,7 @@ mod tests {
     };
 
     fn sample_result() -> SourceInferenceResult {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn durable_workspace_lock_requires_unresolved_marker_for_incomplete_closure() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn durable_workspace_lock_accepts_complete_closure_without_unresolved_marker() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -516,7 +516,7 @@ mod tests {
 
     #[test]
     fn durable_workspace_lock_rejects_embedded_binding_entries() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.binding
             .entries
             .insert("host_port".to_string(), json!(3000));
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn durable_workspace_lock_requires_unresolved_marker_when_process_missing() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.resolution.entries.insert(
             "runtime".to_string(),
             json!({"kind": "deno", "resolved_by": "test"}),
@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn durable_workspace_lock_rejects_unrelated_unresolved_marker_for_missing_required_field() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.unresolved.push(UnresolvedValue {
             field: Some("contract.process".to_string()),
             reason: UnresolvedReason::InsufficientEvidence,

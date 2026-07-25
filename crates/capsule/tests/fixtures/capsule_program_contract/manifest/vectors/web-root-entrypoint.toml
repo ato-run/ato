@@ -1,0 +1,12 @@
+schema_version = "0.3"
+name = "web-root"
+version = "0.1.0"
+type = "app"
+default_target = "site"
+
+[targets.site]
+runtime = "web"
+driver = "static"
+run = "index.html"
+working_dir = "."
+port = 8081

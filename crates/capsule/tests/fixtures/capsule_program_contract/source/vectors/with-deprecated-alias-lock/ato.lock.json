@@ -1,0 +1,7 @@
+{
+  "schema": "ato.lock/v1",
+  "program_identity": {
+    "capsule_program_id": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "program_contract": { "schema": "ato.capsule-program/v1" }
+  }
+}

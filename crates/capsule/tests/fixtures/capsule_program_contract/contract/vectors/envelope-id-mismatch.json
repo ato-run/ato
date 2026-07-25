@@ -1,0 +1,30 @@
+{
+  "capsule_program_id": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+  "diagnostics": {
+    "adapter_log": "normalized 1 target"
+  },
+  "generated_at": "2026-07-24T00:00:00Z",
+  "program_contract": {
+    "manifest_intent": {
+      "capsule_type": "web-app",
+      "schema": "ato.capsule-program-manifest-intent/v1",
+      "state": {
+        "scratch": {
+          "durability": "ephemeral",
+          "kind": "filesystem",
+          "purpose": "run scratch"
+        }
+      }
+    },
+    "schema": "ato.capsule-program/v1",
+    "source": {
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "projection_schema": "ato.capsule-program-source-projection/v1"
+    }
+  },
+  "provenance": {
+    "authoring_schema": "0.3",
+    "name": "my-app",
+    "version": "1.2.3"
+  }
+}

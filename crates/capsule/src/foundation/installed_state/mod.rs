@@ -18,7 +18,7 @@
 //! `launch_condition_claims` (see [`launch_condition`]) is the canonical
 //! per-installed-app **launch condition ledger**: for installed apps it is the
 //! device/provider-local source of truth for the conditions required to launch /
-//! relaunch. `capsule.toml` is the app-owned declaration and `ato.lock` is a
+//! relaunch. `capsule.toml` is the app-owned declaration and `capsule.lock` is a
 //! portable resolved description — both are **inputs / provenance**, not the
 //! runtime query layer for relaunch.
 //!

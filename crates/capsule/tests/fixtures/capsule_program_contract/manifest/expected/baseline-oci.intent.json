@@ -1,0 +1,14 @@
+{
+  "capsule_type": "app",
+  "default_target": "app",
+  "schema": "ato.capsule-program-manifest-intent/v1",
+  "targets": {
+    "targets": {
+      "app": {
+        "image": "ghcr.io/example/app:1",
+        "port": 8080,
+        "runtime": "oci"
+      }
+    }
+  }
+}

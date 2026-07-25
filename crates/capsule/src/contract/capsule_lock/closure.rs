@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::error::{CapsuleError, Result};
 
 const KIND_METADATA_ONLY: &str = "metadata_only";
@@ -22,7 +22,7 @@ pub struct ClosureInfo {
     pub provenance_limited: bool,
 }
 
-pub fn normalize_lock_closure(lock: &mut AtoLock) -> Result<()> {
+pub fn normalize_lock_closure(lock: &mut CapsuleLock) -> Result<()> {
     normalize_resolution_closure_entries(&mut lock.resolution.entries)
 }
 

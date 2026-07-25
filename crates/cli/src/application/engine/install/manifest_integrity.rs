@@ -428,9 +428,9 @@ pub(crate) fn extract_manifest_toml_from_capsule(bytes: &[u8]) -> Result<String>
     bail!("Invalid artifact: capsule.toml not found in .capsule archive")
 }
 
-pub(crate) fn extract_embedded_ato_lock_from_capsule(
+pub(crate) fn extract_embedded_capsule_lock_from_capsule(
     bytes: &[u8],
-) -> Result<Option<capsule::ato_lock::AtoLock>> {
+) -> Result<Option<capsule::capsule_lock::CapsuleLock>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -439,14 +439,17 @@ pub(crate) fn extract_embedded_ato_lock_from_capsule(
         let mut entry = entry.context("Invalid .capsule entry")?;
         let path = entry.path().context("Failed to read archive entry path")?;
         let path_str = path.to_string_lossy();
-        if path_str == "ato.lock.json" || path_str == "capsule.lock.json" {
+        if path_str == "capsule.lock"
+            || path_str == "ato.lock.json"
+            || path_str == "capsule.lock.json"
+        {
             let mut lock_raw = Vec::new();
             entry
                 .read_to_end(&mut lock_raw)
                 .context("Failed to read embedded lock from artifact")?;
             let lock_raw =
                 String::from_utf8(lock_raw).with_context(|| "embedded lock must be UTF-8")?;
-            let lock = capsule::ato_lock::load_unvalidated_from_str(&lock_raw)
+            let lock = capsule::capsule_lock::load_unvalidated_from_str(&lock_raw)
                 .map_err(anyhow::Error::from)
                 .with_context(|| "embedded lock is invalid")?;
             return Ok(Some(lock));

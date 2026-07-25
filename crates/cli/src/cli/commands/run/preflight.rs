@@ -975,7 +975,7 @@ fn preflight_python_uv_lock_for_source_driver(plan: &capsule::router::ManifestDa
 
 fn preflight_python_uv_binary_for_source_driver(
     plan: &capsule::router::ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Result<()> {
     if !is_python_source_target(plan) {
         return Ok(());
@@ -1008,7 +1008,7 @@ fn preflight_python_uv_binary_for_source_driver(
         .map_err(|_| {
             AtoExecutionError::lock_incomplete(
                 "source/python target requires hermetic uv from capsule.lock.json (tools.uv)",
-                Some(CAPSULE_LOCK_FILE_NAME),
+                Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
             )
             .into()
         })

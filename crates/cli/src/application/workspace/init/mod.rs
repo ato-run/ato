@@ -49,7 +49,7 @@ pub fn execute_durable_init(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` only materializes a durable baseline when canonical input is missing.",
-                capsule::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::CAPSULE_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }
@@ -167,7 +167,7 @@ pub fn write_manual_manifest_stub(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` manual starter generation is not available on top of canonical lock input.",
-                capsule::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::CAPSULE_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }
@@ -215,7 +215,7 @@ pub fn write_legacy_detected_manifest(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. Legacy manifest generation is not available on top of canonical lock input.",
-                capsule::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::CAPSULE_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }
@@ -351,7 +351,7 @@ mod tests {
         )
         .expect("durable init");
 
-        assert!(dir.path().join("ato.lock.json").exists());
+        assert!(dir.path().join("capsule.lock").exists());
         assert!(dir.path().join("main.ts").exists());
         assert!(dir.path().join("deno.json").exists());
     }
@@ -383,7 +383,7 @@ mod tests {
         )
         .expect("durable init");
 
-        assert!(dir.path().join("ato.lock.json").exists());
+        assert!(dir.path().join("capsule.lock").exists());
         assert!(dir.path().join("main.py").exists());
         assert!(dir.path().join("pyproject.toml").exists());
         assert!(dir.path().join("uv.lock").exists());
@@ -412,7 +412,7 @@ mod tests {
         )
         .expect("durable init");
 
-        assert!(dir.path().join("ato.lock.json").exists());
+        assert!(dir.path().join("capsule.lock").exists());
         assert!(dir.path().join("main.js").exists());
         assert!(dir.path().join("deno.json").exists());
         assert!(dir.path().join("deno.lock").exists());

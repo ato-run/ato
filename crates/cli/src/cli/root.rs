@@ -617,7 +617,7 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Materialize a durable ato.lock.json baseline for a local workspace"
+        about = "Materialize a durable capsule.lock baseline for a local workspace"
     )]
     Init {
         /// Local workspace path to initialize

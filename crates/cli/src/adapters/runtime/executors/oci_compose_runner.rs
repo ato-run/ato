@@ -122,24 +122,28 @@ pub(crate) async fn execute_compose_run(
 
     let provider = DefaultOciProviderSelector.select_provider();
 
-    // 5. Load existing lock with dual-read: prefer ato.lock.json resolution.oci_images,
-    //    fall back to ato.oci.lock.json. Fail-closed on main lock parse/validation errors.
+    // 5. Load existing lock with dual-read: prefer the canonical lock's
+    //    resolution.oci_images (capsule.lock, or its deprecated ato.lock.json
+    //    alias), fall back to ato.oci.lock.json. Fail-closed on main lock
+    //    parse/validation errors.
     let existing_lock = {
-        let main_lock_path = project_dir.join("ato.lock.json");
-        let main_lock = if main_lock_path.exists() {
-            let lock = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path)
-                .map_err(|e| anyhow::anyhow!("failed to read ato.lock.json: {e}"))?;
-            Some(lock)
-        } else {
-            None
+        let main_lock_path = capsule::input_resolver::resolve_canonical_lock_path(project_dir)
+            .map_err(|e| anyhow::anyhow!("failed to resolve canonical lock: {e}"))?;
+        let main_lock = match main_lock_path.as_deref() {
+            Some(path) => {
+                let lock = capsule::capsule_lock::load_unvalidated_from_path(path)
+                    .map_err(|e| anyhow::anyhow!("failed to read canonical lock: {e}"))?;
+                Some(lock)
+            }
+            None => None,
         };
 
         let oci_read = match &main_lock {
-            Some(lock) => capsule::ato_lock::read_oci_lock(lock, project_dir)
-                .map_err(|e| anyhow::anyhow!("ato.lock.json OCI resolution is invalid: {e}"))?,
+            Some(lock) => capsule::capsule_lock::read_oci_lock(lock, project_dir)
+                .map_err(|e| anyhow::anyhow!("canonical lock OCI resolution is invalid: {e}"))?,
             None => {
-                let empty = capsule::ato_lock::AtoLock::default();
-                capsule::ato_lock::read_oci_lock(&empty, project_dir)
+                let empty = capsule::capsule_lock::CapsuleLock::default();
+                capsule::capsule_lock::read_oci_lock(&empty, project_dir)
                     .map_err(|e| anyhow::anyhow!("failed to read OCI lock: {e}"))?
             }
         };
@@ -193,9 +197,9 @@ pub(crate) async fn execute_compose_run(
         .notify("🔒 Lock written: ato.oci.lock.json".to_string())
         .await?;
 
-    // Also write OCI facts into main ato.lock.json.
+    // Also write OCI facts into the canonical lock (capsule.lock).
     {
-        use capsule::ato_lock::oci::{
+        use capsule::capsule_lock::oci::{
             OciImageLockEntry as MainOciImageLockEntry, OciImportEntry,
             construct_resolved_ref_from_sidecar, write_oci_facts_to_main_lock,
         };
@@ -1504,7 +1508,7 @@ services:
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref = capsule::ato_lock::construct_resolved_ref_from_sidecar(
+                let resolved_ref = capsule::capsule_lock::construct_resolved_ref_from_sidecar(
                     &entry.declared_ref,
                     &entry.resolved_digest,
                 );
@@ -1530,17 +1534,17 @@ services:
                 source_hash: source_hash.clone(),
             },
         );
-        capsule::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+        capsule::capsule_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
             .unwrap();
 
         // Verify main lock.
-        let main_lock_path = tmp.path().join("ato.lock.json");
-        assert!(main_lock_path.exists(), "ato.lock.json must be created");
-        let loaded = capsule::ato_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
-        let oci_read = capsule::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let main_lock_path = tmp.path().join("capsule.lock");
+        assert!(main_lock_path.exists(), "capsule.lock must be created");
+        let loaded = capsule::capsule_lock::load_unvalidated_from_path(&main_lock_path).unwrap();
+        let oci_read = capsule::capsule_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         assert_eq!(
             oci_read.source,
-            capsule::ato_lock::OciLockSource::MainLock,
+            capsule::capsule_lock::OciLockSource::MainLock,
             "read must prefer main lock when present"
         );
         assert_eq!(oci_read.images.len(), 2, "must contain both services");
@@ -1599,7 +1603,7 @@ services:
             .images
             .iter()
             .map(|(name, entry)| {
-                let resolved_ref = capsule::ato_lock::construct_resolved_ref_from_sidecar(
+                let resolved_ref = capsule::capsule_lock::construct_resolved_ref_from_sidecar(
                     &entry.declared_ref,
                     &entry.resolved_digest,
                 );
@@ -1625,13 +1629,13 @@ services:
                 source_hash: source_hash.clone(),
             },
         );
-        capsule::ato_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
+        capsule::capsule_lock::write_oci_facts_to_main_lock(tmp.path(), main_images, main_imports)
             .unwrap();
 
         let loaded =
-            capsule::ato_lock::load_unvalidated_from_path(&tmp.path().join("ato.lock.json"))
+            capsule::capsule_lock::load_unvalidated_from_path(&tmp.path().join("capsule.lock"))
                 .unwrap();
-        let oci_read = capsule::ato_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
+        let oci_read = capsule::capsule_lock::read_oci_lock(&loaded, tmp.path()).unwrap();
         let import = oci_read.imports.get("default").unwrap();
         assert_eq!(
             import.source_path, "subdir/docker-compose.yml",
@@ -1645,6 +1649,6 @@ services:
 
     // Re-declare main-lock OCI types for use in tests above.
     // (Not re-exported from parent scope since the parent module uses the sidecar type.)
-    use capsule::ato_lock::OciImageLockEntry as MainOciImageLockEntry;
-    use capsule::ato_lock::OciImportEntry;
+    use capsule::capsule_lock::OciImageLockEntry as MainOciImageLockEntry;
+    use capsule::capsule_lock::OciImportEntry;
 }
