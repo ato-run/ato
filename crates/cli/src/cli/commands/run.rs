@@ -1661,6 +1661,56 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    /// Serializes and isolates `ATO_HOME` for tests that drive
+    /// `normalize_run_target_after_install` through source-inference
+    /// materialization.
+    ///
+    /// That path writes run-state under `$ATO_HOME/runs/source-inference/`
+    /// (`ato_runs_dir()`). Reading the ambient process-global `ATO_HOME` races
+    /// every other env-touching test that repoints it: the run-state write then
+    /// lands in a foreign test's tempdir, and if that test tears its tempdir
+    /// down mid-materialize the write fails and the `.expect(..)` panics. The
+    /// guard holds the crate-wide env lock (`crate::tests::env_lock()` — the
+    /// documented "all env-touching tests must hold this lock" contract) and
+    /// points `ATO_HOME` at a private dir for the test's duration, restoring the
+    /// prior value on drop.
+    struct IsolatedAtoHome {
+        previous: Option<std::ffi::OsString>,
+        _home: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedAtoHome {
+        fn acquire() -> Self {
+            let lock = crate::tests::env_lock().lock().expect("env lock");
+            let home = tempfile::tempdir().expect("ato home tempdir");
+            let previous = std::env::var_os("ATO_HOME");
+            // SAFETY: process-env mutation is serialized by the env lock held above.
+            unsafe {
+                std::env::set_var("ATO_HOME", home.path());
+            }
+            Self {
+                previous,
+                _home: home,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for IsolatedAtoHome {
+        fn drop(&mut self) {
+            // Restore `ATO_HOME` before the tempdir/lock fields drop so no other
+            // env-locked test observes this test's (about-to-be-removed) dir.
+            // SAFETY: the env lock (`_lock`) is still held until this returns.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn resolve_python_dependency_lock_path_prefers_source_uv_lock() {
         let tmp = tempfile::tempdir().expect("create temp dir");
@@ -2043,6 +2093,9 @@ run = "node server.js""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_run_target_accepts_direct_canonical_lock_file() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
         let lock_path = tmp.path().join("capsule.lock");
         let mut lock = CapsuleLock::default();
@@ -2133,6 +2186,9 @@ run = "node server.js""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_provider_target_persists_authoritative_lock_in_workspace() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace_root = tmp.path().join("provider-workspace");
         std::fs::create_dir_all(workspace_root.join(".ato").join("provider"))
@@ -2284,6 +2340,9 @@ run = "main.py""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_run_target_accepts_direct_appimage_file() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
         let appimage_path = tmp.path().join("dist").join("MyApp.AppImage");
         std::fs::create_dir_all(appimage_path.parent().expect("dist parent")).expect("create dist");
