@@ -1470,14 +1470,22 @@ run = "node lib.js fixtures/db.json --port 3000"
         // No need to touch the file — prepend_managed_node_to_path just uses the
         // parent directory; it does not check the binary exists.
 
-        // Force a deterministic baseline PATH for this test.
-        let original_path = std::env::var_os("PATH");
-        // SAFETY: tests are currently single-threaded per integration runner for
-        // this crate; if that ever changes we'll need a test fixture instead of
-        // mutating process env. For a pinpoint regression this is acceptable.
-        unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
-        }
+        // `prepend_managed_node_to_path` derives the child command's PATH from
+        // this process's inherited `PATH` (`prepend_dirs_to_path` reads
+        // `env::var("PATH")`). Hold the crate-wide env lock and read that PATH
+        // ourselves so no concurrent env-touching test can mutate it between our
+        // snapshot and the prepend's own read, then assert against it.
+        //
+        // This test used to `set_var("PATH", "/usr/bin:/bin")` for a
+        // deterministic baseline — an *unlocked* global mutation that raced
+        // every concurrent bare-name spawn in the same test binary (the
+        // source-inference `uv`/`deno` materialize tests) into ENOENT, and was
+        // itself stomped by `runtime_setup`'s podman probe (which scrubs PATH).
+        // Asserting against the real inherited PATH needs no mutation and checks
+        // the same invariant (#294): the managed bin dir is prepended, ahead of
+        // the inherited entries.
+        let _env = crate::tests::env_lock().lock().expect("env lock");
+        let inherited_path = std::env::var("PATH").unwrap_or_default();
 
         let mut cmd = std::process::Command::new(&node_bin);
         prepend_managed_node_to_path(&mut cmd, &node_bin);
@@ -1493,15 +1501,12 @@ run = "node lib.js fixtures/db.json --port 3000"
             })
             .expect("PATH must be set on the command");
 
-        // restore before asserting so a panic doesn't poison env
-        match original_path {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
-
         let managed_dir = node_bin.parent().unwrap().display().to_string();
         let separator = if cfg!(windows) { ";" } else { ":" };
-        let expected = format!("{}{}{}", managed_dir, separator, "/usr/bin:/bin");
+        let expected = match inherited_path.is_empty() {
+            true => managed_dir,
+            false => format!("{managed_dir}{separator}{inherited_path}"),
+        };
         assert_eq!(
             applied_path, expected,
             "managed Node bin dir must be first entry of PATH (#294)"
