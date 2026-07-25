@@ -895,13 +895,19 @@ impl FirecrackerBackend {
     /// already reports as `supports_uffd_mem_backend`, so the flag can never
     /// disagree with what the runner advertises. (U0 built that probe and noted
     /// "no restore path uses it yet"; this is that path.)
-    fn uffd_preview_mode(&self, store: &CasStore, memory: &BlobManifest) -> Option<UffdMode> {
+    fn uffd_preview_mode(
+        &self,
+        store: &CasStore,
+        memory: &BlobManifest,
+        supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+    ) -> Option<UffdMode> {
         let caps = self.probe();
         Self::uffd_preview_mode_for(
             caps.supports_uffd_mem_backend,
             caps.uffd_reason.as_deref(),
             store,
             memory,
+            supervisor_build,
         )
     }
 
@@ -944,6 +950,7 @@ impl FirecrackerBackend {
         uffd_reason: Option<&str>,
         store: &CasStore,
         memory: &BlobManifest,
+        supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
     ) -> Option<UffdMode> {
         let refuse = |reason: String| {
             eprintln!(
@@ -952,6 +959,20 @@ impl FirecrackerBackend {
             );
             None
         };
+        // Precondition (0), and the selector's HIGHEST-precedence rule: a
+        // binding-required artifact is never UFFD until Phase 8 BindingLease
+        // (`decide_mem_backend`: "capsule requires bindings → File"). The runner
+        // lane never evaluates that selector — `ATO_RUNNER_UFFD_PREVIEW` flows
+        // straight from the env var into `RestoreReadyStateInput` — so without
+        // this check the flag alone was enough to demand-page a supervisor
+        // artifact, which is exactly what the selector forbids. Enforcing it
+        // here rather than at the call site means no lane can bypass it.
+        if declares_required_bindings(supervisor_build) {
+            return refuse(
+                "capsule requires bindings; UFFD is no-binding-only until Phase 8 BindingLease"
+                    .to_string(),
+            );
+        }
         if !host_supports_uffd {
             return refuse(
                 uffd_reason
@@ -1504,6 +1525,16 @@ impl SupervisorDrive {
 /// ever bound), so it takes the ordinary health wait, exactly like a no-binding
 /// artifact.
 fn restore_uses_agent_probe(
+    supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
+) -> bool {
+    declares_required_bindings(supervisor_build)
+}
+
+/// Does this artifact require bindings? Shared by the agent-probe selection
+/// above and the UFFD refusal in [`FirecrackerBackend::uffd_preview_mode_for`]
+/// so the two cannot drift apart — they are the same question about the same
+/// receipt, asked for different reasons.
+fn declares_required_bindings(
     supervisor_build: Option<&crate::manifest::SupervisorBuildReceipt>,
 ) -> bool {
     supervisor_build.is_some_and(|s| !s.binding_names.is_empty())
@@ -2795,7 +2826,11 @@ impl SnapshotBackend for FirecrackerBackend {
             // fell back to File would assert nothing. It takes effect only when the
             // product flag is off.
             let uffd = if input.uffd_preview {
-                self.uffd_preview_mode(input.store, memory)
+                self.uffd_preview_mode(
+                    input.store,
+                    memory,
+                    input.manifest.supervisor_build.as_ref(),
+                )
             } else {
                 uffd_mode()
             };
@@ -4255,7 +4290,8 @@ mod tests {
             "test needs a multi-chunk memory image to cover partial residency"
         );
 
-        let mode = |s: &CasStore| FirecrackerBackend::uffd_preview_mode_for(true, None, s, &memory);
+        let mode =
+            |s: &CasStore| FirecrackerBackend::uffd_preview_mode_for(true, None, s, &memory, None);
 
         // Fully resident on a capable host ⇒ UFFD. The common local-CAS-hit path
         // must NOT regress: this gate only ever subtracts UFFD, never adds it.
@@ -4271,10 +4307,42 @@ mod tests {
                 false,
                 Some("no userfaultfd"),
                 &store,
-                &memory
+                &memory,
+                None
             ),
             None,
             "an incapable host must fall back to File"
+        );
+
+        // A binding-required artifact is refused even when everything else is
+        // perfect: capable host, fully resident memory. This is the selector's
+        // highest-precedence rule ("capsule requires bindings → File"), which the
+        // runner lane never evaluated — `ATO_RUNNER_UFFD_PREVIEW` reaches
+        // `RestoreReadyStateInput` straight from the env var, so before this gate
+        // the flag alone could demand-page a supervisor artifact.
+        let bound = crate::manifest::SupervisorBuildReceipt {
+            binding_names: vec!["openai_api_key".into()],
+            page_hygiene_boot_args: true,
+            placeholder_absent_from_seal: Some(true),
+            state_volumes: vec![],
+            state_owner_scope: None,
+        };
+        assert_eq!(
+            FirecrackerBackend::uffd_preview_mode_for(true, None, &store, &memory, Some(&bound)),
+            None,
+            "a binding-required artifact must never be demand-paged before Phase 8"
+        );
+        // ...while a ZERO-binding supervisor artifact (dockerfile import) is not
+        // binding-required, so it keeps UFFD — the gate subtracts only what the
+        // selector forbids, it does not blanket-refuse every supervisor build.
+        let unbound = crate::manifest::SupervisorBuildReceipt {
+            binding_names: vec![],
+            ..bound.clone()
+        };
+        assert_eq!(
+            FirecrackerBackend::uffd_preview_mode_for(true, None, &store, &memory, Some(&unbound)),
+            Some(UffdMode::Cas),
+            "a zero-binding supervisor artifact must still be eligible for UFFD"
         );
 
         // An empty-but-openable CAS — the exact shape the openability check accepts.
