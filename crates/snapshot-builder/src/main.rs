@@ -85,6 +85,9 @@ mod claim_eligibility;
 /// snapshot, resume and seal a candidate from a live held guest, then persist and
 /// upload it through the same path a built artifact takes.
 mod guest_capture;
+/// Submission Wizard PR-2 (slice 3) — the local TCP relay that fronts a held
+/// guest so the operator-registered ingress origin has something to reach.
+mod hold_ingress;
 /// Submission Wizard PR-2 (slice 1) — the pure, KVM-free HOLD-phase orchestration
 /// (hold → capture → #1088 accept). Driven by injected seams; unreachable in prod
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
