@@ -72,10 +72,22 @@ use snapshot::rootfs_builder::{
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
-    BuildLayers, BuildReadyStateInput, FirecrackerBackend, RestoreContract, RestoreReadyStateInput,
-    SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe, no_secret_scan,
+    BuildLayers, BuildReadyStateInput, FirecrackerBackend, ReadyStateManifest, RestoreContract,
+    RestoreReadyStateInput, SanitizerContract, SnapshotBackend, SupervisorBindings, WarmupRecipe,
+    no_secret_scan,
 };
 
+/// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
+/// from the contract the control plane pinned on the claim. Its module doc states
+/// exactly which guarantee that is, and which it deliberately is not.
+mod claim_eligibility;
+/// Submission Wizard PR-2 (slice 3) — the production [`CaptureAction`]: pause,
+/// snapshot, resume and seal a candidate from a live held guest, then persist and
+/// upload it through the same path a built artifact takes.
+mod guest_capture;
+/// Submission Wizard PR-2 (slice 3) — the local TCP relay that fronts a held
+/// guest so the operator-registered ingress origin has something to reach.
+mod hold_ingress;
 /// Submission Wizard PR-2 (slice 1) — the pure, KVM-free HOLD-phase orchestration
 /// (hold → capture → #1088 accept). Driven by injected seams; unreachable in prod
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
@@ -135,6 +147,60 @@ struct Config {
     rootfs_size_mib: u64,
     once: bool,
     poll_secs: u64,
+    /// The interactive HOLD's slot, when this daemon is configured to serve one.
+    ///
+    /// `None` ⇒ this builder does not advertise `interactive_capture` at all
+    /// (see [`supported_job_kinds`]). The lane needs a local port to relay from
+    /// AND the operator-registered `(builder_id, slot_id)` that names the https
+    /// origin fronting it — a builder with only some of that could claim a hold
+    /// it cannot make reachable, so all three arrive together or not at all.
+    hold_slot: Option<HoldSlotConfig>,
+}
+
+/// One interactive-hold slot this daemon can serve.
+///
+/// Read by the job-loop arm that boots a hold (next commit); parsed and
+/// validated now because it is what decides whether the lane is advertised at
+/// all, and that decision must be right from startup.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct HoldSlotConfig {
+    /// Matches the `builder_id` the operator registered with ato-api.
+    builder_id: String,
+    /// Matches the `slot_id` the operator registered with ato-api.
+    slot_id: String,
+    /// Where the relay listens — the local port the registered origin proxies to.
+    proxy_listen: std::net::SocketAddr,
+}
+
+/// Parse the three hold-slot flags, all-or-nothing.
+///
+/// A partial set is an operator error, not a degraded mode: a builder that
+/// advertised `interactive_capture` without a registered slot would claim holds
+/// it could never make reachable, and every one of them would burn a full build
+/// before failing at `hold-ready`. So all three or none, checked at startup.
+fn hold_slot_from(flag: &dyn Fn(&str) -> Option<String>) -> Result<Option<HoldSlotConfig>> {
+    let builder_id = flag("--builder-id");
+    let slot_id = flag("--slot-id");
+    let listen = flag("--hold-proxy-listen");
+    match (builder_id, slot_id, listen) {
+        (None, None, None) => Ok(None),
+        (Some(builder_id), Some(slot_id), Some(listen)) => {
+            let proxy_listen = listen.parse::<std::net::SocketAddr>().map_err(|e| {
+                anyhow!("--hold-proxy-listen `{listen}` is not a host:port address: {e}")
+            })?;
+            Ok(Some(HoldSlotConfig {
+                builder_id,
+                slot_id,
+                proxy_listen,
+            }))
+        }
+        _ => Err(anyhow!(
+            "--builder-id, --slot-id and --hold-proxy-listen must be given together \
+             (they are one registration: the slot ato-api knows, and the local port \
+             its public origin proxies to)"
+        )),
+    }
 }
 
 impl Config {
@@ -169,6 +235,7 @@ impl Config {
             poll_secs: flag("--poll-secs")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(15),
+            hold_slot: hold_slot_from(&flag)?,
         })
     }
 }
@@ -221,14 +288,29 @@ struct ClaimedJob {
     /// any use ([`parse_import_params`]).
     #[serde(default)]
     params: Option<serde_json::Value>,
-    /// Capsule v1 (`ato.execution-contract/v1`) expected contract, if the
-    /// control plane pinned one for this job. `#[serde(default)]` so an
-    /// ato-api that does not send this field yet (every ato-api today)
-    /// parses exactly as before — this is a forward-compatible, additive
-    /// field with no real sender yet; see `attempt_v1_execution_identity`'s
-    /// doc comment for what happens once one is present.
+    /// Capsule v1 (`ato.execution-contract/v1`) expected contract, when the
+    /// control plane pinned one for this job.
+    ///
+    /// ato-api DOES send this (with `execution_id` and
+    /// `execution_identity_schema` below) whenever the job has a row in
+    /// `capsule_snapshot_job_execution_contracts` — migration 0123. All three
+    /// stay `#[serde(default)]` because a job enqueued without a pinned
+    /// identity, or an installation that has not applied 0123, legitimately has
+    /// none, and must parse exactly as before.
     #[serde(default)]
     execution_contract: Option<ExecutionContractV1>,
+    /// The canonical hash of `execution_contract`, as the control plane stored
+    /// it. Carried separately (rather than recomputed) so the builder can VERIFY
+    /// the pair agrees instead of trusting either alone — see
+    /// [`crate::claim_eligibility`]. Read once the hold lane is wired into the
+    /// job loop; parsed now so the claim shape is already correct.
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_id: Option<String>,
+    /// The identity schema tag the contract was stored under.
+    #[serde(default)]
+    #[allow(dead_code)]
+    execution_identity_schema: Option<String>,
     // ── Submission Wizard §3.1 claim extension (interactive_capture only) ──
     //
     // The api emits these five fields on (and only on) a claimed
@@ -508,6 +590,7 @@ fn warmup_from_env() -> std::result::Result<WarmupRecipe, String> {
 /// list is the master switch for the whole submission-wizard lane: while the
 /// kind is unadvertised the api never hands this builder such a job, so the
 /// wizard code paths are unreachable in prod. Pinned by a unit test.
+/// The kinds every builder can always take.
 const SUPPORTED_JOB_KINDS: &[&str] = &[
     "recipe",
     "dockerfile_import",
@@ -516,13 +599,29 @@ const SUPPORTED_JOB_KINDS: &[&str] = &[
     "source_materialize",
 ];
 
+/// What THIS daemon advertises on the claim.
+///
+/// `interactive_capture` is added only when a hold slot is configured. That is
+/// the switch: a builder with no slot cannot make a held guest reachable, so it
+/// must not take holds — claiming one would burn a full build and then fail at
+/// `hold-ready` with `builder_slot_not_registered`. Configuring the slot is an
+/// operator act that pairs with registering its public origin in ato-api, so the
+/// two sides turn on together.
+fn supported_job_kinds(cfg: &Config) -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = SUPPORTED_JOB_KINDS.to_vec();
+    if cfg.hold_slot.is_some() {
+        kinds.push(wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE);
+    }
+    kinds
+}
+
 fn claim(cfg: &Config) -> Result<Vec<ClaimedJob>> {
     let resp: ClaimResponse = ureq::post(&format!("{}/v1/capsule-snapshots/jobs/claim", cfg.api_url))
         .set("authorization", &format!("Bearer {}", cfg.token))
         // ato#1002: advertise every lane this builder handles (see
         // SUPPORTED_JOB_KINDS for what is on the list and what is deliberately
         // off it).
-        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": SUPPORTED_JOB_KINDS }))
+        .send_json(ureq::json!({ "agent_id": cfg.agent_id, "capacity": 1, "supported_kinds": supported_job_kinds(cfg) }))
         .map_err(|e| anyhow!("claim request: {e}"))?
         .into_json()
         .context("parse claim response")?;
@@ -674,6 +773,58 @@ fn ack_source_materialize_failed(
 /// breaking runner-side verification against `capsule_snapshots.execution_id`. Until the
 /// Ready-State build path stamps the true declared execution id into the manifest, a
 /// missing value **fails closed** here (`failure_stage = artifact_metadata`).
+/// Persist a sealed manifest beside its CAS and return the location the registry
+/// records for it.
+///
+/// `cas://<job_id>/<hash>` names `<work>/<job_id>/{manifest.json, cas/}`: a runner
+/// restores by loading `manifest.json`, verifying `manifest.id() == hash`
+/// (fail-closed), then restoring from the co-located CAS. With the artifact store
+/// configured (ato#1002 Snapshot Serving v1), the pair is packed into one
+/// `artifact.tar.gz` and uploaded BEFORE anything is acked, and the returned
+/// location names the remote store instead. Upload failure is a failure of the
+/// whole step — never sealed-without-bytes. Absent config keeps the local
+/// `cas://` location, no packing, no upload.
+///
+/// Shared by the auto-seal build and by the interactive HOLD's capture seam, so a
+/// held candidate is persisted, scanned and located by exactly the same code as a
+/// built artifact.
+fn persist_and_locate_artifact(
+    manifest: &ReadyStateManifest,
+    jobdir: &Path,
+    job_id: &str,
+    artifact_manifest_hash: &str,
+) -> std::result::Result<String, (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let manifest_json = serde_json::to_vec_pretty(manifest).map_err(|e| {
+        fail(
+            "artifact_metadata",
+            format!("serialize sealed manifest: {e}"),
+        )
+    })?;
+    // The manifest carries no layer bytes — only hashes, contracts and sizes — so
+    // a canary hit here means something leaked into metadata.
+    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
+        return Err(fail(
+            "no_secret_scan",
+            "sealed manifest json failed the no-secret scan".into(),
+        ));
+    }
+    std::fs::write(jobdir.join("manifest.json"), &manifest_json)
+        .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
+
+    match upload::ArtifactStore::from_env().map_err(|e| fail("artifact_upload", e))? {
+        Some(store) => store
+            .pack_and_upload(
+                &upload::SystemImportCommandRunner,
+                jobdir,
+                job_id,
+                artifact_manifest_hash,
+            )
+            .map_err(|e| fail("artifact_upload", e)),
+        None => Ok(upload::cas_location(job_id, artifact_manifest_hash)),
+    }
+}
+
 fn sealed_identity(
     execution_id: Option<&str>,
     runner_class_id: Option<String>,
@@ -2587,49 +2738,14 @@ fn process_job(
         manifest_out.execution_id.as_deref(),
         manifest_out.runner_class_id.as_ref().map(|c| c.to_string()),
     )?;
-    let artifact_location = upload::cas_location(&job.id, &artifact_manifest_hash);
 
-    // 7. Persist the sealed manifest beside the CAS (Track E): `cas://<job_id>/<hash>`
-    // names <work>/<job_id>/{manifest.json, cas/}, and a runner restores by loading
-    // manifest.json, verifying `manifest.id() == artifact_manifest_hash` (fail-closed),
-    // then restoring from the co-located CAS. The manifest is derived entirely from
-    // already-scanned sealed content + non-secret metadata (hashes, contracts, sizes) —
-    // it carries no layer bytes and no secrets.
-    let manifest_json = serde_json::to_vec_pretty(&manifest_out).map_err(|e| {
-        fail(
-            "artifact_metadata",
-            format!("serialize sealed manifest: {e}"),
-        )
-    })?;
-    if !no_secret_scan::blob_is_clean(&manifest_json, L4_CANARIES) {
-        return Err(fail(
-            "no_secret_scan",
-            "sealed manifest json failed the no-secret scan".into(),
-        ));
-    }
-    std::fs::write(jobdir.join("manifest.json"), &manifest_json)
-        .map_err(|e| fail("artifact_metadata", format!("persist sealed manifest: {e}")))?;
-
-    // 8. ato#1002 Snapshot Serving v1: with the artifact store configured (all
-    // four ATO_ARTIFACT_S3_* vars — validated all-or-nothing at startup),
-    // package {manifest.json, cas/} into one artifact.tar.gz and upload it
-    // BEFORE the sealed ack; the registered location then names the remote
-    // store ("r2://<bucket>/<job_id>/<artifact_manifest_hash>"). Upload failure
-    // ⇒ failed ack at artifact_upload — never sealed-without-bytes. Absent
-    // config keeps v1 byte-identical: the same-host cas:// location above, no
-    // packing, no upload.
+    // 7-8. Persist the sealed manifest beside the CAS and (when the artifact
+    // store is configured) pack + upload it, yielding the location the registry
+    // records. Shared with the interactive HOLD's capture seam so a held
+    // candidate is persisted and located by exactly the same code as a built
+    // artifact — see `persist_and_locate_artifact`.
     let artifact_location =
-        match upload::ArtifactStore::from_env().map_err(|e| fail("artifact_upload", e))? {
-            Some(store) => store
-                .pack_and_upload(
-                    &upload::SystemImportCommandRunner,
-                    &jobdir,
-                    &job.id,
-                    &artifact_manifest_hash,
-                )
-                .map_err(|e| fail("artifact_upload", e))?,
-            None => artifact_location,
-        };
+        persist_and_locate_artifact(&manifest_out, &jobdir, &job.id, &artifact_manifest_hash)?;
 
     Ok(Artifact {
         capsule_manifest_hash: produced.capsule_manifest_hash,
@@ -3232,18 +3348,22 @@ targets = ["web"]
     }
 
     #[test]
-    fn interactive_capture_is_not_advertised_in_supported_kinds() {
-        // The master switch for this whole lane. It stays OFF until the VM half
-        // (boot-and-hold + pause/snapshot/resume + a production eligibility
-        // proof) exists: the api hands a builder an interactive job only if the
-        // builder asked for the kind.
+    fn interactive_capture_is_advertised_only_with_a_configured_hold_slot() {
+        // The master switch for the whole lane, and it is CONFIGURATION, not a
+        // constant: a builder with no hold slot cannot make a held guest
+        // reachable, so it must not take holds. Claiming one would burn a full
+        // build and then fail at `hold-ready` with `builder_slot_not_registered`.
+        // Configuring the slot is the operator act that pairs with registering
+        // its public origin in ato-api, so the two sides turn on together.
+        let mut cfg = test_cfg();
+        cfg.hold_slot = None;
         assert!(
-            !SUPPORTED_JOB_KINDS.contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
-            "interactive_capture must stay absent from supported_kinds: {SUPPORTED_JOB_KINDS:?}"
+            !supported_job_kinds(&cfg).contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
+            "a builder with no hold slot must not advertise the interactive lane"
         );
-        // …and the five lanes that ARE advertised stay advertised.
+        // The five always-on lanes stay exactly as they were.
         assert_eq!(
-            SUPPORTED_JOB_KINDS,
+            supported_job_kinds(&cfg),
             [
                 "recipe",
                 "dockerfile_import",
@@ -3252,6 +3372,44 @@ targets = ["web"]
                 "source_materialize"
             ]
         );
+
+        cfg.hold_slot = Some(HoldSlotConfig {
+            builder_id: "builder-1".into(),
+            slot_id: "slot-3".into(),
+            proxy_listen: "127.0.0.1:8500".parse().expect("addr"),
+        });
+        assert!(
+            supported_job_kinds(&cfg).contains(&wizard_wire::JOB_KIND_INTERACTIVE_CAPTURE),
+            "a configured hold slot must advertise the interactive lane"
+        );
+    }
+
+    #[test]
+    fn a_partial_hold_slot_configuration_is_refused_at_startup() {
+        // Half a registration is an operator error, not a degraded mode.
+        let only_builder = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&only_builder).is_err());
+
+        let missing_listen = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            "--slot-id" => Some("slot-3".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&missing_listen).is_err());
+
+        let bad_listen = |name: &str| match name {
+            "--builder-id" => Some("builder-1".to_string()),
+            "--slot-id" => Some("slot-3".to_string()),
+            "--hold-proxy-listen" => Some("not-an-address".to_string()),
+            _ => None,
+        };
+        assert!(hold_slot_from(&bad_listen).is_err());
+
+        let none = |_: &str| None;
+        assert!(matches!(hold_slot_from(&none), Ok(None)));
     }
 
     #[test]
@@ -3672,6 +3830,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         }
     }
 
@@ -3691,6 +3850,8 @@ targets = ["web"]
             kind: kind.into(),
             params,
             execution_contract: None,
+            execution_id: None,
+            execution_identity_schema: None,
             // §3.1: absent for every non-wizard kind — which is every kind this
             // helper builds.
             wire_contract_version: None,
@@ -4351,6 +4512,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         };
         // A real (long, random) token gates: an artifact containing it is dirty.
         let cfg = mk("0123456789abcdef0123456789abcdef");
@@ -4382,6 +4544,7 @@ targets = ["web"]
             rootfs_size_mib: 1024,
             once: true,
             poll_secs: 15,
+            hold_slot: None,
         };
         let cas = std::env::temp_dir().join(format!("compat-planted-token-{}", std::process::id()));
         std::fs::create_dir_all(&cas).unwrap();
@@ -4844,6 +5007,48 @@ targets = ["web"]
             &serde_json::json!({}),
         )
         .expect("placeholder opaque digest")
+    }
+
+    /// Eligibility is minted only when the pinned contract and the pinned
+    /// `execution_id` actually agree.
+    ///
+    /// This is the whole strength of the declaration-based gate: the builder does
+    /// not trust either half alone, it recomputes the canonical hash. A contract
+    /// swapped under a stale id — or an id swapped under a contract — must not
+    /// mint a proof that then lets a live workload be captured.
+    #[test]
+    fn eligibility_needs_the_contract_and_its_id_to_agree() {
+        use crate::claim_eligibility::ClaimContractEligibility;
+        use crate::hold_phase::EligibilitySource;
+
+        let source_digest = content_digest_of(b"src", DigestAlgorithm::Blake3);
+        let readonly_layer = content_digest_of(b"rootfs", DigestAlgorithm::Blake3);
+        let contract = v1_minimal_contract(source_digest, readonly_layer);
+        let real_id = contract
+            .compute_execution_id()
+            .expect("a well-formed contract hashes");
+
+        // Agreeing pair ⇒ a proof (this contract declares no External State).
+        let mut ok =
+            ClaimContractEligibility::from_claim(Some(&contract), Some(&real_id.to_string()));
+        assert!(
+            ok.eligibility().is_ok(),
+            "an agreeing contract/id pair with no External State must be eligible"
+        );
+
+        // Same contract, a DIFFERENT well-formed id ⇒ refused.
+        let other_id = format!("blake3:{}", "b".repeat(64));
+        assert_ne!(other_id, real_id.to_string());
+        let mut mismatched = ClaimContractEligibility::from_claim(Some(&contract), Some(&other_id));
+        assert!(
+            mismatched.eligibility().is_err(),
+            "a contract must never be eligible under an id that is not its own hash"
+        );
+
+        // A malformed id is refused too — never coerced into an `ExecutionId`.
+        let mut malformed =
+            ClaimContractEligibility::from_claim(Some(&contract), Some("not-a-blake3-id"));
+        assert!(malformed.eligibility().is_err());
     }
 
     /// A minimal but fully valid `ExecutionContractV1`: zero dependencies,

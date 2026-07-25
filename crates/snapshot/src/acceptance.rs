@@ -1206,6 +1206,42 @@ fn validate_config(config: &AcceptanceConfig) -> Result<(), AcceptanceFailure> {
     Ok(())
 }
 
+// ── Untrusted-child environment hygiene ─────────────────────────────────────
+
+/// Environment namespace reserved for the trusted Snapshot acceptance broker.
+///
+/// Capsule-controlled install, build and probe processes must never inherit
+/// values from this namespace. The broker locator is a capability hint rather
+/// than key material, but hiding the whole namespace keeps the trust boundary
+/// simple and stops a future credential from being exposed by accident.
+pub const SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX: &str = "ATO_SNAPSHOT_ACCEPTANCE_";
+
+/// Remove every Snapshot acceptance credential from an untrusted child.
+///
+/// Call immediately before spawning, as well as when constructing a shared
+/// command: a caller may add ordinary environment overrides afterwards, but must
+/// not be able to reintroduce a credential inherited from the Ato process.
+///
+/// Lives here, beside the acceptance protocol it protects, so every executor of
+/// `seal_at.command` shares one definition — the CLI's build path and the
+/// builder's hold path run the SAME verification command and must scrub the same
+/// namespace (RFC §8.4: no production secret is connected).
+pub fn sanitize_untrusted_environment(command: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .starts_with(SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX)
+        {
+            command.env_remove(name);
+        }
+    }
+    // Remove the currently defined names even when they are absent from Ato's
+    // own environment, so an explicitly added one is still dropped.
+    command
+        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY")
+        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER");
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicU64;

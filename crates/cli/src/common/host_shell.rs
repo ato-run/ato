@@ -7,40 +7,14 @@
 //! escapes).
 
 use std::collections::VecDeque;
-use std::ffi::OsStr;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 
-/// Environment namespace reserved for the trusted Snapshot acceptance broker.
-///
-/// Capsule-controlled install, build, and probe processes must never inherit
-/// values from this namespace. The broker locator is a capability hint rather
-/// than key material, but hiding the entire namespace keeps the trust boundary
-/// simple and prevents future credentials from being exposed accidentally.
-pub const SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX: &str = "ATO_SNAPSHOT_ACCEPTANCE_";
-
-/// Remove every Snapshot acceptance credential from an untrusted child.
-///
-/// Call this immediately before spawning as well as when constructing shared
-/// shell commands: callers may add ordinary environment overrides after
-/// construction, but cannot accidentally reintroduce a credential inherited
-/// by the Ato process.
-pub fn sanitize_untrusted_environment(command: &mut Command) {
-    for (name, _) in std::env::vars_os() {
-        if os_str_starts_with(&name, SNAPSHOT_ACCEPTANCE_CREDENTIAL_ENV_PREFIX) {
-            command.env_remove(name);
-        }
-    }
-    // Always remove the currently defined names, even when they are not set in
-    // Ato's environment at construction time and a caller added one explicitly.
-    command
-        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY")
-        .env_remove("ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER");
-}
-
-fn os_str_starts_with(value: &OsStr, prefix: &str) -> bool {
-    value.to_string_lossy().starts_with(prefix)
-}
+// The definition moved to `snapshot::acceptance`, beside the acceptance protocol
+// it protects, so the CLI's build path and the builder's hold path — which run
+// the SAME `seal_at.command` — scrub the same namespace from one definition
+// (RFC §8.4). Re-exported here so this module's callers are unchanged.
+pub use snapshot::acceptance::sanitize_untrusted_environment;
 
 /// The deterministic Windows shell invocation for a command string:
 /// `cmd.exe /D /S /C "<command>"`.

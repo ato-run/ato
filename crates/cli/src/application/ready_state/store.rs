@@ -326,7 +326,8 @@ fn load_v1_snapshot_with_expected_envelope(
     let recomputed_snapshot_id = snapshot_manifest
         .snapshot_id()
         .map_err(anyhow::Error::new)?;
-    if &snapshot_manifest.execution_id != execution_id || recomputed_snapshot_id.as_str() != snapshot_id
+    if &snapshot_manifest.execution_id != execution_id
+        || recomputed_snapshot_id.as_str() != snapshot_id
     {
         anyhow::bail!("Snapshot v1 path identity does not match its authenticated metadata");
     }
@@ -732,10 +733,10 @@ mod tests {
         ArtifactEnvelopeV1,
     ) {
         use capsule::snapshot_manifest::{
-            CapturePolicyV1, SNAPSHOT_MANIFEST_V1_SCHEMA, SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA,
-            SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA, SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA,
-            RestoreContractV1, SanitizationAttestationV1, SecretScanAttestationV1,
-            SnapshotCaptureProvenance,
+            CapturePolicyV1, RestoreContractV1, SNAPSHOT_MANIFEST_V1_SCHEMA,
+            SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA, SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA,
+            SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA, SanitizationAttestationV1,
+            SecretScanAttestationV1, SnapshotCaptureProvenance,
         };
         use snapshot::{
             BuildLayers, BuildReadyStateInput, FakeSnapshotBackend, RestoreContract,
@@ -816,7 +817,11 @@ mod tests {
 
     /// Build AND commit a Capsule v1 candidate, returning the committed
     /// sidecar + its final directory.
-    fn seal_v1(root: &Path, execution_id: ExecutionId, marker: u8) -> (SnapshotManifestV1, PathBuf) {
+    fn seal_v1(
+        root: &Path,
+        execution_id: ExecutionId,
+        marker: u8,
+    ) -> (SnapshotManifestV1, PathBuf) {
         let (staging, legacy, snapshot, envelope) = candidate_v1(root, &execution_id, marker);
         let path = staging.commit(root, &legacy, &snapshot, &envelope).unwrap();
         (snapshot, path)
@@ -877,14 +882,14 @@ mod tests {
             &tampered_envelope,
         )
         .unwrap();
-        let receipt_path = acceptance_receipt_path(root.path(), &execution_id, snapshot_id.as_str());
+        let receipt_path =
+            acceptance_receipt_path(root.path(), &execution_id, snapshot_id.as_str());
         let mut tampered_receipt: LocalAcceptanceReceiptV1 = read_json(&receipt_path).unwrap();
         tampered_receipt.envelope_id = tampered_envelope.envelope_id;
         tampered_receipt.authenticator = format!("blake3:{}", "0".repeat(64));
         write_json(&receipt_path, &tampered_receipt).unwrap();
 
-        let error =
-            load_v1_snapshot(root.path(), &execution_id, snapshot_id.as_str()).unwrap_err();
+        let error = load_v1_snapshot(root.path(), &execution_id, snapshot_id.as_str()).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -920,9 +925,6 @@ mod tests {
             .into_iter()
             .map(|snapshot| snapshot.snapshot_manifest.snapshot_id().unwrap())
             .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(
-            ids,
-            std::collections::BTreeSet::from([first_id, second_id])
-        );
+        assert_eq!(ids, std::collections::BTreeSet::from([first_id, second_id]));
     }
 }
