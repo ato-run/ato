@@ -21,14 +21,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule::execution_contract::{
-    ContentDigest, DigestAlgorithm, ExecutionContractEnvelopeV1, ExecutionId,
-};
-use capsule::snapshot_manifest::{
-    CapturePolicyV1, RestoreContractV1, SnapshotCaptureProvenance, SnapshotManifestV1,
-};
+use capsule::execution_contract::{ExecutionContractEnvelopeV1, ExecutionId};
 use capsule::types::CapsuleManifest;
-use capsulefs::{BlobManifest, CasStore};
+use capsulefs::CasStore;
 use snapshot::acceptance::{
     AcceptanceCancellation, AcceptanceConfig, AcceptanceDisposition, RunningSnapshotAcceptance,
     SystemClock, VerifiedRunningSnapshotEligibility,
@@ -343,7 +338,9 @@ fn seal_v1_via_disposable_acceptance(
         anyhow::anyhow!("Capsule v1 running-capture Snapshot is ineligible: {failure}")
     })?;
 
-    let candidate = build_v1_candidate_manifest(backend, execution_id, receipt)?;
+    let candidate =
+        snapshot::disposable_lifecycle::build_v1_candidate_manifest(backend, execution_id, receipt)
+            .map_err(|e| anyhow::anyhow!(e))?;
     let config = request
         .acceptance_config
         .unwrap_or_else(|| default_acceptance_config(request.seal_at_argv));
@@ -352,8 +349,10 @@ fn seal_v1_via_disposable_acceptance(
     let mut lifecycle = snapshot::disposable_lifecycle::BackendDisposableLifecycle {
         backend,
         store,
-        legacy_manifest: receipt.manifest.clone(),
-        candidate_manifest: candidate,
+        candidate: snapshot::disposable_lifecycle::FixedCandidate {
+            legacy: receipt.manifest.clone(),
+            candidate,
+        },
         overlay_root,
         session: None,
         last_candidate: None,
@@ -388,118 +387,6 @@ fn seal_v1_via_disposable_acceptance(
         .context("create authenticated Snapshot Artifact Envelope")?;
     staging.commit(state_root, &receipt.manifest, &accepted, &envelope)?;
     Ok(())
-}
-
-/// Derive a REAL (backend-reported) v1 identity/compatibility sidecar for the
-/// legacy manifest `build_ready_state` just sealed. Built directly from the
-/// concrete, already-validated [`ReadyStateManifest`] in hand (rather than a
-/// tolerant JSON round-trip through
-/// [`LegacyReadyStateManifestV1`](capsule::snapshot_manifest::LegacyReadyStateManifestV1),
-/// which exists for reading OPAQUE legacy artifacts this caller does not
-/// have).
-fn build_v1_candidate_manifest(
-    backend: &dyn SnapshotBackend,
-    execution_id: ExecutionId,
-    receipt: &BuildReadyStateReceipt,
-) -> Result<SnapshotManifestV1> {
-    use capsule::snapshot_manifest::{
-        SNAPSHOT_MANIFEST_V1_SCHEMA, SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA,
-        SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA, SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA,
-        SanitizationAttestationV1, SecretScanAttestationV1,
-    };
-
-    let compatibility_contract = backend
-        .snapshot_compatibility_contract()
-        .context("resolve Snapshot v1 backend compatibility")?;
-    let legacy = &receipt.manifest;
-
-    let mut disk_layer_refs = Vec::new();
-    for layer in [
-        &legacy.layers.rootfs,
-        &legacy.layers.runtime,
-        &legacy.layers.dependency,
-        &legacy.layers.app,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        disk_layer_refs.push(blob_layer_ref(layer)?);
-    }
-    let memory_layer_refs = legacy
-        .layers
-        .memory
-        .as_ref()
-        .map(blob_layer_ref)
-        .transpose()?
-        .into_iter()
-        .collect::<Vec<_>>();
-    let vmstate_layer_refs = legacy
-        .layers
-        .vmstate
-        .as_ref()
-        .map(blob_layer_ref)
-        .transpose()?
-        .into_iter()
-        .collect::<Vec<_>>();
-
-    let sanitization_steps = legacy
-        .sanitizer_contract
-        .steps
-        .iter()
-        .map(|step| step.step.clone())
-        .collect();
-    let secret_scan = &receipt.no_secret_proof;
-
-    Ok(SnapshotManifestV1 {
-        schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
-        execution_id,
-        restore_contract: RestoreContractV1 {
-            schema: SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA.to_string(),
-            // Must equal `compatibility_contract.runner_restore_contract`
-            // (`SnapshotManifestV1::validate`'s cross-field invariant) — the
-            // SAME restore protocol identity, viewed from two angles.
-            restore_protocol: compatibility_contract.runner_restore_contract.clone(),
-            steps: Vec::new(),
-        },
-        compatibility_contract,
-        memory_layer_refs,
-        vmstate_layer_refs,
-        disk_layer_refs,
-        capture_policy: CapturePolicyV1::Running,
-        capture_provenance: SnapshotCaptureProvenance {
-            capsule_manifest_hash: Some(legacy.capsule_manifest_hash.clone()),
-            build_receipt_id: legacy.build_receipt_id.clone(),
-        },
-        sanitization_attestation: SanitizationAttestationV1 {
-            schema: SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA.to_string(),
-            steps: sanitization_steps,
-        },
-        secret_scan_attestation: SecretScanAttestationV1 {
-            schema: SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA.to_string(),
-            scanner_identity: secret_scan.scanner_version.clone(),
-            policy_identity: snapshot::POLICY_VERSION.to_string(),
-            scanned_layers: secret_scan.scanned_layers.clone(),
-            verdict: secret_scan.verdict.clone(),
-        },
-    })
-}
-
-/// A real (not placeholder) content commitment for one captured
-/// [`BlobManifest`] layer ref: a domain-separated hash of its own canonical
-/// form. This is a genuine content address of the actual captured layer
-/// metadata (which itself commits to every chunk hash within) — not the same
-/// digest CapsuleFS uses internally for the blob's OWN address, but a real,
-/// independently-verifiable commitment that changes iff the underlying
-/// content changes.
-fn blob_layer_ref(blob: &BlobManifest) -> Result<ContentDigest> {
-    let canonical = serde_jcs::to_vec(blob).context("canonicalize Snapshot layer ref")?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ato.snapshot-layer-ref/v1\0");
-    hasher.update(&canonical);
-    Ok(ContentDigest::new(
-        DigestAlgorithm::Blake3,
-        *hasher.finalize().as_bytes(),
-    ))
 }
 
 #[cfg(test)]
