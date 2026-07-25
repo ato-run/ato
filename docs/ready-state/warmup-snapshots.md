@@ -114,33 +114,51 @@ restore kinds that handler serves — `restore_snapshot`,
 `restore_snapshot_with_bindings` (supervisor) and `restore_snapshot_preview`
 (`crates/cli/src/application/ready_state/restore_lease.rs:41,50,60`).
 
-Two **fail-to-File** gates, both inside `uffd_preview_mode`
-(`crates/snapshot/src/firecracker.rs:898`, called at `:2742`):
+**Three** ordered **fail-to-File** gates, all inside `uffd_preview_mode_for`
+(`crates/snapshot/src/firecracker.rs`, `fn uffd_preview_mode_for`; reached from
+`uffd_preview_mode`, which `restore()` calls when `input.uffd_preview` is set).
+Every refusal `eprintln`s its reason and returns `None`, i.e. **falls back to the
+eager File path** — File is the safe backend and UFFD is only ever the
+optimization, so a preview opt-in can never take a runner's leases down with it:
 
-1. **Host capability** via `FirecrackerBackend::probe()` (`crate::uffd::evaluate`:
+1. **No required bindings** — `declares_required_bindings(supervisor_build)` refuses
+   with "capsule requires bindings; UFFD is no-binding-only until Phase 8
+   BindingLease". This is the pure selector's highest-precedence rule
+   (`crates/snapshot/src/mem_backend_selector.rs`: "a binding-required capsule is
+   never UFFD until Phase 8 `BindingLease`"), and it is enforced **in the backend**
+   rather than at a call site precisely because the runner lane never evaluates
+   `decide_mem_backend` — `ATO_RUNNER_UFFD_PREVIEW` flows straight from env into
+   `RestoreReadyStateInput`, so a call-site check would be bypassable.
+2. **Host capability** via `FirecrackerBackend::probe()` (`crate::uffd::evaluate`:
    x86_64 + `/dev/kvm` + Firecracker ≥ 1.0 + kernel userfaultfd) — an unsupported
-   host **degrades to the eager File path, logging why**. The env gate
-   `ATO_FC_UFFD` (test smokes) stays ungated and hard-fails by contrast.
-2. **Local CAS openable** — `uffd_preview_mode()`
-   (`crates/snapshot/src/firecracker.rs:898`) returns `Some(UffdMode::Cas)` only
-   when `CasStore::open(store.root())` succeeds (`:915`). Local CAS residency is
-   a **precondition** for UFFD, never a disqualifier: `PageSource::Cas` serves
-   every guest fault straight out of the local CAS, so a CAS that will not open
-   would leave the guest faulting on memory nobody can supply → refuse to File
-   and say why. The pure selector states the same rule: `memory image not in
-   local CAS → File` (`crates/snapshot/src/mem_backend_selector.rs:106`).
+   host degrades to File, logging why. The env gate `ATO_FC_UFFD` (test smokes)
+   stays ungated and hard-fails by contrast.
+3. **Memory image fully RESIDENT in the local CAS** — `CasStore::has_all_chunks`
+   over the whole chunk list, not `CasStore::open`. Openable is not populated:
+   `open` `create_dir_all`s the layout and therefore succeeds on an *empty* store,
+   so the pre-#1127 openability check accepted exactly the case it was supposed to
+   reject. Residency is a **precondition**, never a disqualifier: `PageSource::Cas`
+   resolves every guest fault out of the local CAS and production builds it with
+   `remote: None`, so a chunk absent when the guest touches that page has nowhere to
+   come from. Refusing here converts a post-boot page-fault abort — after the
+   session was handed out — into a clean pre-boot `MissingChunk` in
+   `rehydrate_atomic`. The pure selector states the same rule: `memory image not in
+   local CAS → File`.
 
-**Not yet enforced — the no-binding discipline.** `RestoreInput.uffd_preview`
-documents itself as no-binding-only (`crates/snapshot/src/backend.rs:304-309`)
-and the pure selector encodes the same rule
-(`crates/snapshot/src/mem_backend_selector.rs:10-11`: "a binding-required capsule
-is never UFFD until Phase 8 `BindingLease`"). Neither is upheld on the P1 runner
-path: the flag is read from env for every lease, and the backend applies no
-binding gate. `decide_mem_backend` is **never called on the runner path** at all —
-its only callers are `crates/cli/src/application/pipeline/phases/run.rs:3950` and
-`crates/cli/src/application/ready_state/diagnostics.rs:73`, both CLI-lane — so
-none of its invariants constrain a runner. Until Phase 8, **do not set this flag
-on a runner that serves supervisor / required-binding artifacts.**
+All three gates are covered host-independently in CI by the single unit test
+`uffd_preview_requires_a_resident_memory_image_not_just_an_openable_cas`
+(`crates/snapshot/src/firecracker.rs`, `mod tests`), which asserts the
+binding-refusal, the incapable-host refusal, full residency ⇒ `Some(UffdMode::Cas)`,
+and both the empty-CAS and partial-residency refusals. `uffd_preview_mode_for` is
+data-in/decision-out precisely so these rules do not depend on a `#[ignore]`d KVM
+smoke to be enforced.
+
+> Gates 1 and 3 landed in #1127; this section previously described only gate 2 plus
+> a `CasStore::open` check, because it was rewritten in #1128 three seconds after
+> #1127 merged and therefore documented the code as it had been. The paragraph that
+> used to sit here — "Not yet enforced — the no-binding discipline … do not set this
+> flag on a runner that serves supervisor / required-binding artifacts" — told
+> operators to avoid a configuration the code now refuses, and has been deleted.
 
 > **Measured (2026-07-18, warm-cache staging host, deployed 512 MB snapshots):**
 > UFFD is *slower* than File when the image is local — File's cached sequential
@@ -167,10 +185,9 @@ on a runner that serves supervisor / required-binding artifacts.**
 > UFFD pays off only once memory is demand-paged from a remote object store
 > instead of whole-fetched — the deferred **R2-direct paging** work. That page
 > source does not exist on the product path yet: `UffdMode::Cas` builds a remote
-> read-through only under `ATO_FC_UFFD_REMOTE`
-> (`crates/snapshot/src/firecracker.rs:2849`, a test-only env), and
-> `CasSource::ensure_local` early-returns when `remote` is `None`
-> (`crates/snapshot/src/uffd_page_server.rs:450-453`).
+> read-through only under `ATO_FC_UFFD_REMOTE` (a test-only env read in
+> `FirecrackerBackend::restore`), and `CasSource::ensure_local`
+> (`crates/snapshot/src/uffd_page_server.rs`) early-returns when `remote` is `None`.
 
 ### The other two UFFD lanes (`ato run`, development only)
 
@@ -184,19 +201,26 @@ and the two `ato run` lanes do *not* gate identically
 |---|---|---|---|
 | `ATO_READY_STATE_UFFD_AUTO_PREVIEW=1` | U15 auto-select — `decide_mem_backend` chooses | ✅ `capsule_no_bindings` | ✅ `local_cas_has_memory` |
 | `ATO_READY_STATE_UFFD_PREVIEW=1` | U11 forced preview | ❌ none | ✅ bails: `"UFFD preview requires the memory image in the local CAS; it is not present."` (`:3988`) |
-| `ATO_RUNNER_UFFD_PREVIEW=1` | P1 Connected Runner (§4 above) | ❌ none | ❌ none (CAS *openable* only) |
+| `ATO_RUNNER_UFFD_PREVIEW=1` | P1 Connected Runner (§4 above) | ✅ `declares_required_bindings` refuses (#1127) | ✅ **full** `has_all_chunks` sweep (#1127) |
 
 Auto-select takes precedence over the forced preview when both are set
-(`run.rs:3925`). Both are off by default (`…/ready_state/flags.rs:62-82`). Note
-the U11 forced lane shares the runner's binding-invariant hole: combined with
-`ATO_READY_STATE_BINDINGS_PREVIEW=1` it will take a binding-required capsule down
-the UFFD path.
+(`run.rs:3925`). Both are off by default (`…/ready_state/flags.rs:62-82`).
 
-⚠️ The ✅ locality checks are **first-chunk probes**, not full residency sweeps —
-`memory.chunks.first()` + `store.has_chunk` (`run.rs:3934`, `:3983`,
-`crates/cli/src/application/ready_state/diagnostics.rs:55-58`, which calls itself
-"a cheap, honest liveness check"). A partially-resident image (interrupted fetch)
-reports local and fails later, at fault time, instead of cleanly pre-boot.
+All three lanes end at the same place — the boolean they compute is passed as
+`RestoreReadyStateInput.uffd_preview` (`run.rs:4018`) — so since #1127 the backend's
+three gates apply to **all** of them. That closes the U11 forced lane's
+binding-invariant hole too: combined with `ATO_READY_STATE_BINDINGS_PREVIEW=1` it can
+still *ask* for UFFD on a binding-required capsule, but `uffd_preview_mode` refuses
+and the restore runs on File.
+
+⚠️ The two `ato run` lanes' own locality checks are still **first-chunk probes**, not
+full residency sweeps — `memory.chunks.first()` + `store.has_chunk` (`run.rs:3934`,
+`:3983`, `crates/cli/src/application/ready_state/diagnostics.rs:55-58`, which calls
+itself "a cheap, honest liveness check"). They are now only a pre-check: a
+partially-resident image (interrupted fetch) has chunk 0 present, so it passes them,
+and the backend's `has_all_chunks` sweep then refuses UFFD and restores on File. So
+the U11 lane's `bail!` still fires when chunk 0 is missing, but a half-fetched image
+no longer aborts the run — it silently downgrades to File.
 
 ## Source of truth
 
