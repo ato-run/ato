@@ -159,8 +159,24 @@ mod tests {
         (url, handle)
     }
 
+    /// A plain-HTTP resource URL is REFUSED before a single byte is fetched, and
+    /// nothing is written into the cache.
+    ///
+    /// This test used to be `download_success_with_mock_http_server` and asserted the
+    /// opposite — that fetching over `http://` succeeded. It has been failing since
+    /// `ingest::http::validate_https_url` made HTTPS mandatory
+    /// (`CapsuleError::Config("only HTTPS URLs are allowed (got http)")`), and nobody
+    /// noticed because the whole module is behind the non-default
+    /// `provisioning-tests` feature that no CI job enabled. Rewriting it to the
+    /// current policy is the only honest option: a success path cannot be exercised
+    /// against a loopback mock without a TLS listener, and weakening the scheme check
+    /// to make a test pass would trade a security invariant for green.
+    ///
+    /// The download-success path is therefore NOT covered here; what is covered is
+    /// the refusal, the cache-hit short-circuit (`skips_when_cached_file_exists`) and
+    /// the destination allowlist (`fails_if_cache_dir_not_allowlisted`).
     #[tokio::test]
-    async fn download_success_with_mock_http_server() {
+    async fn refuses_a_plain_http_url_without_fetching() {
         let hits = Arc::new(AtomicUsize::new(0));
         let (url, _server) = start_bytes_server(b"hello-model", hits.clone()).await;
 
@@ -172,7 +188,7 @@ mod tests {
             allowed_host_paths: vec![tmp.path().to_string_lossy().to_string()],
         };
 
-        let res = fetch_resource(
+        let err = fetch_resource(
             ResourceFetchRequest {
                 resource_id: "test-model".to_string(),
                 url: url.clone(),
@@ -181,14 +197,16 @@ mod tests {
             cfg,
         )
         .await
-        .unwrap();
+        .expect_err("a plain-http URL must be refused");
 
-        assert!(res.local_path.exists());
-        assert_eq!(fs::read(&res.local_path).unwrap(), b"hello-model");
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-        assert!(!res.cached);
-        assert!(res.bytes_downloaded > 0);
-        assert!(res.local_path.starts_with(cache_dir));
+        assert!(
+            err.to_string().contains("only HTTPS URLs are allowed"),
+            "expected the HTTPS-only refusal, got: {err}"
+        );
+        // Refused BEFORE the request: the server was never touched and no partial
+        // file was left in the cache.
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        assert!(!cache_dir.join("test-model").join("model.bin").exists());
     }
 
     #[tokio::test]
