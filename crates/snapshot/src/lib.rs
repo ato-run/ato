@@ -37,6 +37,7 @@ pub mod bench;
 pub mod compose_plan;
 #[cfg(test)]
 mod contract_fixtures;
+pub mod disposable_lifecycle;
 pub mod docker_import;
 pub mod external_state;
 mod fake;

@@ -191,6 +191,12 @@ impl LeaseKeepalive for HoldLease<'_> {
 pub trait CaptureAction {
     /// Capture an immutable candidate for `capture_epoch` from the live held guest.
     ///
+    /// `candidate_id` is the id the control channel pre-minted for THIS epoch. It
+    /// is passed in rather than looked up because the capture seam has no view of
+    /// the control channel, and §3.6 requires the reported candidate id to equal
+    /// the delivered one (the server cross-checks epoch↔candidate 1:1). An
+    /// implementation must echo it back in [`HeldCapture::candidate_id`].
+    ///
     /// `lease` is the claim's lease, live for the duration of the capture. A
     /// capture is the longest single step of the hold and runs with no control
     /// poll in it, so the implementation MUST drive `lease` between its own
@@ -202,6 +208,7 @@ pub trait CaptureAction {
     fn capture(
         &mut self,
         capture_epoch: u64,
+        candidate_id: &str,
         lease: &mut dyn LeaseKeepalive,
     ) -> Result<HeldCapture, CaptureError>;
 }
@@ -578,10 +585,28 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     // the lease window the capture directive arrived in — so this
                     // is what keeps the claim (and therefore the candidate report
                     // and the terminal ack) alive through them.
+                    // (3b) §3.6 needs the candidate id the control channel minted
+                    // for this epoch, and the capture seam cannot see the control
+                    // channel. A `Capture` without one is a contract violation:
+                    // capturing anyway would produce a candidate that can never be
+                    // reported (the server cross-checks epoch↔candidate 1:1), so
+                    // this fails closed instead of burning a capture.
+                    // `ApiControlSource` already rejects it at the wire via
+                    // `ControlResponse::validate`; this is the same refusal for
+                    // any other `ControlSource`.
+                    let Some(candidate_id) = response.candidate_id.clone() else {
+                        return Ok(HoldTermination::FailedClosed {
+                            failure_reason: format!(
+                                "control delivered `capture` for epoch {epoch} with no \
+                                 candidate_id: the candidate could never be reported"
+                            ),
+                        });
+                    };
+
                     let mut lease = HoldLease::new(&mut *self.control);
 
                     // (4) Firecracker-concrete capture for this epoch.
-                    let captured = self.capture.capture(epoch, &mut lease);
+                    let captured = self.capture.capture(epoch, &candidate_id, &mut lease);
                     // The lease's verdict outranks the capture's. A backend that
                     // was told the lease is gone and produced a candidate anyway
                     // has produced one nobody can report: every call that would
@@ -984,6 +1009,7 @@ mod tests {
         result: Result<HeldCapture, CaptureError>,
         calls: u32,
         lease_drives: u32,
+        seen_candidate_ids: Vec<String>,
     }
 
     impl ScriptedCapture {
@@ -998,6 +1024,7 @@ mod tests {
                 }),
                 calls: 0,
                 lease_drives: 0,
+                seen_candidate_ids: Vec::new(),
             }
         }
 
@@ -1012,9 +1039,14 @@ mod tests {
         fn capture(
             &mut self,
             _capture_epoch: u64,
+            candidate_id: &str,
             lease: &mut dyn LeaseKeepalive,
         ) -> Result<HeldCapture, CaptureError> {
             self.calls += 1;
+            // Record what the phase actually handed down, so a test can prove the
+            // control channel's candidate id reaches the seam (§3.6 requires the
+            // reported id to equal the delivered one).
+            self.seen_candidate_ids.push(candidate_id.to_string());
             for _ in 0..self.lease_drives {
                 let _ = lease.keepalive();
             }
@@ -1058,6 +1090,18 @@ mod tests {
             candidate_id: Some(candidate_id.to_string()),
             hold_expires_at: None,
             pause_permitted,
+        }
+    }
+
+    /// A `capture` directive that names no candidate — the contract violation
+    /// §3.6 makes unreportable.
+    fn capture_without_candidate(epoch: u64) -> ControlResponse {
+        ControlResponse {
+            directive: ControlDirective::Capture,
+            server_capture_epoch: epoch,
+            candidate_id: None,
+            hold_expires_at: None,
+            pause_permitted: true,
         }
     }
 
@@ -1118,6 +1162,70 @@ mod tests {
     }
 
     // ── (i) no capture before pause_permitted (ADR-007) ─────────────────────
+    #[test]
+    fn a_capture_with_no_candidate_id_fails_closed_without_capturing() {
+        // §3.6: the reported candidate id must equal the one the control channel
+        // delivered for the epoch, and the server cross-checks epoch↔candidate
+        // 1:1. A `capture` naming none can therefore never be reported — pausing
+        // the guest and sealing bytes for it would burn a capture (and an epoch)
+        // to produce an artifact nobody can accept.
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture_without_candidate(1)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::FailedClosed { .. }),
+            "a candidate-less capture must end the hold fail-closed"
+        );
+        assert_eq!(cap.calls, 0, "the guest must never be paused for it");
+    }
+
+    #[test]
+    fn the_control_channels_candidate_id_reaches_the_capture_seam() {
+        // The seam has no view of the control channel, so if the phase did not
+        // hand this down, an implementation could only invent an id — and every
+        // report would be rejected by the server's epoch↔candidate cross-check.
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_from_server", true)]);
+        let mut cap = ScriptedCapture::ok("cand_from_server", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let _ = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(
+            cap.seen_candidate_ids,
+            vec!["cand_from_server".to_string()],
+            "the seam must receive the id the control channel delivered"
+        );
+    }
+
     #[test]
     fn refuses_capture_until_pause_permitted() {
         let clock = FakeClock::new();
