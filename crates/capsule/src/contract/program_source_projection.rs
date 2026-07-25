@@ -1155,12 +1155,17 @@ fn projection_io(action: &str, path: &Path, source: std::io::Error) -> CapsulePr
 fn relativize_roots(error: CapsuleProgramError, roots: &[&Path]) -> CapsuleProgramError {
     let rewrite = |message: String| -> String {
         roots.iter().fold(message, |message, root| {
-            let Some(root) = root.to_str() else {
-                return message;
-            };
+            // Match the rendering the message was BUILT with. Every path that
+            // reaches an error here arrives through `Path::display()`, which is
+            // lossy, so a `to_str()` match would silently skip redaction for a
+            // non-UTF-8 root while `display()` still wrote a recognizable form
+            // of it into the message — and the caller who chose that root's
+            // parent (e.g. via TMPDIR) only needs the random basename to
+            // reconstruct a writable path.
+            let rendered = root.display().to_string();
             message
-                .replace(&format!("{root}{}", std::path::MAIN_SEPARATOR), "")
-                .replace(root, SOURCE_ROOT_LABEL)
+                .replace(&format!("{rendered}{}", std::path::MAIN_SEPARATOR), "")
+                .replace(&rendered, SOURCE_ROOT_LABEL)
         })
     };
     match error {
@@ -2103,5 +2108,40 @@ mod tests {
                 "src/main.py".to_string(),
             ],
         );
+    }
+
+    /// A non-UTF-8 root must still be redacted. Messages are built with
+    /// `Path::display()` (lossy), so matching on `to_str()` would skip
+    /// redaction entirely for such a root while `display()` had already
+    /// written a recognizable form of it into the message — and a caller who
+    /// chose the parent (e.g. by setting `TMPDIR`) needs only the random
+    /// basename to reconstruct a writable path and defeat the boundary.
+    #[cfg(unix)]
+    #[test]
+    fn relativization_redacts_a_non_utf8_root() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = PathBuf::from(OsString::from_vec(
+            b"/tmp/non-utf8-\xff/private-root".to_vec(),
+        ));
+        assert!(root.to_str().is_none(), "fixture must not be valid UTF-8");
+
+        let redacted = relativize_roots(
+            CapsuleProgramError::SourceProjection(format!(
+                "required manifest {} does not exist",
+                root.join("capsule.toml").display()
+            )),
+            &[&root],
+        )
+        .to_string();
+
+        assert!(
+            !redacted.contains("private-root"),
+            "non-UTF-8 root leaked: {redacted}"
+        );
+        // Non-vacuous: the message must still be actionable.
+        assert!(redacted.contains("capsule.toml"), "{redacted}");
+        assert!(redacted.contains("does not exist"), "{redacted}");
     }
 }
