@@ -2990,18 +2990,17 @@ fn run_github_python_lock_repair(target: &GitHubPythonLockRepairTarget, json: bo
         );
     }
 
-    let output = Command::new("uv")
-        .args(&args)
-        .current_dir(&target.working_dir)
-        .output()
-        .map_err(|error| {
-            github_python_lock_auto_fix_error(format!(
-                "failed to run `{}` in {}: {}",
-                description,
-                target.working_dir.display(),
-                error
-            ))
-        })?;
+    let mut command = Command::new("uv");
+    command.args(&args).current_dir(&target.working_dir);
+    crate::common::host_shell::sanitize_untrusted_environment(&mut command);
+    let output = command.output().map_err(|error| {
+        github_python_lock_auto_fix_error(format!(
+            "failed to run `{}` in {}: {}",
+            description,
+            target.working_dir.display(),
+            error
+        ))
+    })?;
     if output.status.success() {
         return Ok(());
     }

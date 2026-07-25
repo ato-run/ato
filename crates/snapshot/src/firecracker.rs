@@ -46,6 +46,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use capsule::foundation::install_lifecycle::RunnerClassFacts;
+use capsule::snapshot_manifest::{
+    PortabilityTier, SNAPSHOT_COMPATIBILITY_V1_SCHEMA, SnapshotBackendKind,
+    SnapshotCompatibilityContractV1,
+};
 use capsulefs::{
     BlobManifest, CasStore, ChunkingKind, HotsetRecorder, LayerKind, LazyBlobReader, store_blob,
 };
@@ -59,7 +63,7 @@ use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
-    SupervisorBindings, TeardownReceipt,
+    SupervisorBindings, TeardownReceipt, compatibility_class_identity,
 };
 use crate::bench;
 #[cfg(test)]
@@ -76,6 +80,11 @@ use protocol::binding_lease::{BindingLease, BindingLeaseId, BindingName, SecretV
 pub const FIRECRACKER_BACKEND_ID: &str = "firecracker";
 const KVM_DEVICE: &str = "/dev/kvm";
 const SNAPSHOT_FORMAT: &str = "fc-full-file-v1";
+/// Numeric generation counterpart to [`SNAPSHOT_FORMAT`] (whose name embeds
+/// the same generation as its `-v1` suffix), for
+/// `SnapshotCompatibilityContractV1::format_version` (a `u32`, not the
+/// descriptive format string).
+const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 const DEVICE_PROFILE: &str = "virtio-blk+virtio-net+vsock";
 const NETWORK_MODEL: &str = "tap";
 /// Ceiling for a per-job `boot_timeout` override (`with_boot_timeout`). A build
@@ -1755,6 +1764,46 @@ impl SnapshotBackend for FirecrackerBackend {
         }
     }
 
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContractV1, SnapshotError> {
+        self.ensure_available()?;
+        let facts = self.runner_facts();
+        let vmm_identity = facts.vmm_version.clone();
+        let state_codec = "raw".to_string();
+        let guest_kernel_identity = facts.guest_kernel_id.clone();
+        // `cpu_template` is Required+non-empty on the v1 contract (unlike the
+        // legacy `Option<String>`): an unpinned template is real information
+        // ("no template selected"), not an omission, so it gets an explicit
+        // sentinel rather than staying absent.
+        let cpu_template = facts
+            .cpu_template
+            .clone()
+            .unwrap_or_else(|| "none".to_string());
+        let runner_restore_contract = facts.id().to_string();
+        let compatibility_class_identity = compatibility_class_identity(
+            SnapshotBackendKind::Firecracker,
+            SNAPSHOT_FORMAT_VERSION,
+            &vmm_identity,
+            &state_codec,
+            &guest_kernel_identity,
+            &cpu_template,
+            &runner_restore_contract,
+        )?;
+        Ok(SnapshotCompatibilityContractV1 {
+            schema: SNAPSHOT_COMPATIBILITY_V1_SCHEMA.to_string(),
+            backend: SnapshotBackendKind::Firecracker,
+            format_version: SNAPSHOT_FORMAT_VERSION,
+            vmm_identity,
+            state_codec,
+            guest_kernel_identity,
+            cpu_template,
+            runner_restore_contract,
+            portability_tier: PortabilityTier::ClassPortable,
+            compatibility_class_identity,
+        })
+    }
+
     fn build_ready_state(
         &self,
         input: BuildReadyStateInput<'_>,
@@ -2088,6 +2137,10 @@ impl SnapshotBackend for FirecrackerBackend {
             has_vsock: vsock_enabled(),
             runner_class_id,
             execution_id: input.execution_id.clone(),
+            // `BuildReadyStateInput` does not yet carry a schema tag for the
+            // declared execution id — that wiring is later, separate work.
+            // Until then every sealed manifest is honestly legacy.
+            execution_identity_schema: None,
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
@@ -3672,6 +3725,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: ReadyStateLayers::default(),
             hotset_profile: Default::default(),

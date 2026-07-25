@@ -15,7 +15,9 @@
 
 use std::path::PathBuf;
 
+use capsule::execution_contract::{ContentDigest, DigestAlgorithm};
 use capsule::foundation::install_lifecycle::{RunnerClassId, RunnerClassMismatch};
+use capsule::snapshot_manifest::{SnapshotBackendKind, SnapshotCompatibilityContractV1};
 // The single shared GpuMode lives in capsule (snapshot depends on capsule), so the
 // placement contract and the manifest-level GPU judgment agree on one type.
 pub use capsule::foundation::types::ready_state::GpuMode;
@@ -477,6 +479,15 @@ pub trait SnapshotBackend: Send + Sync {
     /// What this backend can do on this host right now.
     fn probe(&self) -> BackendCapabilities;
 
+    /// Exact Snapshot-v1 compatibility facts for this backend on this host
+    /// (`capsule::snapshot_manifest::SnapshotCompatibilityContractV1`). These
+    /// facts are deliberately separate from Execution Identity and are used
+    /// for candidate selection before any restore is attempted — never
+    /// self-reported by a caller, always the backend's own real facts.
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContractV1, SnapshotError>;
+
     /// Boot-capture-seal: chunk the layers into CapsuleFS, scan for secrets,
     /// and produce a [`ReadyStateManifest`] + receipt. The caller guarantees the
     /// layers were captured with no secret / user data present; this method
@@ -500,6 +511,64 @@ pub trait SnapshotBackend: Send + Sync {
 
     /// Tear down a restored session: kill the VM and destroy its overlay.
     fn stop(&self, session: RestoredSession) -> Result<TeardownReceipt, SnapshotError>;
+}
+
+/// Domain separator for [`compatibility_class_identity`].
+const COMPATIBILITY_CLASS_IDENTITY_DOMAIN: &[u8] = b"ato.snapshot-compatibility-class/v1\0";
+
+/// The exact facts that jointly define a Snapshot's restore-compatibility
+/// class (RFC §7.4): two hosts able to restore each other's Snapshots always
+/// derive the SAME class identity from these same facts.
+#[derive(Serialize)]
+struct CompatibilityClassFacts<'a> {
+    backend: SnapshotBackendKind,
+    format_version: u32,
+    vmm_identity: &'a str,
+    state_codec: &'a str,
+    guest_kernel_identity: &'a str,
+    cpu_template: &'a str,
+    runner_restore_contract: &'a str,
+}
+
+/// Derive a Snapshot restore-compatibility class identity from the exact
+/// facts a [`SnapshotCompatibilityContractV1`] commits to. Shared by every
+/// [`SnapshotBackend`] impl so the derivation rule is defined exactly once:
+/// each backend supplies its own real, locally-observed facts here, never a
+/// separately invented or self-reported hash. Because the identity is a pure
+/// function of these facts, the SAME backend on the SAME host always
+/// recomputes the SAME class identity — which is what lets a restore-time
+/// host capability probe (built from this backend's own
+/// [`SnapshotBackend::snapshot_compatibility_contract`]) satisfy a Snapshot it
+/// built itself.
+pub(crate) fn compatibility_class_identity(
+    backend: SnapshotBackendKind,
+    format_version: u32,
+    vmm_identity: &str,
+    state_codec: &str,
+    guest_kernel_identity: &str,
+    cpu_template: &str,
+    runner_restore_contract: &str,
+) -> Result<ContentDigest, SnapshotError> {
+    let facts = CompatibilityClassFacts {
+        backend,
+        format_version,
+        vmm_identity,
+        state_codec,
+        guest_kernel_identity,
+        cpu_template,
+        runner_restore_contract,
+    };
+    let canonical = serde_jcs::to_vec(&facts).map_err(|error| SnapshotError::Backend {
+        backend: "compatibility-class-identity".to_string(),
+        reason: format!("canonicalize compatibility class facts: {error}"),
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(COMPATIBILITY_CLASS_IDENTITY_DOMAIN);
+    hasher.update(&canonical);
+    Ok(ContentDigest::new(
+        DigestAlgorithm::Blake3,
+        *hasher.finalize().as_bytes(),
+    ))
 }
 
 #[cfg(test)]
