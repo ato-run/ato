@@ -504,6 +504,18 @@ struct Artifact {
     /// `.strict()` ack schema.
     #[serde(skip_serializing_if = "Option::is_none")]
     compose_import_receipt: Option<serde_json::Value>,
+    /// Store thumbnail automation: a best-effort build-time screenshot of the
+    /// booted app's root page (base64-encoded PNG, ~500KB raw cap), captured
+    /// during `build_ready_state`'s warmup window — see `snapshot::screenshot`.
+    /// `None` whenever capture wasn't possible (no headless browser present,
+    /// guest unreachable, timeout, oversized/garbled output) — omitted entirely
+    /// in that case (`skip_serializing_if`), so an ack from a builder host with
+    /// no browser installed stays byte-identical against the pre-screenshot
+    /// `.strict()` ack schema. The ato-api ack handler treats this the same
+    /// way: decode + upload + persist as the store thumbnail ONLY if the
+    /// capsule has none yet, wrapped so it can never fail the ack.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_png_base64: Option<String>,
 }
 
 /// v1.2 PR 3e-2c: the supervisor facet of a sealed ack — names only.
@@ -2787,6 +2799,7 @@ fn process_job(
         docker_import_receipt: produced.docker_import_receipt,
         oci_import_receipt: produced.oci_import_receipt,
         compose_import_receipt: produced.compose_import_receipt,
+        screenshot_png_base64: receipt.screenshot_png_base64.clone(),
     })
 }
 
@@ -4599,6 +4612,7 @@ targets = ["web"]
             docker_import_receipt: None,
             oci_import_receipt: None,
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         let obj = v.as_object().unwrap();
@@ -4672,6 +4686,7 @@ targets = ["web"]
             docker_import_receipt: None,
             oci_import_receipt: None,
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
 
         let value = serde_json::to_value(artifact).expect("serialize artifact ack");
@@ -4720,6 +4735,7 @@ targets = ["web"]
             })),
             oci_import_receipt: None,
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "dockerfile_import");
@@ -4776,6 +4792,7 @@ targets = ["web"]
                 "image": { "original_ref": "ghcr.io/alexta69/metube:latest", "resolved_digest": "ghcr.io/alexta69/metube@sha256:ab", "platform": "linux/amd64" },
             })),
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["manifest_source"], "oci_image_import");
@@ -4821,6 +4838,7 @@ targets = ["web"]
             docker_import_receipt: None,
             oci_import_receipt: None,
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(
@@ -4868,6 +4886,7 @@ targets = ["web"]
             docker_import_receipt: None,
             oci_import_receipt: None,
             compose_import_receipt: None,
+            screenshot_png_base64: None,
         };
         let v = serde_json::to_value(&a).unwrap();
         assert_eq!(v["snapshot_format_id"], "asf.fc-memsnap-v1");

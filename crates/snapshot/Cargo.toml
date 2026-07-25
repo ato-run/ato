@@ -29,6 +29,10 @@ test-support = []
 
 [dependencies]
 anyhow = "1.0"
+# Build-time screenshot capture (store thumbnail automation): base64-encodes
+# the captured PNG for the snapshot-builder ack body. Already a workspace
+# dependency (capsule/cli/desktop/nacelle/netd) — reused here, same version.
+base64 = "0.22"
 blake3 = "1.5"
 capsule = { path = "../capsule" }
 capsulefs = { path = "../capsulefs" }
