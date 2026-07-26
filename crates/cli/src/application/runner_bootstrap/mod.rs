@@ -32,6 +32,9 @@ pub(crate) mod ingress_activation;
 /// Slice 3B — the two-stage probe that confirms a generation is actually being
 /// SERVED, and the only place the activated marker may move.
 pub(crate) mod ingress_probe;
+/// Slice 3C — the single level-triggered reconcile every trigger converges on,
+/// and the observed state it reports back.
+pub(crate) mod ingress_reconcile;
 pub(crate) mod ingress_store;
 pub(crate) mod official_preview;
 pub(crate) mod setup;

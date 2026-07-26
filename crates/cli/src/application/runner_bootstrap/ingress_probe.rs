@@ -50,6 +50,39 @@ use super::ingress_activation::{
 };
 use super::official_preview::GenerationIdentity;
 
+/// Which generation a probe expects to find answering.
+///
+/// The candidate is known in BOTH halves — it was just derived — so both are
+/// checked. A PREVIOUS generation is known only by its id: its full digest is
+/// not recoverable from the id, and it is not written down anywhere the
+/// rollback path can read. Rather than fabricate one (an empty expected digest
+/// would make every rollback confirmation fail), the asymmetry is explicit, and
+/// the id still answers the question a rollback asks — did the restore take
+/// effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExpectedGeneration {
+    pub id: String,
+    pub digest: Option<String>,
+}
+
+impl ExpectedGeneration {
+    /// Both halves, for a generation this process just built.
+    pub(crate) fn exact(identity: &GenerationIdentity) -> Self {
+        Self {
+            id: identity.id.clone(),
+            digest: Some(identity.digest.clone()),
+        }
+    }
+
+    /// The id alone, for a generation only known by name.
+    pub(crate) fn by_id(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            digest: None,
+        }
+    }
+}
+
 /// One origin to confirm, and what "ready" means for it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProbeTarget {
@@ -117,7 +150,7 @@ pub(crate) enum ProbeFailure {
     },
     WrongGeneration {
         origin: String,
-        expected: GenerationIdentity,
+        expected: ExpectedGeneration,
         found: GenerationIdentity,
     },
 }
@@ -144,9 +177,9 @@ impl std::fmt::Display for ProbeFailure {
                 found,
             } => write!(
                 f,
-                "{origin} is served by generation {} ({}), not the expected {} ({}) — \
+                "{origin} is served by generation {} ({}), not the expected {} — \
                  the reload was accepted but these routes are not the ones answering",
-                found.id, found.digest, expected.id, expected.digest
+                found.id, found.digest, expected.id
             ),
         }
     }
@@ -159,7 +192,7 @@ impl std::error::Error for ProbeFailure {}
 fn confirm_target(
     probe: &mut dyn IngressProbe,
     target: &ProbeTarget,
-    expected: &GenerationIdentity,
+    expected: &ExpectedGeneration,
     marker_path: &str,
     budget: ProbeBudget,
 ) -> Result<(), ProbeFailure> {
@@ -203,7 +236,7 @@ fn check_marker(
     origin: &str,
     path: &str,
     response: &ProbeResponse,
-    expected: &GenerationIdentity,
+    expected: &ExpectedGeneration,
 ) -> Result<(), ProbeFailure> {
     let Some(found) = response.marker.as_ref() else {
         return Err(ProbeFailure::MissingMarker {
@@ -211,10 +244,14 @@ fn check_marker(
             path: path.to_string(),
         });
     };
-    // BOTH halves. Matching only the short id would accept a generation that
-    // merely collided with the handle; matching only the digest would accept a
-    // body whose id names something else.
-    if found.id != expected.id || found.digest != expected.digest {
+    // Both halves when both are known: matching only the short id would accept
+    // a generation that merely collided with the handle, and matching only the
+    // digest would accept a body whose id names something else.
+    let digest_disagrees = expected
+        .digest
+        .as_ref()
+        .is_some_and(|digest| *digest != found.digest);
+    if found.id != expected.id || digest_disagrees {
         return Err(ProbeFailure::WrongGeneration {
             origin: origin.to_string(),
             expected: expected.clone(),
@@ -259,14 +296,15 @@ pub(crate) fn confirm_activation(
     caddy: &mut dyn CaddyControl,
     probe: &mut dyn IngressProbe,
     candidate: &GenerationIdentity,
-    previous: Option<&GenerationIdentity>,
+    previous: Option<&str>,
     targets: &[ProbeTarget],
     marker_path: &str,
     budget: ProbeBudget,
 ) -> Result<Confirmation> {
+    let expected = ExpectedGeneration::exact(candidate);
     let mut failure: Option<ProbeFailure> = None;
     for target in targets {
-        if let Err(error) = confirm_target(probe, target, candidate, marker_path, budget) {
+        if let Err(error) = confirm_target(probe, target, &expected, marker_path, budget) {
             failure = Some(error);
             break;
         }
@@ -305,12 +343,12 @@ fn roll_back_and_confirm(
     store: &mut dyn GenerationStore,
     caddy: &mut dyn CaddyControl,
     probe: &mut dyn IngressProbe,
-    previous: Option<&GenerationIdentity>,
+    previous: Option<&str>,
     targets: &[ProbeTarget],
     marker_path: &str,
     budget: ProbeBudget,
 ) -> Result<()> {
-    store.set_current(previous.map(|identity| identity.id.as_str()))?;
+    store.set_current(previous)?;
     let Some(previous) = previous else {
         // A first install: there is no generation to reload into and nothing to
         // probe. Clearing the confirmed state is the honest record — the box is
@@ -321,12 +359,13 @@ fn roll_back_and_confirm(
     };
 
     caddy.reload()?;
+    let expected = ExpectedGeneration::by_id(previous);
     for target in targets {
-        confirm_target(probe, target, previous, marker_path, budget)
+        confirm_target(probe, target, &expected, marker_path, budget)
             .map_err(|error| anyhow::anyhow!("after rolling back: {error}"))?;
     }
-    store.write_activated(Some(&previous.id))?;
-    store.write_receipt(Some(&previous.id))?;
+    store.write_activated(Some(previous))?;
+    store.write_receipt(Some(previous))?;
     store.clear_pending()?;
     Ok(())
 }
@@ -355,13 +394,12 @@ pub(crate) fn confirm_outcome(
         return Ok(None);
     };
     let candidate = identity_of(candidate)?;
-    let previous = previous.as_deref().map(&identity_of).transpose()?;
     confirm_activation(
         store,
         caddy,
         probe,
         &candidate,
-        previous.as_ref(),
+        previous.as_deref(),
         targets,
         marker_path,
         budget,
@@ -576,6 +614,13 @@ mod tests {
         fn generation_complete(&self, digest: &str) -> Result<bool> {
             Ok(self.complete.iter().any(|d| d == digest))
         }
+        fn generation_matches(
+            &self,
+            digest: &str,
+            _fragments: &[super::super::official_preview::GeneratedFragment],
+        ) -> Result<bool> {
+            self.generation_complete(digest)
+        }
         fn write_pending(&mut self, journal: &PendingJournal) -> Result<()> {
             self.pending = Some(journal.clone());
             Ok(())
@@ -667,7 +712,7 @@ mod tests {
             caddy,
             probe,
             candidate,
-            previous,
+            previous.map(|identity| identity.id.as_str()),
             &targets(),
             GENERATION_MARKER_PATH,
             fast(),
