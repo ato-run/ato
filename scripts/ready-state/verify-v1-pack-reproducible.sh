@@ -161,6 +161,16 @@ if [[ "$SHA_ONE" != "$SHA_TWO" ]]; then
     echo "--- first differing bytes (offset, then each file's octal byte) ---"
     cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | head -20 || true
     echo "differing byte count: $(cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | wc -l)"
+    echo
+    # A byte offset says WHERE but not WHICH FIELD. Stat the same inodes out of
+    # both images and diff: that names the field, and an inode timestamp reads
+    # very differently from a superblock one.
+    echo "--- inode diff (root, and a file the capsule ships) ---"
+    for target in "<2>" "/app/app.py" "/sbin/init"; do
+      echo "### $target"
+      diff <(debugfs -R "stat $target" "$IMG_ONE" 2>/dev/null) \
+           <(debugfs -R "stat $target" "$IMG_TWO" 2>/dev/null) || true
+    done
   } >&2
   fail "the pack is NOT reproducible"
 fi

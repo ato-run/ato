@@ -685,7 +685,11 @@ mkfs.ext4 -q -F \
 # byte patch because ext4 carries a superblock checksum that debugfs recomputes
 # and a raw write would invalidate. `wtime` goes last: every debugfs write
 # updates it.
-debugfs -w -f - "$ATO_OUT" >/dev/null 2>&1 <<'DEBUGFS'
+# SOURCE_DATE_EPOCH here and not on mke2fs: mke2fs demonstrably ignores it for
+# `s_mkfs_time`, but every e2fsprogs tool stamps `s_wtime` from `fs->now` when it
+# flushes — so without it debugfs would overwrite the `wtime` set below with the
+# clock as it closes, and the superblock checksum with it.
+SOURCE_DATE_EPOCH={epoch} debugfs -w -f - "$ATO_OUT" >/dev/null 2>&1 <<'DEBUGFS'
 set_super_value mkfs_time {epoch}
 set_super_value lastcheck {epoch}
 set_super_value mtime 0
