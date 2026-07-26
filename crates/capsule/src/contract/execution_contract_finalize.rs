@@ -20,24 +20,45 @@
 //! application measurement layer — never this pure layer) sets it from a
 //! concrete materialized fact.
 //!
-//! ## Strict gate
+//! ## Mint and gate — one definition
 //!
-//! [`ExecutionObservationV1::finalize`] compares the measured observation
-//! against the expected contract facet by facet:
+//! A measurement has two consumers, and they must agree:
+//!
+//! * [`ExecutionObservationV1::into_contract`] **mints** the
+//!   [`ExecutionContractV1`] the measurement determines (RFC §4.6's "finalize
+//!   `lock.execution_contract`", before "compute Execution Identity"). This is
+//!   the only way a contract is ever brought into existence — there is no
+//!   constructor taking authored or lock values — so a contract can only ever be
+//!   what some concrete measurement said.
+//! * [`ExecutionObservationV1::finalize`] **verifies** an expected contract, and
+//!   is expressed on top of the mint: it compares `expected` against the
+//!   contract this measurement determines. A separate comparison-only
+//!   implementation would be a second definition of that contract, and the two
+//!   drifting apart is exactly how a producer ends up publishing one identity
+//!   while a verifier checked another.
+//!
+//! Both refuse the same way:
 //!
 //! * a facet that was not measured ⇒ [`FinalizationError::UnmeasuredFacet`]
-//!   naming the facet (terminal refusal — no fabrication);
+//!   naming the FIRST missing facet in RFC §4.2 order (terminal refusal — no
+//!   fabrication, and no default that would put an unmeasured value into an
+//!   identity);
 //! * a facet whose measured value disagrees with the expected contract ⇒
 //!   [`FinalizationError::FacetMismatch`] naming the facet;
 //! * only when **every** required facet is present *and* matching is the
 //!   `execution_id` issued.
 //!
-//! In G0-2 only three facets are measured today by the producer
-//! (`source.digest`, `dependencies[].derivation_digest`/`output_digest`, and
-//! `filesystem.readonly_layers`). Every other required facet has no measurement
-//! producer yet, so a real observation lacks it and the gate refuses. The unit
-//! tests supply *synthetic* full-measurement fixtures to exercise the matching
-//! path; they never fabricate a measurement from the expected contract.
+//! Because measurement is complete before any comparison, an unmeasured facet is
+//! reported ahead of a mismatch in an earlier one. That precedence is deliberate:
+//! "you did not measure this" is a statement about the observation itself, while
+//! a mismatch is only meaningful once the observation is complete.
+//!
+//! Only a few facets have a real measurement producer today (`source.digest`,
+//! `dependencies` in the zero-dependency case, `filesystem.readonly_layers` for
+//! a single rootfs layer, and `launch.environment[].value_digest`), so a real
+//! observation is still incomplete and both halves refuse. The unit tests supply
+//! *synthetic* full-measurement fixtures to exercise the complete path; they
+//! never fabricate a measurement from an expected contract.
 //!
 //! ## Per-field opaque domain selection (reviewer condition)
 //!
@@ -62,10 +83,13 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::execution_contract::{
-    ContentDigest, EnvironmentValuePayloadV1, EnvironmentVariableContract,
-    ExecutionContractEnvelopeV1, ExecutionContractError, ExecutionContractV1, ExecutionId,
-    ExternalStateContract, GuestPath, GuestSurfaceContract, OpaqueContractDigestV1,
-    OpaqueContractDomainV1, ResolvedTargetContract, VerifiedExecutionId, opaque_subcontract_digest,
+    ContentDigest, EXECUTION_CONTRACT_V1_SCHEMA, EnvironmentValuePayloadV1,
+    EnvironmentVariableContract, ExecutionContractEnvelopeV1, ExecutionContractError,
+    ExecutionContractV1, ExecutionId, ExternalStateContract, GuestPath, GuestSurfaceContract,
+    OpaqueContractDigestV1, OpaqueContractDomainV1, ResolvedArtifactContract,
+    ResolvedBuildOutputContract, ResolvedDependencyContract, ResolvedFilesystemContract,
+    ResolvedLaunchContract, ResolvedPolicyContract, ResolvedSourceContract, ResolvedTargetContract,
+    VerifiedExecutionId, opaque_subcontract_digest,
 };
 
 /// Classifies an environment variable *name* as secret-bearing.
@@ -384,226 +408,247 @@ impl ExecutionObservationV1 {
         self
     }
 
+    /// The [`ExecutionContractV1`] this measurement DETERMINES (RFC §4.6's
+    /// "finalize `lock.execution_contract`" step, before "compute Execution
+    /// Identity").
+    ///
+    /// This is the minting half of the gate, and the ONLY way an execution
+    /// contract is ever brought into existence: there is no constructor that
+    /// takes authored or lock values, so a contract can only be what some
+    /// concrete measurement said. Every facet must be measured — the same
+    /// [`FinalizationError::UnmeasuredFacet`] refusal [`Self::finalize`] makes,
+    /// for the same reason: a contract with a fabricated facet would be an
+    /// identity claim about something nobody looked at.
+    ///
+    /// Opaque facets are committed by recomputing the digest from the measured
+    /// payload under the field's OWN [`OpaqueContractDomainV1`], selected here
+    /// per field and never read from the wire.
+    ///
+    /// [`Self::finalize`] is expressed on top of this, so "the contract a
+    /// measurement determines" has exactly one definition. Two would eventually
+    /// disagree, and a producer that minted one contract while the verifier
+    /// checked another is precisely the failure this whole gate exists to
+    /// prevent.
+    pub fn into_contract(&self) -> Result<ExecutionContractV1, FinalizationError> {
+        // Field order IS error order: Rust evaluates struct-literal fields in
+        // source order, and the facets are written in RFC §4.2 order, so the
+        // facet an incomplete observation is refused on is the FIRST one it is
+        // missing — not whichever field a helper happened to touch first.
+        Ok(ExecutionContractV1 {
+            schema: EXECUTION_CONTRACT_V1_SCHEMA.to_string(),
+            source: ResolvedSourceContract {
+                digest: self.require("source.digest", self.source_digest)?,
+                projection_digest: self.commit(
+                    "source.projection_digest",
+                    OpaqueContractDomainV1::SourceProjection,
+                    self.source_projection_payload.as_ref(),
+                )?,
+            },
+            target: self.require_ref("target", self.target.as_ref())?.clone(),
+            runtime: ResolvedArtifactContract {
+                kind: self
+                    .require_ref("runtime.kind", self.runtime_kind.as_ref())?
+                    .clone(),
+                digest: self.require("runtime.digest", self.runtime_digest)?,
+                dynamic_contract_digest: self.commit(
+                    "runtime.dynamic_contract_digest",
+                    OpaqueContractDomainV1::RuntimeDynamic,
+                    self.runtime_dynamic_payload.as_ref(),
+                )?,
+            },
+            dependencies: self
+                .require_ref("dependencies", self.dependencies.as_ref())?
+                .iter()
+                .map(|measured| ResolvedDependencyContract {
+                    name: measured.name.clone(),
+                    derivation_digest: measured.derivation_digest,
+                    output_digest: measured.output_digest,
+                })
+                .collect(),
+            build_outputs: self.contract_build_outputs()?,
+            launch: self.contract_launch()?,
+            filesystem: ResolvedFilesystemContract {
+                view_digest: self.require("filesystem.view_digest", self.filesystem_view_digest)?,
+                topology_digest: self.commit(
+                    "filesystem.topology_digest",
+                    OpaqueContractDomainV1::FilesystemTopology,
+                    self.filesystem_topology_payload.as_ref(),
+                )?,
+                readonly_layers: self
+                    .require_ref(
+                        "filesystem.readonly_layers",
+                        self.filesystem_readonly_layers.as_ref(),
+                    )?
+                    .clone(),
+                writable_paths: self
+                    .require_ref(
+                        "filesystem.writable_paths",
+                        self.filesystem_writable_paths.as_ref(),
+                    )?
+                    .clone(),
+            },
+            policy: ResolvedPolicyContract {
+                network_digest: self.commit(
+                    "policy.network_digest",
+                    OpaqueContractDomainV1::NetworkPolicy,
+                    self.policy_network_payload.as_ref(),
+                )?,
+                capability_digest: self.commit(
+                    "policy.capability_digest",
+                    OpaqueContractDomainV1::CapabilityPolicy,
+                    self.policy_capability_payload.as_ref(),
+                )?,
+                filesystem_digest: self.commit(
+                    "policy.filesystem_digest",
+                    OpaqueContractDomainV1::FilesystemPolicy,
+                    self.policy_filesystem_payload.as_ref(),
+                )?,
+            },
+            guest_surface: self
+                .require_ref("guest_surface", self.guest_surface.as_ref())?
+                .clone(),
+            external_state: self
+                .require_ref("external_state", self.external_state.as_ref())?
+                .clone(),
+        })
+    }
+
+    fn contract_build_outputs(
+        &self,
+    ) -> Result<Vec<ResolvedBuildOutputContract>, FinalizationError> {
+        let measured = self.require_ref("build_outputs", self.build_outputs.as_ref())?;
+        let mut outputs = Vec::with_capacity(measured.len());
+        for output in measured {
+            outputs.push(ResolvedBuildOutputContract {
+                name: output.name.clone(),
+                digest: output.digest,
+                projection_digest: self.commit(
+                    "build_outputs[].projection_digest",
+                    OpaqueContractDomainV1::BuildOutputProjection,
+                    Some(&output.projection_payload),
+                )?,
+            });
+        }
+        Ok(outputs)
+    }
+
+    fn contract_launch(&self) -> Result<ResolvedLaunchContract, FinalizationError> {
+        let argv = self
+            .require_ref("launch.argv", self.launch_argv.as_ref())?
+            .clone();
+        let cwd = self
+            .require_ref("launch.cwd", self.launch_cwd.as_ref())?
+            .clone();
+        let process_model_digest = self.commit(
+            "launch.process_model_digest",
+            OpaqueContractDomainV1::ProcessModel,
+            self.process_model_payload.as_ref(),
+        )?;
+        let measured_env = self.require_ref("launch.environment", self.environment.as_ref())?;
+        // The NAME heuristic first, inside the mapping: a secret-bearing name is
+        // wrong on its own terms, independently of what the bindings say.
+        let environment = measured_env
+            .iter()
+            .map(environment_variable_from_measured)
+            .collect::<Result<Vec<_>, _>>()?;
+        let environment_policy_digest = self.commit(
+            "launch.environment_policy_digest",
+            OpaqueContractDomainV1::EnvironmentPolicy,
+            self.environment_policy_payload.as_ref(),
+        )?;
+        let secret_bindings = self
+            .require_ref("launch.secret_bindings", self.secret_bindings.as_ref())?
+            .clone();
+        // `secret_bindings` is the AUTHORITATIVE secret set, so it catches what
+        // the heuristic misses (`DATABASE_URL`): a value bound as a secret must
+        // never be committed as a non-secret one. Secret VALUES are never
+        // identity-bearing (RFC §4.3) — the name binding is.
+        let bound: BTreeSet<&str> = secret_bindings.iter().map(String::as_str).collect();
+        if let Some(name) = measured_env
+            .iter()
+            .map(|measured| &measured.name)
+            .find(|name| bound.contains(name.as_str()))
+        {
+            return Err(FinalizationError::SecretBoundEnvValue(name.clone()));
+        }
+        Ok(ResolvedLaunchContract {
+            argv,
+            cwd,
+            process_model_digest,
+            environment,
+            environment_policy_digest,
+            secret_bindings,
+        })
+    }
+
+    /// Commit one measured opaque payload under the field's own domain.
+    fn commit(
+        &self,
+        facet: &'static str,
+        domain: OpaqueContractDomainV1,
+        payload: Option<&Value>,
+    ) -> Result<OpaqueContractDigestV1, FinalizationError> {
+        let payload = self.require_ref(facet, payload)?;
+        opaque_subcontract_digest(domain, payload).map_err(|source| {
+            FinalizationError::OpaqueDigest {
+                facet: facet.to_string(),
+                source,
+            }
+        })
+    }
+
     /// Strict finalization gate (RFC §4.6). Issues an `execution_id` only when
     /// every required facet is present and matches `expected`; otherwise refuses
     /// with a typed terminal error naming the offending facet.
     ///
-    /// The comparison is facet by facet. Opaque facets are verified by
-    /// recomputing the digest from the measured payload under the field's own
-    /// [`OpaqueContractDomainV1`] (selected here, server-side — never read from
-    /// the wire), so a payload valid for one facet's domain cannot pass as
-    /// another facet's commitment. When all facets agree, the measured facets
-    /// are byte-equal (facet-wise) to `expected`, so the canonical
-    /// `execution_id` of `expected` is exactly the measured identity.
+    /// Expressed on top of [`Self::into_contract`] on purpose: the gate compares
+    /// `expected` against **the contract this measurement determines**, so the
+    /// thing being verified is the same thing a producer would have minted. A
+    /// second, comparison-only implementation would be a second definition of
+    /// that contract, and the two drifting apart is precisely how a builder ends
+    /// up verifying one identity and publishing another.
+    ///
+    /// Note the consequence for error ORDER: every facet must be measured before
+    /// any comparison happens, so an unmeasured facet is reported ahead of a
+    /// mismatch in an earlier facet. That is the honest precedence — "you did not
+    /// measure this" is a statement about the observation itself, while a
+    /// mismatch is only meaningful once the observation is complete.
     pub fn finalize(
         &self,
         expected: &ExecutionContractV1,
     ) -> Result<FinalizedExecution, FinalizationError> {
-        // Typed measured-today / typed facets.
-        let source_digest = self.require("source.digest", self.source_digest)?;
-        if source_digest != expected.source.digest {
-            return Err(mismatch("source.digest"));
-        }
-
-        self.verify_opaque(
-            "source.projection_digest",
-            self.source_projection_payload.as_ref(),
-            OpaqueContractDomainV1::SourceProjection,
-            expected.source.projection_digest,
-        )?;
-
-        let target = self.require_ref("target", self.target.as_ref())?;
-        if *target != expected.target {
-            return Err(mismatch("target"));
-        }
-
-        let runtime_kind = self.require_ref("runtime.kind", self.runtime_kind.as_ref())?;
-        let runtime_digest = self.require("runtime.digest", self.runtime_digest)?;
-        if *runtime_kind != expected.runtime.kind || runtime_digest != expected.runtime.digest {
-            return Err(mismatch("runtime"));
-        }
-
-        self.verify_opaque(
-            "runtime.dynamic_contract_digest",
-            self.runtime_dynamic_payload.as_ref(),
-            OpaqueContractDomainV1::RuntimeDynamic,
-            expected.runtime.dynamic_contract_digest,
-        )?;
-
-        let dependencies = self.require_ref("dependencies", self.dependencies.as_ref())?;
-        if dependencies.len() != expected.dependencies.len() {
-            return Err(mismatch("dependencies"));
-        }
-        for (measured, expected_dep) in dependencies.iter().zip(&expected.dependencies) {
-            if measured.name != expected_dep.name
-                || measured.derivation_digest != expected_dep.derivation_digest
-                || measured.output_digest != expected_dep.output_digest
-            {
-                return Err(mismatch("dependencies"));
-            }
-        }
-
-        let build_outputs = self.require_ref("build_outputs", self.build_outputs.as_ref())?;
-        if build_outputs.len() != expected.build_outputs.len() {
-            return Err(mismatch("build_outputs"));
-        }
-        for (measured, expected_output) in build_outputs.iter().zip(&expected.build_outputs) {
-            if measured.name != expected_output.name || measured.digest != expected_output.digest {
-                return Err(mismatch("build_outputs"));
-            }
-            self.verify_opaque(
-                "build_outputs[].projection_digest",
-                Some(&measured.projection_payload),
-                OpaqueContractDomainV1::BuildOutputProjection,
-                expected_output.projection_digest,
-            )?;
-        }
-
-        let launch_argv = self.require_ref("launch.argv", self.launch_argv.as_ref())?;
-        let launch_cwd = self.require_ref("launch.cwd", self.launch_cwd.as_ref())?;
-        if *launch_argv != expected.launch.argv || *launch_cwd != expected.launch.cwd {
-            return Err(mismatch("launch.argv"));
-        }
-
-        self.verify_opaque(
-            "launch.process_model_digest",
-            self.process_model_payload.as_ref(),
-            OpaqueContractDomainV1::ProcessModel,
-            expected.launch.process_model_digest,
-        )?;
-
-        self.verify_environment(expected)?;
-
-        self.verify_opaque(
-            "launch.environment_policy_digest",
-            self.environment_policy_payload.as_ref(),
-            OpaqueContractDomainV1::EnvironmentPolicy,
-            expected.launch.environment_policy_digest,
-        )?;
-
-        let secret_bindings =
-            self.require_ref("launch.secret_bindings", self.secret_bindings.as_ref())?;
-        if *secret_bindings != expected.launch.secret_bindings {
-            return Err(mismatch("launch.secret_bindings"));
-        }
-
-        let view_digest = self.require("filesystem.view_digest", self.filesystem_view_digest)?;
-        if view_digest != expected.filesystem.view_digest {
-            return Err(mismatch("filesystem.view_digest"));
-        }
-
-        self.verify_opaque(
-            "filesystem.topology_digest",
-            self.filesystem_topology_payload.as_ref(),
-            OpaqueContractDomainV1::FilesystemTopology,
-            expected.filesystem.topology_digest,
-        )?;
-
-        let readonly_layers = self.require_ref(
-            "filesystem.readonly_layers",
-            self.filesystem_readonly_layers.as_ref(),
-        )?;
-        if *readonly_layers != expected.filesystem.readonly_layers {
-            return Err(mismatch("filesystem.readonly_layers"));
-        }
-
-        let writable_paths = self.require_ref(
-            "filesystem.writable_paths",
-            self.filesystem_writable_paths.as_ref(),
-        )?;
-        if *writable_paths != expected.filesystem.writable_paths {
-            return Err(mismatch("filesystem.writable_paths"));
-        }
-
-        self.verify_opaque(
-            "policy.network_digest",
-            self.policy_network_payload.as_ref(),
-            OpaqueContractDomainV1::NetworkPolicy,
-            expected.policy.network_digest,
-        )?;
-        self.verify_opaque(
-            "policy.capability_digest",
-            self.policy_capability_payload.as_ref(),
-            OpaqueContractDomainV1::CapabilityPolicy,
-            expected.policy.capability_digest,
-        )?;
-        self.verify_opaque(
-            "policy.filesystem_digest",
-            self.policy_filesystem_payload.as_ref(),
-            OpaqueContractDomainV1::FilesystemPolicy,
-            expected.policy.filesystem_digest,
-        )?;
-
-        let guest_surface = self.require_ref("guest_surface", self.guest_surface.as_ref())?;
-        if *guest_surface != expected.guest_surface {
-            return Err(mismatch("guest_surface"));
-        }
-
-        let external_state = self.require_ref("external_state", self.external_state.as_ref())?;
-        if *external_state != expected.external_state {
-            return Err(mismatch("external_state"));
-        }
-
-        // Every required facet is present and matches `expected`; the measured
-        // facets are byte-equal (facet-wise) to it, so its canonical id is the
-        // measured identity. This is computed from `expected` only after full
-        // measured agreement — never as a stand-in for a missing measurement.
-        let execution_id = expected.compute_execution_id()?;
-        Ok(FinalizedExecution {
-            contract: expected.clone(),
-            execution_id,
-        })
-    }
-
-    fn verify_environment(&self, expected: &ExecutionContractV1) -> Result<(), FinalizationError> {
-        let environment = self.require_ref("launch.environment", self.environment.as_ref())?;
-        if environment.len() != expected.launch.environment.len() {
-            return Err(mismatch("launch.environment"));
-        }
-        // `secret_bindings` is the authoritative secret set: a measured env name
-        // that is bound as a secret must never be measured as a non-secret value,
-        // even when the name heuristic does not flag it (e.g. `DATABASE_URL`).
-        let secret_bindings: BTreeSet<&str> = expected
+        let measured = self.into_contract()?;
+        // The one check the MINT cannot make: `expected` names secret bindings
+        // the observation does not, and a name bound as a secret THERE must
+        // never arrive as a measured non-secret value. Reported as the secret
+        // violation it is rather than as the `launch.secret_bindings` mismatch
+        // it would otherwise collapse into — the two call for different actions.
+        let expected_secrets: BTreeSet<&str> = expected
             .launch
             .secret_bindings
             .iter()
             .map(String::as_str)
             .collect();
-        for (measured, expected_var) in environment.iter().zip(&expected.launch.environment) {
-            // A secret-bearing name must never be measured as a non-secret value.
-            if is_sensitive_env_key(&measured.name) {
-                return Err(FinalizationError::SecretEnvValue(measured.name.clone()));
-            }
-            if secret_bindings.contains(measured.name.as_str()) {
-                return Err(FinalizationError::SecretBoundEnvValue(
-                    measured.name.clone(),
-                ));
-            }
-            if measured.name != expected_var.name {
-                return Err(mismatch("launch.environment"));
-            }
-            verify_measured_env_value(measured, expected_var.value_digest)?;
+        if let Some(name) = measured
+            .launch
+            .environment
+            .iter()
+            .map(|variable| &variable.name)
+            .find(|name| expected_secrets.contains(name.as_str()))
+        {
+            return Err(FinalizationError::SecretBoundEnvValue(name.clone()));
         }
-        Ok(())
-    }
-
-    fn verify_opaque(
-        &self,
-        facet: &'static str,
-        payload: Option<&Value>,
-        domain: OpaqueContractDomainV1,
-        expected: OpaqueContractDigestV1,
-    ) -> Result<(), FinalizationError> {
-        let payload = self.require_ref(facet, payload)?;
-        verify_opaque_digest(domain, payload, expected).map_err(|error| match error {
-            FinalizationError::FacetMismatch { .. } => FinalizationError::FacetMismatch {
-                facet: facet.to_string(),
-            },
-            FinalizationError::OpaqueDigest { source, .. } => FinalizationError::OpaqueDigest {
-                facet: facet.to_string(),
-                source,
-            },
-            other => other,
+        if let Some(facet) = first_facet_difference(&measured, expected) {
+            return Err(mismatch(&facet));
+        }
+        // Every facet of the measured contract equals `expected`'s, so the two
+        // canonicalize identically and `expected`'s id IS the measured identity.
+        // Computed from `expected` only after full measured agreement — never as
+        // a stand-in for a missing measurement.
+        let execution_id = expected.compute_execution_id()?;
+        Ok(FinalizedExecution {
+            contract: expected.clone(),
+            execution_id,
         })
     }
 
@@ -624,6 +669,114 @@ fn mismatch(facet: &str) -> FinalizationError {
     FinalizationError::FacetMismatch {
         facet: facet.to_string(),
     }
+}
+
+/// The FIRST facet on which two contracts differ, named exactly as the gate
+/// reports it, or `None` when they are equal.
+///
+/// The walk order is the RFC §4.2 facet order, so the name a caller sees is the
+/// earliest thing that actually went wrong rather than whichever field a derived
+/// `PartialEq` happened to reach first. Environment variables are named
+/// individually (`launch.environment[NAME].value_digest`) because "the
+/// environment differs" is not actionable when there are twenty of them.
+fn first_facet_difference(
+    measured: &ExecutionContractV1,
+    expected: &ExecutionContractV1,
+) -> Option<String> {
+    if measured.source.digest != expected.source.digest {
+        return Some("source.digest".to_string());
+    }
+    if measured.source.projection_digest != expected.source.projection_digest {
+        return Some("source.projection_digest".to_string());
+    }
+    if measured.target != expected.target {
+        return Some("target".to_string());
+    }
+    if measured.runtime.kind != expected.runtime.kind
+        || measured.runtime.digest != expected.runtime.digest
+    {
+        return Some("runtime".to_string());
+    }
+    if measured.runtime.dynamic_contract_digest != expected.runtime.dynamic_contract_digest {
+        return Some("runtime.dynamic_contract_digest".to_string());
+    }
+    if measured.dependencies != expected.dependencies {
+        return Some("dependencies".to_string());
+    }
+    if measured.build_outputs.len() != expected.build_outputs.len() {
+        return Some("build_outputs".to_string());
+    }
+    for (measured_output, expected_output) in
+        measured.build_outputs.iter().zip(&expected.build_outputs)
+    {
+        if measured_output.name != expected_output.name
+            || measured_output.digest != expected_output.digest
+        {
+            return Some("build_outputs".to_string());
+        }
+        if measured_output.projection_digest != expected_output.projection_digest {
+            return Some("build_outputs[].projection_digest".to_string());
+        }
+    }
+    if measured.launch.argv != expected.launch.argv || measured.launch.cwd != expected.launch.cwd {
+        return Some("launch.argv".to_string());
+    }
+    if measured.launch.process_model_digest != expected.launch.process_model_digest {
+        return Some("launch.process_model_digest".to_string());
+    }
+    if measured.launch.environment.len() != expected.launch.environment.len() {
+        return Some("launch.environment".to_string());
+    }
+    for (measured_var, expected_var) in measured
+        .launch
+        .environment
+        .iter()
+        .zip(&expected.launch.environment)
+    {
+        if measured_var.name != expected_var.name {
+            return Some("launch.environment".to_string());
+        }
+        if measured_var.value_digest != expected_var.value_digest {
+            return Some(format!(
+                "launch.environment[{}].value_digest",
+                measured_var.name
+            ));
+        }
+    }
+    if measured.launch.environment_policy_digest != expected.launch.environment_policy_digest {
+        return Some("launch.environment_policy_digest".to_string());
+    }
+    if measured.launch.secret_bindings != expected.launch.secret_bindings {
+        return Some("launch.secret_bindings".to_string());
+    }
+    if measured.filesystem.view_digest != expected.filesystem.view_digest {
+        return Some("filesystem.view_digest".to_string());
+    }
+    if measured.filesystem.topology_digest != expected.filesystem.topology_digest {
+        return Some("filesystem.topology_digest".to_string());
+    }
+    if measured.filesystem.readonly_layers != expected.filesystem.readonly_layers {
+        return Some("filesystem.readonly_layers".to_string());
+    }
+    if measured.filesystem.writable_paths != expected.filesystem.writable_paths {
+        return Some("filesystem.writable_paths".to_string());
+    }
+    if measured.policy.network_digest != expected.policy.network_digest {
+        return Some("policy.network_digest".to_string());
+    }
+    if measured.policy.capability_digest != expected.policy.capability_digest {
+        return Some("policy.capability_digest".to_string());
+    }
+    if measured.policy.filesystem_digest != expected.policy.filesystem_digest {
+        return Some("policy.filesystem_digest".to_string());
+    }
+    if measured.guest_surface != expected.guest_surface {
+        return Some("guest_surface".to_string());
+    }
+    if measured.external_state != expected.external_state {
+        return Some("external_state".to_string());
+    }
+    None
 }
 
 /// Recompute an opaque sub-contract digest from `payload` under `domain`
@@ -927,6 +1080,198 @@ mod tests {
             .into_envelope()
             .verify()
             .expect("envelope verifies");
+    }
+
+    /// The minted contract IS what the gate verifies — the property the whole
+    /// mint/verify split exists to guarantee.
+    ///
+    /// A producer that minted one contract while the gate checked another is the
+    /// failure mode this module is built to prevent, and it cannot be caught by
+    /// testing either half alone. So: mint from a measurement, then verify the
+    /// SAME measurement against what it minted, and require agreement.
+    #[test]
+    fn a_minted_contract_is_exactly_what_the_gate_verifies() {
+        let fx = fixtures();
+        let observation = full_observation(&fx);
+        let minted = observation.into_contract().expect("full measurement mints");
+
+        let finalized = observation
+            .finalize(&minted)
+            .expect("the gate accepts the contract this very measurement minted");
+        assert_eq!(
+            *finalized.execution_id(),
+            minted.compute_execution_id().unwrap(),
+            "the minted contract's canonical id is the issued identity"
+        );
+        // And it is the same contract the hand-derived expectation describes, so
+        // minting introduced no facet of its own.
+        assert_eq!(minted, expected_contract(&fx));
+    }
+
+    /// Minting demands every facet, and names the FIRST one missing in RFC §4.2
+    /// order.
+    ///
+    /// A mint that filled a gap with a default would put a value into an
+    /// identity nobody measured — the same fabrication `finalize` refuses, one
+    /// step earlier and with nothing to compare against that would catch it.
+    #[test]
+    fn minting_refuses_an_incomplete_measurement_naming_the_first_facet() {
+        assert_eq!(
+            ExecutionObservationV1::new().into_contract().unwrap_err(),
+            FinalizationError::UnmeasuredFacet("source.digest")
+        );
+
+        let fx = fixtures();
+        // One facet short, deep in the walk: the refusal must name THAT facet,
+        // not the first one it happens to touch.
+        let mut observation = full_observation(&fx);
+        observation.external_state = None;
+        assert_eq!(
+            observation.into_contract().unwrap_err(),
+            FinalizationError::UnmeasuredFacet("external_state")
+        );
+    }
+
+    /// **EVERY** measured field is load-bearing: dropping any one of them, from
+    /// an otherwise-complete observation, refuses the mint.
+    ///
+    /// This is the exhaustive form of the guarantee, and it is exhaustive by
+    /// CONSTRUCTION rather than by a hand-maintained list: the destructuring
+    /// below binds every field of `ExecutionObservationV1` with no `..` rest
+    /// pattern, so adding a facet to the observation **fails to compile here**
+    /// until it is given a case. A hand-written list is exactly how a new facet
+    /// would quietly acquire an implicit default — the one thing minting must
+    /// never do.
+    #[test]
+    fn every_unmeasured_facet_refuses_the_mint_and_none_has_an_implicit_default() {
+        let fx = fixtures();
+
+        // Compile-time completeness gate. If this stops compiling, a facet was
+        // added: give it a case below rather than widening the pattern.
+        let ExecutionObservationV1 {
+            source_digest: _,
+            source_projection_payload: _,
+            target: _,
+            runtime_kind: _,
+            runtime_digest: _,
+            runtime_dynamic_payload: _,
+            dependencies: _,
+            build_outputs: _,
+            launch_argv: _,
+            launch_cwd: _,
+            process_model_payload: _,
+            environment: _,
+            environment_policy_payload: _,
+            secret_bindings: _,
+            filesystem_view_digest: _,
+            filesystem_topology_payload: _,
+            filesystem_readonly_layers: _,
+            filesystem_writable_paths: _,
+            policy_network_payload: _,
+            policy_capability_payload: _,
+            policy_filesystem_payload: _,
+            guest_surface: _,
+            external_state: _,
+        } = full_observation(&fx);
+
+        type DropFacet = fn(&mut ExecutionObservationV1);
+        let cases: &[(&str, DropFacet)] = &[
+            ("source.digest", |o| o.source_digest = None),
+            ("source.projection_digest", |o| {
+                o.source_projection_payload = None
+            }),
+            ("target", |o| o.target = None),
+            ("runtime.kind", |o| o.runtime_kind = None),
+            ("runtime.digest", |o| o.runtime_digest = None),
+            ("runtime.dynamic_contract_digest", |o| {
+                o.runtime_dynamic_payload = None
+            }),
+            ("dependencies", |o| o.dependencies = None),
+            ("build_outputs", |o| o.build_outputs = None),
+            ("launch.argv", |o| o.launch_argv = None),
+            ("launch.cwd", |o| o.launch_cwd = None),
+            ("launch.process_model_digest", |o| {
+                o.process_model_payload = None
+            }),
+            ("launch.environment", |o| o.environment = None),
+            ("launch.environment_policy_digest", |o| {
+                o.environment_policy_payload = None
+            }),
+            ("launch.secret_bindings", |o| o.secret_bindings = None),
+            ("filesystem.view_digest", |o| {
+                o.filesystem_view_digest = None
+            }),
+            ("filesystem.topology_digest", |o| {
+                o.filesystem_topology_payload = None
+            }),
+            ("filesystem.readonly_layers", |o| {
+                o.filesystem_readonly_layers = None
+            }),
+            ("filesystem.writable_paths", |o| {
+                o.filesystem_writable_paths = None
+            }),
+            ("policy.network_digest", |o| o.policy_network_payload = None),
+            ("policy.capability_digest", |o| {
+                o.policy_capability_payload = None
+            }),
+            ("policy.filesystem_digest", |o| {
+                o.policy_filesystem_payload = None
+            }),
+            ("guest_surface", |o| o.guest_surface = None),
+            ("external_state", |o| o.external_state = None),
+        ];
+
+        for (facet, drop) in cases {
+            let mut observation = full_observation(&fx);
+            drop(&mut observation);
+            let refusal = observation
+                .into_contract()
+                .expect_err("a facet with no measurement must never be filled in with a default");
+            assert_eq!(
+                refusal,
+                FinalizationError::UnmeasuredFacet(facet),
+                "dropping {facet} must refuse, naming that facet"
+            );
+            // And the gate refuses it too — an incomplete observation can never
+            // be promoted to a complete contract by going through `finalize`
+            // with an expected contract standing by to supply the gap.
+            assert!(matches!(
+                observation.finalize(&expected_contract(&fx)),
+                Err(FinalizationError::UnmeasuredFacet(_))
+            ));
+        }
+    }
+
+    /// A measured value whose NAME is secret-bearing never becomes a committed
+    /// non-secret value, on the mint path too.
+    ///
+    /// The gate's version of this check compares against an expected contract;
+    /// the mint has none, so if this were only enforced there, the first
+    /// producer to mint a lock would be the one path with no check at all.
+    #[test]
+    fn minting_refuses_a_secret_bearing_env_name() {
+        let fx = fixtures();
+        let observation = full_observation(&fx).measured_environment(vec![MeasuredEnvValue {
+            name: "API_TOKEN".to_string(),
+            value_payload: EnvironmentValuePayloadV1::utf8("x"),
+        }]);
+        assert_eq!(
+            observation.into_contract().unwrap_err(),
+            FinalizationError::SecretEnvValue("API_TOKEN".to_string())
+        );
+
+        // And a name the heuristic misses, caught by the authoritative binding
+        // set the measurement itself carries.
+        let observation = full_observation(&fx)
+            .measured_environment(vec![MeasuredEnvValue {
+                name: "DATABASE_URL".to_string(),
+                value_payload: EnvironmentValuePayloadV1::utf8("x"),
+            }])
+            .measured_secret_bindings(vec!["DATABASE_URL".to_string()]);
+        assert_eq!(
+            observation.into_contract().unwrap_err(),
+            FinalizationError::SecretBoundEnvValue("DATABASE_URL".to_string())
+        );
     }
 
     #[test]
