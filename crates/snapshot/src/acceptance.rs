@@ -67,6 +67,7 @@ use capsule::snapshot_manifest::{
     AcceptanceStatus, CapturePolicyV1, SanitizationAttestationV1, SecretScanAttestationV1,
     SnapshotCatalogRecord, SnapshotId, SnapshotManifestV1,
 };
+use capsule::types::SealAtConfig;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -272,6 +273,67 @@ pub struct AcceptanceConfig {
     pub total_deadline: Duration,
     /// Maximum number of capture→verify attempts.
     pub maximum_attempts: u32,
+}
+
+/// Per-attempt verification budget when `[seal_at]` names no `timeout_seconds`.
+pub const DEFAULT_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
+/// Whole-run deadline when `[seal_at]` names no `timeout_seconds`. The excess
+/// over [`DEFAULT_VERIFICATION_TIMEOUT`] is the budget for the NON-verification
+/// work of one attempt (candidate capture, disposable create/restore, teardown).
+pub const DEFAULT_TOTAL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// Bounds for the disposable-restore acceptance loop when the caller does not
+/// override them: exactly ONE attempt.
+///
+/// The RFC's "fresh capture per attempt" retry model assumes each attempt
+/// re-boots the guest to recapture memory/vmstate; both shipped executors of
+/// `seal_at.command` receive their candidate already sealed from a single boot
+/// (the CLI's `seal` from `build_ready_state`, the builder's hold from one
+/// `capture_candidate`), so a real per-attempt recapture is not available
+/// without re-architecting the capture pipeline. Rather than fabricate a
+/// "retry" that silently reruns the SAME candidate, this bounds the run to the
+/// one real attempt the sealed layers actually support. A future PR that
+/// threads a re-bootable capture closure through can widen `maximum_attempts`
+/// without changing this function's contract.
+pub fn default_acceptance_config(seal_at_argv: Vec<String>) -> AcceptanceConfig {
+    AcceptanceConfig {
+        seal_at_argv,
+        verification_timeout: DEFAULT_VERIFICATION_TIMEOUT,
+        total_deadline: DEFAULT_TOTAL_DEADLINE,
+        maximum_attempts: 1,
+    }
+}
+
+/// The acceptance bounds an authored `[seal_at]` table asks for.
+///
+/// Shared by BOTH executors of that table for the same reason the lifecycle
+/// itself is ([`crate::disposable_lifecycle`]): a build and an interactive hold
+/// must spend the same budget on the same authored command, or the same capsule
+/// would be verified under two different deadlines depending on which path
+/// sealed it.
+///
+/// `timeout_seconds` maps onto [`AcceptanceConfig::verification_timeout`] — the
+/// per-attempt bound on the verification program, which is exactly what §6.1
+/// names. `total_deadline` is widened to keep the same non-verification
+/// headroom the default allots (its `total_deadline` minus its
+/// `verification_timeout`), so an authored timeout can actually be spent instead
+/// of being truncated by a fixed 60 s run deadline. `maximum_attempts` is NOT
+/// touched: the single-attempt policy is a property of the capture pipeline (see
+/// [`default_acceptance_config`]), not something the manifest may widen.
+pub fn acceptance_config_for_seal_at(seal_at: &SealAtConfig) -> AcceptanceConfig {
+    let base = default_acceptance_config(seal_at.command.clone());
+    match seal_at.timeout_seconds {
+        None => base,
+        Some(seconds) => {
+            let verification_timeout = Duration::from_secs(u64::from(seconds));
+            AcceptanceConfig {
+                verification_timeout,
+                total_deadline: verification_timeout
+                    + DEFAULT_TOTAL_DEADLINE.saturating_sub(DEFAULT_VERIFICATION_TIMEOUT),
+                ..base
+            }
+        }
+    }
 }
 
 /// The process result of one `seal_at.command` run. Only [`VerificationOutcome::Exited`]

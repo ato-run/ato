@@ -43,11 +43,12 @@
 //! with the candidate). Exact-equality fencing on the control poll would deadlock
 //! the first capture and is never applied here.
 //!
-//! **Not wired to a live guest.** `interactive_capture` is still absent from the
-//! claim loop's `supported_kinds`, so nothing here runs against a real hold: the
-//! VM half (boot-and-hold, pause/snapshot/resume, a production eligibility proof)
-//! does not exist yet. The one production consumer today is the §3.8 terminal ack
-//! for an interactive job that failed before `holding`.
+//! **Turned on by CONFIGURATION, not by this module.** Everything here runs
+//! against a real hold once a builder is configured with a slot
+//! (`--builder-id`/`--slot-id`/`--hold-proxy-listen`), which is what adds
+//! `interactive_capture` to the claim's `supported_kinds`. Without one the api
+//! never hands this daemon such a job, and the only consumer left is the §3.8
+//! terminal ack.
 //!
 //! **Dead-code allow (module-scoped, same rationale as `hold_phase`):** this is a
 //! binary crate, so `pub` items are dead unless `fn main` reaches them; most of
@@ -1282,44 +1283,59 @@ impl<'a, C: WallClock> ApiControlSource<'a, C> {
     }
 }
 
-impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
-    fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
-        if self.polls > 0 && !self.poll_interval.is_zero() {
-            self.lease.clock().sleep(self.poll_interval);
-        }
-        self.polls += 1;
+impl<'a, C: WallClock> ApiControlSource<'a, C> {
+    /// Make ONE builder-lane call under the hold's two fail-closed bounds, and
+    /// retry it only while both hold.
+    ///
+    /// Every call this source makes — the control poll and the two candidate
+    /// reports — has the same shape: it is legitimate only while the lease is,
+    /// and a transient edge blip must not cost the author their live session.
+    /// Sharing the loop is not just brevity: three copies would be three chances
+    /// for one of them to drift into retrying past the lease.
+    ///
+    /// `what` names the call in the retry log. It is a builder-local label, not
+    /// a wire value.
+    fn under_lease<T>(
+        &mut self,
+        what: &str,
+        call: impl Fn(&dyn WizardApi, &Fencing4) -> Result<T, WizardApiError>,
+    ) -> Result<T, ControlFault> {
+        // Copied out so the closure below borrows neither `self` nor the lease
+        // it drives.
+        let api = self.api;
+        let fencing = self.fencing;
         // The retry window for a TRANSIENT blip, captured ONCE here — before the
         // loop can renew the lease. It must not be the live lease deadline: the
         // `tick` below renews on cadence, and every success pushes that deadline
         // out, so a retry bounded by it is bounded by a thing the loop keeps
-        // extending — and a `/control` that fails deterministically while
+        // extending — and a route that fails deterministically while
         // `/lease/renew` stays healthy would then spin forever. `min` with the
         // lease keeps the "never retry past the lease" guarantee; the fixed
         // ceiling ([`CONTROL_POLL_RETRY_WINDOW`]) caps a persistently-unhealthy
-        // control channel so the held guest and builder slot are released.
+        // channel so the held guest and builder slot are released.
         let retry_deadline = self.lease.clock().now_utc()
             + CONTROL_POLL_RETRY_WINDOW.min(self.lease.lease_remaining());
         let mut attempt: u32 = 1;
-        let response = loop {
+        loop {
             // Lease first — and again before every retry: a dead lease makes the
-            // poll itself a 409, and the hold must end on the lease's terms (no
-            // ack), not on a directive. `tick` renews on cadence and fails closed
-            // the moment the observed deadline passes with no successful renew —
-            // the bound for the case where `/lease/renew` ALSO fails.
-            self.lease.tick(self.fencing)?;
-            match self.api.poll_control(self.fencing, observed_capture_epoch) {
-                Ok(response) => break response,
-                // A fenced poll is definitive: the claim is already dead
+            // call itself a 409, and the hold must end on the lease's terms (no
+            // ack), not on whatever the route would have answered. `tick` renews
+            // on cadence and fails closed the moment the observed deadline passes
+            // with no successful renew — the bound for the case where
+            // `/lease/renew` ALSO fails.
+            self.lease.tick(fencing)?;
+            match call(api, fencing) {
+                Ok(value) => return Ok(value),
+                // A fenced answer is definitive: the claim is already dead
                 // server-side, so there is nothing to retry into.
                 Err(err) if err.is_fenced() => return Err(err.into()),
-                // A DETERMINISTIC non-fenced fault — a control body this builder
-                // cannot parse or that fails its refinements (`Contract`,
-                // §1.2/§3.3), or a 4xx from an api that does not have this route
-                // (version skew) — answers identically on every retry while the
-                // lease renews on, so a retry loop never exits. Fail closed at
-                // once, per `ControlFault`'s contract: a malformed control
-                // response leaves the lease in doubt — tear down locally, ack
-                // nothing.
+                // A DETERMINISTIC non-fenced fault — a body this builder cannot
+                // parse or that fails its refinements (`Contract`, §1.2/§3.3),
+                // or a 4xx from an api that does not have this route (version
+                // skew) — answers identically on every retry while the lease
+                // renews on, so a retry loop never exits. Fail closed at once,
+                // per `ControlFault`'s contract: it leaves the lease in doubt —
+                // tear down locally, ack nothing.
                 Err(err) if !err.is_retryable() => return Err(err.into()),
                 // A transient blip — a 5xx from the edge, a reset connection, a
                 // timeout — must not cost the author their live session. There is
@@ -1337,7 +1353,7 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
                         return Err(err.into());
                     }
                     eprintln!(
-                        "[builder] wizard control poll failed (attempt {attempt}), retrying \
+                        "[builder] wizard {what} failed (attempt {attempt}), retrying \
                          inside the lease window: {err}"
                     );
                     attempt += 1;
@@ -1351,11 +1367,85 @@ impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
                     self.lease.clock().sleep(backoff);
                 }
             }
-        };
+        }
+    }
+
+    /// The control-channel pairing a report must be cross-checked against
+    /// (§1.2), or a fail-closed refusal.
+    ///
+    /// The memo is the one this source itself recorded from a `capture`
+    /// directive. Reporting against anything else — an epoch the caller
+    /// restated, say — would make the builder the author of the pairing the
+    /// server is meant to be checking it against.
+    fn capture_command_for(&self, capture_epoch: u64) -> Result<CaptureCommand, ControlFault> {
+        let command = self.last_capture_command.clone().ok_or(ControlFault {
+            message: "no capture command was delivered on this control channel, so there is \
+                      no candidate to report against"
+                .to_string(),
+        })?;
+        if command.capture_epoch != capture_epoch {
+            return Err(ControlFault {
+                message: format!(
+                    "report is for epoch {capture_epoch} but the control channel's last \
+                     capture command was epoch {}",
+                    command.capture_epoch
+                ),
+            });
+        }
+        Ok(command)
+    }
+}
+
+impl<C: WallClock> ControlSource for ApiControlSource<'_, C> {
+    fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault> {
+        if self.polls > 0 && !self.poll_interval.is_zero() {
+            self.lease.clock().sleep(self.poll_interval);
+        }
+        self.polls += 1;
+        let response = self.under_lease("control poll", |api, fencing| {
+            api.poll_control(fencing, observed_capture_epoch)
+        })?;
         if let Some(command) = CaptureCommand::from_control(&response) {
             self.last_capture_command = Some(command);
         }
         Ok(response)
+    }
+
+    /// §3.6 over the wire, cross-checked against the pairing this source
+    /// recorded (§1.2) before the round trip is spent.
+    ///
+    /// **A retry can lose a report that landed.** `is_retryable` covers the
+    /// transport, and a request whose RESPONSE was lost has been applied
+    /// server-side; the retry then answers `409 fenced` ("candidate is not
+    /// awaiting a report"), and this ends the hold with no ack. That is the
+    /// fail-closed side of the trade: the server owns a candidate it did report,
+    /// the sweep resolves the attempt, and nothing is double-published. The
+    /// alternative — no retry at all — would throw away good candidates for
+    /// every ordinary edge blip, which is the far more frequent event.
+    fn report_candidate(&mut self, report: &CandidateReportRequest) -> Result<(), ControlFault> {
+        report
+            .validate()
+            .map_err(|message| ControlFault { message })?;
+        let command = self.capture_command_for(report.capture_epoch)?;
+        self.under_lease("candidate report", |api, fencing| {
+            api.report_candidate(fencing, &command, report).map(|_| ())
+        })
+    }
+
+    /// §3.7 over the wire. Same pairing check: the candidate id rides the PATH,
+    /// and it comes from the control channel's memo rather than from the caller.
+    fn report_acceptance(
+        &mut self,
+        request: &CandidateAcceptanceRequest,
+    ) -> Result<(), ControlFault> {
+        request
+            .validate()
+            .map_err(|message| ControlFault { message })?;
+        let command = self.capture_command_for(request.capture_epoch)?;
+        self.under_lease("candidate acceptance", |api, fencing| {
+            api.report_candidate_acceptance(fencing, &command, request)
+                .map(|_| ())
+        })
     }
 }
 
@@ -2492,6 +2582,10 @@ mod tests {
         controls: Mutex<VecDeque<Result<ControlResponse, WizardApiError>>>,
         control_calls: Mutex<u32>,
         acks: Mutex<Vec<WizardTerminalAck>>,
+        /// Every §3.6 that actually left, with the pairing it was sent under —
+        /// the pairing is the point, so it is recorded, not just counted.
+        candidate_reports: Mutex<Vec<(CaptureCommand, CandidateReportRequest)>>,
+        acceptances: Mutex<Vec<(CaptureCommand, CandidateAcceptanceRequest)>>,
     }
 
     impl ScriptedApi {
@@ -2505,6 +2599,8 @@ mod tests {
                 controls: Mutex::new(controls.into()),
                 control_calls: Mutex::new(0),
                 acks: Mutex::new(Vec::new()),
+                candidate_reports: Mutex::new(Vec::new()),
+                acceptances: Mutex::new(Vec::new()),
             }
         }
 
@@ -2596,19 +2692,33 @@ mod tests {
         fn report_candidate(
             &self,
             _fencing: &Fencing4,
-            _command: &CaptureCommand,
-            _request: &CandidateReportRequest,
+            command: &CaptureCommand,
+            request: &CandidateReportRequest,
         ) -> Result<CandidateReportResponse, WizardApiError> {
-            panic!("unscripted candidate report")
+            self.candidate_reports
+                .lock()
+                .unwrap()
+                .push((command.clone(), request.clone()));
+            Ok(CandidateReportResponse {
+                candidate_id: request.candidate_id.clone(),
+                status: CandidateStatus::Reported,
+            })
         }
 
         fn report_candidate_acceptance(
             &self,
             _fencing: &Fencing4,
-            _command: &CaptureCommand,
-            _request: &CandidateAcceptanceRequest,
+            command: &CaptureCommand,
+            request: &CandidateAcceptanceRequest,
         ) -> Result<CandidateAcceptanceResponse, WizardApiError> {
-            panic!("unscripted acceptance")
+            self.acceptances
+                .lock()
+                .unwrap()
+                .push((command.clone(), request.clone()));
+            Ok(CandidateAcceptanceResponse {
+                candidate_id: command.candidate_id.clone(),
+                status: request.status,
+            })
         }
 
         fn wizard_terminal_ack(
@@ -2854,6 +2964,98 @@ mod tests {
             })
         );
         assert_eq!(source.polls(), 2);
+    }
+
+    /// A report is sent under the pairing the CONTROL CHANNEL delivered, not
+    /// under one the caller restated.
+    ///
+    /// §3.6/§3.7 have the server cross-check epoch↔candidate 1:1 against the id
+    /// it minted. If the builder supplied both halves of what is being checked,
+    /// the check would be the builder agreeing with itself — so the candidate id
+    /// comes from this source's own memo of the `capture` directive, and the
+    /// caller's epoch only has to MATCH it.
+    #[test]
+    fn a_report_rides_the_pairing_the_control_channel_delivered() {
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(vec![], vec![Ok(control("capture", 4, Some("cand_01J1Z0")))]);
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+        source.poll(0).expect("capture directive");
+
+        let mut report = candidate_report();
+        report.capture_epoch = 4;
+        source
+            .report_candidate(&report)
+            .expect("the report leaves under the delivered pairing");
+
+        let sent = api.candidate_reports.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].0,
+            CaptureCommand {
+                candidate_id: "cand_01J1Z0".to_string(),
+                capture_epoch: 4,
+            },
+            "the pairing is the control channel's, not the caller's"
+        );
+    }
+
+    /// Nothing leaves for an epoch the control channel never delivered a capture
+    /// for — the round trip would only come back `409 fenced`, and the builder
+    /// already knows enough to say so.
+    #[test]
+    fn a_report_for_an_epoch_no_capture_command_named_never_leaves() {
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(vec![], vec![Ok(control("capture", 4, Some("cand_01J1Z0")))]);
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+
+        // Before any poll there is no pairing at all.
+        let mut report = candidate_report();
+        report.capture_epoch = 4;
+        let fault = source
+            .report_candidate(&report)
+            .expect_err("no capture command has been delivered");
+        assert!(fault.message.contains("no capture command"), "{fault:?}");
+
+        // And after one, an epoch that is not ITS epoch is refused too.
+        source.poll(0).expect("capture directive");
+        let mut stale = acceptance();
+        stale.capture_epoch = 3;
+        let fault = source
+            .report_acceptance(&stale)
+            .expect_err("epoch 3 is not the delivered epoch 4");
+        assert!(fault.message.contains("epoch 4"), "{fault:?}");
+
+        assert!(api.candidate_reports.lock().unwrap().is_empty());
+        assert!(api.acceptances.lock().unwrap().is_empty());
+    }
+
+    /// A body that cannot satisfy §3.6/§3.7's own refinements is caught before
+    /// the round trip — the api would 400 it, and the candidate's verdict would
+    /// still be untold either way.
+    #[test]
+    fn an_invalid_report_body_is_refused_without_a_round_trip() {
+        let clock = FakeWallClock::at("2026-07-22T09:10:00.000Z");
+        let api = ScriptedApi::new(vec![], vec![Ok(control("capture", 4, Some("cand_01J1Z0")))]);
+        let f = fencing();
+        let driver =
+            LeaseRenewDriver::new(&api, &clock, "2026-07-22T09:15:00.000Z").expect("adopted");
+        let mut source = ApiControlSource::new(&api, &f, driver, Duration::ZERO);
+        source.poll(0).expect("capture directive");
+
+        let mut report = candidate_report();
+        report.capture_epoch = 4;
+        report.execution_id = String::new();
+        let fault = source
+            .report_candidate(&report)
+            .expect_err("an empty execution_id is not reportable");
+        assert!(fault.message.contains("execution_id"), "{fault:?}");
+        assert!(api.candidate_reports.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -50,9 +50,6 @@ pub struct ClaimContractEligibility {
     envelope: Option<ExecutionContractEnvelopeV1>,
 }
 
-/// Not wired into the job loop yet — that is the slice that boots the hold and
-/// fronts it with an ingress. The lane stays OFF until then.
-#[allow(dead_code)]
 impl ClaimContractEligibility {
     /// Build from the identity fields of a claimed job.
     ///
