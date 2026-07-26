@@ -42,6 +42,10 @@ pub mod docker_import;
 pub mod external_state;
 mod fake;
 mod firecracker;
+/// What a guest filesystem CONTAINS, as one digest — the value
+/// `filesystem.view_digest` commits. Content rather than the ext4
+/// serialization, because `mke2fs` stamps every inode with the wall clock.
+pub mod guest_filesystem_digest;
 mod kata;
 mod manifest;
 pub mod mem_backend_selector;

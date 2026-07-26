@@ -67,6 +67,13 @@ pub struct V1BuildSummary {
     pub lock: PathBuf,
     pub guest_image: PathBuf,
     pub guest_image_bytes: u64,
+    /// The packed artifact's digest — a materialization receipt naming WHICH
+    /// file this build wrote. Not an identity input: see
+    /// `V1BuildOutcome::guest_image_digest`.
+    pub guest_image_digest: String,
+    /// The identity-bearing digest of the guest's contents, as
+    /// `filesystem.view_digest` commits it.
+    pub filesystem_view_digest: String,
     pub source_digest: String,
     pub runtime: String,
     pub target: String,
@@ -787,6 +794,8 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
             lock: outcome.lock_path,
             guest_image: outcome.guest_image_path,
             guest_image_bytes: outcome.guest_image_bytes,
+            guest_image_digest: outcome.guest_image_digest,
+            filesystem_view_digest: outcome.filesystem_view_digest,
             source_digest: outcome.source_digest,
             runtime: outcome.runtime_resolved_ref,
             target: format!(
