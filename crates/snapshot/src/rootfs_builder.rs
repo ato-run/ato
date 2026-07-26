@@ -444,6 +444,11 @@ pub fn derive_build_spec_v1(
 /// word preserves boundaries — `["python3", "app one.py"]` stays two arguments
 /// — whereas joining and re-splitting would turn the space into a separator and
 /// launch a different program than the contract committed to.
+// Wired into a production path by ADR-015 step 5-3 in #1144, which calls it
+// from the v1 build lane. Until then its only caller is
+// `build_rootfs_script_v1`, which is itself not yet called — so it is dead by
+// transitivity rather than by design. Remove this with that wiring.
+#[allow(dead_code)]
 pub(crate) fn launch_argv_line(argv: &[String]) -> String {
     let words = argv
         .iter()
@@ -458,6 +463,10 @@ pub(crate) fn launch_argv_line(argv: &[String]) -> String {
 /// [`rootfs_pack_script`]), differing only in that the init launches an argv
 /// instead of a shell string, and that there is no build command — the Step-4
 /// subset rejects `[[build.steps]]`, so there is nothing to run.
+// Wired into a production path by ADR-015 step 5-3 in #1144: the v1 build lane
+// emits this script to pack the guest. This slice produces the recipe; the
+// slice that runs it is the next one. Remove this with that wiring.
+#[allow(dead_code)]
 pub(crate) fn build_rootfs_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     let acquire = format!(
