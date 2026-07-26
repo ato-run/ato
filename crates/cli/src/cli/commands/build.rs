@@ -47,6 +47,30 @@ pub struct BuildResult {
     pub target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derived_from: Option<PathBuf>,
+    /// Present only for a `schema_version = "1"` build. The terminal prints a
+    /// short id; this carries the whole one, for anything that consumes
+    /// `--json`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub v1: Option<V1BuildSummary>,
+}
+
+/// The result of the v1 producer lane, as `--json` reports it.
+///
+/// `trusted_load_verified` is always `true` here: the lane has no path that
+/// returns success without having read the lock back off disk, recomputed the
+/// execution id from what it read, and found it equal to what it minted. It is
+/// serialized anyway because a consumer should be able to see the claim rather
+/// than infer it from the field's absence.
+#[derive(Debug, Serialize)]
+pub struct V1BuildSummary {
+    pub execution_id: String,
+    pub lock: PathBuf,
+    pub guest_image: PathBuf,
+    pub guest_image_bytes: u64,
+    pub source_digest: String,
+    pub runtime: String,
+    pub target: String,
+    pub trusted_load_verified: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -185,6 +209,23 @@ pub fn execute_pack_command_with_injected_manifest(
     }
 
     let manifest = dir.join("capsule.toml");
+
+    // The schema decides which producer runs, and it decides FIRST — before
+    // this command resolves a lock, infers a manifest, or writes anything.
+    //
+    // v1 is not a variant of the v0.3 lane, it is a different producer: it
+    // builds a bootable guest and mints an Execution Identity from measuring
+    // it, where v0.3 packs a `.capsule` archive. Nothing below promotes one
+    // into the other, and a v1 build that fails does not fall back here — a
+    // fallback would produce an artifact under a schema the author did not
+    // ask for.
+    if manifest_declares_schema_v1(&dir, injected_manifest)? {
+        let outcome = run_v1_build_lane(&dir, reporter.as_ref())?;
+        record_timing(&mut timing_entries, "build.total", total_started.elapsed());
+        emit_timings(reporter.clone(), timings, &timing_entries)?;
+        return Ok(outcome);
+    }
+
     let authoritative_input = if injected_manifest.is_none() {
         let resolved = resolve_producer_authoritative_input(&dir, reporter.clone(), false)?;
         for advisory in &resolved.advisories {
@@ -379,6 +420,7 @@ pub fn execute_pack_command_with_injected_manifest(
             schema_version: Some(result.schema_version),
             target: Some(result.target),
             derived_from: Some(result.derived_from),
+            v1: None,
         });
     }
 
@@ -462,6 +504,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 schema_version: None,
                 target: None,
                 derived_from: None,
+                v1: None,
             }
         }
         capsule::router::RuntimeKind::NativeInference => {
@@ -513,6 +556,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 schema_version: None,
                 target: None,
                 derived_from: None,
+                v1: None,
             }
         }
         capsule::router::RuntimeKind::Wasm => {
@@ -540,6 +584,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 schema_version: None,
                 target: None,
                 derived_from: None,
+                v1: None,
             }
         }
         capsule::router::RuntimeKind::Web => {
@@ -609,6 +654,7 @@ pub fn execute_pack_command_with_injected_manifest(
                 schema_version: None,
                 target: None,
                 derived_from: None,
+                v1: None,
             }
         }
     };
@@ -628,6 +674,160 @@ pub fn execute_pack_command_with_injected_manifest(
 
     Ok(result)
 }
+
+/// Does this workspace's manifest declare `schema_version = "1"`?
+///
+/// Read from the raw TOML rather than by trying each parser in turn:
+/// `CapsuleManifest::from_toml` and `CapsuleManifestV1::from_toml` each reject
+/// the other's schema, so "whichever parses" would make a manifest that is
+/// merely MALFORMED under v1 silently fall through to the v0.3 lane and fail
+/// there with a message about the wrong schema. The declaration is the author's,
+/// and it is read as such.
+///
+/// A workspace with no manifest at all is not v1: `--init` and zero-config
+/// inference are v0.3 surfaces, and the v1 authoring surface has no inference
+/// (ADR-015 — only a v1 manifest mints an identity).
+///
+/// An on-disk `capsule.toml` OUTRANKS an injected draft, which is the same
+/// precedence both lanes apply: the v0.3 lane only falls back to the injected
+/// text when no manifest exists, and `build_v1::run` reads the workspace's
+/// manifest directly. Routing on the draft instead would send a v1 repository
+/// installed from a store — whose install draft is v0.3 — into the v0.3 lane,
+/// which would then load the on-disk v1 manifest and fail on a schema complaint
+/// about the one thing the author got right.
+fn manifest_declares_schema_v1(dir: &Path, injected_manifest: Option<&str>) -> Result<bool> {
+    let manifest_path = dir.join("capsule.toml");
+    let text = if manifest_path.exists() {
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?
+    } else {
+        match injected_manifest {
+            Some(text) => text.to_string(),
+            None => return Ok(false),
+        }
+    };
+    // A manifest that does not parse as TOML is not this function's problem to
+    // report: the lane it belongs to will say so with the context it has.
+    let Ok(raw) = toml::from_str::<toml::Value>(&text) else {
+        return Ok(false);
+    };
+    Ok(raw
+        .get("schema_version")
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        == Some(capsule::types::manifest_v1::MANIFEST_SCHEMA_V1))
+}
+
+/// Run the v1 producer lane and report it.
+///
+/// Everything substantive lives in [`ready_state::build_v1::run`]; this is the
+/// adapter that gives it a work directory, an output path, a process-unique
+/// image tag, and a host producer, then turns its outcome into a `BuildResult`.
+fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<BuildResult> {
+    use crate::application::ready_state::{self, build_v1};
+
+    // Scratch: the frozen source archive and the materialized projection. Both
+    // are intermediates, so they go to a temp dir that is removed when this
+    // returns — including on the failure paths.
+    let work = tempfile::tempdir().context("create the v1 build work directory")?;
+
+    // The guest image goes to the Ready-State root, NOT beside the source the
+    // way v0.3 leaves its `.capsule`. Two reasons, and the first is
+    // load-bearing: a build output inside the workspace would be frozen as
+    // program source by the next build and hashed into `source.digest`, so the
+    // identity would never reach a fixed point (`build_v1::run` refuses such a
+    // path outright). The second is size — this is a bootable filesystem image,
+    // not a small archive.
+    let guest_image_dir = ready_state::state_root().join(V1_BUILD_OUTPUT_DIR);
+    fs::create_dir_all(&guest_image_dir)
+        .with_context(|| format!("create {}", guest_image_dir.display()))?;
+    let guest_image_path = guest_image_dir.join(v1_guest_image_file_name(dir));
+
+    let producer = build_v1::HostV1GuestProducer::probe()
+        .map_err(|reason| anyhow::anyhow!("a v1 build needs a container tool: {reason}"))?;
+
+    let outcome = build_v1::run(
+        build_v1::V1BuildRequest {
+            workspace_root: dir,
+            work_root: work.path(),
+            guest_image_path: &guest_image_path,
+            rootfs_size_mib: V1_GUEST_IMAGE_SIZE_MIB,
+            // Process-unique, mirroring the legacy builder's `ato-rootfs-$$`:
+            // two concurrent builds must not pack each other's image.
+            image_ref: &format!("ato-v1-build-{}", std::process::id()),
+        },
+        &producer,
+    )?;
+
+    // Deliberately small. The full execution id, the digests and the target are
+    // in `--json`; a terminal needs to recognize the build, not to be able to
+    // quote its identity from a scrollback.
+    futures::executor::block_on(reporter.notify(format!(
+        "Built capsule revision\nExecution ID: {}\nLock: {}\nVerified: yes\nGuest image: {}",
+        outcome.short_execution_id(),
+        outcome
+            .lock_path
+            .file_name()
+            .unwrap_or(outcome.lock_path.as_os_str())
+            .to_string_lossy(),
+        outcome.guest_image_path.display(),
+    )))?;
+
+    Ok(BuildResult {
+        ok: true,
+        kind: "guest-image".to_string(),
+        artifact: Some(outcome.guest_image_path.clone()),
+        image: None,
+        build_strategy: "v1-recipe".to_string(),
+        schema_version: Some(capsule::types::manifest_v1::MANIFEST_SCHEMA_V1.to_string()),
+        target: None,
+        derived_from: None,
+        v1: Some(V1BuildSummary {
+            execution_id: outcome.execution_id,
+            lock: outcome.lock_path,
+            guest_image: outcome.guest_image_path,
+            guest_image_bytes: outcome.guest_image_bytes,
+            source_digest: outcome.source_digest,
+            runtime: outcome.runtime_resolved_ref,
+            target: format!(
+                "{}/{}/{}",
+                outcome.target.os, outcome.target.architecture, outcome.target.abi
+            ),
+            trusted_load_verified: outcome.trusted_load_verified,
+        }),
+    })
+}
+
+/// Where a v1 build leaves its bootable guest image, under the Ready-State
+/// root. Never inside the workspace — see `run_v1_build_lane`.
+const V1_BUILD_OUTPUT_DIR: &str = "v1-build";
+
+/// The image file for one build, named by a digest of the workspace path plus
+/// this process's id.
+///
+/// The workspace digest is because the output root is shared across workspaces:
+/// a fixed name would have two projects overwrite each other's image, and the
+/// second one's `capsule.lock` would name a file holding the first one's bytes.
+/// The path is hashed rather than slugified because a workspace path is not a
+/// filename — it can be long, non-UTF-8, or differ from another only in a
+/// separator.
+///
+/// The pid is because two builds of the SAME workspace can run at once (a
+/// watcher beside a manual run, a CI job beside an editor task) and the pack
+/// script does `rm -f "$ATO_OUT"; dd …; mkfs.ext4 …; mount -o loop "$ATO_OUT"`.
+/// Two simultaneous loop mounts of one file corrupt it, and the digest each
+/// build then commits would describe bytes the other build wrote — an
+/// unmeasured value in the identity, which is the one thing this lane exists to
+/// prevent. Each build gets its own file; it is the caller's, and cleaning up
+/// old ones is not yet automated.
+fn v1_guest_image_file_name(workspace_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_root.as_os_str().as_encoded_bytes());
+    format!("{:x}-{}.img", hasher.finalize(), std::process::id())
+}
+/// Matches the `rootfs_build` dev tool's default. A v1 manifest has no size
+/// field yet, and the Step-4 subset installs at most one dependency set.
+const V1_GUEST_IMAGE_SIZE_MIB: u64 = 1024;
 
 /// Seal the just-built capsule into a Ready-State artifact when
 /// `ATO_READY_STATE_ENABLED` is on. No-op (and legacy build unchanged) when off.
@@ -1823,8 +2023,8 @@ mod tests {
     use super::{
         attempt_v1_execution_identity, build_decision_from_manifest_text, content_digest_of,
         execute_pack_command, execute_pack_command_with_injected_manifest,
-        measure_workspace_source_digest, plan_v03_build_provision_command,
-        run_v03_build_lifecycle_steps,
+        manifest_declares_schema_v1, measure_workspace_source_digest,
+        plan_v03_build_provision_command, run_v03_build_lifecycle_steps,
     };
     use capsule::execution_contract::{
         ContentDigest, DigestAlgorithm, EXECUTION_CONTRACT_V1_SCHEMA, ExecutionContractEnvelopeV1,
@@ -2829,5 +3029,90 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         hasher.update(bytes);
         let expected: [u8; 32] = hasher.finalize().into();
         assert_eq!(sha256_digest.bytes(), expected);
+    }
+
+    // --- Which producer runs -------------------------------------------------
+
+    /// The schema the author declared decides the lane, read from the raw TOML.
+    ///
+    /// "Whichever parser accepts it" would be wrong in a way that only shows up
+    /// on malformed input: each parser rejects the other's schema, so a v1
+    /// manifest with a typo would fall through to the v0.3 lane and be reported
+    /// as having the wrong schema_version — a message about the thing the author
+    /// got right.
+    #[test]
+    fn the_declared_schema_decides_which_producer_runs() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let write = |text: &str| {
+            std::fs::write(workspace.path().join("capsule.toml"), text).expect("write");
+        };
+
+        write("schema_version = \"1\"\nname = \"demo\"\n");
+        assert!(manifest_declares_schema_v1(workspace.path(), None).unwrap());
+
+        // A v1 manifest that is otherwise INVALID still belongs to the v1 lane:
+        // the declaration is what routes it, so it is refused with a v1 message.
+        write("schema_version = \"1\"\nnot_a_field = true\n");
+        assert!(manifest_declares_schema_v1(workspace.path(), None).unwrap());
+
+        write("schema_version = \"0.3\"\nname = \"demo\"\n");
+        assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
+
+        // No declaration at all is v0.3: `schema_version` defaults there, and
+        // v1 has no inference — only a v1 manifest mints an identity.
+        write("name = \"demo\"\n");
+        assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
+
+        // Unparseable TOML is left for the lane that can report it with context.
+        write("this is not toml {{{");
+        assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
+    }
+
+    /// Routing follows the SAME manifest precedence both lanes apply: an
+    /// on-disk `capsule.toml` outranks an injected draft, and the draft is
+    /// consulted only when there is no manifest.
+    ///
+    /// This is not a preference — it is the precedence the destinations already
+    /// have. The v0.3 lane falls back to the injected text only when no manifest
+    /// exists, and `build_v1::run` reads the workspace's manifest directly. If
+    /// routing used the draft instead, a v1 repository installed from a store
+    /// (whose install draft is v0.3) would be sent to the v0.3 lane, which would
+    /// then load the on-disk v1 manifest and complain about its
+    /// `schema_version` — the one thing the author got right.
+    #[test]
+    fn routing_follows_the_same_manifest_precedence_as_the_lanes() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let v03_draft = "schema_version = \"0.3\"\nname = \"draft\"\n";
+        let v1_draft = "schema_version = \"1\"\nname = \"draft\"\n";
+
+        // A v1 manifest on disk wins over a v0.3 draft — the store-install case.
+        std::fs::write(
+            workspace.path().join("capsule.toml"),
+            "schema_version = \"1\"\nname = \"on-disk\"\n",
+        )
+        .expect("write");
+        assert!(manifest_declares_schema_v1(workspace.path(), Some(v03_draft)).unwrap());
+
+        // And the mirror: a v0.3 manifest on disk is not overridden by a v1 draft.
+        std::fs::write(
+            workspace.path().join("capsule.toml"),
+            "schema_version = \"0.3\"\nname = \"on-disk\"\n",
+        )
+        .expect("write");
+        assert!(!manifest_declares_schema_v1(workspace.path(), Some(v1_draft)).unwrap());
+
+        // With no manifest, the draft is what there is to route on.
+        std::fs::remove_file(workspace.path().join("capsule.toml")).expect("remove");
+        assert!(manifest_declares_schema_v1(workspace.path(), Some(v1_draft)).unwrap());
+        assert!(!manifest_declares_schema_v1(workspace.path(), Some(v03_draft)).unwrap());
+    }
+
+    /// A workspace with no manifest is not v1 — `--init` and zero-config
+    /// inference are v0.3 surfaces, and reading a missing file is not an error
+    /// this function reports.
+    #[test]
+    fn a_workspace_without_a_manifest_is_not_v1() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
     }
 }

@@ -360,6 +360,55 @@ pub fn derive_build_spec(
 /// the generated Dockerfile's `WORKDIR` and the init's `cd` agree on it.
 pub const V1_GUEST_WORKING_DIRECTORY: &str = "/app";
 
+/// argv a runtime prepends to the authored command — and the fact that a
+/// producer looked.
+///
+/// A bare `Vec<String>` cannot carry that second half. An empty vector reads
+/// both as "the runtime prepends nothing" and as "nobody measured this", and
+/// the Execution Contract must never record the latter as the former:
+/// `runtime.dynamic_contract` is a measured facet (ADR-015 §4.1), so an absent
+/// measurement has to refuse the mint rather than mint an empty one. The only
+/// way to construct this value is to say which of the two you observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ObservedInvocationPrefix(Vec<String>);
+
+impl ObservedInvocationPrefix {
+    /// The producer confirmed the runtime prepends nothing and execs the
+    /// authored argv directly. A measurement, not a default.
+    #[must_use]
+    pub fn observed_none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The producer confirmed the runtime prepends exactly `words`.
+    ///
+    /// Refuses an empty `words`: that is [`Self::observed_none`]'s meaning, and
+    /// allowing it here would reintroduce the ambiguity the type exists to
+    /// remove — a caller with nothing measured could reach the "nothing
+    /// prepended" value by passing the vector it happens to hold.
+    pub fn observed(words: Vec<String>) -> Result<Self, String> {
+        if words.is_empty() {
+            return Err(
+                "an observed invocation prefix is empty; use observed_none() to record that \
+                 the runtime prepends nothing"
+                    .into(),
+            );
+        }
+        Ok(Self(words))
+    }
+
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_words(self) -> Vec<String> {
+        self.0
+    }
+}
+
 /// A buildable rootfs for a `schema_version = "1"` capsule.
 ///
 /// The difference from [`RootfsBuildSpec`] that matters is `resolved_argv`.
@@ -375,13 +424,13 @@ pub struct RootfsBuildSpecV1 {
     pub install_cmd: Option<String>,
     /// argv the runtime prepends to the authored command.
     ///
-    /// Empty for every family in the Step-4 subset, and that emptiness is a
-    /// measurement rather than a gap: v1 argv is exact, so the v0.3 bare-`.py`
+    /// Nothing for every family in the Step-4 subset, and that is a measurement
+    /// rather than a gap: v1 argv is exact, so the v0.3 bare-`.py`
     /// normalization (which silently turns `app.py` into `python3 app.py`)
     /// deliberately does NOT apply — an author who wants an interpreter names
     /// it. The field exists because a future runtime may genuinely prepend one,
     /// and the contract must be able to say so.
-    pub runtime_invocation_prefix: Vec<String>,
+    pub runtime_invocation_prefix: ObservedInvocationPrefix,
     /// The complete argv init execs: `runtime_invocation_prefix` ++ the
     /// authored `[run] command`.
     pub resolved_argv: Vec<String>,
@@ -418,10 +467,24 @@ pub fn derive_build_spec_v1(
     // at derivation rather than escaping at emission (fail-closed).
     for (index, word) in authored.iter().enumerate() {
         reject_control_chars(&format!("[run] command argv[{index}]"), word)?;
+        // The Execution Contract refuses an empty or whitespace-only argv word
+        // (`launch.argv` must be resolved). Refusing it here means the recipe
+        // never builds an image whose identity could not be minted — the same
+        // refusal, before anything is spent on it, and pointing at the manifest
+        // line rather than at a contract field.
+        if word.trim().is_empty() {
+            return Err(format!(
+                "[run] command argv[{index}] is empty; every word of an exact argv must \
+                 resolve to something, so an empty argument cannot be committed"
+            ));
+        }
     }
 
-    let runtime_invocation_prefix: Vec<String> = Vec::new();
+    // Measured, not assumed: none of the three families in the Step-4 subset
+    // wraps the authored argv — the generated init execs it directly.
+    let runtime_invocation_prefix = ObservedInvocationPrefix::observed_none();
     let resolved_argv = runtime_invocation_prefix
+        .words()
         .iter()
         .chain(authored.iter())
         .cloned()
@@ -444,11 +507,6 @@ pub fn derive_build_spec_v1(
 /// word preserves boundaries — `["python3", "app one.py"]` stays two arguments
 /// — whereas joining and re-splitting would turn the space into a separator and
 /// launch a different program than the contract committed to.
-// Wired into a production path by ADR-015 step 5-3 in #1144, which calls it
-// from the v1 build lane. Until then its only caller is
-// `build_rootfs_script_v1`, which is itself not yet called — so it is dead by
-// transitivity rather than by design. Remove this with that wiring.
-#[allow(dead_code)]
 pub(crate) fn launch_argv_line(argv: &[String]) -> String {
     let words = argv
         .iter()
@@ -458,36 +516,83 @@ pub(crate) fn launch_argv_line(argv: &[String]) -> String {
     format!("{words} >/tmp/app.log 2>&1 &")
 }
 
-/// The v1 counterpart of [`build_rootfs_script`]: same acquire → create →
-/// export → init → pack pipeline (shared verbatim through
-/// [`rootfs_pack_script`]), differing only in that the init launches an argv
-/// instead of a shell string, and that there is no build command — the Step-4
-/// subset rejects `[[build.steps]]`, so there is nothing to run.
-// Wired into a production path by ADR-015 step 5-3 in #1144: the v1 build lane
-// emits this script to pack the guest. This slice produces the recipe; the
-// slice that runs it is the next one. Remove this with that wiring.
-#[allow(dead_code)]
-pub(crate) fn build_rootfs_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
+/// Assemble the v1 app image and STOP — the image survives the script under
+/// `$ATO_IMAGE`, unpacked.
+///
+/// v0.3 builds and packs in one bash invocation because nothing ever needs to
+/// look at the intermediate image. v1 does: `target.{os,architecture,abi,libc}`
+/// has to be measured off the image the guest actually boots, not off the base
+/// image it was derived from, and by the time the pack half has run the image
+/// is gone (the pack script's EXIT trap `rmi`s it). Splitting the two is what
+/// makes the measurement land on the built artifact.
+///
+/// `pinned_base_ref` is the base image resolved to `repo@sha256:…`, never the
+/// tag the spec derived. A tag can move between the resolution that recorded
+/// `runtime.digest` and the build that consumes it, and then the contract would
+/// name bytes the guest never ran.
+///
+/// Security: same properties as [`build_rootfs_script`] — the Dockerfile is a
+/// QUOTED heredoc so the builder-host shell expands nothing in its body, and
+/// the manifest-derived install command is embedded as a single-quoted argument
+/// to `/bin/sh -lc`, so it runs only inside Docker's RUN.
+///
+/// env: `ATO_SRC` (the PROJECTED source tree), `ATO_IMAGE`.
+pub(crate) fn assemble_app_image_script_v1(
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
-    let acquire = format!(
-        r#"cp -a "$ATO_SRC/." "$BUILD/"
+    // The projection goes in a SUBDIRECTORY of the build context, and the
+    // generated Dockerfile sits beside it rather than inside it.
+    //
+    // v0.3 copies the source to the context root and writes its Dockerfile
+    // there, which is harmless when nothing claims what the guest contains. It
+    // is not harmless here: a repository carrying its own `Dockerfile` would
+    // have it overwritten by the generated one and then shipped to `/app` by
+    // `COPY .`, so `source.digest` would commit a tree — the one holding the
+    // AUTHOR's Dockerfile — that the guest does not have. Editing that file
+    // would move the execution id without changing anything the guest sees, and
+    // a repository with no Dockerfile would still get one at `/app` that is not
+    // in the projection. Copying `src/.` makes the guest's `{workdir}` exactly
+    // the projection, byte for byte.
+    format!(
+        r#"set -euo pipefail
+BUILD=$(mktemp -d)
+cleanup() {{
+  [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
+}}
+trap cleanup EXIT
+mkdir -p "$BUILD/src"
+cp -a "$ATO_SRC/." "$BUILD/src/"
 # QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
 cat > "$BUILD/Dockerfile" <<'DOCKER'
 FROM {base}
 WORKDIR {workdir}
-COPY . {workdir}
+COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
 DOCKER
-docker build -q -t "$TAG" "$BUILD" >/dev/null
+docker build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
 "#,
-        base = spec.base_image,
+        base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
         install_q = install_q,
-    );
+    )
+}
+
+/// Pack the already-assembled `$ATO_IMAGE` into a read-only-bootable ext4.
+///
+/// The create → export → init → pack half of [`build_rootfs_script`], shared
+/// verbatim through [`rootfs_pack_script`] with an empty acquire section (the
+/// image already exists). It differs from v0.3 only in that the init launches
+/// an argv instead of a shell string, and that there is no build command — the
+/// Step-4 subset rejects `[[build.steps]]`, so there is nothing to run.
+///
+/// env: `ATO_IMAGE`, `ATO_OUT`.
+pub(crate) fn pack_app_image_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
     rootfs_pack_script(&PackScriptInputs {
         tool: "docker",
-        tag_init: "TAG=\"ato-rootfs-$$\"".into(),
-        acquire,
+        tag_init: "TAG=\"$ATO_IMAGE\"".into(),
+        acquire: String::new(),
         agent_prep: String::new(),
         launch: launch_argv_line(&spec.resolved_argv),
         init_cwd: V1_GUEST_WORKING_DIRECTORY,
@@ -500,6 +605,141 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
         extra_mounts: String::new(),
         extra_prelaunch: String::new(),
     })
+}
+
+/// A guest image that exists on the builder host and has not been packed yet.
+///
+/// Holding it is what lets `measure_guest_target` run against the artifact the
+/// guest boots. It is not `Copy` and not `Clone`: exactly one owner is
+/// responsible for either packing it (which consumes it) or discarding it, so
+/// a failure between assembly and packing cannot leak an image.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AssembledGuestImage {
+    image_ref: String,
+}
+
+impl AssembledGuestImage {
+    /// Take responsibility for an image that already exists under `image_ref`.
+    ///
+    /// The value is a claim that there is an image to pack;
+    /// [`assemble_app_image_v1`] earns that claim by building one. This lets a
+    /// caller that produced the image another way take the same obligation —
+    /// pack it or discard it — which is what a producer standing in for docker
+    /// in a test needs, and what a second assembly backend would need. It is
+    /// not a way to conjure an image: nothing downstream checks that the
+    /// reference resolves, so an `adopt` of a name nothing built fails at the
+    /// first command that addresses it.
+    #[must_use]
+    pub fn adopt(image_ref: String) -> Self {
+        Self { image_ref }
+    }
+
+    /// The local reference the assembled image is tagged with. Use it as
+    /// `measure_guest_target`'s `image_ref`.
+    #[must_use]
+    pub fn image_ref(&self) -> &str {
+        &self.image_ref
+    }
+}
+
+/// Build the v1 app image from the PROJECTED source tree.
+///
+/// `projected_source` must be the materialized program-source projection — the
+/// tree `source.digest` names — and not the workspace checkout. Passing the
+/// checkout would put `capsule.toml` and the lock into the guest at
+/// `/app`, and the contract would then commit a digest for a tree the guest
+/// does not have.
+///
+/// Shells out to `docker`. Docker is a build tool here, not a trust boundary.
+pub fn assemble_app_image_v1(
+    projected_source: &Path,
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    image_ref: &str,
+) -> Result<AssembledGuestImage, String> {
+    // Both land in a generated script — the base ref inside a quoted heredoc,
+    // the image ref as a shell variable. A newline in either could break out.
+    reject_control_chars("pinned base image reference", pinned_base_ref)?;
+    reject_control_chars("assembled image reference", image_ref)?;
+
+    let script = assemble_app_image_script_v1(spec, pinned_base_ref);
+    run_builder_script(
+        "assemble app image",
+        &script,
+        &[
+            ("ATO_SRC", projected_source.as_os_str().to_os_string()),
+            ("ATO_IMAGE", image_ref.into()),
+        ],
+    )?;
+    Ok(AssembledGuestImage {
+        image_ref: image_ref.to_string(),
+    })
+}
+
+/// Pack an assembled image into `out_ext4`, returning its size in bytes.
+///
+/// Consumes the image: the emitted script removes it on exit, so there is
+/// nothing left to discard afterwards. Requires root (mount) + docker.
+pub fn pack_app_image_v1(
+    image: AssembledGuestImage,
+    spec: &RootfsBuildSpecV1,
+    out_ext4: &Path,
+    size_mib: u64,
+) -> Result<u64, String> {
+    let script = pack_app_image_script_v1(spec, size_mib);
+    run_builder_script(
+        "pack app image",
+        &script,
+        &[
+            ("ATO_IMAGE", image.image_ref.as_str().into()),
+            ("ATO_OUT", out_ext4.as_os_str().to_os_string()),
+        ],
+    )?;
+    std::fs::metadata(out_ext4)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("stat packed rootfs {}: {error}", out_ext4.display()))
+}
+
+/// Remove an assembled image that will not be packed.
+///
+/// Best-effort by design: this runs on the failure path, where the caller is
+/// already returning a more informative error and a leaked image is a disk
+/// cost rather than a correctness problem. Consuming the image means a caller
+/// cannot discard one and then pack it.
+pub fn discard_app_image_v1(image: AssembledGuestImage) {
+    let _ = Command::new("docker")
+        .args(["rmi", "-f", &image.image_ref])
+        .output();
+}
+
+/// Run one generated builder script under `bash -c`, reporting the stderr tail
+/// on failure. The shared spawn half of [`build_rootfs`] and the two v1 halves.
+fn run_builder_script(
+    stage: &str,
+    script: &str,
+    env: &[(&str, std::ffi::OsString)],
+) -> Result<(), String> {
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(script);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command
+        .output()
+        .map_err(|error| format!("spawn {stage}: {error}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let tail: String = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("{stage} failed: {tail}"))
 }
 
 /// Which runtime family a source tree belongs to.
@@ -2215,7 +2455,11 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert_eq!(spec.base_image, "python:3.11-slim");
         assert_eq!(spec.port, 8080);
         // Nothing prepended, and that is a measurement rather than a gap.
-        assert!(spec.runtime_invocation_prefix.is_empty());
+        assert_eq!(
+            spec.runtime_invocation_prefix,
+            ObservedInvocationPrefix::observed_none()
+        );
+        assert!(spec.runtime_invocation_prefix.words().is_empty());
         assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
     }
 
@@ -2297,25 +2541,165 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_v1_script_puts_the_source_and_the_launch_in_the_same_directory() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let script = build_rootfs_script_v1(&spec, 512);
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        let pack = pack_app_image_script_v1(&spec, 512);
 
         assert!(
-            script.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
-            "{script}"
+            assemble.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
+            "{assemble}"
         );
         assert!(
-            script.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
-            "{script}"
+            pack.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
+            "{pack}"
         );
         // And it launches the argv directly — no `sh -lc` re-parsing.
+        assert!(pack.contains("'python3' 'app.py' >/tmp/app.log"), "{pack}");
         assert!(
-            script.contains("'python3' 'app.py' >/tmp/app.log"),
+            !pack.contains("/bin/sh -lc 'python3 app.py'"),
+            "the v1 init must not re-parse a joined command: {pack}"
+        );
+    }
+
+    const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// The image is built FROM the digest-pinned reference the lane resolved,
+    /// never from the tag the spec derived. A tag can move between the
+    /// resolution that recorded `runtime.digest` and this build, and then the
+    /// contract would name bytes the guest never ran.
+    #[test]
+    fn the_assembled_image_is_built_from_the_pinned_reference() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE);
+
+        assert!(script.contains(&format!("FROM {PINNED_BASE}")), "{script}");
+        assert_eq!(spec.base_image, "python:3.11-slim");
+        assert!(
+            !script.contains("FROM python:3.11-slim"),
+            "the mutable tag must not reach the Dockerfile: {script}"
+        );
+    }
+
+    /// The author's own `Dockerfile` must reach the guest unchanged, and the
+    /// generated one must not reach it at all.
+    ///
+    /// Writing the generated Dockerfile into the copied tree — which is what
+    /// v0.3 does, harmlessly, because it claims nothing about the guest's
+    /// contents — would overwrite an author's file and then ship Ato's
+    /// three-liner to `/app`. `source.digest` would then commit a tree the
+    /// guest does not have.
+    #[test]
+    fn the_generated_dockerfile_never_enters_the_guest() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE);
+
+        // The projection lands in a subdirectory; the Dockerfile sits beside it.
+        assert!(
+            script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/src/""#),
+            "{script}"
+        );
+        assert!(script.contains(r#"cat > "$BUILD/Dockerfile""#), "{script}");
+        assert!(
+            !script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/""#),
+            "the projection must not be copied to the context root, where the \
+             generated Dockerfile would overwrite the author's: {script}"
+        );
+        // And only the projection is copied into the guest.
+        assert!(
+            script.contains(&format!("COPY src/. {V1_GUEST_WORKING_DIRECTORY}/")),
             "{script}"
         );
         assert!(
-            !script.contains("/bin/sh -lc 'python3 app.py'"),
-            "the v1 init must not re-parse a joined command: {script}"
+            !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
+            "COPY . would ship the generated Dockerfile to the guest: {script}"
         );
+    }
+
+    /// The assemble half must leave the image behind — the whole reason the
+    /// pipeline is split is so `measure_guest_target` can inspect the artifact
+    /// the guest boots, and an `rmi` here would delete it first.
+    #[test]
+    fn assembling_does_not_remove_the_image_but_packing_does() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        assert!(
+            !assemble.contains("rmi"),
+            "the assembled image must survive for measurement: {assemble}"
+        );
+
+        // The pack half is the last user, so it is the one that cleans up.
+        let pack = pack_app_image_script_v1(&spec, 512);
+        assert!(pack.contains("rmi -f \"$TAG\""), "{pack}");
+        assert!(pack.contains("TAG=\"$ATO_IMAGE\""), "{pack}");
+    }
+
+    /// The two halves must name the same image, or the pack would export
+    /// whatever else happened to carry that tag.
+    #[test]
+    fn both_halves_address_the_image_through_the_same_variable() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        assert!(
+            assemble_app_image_script_v1(&spec, PINNED_BASE)
+                .contains("docker build -q -t \"$ATO_IMAGE\""),
+        );
+        assert!(pack_app_image_script_v1(&spec, 512).contains("TAG=\"$ATO_IMAGE\""));
+    }
+
+    /// The base reference is interpolated into the generated Dockerfile, so a
+    /// newline in it could add a `RUN` line the author never wrote. It is
+    /// refused before any script is generated, not escaped at emission — and
+    /// the refusal happens before docker is ever spawned.
+    #[test]
+    fn a_control_character_in_an_image_reference_is_refused() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let source = tempfile::tempdir().expect("tempdir");
+
+        let error = assemble_app_image_v1(
+            source.path(),
+            &spec,
+            "python@sha256:aaa\nRUN rm -rf /",
+            "ato-v1-test",
+        )
+        .expect_err("a newline in the base ref is refused");
+        assert!(error.contains("newline"), "{error}");
+
+        let error = assemble_app_image_v1(
+            source.path(),
+            &spec,
+            PINNED_BASE,
+            "ato-v1-test\nRUN rm -rf /",
+        )
+        .expect_err("a newline in the image ref is refused");
+        assert!(error.contains("newline"), "{error}");
+    }
+
+    /// The image reference reaches the script only as an environment variable
+    /// inside double quotes — it is never interpolated into the script text, so
+    /// a metacharacter in a tag cannot become shell syntax.
+    #[test]
+    fn the_image_reference_is_never_interpolated_into_the_script() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        let pack = pack_app_image_script_v1(&spec, 512);
+        // Both scripts are generated without knowing the reference at all.
+        for script in [&assemble, &pack] {
+            assert!(script.contains("$ATO_IMAGE"), "{script}");
+        }
+    }
+
+    /// An observed prefix and an unmeasured one must not be spellable the same
+    /// way: the empty vector is reachable only through the constructor that
+    /// says the runtime prepends nothing.
+    #[test]
+    fn an_empty_observed_prefix_must_name_which_emptiness_it_is() {
+        assert!(ObservedInvocationPrefix::observed(Vec::new()).is_err());
+        assert_eq!(
+            ObservedInvocationPrefix::observed(vec!["uv".into(), "run".into()])
+                .expect("a real prefix")
+                .words(),
+            ["uv", "run"]
+        );
+        assert!(ObservedInvocationPrefix::observed_none().words().is_empty());
     }
 
     fn base_toml() -> String {
