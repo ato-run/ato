@@ -257,7 +257,60 @@ pub(crate) fn derive_slot_plans(cfg: &OfficialPreviewConfig) -> Result<Vec<Runne
         });
     }
     reject_port_collisions(&plans)?;
+    reject_origin_problems(&plans)?;
     Ok(plans)
+}
+
+/// Every origin this plan set claims must be a legal DNS name and must be
+/// claimed exactly once.
+///
+/// Checked on the PLAN, not inside the renderer: an origin is an identity that
+/// systemd arguments, Caddy routes and the ato-api registration all carry, so a
+/// name that is only rejected at render time would already have been registered
+/// by one of the other two. `s<N>` and `w<N>` are also checked against each
+/// other here — they are different families precisely so a stale route from one
+/// cannot answer for the other, and that only holds if they never collide.
+fn reject_origin_problems(plans: &[RunnerSlotPlan]) -> Result<()> {
+    let mut seen: BTreeMap<String, String> = BTreeMap::new();
+    for plan in plans {
+        for (origin, family) in [
+            (Some(&plan.preview_origin), "preview"),
+            (plan.wizard_origin.as_ref(), "wizard"),
+        ] {
+            let Some(origin) = origin else { continue };
+            validate_origin_hostname(origin)?;
+            let owner = format!("{family} {}", plan.slot_id);
+            if let Some(previous) = seen.insert(origin.clone(), owner.clone()) {
+                bail!(
+                    "origin {origin} is claimed by both {previous} and {owner} — two routes for \
+                     one hostname means whichever Caddy loads last silently answers for the other"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The DNS limits an origin must satisfy to be resolvable at all: ≤253 bytes
+/// overall, ≤63 per label, no empty label, no leading/trailing hyphen.
+///
+/// The base hostname is already validated on the way in; this catches what
+/// PREFIXING it can break — a base that is legal on its own can exceed 253 once
+/// `w<N>.` is added, and the slot label itself must be legal.
+fn validate_origin_hostname(origin: &str) -> Result<()> {
+    if origin.len() > 253 {
+        bail!(
+            "generated origin {origin:?} is {} bytes, over the 253-byte DNS limit — \
+             shorten --public-base-url",
+            origin.len()
+        );
+    }
+    for label in origin.split('.') {
+        if label.is_empty() || label.len() > 63 || label.starts_with('-') || label.ends_with('-') {
+            bail!("generated origin {origin:?} has an invalid DNS label {label:?}");
+        }
+    }
+    Ok(())
 }
 
 /// Every loopback port this plan set claims must be claimed exactly once —
@@ -349,6 +402,8 @@ pub(crate) struct GeneratedFragment {
 
 pub(crate) const PREVIEW_FRAGMENT: &str = "preview.caddy";
 pub(crate) const WIZARD_FRAGMENT: &str = "wizard-hold.caddy";
+/// Domain separator for the generation manifest digest.
+pub(crate) const GENERATION_DOMAIN: &str = "ato.runner-caddy-generation/v1";
 
 fn vhost(hostname: &str, listen: &str) -> String {
     format!(
@@ -417,21 +472,52 @@ pub(crate) fn render_generation(
     fragments
 }
 
-/// The identity of a generation: a digest over the rendered bytes.
+/// Every fragment name a generation can contain, in a FIXED order.
+///
+/// The digest below walks this list rather than the fragments that happen to be
+/// present, which is what lets "no wizard fragment" be a distinct value from
+/// "an empty wizard fragment".
+pub(crate) const GENERATION_FRAGMENTS: &[&str] = &[PREVIEW_FRAGMENT, WIZARD_FRAGMENT];
+
+/// The identity of a generation: a digest over a domain-separated MANIFEST of
+/// its fragments, not over their concatenated bytes.
+///
+/// Concatenation cannot tell three different generations apart:
+///
+/// - a missing `wizard-hold.caddy` from a present-but-empty one;
+/// - two fragments whose bytes differ only in where one ends and the next
+///   begins (`"ab" + "c"` vs `"a" + "bc"`);
+/// - the same bytes filed under a different name.
+///
+/// All three are different things to Caddy, so all three must be different
+/// generations. The manifest therefore commits, per KNOWN fragment name and in
+/// a fixed order, either its length and content digest or an explicit absence
+/// marker — never nothing at all.
 ///
 /// Used as the generation directory name and recorded alongside the ato-api
 /// registration, so "which routes are live" is answerable without diffing
-/// files. Derived from the OUTPUT rather than the config so that two configs
-/// that render identically share one generation — a re-run that changes
-/// nothing must not swap the active generation.
+/// files. Taken over the OUTPUT so that two configs which render identically
+/// share one generation: a re-run that changes nothing must not swap the active
+/// generation.
 pub(crate) fn generation_digest(fragments: &[GeneratedFragment]) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ato.runner-ingress-generation/v1\0");
-    for fragment in fragments {
-        hasher.update(fragment.file_name.as_bytes());
+    hasher.update(GENERATION_DOMAIN.as_bytes());
+    hasher.update(&[0]);
+    for name in GENERATION_FRAGMENTS {
+        hasher.update(name.as_bytes());
         hasher.update(&[0]);
-        hasher.update(&(fragment.content.len() as u64).to_le_bytes());
-        hasher.update(fragment.content.as_bytes());
+        match fragments.iter().find(|f| f.file_name == *name) {
+            Some(fragment) => {
+                hasher.update(b"present");
+                hasher.update(&[0]);
+                hasher.update(&(fragment.content.len() as u64).to_le_bytes());
+                hasher.update(blake3::hash(fragment.content.as_bytes()).as_bytes());
+            }
+            None => {
+                hasher.update(b"absent");
+                hasher.update(&[0]);
+            }
+        }
     }
     hasher.finalize().to_hex()[..16].to_string()
 }
@@ -850,6 +936,59 @@ mod tests {
             !wizard.content.contains("w1."),
             "the dropped slot must leave no route behind: {}",
             wizard.content
+        );
+    }
+
+    /// Absence, emptiness and a different byte boundary are three DIFFERENT
+    /// generations.
+    ///
+    /// A digest over concatenated fragment bytes cannot tell them apart, and all
+    /// three are different things to Caddy — the first serves no wizard routes,
+    /// the second serves a file that parses to none, and the third is a
+    /// different set of routes entirely.
+    #[test]
+    fn the_generation_digest_separates_absence_from_emptiness_and_from_a_moved_boundary() {
+        let preview = |content: &str| GeneratedFragment {
+            file_name: PREVIEW_FRAGMENT,
+            content: content.to_string(),
+        };
+        let wizard = |content: &str| GeneratedFragment {
+            file_name: WIZARD_FRAGMENT,
+            content: content.to_string(),
+        };
+
+        let absent = generation_digest(&[preview("a")]);
+        let empty = generation_digest(&[preview("a"), wizard("")]);
+        assert_ne!(
+            absent, empty,
+            "no wizard fragment must not digest the same as an empty one"
+        );
+
+        // Same concatenated bytes, different boundary.
+        let left = generation_digest(&[preview("ab"), wizard("c")]);
+        let right = generation_digest(&[preview("a"), wizard("bc")]);
+        assert_ne!(left, right, "the fragment boundary is identity-bearing");
+
+        // Same bytes under a different name.
+        let swapped = generation_digest(&[preview("c"), wizard("ab")]);
+        assert_ne!(left, swapped, "the fragment NAME is identity-bearing");
+    }
+
+    /// A base hostname that is legal on its own can become illegal once a slot
+    /// label is prefixed — caught on the plan, before any consumer has taken
+    /// the name.
+    #[test]
+    fn an_origin_that_prefixing_makes_illegal_is_refused_on_the_plan() {
+        let long_label = "a".repeat(60);
+        let base = format!("https://{long_label}.{long_label}.{long_label}.{long_label}.ato.run");
+        let error = derive_slot_plans(&OfficialPreviewConfig {
+            public_base_url: base,
+            ..cfg_with_holds()
+        })
+        .expect_err("must refuse");
+        assert!(
+            format!("{error:#}").contains("253-byte DNS limit"),
+            "{error:#}"
         );
     }
 
