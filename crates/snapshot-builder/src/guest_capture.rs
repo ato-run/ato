@@ -25,11 +25,27 @@
 //! whether the GUEST survived, independent of why a capture failed. That bit is
 //! preserved on both outcomes, including a failure during sealing or upload.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use snapshot::{HeldCaptureFailure, HeldGuest};
 
 use crate::hold_phase::{CaptureAction, CaptureError, HeldCapture, LeaseKeepalive};
+
+/// The candidate the capture just sealed, handed to the verifier.
+///
+/// `HoldPhase` takes its lifecycle UP FRONT but the candidate only exists after
+/// `CaptureAction::capture` runs, so the two need somewhere to meet. This is
+/// that place: the capture writes, the disposable-restore lifecycle reads.
+///
+/// A `RefCell` rather than a lock because both live on the one hold thread —
+/// `HoldPhase::run` is a blocking loop and calls them in strict sequence.
+///
+/// The value is REPLACED on every capture, never appended to: verifying a stale
+/// candidate would accept one artifact and publish another. RFC §8.2 allows
+/// repeated captures, so "the candidate" always means the most recent one.
+pub type CapturedCandidateCell = Rc<RefCell<Option<snapshot::BuildReadyStateReceipt>>>;
 
 /// Everything the capture needs that is not the guest itself.
 pub struct CaptureContext {
@@ -44,20 +60,17 @@ pub struct CaptureContext {
 pub struct GuestCaptureAction<'a> {
     guest: HeldGuest<'a>,
     ctx: CaptureContext,
+    /// Where each sealed candidate is published for the verifier.
+    captured: CapturedCandidateCell,
 }
 
-/// These have no caller yet: the job-loop wiring that boots the hold and fronts
-/// it with an ingress is the next slice, and the lane stays OFF until then
-/// (`interactive_capture` is not advertised on the claim).
-#[allow(dead_code)]
 impl<'a> GuestCaptureAction<'a> {
-    pub fn new(guest: HeldGuest<'a>, ctx: CaptureContext) -> Self {
-        Self { guest, ctx }
-    }
-
-    /// The address a host-side proxy fronts to reach the held workload.
-    pub fn workload_addr(&self) -> String {
-        self.guest.workload_addr()
+    pub fn new(guest: HeldGuest<'a>, ctx: CaptureContext, captured: CapturedCandidateCell) -> Self {
+        Self {
+            guest,
+            ctx,
+            captured,
+        }
     }
 
     /// Tear the hold down. Consumes the action, so no capture can follow.
@@ -154,6 +167,11 @@ impl CaptureAction for GuestCaptureAction<'_> {
             )
         })?;
 
+        // Publish BEFORE returning: `HoldPhase` runs acceptance against this
+        // candidate on the very next statement, and a verifier that read a stale
+        // one would accept an artifact nobody is about to publish.
+        *self.captured.borrow_mut() = Some(candidate.receipt);
+
         Ok(HeldCapture {
             // Echoed verbatim: §3.6 has the server cross-check epoch↔candidate
             // 1:1 against the id it minted, so this must never be re-derived.
@@ -165,6 +183,61 @@ impl CaptureAction for GuestCaptureAction<'_> {
             artifact_location,
             source_lost,
         })
+    }
+}
+
+/// The hold's [`CandidateSource`]: whatever the last capture published.
+///
+/// `HoldPhase` takes its lifecycle before any candidate exists, so the manifests
+/// cannot be fixed at construction the way the CLI build path fixes them. This
+/// reads the cell the capture writes, so acceptance always verifies the candidate
+/// that was just sealed — the one about to be reported.
+///
+/// Reading before any capture is a hard error, not an empty default: it would
+/// mean acceptance ran with nothing to verify.
+pub struct HeldCandidateSource<'a> {
+    captured: CapturedCandidateCell,
+    /// The backend, to derive the v1 sidecar for whatever was captured. Borrowed
+    /// for the hold rather than `'static`: the backend a job runs on carries
+    /// that job's boot timeout (`with_boot_timeout`), so it is a per-job value
+    /// and leaking one per hold would leak the job's config with it.
+    backend: &'a dyn snapshot::SnapshotBackend,
+    execution_id: capsule::execution_contract::ExecutionId,
+}
+
+impl<'a> HeldCandidateSource<'a> {
+    pub fn new(
+        captured: CapturedCandidateCell,
+        backend: &'a dyn snapshot::SnapshotBackend,
+        execution_id: capsule::execution_contract::ExecutionId,
+    ) -> Self {
+        Self {
+            captured,
+            backend,
+            execution_id,
+        }
+    }
+
+    fn receipt(&self) -> Result<snapshot::BuildReadyStateReceipt, String> {
+        self.captured
+            .borrow()
+            .clone()
+            .ok_or_else(|| "acceptance ran before any candidate was captured".to_string())
+    }
+}
+
+impl snapshot::disposable_lifecycle::CandidateSource for HeldCandidateSource<'_> {
+    fn legacy_manifest(&self) -> Result<snapshot::ReadyStateManifest, String> {
+        Ok(self.receipt()?.manifest)
+    }
+
+    fn candidate_manifest(&self) -> Result<capsule::snapshot_manifest::SnapshotManifestV1, String> {
+        let receipt = self.receipt()?;
+        snapshot::disposable_lifecycle::build_v1_candidate_manifest(
+            self.backend,
+            self.execution_id.clone(),
+            &receipt,
+        )
     }
 }
 
@@ -230,6 +303,27 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    /// Acceptance before any capture is an error, never an empty default.
+    ///
+    /// Returning something benign would let the verifier run against nothing and
+    /// report a verdict about an artifact that does not exist.
+    #[test]
+    fn reading_the_candidate_before_any_capture_fails() {
+        use snapshot::disposable_lifecycle::CandidateSource;
+        let cell: CapturedCandidateCell = Rc::new(RefCell::new(None));
+        // A real backend, but no live VM: this path returns before any method on
+        // it is reached.
+        let backend = snapshot::FirecrackerBackend::new();
+        let source = HeldCandidateSource::new(
+            Rc::clone(&cell),
+            &backend,
+            capsule::execution_contract::ExecutionId::new(format!("blake3:{}", "a".repeat(64)))
+                .expect("id"),
+        );
+        let err = source.legacy_manifest().expect_err("must refuse");
+        assert!(err.contains("before any candidate"), "{err}");
     }
 
     /// A live lease lets the capture proceed past the gate.
