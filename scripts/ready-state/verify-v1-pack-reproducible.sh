@@ -122,8 +122,17 @@ PYEOF
 run_build one
 run_build two
 
-read -r ID_ONE IMG_ONE SRC_ONE < <(tr '\n' ' ' < "$WORK/one.facts")
-read -r ID_TWO IMG_TWO SRC_TWO < <(tr '\n' ' ' < "$WORK/two.facts")
+# Line-addressed rather than `read`-from-a-pipe: `read` returns non-zero when it
+# hits EOF without a trailing delimiter, which under `set -e` kills the script
+# silently — after both builds have already succeeded, so the log shows the work
+# done and no reason for the failure.
+facts() { sed -n "${2}p" "$WORK/$1.facts"; }
+ID_ONE="$(facts one 1)";  IMG_ONE="$(facts one 2)";  SRC_ONE="$(facts one 3)"
+ID_TWO="$(facts two 1)";  IMG_TWO="$(facts two 2)";  SRC_TWO="$(facts two 3)"
+for value in "$ID_ONE" "$IMG_ONE" "$SRC_ONE" "$ID_TWO" "$IMG_TWO" "$SRC_TWO"; do
+  [[ -n "$value" ]] || fail "a build reported no execution id / image / source digest"
+done
+[[ -f "$IMG_ONE" && -f "$IMG_TWO" ]] || fail "a reported guest image does not exist"
 
 echo
 echo "== results =="
