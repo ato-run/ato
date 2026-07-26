@@ -31,6 +31,28 @@
 //! Execution Contract is what the runner actually starts, which may legitimately
 //! wrap it — see ADR-015 §3.
 //!
+//! # Environment: a value, or a name, never a guess
+//!
+//! The Execution Contract has exactly two places a variable can live:
+//! `launch.environment` (non-secret values, each committed by digest) and
+//! `launch.secret_bindings` (names only — a secret VALUE is never
+//! identity-bearing, RFC §4.3). So the authoring surface has exactly two too:
+//!
+//! ```toml
+//! [env]                  # authored non-secret values -> launch.environment
+//! NODE_ENV = "production"
+//!
+//! [config.API_KEY]       # supplied at launch
+//! kind = "secret"        # -> launch.secret_bindings (the NAME only)
+//! required = true
+//! ```
+//!
+//! `kind` and `required` are both explicit. v0.3's `ConfigField` has no
+//! `required` field at all and its `ConfigKind` DEFAULTS to `secret`, so a
+//! legacy capsule's whole env surface classifies as secret — that default is
+//! not reused here, and a v1 config field that omits either is refused rather
+//! than assumed.
+//!
 //! # Fail closed, and refuse rather than approximate
 //!
 //! Unknown fields, duplicate keys and ambiguous defaults are rejected. Features
@@ -128,9 +150,45 @@ pub struct CapsuleManifestV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seal_at: Option<SealAtV1>,
 
+    /// `[env]` — authored non-secret values. Identity-bearing, so they are
+    /// values here rather than a schema for values.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+
+    /// `[config.<NAME>]` — variables supplied at launch, not at authoring.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, ConfigFieldV1>,
+
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+}
+
+/// One launch-supplied variable. BOTH fields are explicit.
+///
+/// v0.3's equivalent has no `required` at all and defaults its kind to
+/// `secret`, which silently reclassifies a legacy capsule's entire env surface.
+/// Neither default is inherited: a v1 field that omits either is refused, so
+/// the classification is always something the author said.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigFieldV1 {
+    pub kind: ConfigKindV1,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigKindV1 {
+    /// The value never enters identity; only the NAME is bound (RFC §4.3).
+    Secret,
+    /// A non-secret value supplied at launch. Identity-bearing, but not known
+    /// at authoring time — see the subset refusal in
+    /// [`CapsuleManifestV1::validate_for_interactive_capture`].
+    String,
+    Number,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +294,20 @@ fn validate_argv(field: &'static str, argv: &[String]) -> Result<(), ManifestV1E
     Ok(())
 }
 
+/// A POSIX environment variable name: `[A-Za-z_][A-Za-z0-9_]*`.
+fn is_env_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The workspace's secret-name heuristic, kept in ONE place: this delegates to
+/// the contract's classifier so the authoring surface and the identity gate can
+/// never disagree about which names are secret-bearing.
+fn looks_secret(name: &str) -> bool {
+    crate::execution_contract_finalize::is_sensitive_env_key(name)
+}
+
 impl CapsuleManifestV1 {
     /// Parse and validate. There is no lenient mode: a manifest that does not
     /// validate is not a v1 manifest.
@@ -300,6 +372,51 @@ impl CapsuleManifestV1 {
             }
         }
 
+        // A variable is either an authored non-secret VALUE or a launch-supplied
+        // NAME. Both is a contradiction the Execution Contract refuses at
+        // generation time (`EnvironmentNameIsSecretBinding`); refusing it here
+        // as well costs nothing and tells the author which line to change.
+        for name in self.env.keys() {
+            if !is_env_var_name(name) {
+                return Err(ManifestV1Error::Invalid {
+                    field: "env.<NAME>",
+                    reason: format!("{name:?} is not a POSIX environment variable name"),
+                });
+            }
+            // The heuristic is defence in depth, not the boundary — but a
+            // secret-looking name authored as a plain VALUE would be refused by
+            // the contract later, and naming it here says which line to fix.
+            if looks_secret(name) {
+                return Err(ManifestV1Error::Invalid {
+                    field: "env.<NAME>",
+                    reason: format!(
+                        "{name:?} is secret-bearing; a secret value is never identity-bearing \
+                         (RFC §4.3) — declare it as [config.{name}] with kind = \"secret\" so \
+                         only the name is bound"
+                    ),
+                });
+            }
+            if let Some(field) = self.config.get(name) {
+                return Err(ManifestV1Error::Invalid {
+                    field: "config.<NAME>",
+                    reason: format!(
+                        "{name:?} is declared both as an authored [env] value and as a \
+                         [config.{name}] ({:?}) — a variable is either a value or a \
+                         launch-supplied name, never both",
+                        field.kind
+                    ),
+                });
+            }
+        }
+        for name in self.config.keys() {
+            if !is_env_var_name(name) {
+                return Err(ManifestV1Error::Invalid {
+                    field: "config.<NAME>",
+                    reason: format!("{name:?} is not a POSIX environment variable name"),
+                });
+            }
+        }
+
         for (name, state) in &self.state {
             if name.trim().is_empty() {
                 return Err(ManifestV1Error::Missing {
@@ -361,6 +478,29 @@ impl CapsuleManifestV1 {
                       needs `workload_idle`, which is a separate lifecycle",
             });
         }
+        // A non-secret variable supplied at LAUNCH has a value that is
+        // identity-bearing and unknown at authoring time. The contract has
+        // nowhere to put it — `launch.environment` commits values, and
+        // `secret_bindings` carries names precisely because secret values are
+        // excluded from identity. Rather than invent a third place or pretend
+        // the value does not matter, the subset refuses it.
+        if let Some(name) = self
+            .config
+            .iter()
+            .find(|(_, field)| field.kind != ConfigKindV1::Secret)
+            .map(|(name, _)| name)
+        {
+            return Err(ManifestV1Error::Invalid {
+                field: "config.<NAME>",
+                reason: format!(
+                    "{name} is a non-secret launch-supplied value: identity-bearing, but unknown \
+                     when the contract is minted, and the contract has nowhere to put it. \
+                     Author it as an [env] value, or declare it kind = \"secret\" so only the \
+                     name is bound."
+                ),
+            });
+        }
+
         let Some(web) = &self.web else {
             return Err(ManifestV1Error::Missing { field: "[web]" });
         };
@@ -757,6 +897,190 @@ command = ["true"]
                 }
                 other => panic!("expected Unsupported({feature}), got {other}"),
             }
+        }
+    }
+
+    /// A variable is a VALUE or a NAME, never both.
+    ///
+    /// The Execution Contract refuses the same contradiction at generation time
+    /// (`EnvironmentNameIsSecretBinding`); refusing it here as well costs
+    /// nothing and tells the author which line to change.
+    #[test]
+    fn a_variable_cannot_be_both_an_authored_value_and_a_config_field() {
+        let error = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[env]
+DATABASE_URL = "postgres://localhost/db"
+
+[config.DATABASE_URL]
+kind = "secret"
+required = true
+"#,
+        )
+        .expect_err("a variable is a value or a name, never both");
+        match error {
+            ManifestV1Error::Invalid { field, reason } => {
+                assert_eq!(field, "config.<NAME>");
+                assert!(reason.contains("never both"), "{reason}");
+            }
+            other => panic!("{other}"),
+        }
+    }
+
+    /// A secret-bearing NAME authored as a plain value is refused where the
+    /// author can see it, rather than at the identity gate much later.
+    ///
+    /// The heuristic is defence in depth, not the boundary — `secret_bindings`
+    /// is authoritative — but a name it does catch should be caught at the line
+    /// that wrote it.
+    #[test]
+    fn a_secret_bearing_name_cannot_be_an_authored_env_value() {
+        for name in ["API_TOKEN", "app_secret", "DB_PASSWORD", "MY_API_KEY"] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[env]
+{name} = "hunter2"
+"#
+            ))
+            .expect_err("must refuse {name}");
+            match error {
+                ManifestV1Error::Invalid { field, reason } => {
+                    assert_eq!(field, "env.<NAME>");
+                    assert!(reason.contains("kind = \"secret\""), "{reason}");
+                }
+                other => panic!("{name}: {other}"),
+            }
+        }
+    }
+
+    /// Both `kind` and `required` are explicit. v0.3 has no `required` at all
+    /// and defaults its kind to `secret`; neither default is inherited.
+    #[test]
+    fn a_config_field_must_state_both_kind_and_required() {
+        for partial in [r#"kind = "secret""#, "required = true"] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[config.API_KEY]
+{partial}
+"#
+            ))
+            .expect_err("both are explicit");
+            assert!(
+                matches!(error, ManifestV1Error::Toml(_)),
+                "{partial}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_secret_config_field_and_an_authored_value_coexist_when_they_are_different_names() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[env]
+NODE_ENV = "production"
+
+[config.API_KEY]
+kind = "secret"
+required = true
+"#,
+        )
+        .expect("parses");
+        assert_eq!(manifest.env["NODE_ENV"], "production");
+        assert_eq!(manifest.config["API_KEY"].kind, ConfigKindV1::Secret);
+        assert!(manifest.config["API_KEY"].required);
+    }
+
+    /// A non-secret launch-supplied value is identity-bearing and unknown when
+    /// the contract is minted — the contract has nowhere to put it, so the
+    /// subset says so instead of inventing a place.
+    #[test]
+    fn a_non_secret_launch_supplied_value_is_refused_by_the_subset() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[web]
+port = 8080
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["true"]
+
+[config.REGION]
+kind = "string"
+required = true
+"#,
+        )
+        .expect("it PARSES — it is a valid v1 manifest");
+        let error = manifest
+            .validate_for_interactive_capture()
+            .expect_err("outside the subset");
+        match error {
+            ManifestV1Error::Invalid { field, reason } => {
+                assert_eq!(field, "config.<NAME>");
+                assert!(reason.contains("nowhere to put it"), "{reason}");
+            }
+            other => panic!("{other}"),
+        }
+    }
+
+    #[test]
+    fn a_non_posix_variable_name_is_refused() {
+        for (table, line) in [
+            ("env", "1BAD = \"x\""),
+            ("config.1BAD", "kind = \"secret\"\nrequired = true"),
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+[{table}]
+{line}
+"#
+            ))
+            .expect_err("must refuse a non-POSIX name");
+            assert!(
+                matches!(error, ManifestV1Error::Invalid { .. }),
+                "{table}: {error}"
+            );
         }
     }
 
