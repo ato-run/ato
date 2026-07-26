@@ -439,6 +439,104 @@ pub(crate) fn resolve_base_digests(
     Ok(resolved)
 }
 
+/// The platform an image declares, from `image inspect`'s TOP-LEVEL fields.
+///
+/// Deliberately separate from [`DockerImageConfig`]: `Config` describes the
+/// PROCESS the image starts (entrypoint, env, ports), while `Os`/`Architecture`
+/// describe the MACHINE it expects. Parsing them through the config path would
+/// invite reading `Config.Os`, which does not exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ImagePlatform {
+    pub os: String,
+    pub architecture: String,
+}
+
+pub(crate) fn inspect_image_platform(
+    runner: &dyn ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<ImagePlatform, String> {
+    let out = run_tool(
+        runner,
+        tool,
+        &[
+            "image",
+            "inspect",
+            "--format",
+            "{{.Os}}\t{{.Architecture}}",
+            image_ref,
+        ],
+        &format!("inspect platform of {image_ref:?}"),
+    )?;
+    // Split BEFORE trimming: an image that declares neither field emits a bare
+    // tab, and trimming the line first would eat the separator and report a
+    // shape problem where the real finding is an empty platform.
+    let line = out.stdout.lines().next().unwrap_or_default();
+    let (os, architecture) = line.split_once('\t').ok_or_else(|| {
+        format!("image {image_ref:?} platform inspect returned {line:?}, not os<TAB>arch")
+    })?;
+    let (os, architecture) = (os.trim(), architecture.trim());
+    if os.is_empty() || architecture.is_empty() {
+        return Err(format!(
+            "image {image_ref:?} declares an empty os/architecture ({os:?}/{architecture:?}); \
+             a platform that is not stated is not a platform that can be recorded \
+             (fail-closed)"
+        ));
+    }
+    Ok(ImagePlatform {
+        os: os.to_string(),
+        architecture: architecture.to_string(),
+    })
+}
+
+/// The libc flavour inside an image, probed by RUNNING it.
+///
+/// Nothing in image metadata records this — `python:3.11-slim` and
+/// `python:3.11-alpine` are both `linux/amd64` and differ only here — so the
+/// only honest way to learn it is to ask the image itself.
+///
+/// `ldd --version` is the probe because both implementations answer it, though
+/// differently: glibc prints `ldd (GNU libc) …` / `ldd (Debian GLIBC …)` on
+/// stdout and exits 0, while musl prints `musl libc (x86_64)` on stderr and
+/// exits 1. Hence `2>&1` and the `|| true` — the exit code carries no
+/// information, the text does.
+pub(crate) fn probe_image_libc(
+    runner: &dyn ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<String, String> {
+    let out = run_tool(
+        runner,
+        tool,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--platform",
+            DOCKER_IMPORT_PLATFORM,
+            "--entrypoint",
+            "/bin/sh",
+            image_ref,
+            "-c",
+            "ldd --version 2>&1 | head -n 1 || true",
+        ],
+        &format!("probe libc of {image_ref:?}"),
+    )?;
+    let reported = out.stdout.trim().to_ascii_lowercase();
+    if reported.contains("musl") {
+        return Ok("musl".to_string());
+    }
+    if reported.contains("glibc") || reported.contains("gnu libc") {
+        return Ok("glibc".to_string());
+    }
+    Err(format!(
+        "libc probe of {image_ref:?} reported {:?}, which names neither glibc nor musl; \
+         refusing to record a libc nobody identified (fail-closed)",
+        out.stdout.trim()
+    ))
+}
+
 fn parse_image_config(inspect_json: &str) -> Result<DockerImageConfig, String> {
     let v: serde_json::Value = serde_json::from_str(inspect_json)
         .map_err(|e| format!("image inspect JSON parse error: {e}"))?;
