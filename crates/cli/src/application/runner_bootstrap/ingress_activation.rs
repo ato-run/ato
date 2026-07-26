@@ -65,7 +65,7 @@ use super::official_preview::GeneratedFragment;
 /// the outcome is settled. `previous` is what a rollback restores — including
 /// `None`, which is a real value on a first install and must not be confused
 /// with "unknown".
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingJournal {
     pub candidate: String,
     pub previous: Option<String>,
