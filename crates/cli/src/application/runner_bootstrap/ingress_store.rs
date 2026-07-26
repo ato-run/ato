@@ -427,6 +427,16 @@ impl GenerationStore for FsGenerationStore {
         Ok(true)
     }
 
+    fn generation_matches(&self, digest: &str, fragments: &[GeneratedFragment]) -> Result<bool> {
+        if !self.generation_complete(digest)? {
+            return Ok(false);
+        }
+        let Some(on_disk) = self.read_manifest(digest)? else {
+            return Ok(false);
+        };
+        Ok(on_disk == manifest_for(digest, fragments))
+    }
+
     fn write_pending(&mut self, journal: &PendingJournal) -> Result<()> {
         atomic_write(
             &self.root,
