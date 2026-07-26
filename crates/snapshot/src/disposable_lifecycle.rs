@@ -19,15 +19,20 @@
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use capsule::snapshot_manifest::SnapshotManifestV1;
+use capsule::snapshot_manifest::{
+    CapturePolicyV1, RestoreContractV1, SnapshotCaptureProvenance, SnapshotManifestV1,
+};
 use capsulefs::CasStore;
 
+use crate::BuildReadyStateReceipt;
 use crate::acceptance::{
     AcceptanceBudget, CandidateSnapshot, DisposableAcceptanceLifecycle, DisposableSessionHandle,
     VerificationOutcome, sanitize_untrusted_environment,
 };
 use crate::manifest::ReadyStateManifest;
 use crate::{RestoreReadyStateInput, RestoredSession, SnapshotBackend};
+use capsule::execution_contract::{ContentDigest, DigestAlgorithm, ExecutionId};
+use capsulefs::BlobManifest;
 
 /// Real (non-stubbed) [`DisposableAcceptanceLifecycle`] backed by an actual
 /// [`SnapshotBackend`]: capture wraps the already-sealed candidate (see
@@ -35,11 +40,41 @@ use crate::{RestoreReadyStateInput, RestoredSession, SnapshotBackend};
 /// allocates the disposable overlay, restore calls the REAL
 /// `backend.restore`, and destroy calls the REAL `backend.stop` — no phase is
 /// faked or self-attesting.
-pub struct BackendDisposableLifecycle<'a> {
+/// How a lifecycle learns which candidate to verify.
+///
+/// The CLI's build path knows both manifests before acceptance starts, so it
+/// sets them once. A hold cannot: `HoldPhase` takes its lifecycle up front, and
+/// the candidate only exists after the capture runs. `LateBound` lets the hold
+/// hand over the manifests the instant they exist, and the phases below read
+/// whatever is current — which is always the candidate the capture just sealed,
+/// never a stale one.
+pub trait CandidateSource {
+    /// The legacy manifest to restore (what `backend.restore` takes).
+    fn legacy_manifest(&self) -> Result<ReadyStateManifest, String>;
+    /// The v1 candidate manifest under verification.
+    fn candidate_manifest(&self) -> Result<SnapshotManifestV1, String>;
+}
+
+/// A source fixed at construction — the CLI build path.
+pub struct FixedCandidate {
+    pub legacy: ReadyStateManifest,
+    pub candidate: SnapshotManifestV1,
+}
+
+impl CandidateSource for FixedCandidate {
+    fn legacy_manifest(&self) -> Result<ReadyStateManifest, String> {
+        Ok(self.legacy.clone())
+    }
+    fn candidate_manifest(&self) -> Result<SnapshotManifestV1, String> {
+        Ok(self.candidate.clone())
+    }
+}
+
+pub struct BackendDisposableLifecycle<'a, S: CandidateSource = FixedCandidate> {
     pub backend: &'a dyn SnapshotBackend,
     pub store: &'a CasStore,
-    pub legacy_manifest: ReadyStateManifest,
-    pub candidate_manifest: SnapshotManifestV1,
+    /// Where the manifests come from — fixed for a build, late-bound for a hold.
+    pub candidate: S,
     pub overlay_root: std::path::PathBuf,
     /// The live restored session, if a restore is currently in progress.
     /// `maximum_attempts` is always 1 in the shipped config (see
@@ -52,16 +87,15 @@ pub struct BackendDisposableLifecycle<'a> {
     pub last_candidate: Option<SnapshotManifestV1>,
 }
 
-impl DisposableAcceptanceLifecycle for BackendDisposableLifecycle<'_> {
+impl<S: CandidateSource> DisposableAcceptanceLifecycle for BackendDisposableLifecycle<'_, S> {
     fn capture_candidate(
         &mut self,
         _attempt: u32,
         _budget: &AcceptanceBudget,
     ) -> Result<CandidateSnapshot, String> {
-        self.last_candidate = Some(self.candidate_manifest.clone());
-        Ok(CandidateSnapshot {
-            manifest: self.candidate_manifest.clone(),
-        })
+        let manifest = self.candidate.candidate_manifest()?;
+        self.last_candidate = Some(manifest.clone());
+        Ok(CandidateSnapshot { manifest })
     }
 
     fn create_disposable_session(
@@ -86,7 +120,7 @@ impl DisposableAcceptanceLifecycle for BackendDisposableLifecycle<'_> {
             .backend
             .restore(RestoreReadyStateInput {
                 store: self.store,
-                manifest: self.legacy_manifest.clone(),
+                manifest: self.candidate.legacy_manifest()?,
                 overlay_root: overlay,
                 host_runner_class: None,
                 uffd_preview: false,
@@ -185,4 +219,117 @@ fn classify_exit_status(status: std::process::ExitStatus) -> VerificationOutcome
         Some(code) => VerificationOutcome::Exited(code),
         None => VerificationOutcome::Lost,
     }
+}
+
+/// Derive a REAL (backend-reported) v1 identity/compatibility sidecar for the
+/// legacy manifest `build_ready_state` just sealed. Built directly from the
+/// concrete, already-validated [`ReadyStateManifest`] in hand (rather than a
+/// tolerant JSON round-trip through
+/// [`LegacyReadyStateManifestV1`](capsule::snapshot_manifest::LegacyReadyStateManifestV1),
+/// which exists for reading OPAQUE legacy artifacts this caller does not
+/// have).
+pub fn build_v1_candidate_manifest(
+    backend: &dyn SnapshotBackend,
+    execution_id: ExecutionId,
+    receipt: &BuildReadyStateReceipt,
+) -> Result<SnapshotManifestV1, String> {
+    use capsule::snapshot_manifest::{
+        SNAPSHOT_MANIFEST_V1_SCHEMA, SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA,
+        SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA, SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA,
+        SanitizationAttestationV1, SecretScanAttestationV1,
+    };
+
+    let compatibility_contract = backend
+        .snapshot_compatibility_contract()
+        .map_err(|e| format!("resolve Snapshot v1 backend compatibility: {e}",))?;
+    let legacy = &receipt.manifest;
+
+    let mut disk_layer_refs = Vec::new();
+    for layer in [
+        &legacy.layers.rootfs,
+        &legacy.layers.runtime,
+        &legacy.layers.dependency,
+        &legacy.layers.app,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        disk_layer_refs.push(blob_layer_ref(layer)?);
+    }
+    let memory_layer_refs = legacy
+        .layers
+        .memory
+        .as_ref()
+        .map(blob_layer_ref)
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let vmstate_layer_refs = legacy
+        .layers
+        .vmstate
+        .as_ref()
+        .map(blob_layer_ref)
+        .transpose()?
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let sanitization_steps = legacy
+        .sanitizer_contract
+        .steps
+        .iter()
+        .map(|step| step.step.clone())
+        .collect();
+    let secret_scan = &receipt.no_secret_proof;
+
+    Ok(SnapshotManifestV1 {
+        schema: SNAPSHOT_MANIFEST_V1_SCHEMA.to_string(),
+        execution_id,
+        restore_contract: RestoreContractV1 {
+            schema: SNAPSHOT_RESTORE_CONTRACT_V1_SCHEMA.to_string(),
+            // Must equal `compatibility_contract.runner_restore_contract`
+            // (`SnapshotManifestV1::validate`'s cross-field invariant) — the
+            // SAME restore protocol identity, viewed from two angles.
+            restore_protocol: compatibility_contract.runner_restore_contract.clone(),
+            steps: Vec::new(),
+        },
+        compatibility_contract,
+        memory_layer_refs,
+        vmstate_layer_refs,
+        disk_layer_refs,
+        capture_policy: CapturePolicyV1::Running,
+        capture_provenance: SnapshotCaptureProvenance {
+            capsule_manifest_hash: Some(legacy.capsule_manifest_hash.clone()),
+            build_receipt_id: legacy.build_receipt_id.clone(),
+        },
+        sanitization_attestation: SanitizationAttestationV1 {
+            schema: SNAPSHOT_SANITIZATION_ATTESTATION_V1_SCHEMA.to_string(),
+            steps: sanitization_steps,
+        },
+        secret_scan_attestation: SecretScanAttestationV1 {
+            schema: SNAPSHOT_SECRET_SCAN_ATTESTATION_V1_SCHEMA.to_string(),
+            scanner_identity: secret_scan.scanner_version.clone(),
+            policy_identity: crate::POLICY_VERSION.to_string(),
+            scanned_layers: secret_scan.scanned_layers.clone(),
+            verdict: secret_scan.verdict.clone(),
+        },
+    })
+}
+
+/// A real (not placeholder) content commitment for one captured
+/// [`BlobManifest`] layer ref: a domain-separated hash of its own canonical
+/// form. This is a genuine content address of the actual captured layer
+/// metadata (which itself commits to every chunk hash within) — not the same
+/// digest CapsuleFS uses internally for the blob's OWN address, but a real,
+/// independently-verifiable commitment that changes iff the underlying
+/// content changes.
+pub(crate) fn blob_layer_ref(blob: &BlobManifest) -> Result<ContentDigest, String> {
+    let canonical =
+        serde_jcs::to_vec(blob).map_err(|e| format!("canonicalize Snapshot layer ref: {e}"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ato.snapshot-layer-ref/v1\0");
+    hasher.update(&canonical);
+    Ok(ContentDigest::new(
+        DigestAlgorithm::Blake3,
+        *hasher.finalize().as_bytes(),
+    ))
 }
