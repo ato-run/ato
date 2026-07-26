@@ -627,7 +627,9 @@ content_ready_path=\"/\"\n",
             filesystem: ResolvedFilesystemContract {
                 view_digest: digest(seed.wrapping_add(2)),
                 topology_digest: placeholder,
-                readonly_layers: Vec::new(),
+                // Non-empty by ADR-015 §6.3: an execution with no immutable
+                // layer has no filesystem to identify.
+                readonly_layers: vec![digest(seed.wrapping_add(3))],
                 writable_paths: Vec::new(),
             },
             policy: ResolvedPolicyContract {
