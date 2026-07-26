@@ -50,6 +50,7 @@ pub use contract::capsule_lock;
 pub use contract::capsule_program_contract;
 pub use contract::execution_contract;
 pub use contract::execution_contract_finalize;
+pub use contract::execution_payloads;
 pub use contract::lock_runtime;
 pub use contract::lockfile;
 pub use contract::manifest;

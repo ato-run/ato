@@ -399,7 +399,7 @@ fn run_tool(
 /// digest-pinned identity via `image inspect --format {{index .RepoDigests 0}}`.
 /// A ref that cannot be digest-resolved fails the import — a tag is not a
 /// reproducible identity (ato#994 base-image policy).
-fn resolve_base_digests(
+pub(crate) fn resolve_base_digests(
     runner: &dyn ImportCommandRunner,
     tool: BuildTool,
     refs: &[String],
@@ -789,20 +789,26 @@ pub fn pull_and_inspect_image(
     })
 }
 
+/// Shared test double for the command seam.
+///
+/// Lives outside `mod tests` so the sibling modules that also drive this seam
+/// use the SAME fake — a second scripted runner would be a second opinion about
+/// what a build tool does.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
     use std::sync::Mutex;
+
+    use super::{ImportCommandOutput, ImportCommandRunner};
 
     /// Scripted fake: matches invocations by (program, first tokens) and
     /// records every call for order/shape assertions.
-    struct FakeRunner {
-        script: Vec<(String, ImportCommandOutput)>,
-        calls: Mutex<Vec<String>>,
+    pub(crate) struct FakeRunner {
+        pub(crate) script: Vec<(String, ImportCommandOutput)>,
+        pub(crate) calls: Mutex<Vec<String>>,
     }
 
     impl FakeRunner {
-        fn new(script: Vec<(&str, i32, &str, &str)>) -> Self {
+        pub(crate) fn new(script: Vec<(&str, i32, &str, &str)>) -> Self {
             FakeRunner {
                 script: script
                     .into_iter()
@@ -820,7 +826,8 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
             }
         }
-        fn calls(&self) -> Vec<String> {
+        #[allow(dead_code)]
+        pub(crate) fn calls(&self) -> Vec<String> {
             self.calls.lock().unwrap().clone()
         }
     }
@@ -841,6 +848,14 @@ mod tests {
             ))
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    use super::testing::FakeRunner;
 
     // --- probe_build_tool -------------------------------------------------------
 
