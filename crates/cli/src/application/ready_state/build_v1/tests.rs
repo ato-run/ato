@@ -1120,6 +1120,8 @@ fn the_short_execution_id_is_a_recognizable_prefix() {
         lock_path: PathBuf::from("capsule.lock"),
         guest_image_path: PathBuf::from("guest.img"),
         guest_image_bytes: 1,
+        guest_image_digest: format!("blake3:{}", "d".repeat(64)),
+        filesystem_view_digest: format!("blake3:{}", "e".repeat(64)),
         source_digest: format!("sha256:{}", "b".repeat(64)),
         runtime_resolved_ref: pinned_ref(PYTHON_SLIM, 'c'),
         target: linux_gnu_x86_64(),
@@ -1137,18 +1139,15 @@ fn the_short_execution_id_is_a_recognizable_prefix() {
     assert_ne!(outcome.short_execution_id(), outcome.execution_id);
 }
 
-/// `source.digest` is a pure function of the program source, and GIVEN a
-/// reproducible guest image the lane adds no other instability.
+/// Two builds of one program source mint one `execution_id`.
 ///
-/// Read the second half precisely, because the double is what makes it hold:
-/// `FakeProducer::pack` writes bytes that are a function of the projection, so
-/// an equal `execution_id` here says every OTHER input the lane feeds the mint
-/// is stable across two builds. It does NOT say the real producer is
-/// reproducible — see `KNOWN: the packed guest image is not reproducible` in
-/// the module doc. `source_digest` is asserted separately because that one IS
-/// guaranteed end to end, double or not.
+/// This is the property `capsule.lock` depends on, and it holds against the
+/// real producer too — the identity commits the guest's CONTENTS, so the
+/// wall-clock stamps `mke2fs` puts in the artifact cannot reach it. Proven end
+/// to end by the `v1 pack is reproducible` CI job; here it says the lane feeds
+/// the mint nothing else that varies between two runs.
 #[test]
-fn source_digest_is_stable_and_the_lane_adds_no_other_instability() {
+fn repeated_v1_builds_mint_the_same_execution_id() {
     let workspace = Workspace::new(&minimal_manifest(""));
     let first = workspace.build(&FakeProducer::healthy()).expect("build");
     let second = workspace.build(&FakeProducer::healthy()).expect("rebuild");
@@ -1156,11 +1155,8 @@ fn source_digest_is_stable_and_the_lane_adds_no_other_instability() {
     assert_eq!(first.execution_id, second.execution_id);
 }
 
-/// Nothing about where the checkout lives reaches the identity.
-///
-/// `source_digest` is the load-bearing assertion — it holds against the real
-/// producer too. The `execution_id` half again depends on the double being
-/// reproducible; what it adds is that no host path leaks into any other facet.
+/// Nothing about where the checkout lives reaches the identity — not the
+/// source digest, and not any other facet.
 #[test]
 fn nothing_about_the_host_path_reaches_the_identity() {
     let manifest = minimal_manifest("");
@@ -1380,4 +1376,81 @@ fn first_source_digest(workspace: &Workspace) -> String {
         .source
         .digest
         .to_string()
+}
+
+/// The packed artifact's digest is RECORDED but never committed.
+///
+/// The two values are one `ContentDigest` apart and swapping them is the whole
+/// bug this design exists to prevent: the artifact digest is not stable across
+/// builds, so committing it would make a rebuild a different execution. The
+/// receipt still needs it — it names which file this build wrote.
+#[test]
+fn the_artifact_digest_is_recorded_and_never_committed() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let outcome = workspace.build(&FakeProducer::healthy()).expect("build");
+    let contract = workspace
+        .lock()
+        .execution_contract
+        .unwrap()
+        .execution_contract;
+
+    // The receipt names the file on disk.
+    assert_eq!(
+        outcome.guest_image_digest,
+        materialization_digest(&workspace.guest_image_path())
+            .expect("hash the artifact")
+            .to_string()
+    );
+
+    // The contract commits the CONTENTS, which is a different value.
+    assert_eq!(
+        outcome.filesystem_view_digest,
+        contract.filesystem.view_digest.to_string()
+    );
+    assert_ne!(
+        outcome.guest_image_digest, outcome.filesystem_view_digest,
+        "the artifact digest and the view digest must not be the same value"
+    );
+
+    // And the artifact digest appears nowhere in the identity preimage.
+    let canonical = String::from_utf8(contract.canonical_bytes().expect("canonical")).unwrap();
+    let bare = outcome
+        .guest_image_digest
+        .split_once(':')
+        .expect("an algorithm-prefixed digest")
+        .1;
+    assert!(
+        !canonical.contains(bare),
+        "the packed artifact's digest reached the execution identity"
+    );
+}
+
+/// A producer cannot supply the identity-bearing digest.
+///
+/// Structural rather than asserted at runtime: no method on `V1GuestProducer`
+/// returns a digest, so the seam a test replaces has no way to inject one. The
+/// lane computes it from the exported tree. This test states the property so
+/// that adding such a method has to argue with it.
+#[test]
+fn no_producer_method_can_supply_the_identity() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let producer = FakeProducer::healthy();
+    workspace.build(&producer).expect("build");
+
+    let view = workspace
+        .lock()
+        .execution_contract
+        .unwrap()
+        .execution_contract
+        .filesystem
+        .view_digest;
+
+    // The double never chose this value: it wrote a tree, and the lane digested
+    // it. Recomputing from the same tree is the only way to reach the same
+    // number, which is what "the producer cannot inject one" means in practice.
+    assert!(view.to_string().starts_with("blake3:"));
+    assert!(
+        producer.log().filesystem_uuids.len() == 1,
+        "the producer was asked to pack, not to measure"
+    );
 }

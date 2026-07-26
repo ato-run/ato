@@ -122,6 +122,8 @@ if not found:
 print(found["execution_id"])
 print(found["guest_image"])
 print(found["source_digest"])
+print(found["filesystem_view_digest"])
+print(found["guest_image_digest"])
 PYEOF
 }
 
@@ -134,9 +136,12 @@ run_build two
 # done and no reason for the failure.
 facts() { sed -n "${2}p" "$WORK/$1.facts"; }
 ID_ONE="$(facts one 1)";  IMG_ONE="$(facts one 2)";  SRC_ONE="$(facts one 3)"
+VIEW_ONE="$(facts one 4)"; ART_ONE="$(facts one 5)"
 ID_TWO="$(facts two 1)";  IMG_TWO="$(facts two 2)";  SRC_TWO="$(facts two 3)"
-for value in "$ID_ONE" "$IMG_ONE" "$SRC_ONE" "$ID_TWO" "$IMG_TWO" "$SRC_TWO"; do
-  [[ -n "$value" ]] || fail "a build reported no execution id / image / source digest"
+VIEW_TWO="$(facts two 4)"; ART_TWO="$(facts two 5)"
+for value in "$ID_ONE" "$IMG_ONE" "$SRC_ONE" "$VIEW_ONE" "$ART_ONE" \
+             "$ID_TWO" "$IMG_TWO" "$SRC_TWO" "$VIEW_TWO" "$ART_TWO"; do
+  [[ -n "$value" ]] || fail "a build did not report one of its digests"
 done
 [[ -f "$IMG_ONE" && -f "$IMG_TWO" ]] || fail "a reported guest image does not exist"
 
@@ -144,12 +149,20 @@ echo
 echo "== results =="
 SHA_ONE="$(sha256sum "$IMG_ONE" | cut -d' ' -f1)"
 SHA_TWO="$(sha256sum "$IMG_TWO" | cut -d' ' -f1)"
-printf 'source_digest  %s\n               %s\n' "$SRC_ONE" "$SRC_TWO"
-printf 'image sha256   %s\n               %s\n' "$SHA_ONE" "$SHA_TWO"
-printf 'execution_id   %s\n               %s\n' "$ID_ONE" "$ID_TWO"
+echo "IDENTITY (must match):"
+printf '  source_digest         %s\n                        %s\n' "$SRC_ONE" "$SRC_TWO"
+printf '  filesystem.view_digest %s\n                        %s\n' "$VIEW_ONE" "$VIEW_TWO"
+printf '  execution_id          %s\n                        %s\n' "$ID_ONE" "$ID_TWO"
+echo "MATERIALIZATION (recorded, may differ):"
+printf '  artifact digest       %s\n                        %s\n' "$ART_ONE" "$ART_TWO"
+printf '  image sha256          %s\n                        %s\n' "$SHA_ONE" "$SHA_TWO"
 echo
 
 [[ "$SRC_ONE" == "$SRC_TWO" ]] || fail "source.digest differs — the projection is not stable, which is a bug ABOVE the pack"
+[[ "$VIEW_ONE" == "$VIEW_TWO" ]] || fail "filesystem.view_digest differs — the guest CONTENTS are not stable, which is a real difference and not a serialization one"
+# The artifact digest is a receipt, so it is checked for PRESENCE, never for
+# equality: two packs of one guest filesystem legitimately differ here.
+[[ "$ART_ONE" != "$ART_TWO" || "$ART_ONE" == "$ART_TWO" ]]
 
 if [[ "$SHA_ONE" == "$SHA_TWO" ]]; then
   echo "(the packed images also happened to match byte for byte)"

@@ -28,7 +28,7 @@ fn digest(root: &Path) -> ContentDigest {
 /// The same contents digest the same, and the digest is over CONTENT: a second
 /// tree built independently at another path agrees with the first.
 #[test]
-fn the_same_contents_at_another_path_digest_the_same() {
+fn equivalent_guest_trees_have_the_same_filesystem_view_digest() {
     let one = tree();
     let two = tree();
     assert_ne!(one.path(), two.path());
@@ -41,7 +41,7 @@ fn the_same_contents_at_another_path_digest_the_same() {
 /// with it would change on every build.
 #[cfg(unix)]
 #[test]
-fn timestamps_do_not_reach_the_digest() {
+fn mkfs_and_build_timestamps_do_not_reach_the_digest() {
     let root = tree();
     let before = digest(root.path());
 
@@ -230,4 +230,58 @@ fn the_digest_is_domain_separated() {
     );
     assert_ne!(empty_tree, undomained);
     assert_eq!(GUEST_FILESYSTEM_VIEW_DOMAIN, "ato.guest-filesystem-view/v1");
+}
+
+/// A hard link is committed as two paths with equal contents, and the link
+/// count is not committed.
+///
+/// Asserted rather than assumed, because it is the one place the digest is
+/// deliberately coarser than the filesystem: a tree with a hard link and a tree
+/// with two copies of the same bytes are one digest. The module doc says why,
+/// and says which future lane has to revisit it.
+#[cfg(unix)]
+#[test]
+fn a_hard_link_digests_as_two_paths_with_equal_contents() {
+    let linked = TempDir::new().expect("tempdir");
+    std::fs::write(linked.path().join("a"), b"shared").expect("write");
+    std::fs::hard_link(linked.path().join("a"), linked.path().join("b")).expect("link");
+
+    let copied = TempDir::new().expect("tempdir");
+    std::fs::write(copied.path().join("a"), b"shared").expect("write");
+    std::fs::write(copied.path().join("b"), b"shared").expect("write");
+
+    assert_eq!(digest(linked.path()), digest(copied.path()));
+    // Non-vacuous: differing content at either path still separates them.
+    std::fs::write(copied.path().join("b"), b"other").expect("write");
+    assert_ne!(digest(linked.path()), digest(copied.path()));
+}
+
+/// Extended attributes are out of scope for v1 and are NOT read, so two trees
+/// differing only in one digest the same.
+///
+/// Pinned as a known limitation rather than left to be discovered: a reader who
+/// assumes xattrs are covered would be wrong, and the module doc says what a
+/// lane admitting them has to do (extend the domain).
+#[cfg(target_os = "linux")]
+#[test]
+fn extended_attributes_are_out_of_scope_for_v1() {
+    let root = tree();
+    let file = root.path().join("app/main.py");
+    let before = digest(root.path());
+
+    let set = std::process::Command::new("setfattr")
+        .args(["-n", "user.ato_test", "-v", "1"])
+        .arg(&file)
+        .output();
+    match set {
+        Ok(output) if output.status.success() => {
+            assert_eq!(
+                before,
+                digest(root.path()),
+                "v1 does not read xattrs; if this starts failing the scope changed \
+                 and GUEST_FILESYSTEM_VIEW_DOMAIN must change with it"
+            );
+        }
+        _ => eprintln!("skipping: setfattr unavailable or filesystem lacks xattr support"),
+    }
 }

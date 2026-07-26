@@ -2822,15 +2822,18 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         }
     }
 
-    /// The pack half must not leave a source of entropy or a clock read in the
-    /// bytes the Execution Identity commits.
+    /// The pack pins what it can of the ARTIFACT — a stable UUID, a stable hash
+    /// seed, fixed superblock clocks.
     ///
-    /// Asserted against the emitted script because `mkfs.ext4` does not run on
-    /// every host this suite does. That makes this a check on the RECIPE, not a
-    /// proof of byte-equality — the proof is two real builds agreeing, which is
-    /// `scripts/ready-state/verify-v1-pack-reproducible.sh` on a Linux host.
+    /// None of it bears on the Execution Identity, which commits the guest's
+    /// contents (`crate::guest_filesystem_digest`) precisely because the image
+    /// cannot be made byte-stable: `mke2fs` stamps every inode with the wall
+    /// clock. This is a check that the recipe still asks for the controls that
+    /// DO work, so an artifact differs only where it must and stays cheap to
+    /// cache and to diff. It is not, and must not be read as, a claim of
+    /// byte-equality.
     #[test]
-    fn the_v1_pack_leaves_no_clock_or_entropy_in_the_image() {
+    fn the_pack_pins_what_it_can_of_the_artifact_without_claiming_byte_equality() {
         let script = mkfs_guest_rootfs_script_v1(512);
 
         // The two values mke2fs would otherwise draw at random.

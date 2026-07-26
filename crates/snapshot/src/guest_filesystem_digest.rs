@@ -30,9 +30,33 @@
 //! contents: timestamps, inode numbers, link counts, block addresses, and the
 //! order the tree happened to be walked in.
 //!
-//! Hard links are not distinguished from two files with identical content. The
-//! contents of the guest are the same either way; the sharing is an allocation
-//! detail of the same kind as a block address.
+//! # Hard links, and what v1 does not cover
+//!
+//! **Hard links** are committed as what they look like: two paths whose
+//! contents are equal. The link count is not committed, so a tree where
+//! `/bin/sh` and `/bin/dash` share an inode digests the same as one where they
+//! are two copies of the same bytes. That is deliberate — the guest reads the
+//! same bytes at the same two paths either way, and the sharing is an
+//! allocation detail of the same kind as a block address. It is NOT free: a
+//! capsule that depended on a write through one path being visible at the other
+//! would be two different guests with one digest. The Step-4 subset ships
+//! read-only roots, so no such capsule can exist yet; a lane that allows a
+//! writable root must revisit this before it does.
+//!
+//! **Not covered by v1, and refused rather than ignored where it can be**:
+//!
+//! * **Extended attributes and POSIX ACLs.** Not read, so two trees differing
+//!   only in an xattr or an ACL digest the same. They are outside the Step-4
+//!   subset (nothing in it sets one), and reading them would fix their
+//!   canonical encoding into the identity forever on the strength of a guess.
+//!   A lane that admits them must extend the domain string below, which is what
+//!   makes the extension visible rather than silent.
+//! * **Sparse files.** A hole and a run of zero bytes digest the same, because
+//!   the digest is over content and both read as zeros. The guest cannot tell
+//!   them apart either; only the space they occupy differs, which is an
+//!   allocation property.
+//! * **Anything a `docker export` tarball cannot carry** — mount points,
+//!   open file descriptions, and the like — is not in the tree to begin with.
 
 use std::collections::BTreeMap;
 use std::path::Path;

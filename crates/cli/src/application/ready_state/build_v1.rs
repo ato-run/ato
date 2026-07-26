@@ -195,6 +195,19 @@ pub(crate) struct V1BuildOutcome {
     pub lock_path: PathBuf,
     pub guest_image_path: PathBuf,
     pub guest_image_bytes: u64,
+    /// Blake3 over the packed ext4, as a MATERIALIZATION receipt.
+    ///
+    /// Deliberately not in the contract. Two packs of one guest filesystem
+    /// differ here — `mke2fs` stamps every inode with the wall clock — so
+    /// committing it would make a rebuild a different execution. It is recorded
+    /// because an artifact still needs a name: it says WHICH file this build
+    /// produced, and lets a later reader check that the file on disk is the one
+    /// the build reported. `filesystem_view_digest` is the identity-bearing
+    /// value, and the two must never be swapped.
+    pub guest_image_digest: String,
+    /// The identity-bearing digest of the guest's CONTENTS, as committed by
+    /// `filesystem.view_digest`.
+    pub filesystem_view_digest: String,
     pub source_digest: String,
     pub runtime_resolved_ref: String,
     pub target: ResolvedTargetContract,
@@ -337,6 +350,22 @@ impl V1GuestProducer for HostV1GuestProducer {
     }
 }
 
+/// Blake3 over a packed artifact, streamed.
+///
+/// A MATERIALIZATION measurement, never an identity input — the name says so
+/// because the two are one `ContentDigest` apart and the whole point of
+/// `guest_filesystem_digest` is that this value is not stable across builds.
+/// Streamed because the artifact is a filesystem image sized in gigabytes.
+fn materialization_digest(path: &Path) -> std::io::Result<ContentDigest> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(ContentDigest::new(
+        DigestAlgorithm::Blake3,
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
 /// Run the v1 producer lane end to end.
 ///
 /// The step order is load-bearing and is the ADR-015 §5-3 order verbatim: the
@@ -475,6 +504,20 @@ pub(crate) fn run(
         )
         .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
 
+    // The packed artifact's own digest, for the receipt and NOT for the
+    // contract. It names which file this build wrote; two packs of one guest
+    // filesystem differ here, which is exactly why the identity commits the
+    // contents above instead.
+    let guest_image_digest =
+        materialization_digest(request.guest_image_path).map_err(|source| {
+            V1BuildError::RecipeBuildFailed {
+                reason: format!(
+                    "hash the packed guest image at {}: {source}",
+                    request.guest_image_path.display()
+                ),
+            }
+        })?;
+
     // 9. Observe every facet, then mint. `V1BuildObservation`'s fields are all
     // required, so an observation that reaches `observe_v1` is complete by
     // construction — there is no "9 of 10" state to count.
@@ -538,6 +581,8 @@ pub(crate) fn run(
         lock_path,
         guest_image_path: request.guest_image_path.to_path_buf(),
         guest_image_bytes,
+        guest_image_digest: guest_image_digest.to_string(),
+        filesystem_view_digest: minted.execution_contract.filesystem.view_digest.to_string(),
         source_digest: minted.execution_contract.source.digest.to_string(),
         runtime_resolved_ref: runtime.resolved_ref,
         target,
