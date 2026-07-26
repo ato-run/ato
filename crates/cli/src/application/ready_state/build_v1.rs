@@ -27,25 +27,25 @@
 //! Identity that no measurement produced, and the identity's only claim is that
 //! every value in it was measured. A v1 build that cannot complete fails.
 //!
-//! # KNOWN: the packed guest image is not reproducible, so `execution_id` is not
+//! # The identity names the guest's contents, not the image's bytes
 //!
-//! `filesystem.view_digest` and `filesystem.readonly_layers` are blake3 over the
-//! packed ext4, and that file differs on every run of the real producer:
-//! `mkfs.ext4 -q -F` writes a random UUID, a random directory-hash seed and
-//! wall-clock mkfs timestamps, and the exported rootfs carries build-time
-//! mtimes. So two builds of a byte-identical workspace mint two different
-//! execution ids, and `capsule.lock` is rewritten every time.
+//! `filesystem.view_digest` used to be blake3 over the packed ext4. Running two
+//! builds proved that wrong: `mke2fs` stamps every inode it creates with the
+//! wall clock and ignores `SOURCE_DATE_EPOCH` (measured, e2fsprogs 1.47.0 —
+//! ~9,400 timestamp fields differed between two packs of one tree, while the
+//! UUID, hash seed and superblock clocks were already pinned). Two builds of one
+//! program source were therefore two different executions.
 //!
-//! Everything ELSE the mint consumes is a function of the program source and
-//! the pinned base image — `source.digest`, the withheld-control-file set,
-//! `runtime.digest`, `target`, `launch.argv`, `launch.cwd`. The lane holds that
-//! property (its tests pin it, with a deterministic producer standing in for
-//! the two host-privileged steps); the packing does not.
+//! Pinning the rest was possible but would have made the identity hostage to
+//! e2fsprogs: an `apt upgrade` on a builder that changed block allocation would
+//! change every capsule's id with no source change. So the lane exports the
+//! guest filesystem, digests its CONTENTS with
+//! [`snapshot::guest_filesystem_digest`], and packs afterwards. The ext4 is an
+//! artifact, not the identity.
 //!
-//! Closing it means a reproducible pack — `SOURCE_DATE_EPOCH` plus a pinned
-//! `-U`/`hash_seed` and normalized mtimes, which `mke2fs -d` supports — and it
-//! cannot be verified anywhere `mkfs.ext4` does not run, so it belongs with the
-//! on-hardware step rather than here.
+//! That digest is taken HERE rather than in [`V1GuestProducer`] on purpose: the
+//! producer is the seam a test replaces, and a producer that could supply this
+//! digest could supply an identity.
 //!
 //! # Host-privileged steps
 //!
@@ -74,10 +74,11 @@ use capsule::types::manifest_v1::CapsuleManifestV1;
 use snapshot::docker_import::{
     BuildTool, ResolvedRuntimeArtifact, measure_guest_target, resolve_runtime_artifact,
 };
+use snapshot::guest_filesystem_digest::guest_filesystem_digest;
 use snapshot::rootfs_builder::{
     AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
-    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, pack_app_image_v1,
-    v1_filesystem_uuid,
+    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
+    mkfs_guest_rootfs_v1, v1_filesystem_uuid,
 };
 
 use super::observe_v1::{V1BuildObservation, observe_v1};
@@ -235,12 +236,24 @@ pub(crate) trait V1GuestProducer {
     /// Resolve a base image reference to its immutable artifact identity.
     fn resolve_runtime(&self, image_ref: &str) -> Result<ResolvedRuntimeArtifact, String>;
 
-    /// Pack an assembled image into a bootable guest image at `out`, returning
-    /// its size in bytes. Consumes the image.
-    fn pack(
+    /// Export an assembled image's filesystem into `rootfs_dir` and install the
+    /// guest init. Consumes the image.
+    ///
+    /// Separate from the pack because what lands in `rootfs_dir` is what the
+    /// identity commits, and the lane — not the producer — is what digests it.
+    /// A producer that could supply the digest could supply an identity.
+    fn export_rootfs(
         &self,
         image: AssembledGuestImage,
         spec: &RootfsBuildSpecV1,
+        rootfs_dir: &Path,
+    ) -> Result<(), String>;
+
+    /// Turn an exported rootfs into a bootable guest image at `out`, returning
+    /// its size in bytes.
+    fn pack_rootfs(
+        &self,
+        rootfs_dir: &Path,
         out: &Path,
         size_mib: u64,
         filesystem_uuid: &str,
@@ -300,42 +313,28 @@ impl V1GuestProducer for HostV1GuestProducer {
         resolve_runtime_artifact(&self.runner, self.tool, image_ref)
     }
 
-    fn pack(
+    fn export_rootfs(
         &self,
         image: AssembledGuestImage,
         spec: &RootfsBuildSpecV1,
+        rootfs_dir: &Path,
+    ) -> Result<(), String> {
+        export_guest_rootfs_v1(image, spec, rootfs_dir, self.tool.as_str())
+    }
+
+    fn pack_rootfs(
+        &self,
+        rootfs_dir: &Path,
         out: &Path,
         size_mib: u64,
         filesystem_uuid: &str,
     ) -> Result<u64, String> {
-        pack_app_image_v1(
-            image,
-            spec,
-            out,
-            size_mib,
-            filesystem_uuid,
-            self.tool.as_str(),
-        )
+        mkfs_guest_rootfs_v1(rootfs_dir, out, size_mib, filesystem_uuid)
     }
 
     fn discard(&self, image: AssembledGuestImage) {
         discard_app_image_v1(image, self.tool.as_str());
     }
-}
-
-/// Blake3 over the packed guest image, streamed.
-///
-/// The image is an ext4 filesystem sized in gigabytes. Reading it into memory
-/// to hash it would make this the build's peak allocation for no reason — the
-/// hash is incremental.
-pub(crate) fn measure_guest_image_digest(path: &Path) -> std::io::Result<ContentDigest> {
-    let mut hasher = blake3::Hasher::new();
-    let mut file = std::fs::File::open(path)?;
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(ContentDigest::new(
-        DigestAlgorithm::Blake3,
-        *hasher.finalize().as_bytes(),
-    ))
 }
 
 /// Run the v1 producer lane end to end.
@@ -435,34 +434,46 @@ pub(crate) fn run(
         return Err(error);
     }
 
-    // 8. Pack it. `pack` consumes the image, so there is nothing left to leak.
+    // 8. Export the guest filesystem, digest THAT, then pack it.
     //
-    // The filesystem UUID and hash seed are derived from inputs already fixed —
-    // the projected source, the pinned base, the exact argv — rather than left
-    // to `mke2fs`'s entropy, because they land in the bytes step 9 commits.
+    // The digest is over the exported tree and not over the packed image, and
+    // the reason is measured rather than aesthetic: `mke2fs` stamps every inode
+    // it creates with the wall clock and ignores `SOURCE_DATE_EPOCH`, so two
+    // packs of one tree differ in thousands of timestamp fields. Committing
+    // those bytes would have made a rebuild a different execution, and pinning
+    // them would have made the identity hostage to the builder's e2fsprogs
+    // version. The contents are the thing anyone means by "the same guest".
+    //
+    // It is measured HERE rather than in the producer on purpose: the producer
+    // is the seam a test replaces, and a producer that could supply this digest
+    // could supply an identity.
+    let rootfs_dir = request.work_root.join("guest-rootfs");
+    std::fs::create_dir_all(&rootfs_dir).map_err(|source| V1BuildError::RecipeBuildFailed {
+        reason: format!("create the guest rootfs directory: {source}"),
+    })?;
+    producer
+        .export_rootfs(image, &spec, &rootfs_dir)
+        .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
+    let filesystem_view_digest = guest_filesystem_digest(&rootfs_dir)
+        .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
+
+    // The filesystem UUID is derived from inputs already fixed — the projected
+    // source, the pinned base, the exact argv — rather than drawn by `mke2fs`.
+    // Not identity-bearing any more, but a filesystem UUID that is stable for
+    // one program and distinct between programs is what a UUID is for.
     let filesystem_uuid = v1_filesystem_uuid(
         &source_digest.to_string(),
         &runtime.resolved_ref,
         &spec.resolved_argv,
     );
     let guest_image_bytes = producer
-        .pack(
-            image,
-            &spec,
+        .pack_rootfs(
+            &rootfs_dir,
             request.guest_image_path,
             request.rootfs_size_mib,
             &filesystem_uuid,
         )
         .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
-    let guest_image_digest =
-        measure_guest_image_digest(request.guest_image_path).map_err(|source| {
-            V1BuildError::RecipeBuildFailed {
-                reason: format!(
-                    "hash the packed guest image at {}: {source}",
-                    request.guest_image_path.display()
-                ),
-            }
-        })?;
 
     // 9. Observe every facet, then mint. `V1BuildObservation`'s fields are all
     // required, so an observation that reaches `observe_v1` is complete by
@@ -474,7 +485,7 @@ pub(crate) fn run(
         runtime_kind: runtime_kind_name(&spec).to_string(),
         runtime: &runtime,
         runtime_invocation_prefix: spec.runtime_invocation_prefix.clone(),
-        guest_image_digest,
+        filesystem_view_digest,
         target: target.clone(),
         resolved_argv: spec.resolved_argv.clone(),
         working_directory: V1_GUEST_WORKING_DIRECTORY.to_string(),

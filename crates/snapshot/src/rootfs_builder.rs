@@ -596,61 +596,40 @@ DOCKER
 /// which nothing else normalizes.
 pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 
-/// Pack the already-assembled `$ATO_IMAGE` into a read-only-bootable ext4,
-/// reproducibly.
+/// Export the assembled `$ATO_IMAGE` into `$ATO_ROOTFS` and install the init.
 ///
-/// Same create → export → init → pack shape as [`build_rootfs_script`], and it
-/// differs from v0.3 in the two ways v1 needs:
+/// The first of the two pack halves. It is separate because what lands here is
+/// what the Execution Identity commits: the lane digests this tree with
+/// [`crate::guest_filesystem_digest`] before it is turned into a filesystem
+/// image, so the identity names the guest's CONTENTS rather than one ext4
+/// serialization of them (see that module for why the serialization cannot be
+/// the answer).
 ///
-/// **The init launches an argv** rather than a shell string, and there is no
-/// build command — the Step-4 subset rejects `[[build.steps]]`.
+/// Timestamps are still normalized here. They no longer bear on the identity,
+/// but a guest whose files all claim the same mtime is easier to reason about
+/// than one stamped with whenever its builder happened to run, and it costs one
+/// `find`.
 ///
-/// **The image is a function of its inputs, not of the clock or the allocator.**
-/// v0.3 does `mkfs.ext4` on an empty file, `mount -o loop`, then `cp -a`. That
-/// produces a different image every run — `mkfs.ext4` writes a random UUID, a
-/// random directory-hash seed and wall-clock superblock timestamps, the exported
-/// rootfs carries build-time mtimes, and copying into a mounted filesystem
-/// leaves allocation to the running kernel. v0.3 can afford that because nothing
-/// claims what its image IS. v1 commits blake3 of these bytes as
-/// `filesystem.view_digest`, so each of those becomes part of the identity.
-///
-/// So: timestamps are normalized to [`V1_GUEST_IMAGE_EPOCH`], the UUID and hash
-/// seed are passed in (derived by the caller from the build's own inputs, so
-/// they are stable per program but distinct per capsule), and the filesystem is
-/// POPULATED BY `mke2fs -d` instead of by a mount-and-copy — which fixes the
-/// allocation order and, incidentally, removes the loop mount from this half
-/// entirely.
-///
-/// env: `ATO_IMAGE`, `ATO_OUT`, `ATO_FS_UUID`.
-pub(crate) fn pack_app_image_script_v1(
-    spec: &RootfsBuildSpecV1,
-    size_mib: u64,
-    tool: &str,
-) -> String {
+/// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
+pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
 CID=""
-BUILD=$(mktemp -d)
-# Failure-safe cleanup: on ANY exit leave no container, image, or temp dir
-# behind (Phase 8 orphan-hardening parity). No mount to unwind — `mke2fs -d`
-# populates the filesystem without one.
 cleanup() {{
   [ -n "$CID" ] && {tool} rm -f "$CID" >/dev/null 2>&1 || true
   {tool} rmi -f "$TAG" >/dev/null 2>&1 || true
-  [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
 }}
 trap cleanup EXIT
 CID=$({tool} create "$TAG")
-mkdir -p "$BUILD/rootfs"
-{tool} export "$CID" | tar -x -C "$BUILD/rootfs"
+{tool} export "$CID" | tar -x -C "$ATO_ROOTFS"
 {tool} rm -f "$CID" >/dev/null; CID=""
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
 # single-quoted, so the guest shell parses back EXACTLY the argv the contract commits.
-rm -f "$BUILD/rootfs/sbin/init"
-cat > "$BUILD/rootfs/sbin/init" <<'INIT'
+rm -f "$ATO_ROOTFS/sbin/init"
+cat > "$ATO_ROOTFS/sbin/init" <<'INIT'
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
@@ -664,31 +643,47 @@ cd {init_cwd}
 {launch}
 while true; do sleep 1000; done
 INIT
-chmod +x "$BUILD/rootfs/sbin/init"
-# Every inode timestamp becomes a constant. `-h` so a symlink's own timestamps
-# are set rather than its target's being set twice.
-find "$BUILD/rootfs" -exec touch -h -d @{epoch} {{}} +
+chmod +x "$ATO_ROOTFS/sbin/init"
+# Not identity-bearing any more, but a guest that claims one mtime everywhere is
+# easier to reason about than one stamped with its builder's clock. `-h` so a
+# symlink's own timestamps are set rather than its target's twice.
+find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
+"#,
+        tool = tool,
+        launch = launch_argv_line(&spec.resolved_argv),
+        init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        port = spec.port,
+        epoch = V1_GUEST_IMAGE_EPOCH,
+    )
+}
+
+/// Turn an exported rootfs into a bootable ext4.
+///
+/// The second half. `mke2fs -d` populates at mkfs time, so there is no loop
+/// mount to unwind and no running kernel deciding the allocation order.
+///
+/// The UUID, the hash seed and the superblock clocks are pinned even though the
+/// identity no longer depends on them: a stable UUID is what a filesystem UUID
+/// is FOR, and an image that differs only where it must is easier to cache and
+/// to diff. It is not byte-identical — `mke2fs` stamps every inode it creates
+/// with the wall clock and ignores `SOURCE_DATE_EPOCH` (measured, e2fsprogs
+/// 1.47.0) — and chasing that was what made the identity hostage to the tool.
+///
+/// env: `ATO_ROOTFS`, `ATO_OUT`, `ATO_FS_UUID`.
+pub(crate) fn mkfs_guest_rootfs_script_v1(size_mib: u64) -> String {
+    format!(
+        r#"set -euo pipefail
 rm -f "$ATO_OUT"
 dd if=/dev/zero of="$ATO_OUT" bs=1M count={size} status=none
-# `-d` populates at mkfs time: no loop mount, and the allocation order is
-# mke2fs's own rather than the running kernel's. `-U` and `-E hash_seed` replace
-# the two values mke2fs would otherwise draw at random.
 mkfs.ext4 -q -F \
   -U "$ATO_FS_UUID" \
   -E hash_seed="$ATO_FS_UUID" \
-  -d "$BUILD/rootfs" \
+  -d "$ATO_ROOTFS" \
   "$ATO_OUT"
-# The superblock clocks, set explicitly because mke2fs does NOT honour
-# SOURCE_DATE_EPOCH: measured on e2fsprogs 1.47.0, two runs ten seconds apart
-# produced two "Filesystem created" values ten seconds apart, and everything
-# else in the superblock was already identical. Through debugfs rather than a
-# byte patch because ext4 carries a superblock checksum that debugfs recomputes
-# and a raw write would invalidate. `wtime` goes last: every debugfs write
-# updates it.
-# SOURCE_DATE_EPOCH here and not on mke2fs: mke2fs demonstrably ignores it for
-# `s_mkfs_time`, but every e2fsprogs tool stamps `s_wtime` from `fs->now` when it
-# flushes — so without it debugfs would overwrite the `wtime` set below with the
-# clock as it closes, and the superblock checksum with it.
+# SOURCE_DATE_EPOCH on debugfs and NOT on mke2fs: mke2fs ignores it, while every
+# e2fsprogs tool stamps `s_wtime` from `fs->now` as it flushes — so without it
+# debugfs would write the clock over the wtime set below, and the superblock
+# checksum with it.
 SOURCE_DATE_EPOCH={epoch} debugfs -w -f - "$ATO_OUT" >/dev/null 2>&1 <<'DEBUGFS'
 set_super_value mkfs_time {epoch}
 set_super_value lastcheck {epoch}
@@ -696,12 +691,7 @@ set_super_value mtime 0
 set_super_value wtime {epoch}
 quit
 DEBUGFS
-# BUILD is removed by the EXIT trap (also on any failure above).
 "#,
-        tool = tool,
-        launch = launch_argv_line(&spec.resolved_argv),
-        init_cwd = V1_GUEST_WORKING_DIRECTORY,
-        port = spec.port,
         size = size_mib,
         epoch = V1_GUEST_IMAGE_EPOCH,
     )
@@ -777,17 +767,39 @@ pub fn assemble_app_image_v1(
     })
 }
 
-/// Pack an assembled image into `out_ext4`, returning its size in bytes.
+/// Export an assembled image's filesystem into `rootfs_dir` and install the
+/// guest init.
 ///
-/// Consumes the image: the emitted script removes it on exit, so there is
-/// nothing left to discard afterwards. Requires root (mount) + docker.
-pub fn pack_app_image_v1(
+/// Consumes the image: the emitted script removes it on exit. `rootfs_dir` must
+/// exist and be empty — what ends up there is what the Execution Identity
+/// commits, so a leftover file would be committed as part of the guest.
+///
+/// Requires root: `tar -x` must restore the ownership the image records.
+pub fn export_guest_rootfs_v1(
     image: AssembledGuestImage,
     spec: &RootfsBuildSpecV1,
+    rootfs_dir: &Path,
+    tool: &str,
+) -> Result<(), String> {
+    let script = export_guest_rootfs_script_v1(spec, tool);
+    run_builder_script(
+        "export guest rootfs",
+        &script,
+        &[
+            ("ATO_IMAGE", image.image_ref.as_str().into()),
+            ("ATO_ROOTFS", rootfs_dir.as_os_str().to_os_string()),
+        ],
+    )
+}
+
+/// Pack an exported rootfs into `out_ext4`, returning its size in bytes.
+///
+/// Requires root (`mke2fs -d` records the tree's ownership) and e2fsprogs.
+pub fn mkfs_guest_rootfs_v1(
+    rootfs_dir: &Path,
     out_ext4: &Path,
     size_mib: u64,
     filesystem_uuid: &str,
-    tool: &str,
 ) -> Result<u64, String> {
     // Interpolated nowhere, but it reaches `mke2fs` as two arguments, so a
     // malformed value is refused rather than passed on.
@@ -796,12 +808,12 @@ pub fn pack_app_image_v1(
             "filesystem uuid {filesystem_uuid:?} is not a canonical 8-4-4-4-12 hex UUID"
         ));
     }
-    let script = pack_app_image_script_v1(spec, size_mib, tool);
+    let script = mkfs_guest_rootfs_script_v1(size_mib);
     run_builder_script(
-        "pack app image",
+        "pack guest rootfs",
         &script,
         &[
-            ("ATO_IMAGE", image.image_ref.as_str().into()),
+            ("ATO_ROOTFS", rootfs_dir.as_os_str().to_os_string()),
             ("ATO_OUT", out_ext4.as_os_str().to_os_string()),
             ("ATO_FS_UUID", filesystem_uuid.into()),
         ],
@@ -2704,21 +2716,24 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     fn the_v1_script_puts_the_source_and_the_launch_in_the_same_directory() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
-        let pack = pack_app_image_script_v1(&spec, 512, "docker");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
 
         assert!(
             assemble.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
             "{assemble}"
         );
         assert!(
-            pack.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
-            "{pack}"
+            export.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
+            "{export}"
         );
         // And it launches the argv directly — no `sh -lc` re-parsing.
-        assert!(pack.contains("'python3' 'app.py' >/tmp/app.log"), "{pack}");
         assert!(
-            !pack.contains("/bin/sh -lc 'python3 app.py'"),
-            "the v1 init must not re-parse a joined command: {pack}"
+            export.contains("'python3' 'app.py' >/tmp/app.log"),
+            "{export}"
+        );
+        assert!(
+            !export.contains("/bin/sh -lc 'python3 app.py'"),
+            "the v1 init must not re-parse a joined command: {export}"
         );
     }
 
@@ -2789,7 +2804,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         for tool in ["docker", "podman"] {
             let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, tool);
-            let pack = pack_app_image_script_v1(&spec, 512, tool);
+            let pack = export_guest_rootfs_script_v1(&spec, tool);
             assert!(
                 assemble.contains(&format!("{tool} build -q -t")),
                 "{assemble}"
@@ -2816,8 +2831,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     /// `scripts/ready-state/verify-v1-pack-reproducible.sh` on a Linux host.
     #[test]
     fn the_v1_pack_leaves_no_clock_or_entropy_in_the_image() {
-        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let script = pack_app_image_script_v1(&spec, 512, "docker");
+        let script = mkfs_guest_rootfs_script_v1(512);
 
         // The two values mke2fs would otherwise draw at random.
         assert!(script.contains(r#"-U "$ATO_FS_UUID""#), "{script}");
@@ -2850,13 +2864,15 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             !script.contains("SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} mkfs"),
             "{script}"
         );
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
         assert!(
-            script.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
-            "{script}"
+            export.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
+            "{export}"
         );
         // And the allocation order: populated by mke2fs, not by the running
         // kernel through a loop mount.
-        assert!(script.contains(r#"-d "$BUILD/rootfs""#), "{script}");
+        assert!(script.contains(r#"-d "$ATO_ROOTFS""#), "{script}");
         assert!(
             !script.contains("mount -o loop"),
             "a loop mount leaves allocation to the running kernel: {script}"
@@ -2911,15 +2927,12 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     /// A malformed UUID is refused rather than handed to `mke2fs`.
     #[test]
     fn the_pack_refuses_a_uuid_it_did_not_derive() {
-        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         let out = tempfile::tempdir().expect("tempdir");
-        let error = pack_app_image_v1(
-            AssembledGuestImage::adopt("ato-v1-test".into()),
-            &spec,
+        let error = mkfs_guest_rootfs_v1(
+            &out.path().join("rootfs"),
             &out.path().join("guest.img"),
             512,
             "not-a-uuid",
-            "docker",
         )
         .expect_err("refused");
         assert!(error.contains("canonical"), "{error}");
@@ -2944,22 +2957,25 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             "the assembled image must survive for measurement: {assemble}"
         );
 
-        // The pack half is the last user, so it is the one that cleans up.
-        let pack = pack_app_image_script_v1(&spec, 512, "docker");
-        assert!(pack.contains("rmi -f \"$TAG\""), "{pack}");
-        assert!(pack.contains("TAG=\"$ATO_IMAGE\""), "{pack}");
+        // The EXPORT half is the last user of the image, so it cleans it up.
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(export.contains("rmi -f \"$TAG\""), "{export}");
+        assert!(export.contains("TAG=\"$ATO_IMAGE\""), "{export}");
+        // And the mkfs half never refers to the image at all: by then the
+        // filesystem is an exported tree that has already been digested.
+        assert!(!mkfs_guest_rootfs_script_v1(512).contains("ATO_IMAGE"));
     }
 
-    /// The two halves must name the same image, or the pack would export
-    /// whatever else happened to carry that tag.
+    /// The two halves that handle the image must name the same one, or the
+    /// export would unpack whatever else happened to carry that tag.
     #[test]
-    fn both_halves_address_the_image_through_the_same_variable() {
+    fn both_image_halves_address_it_through_the_same_variable() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         assert!(
             assemble_app_image_script_v1(&spec, PINNED_BASE, "docker")
                 .contains("docker build -q -t \"$ATO_IMAGE\""),
         );
-        assert!(pack_app_image_script_v1(&spec, 512, "docker").contains("TAG=\"$ATO_IMAGE\""));
+        assert!(export_guest_rootfs_script_v1(&spec, "docker").contains("TAG=\"$ATO_IMAGE\""));
     }
 
     /// The base reference is interpolated into the generated Dockerfile, so a
@@ -2998,10 +3014,12 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_image_reference_is_never_interpolated_into_the_script() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
-        let pack = pack_app_image_script_v1(&spec, 512, "docker");
-        // Both scripts are generated without knowing the reference at all.
-        for script in [&assemble, &pack] {
+        // Both scripts that touch the image are generated without knowing the
+        // reference at all — it arrives only as an environment variable.
+        for script in [
+            assemble_app_image_script_v1(&spec, PINNED_BASE, "docker"),
+            export_guest_rootfs_script_v1(&spec, "docker"),
+        ] {
             assert!(script.contains("$ATO_IMAGE"), "{script}");
         }
     }

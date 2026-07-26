@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
-# Prove — or disprove — that the v1 guest pack is reproducible.
+# Prove — or disprove — that two builds of one program source are one execution.
 #
-# `filesystem.view_digest` is blake3 over the packed ext4 and is committed by the
-# Execution Identity, so if the pack is not byte-stable then two builds of one
-# program source are two different executions and `capsule.lock` churns on every
-# build. The unit tests can only check that the RECIPE asks for determinism
-# (`-U`, `-E hash_seed`, `SOURCE_DATE_EPOCH`, `mke2fs -d`, no loop mount); only
-# running `mke2fs` twice can show that it delivers it.
+# `execution_id` is what `capsule.lock` publishes and what the wizard lane
+# enqueues against, so if it moves between two identical builds then a rebuild
+# is a different capsule, the lock churns, and two builder hosts never agree.
+# The unit tests cannot show this: it is a property of the whole lane running
+# twice against a real docker and a real mke2fs.
 #
-# This does exactly that: two identical `ato build` runs over one fixture, then
-# `sha256sum` on the two images and on the two `execution_id`s.
+# This runs it. Two identical `ato build` runs over one fixture, then compares
+# `source_digest` and `execution_id`.
+#
+# The packed ext4 is NOT expected to be byte-identical, and that is deliberate:
+# `mke2fs` stamps every inode with the wall clock and ignores SOURCE_DATE_EPOCH
+# (measured, e2fsprogs 1.47.0). The identity commits the guest's CONTENTS —
+# `snapshot::guest_filesystem_digest` — precisely so it does not depend on how
+# the allocator laid them out or on which e2fsprogs the builder has installed.
+# The image hash is reported below as information, never as a gate.
 #
 # Requires: Linux, root (docker export needs it to restore ownership), docker,
 # e2fsprogs >= 1.45.7 (SOURCE_DATE_EPOCH support). Prints the versions it found
@@ -145,10 +151,17 @@ echo
 
 [[ "$SRC_ONE" == "$SRC_TWO" ]] || fail "source.digest differs — the projection is not stable, which is a bug ABOVE the pack"
 
-if [[ "$SHA_ONE" != "$SHA_TWO" ]]; then
+if [[ "$SHA_ONE" == "$SHA_TWO" ]]; then
+  echo "(the packed images also happened to match byte for byte)"
+else
+  echo "(the packed images differ, as expected: mke2fs stamps inodes with the"
+  echo " clock. The identity commits contents, not this serialization.)"
+fi
+
+if [[ "$ID_ONE" != "$ID_TWO" ]]; then
   {
-    echo "The two images differ. Everything below is what is still varying;"
-    echo "anything NOT listed is already stable."
+    echo "Two builds of one source minted two executions. Everything below is"
+    echo "what is still varying; anything NOT listed is already stable."
     echo
     # The full metadata, diffed — superblock AND group descriptors, so a
     # difference that is not a superblock field still gets named. One run of
@@ -161,6 +174,8 @@ if [[ "$SHA_ONE" != "$SHA_TWO" ]]; then
     echo "--- first differing bytes (offset, then each file's octal byte) ---"
     cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | head -20 || true
     echo "differing byte count: $(cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | wc -l)"
+    echo "(byte differences are expected; they are shown only to locate a"
+    echo " CONTENT difference, which would be a real one)"
     echo
     # A byte offset says WHERE but not WHICH FIELD. Stat the same inodes out of
     # both images and diff: that names the field, and an inode timestamp reads
@@ -172,9 +187,7 @@ if [[ "$SHA_ONE" != "$SHA_TWO" ]]; then
            <(debugfs -R "stat $target" "$IMG_TWO" 2>/dev/null) || true
     done
   } >&2
-  fail "the pack is NOT reproducible"
+  fail "the same program source minted two different execution_ids"
 fi
 
-[[ "$ID_ONE" == "$ID_TWO" ]] || fail "images match but execution_id differs — something OTHER than the image is unstable"
-
-echo "PASS: two builds of one source produced byte-identical images and one execution_id"
+echo "PASS: two builds of one program source minted one execution_id"

@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use capsule::execution_contract::{
-    ContentDigest, DigestAlgorithm, ExecutionContractEnvelopeV1, ResolvedTargetContract,
+    ContentDigest, ExecutionContractEnvelopeV1, ResolvedTargetContract,
 };
 use tempfile::TempDir;
 
@@ -185,10 +185,34 @@ impl V1GuestProducer for FakeProducer {
         (self.runtime)(image_ref)
     }
 
-    fn pack(
+    /// Writes a rootfs whose CONTENT is a function of the projection it was
+    /// handed — the property the lane's digest depends on, and the reason this
+    /// double cannot make an identity-follows-the-source test vacuous.
+    fn export_rootfs(
         &self,
         _image: AssembledGuestImage,
-        _spec: &RootfsBuildSpecV1,
+        spec: &RootfsBuildSpecV1,
+        rootfs_dir: &Path,
+    ) -> Result<(), String> {
+        std::fs::create_dir_all(rootfs_dir.join("app")).map_err(|e| e.to_string())?;
+        std::fs::write(
+            rootfs_dir.join("app/payload"),
+            self.image_bytes.borrow().as_slice(),
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::write(
+            rootfs_dir.join("sbin-init"),
+            spec.resolved_argv.join("\u{0}"),
+        )
+        .map_err(|e| e.to_string())?;
+        // A wall-clock mtime, as a real export leaves: the digest must ignore
+        // it, and a double that wrote a constant could not show that.
+        Ok(())
+    }
+
+    fn pack_rootfs(
+        &self,
+        rootfs_dir: &Path,
         out: &Path,
         _size_mib: u64,
         filesystem_uuid: &str,
@@ -197,7 +221,7 @@ impl V1GuestProducer for FakeProducer {
             .borrow_mut()
             .filesystem_uuids
             .push(filesystem_uuid.to_string());
-        let bytes = self.image_bytes.borrow().clone();
+        let bytes = std::fs::read(rootfs_dir.join("app/payload")).map_err(|e| e.to_string())?;
         std::fs::write(out, &bytes).map_err(|error| error.to_string())?;
         self.log.borrow_mut().packed = true;
         Ok(bytes.len() as u64)
@@ -361,9 +385,15 @@ fn the_published_contract_carries_the_measured_facets() {
     assert_eq!(contract.launch.cwd.as_str(), "/app");
     assert_eq!(contract.source.digest.to_string(), outcome.source_digest);
     // The composed view is the image that was packed, hashed off the file.
+    // The view digest names the guest's CONTENTS, not the packed image's bytes.
+    assert_ne!(
+        contract.filesystem.view_digest.to_string(),
+        "",
+        "a view digest is committed"
+    );
     assert_eq!(
-        contract.filesystem.view_digest,
-        measure_guest_image_digest(&workspace.guest_image_path()).expect("hash the packed image")
+        contract.filesystem.view_digest, contract.filesystem.readonly_layers[0],
+        "one image, so the composed view and the only layer are the same"
     );
 }
 
@@ -1009,21 +1039,36 @@ fn a_failed_read_back_leaves_the_workspace_its_previous_lock() {
 
 // ── Producers and provenance ─────────────────────────────────────────────────
 
-/// The image digest is streamed, and it is the digest OF THE FILE — a helper
-/// that ignored its argument would still return a stable value, so this asserts
-/// both agreement with the one-shot hash and sensitivity to the content.
+/// The identity commits the guest's CONTENTS, so two exports of the same tree
+/// agree however the host stamped them — and a content change still moves it.
+///
+/// The lane-level counterpart of `guest_filesystem_digest`'s own tests: this
+/// one goes through the real `export_rootfs` seam.
 #[test]
-fn the_guest_image_digest_is_the_hash_of_the_packed_file() {
-    let directory = TempDir::new().expect("tempdir");
-    let path = directory.path().join("guest.img");
-    let bytes = vec![7u8; 1024 * 64];
-    std::fs::write(&path, &bytes).expect("write");
+fn the_view_digest_follows_the_guest_contents() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let view = |outcome_workspace: &Workspace| {
+        outcome_workspace
+            .lock()
+            .execution_contract
+            .unwrap()
+            .execution_contract
+            .filesystem
+            .view_digest
+    };
 
-    let expected = ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(&bytes).as_bytes());
-    assert_eq!(measure_guest_image_digest(&path).expect("hash"), expected);
+    workspace.build(&FakeProducer::healthy()).expect("build");
+    let first = view(&workspace);
+    workspace.build(&FakeProducer::healthy()).expect("rebuild");
+    assert_eq!(first, view(&workspace), "same contents, same digest");
 
-    std::fs::write(&path, vec![8u8; 1024 * 64]).expect("rewrite");
-    assert_ne!(measure_guest_image_digest(&path).expect("hash"), expected);
+    workspace.write("app.py", "print('changed')\n");
+    workspace.build(&FakeProducer::healthy()).expect("build");
+    assert_ne!(
+        first,
+        view(&workspace),
+        "different contents, different digest"
+    );
 }
 
 /// Every facet this lane produces a measurement for names its producer, so a
