@@ -104,6 +104,73 @@ pub struct ResolvedBaseImage {
     pub resolved_digest: String,
 }
 
+/// The runtime artifact a source-runtime capsule actually executes on, resolved
+/// to an immutable identity.
+///
+/// A source capsule's interpreter is not fetched by the provider cache — it
+/// comes from the Docker BASE IMAGE the rootfs is built on (`python:3.11-slim`,
+/// `node:20-slim`). That is a TAG: a mutable reference that names different
+/// bytes on different days, which is exactly what RFC §4.2 refuses as an
+/// identity ("an authored version selector such as `node = "22"` is not
+/// sufficient by itself").
+///
+/// So the tag is resolved to its registry digest — the same resolution, through
+/// the same function, that the Dockerfile-import lane already performs on every
+/// base it pins. One resolver, so a recipe capsule and an import capsule cannot
+/// disagree about what "the runtime artifact" is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeArtifact {
+    /// What the build asked for, e.g. `python:3.11-slim`.
+    pub original_ref: String,
+    /// The digest-pinned reference, e.g. `docker.io/library/python@sha256:…`.
+    pub resolved_ref: String,
+    /// The identity-bearing half, as the Execution Contract records it.
+    pub digest: capsule::execution_contract::ContentDigest,
+}
+
+/// Resolve one base image reference to the immutable artifact identity behind
+/// it.
+///
+/// Fails closed on a reference that will not resolve to a registry digest,
+/// because a tag cannot be an Execution Identity input — the same refusal the
+/// import lane makes, for the same reason.
+pub fn resolve_runtime_artifact(
+    runner: &dyn build::ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<ResolvedRuntimeArtifact, String> {
+    let resolved =
+        build::resolve_base_digests(runner, tool, std::slice::from_ref(&image_ref.to_string()))?;
+    let base = resolved
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no resolution returned for {image_ref:?}"))?;
+    // `repo@sha256:<hex>` — the identity is the digest half; the repository
+    // that served it is provenance, not identity (RFC §4.2: two refs resolving
+    // to the same bytes are the same execution).
+    let digest_text = base
+        .resolved_digest
+        .rsplit_once('@')
+        .map(|(_, digest)| digest)
+        .ok_or_else(|| {
+            format!(
+                "resolved reference {:?} is not repo@digest",
+                base.resolved_digest
+            )
+        })?;
+    let digest = capsule::execution_contract::ContentDigest::try_from(digest_text.to_string())
+        .map_err(|error| {
+            format!(
+                "resolved runtime digest {digest_text:?} is not a canonical ContentDigest: {error}"
+            )
+        })?;
+    Ok(ResolvedRuntimeArtifact {
+        original_ref: base.original_ref,
+        resolved_ref: base.resolved_digest,
+        digest,
+    })
+}
+
 /// The resolved, pre-build import request. Non-secret; safe in a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DockerImportSpec {
@@ -1342,6 +1409,56 @@ mod compose_import_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ── the source-runtime artifact resolver ────────────────────────────────
+
+    /// A tag is resolved to the immutable bytes behind it.
+    ///
+    /// `python:3.11-slim` names different bytes on different days. RFC §4.2 is
+    /// explicit that a version selector is not an identity, so the recipe lane
+    /// resolves its base image exactly as the import lane resolves every base it
+    /// pins — through the same function, so the two cannot disagree about what
+    /// the runtime artifact is.
+    #[test]
+    fn a_source_runtimes_base_tag_resolves_to_its_registry_digest() {
+        let digest_hex = "b".repeat(64);
+        let runner = crate::docker_import::build::testing::FakeRunner::new(vec![
+            ("docker pull --platform", 0, "", ""),
+            (
+                "docker image inspect",
+                0,
+                &format!("docker.io/library/python@sha256:{digest_hex}\n"),
+                "",
+            ),
+        ]);
+        let resolved = resolve_runtime_artifact(&runner, BuildTool::Docker, "python:3.11-slim")
+            .expect("resolves");
+
+        assert_eq!(resolved.original_ref, "python:3.11-slim");
+        assert_eq!(
+            resolved.resolved_ref,
+            format!("docker.io/library/python@sha256:{digest_hex}")
+        );
+        // The identity is the DIGEST half — the repository that served it is
+        // provenance, since two refs resolving to the same bytes are the same
+        // execution.
+        assert_eq!(resolved.digest.to_string(), format!("sha256:{digest_hex}"));
+    }
+
+    /// A reference that will not resolve to a registry digest fails the build.
+    /// A tag cannot be an Execution Identity input, so there is nothing to fall
+    /// back to.
+    #[test]
+    fn a_tag_that_does_not_resolve_to_a_digest_fails_closed() {
+        let runner = crate::docker_import::build::testing::FakeRunner::new(vec![
+            ("docker pull --platform", 0, "", ""),
+            // A locally-built image has no RepoDigest.
+            ("docker image inspect", 0, "\n", ""),
+        ]);
+        let error = resolve_runtime_artifact(&runner, BuildTool::Docker, "local-only:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("not a reproducible identity"), "{error}");
+    }
     use super::*;
 
     // --- normalize_binding_name -------------------------------------------------

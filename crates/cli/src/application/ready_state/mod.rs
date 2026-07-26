@@ -18,6 +18,10 @@ pub(crate) mod bindings;
 pub(crate) mod build;
 pub(crate) mod diagnostics;
 pub(crate) mod flags;
+/// Collecting the measurements a v1 Execution Contract is minted from
+/// (ADR-015 step 4). Measuring lives here because the contract layer performs
+/// no host I/O by design.
+pub(crate) mod observe_v1;
 pub(crate) mod restore;
 pub(crate) mod restore_lease;
 pub(crate) mod runtime_adapter;
