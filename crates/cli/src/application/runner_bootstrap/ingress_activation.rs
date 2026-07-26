@@ -107,6 +107,13 @@ pub(crate) trait GenerationStore {
     /// Whether every fragment of `digest` is present and complete on disk. A
     /// half-written generation must never become `current`.
     fn generation_complete(&self, digest: &str) -> Result<bool>;
+    /// Whether the generation on disk under `digest` IS the one these fragments
+    /// describe — complete, and byte-for-byte what was intended.
+    ///
+    /// Separate from [`Self::generation_complete`] because "finished writing"
+    /// and "finished writing THIS" are different questions, and only the second
+    /// one licenses skipping an activation.
+    fn generation_matches(&self, digest: &str, fragments: &[GeneratedFragment]) -> Result<bool>;
     fn write_pending(&mut self, journal: &PendingJournal) -> Result<()>;
     fn clear_pending(&mut self) -> Result<()>;
     /// The activation receipt for the last CONFIRMED generation, if any. A
@@ -447,6 +454,13 @@ mod tests {
         }
         fn generation_complete(&self, digest: &str) -> Result<bool> {
             Ok(*self.generations.get(digest).unwrap_or(&false))
+        }
+        fn generation_matches(
+            &self,
+            digest: &str,
+            _fragments: &[GeneratedFragment],
+        ) -> Result<bool> {
+            self.generation_complete(digest)
         }
         fn write_pending(&mut self, journal: &PendingJournal) -> Result<()> {
             self.gate("write_pending")?;
