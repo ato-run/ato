@@ -171,6 +171,69 @@ pub fn resolve_runtime_artifact(
     })
 }
 
+/// Measure the guest target the sealed image actually runs on
+/// (`target.{os,architecture,abi,libc}`, RFC §4.2).
+///
+/// Every value here is read off the IMAGE, never off the builder host. That
+/// distinction is the whole point: the host is an x86-64 Linux box today and
+/// may be an arm64 Mac tomorrow, while the guest platform is pinned by
+/// [`DOCKER_IMPORT_PLATFORM`] and by the base image the build chose. A target
+/// facet derived from `std::env::consts` would record the machine that
+/// happened to run the build, which is not what the capsule executes on.
+///
+/// Two measurements, both fail-closed:
+///
+/// * `os` / `architecture` come from `image inspect`'s TOP-LEVEL fields (not
+///   `Config` — that object describes the process, this describes the
+///   platform). An empty value is refused rather than defaulted.
+/// * `libc` is probed by running `ldd --version` INSIDE the image, because
+///   nothing in the image metadata records it: `python:3.11-slim` and
+///   `python:3.11-alpine` are the same `linux/amd64` and a different libc, and
+///   that difference is exactly what makes a native extension load or not.
+///
+/// `abi` is then resolved from the measured libc rather than defaulted — for
+/// Linux the toolchain env IS the libc flavour (`gnu` for glibc, `musl` for
+/// musl), the same component a Rust target triple carries. A libc the probe
+/// cannot classify, or a non-Linux image, is refused: ADR-015 §4.1 requires
+/// `abi` to be resolved, and there is no value here that would be honest to
+/// assume.
+pub fn measure_guest_target(
+    runner: &dyn build::ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<capsule::execution_contract::ResolvedTargetContract, String> {
+    let platform = build::inspect_image_platform(runner, tool, image_ref)?;
+    if platform.os != "linux" {
+        return Err(format!(
+            "image {image_ref:?} targets os {:?}; only linux guests can have their abi \
+             resolved from a libc probe, and defaulting one would be an identity claim \
+             about something nobody measured (fail-closed)",
+            platform.os
+        ));
+    }
+    let libc = build::probe_image_libc(runner, tool, image_ref)?;
+    let abi = match libc.as_str() {
+        "glibc" => "gnu",
+        "musl" => "musl",
+        other => {
+            return Err(format!(
+                "image {image_ref:?} reported libc {other:?}, which has no known ABI name; \
+                 refusing to guess (fail-closed)"
+            ));
+        }
+    };
+    Ok(capsule::execution_contract::ResolvedTargetContract {
+        os: platform.os,
+        architecture: platform.architecture,
+        abi: abi.to_string(),
+        libc: Some(libc),
+        // Nothing is claimed here. An observable feature is a capability the
+        // capsule DECLARES it depends on and the target was checked for; the
+        // Step-4 subset declares none, so an empty map is the measurement.
+        observable_features: std::collections::BTreeMap::new(),
+    })
+}
+
 /// The resolved, pre-build import request. Non-secret; safe in a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DockerImportSpec {
@@ -1458,6 +1521,94 @@ mod tests {
         let error = resolve_runtime_artifact(&runner, BuildTool::Docker, "local-only:latest")
             .expect_err("must refuse");
         assert!(error.contains("not a reproducible identity"), "{error}");
+    }
+
+    // --- measure_guest_target ---------------------------------------------------
+
+    fn target_runner(platform: &str, libc_line: &str) -> build::testing::FakeRunner {
+        build::testing::FakeRunner::new(vec![
+            ("docker image inspect", 0, platform, ""),
+            ("docker run --rm", 0, libc_line, ""),
+        ])
+    }
+
+    /// The target is read off the IMAGE, and `abi` is resolved from the measured
+    /// libc rather than defaulted.
+    #[test]
+    fn a_glibc_image_measures_a_linux_gnu_target() {
+        let runner = target_runner("linux\tamd64\n", "ldd (Debian GLIBC 2.36-9+deb12u7) 2.36\n");
+        let target =
+            measure_guest_target(&runner, BuildTool::Docker, "python:3.11-slim").expect("measures");
+
+        assert_eq!(target.os, "linux");
+        assert_eq!(target.architecture, "amd64");
+        assert_eq!(target.abi, "gnu");
+        assert_eq!(target.libc.as_deref(), Some("glibc"));
+        assert!(target.observable_features.is_empty());
+    }
+
+    /// The libc probe is the reason this runs the image at all: two images that
+    /// are the same `linux/amd64` still have different targets, and only asking
+    /// them apart tells them apart.
+    #[test]
+    fn a_musl_image_of_the_same_platform_measures_a_different_target() {
+        let glibc = measure_guest_target(
+            &target_runner("linux\tamd64\n", "ldd (GNU libc) 2.36\n"),
+            BuildTool::Docker,
+            "python:3.11-slim",
+        )
+        .expect("glibc measures");
+        let musl = measure_guest_target(
+            &target_runner("linux\tamd64\n", "musl libc (x86_64)\n"),
+            BuildTool::Docker,
+            "python:3.11-alpine",
+        )
+        .expect("musl measures");
+
+        assert_eq!(glibc.os, musl.os);
+        assert_eq!(glibc.architecture, musl.architecture);
+        assert_ne!(
+            glibc, musl,
+            "same platform, different libc — the targets must not be equal"
+        );
+        assert_eq!(musl.abi, "musl");
+        assert_eq!(musl.libc.as_deref(), Some("musl"));
+    }
+
+    /// A libc the probe cannot name has no honest ABI, so there is nothing to
+    /// record. Refusing here is the point: an assumed `gnu` would be an identity
+    /// claim about something nobody measured.
+    #[test]
+    fn an_unidentifiable_libc_refuses_rather_than_assuming_an_abi() {
+        let runner = target_runner("linux\tamd64\n", "sh: ldd: not found\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "distroless:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("neither glibc nor musl"), "{error}");
+    }
+
+    /// An image that declares no platform is refused rather than backfilled from
+    /// the builder host — the host is not what the capsule runs on.
+    #[test]
+    fn an_image_with_no_declared_platform_fails_closed() {
+        let runner = target_runner("\t\n", "ldd (GNU libc) 2.36\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "broken:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("empty os/architecture"), "{error}");
+    }
+
+    /// The ABI resolution rule is stated for Linux only, so a non-Linux image is
+    /// refused before the probe runs rather than being given a Linux ABI.
+    #[test]
+    fn a_non_linux_image_is_refused_before_the_libc_probe() {
+        let runner = target_runner("windows\tamd64\n", "unreachable\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "mcr:windows")
+            .expect_err("must refuse");
+        assert!(error.contains("only linux guests"), "{error}");
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "the libc probe must not run for a platform whose abi rule does not apply"
+        );
     }
     use super::*;
 
