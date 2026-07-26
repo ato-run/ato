@@ -2836,11 +2836,19 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
                 "{field}: {script}"
             );
         }
-        // Not merely absent as a word — the script explains in a comment WHY it
-        // is not used. What must not come back is the assignment.
+        // SOURCE_DATE_EPOCH belongs on debugfs and NOT on mke2fs, and the
+        // difference is measured rather than stylistic: mke2fs ignores it (its
+        // `s_mkfs_time` was wall-clock with it set), while debugfs stamps
+        // `s_wtime` from `fs->now` as it flushes and would otherwise overwrite
+        // the value it was just told to set. Putting it back on mke2fs would
+        // read as a control that works.
         assert!(
-            !script.contains("SOURCE_DATE_EPOCH="),
-            "mke2fs ignores it, so setting it would look like a control that works: {script}"
+            script.contains(&format!("SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} debugfs")),
+            "{script}"
+        );
+        assert!(
+            !script.contains("SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} mkfs"),
+            "{script}"
         );
         assert!(
             script.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
