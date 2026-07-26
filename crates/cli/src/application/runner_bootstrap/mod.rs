@@ -18,12 +18,18 @@
 
 use serde::Serialize;
 
-pub(crate) mod checks;
-pub(crate) mod doctor;
 /// Transactional activation of a rendered ingress generation (slice 2): the
 /// three-state model that keeps a swapped-but-never-reloaded generation from
 /// being mistaken for a no-op.
+/// The production [`ingress_activation::CaddyControl`]: argv-only, deadline
+/// bounded invocations of the Caddy CLI.
+pub(crate) mod caddy_control;
+pub(crate) mod checks;
+pub(crate) mod doctor;
 pub(crate) mod ingress_activation;
+/// The durable [`ingress_activation::GenerationStore`]: generation directories,
+/// atomic markers and the `current` symlink, over a real directory tree.
+pub(crate) mod ingress_store;
 pub(crate) mod official_preview;
 pub(crate) mod setup;
 pub(crate) mod smoke;
