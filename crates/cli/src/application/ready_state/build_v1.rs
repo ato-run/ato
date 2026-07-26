@@ -1,0 +1,850 @@
+//! The v1 producer lane: build a guest, observe it, mint its identity, publish
+//! it, and read it back.
+//!
+//! ADR-015 step 5-3. Before this, `ato build`'s only relationship with a v1
+//! Execution Contract was to READ one out of `capsule.lock` and check the three
+//! facets it could measure ([`crate::cli::commands::build`]'s
+//! `attempt_v1_execution_identity`). Nothing anywhere MINTED one, and the
+//! reason was structural rather than missing plumbing: the Ready-State seal
+//! path hands the fake backend the `.capsule` archive's bytes, so there was no
+//! bootable guest image to observe. `resolved_argv`, `working_directory` and
+//! `target` had no observation subject.
+//!
+//! This lane produces one. It runs the recipe producer over the PROJECTED
+//! program source, measures the image that comes out, and only then mints:
+//!
+//! ```text
+//! workspace → pinned source → projection → recipe build → guest image
+//!           → runtime artifact → guest target → observe → mint
+//!           → capsule.lock (atomic) → trusted-load → recompute → compare
+//! ```
+//!
+//! # What this lane refuses to do
+//!
+//! It never promotes a v0.3 build result into a v1 envelope, never reads a lock
+//! to fill in a facet it could not measure, and never falls back to the v0.3
+//! lane when a step fails. Each of those would put a value into an Execution
+//! Identity that no measurement produced, and the identity's only claim is that
+//! every value in it was measured. A v1 build that cannot complete fails.
+//!
+//! # Host-privileged steps
+//!
+//! Assembling the app image needs `docker`; packing it into a bootable ext4
+//! needs `mount`, hence root. Those two are behind [`V1GuestProducer`] so the
+//! lane above them is exercised without either. Everything else here — the
+//! projection, the resolution, the observation, the mint, the write, the
+//! read-back — is the same code in a test as on a builder host. The real
+//! producer running end to end on hardware is ADR-015 step 6.
+
+use std::path::{Path, PathBuf};
+
+use capsule::capsule_lock::{self, CapsuleLock, LockEnvironmentValue, LockLaunchSection};
+use capsule::common::lock_presence::CAPSULE_LOCK_FILE_NAME;
+use capsule::execution_contract::{
+    ContentDigest, DigestAlgorithm, EnvironmentValuePayloadV1, ExecutionContractEnvelopeV1,
+    ExecutionContractV1, ResolvedTargetContract,
+};
+use capsule::execution_contract_finalize::{FinalizationError, environment_value_digest};
+use capsule::program_source_projection::{
+    MaterializedProgramSource, VerifiedPinnedSourceMaterialization,
+    materialize_program_source_projection,
+};
+use capsule::routing::input_resolver::resolve_canonical_lock_path;
+use capsule::types::manifest_v1::CapsuleManifestV1;
+use snapshot::docker_import::{
+    BuildTool, ResolvedRuntimeArtifact, measure_guest_target, resolve_runtime_artifact,
+};
+use snapshot::rootfs_builder::{
+    AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
+    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, pack_app_image_v1,
+};
+
+use super::observe_v1::{V1BuildObservation, observe_v1};
+
+/// Where in the lane a v1 build stopped.
+///
+/// Deliberately not one `V1BuildFailed`. Each variant names a different thing
+/// that is wrong with the world and a different fix: a projection failure is
+/// the author's tree, a runtime-resolution failure is the registry, a
+/// trusted-load failure is this lane having written something it cannot read
+/// back. Collapsing them would make every one of those read as "the build
+/// broke".
+///
+/// No variant carries a secret, a credential, or a token: the only values
+/// interpolated below are paths inside the workspace, image references, facet
+/// names, and digests.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum V1BuildError {
+    #[error("this workspace cannot be pinned for a v1 build: {reason}")]
+    SourceNotPinnable { reason: String },
+
+    #[error("the program source could not be projected into the guest: {reason}")]
+    ProgramSourceProjectionFailed { reason: String },
+
+    #[error("no v1 recipe covers this capsule: {reason}")]
+    RecipeDerivationFailed { reason: String },
+
+    #[error("the recipe build did not produce a guest image: {reason}")]
+    RecipeBuildFailed { reason: String },
+
+    #[error("the runtime artifact {image_ref} could not be resolved: {reason}")]
+    RuntimeArtifactResolutionFailed { image_ref: String, reason: String },
+
+    #[error("the guest target could not be measured from {image_ref}: {reason}")]
+    GuestTargetMeasurementFailed { image_ref: String, reason: String },
+
+    #[error("a required facet has no measurement: {facet}")]
+    ObservationIncomplete { facet: String },
+
+    #[error("a measurement contradicts another: {detail}")]
+    ObservationConflict { detail: String },
+
+    #[error("the execution identity could not be minted: {reason}")]
+    MintFailed { reason: String },
+
+    #[error("the lock at {path} could not be published: {reason}")]
+    LockPersistFailed { path: PathBuf, reason: String },
+
+    #[error("the lock written at {path} does not read back: {reason}")]
+    TrustedLoadFailed { path: PathBuf, reason: String },
+
+    #[error(
+        "the lock at {path} reads back as a different execution than was minted \
+         ({field}: minted {minted}, read back {persisted})"
+    )]
+    PersistedEnvelopeMismatch {
+        path: PathBuf,
+        field: &'static str,
+        minted: String,
+        persisted: String,
+    },
+}
+
+/// Which producer output a facet came from.
+///
+/// Not part of the identity — the contract commits values, not their
+/// provenance. It exists so a refusal can say WHICH producer failed to supply
+/// the facet the mint is missing, instead of naming a contract field the reader
+/// then has to trace backwards. [`V1BuildError::ObservationIncomplete`] carries
+/// it; the mapping is asserted in this module's tests.
+fn facet_provenance(facet: &str) -> &'static str {
+    match facet {
+        "source.digest" | "source.projection_digest" => {
+            "the materialized program-source projection"
+        }
+        "target" => "measure_guest_target over the assembled guest image",
+        "runtime.kind" | "runtime.digest" | "runtime.dynamic_contract_digest" => {
+            "resolve_runtime_artifact over the recipe's base image"
+        }
+        "launch.argv" | "launch.cwd" => "the recipe's guest launch descriptor",
+        facet if facet.starts_with("filesystem.") => "the packed guest image",
+        _ => "the v1 manifest, through the Step-4 subset gate",
+    }
+}
+
+/// A v1 build's inputs.
+pub(crate) struct V1BuildRequest<'a> {
+    /// The workspace `ato build` was pointed at. Read only.
+    pub workspace_root: &'a Path,
+    /// A directory this lane may use for the frozen source archive, the
+    /// materialized projection, and the packed image. Must exist.
+    pub work_root: &'a Path,
+    /// Where the bootable guest image is written.
+    pub guest_image_path: &'a Path,
+    pub rootfs_size_mib: u64,
+    /// The local tag the assembled image is given before it is packed. Must be
+    /// unique on the builder host for the duration of the build.
+    pub image_ref: &'a str,
+}
+
+/// What a completed v1 build produced.
+///
+/// Everything here is a value the lane MEASURED and then verified survived a
+/// round trip through the lock — `trusted_load_verified` is only ever `true`
+/// because there is no path that returns this without the read-back having
+/// agreed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct V1BuildOutcome {
+    pub execution_id: String,
+    pub lock_path: PathBuf,
+    pub guest_image_path: PathBuf,
+    pub guest_image_bytes: u64,
+    pub source_digest: String,
+    pub runtime_resolved_ref: String,
+    pub target: ResolvedTargetContract,
+    pub trusted_load_verified: bool,
+}
+
+impl V1BuildOutcome {
+    /// The first 12 hex characters after the algorithm prefix — enough to
+    /// recognize a build in a terminal, never enough to quote as the identity.
+    #[must_use]
+    pub fn short_execution_id(&self) -> String {
+        self.execution_id
+            .split_once(':')
+            .map(|(algorithm, hex)| format!("{algorithm}:{}", &hex[..hex.len().min(12)]))
+            .unwrap_or_else(|| self.execution_id.clone())
+    }
+}
+
+/// The two operations this lane cannot perform without docker and root.
+///
+/// The seam is here rather than around the whole build because everything else
+/// — projection, resolution, observation, mint, persist, read-back — is
+/// host-independent and must run identically in a test and on a builder.
+pub(crate) trait V1GuestProducer {
+    /// Build the app image from the PROJECTED source tree, `FROM` the pinned
+    /// base reference. Must leave the image addressable: the guest target is
+    /// measured from it before it is packed.
+    fn assemble(
+        &self,
+        projected_source: &Path,
+        spec: &RootfsBuildSpecV1,
+        pinned_base_ref: &str,
+        image_ref: &str,
+    ) -> Result<AssembledGuestImage, String>;
+
+    /// Measure the guest platform of an assembled image.
+    fn measure_target(&self, image_ref: &str) -> Result<ResolvedTargetContract, String>;
+
+    /// Resolve a base image reference to its immutable artifact identity.
+    fn resolve_runtime(&self, image_ref: &str) -> Result<ResolvedRuntimeArtifact, String>;
+
+    /// Pack an assembled image into a bootable guest image at `out`, returning
+    /// its size in bytes. Consumes the image.
+    fn pack(
+        &self,
+        image: AssembledGuestImage,
+        spec: &RootfsBuildSpecV1,
+        out: &Path,
+        size_mib: u64,
+    ) -> Result<u64, String>;
+
+    /// Drop an assembled image that will not be packed.
+    fn discard(&self, image: AssembledGuestImage);
+}
+
+/// The production producer: docker for assembly and inspection, `mount` for
+/// packing.
+pub(crate) struct HostV1GuestProducer {
+    runner: snapshot::docker_import::build::SystemImportCommandRunner,
+    tool: BuildTool,
+}
+
+impl HostV1GuestProducer {
+    /// Probe the builder host for its container tool. Fails closed when none is
+    /// available rather than deferring the discovery to a half-run build.
+    pub fn probe() -> Result<Self, String> {
+        let runner = snapshot::docker_import::build::SystemImportCommandRunner;
+        let probe = snapshot::docker_import::build::probe_build_tool(&runner)?;
+        Ok(Self {
+            runner,
+            tool: probe.tool,
+        })
+    }
+}
+
+impl V1GuestProducer for HostV1GuestProducer {
+    fn assemble(
+        &self,
+        projected_source: &Path,
+        spec: &RootfsBuildSpecV1,
+        pinned_base_ref: &str,
+        image_ref: &str,
+    ) -> Result<AssembledGuestImage, String> {
+        assemble_app_image_v1(projected_source, spec, pinned_base_ref, image_ref)
+    }
+
+    fn measure_target(&self, image_ref: &str) -> Result<ResolvedTargetContract, String> {
+        measure_guest_target(&self.runner, self.tool, image_ref)
+    }
+
+    fn resolve_runtime(&self, image_ref: &str) -> Result<ResolvedRuntimeArtifact, String> {
+        resolve_runtime_artifact(&self.runner, self.tool, image_ref)
+    }
+
+    fn pack(
+        &self,
+        image: AssembledGuestImage,
+        spec: &RootfsBuildSpecV1,
+        out: &Path,
+        size_mib: u64,
+    ) -> Result<u64, String> {
+        pack_app_image_v1(image, spec, out, size_mib)
+    }
+
+    fn discard(&self, image: AssembledGuestImage) {
+        discard_app_image_v1(image);
+    }
+}
+
+/// Blake3 over the packed guest image, streamed.
+///
+/// The image is an ext4 filesystem sized in gigabytes. Reading it into memory
+/// to hash it would make this the build's peak allocation for no reason — the
+/// hash is incremental.
+pub(crate) fn measure_guest_image_digest(path: &Path) -> std::io::Result<ContentDigest> {
+    let mut hasher = blake3::Hasher::new();
+    let mut file = std::fs::File::open(path)?;
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(ContentDigest::new(
+        DigestAlgorithm::Blake3,
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+/// Run the v1 producer lane end to end.
+///
+/// The step order is load-bearing and is the ADR-015 §5-3 order verbatim: the
+/// mint cannot move ahead of the guest image, because every facet it commits is
+/// a measurement of that image or of the projection that went into it, and the
+/// lock cannot be published ahead of the mint, because what it publishes IS the
+/// mint. Reordering either would let a lock name a build that does not exist.
+pub(crate) fn run(
+    request: V1BuildRequest<'_>,
+    producer: &dyn V1GuestProducer,
+) -> Result<V1BuildOutcome, V1BuildError> {
+    // The lock's NAME is resolved before anything else runs: it decides which
+    // control file the projection withholds (below), and its fail-closed rules
+    // — a workspace carrying both spellings has no single authoritative lock —
+    // must stop the build before it spends a registry round trip on it.
+    let lock_path = resolve_lock_path(request.workspace_root)?;
+
+    // 1–3. Freeze the workspace, then project it. The projected tree — not the
+    // checkout — is what the guest gets and what `source.digest` names.
+    let projection_root = request.work_root.join("projected-source");
+    std::fs::create_dir_all(&projection_root).map_err(|source| {
+        V1BuildError::ProgramSourceProjectionFailed {
+            reason: format!("create the projection directory: {source}"),
+        }
+    })?;
+    let projected = project_workspace(request.workspace_root, request.work_root, &projection_root)?;
+
+    // The manifest is read from the WORKSPACE, not from the projection: the
+    // projection is precisely the tree with the manifest removed.
+    let manifest = read_v1_manifest(request.workspace_root)?;
+
+    // 4. Derive the recipe from the projected tree. Probing the projection
+    // rather than the checkout matters: the probe decides the runtime family
+    // from the files present, and those are the files the guest will have.
+    let probe = SourceProbe::scan(&projection_root);
+    let spec = derive_build_spec_v1(&manifest, &probe)
+        .map_err(|reason| V1BuildError::RecipeDerivationFailed { reason })?;
+
+    // 5. Resolve the base image to an immutable digest BEFORE building, so the
+    // image is built `FROM` the same bytes the contract records. Resolving
+    // afterwards would leave a window in which the tag moves and the contract
+    // names a runtime the guest never ran.
+    let runtime = producer
+        .resolve_runtime(&spec.base_image)
+        .map_err(|reason| V1BuildError::RuntimeArtifactResolutionFailed {
+            image_ref: spec.base_image.clone(),
+            reason,
+        })?;
+    verify_resolution_matches_recipe(&spec, &runtime)?;
+
+    // 6. Assemble the guest image from the projection.
+    let image = producer
+        .assemble(
+            &projection_root,
+            &spec,
+            &runtime.resolved_ref,
+            request.image_ref,
+        )
+        .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
+
+    // 7. Measure the guest from the image that was just built — not from the
+    // base image it derived from, and never from this host. Any failure from
+    // here until the image is packed has to drop it.
+    let target = match producer.measure_target(image.image_ref()) {
+        Ok(target) => target,
+        Err(reason) => {
+            let image_ref = image.image_ref().to_string();
+            producer.discard(image);
+            return Err(V1BuildError::GuestTargetMeasurementFailed { image_ref, reason });
+        }
+    };
+    if let Err(error) = verify_target_agrees_with_runtime(&target, &spec) {
+        producer.discard(image);
+        return Err(error);
+    }
+
+    // 8. Pack it. `pack` consumes the image, so there is nothing left to leak.
+    let guest_image_bytes = producer
+        .pack(
+            image,
+            &spec,
+            request.guest_image_path,
+            request.rootfs_size_mib,
+        )
+        .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
+    let guest_image_digest =
+        measure_guest_image_digest(request.guest_image_path).map_err(|source| {
+            V1BuildError::RecipeBuildFailed {
+                reason: format!(
+                    "hash the packed guest image at {}: {source}",
+                    request.guest_image_path.display()
+                ),
+            }
+        })?;
+
+    // 9. Observe every facet, then mint. `V1BuildObservation`'s fields are all
+    // required, so an observation that reaches `observe_v1` is complete by
+    // construction — there is no "9 of 10" state to count.
+    let observation = observe_v1(V1BuildObservation {
+        manifest: &manifest,
+        source_digest: ContentDigest::new(
+            DigestAlgorithm::Sha256,
+            projected.contract.digest.bytes(),
+        ),
+        excluded_control_files: withheld_control_files(&projected, &lock_path),
+        runtime_kind: runtime_kind_name(&spec).to_string(),
+        runtime: &runtime,
+        runtime_invocation_prefix: spec.runtime_invocation_prefix.clone(),
+        guest_image_digest,
+        target: target.clone(),
+        resolved_argv: spec.resolved_argv.clone(),
+        working_directory: V1_GUEST_WORKING_DIRECTORY.to_string(),
+    })
+    .map_err(|error| V1BuildError::ObservationConflict {
+        detail: format!("{error:#}"),
+    })?;
+
+    let minted = observation
+        .into_minted_envelope()
+        .map_err(mint_error_from_finalization)?;
+
+    // 10. Publish. Atomic: a reader sees the whole old lock or the whole new
+    // one, and a crash leaves the previous one intact.
+    persist_execution_contract(&lock_path, &manifest, &minted)?;
+
+    // 11. Read it back from disk through the trusted path — not from the value
+    // still in memory, which would prove nothing about what was written.
+    let persisted = capsule_lock::load_verified_from_path(&lock_path).map_err(|source| {
+        V1BuildError::TrustedLoadFailed {
+            path: lock_path.clone(),
+            reason: source.to_string(),
+        }
+    })?;
+    let read_back =
+        persisted
+            .execution_contract
+            .as_ref()
+            .ok_or_else(|| V1BuildError::TrustedLoadFailed {
+                path: lock_path.clone(),
+                reason: "the lock read back without an execution contract".to_string(),
+            })?;
+    if let Err(error) = compare_persisted_to_minted(&lock_path, &minted, read_back) {
+        return Err(discard_unverifiable_lock(&lock_path, error));
+    }
+
+    Ok(V1BuildOutcome {
+        execution_id: minted.execution_id.as_str().to_string(),
+        lock_path,
+        guest_image_path: request.guest_image_path.to_path_buf(),
+        guest_image_bytes,
+        source_digest: minted.execution_contract.source.digest.to_string(),
+        runtime_resolved_ref: runtime.resolved_ref,
+        target,
+        trusted_load_verified: true,
+    })
+}
+
+/// Freeze the workspace into a content-addressed archive, mint the pinned proof
+/// by extracting it, and materialize the projection into `destination`.
+///
+/// The archive round trip is not ceremony. A live checkout can change while it
+/// is being read, and ADR-014 §1 admits only a pinned materialization for
+/// exactly that reason: `source.digest` has to name a tree that cannot move
+/// under the build. It is also what refuses a Git working tree — a root-level
+/// `.git` is neither a control file the projection may withhold nor content
+/// whose bytes are reproducible, so a checkout is not a source a v1 identity
+/// can be minted from.
+fn project_workspace(
+    workspace_root: &Path,
+    work_root: &Path,
+    destination: &Path,
+) -> Result<MaterializedProgramSource, V1BuildError> {
+    let archive = work_root.join("source.tar.zst");
+    capsule::blob::materialize_source_archive(workspace_root, &archive).map_err(|source| {
+        V1BuildError::SourceNotPinnable {
+            reason: source.to_string(),
+        }
+    })?;
+    let pinned =
+        VerifiedPinnedSourceMaterialization::from_source_archive(&archive).map_err(|source| {
+            V1BuildError::SourceNotPinnable {
+                reason: source.to_string(),
+            }
+        })?;
+    materialize_program_source_projection(&pinned, destination).map_err(|source| {
+        V1BuildError::ProgramSourceProjectionFailed {
+            reason: source.to_string(),
+        }
+    })
+}
+
+fn read_v1_manifest(workspace_root: &Path) -> Result<CapsuleManifestV1, V1BuildError> {
+    let path = workspace_root.join("capsule.toml");
+    let text =
+        std::fs::read_to_string(&path).map_err(|source| V1BuildError::SourceNotPinnable {
+            reason: format!("read {}: {source}", path.display()),
+        })?;
+    CapsuleManifestV1::from_toml(&text).map_err(|source| V1BuildError::RecipeDerivationFailed {
+        reason: source.to_string(),
+    })
+}
+
+/// The runtime family name the contract records. Resolved from the recipe, so
+/// it can never disagree with the base image the recipe chose.
+fn runtime_kind_name(spec: &RootfsBuildSpecV1) -> &'static str {
+    use snapshot::rootfs_builder::RuntimeKind;
+    match spec.runtime {
+        RuntimeKind::Python => "python",
+        RuntimeKind::Node => "node",
+        RuntimeKind::StaticWeb => "static-web",
+    }
+}
+
+/// The artifact that was resolved must be the one the recipe asked for.
+///
+/// `resolve_runtime_artifact` echoes back the reference it was given; if that
+/// ever stopped matching the recipe's base image, the contract would record a
+/// runtime the build did not use, and nothing downstream would notice.
+fn verify_resolution_matches_recipe(
+    spec: &RootfsBuildSpecV1,
+    runtime: &ResolvedRuntimeArtifact,
+) -> Result<(), V1BuildError> {
+    if runtime.original_ref != spec.base_image {
+        return Err(V1BuildError::RuntimeArtifactResolutionFailed {
+            image_ref: spec.base_image.clone(),
+            reason: format!(
+                "the resolution answered for {} instead",
+                runtime.original_ref
+            ),
+        });
+    }
+    if !runtime.resolved_ref.contains("@sha256:") {
+        return Err(V1BuildError::RuntimeArtifactResolutionFailed {
+            image_ref: spec.base_image.clone(),
+            reason: format!(
+                "{} is not pinned to a digest, so it cannot be an identity input",
+                runtime.resolved_ref
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The measured target and the recipe must describe the same machine.
+///
+/// `measure_guest_target` already refuses a non-Linux image and an
+/// unclassifiable libc. What it cannot know is that this lane's recipes only
+/// produce Linux guests — so an image that measured as something else means the
+/// recipe and the artifact have come apart, and minting would commit a target
+/// the recipe cannot have built.
+fn verify_target_agrees_with_runtime(
+    target: &ResolvedTargetContract,
+    spec: &RootfsBuildSpecV1,
+) -> Result<(), V1BuildError> {
+    if target.os != "linux" {
+        return Err(V1BuildError::ObservationConflict {
+            detail: format!(
+                "the guest measured os {:?}, but the {} recipe builds a linux guest",
+                target.os,
+                runtime_kind_name(spec)
+            ),
+        });
+    }
+    match (target.abi.as_str(), target.libc.as_deref()) {
+        ("gnu", Some("glibc")) | ("musl", Some("musl")) => Ok(()),
+        (abi, libc) => Err(V1BuildError::ObservationConflict {
+            detail: format!(
+                "the guest measured abi {abi:?} with libc {libc:?}; the two disagree, and \
+                 an abi that does not follow from the measured libc is not resolved"
+            ),
+        }),
+    }
+}
+
+/// Map the mint's refusal onto the lane's vocabulary.
+///
+/// `UnmeasuredFacet` is the one that must not be flattened: it names a facet
+/// whose producer did not run, which is a different problem from a contract
+/// that will not serialize.
+fn mint_error_from_finalization(error: FinalizationError) -> V1BuildError {
+    match error {
+        FinalizationError::UnmeasuredFacet(facet) => V1BuildError::ObservationIncomplete {
+            facet: format!("{facet} (produced by {})", facet_provenance(facet)),
+        },
+        other => V1BuildError::MintFailed {
+            reason: other.to_string(),
+        },
+    }
+}
+
+/// Write the minted envelope into the workspace's canonical lock.
+///
+/// The lock's NAME is decided by the shared resolver, never by this lane: a
+/// workspace already carrying the deprecated `ato.lock.json` alias keeps it,
+/// and one carrying neither gets `capsule.lock`. Adding a rule here would give
+/// a workspace two locks.
+///
+/// An existing lock is loaded through the VERIFIED path. A lock that does not
+/// verify is not a base to build on — overwriting it would silently repair a
+/// tampered file, and preserving its other sections would carry whatever was
+/// wrong with it into the new one.
+fn persist_execution_contract(
+    lock_path: &Path,
+    manifest: &CapsuleManifestV1,
+    minted: &ExecutionContractEnvelopeV1,
+) -> Result<(), V1BuildError> {
+    let mut lock = if lock_path.exists() {
+        capsule_lock::load_verified_from_path(lock_path).map_err(|source| {
+            V1BuildError::LockPersistFailed {
+                path: lock_path.to_path_buf(),
+                reason: format!(
+                    "the existing lock does not verify, so it is not a base to build on: {source}"
+                ),
+            }
+        })?
+    } else {
+        CapsuleLock::default()
+    };
+
+    lock.execution_contract = Some(minted.clone());
+    lock.launch = d5_launch_section(manifest, minted)?;
+
+    capsule_lock::write_pretty_to_path(&lock, lock_path).map_err(|source| {
+        V1BuildError::LockPersistFailed {
+            path: lock_path.to_path_buf(),
+            reason: source.to_string(),
+        }
+    })
+}
+
+/// Which file this build will publish its lock to.
+///
+/// Decided by the shared resolver, never by this lane: a workspace already
+/// carrying the deprecated `ato.lock.json` alias keeps it, one carrying neither
+/// gets `capsule.lock`, and one carrying both is refused here rather than given
+/// a third rule that would leave it with two locks.
+fn resolve_lock_path(workspace_root: &Path) -> Result<PathBuf, V1BuildError> {
+    resolve_canonical_lock_path(workspace_root)
+        .map_err(|source| V1BuildError::LockPersistFailed {
+            path: workspace_root.join(CAPSULE_LOCK_FILE_NAME),
+            reason: source.to_string(),
+        })
+        .map(|existing| existing.unwrap_or_else(|| workspace_root.join(CAPSULE_LOCK_FILE_NAME)))
+}
+
+/// The control files a v1 build withholds from the program source, as the
+/// identity records them.
+///
+/// The projection reports what it actually removed: the manifest, plus whatever
+/// lock the workspace already carried. For a PRODUCER that is not stable —
+/// this lane WRITES the lock, so a first build (nothing to withhold but the
+/// manifest) and every build after it (manifest and lock) would report
+/// different sets. The set is identity-bearing, so the same program source
+/// would mint one identity the first time and a different one forever after,
+/// and `ato build` twice in a row would disagree with itself.
+///
+/// The lock is a control file of this workspace whether or not it exists yet:
+/// this build is about to write it, at the name already resolved. Declaring it
+/// consistently is what makes the identity a function of the program source
+/// rather than of build history. Which NAME is withheld still varies, and still
+/// should — a repository that spells its lock `ato.lock.json` held a different
+/// file out than one that spells it `capsule.lock`, and that is the difference
+/// the payload exists to record.
+fn withheld_control_files(projected: &MaterializedProgramSource, lock_path: &Path) -> Vec<String> {
+    let mut withheld = projected.excluded_control_files.clone();
+    let lock_name = lock_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| CAPSULE_LOCK_FILE_NAME.to_string());
+    if !withheld.contains(&lock_name) {
+        withheld.push(lock_name);
+    }
+    // `SourceProjectionPayloadV1::a1v2` sorts and dedups, but the value is
+    // compared in tests and read in errors, so it leaves here canonical.
+    withheld.sort();
+    withheld.dedup();
+    withheld
+}
+
+/// The D5 `launch.environment` section the lock's read path requires.
+///
+/// When the envelope commits a non-empty `launch.environment`, the lock must
+/// carry every committed non-secret name with a matching value digest —
+/// `verify_environment_values` enforces set equality in both directions, so
+/// writing the envelope alone would produce a lock that cannot be read back.
+/// The values come from the same manifest the observation read, and the digests
+/// are re-derived rather than copied, so a disagreement fails here rather than
+/// at the reader.
+fn d5_launch_section(
+    manifest: &CapsuleManifestV1,
+    minted: &ExecutionContractEnvelopeV1,
+) -> Result<Option<LockLaunchSection>, V1BuildError> {
+    if minted.execution_contract.launch.environment.is_empty() {
+        return Ok(None);
+    }
+    let mut environment = Vec::with_capacity(manifest.env.len());
+    for (name, value) in &manifest.env {
+        let payload = EnvironmentValuePayloadV1::utf8(value.clone());
+        let digest =
+            environment_value_digest(&payload).map_err(|source| V1BuildError::MintFailed {
+                reason: format!("digest the value of [env] {name}: {source}"),
+            })?;
+        environment.push(LockEnvironmentValue {
+            name: name.clone(),
+            value: payload,
+            value_digest: digest.to_string(),
+        });
+    }
+    // `manifest.env` is a BTreeMap, so this is already sorted; the lock's read
+    // path requires strictly increasing names and would reject anything else.
+    environment.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Some(LockLaunchSection { environment }))
+}
+
+/// Every identity-bearing field of the persisted envelope must equal the minted
+/// one.
+///
+/// `load_verified_from_path` already recomputes the execution id and refuses a
+/// mismatch, so a lock that reads back at all is internally consistent. What it
+/// cannot tell is whether it is consistent about THIS build: a stale lock left
+/// by an earlier run would verify perfectly and describe a different execution.
+/// Comparing field by field rather than only by id is what makes the refusal
+/// name what differs.
+fn compare_persisted_to_minted(
+    lock_path: &Path,
+    minted: &ExecutionContractEnvelopeV1,
+    persisted: &ExecutionContractEnvelopeV1,
+) -> Result<(), V1BuildError> {
+    let mismatch = |field: &'static str, minted: String, persisted: String| {
+        V1BuildError::PersistedEnvelopeMismatch {
+            path: lock_path.to_path_buf(),
+            field,
+            minted,
+            persisted,
+        }
+    };
+
+    let expected = &minted.execution_contract;
+    let actual = &persisted.execution_contract;
+
+    if expected.schema != actual.schema {
+        return Err(mismatch(
+            "schema",
+            expected.schema.clone(),
+            actual.schema.clone(),
+        ));
+    }
+    if expected.source.digest != actual.source.digest {
+        return Err(mismatch(
+            "source.digest",
+            expected.source.digest.to_string(),
+            actual.source.digest.to_string(),
+        ));
+    }
+    if expected.runtime != actual.runtime {
+        return Err(mismatch(
+            "runtime",
+            expected.runtime.digest.to_string(),
+            actual.runtime.digest.to_string(),
+        ));
+    }
+    if expected.target != actual.target {
+        return Err(mismatch(
+            "target",
+            describe_target(&expected.target),
+            describe_target(&actual.target),
+        ));
+    }
+    if expected.launch.argv != actual.launch.argv {
+        return Err(mismatch(
+            "launch.argv",
+            format!("{:?}", expected.launch.argv),
+            format!("{:?}", actual.launch.argv),
+        ));
+    }
+    if expected.launch.cwd != actual.launch.cwd {
+        return Err(mismatch(
+            "launch.cwd",
+            expected.launch.cwd.as_str().to_string(),
+            actual.launch.cwd.as_str().to_string(),
+        ));
+    }
+    if expected.filesystem != actual.filesystem {
+        return Err(mismatch(
+            "filesystem",
+            expected.filesystem.view_digest.to_string(),
+            actual.filesystem.view_digest.to_string(),
+        ));
+    }
+
+    // The whole contract, canonicalized. Catches every field the explicit
+    // comparisons above do not name — including any added later, which is why
+    // this is not merely a slower repeat of them.
+    let canonical = |contract: &ExecutionContractV1| {
+        contract
+            .canonical_bytes()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_else(|error| format!("<uncanonicalizable: {error}>"))
+    };
+    if canonical(expected) != canonical(actual) {
+        return Err(mismatch(
+            "canonical payload",
+            canonical(expected),
+            canonical(actual),
+        ));
+    }
+
+    // Recomputed from the persisted contract, not read from its stored field:
+    // the id has to be a function of what came back off the disk.
+    let recomputed =
+        actual
+            .compute_execution_id()
+            .map_err(|source| V1BuildError::TrustedLoadFailed {
+                path: lock_path.to_path_buf(),
+                reason: format!("recompute the execution id of the persisted contract: {source}"),
+            })?;
+    if recomputed != minted.execution_id {
+        return Err(mismatch(
+            "execution_id",
+            minted.execution_id.as_str().to_string(),
+            recomputed.as_str().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn describe_target(target: &ResolvedTargetContract) -> String {
+    format!(
+        "{}/{}/{} libc={:?}",
+        target.os, target.architecture, target.abi, target.libc
+    )
+}
+
+/// A lock that was written but does not read back as this build is not a
+/// product — remove it, and say so if it cannot be removed.
+///
+/// Leaving it would leave the workspace holding a lock that verifies (its id
+/// matches its own contract) while describing an execution this build did not
+/// produce. The next reader has no way to tell.
+fn discard_unverifiable_lock(lock_path: &Path, cause: V1BuildError) -> V1BuildError {
+    match std::fs::remove_file(lock_path) {
+        Ok(()) => cause,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => cause,
+        Err(source) => V1BuildError::LockPersistFailed {
+            path: lock_path.to_path_buf(),
+            reason: format!(
+                "the lock did not verify ({cause}), and removing it failed too: {source}. \
+                 It is still on disk and must not be trusted."
+            ),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests;
