@@ -124,7 +124,11 @@ fi
 
 # ── build twice ──────────────────────────────────────────────────────────────
 run_build() {
-  local label="$1" dir="$WORK/$label"
+  # Two statements, not one: bash expands the whole `local` line before it
+  # assigns any of it, so `dir="$WORK/$label"` in the same statement reads
+  # `label` while it is still unset — which `set -u` turns into a hard failure.
+  local label="$1"
+  local dir="$WORK/$label"
   note "build $label"
   cp -a "$FIXTURE" "$dir"
   # A fresh copy each time so neither build sees the other's capsule.lock as a
