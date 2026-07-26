@@ -27,6 +27,9 @@ pub(crate) mod doctor;
 /// three-state model that keeps a swapped-but-never-reloaded generation from
 /// being mistaken for a no-op.
 pub(crate) mod ingress_activation;
+/// Slice 3B — the two-stage probe that confirms a generation is actually being
+/// SERVED, and the only place the activated marker may move.
+pub(crate) mod ingress_probe;
 /// The durable [`ingress_activation::GenerationStore`]: generation directories,
 /// atomic markers and the `current` symlink, over a real directory tree.
 pub(crate) mod ingress_store;
