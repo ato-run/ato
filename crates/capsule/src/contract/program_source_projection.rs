@@ -862,6 +862,31 @@ pub struct CapsuleControlFiles {
     pub lock: Option<PathBuf>,
 }
 
+impl CapsuleControlFiles {
+    /// The withheld files as root-relative names, sorted — the form the
+    /// Execution Contract's `source.projection_digest` payload commits
+    /// (`SourceProjectionPayloadV1::a1v2`).
+    ///
+    /// Both control files live directly at the selected root by construction
+    /// (§1 steps 2–3 resolve them by exact join), so the root-relative name IS
+    /// the file name. Deriving it here rather than at each call site is what
+    /// keeps the projection and the payload naming the same set: a caller that
+    /// re-listed the names by hand could name `capsule.lock` for a repo that
+    /// actually held `ato.lock.json`, and the digest would then describe a
+    /// projection nobody performed.
+    #[must_use]
+    pub fn excluded_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = [Some(&self.manifest), self.lock.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
 /// Resolves the control files at `selected_root` (§1 steps 2–3): the manifest
 /// must exist as a regular file, and the lock path is selected by exact path —
 /// `capsule.lock` canonical, `ato.lock.json` deprecated alias, coexistence
@@ -1063,7 +1088,11 @@ impl StagedCapsuleSource {
         if let Some(lock) = control_files.lock.as_deref() {
             remove(lock)?;
         }
-        Ok(ProjectedCapsuleSource { staging })
+        let excluded_control_files = control_files.excluded_names();
+        Ok(ProjectedCapsuleSource {
+            staging,
+            excluded_control_files,
+        })
     }
 }
 
@@ -1074,9 +1103,72 @@ impl StagedCapsuleSource {
 /// the only field is the process-private staging directory.
 pub struct ProjectedCapsuleSource {
     staging: TempDir,
+    excluded_control_files: Vec<String>,
 }
 
 impl ProjectedCapsuleSource {
+    /// The control files this projection withheld, as root-relative names.
+    ///
+    /// Identity-bearing (`SourceProjectionPayloadV1::a1v2` commits them), and
+    /// recorded by [`StagedCapsuleSource::into_projected`] from the files it
+    /// actually removed — not re-derived from a name list, so it cannot claim a
+    /// lock name the repository did not carry.
+    #[must_use]
+    pub fn excluded_control_files(&self) -> &[String] {
+        &self.excluded_control_files
+    }
+
+    /// Copy the projected tree into `destination` and return the digest of what
+    /// was written there.
+    ///
+    /// This is the seam a guest producer needs and [`Self::projected_file_paths`]
+    /// deliberately withholds: a build has to place real bytes somewhere it can
+    /// run `COPY` over, and the digest that names those bytes has to be taken
+    /// over the same tree — otherwise `source.digest` describes the projection
+    /// while the guest runs the raw checkout, and the two differ by exactly the
+    /// control files. Returning the digest FROM the call that writes the tree is
+    /// what makes that mix-up unrepresentable: there is no window in which a
+    /// caller holds one without the other.
+    ///
+    /// `destination` must already exist and be empty. Populating it here rather
+    /// than creating it keeps the lifetime with the caller (the producer owns
+    /// its build directory), and refusing a non-empty one is fail-closed: a
+    /// stray file left by a previous run would be copied into the guest and
+    /// hashed as program source.
+    ///
+    /// The digest is taken over `destination`, then checked against the digest
+    /// of the staging projection. They can only disagree if the copy did not
+    /// reproduce the tree — a filesystem that drops the executable bit A1
+    /// commits, most plausibly — and that is a refusal rather than a second
+    /// identity, because the guest would then run bytes no digest names.
+    pub fn materialize_into(
+        &self,
+        destination: &Path,
+    ) -> Result<ProgramSourceContract, CapsuleProgramError> {
+        require_empty_directory(destination)?;
+        copy_tree(self.staging.path(), destination)
+            .map_err(|error| relativize_roots(error, &[self.staging.path(), destination]))?;
+
+        let projected = self.source_contract()?;
+        let materialized_hash = materialized_source_tree_hash(destination)
+            .map_err(|source| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "failed to hash the materialized projection: {source}"
+                ))
+            })
+            .map_err(|error| relativize_roots(error, &[destination]))?;
+        let materialized = ProgramSourceDigest::parse(&materialized_hash)?;
+        if materialized != projected.digest {
+            return Err(CapsuleProgramError::SourceProjection(format!(
+                "the materialized projection hashes to {materialized}, but the projection it \
+                 was copied from hashes to {}: the destination filesystem did not reproduce \
+                 the tree (an executable bit or a file is missing), so no digest here names \
+                 the bytes a guest would run",
+                projected.digest
+            )));
+        }
+        Ok(projected)
+    }
     /// The projected file set: every regular file in the projected tree as a
     /// `/`-joined path relative to the projected root, sorted lexicographically.
     /// This is exactly the file set [`Self::source_contract`]'s digest covers,
@@ -1127,6 +1219,72 @@ pub fn project_program_source(
     StagedCapsuleSource::stage(pinned)?
         .into_projected()?
         .source_contract()
+}
+
+/// Everything a guest producer needs to commit what it placed in the guest:
+/// the digest of the projection, and the control files the projection withheld.
+///
+/// The two travel together because the Execution Contract commits them
+/// together — `source.digest` names the tree, `source.projection_digest`'s
+/// payload names what was held out of it — and a producer that assembled them
+/// from separate calls could pair a digest with the wrong exclusion list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedProgramSource {
+    pub contract: ProgramSourceContract,
+    /// Root-relative, sorted. See [`CapsuleControlFiles::excluded_names`].
+    pub excluded_control_files: Vec<String>,
+}
+
+/// Materialize the program-source projection of `pinned` into `destination`
+/// and return the digest of exactly those bytes.
+///
+/// The producer counterpart of [`project_program_source`]: same §1 order, but
+/// the projected tree survives the call at a path the caller chose, so a build
+/// can copy it into a guest. `destination` must exist and be empty.
+///
+/// The host repository is NOT what gets placed in the guest and NOT what
+/// `source.digest` names: the manifest and the one resolved lock are withheld,
+/// which is why a change to either moves neither the tree in the guest nor the
+/// identity, while a change to any other file moves both.
+pub fn materialize_program_source_projection(
+    pinned: &VerifiedPinnedSourceMaterialization,
+    destination: &Path,
+) -> Result<MaterializedProgramSource, CapsuleProgramError> {
+    let projected = StagedCapsuleSource::stage(pinned)?.into_projected()?;
+    let contract = projected.materialize_into(destination)?;
+    Ok(MaterializedProgramSource {
+        contract,
+        excluded_control_files: projected.excluded_control_files().to_vec(),
+    })
+}
+
+/// `destination` exists, is a directory, and holds nothing. Fail-closed: a
+/// leftover file would be copied into the guest and hashed as program source.
+fn require_empty_directory(destination: &Path) -> Result<(), CapsuleProgramError> {
+    let metadata = fs::symlink_metadata(destination).map_err(|source| {
+        projection_io(
+            "inspect the materialization destination",
+            destination,
+            source,
+        )
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(CapsuleProgramError::SourceProjection(format!(
+            "materialization destination {} is not a directory",
+            destination.display()
+        )));
+    }
+    let mut entries = fs::read_dir(destination).map_err(|source| {
+        projection_io("read the materialization destination", destination, source)
+    })?;
+    if entries.next().is_some() {
+        return Err(CapsuleProgramError::SourceProjection(format!(
+            "materialization destination {} is not empty; a leftover file would be copied \
+             into the guest and hashed as program source",
+            destination.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Copies `source_dir` into `dest_dir` recursively. `fs::copy` preserves unix
@@ -2352,5 +2510,223 @@ mod tests {
         // Non-vacuous: the message must still be actionable.
         assert!(redacted.contains("capsule.toml"), "{redacted}");
         assert!(redacted.contains("does not exist"), "{redacted}");
+    }
+
+    // --- Materializing the projection for a guest producer ------------------
+
+    fn materialize_projection(root: &Path) -> (TempDir, MaterializedProgramSource) {
+        let destination = TempDir::new().unwrap();
+        let materialized = materialize_program_source_projection(&pinned(root), destination.path())
+            .expect("the projection materializes");
+        (destination, materialized)
+    }
+
+    /// What lands in the destination is the PROJECTION, not the checkout: the
+    /// control files are gone, everything else survives byte-for-byte. This is
+    /// the property that makes `source.digest` name what a guest would run.
+    #[test]
+    fn the_materialized_tree_is_the_projection_not_the_checkout() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        write_file(root.path(), "capsule.lock", LOCK_BODY);
+
+        let (destination, materialized) = materialize_projection(root.path());
+        let at = |rel: &str| destination.path().join(rel);
+
+        assert!(!at("capsule.toml").exists(), "the manifest is withheld");
+        assert!(!at("capsule.lock").exists(), "the lock is withheld");
+        assert_eq!(fs::read(at("src/main.py")).unwrap(), b"print('hi')\n");
+        // A control-file NAME at a nested path is ordinary source and stays.
+        assert!(at("examples/capsule.toml").exists());
+        assert!(at("fixtures/ato.lock.json").exists());
+
+        assert_eq!(
+            materialized.excluded_control_files,
+            ["capsule.lock", "capsule.toml"]
+        );
+    }
+
+    /// The digest handed back names the materialized tree — it is the same
+    /// value the read-only projection entrypoint computes for the same input.
+    ///
+    /// This is the regression guard for swapping the two: returning the hash of
+    /// the pre-projection checkout would still be a digest, still parse, and
+    /// still be stable across runs. Only comparing it against the projection
+    /// catches it — and the assertion is non-vacuous because the checkout
+    /// contains control files, so its hash genuinely differs (asserted below).
+    #[test]
+    fn the_materialized_digest_is_the_projection_digest() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        write_file(root.path(), "capsule.lock", LOCK_BODY);
+
+        let (_destination, materialized) = materialize_projection(root.path());
+        assert_eq!(materialized.contract, project(root.path()).unwrap());
+
+        // Non-vacuous: the unprojected checkout hashes to something else.
+        let checkout_hash = materialized_source_tree_hash(root.path()).unwrap();
+        assert_ne!(
+            ProgramSourceDigest::parse(&checkout_hash).unwrap(),
+            materialized.contract.digest,
+            "if these agreed, the assertion above could not tell the two apart"
+        );
+    }
+
+    /// Two checkouts of the same project at different host paths materialize to
+    /// the same identity: nothing about where the tree lives reaches the digest.
+    #[test]
+    fn the_same_project_at_a_different_host_path_is_the_same_identity() {
+        let one = TempDir::new().unwrap();
+        let two = TempDir::new().unwrap();
+        for root in [one.path(), two.path()] {
+            write_base_tree(root);
+            write_file(root, "capsule.lock", LOCK_BODY);
+        }
+        assert_ne!(one.path(), two.path());
+
+        let (_d1, first) = materialize_projection(one.path());
+        let (_d2, second) = materialize_projection(two.path());
+        assert_eq!(first, second);
+    }
+
+    /// Rewriting a control file moves neither the guest tree nor the identity;
+    /// rewriting anything else moves both.
+    #[test]
+    fn only_a_change_the_guest_would_see_moves_the_identity() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        write_file(root.path(), "capsule.lock", LOCK_BODY);
+        let (_baseline_dir, baseline) = materialize_projection(root.path());
+
+        write_file(
+            root.path(),
+            "capsule.toml",
+            b"[capsule]\nname = \"other\"\n",
+        );
+        write_file(
+            root.path(),
+            "capsule.lock",
+            b"{\"schema\": \"ato.lock/v1\"}\n",
+        );
+        let (_after_control_dir, after_control) = materialize_projection(root.path());
+        assert_eq!(
+            baseline.contract, after_control.contract,
+            "a control file is withheld, so it cannot move the identity"
+        );
+
+        write_file(root.path(), "src/main.py", b"print('bye')\n");
+        let (_after_source_dir, after_source) = materialize_projection(root.path());
+        assert_ne!(
+            baseline.contract, after_source.contract,
+            "a file the guest would run moves the identity"
+        );
+    }
+
+    /// The withheld set records which lock name the repository actually held —
+    /// the two spellings are a different exclusion, and the payload says so.
+    #[test]
+    fn the_withheld_set_names_the_lock_the_repository_carried() {
+        let canonical = TempDir::new().unwrap();
+        write_base_tree(canonical.path());
+        write_file(canonical.path(), "capsule.lock", LOCK_BODY);
+
+        let alias = TempDir::new().unwrap();
+        write_base_tree(alias.path());
+        write_file(alias.path(), "ato.lock.json", LOCK_BODY);
+
+        let none = TempDir::new().unwrap();
+        write_base_tree(none.path());
+
+        assert_eq!(
+            materialize_projection(canonical.path())
+                .1
+                .excluded_control_files,
+            ["capsule.lock", "capsule.toml"]
+        );
+        assert_eq!(
+            materialize_projection(alias.path())
+                .1
+                .excluded_control_files,
+            ["ato.lock.json", "capsule.toml"]
+        );
+        assert_eq!(
+            materialize_projection(none.path()).1.excluded_control_files,
+            ["capsule.toml"]
+        );
+    }
+
+    /// A symlink anywhere in the tree is refused, not followed and not skipped
+    /// — so there is no projection whose digest disagrees with what a producer
+    /// would copy. The refusal happens before the destination is touched.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_refused_before_anything_is_materialized() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        std::os::unix::fs::symlink("src/main.py", root.path().join("link.py")).unwrap();
+
+        let destination = TempDir::new().unwrap();
+        let error = materialize_program_source_projection(&pinned(root.path()), destination.path())
+            .expect_err("a symlink is inadmissible");
+        assert!(format!("{error}").contains("symlink"), "{error}");
+        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+    }
+
+    /// A non-empty destination is refused: its leftovers would be copied into
+    /// the guest and hashed as program source.
+    #[test]
+    fn a_non_empty_destination_is_refused() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        let destination = TempDir::new().unwrap();
+        write_file(destination.path(), "stale.py", b"print('stale')\n");
+
+        let error = materialize_program_source_projection(&pinned(root.path()), destination.path())
+            .expect_err("a dirty destination is refused");
+        assert!(format!("{error}").contains("not empty"), "{error}");
+    }
+
+    /// A destination that does not exist is refused rather than created: the
+    /// producer owns its build directory's lifetime.
+    #[test]
+    fn a_missing_destination_is_refused() {
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        let parent = TempDir::new().unwrap();
+
+        let error = materialize_program_source_projection(
+            &pinned(root.path()),
+            &parent.path().join("absent"),
+        )
+        .expect_err("a missing destination is refused");
+        assert!(matches!(
+            error,
+            CapsuleProgramError::SourceProjection(_)
+                | CapsuleProgramError::NotPinnedMaterialization(_)
+        ));
+    }
+
+    /// The executable bit A1 commits survives materialization — if it did not,
+    /// the guest would run a file the digest does not describe, and
+    /// `materialize_into`'s cross-check would refuse rather than hand back a
+    /// second identity.
+    #[cfg(unix)]
+    #[test]
+    fn the_executable_bit_survives_materialization() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = TempDir::new().unwrap();
+        write_base_tree(root.path());
+        let script = root.path().join("run.sh");
+        fs::write(&script, b"#!/bin/sh\nexec true\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let (destination, materialized) = materialize_projection(root.path());
+        let mode = fs::metadata(destination.path().join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "the executable bit is preserved");
+        assert_eq!(materialized.contract, project(root.path()).unwrap());
     }
 }

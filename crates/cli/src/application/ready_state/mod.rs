@@ -16,6 +16,10 @@ pub(crate) mod binding_grants;
 pub(crate) mod binding_host;
 pub(crate) mod bindings;
 pub(crate) mod build;
+/// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
+/// builds a guest, measures it, mints an Execution Identity from those
+/// measurements, and publishes it into `capsule.lock` (ADR-015 step 5-3).
+pub(crate) mod build_v1;
 pub(crate) mod diagnostics;
 pub(crate) mod flags;
 /// Collecting the measurements a v1 Execution Contract is minted from
