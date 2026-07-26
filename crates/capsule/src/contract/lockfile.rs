@@ -30,7 +30,7 @@ use crate::types::{CapsuleManifest, ExternalCapsuleDependency, ParamValue, Templ
 #[path = "lockfile_runtime.rs"]
 mod lockfile_runtime;
 #[path = "lockfile_support.rs"]
-mod lockfile_support;
+pub(crate) mod lockfile_support;
 
 use lockfile_runtime::{
     deno_artifact_filename, generate_deno_lock, generate_node_lockfile, generate_uv_lock,
