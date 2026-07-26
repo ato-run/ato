@@ -513,6 +513,34 @@ impl ExecutionObservationV1 {
         })
     }
 
+    /// Mint the [`ExecutionContractEnvelopeV1`] this measurement determines:
+    /// the contract from [`Self::into_contract`], carrying the canonical
+    /// `execution_id` of that very contract.
+    ///
+    /// This exists so no caller ever assembles an envelope field-by-field. The
+    /// envelope's whole job is to bind a contract to an id, and its
+    /// [`ExecutionContractEnvelopeV1::verify`] recomputes that id and refuses a
+    /// mismatch — so an envelope built by hand is an envelope that can be built
+    /// wrong, and the only place the wrongness surfaces is at the reader, after
+    /// it has been persisted and shipped. Minting it here makes the id a
+    /// function of the contract by construction: there is no argument to pass
+    /// that could disagree.
+    ///
+    /// Note this is a MINT, not a verification: unlike [`Self::finalize`] there
+    /// is no `expected` to check against, because there is nothing to check
+    /// against yet — this is the call that brings the identity into existence.
+    /// Its only gate is completeness, which [`Self::into_contract`] enforces
+    /// facet by facet.
+    pub fn into_minted_envelope(&self) -> Result<ExecutionContractEnvelopeV1, FinalizationError> {
+        let contract = self.into_contract()?;
+        let execution_id = contract.compute_execution_id()?;
+        Ok(FinalizedExecution {
+            contract,
+            execution_id,
+        }
+        .into_envelope())
+    }
+
     fn contract_build_outputs(
         &self,
     ) -> Result<Vec<ResolvedBuildOutputContract>, FinalizationError> {
@@ -1225,6 +1253,44 @@ mod tests {
         // And it is the same contract the hand-derived expectation describes, so
         // minting introduced no facet of its own.
         assert_eq!(minted, expected_contract(&fx));
+    }
+
+    /// The minted envelope's id is the canonical hash of the contract it
+    /// carries — the invariant that makes hand-assembling an envelope
+    /// unnecessary, and therefore something no caller should do.
+    #[test]
+    fn a_minted_envelope_carries_the_id_of_the_contract_it_holds() {
+        let fx = fixtures();
+        let observation = full_observation(&fx);
+
+        let envelope = observation
+            .into_minted_envelope()
+            .expect("full measurement mints an envelope");
+
+        envelope
+            .verify()
+            .expect("a minted envelope verifies against its own contract");
+        assert_eq!(envelope.execution_contract, expected_contract(&fx));
+        assert_eq!(
+            envelope.execution_id,
+            expected_contract(&fx).compute_execution_id().unwrap()
+        );
+        // Nothing beyond the identity is claimed: the envelope's non-identity
+        // fields are a producer's to fill in later, not the mint's to invent.
+        assert!(envelope.capsule_program_id.is_none());
+        assert!(envelope.generated_at.is_none());
+    }
+
+    /// Minting an ENVELOPE is gated exactly as minting a contract is: the
+    /// completeness refusal must not be softened by the extra hashing step.
+    #[test]
+    fn minting_an_envelope_refuses_an_incomplete_measurement() {
+        assert_eq!(
+            ExecutionObservationV1::new()
+                .into_minted_envelope()
+                .unwrap_err(),
+            FinalizationError::UnmeasuredFacet("source.digest")
+        );
     }
 
     /// Minting demands every facet, and names the FIRST one missing in RFC §4.2
