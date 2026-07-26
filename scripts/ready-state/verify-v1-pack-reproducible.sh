@@ -23,6 +23,17 @@ if [[ -z "$ATO_BIN" || ! -x "$ATO_BIN" ]]; then
   echo "usage: $0 /path/to/ato    (or put ato on PATH)" >&2
   exit 2
 fi
+# Absolute, because each build runs in its own directory: a relative
+# `target/debug/ato` resolves against the repo root here and against the fixture
+# there, where it does not exist. A bare name goes through PATH rather than
+# being joined onto $PWD, which would invent a path that does not exist.
+if [[ "$ATO_BIN" == */* ]]; then
+  ATO_BIN="$(cd "$(dirname "$ATO_BIN")" && pwd)/$(basename "$ATO_BIN")"
+else
+  ATO_BIN="$(command -v "$ATO_BIN")"
+fi
+[[ -x "$ATO_BIN" ]] || { echo "not executable: $ATO_BIN" >&2; exit 2; }
+echo "ato binary: $ATO_BIN"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
