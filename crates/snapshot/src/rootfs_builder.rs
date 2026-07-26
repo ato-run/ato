@@ -540,6 +540,7 @@ pub(crate) fn launch_argv_line(argv: &[String]) -> String {
 pub(crate) fn assemble_app_image_script_v1(
     spec: &RootfsBuildSpecV1,
     pinned_base_ref: &str,
+    tool: &str,
 ) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     // The projection goes in a SUBDIRECTORY of the build context, and the
@@ -571,8 +572,9 @@ WORKDIR {workdir}
 COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
 DOCKER
-docker build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
+{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
 "#,
+        tool = tool,
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
         install_q = install_q,
@@ -620,7 +622,11 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 /// entirely.
 ///
 /// env: `ATO_IMAGE`, `ATO_OUT`, `ATO_FS_UUID`.
-pub(crate) fn pack_app_image_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
+pub(crate) fn pack_app_image_script_v1(
+    spec: &RootfsBuildSpecV1,
+    size_mib: u64,
+    tool: &str,
+) -> String {
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
@@ -630,15 +636,15 @@ BUILD=$(mktemp -d)
 # behind (Phase 8 orphan-hardening parity). No mount to unwind — `mke2fs -d`
 # populates the filesystem without one.
 cleanup() {{
-  [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1 || true
-  docker rmi -f "$TAG" >/dev/null 2>&1 || true
+  [ -n "$CID" ] && {tool} rm -f "$CID" >/dev/null 2>&1 || true
+  {tool} rmi -f "$TAG" >/dev/null 2>&1 || true
   [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
 }}
 trap cleanup EXIT
-CID=$(docker create "$TAG")
+CID=$({tool} create "$TAG")
 mkdir -p "$BUILD/rootfs"
-docker export "$CID" | tar -x -C "$BUILD/rootfs"
-docker rm -f "$CID" >/dev/null; CID=""
+{tool} export "$CID" | tar -x -C "$BUILD/rootfs"
+{tool} rm -f "$CID" >/dev/null; CID=""
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
@@ -674,6 +680,7 @@ SOURCE_DATE_EPOCH={epoch} mkfs.ext4 -q -F \
   "$ATO_OUT"
 # BUILD is removed by the EXIT trap (also on any failure above).
 "#,
+        tool = tool,
         launch = launch_argv_line(&spec.resolved_argv),
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
         port = spec.port,
@@ -731,13 +738,14 @@ pub fn assemble_app_image_v1(
     spec: &RootfsBuildSpecV1,
     pinned_base_ref: &str,
     image_ref: &str,
+    tool: &str,
 ) -> Result<AssembledGuestImage, String> {
     // Both land in a generated script — the base ref inside a quoted heredoc,
     // the image ref as a shell variable. A newline in either could break out.
     reject_control_chars("pinned base image reference", pinned_base_ref)?;
     reject_control_chars("assembled image reference", image_ref)?;
 
-    let script = assemble_app_image_script_v1(spec, pinned_base_ref);
+    let script = assemble_app_image_script_v1(spec, pinned_base_ref, tool);
     run_builder_script(
         "assemble app image",
         &script,
@@ -761,6 +769,7 @@ pub fn pack_app_image_v1(
     out_ext4: &Path,
     size_mib: u64,
     filesystem_uuid: &str,
+    tool: &str,
 ) -> Result<u64, String> {
     // Interpolated nowhere, but it reaches `mke2fs` as two arguments, so a
     // malformed value is refused rather than passed on.
@@ -769,7 +778,7 @@ pub fn pack_app_image_v1(
             "filesystem uuid {filesystem_uuid:?} is not a canonical 8-4-4-4-12 hex UUID"
         ));
     }
-    let script = pack_app_image_script_v1(spec, size_mib);
+    let script = pack_app_image_script_v1(spec, size_mib, tool);
     run_builder_script(
         "pack app image",
         &script,
@@ -790,8 +799,8 @@ pub fn pack_app_image_v1(
 /// already returning a more informative error and a leaked image is a disk
 /// cost rather than a correctness problem. Consuming the image means a caller
 /// cannot discard one and then pack it.
-pub fn discard_app_image_v1(image: AssembledGuestImage) {
-    let _ = Command::new("docker")
+pub fn discard_app_image_v1(image: AssembledGuestImage, tool: &str) {
+    let _ = Command::new(tool)
         .args(["rmi", "-f", &image.image_ref])
         .output();
 }
@@ -2676,8 +2685,8 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_v1_script_puts_the_source_and_the_launch_in_the_same_directory() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
-        let pack = pack_app_image_script_v1(&spec, 512);
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        let pack = pack_app_image_script_v1(&spec, 512, "docker");
 
         assert!(
             assemble.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
@@ -2704,7 +2713,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_assembled_image_is_built_from_the_pinned_reference() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let script = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
 
         assert!(script.contains(&format!("FROM {PINNED_BASE}")), "{script}");
         assert_eq!(spec.base_image, "python:3.11-slim");
@@ -2725,7 +2734,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_generated_dockerfile_never_enters_the_guest() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let script = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
 
         // The projection lands in a subdirectory; the Dockerfile sits beside it.
         assert!(
@@ -2749,6 +2758,37 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         );
     }
 
+    /// Every step must drive the SAME container tool.
+    ///
+    /// The resolution and the measurement go through one tool's local image
+    /// store; building through another's would look up a digest in a store that
+    /// does not hold the image the build produced. The scripts used to hardcode
+    /// `docker` while the CLI probed for `podman` first — a host with podman and
+    /// no docker would have failed at the build, and a host with both would have
+    /// measured one image and packed another.
+    #[test]
+    fn every_step_drives_the_probed_tool() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        for tool in ["docker", "podman"] {
+            let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, tool);
+            let pack = pack_app_image_script_v1(&spec, 512, tool);
+            assert!(
+                assemble.contains(&format!("{tool} build -q -t")),
+                "{assemble}"
+            );
+            for verb in ["create", "export", "rm -f", "rmi -f"] {
+                assert!(
+                    pack.contains(&format!("{tool} {verb}")),
+                    "{tool} {verb}: {pack}"
+                );
+            }
+            if tool != "docker" {
+                assert!(!assemble.contains("docker "), "{assemble}");
+                assert!(!pack.contains("docker "), "{pack}");
+            }
+        }
+    }
+
     /// The pack half must not leave a source of entropy or a clock read in the
     /// bytes the Execution Identity commits.
     ///
@@ -2759,7 +2799,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_v1_pack_leaves_no_clock_or_entropy_in_the_image() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let script = pack_app_image_script_v1(&spec, 512);
+        let script = pack_app_image_script_v1(&spec, 512, "docker");
 
         // The two values mke2fs would otherwise draw at random.
         assert!(script.contains(r#"-U "$ATO_FS_UUID""#), "{script}");
@@ -2844,6 +2884,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             &out.path().join("guest.img"),
             512,
             "not-a-uuid",
+            "docker",
         )
         .expect_err("refused");
         assert!(error.contains("canonical"), "{error}");
@@ -2862,14 +2903,14 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     fn assembling_does_not_remove_the_image_but_packing_does() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
 
-        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
         assert!(
             !assemble.contains("rmi"),
             "the assembled image must survive for measurement: {assemble}"
         );
 
         // The pack half is the last user, so it is the one that cleans up.
-        let pack = pack_app_image_script_v1(&spec, 512);
+        let pack = pack_app_image_script_v1(&spec, 512, "docker");
         assert!(pack.contains("rmi -f \"$TAG\""), "{pack}");
         assert!(pack.contains("TAG=\"$ATO_IMAGE\""), "{pack}");
     }
@@ -2880,10 +2921,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     fn both_halves_address_the_image_through_the_same_variable() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         assert!(
-            assemble_app_image_script_v1(&spec, PINNED_BASE)
+            assemble_app_image_script_v1(&spec, PINNED_BASE, "docker")
                 .contains("docker build -q -t \"$ATO_IMAGE\""),
         );
-        assert!(pack_app_image_script_v1(&spec, 512).contains("TAG=\"$ATO_IMAGE\""));
+        assert!(pack_app_image_script_v1(&spec, 512, "docker").contains("TAG=\"$ATO_IMAGE\""));
     }
 
     /// The base reference is interpolated into the generated Dockerfile, so a
@@ -2900,6 +2941,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             &spec,
             "python@sha256:aaa\nRUN rm -rf /",
             "ato-v1-test",
+            "docker",
         )
         .expect_err("a newline in the base ref is refused");
         assert!(error.contains("newline"), "{error}");
@@ -2909,6 +2951,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             &spec,
             PINNED_BASE,
             "ato-v1-test\nRUN rm -rf /",
+            "docker",
         )
         .expect_err("a newline in the image ref is refused");
         assert!(error.contains("newline"), "{error}");
@@ -2920,8 +2963,8 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     #[test]
     fn the_image_reference_is_never_interpolated_into_the_script() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
-        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE);
-        let pack = pack_app_image_script_v1(&spec, 512);
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        let pack = pack_app_image_script_v1(&spec, 512, "docker");
         // Both scripts are generated without knowing the reference at all.
         for script in [&assemble, &pack] {
             assert!(script.contains("$ATO_IMAGE"), "{script}");

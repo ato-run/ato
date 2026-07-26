@@ -250,8 +250,13 @@ pub(crate) trait V1GuestProducer {
     fn discard(&self, image: AssembledGuestImage);
 }
 
-/// The production producer: docker for assembly and inspection, `mount` for
-/// packing.
+/// The production producer: the probed container tool for assembly and
+/// inspection, `mke2fs` for packing.
+///
+/// The tool is probed ONCE and used for every step. It has to be: resolving the
+/// base image and measuring the guest go through one tool's local image store,
+/// and building through another's would look up a digest in a store that does
+/// not hold the image the build produced.
 pub(crate) struct HostV1GuestProducer {
     runner: snapshot::docker_import::build::SystemImportCommandRunner,
     tool: BuildTool,
@@ -278,7 +283,13 @@ impl V1GuestProducer for HostV1GuestProducer {
         pinned_base_ref: &str,
         image_ref: &str,
     ) -> Result<AssembledGuestImage, String> {
-        assemble_app_image_v1(projected_source, spec, pinned_base_ref, image_ref)
+        assemble_app_image_v1(
+            projected_source,
+            spec,
+            pinned_base_ref,
+            image_ref,
+            self.tool.as_str(),
+        )
     }
 
     fn measure_target(&self, image_ref: &str) -> Result<ResolvedTargetContract, String> {
@@ -297,11 +308,18 @@ impl V1GuestProducer for HostV1GuestProducer {
         size_mib: u64,
         filesystem_uuid: &str,
     ) -> Result<u64, String> {
-        pack_app_image_v1(image, spec, out, size_mib, filesystem_uuid)
+        pack_app_image_v1(
+            image,
+            spec,
+            out,
+            size_mib,
+            filesystem_uuid,
+            self.tool.as_str(),
+        )
     }
 
     fn discard(&self, image: AssembledGuestImage) {
-        discard_app_image_v1(image);
+        discard_app_image_v1(image, self.tool.as_str());
     }
 }
 

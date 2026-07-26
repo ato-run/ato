@@ -79,24 +79,32 @@ run_build() {
   # pre-existing control file — the withheld set is identity-bearing.
   local dir="$WORK/$label"
   cp -a "$FIXTURE" "$dir"
-  ( cd "$dir" && "$ATO_BIN" build --json . ) > "$WORK/$label.json"
-  python3 - "$WORK/$label.json" <<'PYEOF' > "$WORK/$label.facts"
+  # `--json` is a GLOBAL flag and prints the result pretty at the end, after
+  # whatever the reporter wrote — so the payload is the last balanced object in
+  # the stream, not a line.
+  ( cd "$dir" && "$ATO_BIN" --json build . ) > "$WORK/$label.out" 2>"$WORK/$label.err" \
+    || { echo "--- $label stdout ---"; cat "$WORK/$label.out"; \
+         echo "--- $label stderr ---"; cat "$WORK/$label.err"; fail "ato build ($label) failed"; }
+  python3 - "$WORK/$label.out" <<'PYEOF' > "$WORK/$label.facts"
 import json, sys
-for line in open(sys.argv[1]):
-    line = line.strip()
-    if line.startswith("{"):
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
-        v1 = d.get("v1")
-        if v1:
-            print(v1["execution_id"])
-            print(v1["guest_image"])
-            print(v1["source_digest"])
-            break
-else:
-    sys.exit("no v1 build result in --json output")
+
+text = open(sys.argv[1]).read()
+decoder = json.JSONDecoder()
+found = None
+for start in range(len(text)):
+    if text[start] != "{":
+        continue
+    try:
+        value, _ = decoder.raw_decode(text[start:])
+    except ValueError:
+        continue
+    if isinstance(value, dict) and value.get("v1"):
+        found = value["v1"]          # keep scanning: the LAST one is the result
+if not found:
+    sys.exit("no v1 build result in --json output (was this a v0.3 manifest?)")
+print(found["execution_id"])
+print(found["guest_image"])
+print(found["source_digest"])
 PYEOF
 }
 

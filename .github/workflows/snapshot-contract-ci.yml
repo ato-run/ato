@@ -46,6 +46,10 @@ on:
       - "Cargo.lock"
       - "rust-toolchain.toml"
       - ".github/workflows/snapshot-contract-ci.yml"
+      # The reproducibility proof drives the CLI's v1 build lane end to end, so
+      # it must also fire when that lane or the script itself changes.
+      - "crates/cli/**"
+      - "scripts/ready-state/verify-v1-pack-reproducible.sh"
   workflow_dispatch:
 
 permissions:
@@ -56,6 +60,33 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # The reproducibility claim, actually run rather than asserted.
+  #
+  # `filesystem.view_digest` is blake3 over the packed ext4 and the Execution
+  # Identity commits it, so a pack that is not byte-stable makes two builds of
+  # one program source two different executions. The unit tests can only check
+  # that the emitted script ASKS for determinism (`-U`, `-E hash_seed`,
+  # `SOURCE_DATE_EPOCH`, `mke2fs -d`, no loop mount) — whether `mke2fs`
+  # DELIVERS it needs `mke2fs`, which the dev Macs do not have.
+  #
+  # A GitHub runner does: Linux, passwordless sudo, docker, e2fsprogs 1.47. So
+  # the proof runs here on every PR that touches the pack, and a regression
+  # surfaces as a red check rather than on a builder host weeks later.
+  v1-pack-reproducible:
+    name: v1 pack is reproducible
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - run: docker --version && mke2fs -V 2>&1 | head -1
+      - run: cargo build -p cli --bin ato
+      # Root because `docker export | tar -x` restores ownership. `-E` keeps the
+      # cargo/rustup environment so the built binary's own toolchain lookups
+      # behave the same as they would for the user.
+      - name: two builds of one source must agree
+        run: sudo -E ./scripts/ready-state/verify-v1-pack-reproducible.sh target/debug/ato
+
   snapshot-acceptance:
     name: snapshot acceptance
     runs-on: ubuntu-latest
