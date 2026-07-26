@@ -672,12 +672,26 @@ rm -f "$ATO_OUT"
 dd if=/dev/zero of="$ATO_OUT" bs=1M count={size} status=none
 # `-d` populates at mkfs time: no loop mount, and the allocation order is
 # mke2fs's own rather than the running kernel's. `-U` and `-E hash_seed` replace
-# the two random values; SOURCE_DATE_EPOCH replaces the superblock clock reads.
-SOURCE_DATE_EPOCH={epoch} mkfs.ext4 -q -F \
+# the two values mke2fs would otherwise draw at random.
+mkfs.ext4 -q -F \
   -U "$ATO_FS_UUID" \
   -E hash_seed="$ATO_FS_UUID" \
   -d "$BUILD/rootfs" \
   "$ATO_OUT"
+# The superblock clocks, set explicitly because mke2fs does NOT honour
+# SOURCE_DATE_EPOCH: measured on e2fsprogs 1.47.0, two runs ten seconds apart
+# produced two "Filesystem created" values ten seconds apart, and everything
+# else in the superblock was already identical. Through debugfs rather than a
+# byte patch because ext4 carries a superblock checksum that debugfs recomputes
+# and a raw write would invalidate. `wtime` goes last: every debugfs write
+# updates it.
+debugfs -w -f - "$ATO_OUT" >/dev/null 2>&1 <<'DEBUGFS'
+set_super_value mkfs_time {epoch}
+set_super_value lastcheck {epoch}
+set_super_value mtime 0
+set_super_value wtime {epoch}
+quit
+DEBUGFS
 # BUILD is removed by the EXIT trap (also on any failure above).
 "#,
         tool = tool,
@@ -2807,13 +2821,22 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             script.contains(r#"-E hash_seed="$ATO_FS_UUID""#),
             "{script}"
         );
-        // The superblock clock reads, and the inode timestamps nothing else
-        // normalizes.
+        // The superblock clocks. mke2fs does NOT honour SOURCE_DATE_EPOCH —
+        // measured on e2fsprogs 1.47.0, where two runs ten seconds apart
+        // produced two "Filesystem created" values ten seconds apart — so they
+        // are set afterwards through debugfs, which recomputes the superblock
+        // checksum that a raw byte patch would invalidate.
+        for field in ["mkfs_time", "lastcheck", "wtime"] {
+            assert!(
+                script.contains(&format!("set_super_value {field} {V1_GUEST_IMAGE_EPOCH}")),
+                "{field}: {script}"
+            );
+        }
+        // Not merely absent as a word — the script explains in a comment WHY it
+        // is not used. What must not come back is the assignment.
         assert!(
-            script.contains(&format!(
-                "SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} mkfs.ext4"
-            )),
-            "{script}"
+            !script.contains("SOURCE_DATE_EPOCH="),
+            "mke2fs ignores it, so setting it would look like a control that works: {script}"
         );
         assert!(
             script.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),

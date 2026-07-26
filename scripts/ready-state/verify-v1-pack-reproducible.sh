@@ -146,12 +146,22 @@ echo
 [[ "$SRC_ONE" == "$SRC_TWO" ]] || fail "source.digest differs — the projection is not stable, which is a bug ABOVE the pack"
 
 if [[ "$SHA_ONE" != "$SHA_TWO" ]]; then
-  echo "The two images differ. What is still varying:" >&2
-  # Name the culprit rather than just reporting inequality.
-  for img in "$IMG_ONE" "$IMG_TWO"; do
-    dumpe2fs -h "$img" 2>/dev/null | grep -Ei 'UUID|Hash Seed|created|write time|mount time|Lifetime' || true
-    echo "--"
-  done >&2
+  {
+    echo "The two images differ. Everything below is what is still varying;"
+    echo "anything NOT listed is already stable."
+    echo
+    # The full metadata, diffed — superblock AND group descriptors, so a
+    # difference that is not a superblock field still gets named. One run of
+    # this should be enough to know what to fix next.
+    echo "--- dumpe2fs diff ---"
+    diff <(dumpe2fs "$IMG_ONE" 2>/dev/null) <(dumpe2fs "$IMG_TWO" 2>/dev/null) || true
+    echo
+    # And where in the file, in case the difference is in data rather than
+    # metadata: the first few differing offsets locate it.
+    echo "--- first differing bytes (offset, then each file's octal byte) ---"
+    cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | head -20 || true
+    echo "differing byte count: $(cmp -l "$IMG_ONE" "$IMG_TWO" 2>/dev/null | wc -l)"
+  } >&2
   fail "the pack is NOT reproducible"
 fi
 
