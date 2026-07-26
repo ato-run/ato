@@ -325,26 +325,7 @@ pub fn derive_build_spec(
         .to_ascii_lowercase();
     let runtime = match rt.normalize() {
         RuntimeType::Web => RuntimeKind::StaticWeb,
-        RuntimeType::Source => {
-            if driver == "node"
-                || lang == "javascript"
-                || lang == "typescript"
-                || probe.has_package_json
-            {
-                RuntimeKind::Node
-            } else if driver == "python"
-                || lang == "python"
-                || probe.has_requirements_txt
-                || probe.has_pyproject
-                || probe.has_py_files
-            {
-                RuntimeKind::Python
-            } else if driver == "static" || probe.has_index_html {
-                RuntimeKind::StaticWeb
-            } else {
-                return Err("source runtime: no node (package.json/driver) or python (requirements.txt/pyproject/driver) detected".into());
-            }
-        }
+        RuntimeType::Source => detect_runtime_kind(&driver, &lang, probe)?,
         other => {
             return Err(format!(
                 "unsupported runtime {other:?} (v1 supports: static web, node source, python source)"
@@ -352,7 +333,207 @@ pub fn derive_build_spec(
         }
     };
 
-    let (base_image, install_cmd) = match runtime {
+    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+
+    Ok(RootfsBuildSpec {
+        runtime,
+        base_image,
+        install_cmd,
+        build_cmd,
+        start_cmd,
+        declared_start_cmd,
+        port,
+        healthcheck,
+        probe_synthesized,
+        supervisor: None,
+    })
+}
+
+/// Where a v1 build places the source in the guest, and therefore the working
+/// directory its launch runs in.
+///
+/// The BUILD decides this, not the author: the v1 manifest has no
+/// working-directory field and should not gain one, because requiring the
+/// author to restate `/app` only creates a way for the manifest to be wrong
+/// about where the builder put things. It is a resolved facet of the Execution
+/// Contract (ADR-015 §4.1 `launch.cwd`), and this constant is the single place
+/// the generated Dockerfile's `WORKDIR` and the init's `cd` agree on it.
+pub const V1_GUEST_WORKING_DIRECTORY: &str = "/app";
+
+/// A buildable rootfs for a `schema_version = "1"` capsule.
+///
+/// The difference from [`RootfsBuildSpec`] that matters is `resolved_argv`.
+/// v0.3 carries a `start_cmd: String` that the init hands to `sh -lc`, so the
+/// guest re-parses it and argument boundaries are whatever the shell decides.
+/// v1's `[run] command` is exact argv (RFC §6.1), and the Execution Contract
+/// commits it as a list — so re-joining it into a shell string here would
+/// destroy the very boundaries the contract promises to have preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RootfsBuildSpecV1 {
+    pub runtime: RuntimeKind,
+    pub base_image: String,
+    pub install_cmd: Option<String>,
+    /// argv the runtime prepends to the authored command.
+    ///
+    /// Empty for every family in the Step-4 subset, and that emptiness is a
+    /// measurement rather than a gap: v1 argv is exact, so the v0.3 bare-`.py`
+    /// normalization (which silently turns `app.py` into `python3 app.py`)
+    /// deliberately does NOT apply — an author who wants an interpreter names
+    /// it. The field exists because a future runtime may genuinely prepend one,
+    /// and the contract must be able to say so.
+    pub runtime_invocation_prefix: Vec<String>,
+    /// The complete argv init execs: `runtime_invocation_prefix` ++ the
+    /// authored `[run] command`.
+    pub resolved_argv: Vec<String>,
+    pub port: u16,
+}
+
+/// Derive a v1 rootfs spec from the authored manifest and a source probe.
+///
+/// Fail-closed on everything the Step-4 subset does not cover — the subset gate
+/// runs first, so a manifest with `[tools]`, `[[build.steps]]` or `[state.*]`
+/// never reaches the runtime detection below.
+pub fn derive_build_spec_v1(
+    m: &capsule::types::manifest_v1::CapsuleManifestV1,
+    probe: &SourceProbe,
+) -> Result<RootfsBuildSpecV1, String> {
+    m.validate_for_interactive_capture()
+        .map_err(|error| error.to_string())?;
+
+    let web = m
+        .web
+        .as_ref()
+        .ok_or("a v1 build needs a [web] surface to serve")?;
+
+    // v1 has no driver/language hints — the tree is the whole declaration.
+    let runtime = detect_runtime_kind("", "", probe)?;
+    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+
+    let authored = &m.run.command;
+    if authored.is_empty() {
+        return Err("[run] command is empty; there is no argv to launch".into());
+    }
+    // Each word is emitted single-quoted into the generated init, so a control
+    // character could break out of the quoting or the heredoc delimiter. Reject
+    // at derivation rather than escaping at emission (fail-closed).
+    for (index, word) in authored.iter().enumerate() {
+        reject_control_chars(&format!("[run] command argv[{index}]"), word)?;
+    }
+
+    let runtime_invocation_prefix: Vec<String> = Vec::new();
+    let resolved_argv = runtime_invocation_prefix
+        .iter()
+        .chain(authored.iter())
+        .cloned()
+        .collect();
+
+    Ok(RootfsBuildSpecV1 {
+        runtime,
+        base_image,
+        install_cmd,
+        runtime_invocation_prefix,
+        resolved_argv,
+        port: web.port,
+    })
+}
+
+/// The init line that launches a v1 capsule: every argv word single-quoted,
+/// which the guest `/bin/sh` parses back into EXACTLY the same argv.
+///
+/// This is the whole reason v1 does not reuse `sh -lc '<joined>'`. Quoting each
+/// word preserves boundaries — `["python3", "app one.py"]` stays two arguments
+/// — whereas joining and re-splitting would turn the space into a separator and
+/// launch a different program than the contract committed to.
+pub(crate) fn launch_argv_line(argv: &[String]) -> String {
+    let words = argv
+        .iter()
+        .map(|word| shell_single_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{words} >/tmp/app.log 2>&1 &")
+}
+
+/// The v1 counterpart of [`build_rootfs_script`]: same acquire → create →
+/// export → init → pack pipeline (shared verbatim through
+/// [`rootfs_pack_script`]), differing only in that the init launches an argv
+/// instead of a shell string, and that there is no build command — the Step-4
+/// subset rejects `[[build.steps]]`, so there is nothing to run.
+pub(crate) fn build_rootfs_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
+    let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    let acquire = format!(
+        r#"cp -a "$ATO_SRC/." "$BUILD/"
+# QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
+cat > "$BUILD/Dockerfile" <<'DOCKER'
+FROM {base}
+WORKDIR {workdir}
+COPY . {workdir}
+RUN /bin/sh -lc {install_q}
+DOCKER
+docker build -q -t "$TAG" "$BUILD" >/dev/null
+"#,
+        base = spec.base_image,
+        workdir = V1_GUEST_WORKING_DIRECTORY,
+        install_q = install_q,
+    );
+    rootfs_pack_script(&PackScriptInputs {
+        tool: "docker",
+        tag_init: "TAG=\"ato-rootfs-$$\"".into(),
+        acquire,
+        agent_prep: String::new(),
+        launch: launch_argv_line(&spec.resolved_argv),
+        init_cwd: V1_GUEST_WORKING_DIRECTORY,
+        port: spec.port,
+        // Cosmetic in the emitted script (it appears in a comment); a v1
+        // capsule declares no readiness probe, and inventing one here would be
+        // a default nobody authored.
+        healthcheck: "/".to_string(),
+        size_mib,
+        extra_mounts: String::new(),
+        extra_prelaunch: String::new(),
+    })
+}
+
+/// Which runtime family a source tree belongs to.
+///
+/// Shared by the v0.3 recipe path and the v1 authoring surface so the two can
+/// never disagree about what "a python capsule" is. `driver`/`language` are the
+/// v0.3 target's explicit hints (lowercased, empty when absent); v1 has no
+/// counterpart for them by design — a v1 manifest declares no runtime, so the
+/// tree is the whole declaration and the probe decides alone.
+pub(crate) fn detect_runtime_kind(
+    driver: &str,
+    language: &str,
+    probe: &SourceProbe,
+) -> Result<RuntimeKind, String> {
+    if driver == "node"
+        || language == "javascript"
+        || language == "typescript"
+        || probe.has_package_json
+    {
+        Ok(RuntimeKind::Node)
+    } else if driver == "python"
+        || language == "python"
+        || probe.has_requirements_txt
+        || probe.has_pyproject
+        || probe.has_py_files
+    {
+        Ok(RuntimeKind::Python)
+    } else if driver == "static" || probe.has_index_html {
+        Ok(RuntimeKind::StaticWeb)
+    } else {
+        Err("source runtime: no node (package.json/driver) or python (requirements.txt/pyproject/driver) detected".into())
+    }
+}
+
+/// The base image a runtime family boots on, and the install step its
+/// dependency manifest implies. Both are RESOLVED values — the builder's
+/// choice, not the author's — which is why the Execution Contract records the
+/// base image by resolved digest rather than by the tag chosen here.
+pub(crate) fn base_image_and_install(
+    runtime: RuntimeKind,
+    probe: &SourceProbe,
+) -> (String, Option<String>) {
+    match runtime {
         RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
         RuntimeKind::Node => (
             "node:20-slim".to_string(),
@@ -373,20 +554,7 @@ pub fn derive_build_spec(
                 "true".to_string()
             }),
         ),
-    };
-
-    Ok(RootfsBuildSpec {
-        runtime,
-        base_image,
-        install_cmd,
-        build_cmd,
-        start_cmd,
-        declared_start_cmd,
-        port,
-        healthcheck,
-        probe_synthesized,
-        supervisor: None,
-    })
+    }
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -2000,6 +2168,146 @@ sync; umount "$MNT"
 mod tests {
     use super::*;
     use capsule::foundation::types::manifest::CapsuleManifest;
+
+    // --- v1 authoring surface ---------------------------------------------------
+
+    const V1_MINIMAL: &str = r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python3", "app.py"]
+
+[web]
+port = 8080
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
+"#;
+
+    fn v1(text: &str) -> capsule::types::manifest_v1::CapsuleManifestV1 {
+        capsule::types::manifest_v1::CapsuleManifestV1::from_toml(text).expect("v1 manifest parses")
+    }
+
+    fn python_probe() -> SourceProbe {
+        SourceProbe {
+            has_py_files: true,
+            ..SourceProbe::default()
+        }
+    }
+
+    #[test]
+    fn a_v1_spec_resolves_the_argv_the_author_wrote() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+
+        assert_eq!(spec.runtime, RuntimeKind::Python);
+        assert_eq!(spec.base_image, "python:3.11-slim");
+        assert_eq!(spec.port, 8080);
+        // Nothing prepended, and that is a measurement rather than a gap.
+        assert!(spec.runtime_invocation_prefix.is_empty());
+        assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
+    }
+
+    /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
+    /// is a shell string that has to exec somehow. v1 argv is exact, so the same
+    /// input must survive untouched — an author who wants an interpreter names
+    /// one, and inventing it here would put a word into the Execution Identity
+    /// that nobody wrote.
+    #[test]
+    fn a_v1_bare_script_argv_is_not_rewritten_the_way_v0_3_rewrites_it() {
+        let bare = V1_MINIMAL.replace(r#"["python3", "app.py"]"#, r#"["app.py"]"#);
+        let spec = derive_build_spec_v1(&v1(&bare), &python_probe()).expect("derives");
+        assert_eq!(spec.resolved_argv, ["app.py"]);
+
+        // The v0.3 path, same input shape, DOES rewrite it — so this is a real
+        // divergence between the two surfaces, not an untested coincidence.
+        let legacy = derive_build_spec(
+            &CapsuleManifest::from_toml(&base_toml().replace("python3 app.py", "app.py"))
+                .expect("v0.3 manifest parses"),
+            &python_probe(),
+        )
+        .expect("derives");
+        assert_eq!(legacy.start_cmd, "python3 app.py");
+    }
+
+    /// The launch line must round-trip through the guest shell to the SAME
+    /// argv, including a word containing a space, a single quote, and an empty
+    /// word. This is asserted by actually running `/bin/sh` over the emitted
+    /// line rather than by eyeballing the quoting.
+    #[cfg(unix)]
+    #[test]
+    fn the_emitted_launch_line_parses_back_to_the_exact_argv() {
+        let argv: Vec<String> = vec![
+            "python3".into(),
+            "my app.py".into(),
+            "it's".into(),
+            String::new(),
+            "--flag=a b".into(),
+        ];
+        let line = launch_argv_line(&argv);
+        let words = line
+            .strip_suffix(" >/tmp/app.log 2>&1 &")
+            .expect("the launch line ends with the redirect");
+
+        // `printf '%s\0'` writes each argument the shell parsed, NUL-separated,
+        // so the boundaries are readable without guessing.
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\0' {words}"))
+            .output()
+            .expect("run /bin/sh");
+        assert!(out.status.success(), "{:?}", out);
+        let mut parsed: Vec<String> = String::from_utf8(out.stdout)
+            .expect("utf8")
+            .split('\0')
+            .map(String::from)
+            .collect();
+        parsed.pop(); // trailing empty piece after the final NUL
+
+        assert_eq!(parsed, argv);
+    }
+
+    /// A newline in an argv word could break out of the single quoting or the
+    /// heredoc delimiter, so it is refused at derivation rather than escaped at
+    /// emission.
+    #[test]
+    fn a_control_character_in_the_argv_is_refused() {
+        let evil = V1_MINIMAL.replace(
+            r#"["python3", "app.py"]"#,
+            r#"["python3", "app.py\nINIT\nrm -rf /"]"#,
+        );
+        let error = derive_build_spec_v1(&v1(&evil), &python_probe()).expect_err("must refuse");
+        assert!(error.contains("newline"), "{error}");
+    }
+
+    /// The generated init and the generated Dockerfile must agree on where the
+    /// source lives — a `WORKDIR` the init does not `cd` into would launch the
+    /// argv from the wrong directory while the contract recorded the other one.
+    #[test]
+    fn the_v1_script_puts_the_source_and_the_launch_in_the_same_directory() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = build_rootfs_script_v1(&spec, 512);
+
+        assert!(
+            script.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
+            "{script}"
+        );
+        // And it launches the argv directly — no `sh -lc` re-parsing.
+        assert!(
+            script.contains("'python3' 'app.py' >/tmp/app.log"),
+            "{script}"
+        );
+        assert!(
+            !script.contains("/bin/sh -lc 'python3 app.py'"),
+            "the v1 init must not re-parse a joined command: {script}"
+        );
+    }
 
     fn base_toml() -> String {
         r#"
