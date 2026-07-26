@@ -50,6 +50,7 @@ pub use validate::{
     CapsuleLockValidationError, ValidationMode, validate_persisted, validate_structural,
 };
 
+use crate::contract::lockfile::lockfile_support::write_atomic_bytes_with_os_lock;
 use crate::error::{CapsuleError, Result};
 
 /// Parses capsule.lock JSON without applying any validation.
@@ -162,18 +163,21 @@ pub fn to_pretty_json(lock: &CapsuleLock) -> Result<String> {
 }
 
 /// Writes a durable pretty capsule.lock artifact after recomputing lock_id.
+///
+/// The write is atomic and OS-locked, through the same
+/// [`write_atomic_bytes_with_os_lock`] the legacy lockfile writer already uses:
+/// temp file in the destination directory, `fsync`, `rename`, then `fsync` of
+/// the parent. A plain `write` here would be a real hazard rather than a
+/// theoretical one — every reader of this file goes through
+/// [`load_verified_from_path`], which validates `lock_id` against the canonical
+/// projection, so a torn write does not read back as a slightly-stale lock: it
+/// reads back as a lock that fails verification, and the workspace loses its
+/// identity until someone regenerates it. Renaming a fully-written temp file
+/// means a concurrent reader sees either the whole old lock or the whole new
+/// one, and a crash mid-write leaves the old one intact.
 pub fn write_pretty_to_path(lock: &CapsuleLock, path: &Path) -> Result<()> {
     let raw = to_pretty_json(lock)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|err| {
-            CapsuleError::Config(format!(
-                "Failed to create parent directory {}: {err}",
-                parent.display()
-            ))
-        })?;
-    }
-    fs::write(path, raw)
-        .map_err(|err| CapsuleError::Config(format!("Failed to write {}: {err}", path.display())))
+    write_atomic_bytes_with_os_lock(path, raw.as_bytes(), "capsule.lock", CapsuleError::Config)
 }
 
 /// Returns canonical persisted bytes for a durable capsule.lock artifact.
@@ -515,6 +519,67 @@ mod tests {
         write_pretty_to_path(&lock, file.path()).expect("write pretty lock");
         let parsed = load_unvalidated_from_path(file.path()).expect("read pretty lock");
         assert!(validate_persisted_strict(&parsed).is_ok());
+    }
+
+    /// The write must not be observable half-done. A reader that catches a
+    /// partial lock does not get a stale-but-valid one — `lock_id` is a hash of
+    /// the document, so a truncated file fails verification and the workspace
+    /// has no usable identity until someone regenerates it.
+    ///
+    /// This asserts the mechanism rather than racing a real reader: an atomic
+    /// write publishes by `rename`, so the destination inode is REPLACED, while
+    /// a plain `write` truncates the existing one in place. Holding the old
+    /// file open across the write distinguishes the two — through the old
+    /// handle the previous bytes are still whole.
+    #[cfg(unix)]
+    #[test]
+    fn writing_a_lock_replaces_the_file_rather_than_truncating_it_in_place() {
+        use std::fs;
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        use super::load_verified_from_path;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("capsule.lock");
+
+        let first = persisted_sample_lock();
+        write_pretty_to_path(&first, &path).expect("write first lock");
+        let before = fs::read_to_string(&path).expect("read first lock");
+        let before_inode = fs::metadata(&path).expect("stat first lock").ino();
+
+        // An open handle to the ORIGINAL file, held across the second write.
+        let mut held = fs::File::open(&path).expect("hold the first lock open");
+
+        let mut second = sample_lock();
+        second
+            .resolution
+            .entries
+            .insert("runtime".to_string(), json!({"kind": "node"}));
+        recompute_lock_id(&mut second).expect("compute lock_id");
+        write_pretty_to_path(&second, &path).expect("write second lock");
+
+        let mut through_old_handle = String::new();
+        held.read_to_string(&mut through_old_handle)
+            .expect("read through the held handle");
+        assert_eq!(
+            through_old_handle, before,
+            "the previous lock must survive intact behind an open handle — an \
+             in-place truncating write would have destroyed it"
+        );
+        assert_ne!(
+            before_inode,
+            fs::metadata(&path).expect("stat second lock").ino(),
+            "an atomic publish renames a new file over the old one, so the \
+             destination inode must change"
+        );
+
+        // And the published bytes are the NEW lock, fully verified.
+        let reloaded = load_verified_from_path(&path).expect("load the published lock");
+        assert_eq!(
+            reloaded.resolution.entries["runtime"],
+            json!({"kind": "node"})
+        );
     }
 
     #[test]
