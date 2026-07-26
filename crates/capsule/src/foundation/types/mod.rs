@@ -7,6 +7,9 @@ pub mod error;
 pub mod identity;
 pub mod license;
 pub mod manifest;
+/// `schema_version = "1"` — the authoring surface an Execution Identity may be
+/// minted from. Deliberately NOT convertible from v0.3 (ADR-015 §1).
+pub mod manifest_v1;
 pub mod oci;
 pub mod orchestration;
 pub mod profile;
