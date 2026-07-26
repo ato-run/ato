@@ -762,12 +762,27 @@ pub struct ExecutionContractV1 {
     pub source: ResolvedSourceContract,
     pub target: ResolvedTargetContract,
     pub runtime: ResolvedArtifactContract,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub dependencies: Vec<ResolvedDependencyContract>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub build_outputs: Vec<ResolvedBuildOutputContract>,
     pub launch: ResolvedLaunchContract,
     pub filesystem: ResolvedFilesystemContract,
     pub policy: ResolvedPolicyContract,
     pub guest_surface: GuestSurfaceContract,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub external_state: Vec<ExternalStateContract>,
 }
 
@@ -874,6 +889,11 @@ pub struct ResolvedLaunchContract {
     pub argv: Vec<String>,
     pub cwd: GuestPath,
     pub process_model_digest: OpaqueContractDigestV1,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub environment: Vec<EnvironmentVariableContract>,
     pub environment_policy_digest: OpaqueContractDigestV1,
     #[serde(
@@ -968,6 +988,11 @@ pub struct ResolvedFilesystemContract {
     pub view_digest: ContentDigest,
     pub topology_digest: OpaqueContractDigestV1,
     pub readonly_layers: Vec<ContentDigest>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub writable_paths: Vec<GuestPath>,
 }
 
@@ -1004,6 +1029,11 @@ pub struct GuestSurfaceContract {
         deserialize_with = "present_not_null"
     )]
     pub port: Option<NonZeroU16>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "present_non_empty_list"
+    )]
     pub features: Vec<String>,
 }
 
@@ -1214,6 +1244,15 @@ impl ExecutionContractV1 {
                     name.to_string(),
                 ));
             }
+        }
+        // REQUIRED and non-empty (ADR-015 §6.3): an execution with no immutable
+        // layer has no filesystem to identify, so an empty list here is not a
+        // capsule with nothing mounted — it is a contract that failed to record
+        // what it is.
+        if self.filesystem.readonly_layers.is_empty() {
+            return Err(ExecutionContractError::UnresolvedField(
+                "filesystem.readonly_layers",
+            ));
         }
         validate_sorted_digests(
             "filesystem.readonly_layers",
@@ -1468,6 +1507,20 @@ fn present_non_empty_string_list<'de, D>(deserializer: D) -> Result<Vec<String>,
 where
     D: serde::Deserializer<'de>,
 {
+    present_non_empty_list(deserializer)
+}
+
+/// The same rule for any element type: an ABSENT optional collection omits its
+/// key, so an explicit `[]` is a second spelling of the same value.
+///
+/// Two spellings of one value would canonicalize to two documents and therefore
+/// two `execution_id`s for one execution — which is the one thing the canonical
+/// form exists to prevent (ADR-015 §6.3).
+fn present_non_empty_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     let list = Vec::deserialize(deserializer)?;
     if list.is_empty() {
         return Err(serde::de::Error::custom(
@@ -1556,6 +1609,106 @@ pub(in crate::contract) fn test_execution_contract(seed: u8) -> ExecutionContrac
 
 #[cfg(test)]
 mod tests {
+
+    /// Every optional identity collection has exactly ONE spelling for absence:
+    /// the key is omitted. `[]` is rejected on the way in and never produced on
+    /// the way out.
+    ///
+    /// Before ADR-015 §6.3 these six serialized `[]` when empty, which is a
+    /// second spelling of the same value — two canonical documents, two
+    /// `execution_id`s, one execution. The rule was applied to code and vectors
+    /// together, before anything minted in production, because afterwards it
+    /// would be a contract version.
+    #[test]
+    fn every_optional_collection_omits_its_key_when_empty() {
+        let mut contract = super::test_execution_contract(1);
+        contract.dependencies.clear();
+        contract.build_outputs.clear();
+        contract.launch.environment.clear();
+        contract.launch.secret_bindings.clear();
+        contract.filesystem.writable_paths.clear();
+        contract.guest_surface.features.clear();
+        contract.external_state.clear();
+        contract.target.observable_features.clear();
+
+        let json = serde_json::to_value(&contract).expect("serialize");
+        for key in ["dependencies", "build_outputs", "external_state"] {
+            assert!(json.get(key).is_none(), "{key} must be omitted when empty");
+        }
+        for (parent, key) in [
+            ("launch", "environment"),
+            ("launch", "secret_bindings"),
+            ("filesystem", "writable_paths"),
+            ("guest_surface", "features"),
+            ("target", "observable_features"),
+        ] {
+            assert!(
+                json[parent].get(key).is_none(),
+                "{parent}.{key} must be omitted when empty"
+            );
+        }
+
+        // And an explicit `[]` on the way back in is refused rather than
+        // normalized — normalizing it is precisely how two languages derive two
+        // ids for one execution.
+        for pointer in [
+            "/dependencies",
+            "/build_outputs",
+            "/external_state",
+            "/launch/environment",
+            "/launch/secret_bindings",
+            "/filesystem/writable_paths",
+            "/guest_surface/features",
+        ] {
+            let mut spelled = json.clone();
+            let (parent, key) = pointer.rsplit_once('/').expect("pointer");
+            let target = if parent.is_empty() {
+                &mut spelled
+            } else {
+                spelled.pointer_mut(parent).expect("parent")
+            };
+            target[key] = serde_json::json!([]);
+            assert!(
+                serde_json::from_value::<ExecutionContractV1>(spelled).is_err(),
+                "an explicit [] at {pointer} must be refused"
+            );
+        }
+    }
+
+    /// `filesystem.readonly_layers` is REQUIRED and non-empty: an execution with
+    /// no immutable layer has no filesystem to identify, so an empty list is a
+    /// contract that failed to record what it is — not a capsule with nothing
+    /// mounted.
+    #[test]
+    fn readonly_layers_must_not_be_empty() {
+        let mut contract = super::test_execution_contract(1);
+        contract.filesystem.readonly_layers.clear();
+        assert!(matches!(
+            contract.validate(),
+            Err(ExecutionContractError::UnresolvedField(
+                "filesystem.readonly_layers"
+            ))
+        ));
+    }
+
+    /// The rule MOVES the identity for a contract with an empty collection —
+    /// which is why it had to land before anything minted in production.
+    #[test]
+    fn omitting_an_empty_collection_changes_the_execution_id() {
+        let populated = super::test_execution_contract(1);
+        let mut emptied = populated.clone();
+        emptied.external_state.clear();
+        assert_ne!(
+            populated.compute_execution_id().unwrap(),
+            emptied.compute_execution_id().unwrap()
+        );
+        // The emptied contract still canonicalizes — it simply says less.
+        let bytes = String::from_utf8(emptied.canonical_bytes().unwrap()).unwrap();
+        assert!(
+            !bytes.contains("external_state"),
+            "the key is gone, not empty: {bytes}"
+        );
+    }
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
