@@ -404,6 +404,20 @@ pub(crate) const PREVIEW_FRAGMENT: &str = "preview.caddy";
 pub(crate) const WIZARD_FRAGMENT: &str = "wizard-hold.caddy";
 /// Domain separator for the generation manifest digest.
 pub(crate) const GENERATION_DOMAIN: &str = "ato.runner-caddy-generation/v1";
+/// The path every generated vhost answers with its own generation identity.
+///
+/// Served by the CADDY ROUTE, never by the app behind it: the question a probe
+/// asks is "which generation is answering for this origin", and an app cannot
+/// answer that — it does not know, and it would still answer after a rollback.
+pub(crate) const GENERATION_MARKER_PATH: &str = "/.well-known/ato/ingress-generation";
+/// Stands in for the marker body while the generation is being hashed.
+///
+/// The identity is derived FROM the rendered routes, so a body containing the
+/// identity cannot also be an input to it. Hashing this fixed token instead
+/// breaks the circle: the digest commits the ROUTES, and the marker is a pure
+/// function of that digest, so committing it would add nothing and could not
+/// terminate.
+const MARKER_PLACEHOLDER: &str = "__ATO_GENERATION_MARKER__";
 
 fn vhost(hostname: &str, listen: &str) -> String {
     format!(
@@ -411,9 +425,67 @@ fn vhost(hostname: &str, listen: &str) -> String {
          \thandle {WELLKNOWN_PATH} {{\n\
          \t\trespond \"ok\" 200\n\
          \t}}\n\
+         \thandle {GENERATION_MARKER_PATH} {{\n\
+         \t\theader Content-Type application/json\n\
+         \t\trespond \"{MARKER_PLACEHOLDER}\" 200\n\
+         \t}}\n\
          \treverse_proxy {listen}\n\
          }}\n"
     )
+}
+
+/// A generation's identity as a probe reads it back.
+///
+/// `id` is the short handle (and the directory name); `digest` is the full
+/// commitment. Both are checked, because a probe that matched only the
+/// truncated handle would accept a generation that merely collided with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GenerationIdentity {
+    pub id: String,
+    pub digest: String,
+}
+
+impl GenerationIdentity {
+    /// The exact JSON body the marker route returns. Serialized from a fixed
+    /// field order rather than a map, so the bytes a probe compares are the
+    /// bytes this produced.
+    pub(crate) fn marker_body(&self) -> String {
+        format!(
+            "{{\"schema\":\"{GENERATION_DOMAIN}\",\"generation_id\":\"{}\",\"generation_digest\":\"{}\"}}",
+            self.id, self.digest
+        )
+    }
+}
+
+/// Substitute the real marker into a rendered generation.
+///
+/// Called AFTER the identity is derived, for the reason
+/// [`MARKER_PLACEHOLDER`] exists. The bytes that reach disk therefore differ
+/// from the bytes that were hashed — by exactly the marker, which the digest
+/// determines — so the manifest records the FINAL lengths while the id records
+/// the routes.
+pub(crate) fn finalize_generation(
+    fragments: &[GeneratedFragment],
+    identity: &GenerationIdentity,
+) -> Vec<GeneratedFragment> {
+    let body = identity.marker_body();
+    fragments
+        .iter()
+        .map(|fragment| GeneratedFragment {
+            file_name: fragment.file_name,
+            content: fragment.content.replace(MARKER_PLACEHOLDER, &body),
+        })
+        .collect()
+}
+
+/// The identity of a rendered generation: the short handle plus the full
+/// commitment.
+pub(crate) fn generation_identity(fragments: &[GeneratedFragment]) -> GenerationIdentity {
+    let full = generation_manifest_hash(fragments);
+    GenerationIdentity {
+        id: full[..16].to_string(),
+        digest: full,
+    }
 }
 
 /// Render the whole generation from the plans.
@@ -500,6 +572,11 @@ pub(crate) const GENERATION_FRAGMENTS: &[&str] = &[PREVIEW_FRAGMENT, WIZARD_FRAG
 /// share one generation: a re-run that changes nothing must not swap the active
 /// generation.
 pub(crate) fn generation_digest(fragments: &[GeneratedFragment]) -> String {
+    generation_manifest_hash(fragments)[..16].to_string()
+}
+
+/// The full manifest hash. [`generation_digest`] is its short handle.
+fn generation_manifest_hash(fragments: &[GeneratedFragment]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(GENERATION_DOMAIN.as_bytes());
     hasher.update(&[0]);
@@ -519,7 +596,7 @@ pub(crate) fn generation_digest(fragments: &[GeneratedFragment]) -> String {
             }
         }
     }
-    hasher.finalize().to_hex()[..16].to_string()
+    hasher.finalize().to_hex().to_string()
 }
 
 /// The ingress slots ato-api should have registered for this runner — the
@@ -972,6 +1049,68 @@ mod tests {
         // Same bytes under a different name.
         let swapped = generation_digest(&[preview("c"), wizard("ab")]);
         assert_ne!(left, swapped, "the fragment NAME is identity-bearing");
+    }
+
+    /// The marker is answered by the Caddy ROUTE, on every origin, and its body
+    /// is substituted only after the identity exists.
+    ///
+    /// An app cannot answer "which generation is serving me" — it does not know,
+    /// and it would keep answering the same thing after a rollback. So the
+    /// question has to be answered by the thing that was actually swapped.
+    #[test]
+    fn every_origin_answers_the_generation_marker_from_the_route() {
+        let plans = derive_slot_plans(&cfg_with_holds()).unwrap();
+        let base = base_hostname(&cfg_with_holds().public_base_url);
+        let rendered = render_generation(&plans, &base);
+        let identity = generation_identity(&rendered);
+        let finalized = finalize_generation(&rendered, &identity);
+
+        for fragment in &finalized {
+            assert!(
+                !fragment.content.contains(MARKER_PLACEHOLDER),
+                "the placeholder must not survive into the published bytes"
+            );
+        }
+        let preview = fragment(&finalized, PREVIEW_FRAGMENT).unwrap();
+        let wizard = fragment(&finalized, WIZARD_FRAGMENT).unwrap();
+        // One marker handler per vhost: base + s0 + s1 in preview, w0 + w1 in
+        // wizard. A generation that answered on only some origins would let a
+        // probe pass while another origin still served the old routes.
+        assert_eq!(preview.content.matches(GENERATION_MARKER_PATH).count(), 3);
+        assert_eq!(wizard.content.matches(GENERATION_MARKER_PATH).count(), 2);
+        assert!(preview.content.contains(&identity.marker_body()));
+        assert!(wizard.content.contains(&identity.marker_body()));
+    }
+
+    /// The identity is derived from the routes, and substituting the marker
+    /// does not change it — that is what makes the derivation terminate.
+    #[test]
+    fn the_identity_commits_the_routes_not_the_marker() {
+        let plans = derive_slot_plans(&cfg_with_holds()).unwrap();
+        let base = base_hostname(&cfg_with_holds().public_base_url);
+        let rendered = render_generation(&plans, &base);
+        let identity = generation_identity(&rendered);
+
+        assert_eq!(identity.id, generation_digest(&rendered));
+        assert_eq!(identity.digest.len(), 64, "the full commitment is kept");
+        assert!(identity.digest.starts_with(&identity.id));
+
+        // Re-deriving from the finalized bytes would be a different value — and
+        // that is precisely why the marker is substituted afterwards rather than
+        // hashed.
+        let finalized = finalize_generation(&rendered, &identity);
+        assert_ne!(generation_digest(&finalized), identity.id);
+
+        // Different routes, different identity.
+        let narrower = render_generation(
+            &derive_slot_plans(&OfficialPreviewConfig {
+                max_slots: 1,
+                ..cfg_with_holds()
+            })
+            .unwrap(),
+            &base,
+        );
+        assert_ne!(generation_identity(&narrower).digest, identity.digest);
     }
 
     /// A base hostname that is legal on its own can become illegal once a slot
