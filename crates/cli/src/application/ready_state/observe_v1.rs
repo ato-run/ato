@@ -20,8 +20,7 @@
 
 use anyhow::{Context, Result};
 use capsule::execution_contract::{
-    ContentDigest, DigestAlgorithm, ExternalStateContract, GuestPath, GuestSurfaceContract,
-    ResolvedTargetContract,
+    ContentDigest, ExternalStateContract, GuestPath, GuestSurfaceContract, ResolvedTargetContract,
 };
 use capsule::execution_contract_finalize::{ExecutionObservationV1, MeasuredEnvValue};
 use capsule::execution_payloads::{
@@ -31,6 +30,7 @@ use capsule::execution_payloads::{
 };
 use capsule::types::manifest_v1::{CapsuleManifestV1, ConfigKindV1};
 use snapshot::docker_import::ResolvedRuntimeArtifact;
+use snapshot::rootfs_builder::ObservedInvocationPrefix;
 
 /// The Ato surface-contract profile a `[web]` capsule serves.
 ///
@@ -38,14 +38,14 @@ use snapshot::docker_import::ResolvedRuntimeArtifact;
 /// it names Ato's own contract, not an application-layer choice the author
 /// makes.
 ///
-/// No production caller yet: `ato build` writing this contract into
-/// `capsule.lock` is ADR-015 step 5. The assembly below is exercised in full by
-/// this module's tests.
-#[allow(dead_code)]
 pub(crate) const WEB_SURFACE_PROTOCOL: &str = "ato.web-surface.v1";
 
 /// Everything measured about one concrete build.
-#[allow(dead_code)]
+///
+/// Completeness is the type's, not a caller's: every field is required, so an
+/// observation that exists at all carries every input `observe_v1` needs. There
+/// is no partially-filled state to count facets in and no `Option` to forget —
+/// a producer that has not measured something cannot construct this.
 pub(crate) struct V1BuildObservation<'a> {
     pub manifest: &'a CapsuleManifestV1,
     /// A1v2 tree hash of the PROJECTED source (control files already withheld).
@@ -60,10 +60,18 @@ pub(crate) struct V1BuildObservation<'a> {
     pub runtime_kind: String,
     /// The base image, resolved to an immutable digest.
     pub runtime: &'a ResolvedRuntimeArtifact,
-    /// argv the runtime prepends to the authored command, if any.
-    pub runtime_invocation_prefix: Vec<String>,
-    /// The composed immutable image the guest boots.
-    pub rootfs: &'a [u8],
+    /// argv the runtime prepends to the authored command — including the
+    /// measured fact that it prepends nothing, which is not the same as nobody
+    /// having looked.
+    pub runtime_invocation_prefix: ObservedInvocationPrefix,
+    /// Blake3 over the composed immutable image the guest boots.
+    ///
+    /// A digest rather than the bytes because the image is an ext4 filesystem
+    /// sized in gigabytes — holding it in memory to hash it would be the
+    /// build's peak allocation, for a value that streams. It must be taken over
+    /// the packed artifact itself; `build_v1::measure_guest_image_digest` is
+    /// the producer.
+    pub guest_image_digest: ContentDigest,
     pub target: ResolvedTargetContract,
     /// The complete argv the runner starts — the authored command after
     /// resolution, which may legitimately carry a runtime prefix (ADR-015 §3).
@@ -83,7 +91,6 @@ const SEALED_WRITABLE_PATHS: &[&str] = &["/run", "/tmp", "/var/tmp"];
 
 /// Assemble the observation. Every facet is set — `into_contract` requires all
 /// of them, and a facet left unset would refuse the mint rather than default.
-#[allow(dead_code)]
 pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV1> {
     // The subset gate has already run, so these are genuinely empty rather than
     // unmeasured: the manifest declares no dependencies, no build outputs and
@@ -93,10 +100,7 @@ pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObser
         .validate_for_interactive_capture()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
-    let rootfs_digest = ContentDigest::new(
-        DigestAlgorithm::Blake3,
-        *blake3::hash(build.rootfs).as_bytes(),
-    );
+    let rootfs_digest = build.guest_image_digest;
 
     let mut environment: Vec<MeasuredEnvValue> = build
         .manifest
@@ -168,7 +172,7 @@ pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObser
         .measured_runtime(build.runtime_kind.clone(), build.runtime.digest)
         .measured_runtime_dynamic(serde_json::to_value(RuntimeDynamicPayloadV1::new(
             build.runtime_kind,
-            build.runtime_invocation_prefix,
+            build.runtime_invocation_prefix.into_words(),
         ))?)
         .measured_dependencies(Vec::new())
         .measured_build_outputs(Vec::new())
@@ -221,7 +225,7 @@ pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObser
 #[cfg(test)]
 mod tests {
     use super::*;
-    use capsule::execution_contract::ExecutionContractV1;
+    use capsule::execution_contract::{DigestAlgorithm, ExecutionContractV1};
 
     fn manifest(extra: &str) -> CapsuleManifestV1 {
         CapsuleManifestV1::from_toml(&format!(
@@ -263,6 +267,12 @@ command = ["true"]
         }
     }
 
+    /// Stand-in for `build_v1::measure_guest_image_digest`, which streams the
+    /// same hash over the packed file.
+    fn guest_image_digest(bytes: &[u8]) -> ContentDigest {
+        ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())
+    }
+
     fn observe(manifest: &CapsuleManifestV1, rootfs: &[u8]) -> ExecutionObservationV1 {
         let runtime = runtime();
         observe_v1(V1BuildObservation {
@@ -271,8 +281,8 @@ command = ["true"]
             excluded_control_files: vec!["capsule.lock".into(), "capsule.toml".into()],
             runtime_kind: "python".into(),
             runtime: &runtime,
-            runtime_invocation_prefix: Vec::new(),
-            rootfs,
+            runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
+            guest_image_digest: guest_image_digest(rootfs),
             target: target(),
             resolved_argv: vec!["python".into(), "-m".into(), "app".into()],
             working_directory: "/app".into(),
@@ -343,8 +353,8 @@ command = ["true"]
             excluded_control_files: vec!["capsule.lock".into(), "capsule.toml".into()],
             runtime_kind: "python".into(),
             runtime: &other,
-            runtime_invocation_prefix: Vec::new(),
-            rootfs: b"rootfs",
+            runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
+            guest_image_digest: guest_image_digest(b"rootfs"),
             target: target(),
             resolved_argv: vec!["python".into(), "-m".into(), "app".into()],
             working_directory: "/app".into(),
@@ -432,8 +442,8 @@ required = true
             excluded_control_files: vec!["capsule.toml".into()],
             runtime_kind: "python".into(),
             runtime: &runtime(),
-            runtime_invocation_prefix: Vec::new(),
-            rootfs: b"rootfs",
+            runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
+            guest_image_digest: guest_image_digest(b"rootfs"),
             target: target(),
             resolved_argv: vec!["python".into()],
             working_directory: "/app".into(),
