@@ -64,14 +64,15 @@ pub(crate) struct V1BuildObservation<'a> {
     /// measured fact that it prepends nothing, which is not the same as nobody
     /// having looked.
     pub runtime_invocation_prefix: ObservedInvocationPrefix,
-    /// Blake3 over the composed immutable image the guest boots.
+    /// What the guest filesystem CONTAINS, as one digest.
     ///
-    /// A digest rather than the bytes because the image is an ext4 filesystem
-    /// sized in gigabytes — holding it in memory to hash it would be the
-    /// build's peak allocation, for a value that streams. It must be taken over
-    /// the packed artifact itself; `build_v1::measure_guest_image_digest` is
-    /// the producer.
-    pub guest_image_digest: ContentDigest,
+    /// Content rather than the ext4 serialization of it, and the difference is
+    /// measured: `mke2fs` stamps every inode it creates with the wall clock and
+    /// ignores `SOURCE_DATE_EPOCH`, so hashing the packed image made a rebuild
+    /// of one program source a different execution. See
+    /// `snapshot::guest_filesystem_digest` for what is committed and what is
+    /// deliberately not.
+    pub filesystem_view_digest: ContentDigest,
     pub target: ResolvedTargetContract,
     /// The complete argv the runner starts — the authored command after
     /// resolution, which may legitimately carry a runtime prefix (ADR-015 §3).
@@ -100,7 +101,7 @@ pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObser
         .validate_for_interactive_capture()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
 
-    let rootfs_digest = build.guest_image_digest;
+    let rootfs_digest = build.filesystem_view_digest;
 
     let mut environment: Vec<MeasuredEnvValue> = build
         .manifest
@@ -267,9 +268,9 @@ command = ["true"]
         }
     }
 
-    /// Stand-in for `build_v1::measure_guest_image_digest`, which streams the
-    /// same hash over the packed file.
-    fn guest_image_digest(bytes: &[u8]) -> ContentDigest {
+    /// Stand-in for `snapshot::guest_filesystem_digest`, which takes the same
+    /// kind of value over the exported rootfs TREE.
+    fn view_digest(bytes: &[u8]) -> ContentDigest {
         ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())
     }
 
@@ -282,7 +283,7 @@ command = ["true"]
             runtime_kind: "python".into(),
             runtime: &runtime,
             runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
-            guest_image_digest: guest_image_digest(rootfs),
+            filesystem_view_digest: view_digest(rootfs),
             target: target(),
             resolved_argv: vec!["python".into(), "-m".into(), "app".into()],
             working_directory: "/app".into(),
@@ -354,7 +355,7 @@ command = ["true"]
             runtime_kind: "python".into(),
             runtime: &other,
             runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
-            guest_image_digest: guest_image_digest(b"rootfs"),
+            filesystem_view_digest: view_digest(b"rootfs"),
             target: target(),
             resolved_argv: vec!["python".into(), "-m".into(), "app".into()],
             working_directory: "/app".into(),
@@ -443,7 +444,7 @@ required = true
             runtime_kind: "python".into(),
             runtime: &runtime(),
             runtime_invocation_prefix: ObservedInvocationPrefix::observed_none(),
-            guest_image_digest: guest_image_digest(b"rootfs"),
+            filesystem_view_digest: view_digest(b"rootfs"),
             target: target(),
             resolved_argv: vec!["python".into()],
             working_directory: "/app".into(),
