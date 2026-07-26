@@ -34,28 +34,28 @@
 //! hardware in a follow-up). The #1088 acceptance runs through the EXISTING
 //! [`DisposableAcceptanceLifecycle`] trait and [`RunningSnapshotAcceptance::accept`].
 //!
-//! **External state stays deferred (warm-cache-only slice):** eligibility enters
-//! through [`EligibilitySource`], which must fail closed for any capsule that
-//! requires External State or restore-time secret bindings (#1090). Wiring the
-//! real [`VerifiedRunningSnapshotEligibility::analyze_execution_contract`] over a
-//! finalized `ExecutionContractEnvelopeV1` in `produce_build` is a later PR-2
-//! slice; this slice constructs no production eligibility and no
-//! `TrustedProductionStateRef` / `VerifiedCaptureTopology`.
+//! **Eligibility** enters through [`EligibilitySource`], which must fail closed
+//! for any capsule that requires External State or restore-time secret bindings
+//! (#1090). In prod that is [`crate::claim_eligibility::ClaimContractEligibility`],
+//! which mints the proof from the Execution Contract the control plane pinned on
+//! the claim — see its module doc for exactly which guarantee that is, and which
+//! it deliberately is not.
+//!
+//! Every seam now has a production implementation, and
+//! `process_interactive_capture_job` assembles them:
+//! [`ControlSource`] → [`crate::wizard_api::ApiControlSource`] (control poll,
+//! candidate/acceptance reports, and the lease renew that rides all three),
+//! [`CaptureAction`] → [`crate::guest_capture::GuestCaptureAction`] (pause →
+//! snapshot → resume → seal against a live held guest), and the acceptance
+//! lifecycle → `snapshot::disposable_lifecycle::BackendDisposableLifecycle`. The
+//! orchestration below stays pure and is still exercised in full by this
+//! module's own KVM-free unit tests.
 //!
 //! **Dead-code allow (scoped to this module):** `snapshot-builder` is a *binary*
-//! crate, so `pub` items count as dead unless reached from `fn main`. The
-//! production consumer — the live boot-to-hold session in
-//! `process_interactive_capture_job` — is a later PR-2 slice, so nothing in the
-//! non-test binary constructs a [`HoldPhase`] yet. The orchestration is exercised
-//! in full by this module's own KVM-free unit tests. The allow is intentionally
-//! module-scoped (not crate-wide) and removed when the live wiring lands.
-//!
-//! Slice 2 filled in the seam that needs no guest: [`ControlSource`] now has a
-//! production implementation ([`crate::wizard_api::ApiControlSource`], control
-//! poll + lease renew over the api). [`CaptureAction`] and [`EligibilitySource`]
-//! still have none — those need `crates/snapshot`'s pause/snapshot/resume path
-//! and a finalized `ExecutionContractEnvelopeV1`, neither of which is reachable
-//! from here yet.
+//! crate, so `pub` items count as dead unless reached from `fn main`. Several
+//! items here exist for the seams' contracts (and are exercised by the tests
+//! below) without being named from the wiring; the allow is module-scoped
+//! rather than crate-wide.
 #![allow(dead_code)]
 
 use std::time::Duration;
@@ -67,6 +67,7 @@ use snapshot::acceptance::{
 };
 
 use crate::wizard_wire::{
+    AcceptanceReceipt, AcceptanceReceiptSchema, AcceptanceStatus, CandidateAcceptanceRequest,
     CandidateReportRequest, ControlDirective, ControlResponse, Fencing4, TerminalAckReason,
     WizardFailureStage,
 };
@@ -109,6 +110,29 @@ pub trait ControlSource: LeaseKeepalive {
     /// spin until the TTL and then ack. Both are lies; [`ControlFault`] is the
     /// truth.
     fn poll(&mut self, observed_capture_epoch: u64) -> Result<ControlResponse, ControlFault>;
+
+    /// §3.6 — report the candidate this hold just sealed.
+    ///
+    /// On the SAME seam as the poll, and for the same reason the lease is
+    /// ([`LeaseKeepalive`]'s doc): report and poll are two calls on ONE claim,
+    /// fenced by one tuple and paced by one lease driver. Splitting them would
+    /// give the hold two independent notions of whether that claim is still
+    /// alive.
+    ///
+    /// The implementation supplies the epoch↔candidate pairing the server
+    /// cross-checks (§1.2) from what the control channel actually delivered —
+    /// [`HoldPhase`] never restates it, because a pairing restated by the party
+    /// being checked proves nothing.
+    fn report_candidate(&mut self, report: &CandidateReportRequest) -> Result<(), ControlFault>;
+
+    /// §3.7 — report the acceptance outcome of the candidate last reported.
+    ///
+    /// NOT job-terminal: acceptance is a per-candidate endpoint, and with the
+    /// source alive the attempt returns to holding either way.
+    fn report_acceptance(
+        &mut self,
+        request: &CandidateAcceptanceRequest,
+    ) -> Result<(), ControlFault>;
 }
 
 /// Keeping the claim's lease alive WITHOUT polling for a directive.
@@ -603,19 +627,24 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         });
                     };
 
-                    let mut lease = HoldLease::new(&mut *self.control);
-
-                    // (4) Firecracker-concrete capture for this epoch.
-                    let captured = self.capture.capture(epoch, &candidate_id, &mut lease);
-                    // The lease's verdict outranks the capture's. A backend that
-                    // was told the lease is gone and produced a candidate anyway
-                    // has produced one nobody can report: every call that would
-                    // carry it is a 409, and §3.8 has no ack for a dead lease.
-                    if let Some(fault) = lease.fault() {
-                        return Ok(HoldTermination::TornDownWithoutAck {
-                            failure_reason: fault.message.clone(),
-                        });
-                    }
+                    // (4) Firecracker-concrete capture for this epoch. The lease
+                    // is scoped to the step so the control seam is free again
+                    // afterwards — the §3.6 report rides the same seam.
+                    let captured = {
+                        let mut lease = HoldLease::new(&mut *self.control);
+                        let captured = self.capture.capture(epoch, &candidate_id, &mut lease);
+                        // The lease's verdict outranks the capture's. A backend
+                        // that was told the lease is gone and produced a
+                        // candidate anyway has produced one nobody can report:
+                        // every call that would carry it is a 409, and §3.8 has
+                        // no ack for a dead lease.
+                        if let Some(fault) = lease.fault() {
+                            return Ok(HoldTermination::TornDownWithoutAck {
+                                failure_reason: fault.message.clone(),
+                            });
+                        }
+                        captured
+                    };
                     let held = match captured {
                         Ok(held) => held,
                         Err(err) => {
@@ -632,6 +661,34 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     // Record the captured epoch (ADR-008): a later return to
                     // holding must not let a stale/duplicate command re-capture it.
                     last_captured_epoch = Some(epoch);
+
+                    // (5) §3.6 BEFORE the acceptance run, not after it. Three
+                    // reasons, and the first two are correctness:
+                    //
+                    // - §3.7 refuses an outcome for a candidate that was never
+                    //   reported ("only a reported (captured) candidate can
+                    //   carry an acceptance outcome"), so a report deferred
+                    //   until acceptance finished would make the REJECTED branch
+                    //   unreportable — the one branch the author most needs to
+                    //   see;
+                    // - the report is what un-quiesces the attempt server-side,
+                    //   and until it lands the author's preview stays drained
+                    //   for the whole (minutes-long) acceptance run;
+                    // - the api models that window as its own state
+                    //   (`validating`), which only exists if this call is what
+                    //   opens it.
+                    let report = self.candidate_report(epoch, &held);
+                    if let Err(fault) = self.control.report_candidate(&report) {
+                        // No ack, on the same rule as any other fault on this
+                        // channel: a report that could not land means the server
+                        // does not know this candidate exists, and the reasons a
+                        // report fails (fenced, superseded epoch, an exchange
+                        // that broke the contract) are the reasons a builder may
+                        // not assert a job-terminal state either.
+                        return Ok(HoldTermination::TornDownWithoutAck {
+                            failure_reason: format!("candidate report: {}", fault.message),
+                        });
+                    }
 
                     // Fresh eligibility proof to seed accept() (it consumes the
                     // proof by value); re-analysis on later captures fails closed.
@@ -653,30 +710,55 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     // `total_deadline` is minutes, which is longer than a lease
                     // window, so an unwrapped run routinely finishes on a lease
                     // that died under it.
-                    let run = RunningSnapshotAcceptance::accept(
-                        &mut LeaseKeptLifecycle {
-                            inner: &mut *self.lifecycle,
-                            lease: &mut lease,
-                        },
-                        eligibility,
-                        &self.acceptance_config,
-                        self.cancellation,
-                        self.clock,
-                    )?;
-                    // Again the lease's verdict first: a run that was refused
-                    // phase-by-phase because the lease died reports as a
-                    // rejection, and a rejection is an ACK — exactly the claim a
-                    // builder with no lease may not make.
-                    if let Some(fault) = lease.fault() {
+                    let run = {
+                        let mut lease = HoldLease::new(&mut *self.control);
+                        let run = RunningSnapshotAcceptance::accept(
+                            &mut LeaseKeptLifecycle {
+                                inner: &mut *self.lifecycle,
+                                lease: &mut lease,
+                            },
+                            eligibility,
+                            &self.acceptance_config,
+                            self.cancellation,
+                            self.clock,
+                        )?;
+                        // Again the lease's verdict first: a run that was refused
+                        // phase-by-phase because the lease died reports as a
+                        // rejection, and a rejection is an ACK — exactly the claim
+                        // a builder with no lease may not make.
+                        if let Some(fault) = lease.fault() {
+                            return Ok(HoldTermination::TornDownWithoutAck {
+                                failure_reason: fault.message.clone(),
+                            });
+                        }
+                        run
+                    };
+
+                    // (6) §3.7 — the verdict for THIS candidate, accepted or
+                    // rejected. Sent on both branches: a rejected candidate that
+                    // is never told to the server leaves the author's wizard
+                    // showing a validation that is still running, when in fact it
+                    // finished and failed.
+                    let acceptance = match acceptance_request(&self.fencing, epoch, &run) {
+                        Ok(request) => request,
+                        Err(reason) => {
+                            // The run happened; its receipt could not be put on
+                            // the wire. Ending the attempt fail-closed is the
+                            // honest outcome — the alternative is holding on with
+                            // a candidate whose verdict nobody will ever hear.
+                            return Ok(HoldTermination::FailedClosed {
+                                failure_reason: reason,
+                            });
+                        }
+                    };
+                    if let Err(fault) = self.control.report_acceptance(&acceptance) {
                         return Ok(HoldTermination::TornDownWithoutAck {
-                            failure_reason: fault.message.clone(),
+                            failure_reason: format!("candidate acceptance: {}", fault.message),
                         });
                     }
 
                     if run.is_accepted() {
-                        return Ok(HoldTermination::Accepted {
-                            report: self.candidate_report(epoch, &held),
-                        });
+                        return Ok(HoldTermination::Accepted { report });
                     }
 
                     // Acceptance failed. ADR-012 branch on source availability.
@@ -696,7 +778,7 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
         }
     }
 
-    /// Build the §3.6 candidate report for an accepted capture, echoing the
+    /// Build the §3.6 candidate report for a sealed capture, echoing the
     /// attempt's FENCING-4 identity and the adopted `capture_epoch`.
     fn candidate_report(&self, capture_epoch: u64, held: &HeldCapture) -> CandidateReportRequest {
         CandidateReportRequest {
@@ -710,6 +792,63 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
             source_lost: held.source_lost,
         }
     }
+}
+
+/// Build the §3.7 acceptance body for a finished acceptance run.
+///
+/// The receipt travels VERBATIM: §3.7's envelope is deliberately opaque
+/// (`receipt_schema` + an object whose payload the wire does not pin), so the
+/// run's own `AcceptanceReceiptV1` is serialized as-is rather than projected
+/// onto a hand-picked subset. A projection is a second definition of what was
+/// verified, and the one thing the receipt exists to be is the record of what
+/// actually ran.
+///
+/// `Err` when the receipt cannot be represented on the wire — which the §3.7
+/// envelope's "is an object" rule makes a real (if remote) possibility, and a
+/// silently-empty receipt would be an accepted candidate with no evidence.
+fn acceptance_request(
+    fencing: &Fencing4,
+    capture_epoch: u64,
+    run: &snapshot::acceptance::AcceptanceRun,
+) -> Result<CandidateAcceptanceRequest, String> {
+    let (status, acceptance_receipt, failure_reason) = if run.is_accepted() {
+        let value = serde_json::to_value(&run.receipt)
+            .map_err(|e| format!("serialize the acceptance receipt: {e}"))?;
+        let serde_json::Value::Object(receipt) = value else {
+            return Err("acceptance receipt is not a JSON object".to_string());
+        };
+        (
+            AcceptanceStatus::Accepted,
+            Some(AcceptanceReceipt {
+                receipt_schema: AcceptanceReceiptSchema,
+                receipt,
+            }),
+            None,
+        )
+    } else {
+        (
+            AcceptanceStatus::Rejected,
+            None,
+            Some(
+                run.failure()
+                    .map(|failure| failure.to_string())
+                    .unwrap_or_else(|| "acceptance rejected".to_string()),
+            ),
+        )
+    };
+    let request = CandidateAcceptanceRequest {
+        submission_attempt_id: fencing.submission_attempt_id.clone(),
+        worker_claim_id: fencing.worker_claim_id.clone(),
+        capture_epoch,
+        status,
+        acceptance_receipt,
+        failure_reason,
+    };
+    // The §3.7 required-by-refinement rules are the api's too, so a body that
+    // cannot pass them is caught here rather than spent as a round trip that
+    // comes back 400 with the candidate's verdict still untold.
+    request.validate()?;
+    Ok(request)
 }
 
 #[cfg(test)]
@@ -907,6 +1046,18 @@ mod tests {
         advance_per_poll: Duration,
         keepalives: usize,
         lose_lease_after: Option<usize>,
+        /// Every §3.6/§3.7 call, in the order it was made — the ordering
+        /// between them is a wire rule, so it is recorded rather than counted.
+        wire: Vec<WireCall>,
+        refuse_report: bool,
+        refuse_acceptance: bool,
+    }
+
+    /// A recorded builder→api call on the reporting half of the seam.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum WireCall {
+        Candidate(CandidateReportRequest),
+        Acceptance(CandidateAcceptanceRequest),
     }
 
     impl ScriptedControl {
@@ -919,6 +1070,9 @@ mod tests {
                 advance_per_poll: Duration::ZERO,
                 keepalives: 0,
                 lose_lease_after: None,
+                wire: Vec::new(),
+                refuse_report: false,
+                refuse_acceptance: false,
             }
         }
 
@@ -928,13 +1082,9 @@ mod tests {
             responses: Vec<ControlResponse>,
         ) -> Self {
             Self {
-                responses,
-                idx: 0,
-                polls: 0,
                 clock: Some(clock),
                 advance_per_poll: per_poll,
-                keepalives: 0,
-                lose_lease_after: None,
+                ..Self::new(responses)
             }
         }
 
@@ -942,6 +1092,39 @@ mod tests {
         fn losing_the_lease_after(mut self, n: usize) -> Self {
             self.lose_lease_after = Some(n);
             self
+        }
+
+        /// The §3.6 report is refused — a superseded epoch, or a claim that died
+        /// while the capture was sealing.
+        fn refusing_the_candidate_report(mut self) -> Self {
+            self.refuse_report = true;
+            self
+        }
+
+        /// The §3.7 acceptance is refused.
+        fn refusing_the_acceptance_report(mut self) -> Self {
+            self.refuse_acceptance = true;
+            self
+        }
+
+        fn candidate_reports(&self) -> Vec<&CandidateReportRequest> {
+            self.wire
+                .iter()
+                .filter_map(|call| match call {
+                    WireCall::Candidate(report) => Some(report),
+                    WireCall::Acceptance(_) => None,
+                })
+                .collect()
+        }
+
+        fn acceptance_reports(&self) -> Vec<&CandidateAcceptanceRequest> {
+            self.wire
+                .iter()
+                .filter_map(|call| match call {
+                    WireCall::Acceptance(request) => Some(request),
+                    WireCall::Candidate(_) => None,
+                })
+                .collect()
         }
     }
 
@@ -966,6 +1149,32 @@ mod tests {
             let i = self.idx.min(self.responses.len() - 1);
             self.idx += 1;
             Ok(self.responses[i].clone())
+        }
+
+        fn report_candidate(
+            &mut self,
+            report: &CandidateReportRequest,
+        ) -> Result<(), ControlFault> {
+            self.wire.push(WireCall::Candidate(report.clone()));
+            if self.refuse_report {
+                return Err(ControlFault {
+                    message: "fenced: superseded capture epoch".to_string(),
+                });
+            }
+            Ok(())
+        }
+
+        fn report_acceptance(
+            &mut self,
+            request: &CandidateAcceptanceRequest,
+        ) -> Result<(), ControlFault> {
+            self.wire.push(WireCall::Acceptance(request.clone()));
+            if self.refuse_acceptance {
+                return Err(ControlFault {
+                    message: "fenced: claim is no longer active".to_string(),
+                });
+            }
+            Ok(())
         }
     }
 
@@ -993,6 +1202,20 @@ mod tests {
                     message: "fenced: claim is no longer active".to_string(),
                 }),
             }
+        }
+
+        fn report_candidate(
+            &mut self,
+            _report: &CandidateReportRequest,
+        ) -> Result<(), ControlFault> {
+            Ok(())
+        }
+
+        fn report_acceptance(
+            &mut self,
+            _request: &CandidateAcceptanceRequest,
+        ) -> Result<(), ControlFault> {
+            Ok(())
         }
     }
 
@@ -1301,6 +1524,193 @@ mod tests {
             }
             other => panic!("expected Accepted, got {other:?}"),
         }
+    }
+
+    // ── §3.6 / §3.7 reporting ───────────────────────────────────────────────
+
+    /// The candidate is reported BEFORE the acceptance run, and its verdict
+    /// after — in that order, on the wire.
+    ///
+    /// The order is not cosmetic. §3.7 refuses an outcome for a candidate that
+    /// was never reported, and until §3.6 lands the attempt is still quiesced
+    /// server-side — so a report deferred until after acceptance would leave the
+    /// author's preview drained for the whole (minutes-long) run and make the
+    /// rejected branch unreportable entirely.
+    #[test]
+    fn the_candidate_is_reported_before_its_acceptance_verdict() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_1", true)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert!(matches!(outcome, HoldTermination::Accepted { .. }));
+        assert!(
+            matches!(
+                control.wire.as_slice(),
+                [WireCall::Candidate(_), WireCall::Acceptance(_)]
+            ),
+            "expected exactly one §3.6 then one §3.7, got {:?}",
+            control.wire
+        );
+        let report = control.candidate_reports()[0];
+        assert_eq!(report.candidate_id, "cand_1");
+        assert_eq!(report.capture_epoch, 1);
+        let acceptance = control.acceptance_reports()[0];
+        assert_eq!(acceptance.status, AcceptanceStatus::Accepted);
+        assert_eq!(acceptance.capture_epoch, 1);
+        let receipt = acceptance
+            .acceptance_receipt
+            .as_ref()
+            .expect("an accepted candidate carries its receipt");
+        assert!(
+            !receipt.receipt.is_empty(),
+            "the receipt travels verbatim, not as an empty envelope"
+        );
+        acceptance
+            .validate()
+            .expect("acceptance body is wire-valid");
+    }
+
+    /// A candidate the verifier REJECTED is still reported, and its rejection is
+    /// told to the server before the hold goes back to holding.
+    ///
+    /// The author is watching a wizard that shows `validating`. Returning to the
+    /// hold without saying anything leaves that spinner running against a
+    /// verification that already finished and failed.
+    #[test]
+    fn a_rejected_candidate_reports_its_rejection_and_keeps_holding() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // Capture once, then hold; the TTL ends the attempt after the rejection.
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(11 * 60),
+            vec![capture(1, "cand_1", true), hold(false)],
+        );
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(7)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "a rejection with the source alive returns to holding, not to a terminal state: {outcome:?}"
+        );
+        assert_eq!(control.candidate_reports().len(), 1);
+        let acceptance = control.acceptance_reports();
+        assert_eq!(acceptance.len(), 1);
+        assert_eq!(acceptance[0].status, AcceptanceStatus::Rejected);
+        assert!(
+            acceptance[0].acceptance_receipt.is_none(),
+            "§3.7: a rejection carries no receipt"
+        );
+        assert!(
+            acceptance[0]
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.is_empty()),
+            "a rejection says why"
+        );
+    }
+
+    /// A §3.6 report the server refuses ends the hold with NO ack — and with NO
+    /// acceptance run.
+    ///
+    /// Verifying a candidate the server does not know about could only produce a
+    /// verdict about nothing: §3.7 names the candidate in its PATH, so there is
+    /// no endpoint the outcome could be sent to. Spending a disposable restore
+    /// on it would burn minutes of the author's hold for a result that can never
+    /// leave the process.
+    #[test]
+    fn a_refused_candidate_report_ends_the_hold_before_acceptance_and_without_an_ack() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control =
+            ScriptedControl::new(vec![capture(1, "cand_1", true)]).refusing_the_candidate_report();
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::TornDownWithoutAck { .. }),
+            "expected a torn-down hold, got {outcome:?}"
+        );
+        assert_eq!(
+            outcome.terminal_ack_reason(),
+            None,
+            "a builder that could not report its candidate may not assert a job-terminal state"
+        );
+        assert_eq!(
+            lifecycle.executes, 0,
+            "no seal_at argv may run for a candidate the server refused"
+        );
+        assert!(
+            control.acceptance_reports().is_empty(),
+            "and no verdict may be sent about it"
+        );
+    }
+
+    /// A §3.7 report the server refuses ends the hold the same way — no ack.
+    #[test]
+    fn a_refused_acceptance_report_tears_down_without_an_ack() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control =
+            ScriptedControl::new(vec![capture(1, "cand_1", true)]).refusing_the_acceptance_report();
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(outcome.terminal_ack_reason(), None, "{outcome:?}");
     }
 
     // ── (iii) TTL/deadline reached → attempt_ended, no capture ──────────────

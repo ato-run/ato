@@ -27,11 +27,6 @@
 //! forgotten relay cannot outlive the hold that owns it and keep a port bound
 //! against the next one.
 
-// Constructed by the job-loop wiring that boots a hold; that arm is the next
-// slice, and the lane stays OFF until then (`interactive_capture` is not
-// advertised on the claim). The tests below exercise every item for real.
-#![allow(dead_code)]
-
 use std::io::{self};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
@@ -44,7 +39,6 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// A running relay: `listen` -> the held guest.
 pub struct HoldIngress {
     listen: SocketAddr,
-    upstream: String,
     stopping: Arc<AtomicBool>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -79,7 +73,6 @@ impl HoldIngress {
 
         Ok(Self {
             listen: bound,
-            upstream: upstream.to_string(),
             stopping,
             accept_thread: Some(accept_thread),
         })
@@ -88,11 +81,6 @@ impl HoldIngress {
     /// The address actually bound (useful when `listen` asked for port 0).
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen
-    }
-
-    /// The guest address this relay fronts.
-    pub fn upstream(&self) -> &str {
-        &self.upstream
     }
 
     /// Stop accepting and wait for the accept loop to end.
