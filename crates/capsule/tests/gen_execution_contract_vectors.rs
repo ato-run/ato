@@ -706,6 +706,45 @@ fn regenerate_shared_vectors() {
         "explicit empty array is a non-canonical spelling of an absent launch.secret_bindings; only key omission is canonical",
         &|v| v["launch"]["secret_bindings"] = json!([]),
     );
+    // ADR-015 §6.3 extended the one-spelling-for-absence rule to every optional
+    // identity collection. Each of these was previously accepted AND serialized
+    // as `[]`, which is a second spelling of the same value — two documents, two
+    // execution_ids, one execution.
+    invalid(
+        "invalid-empty-dependencies",
+        "explicit empty array is a non-canonical spelling of an absent dependencies; only key omission is canonical",
+        &|v| v["dependencies"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-build-outputs",
+        "explicit empty array is a non-canonical spelling of an absent build_outputs; only key omission is canonical",
+        &|v| v["build_outputs"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-environment",
+        "explicit empty array is a non-canonical spelling of an absent launch.environment; only key omission is canonical",
+        &|v| v["launch"]["environment"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-writable-paths",
+        "explicit empty array is a non-canonical spelling of an absent filesystem.writable_paths; only key omission is canonical",
+        &|v| v["filesystem"]["writable_paths"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-features",
+        "explicit empty array is a non-canonical spelling of an absent guest_surface.features; only key omission is canonical",
+        &|v| v["guest_surface"]["features"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-external-state",
+        "explicit empty array is a non-canonical spelling of an absent external_state; only key omission is canonical",
+        &|v| v["external_state"] = json!([]),
+    );
+    invalid(
+        "invalid-empty-readonly-layers",
+        "filesystem.readonly_layers is REQUIRED and non-empty: an execution with no immutable layer has no filesystem to identify",
+        &|v| v["filesystem"]["readonly_layers"] = json!([]),
+    );
     invalid(
         "invalid-relative-cwd",
         "a relative launch.cwd is not a canonical guest path (must be absolute)",
@@ -858,7 +897,7 @@ fn regenerate_shared_vectors() {
         execution_id_formula: "\"blake3:\" + lowercase_hex(BLAKE3(UTF8(domain_separator_utf8) || 0x00 || JCS(contract)))".to_string(),
         jcs: "RFC 8785 (JSON Canonicalization Scheme)".to_string(),
         numbers: "v1 contracts contain only integer numbers: the sole JSON number is guest_surface.port, a nonzero integer in 1..=65535 (0 is rejected fail-closed). No fractional or exponent literals ever appear in a valid contract, so implementations face no RFC 8785 number-serialization ambiguity beyond small integers.".to_string(),
-        optional_fields: "Optional identity fields (target.libc, target.observable_features, launch.secret_bindings, guest_surface.port) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.".to_string(),
+        optional_fields: "Optional identity fields (target.libc, target.observable_features, guest_surface.port, and every optional collection: dependencies, build_outputs, launch.environment, launch.secret_bindings, filesystem.writable_paths, guest_surface.features, external_state) have exactly one canonical spelling for absence: the key is omitted from the JSON entirely. Explicit null and explicit-empty collections ({} / []) are non-canonical spellings of absence and MUST be rejected before hashing; implementations must never silently normalize them to the omitted form, or semantically identical input would derive different execution_ids across languages. Pinned by the invalid-null-* and invalid-empty-* vectors.".to_string(),
         opaque_digests: "The opaque sub-contract digest fields (source.projection_digest, runtime.dynamic_contract_digest, build_outputs[].projection_digest, launch.process_model_digest, launch.environment_policy_digest, launch.environment[].value_digest, filesystem.topology_digest, policy.network_digest, policy.capability_digest, policy.filesystem_digest) are ALWAYS blake3: their preimage is fixed by v1 as blake3(UTF8(domain) || 0x00 || JCS(payload)) under one of the frozen domains ato.source-projection-contract/v1, ato.runtime-dynamic-contract/v1, ato.build-output-projection/v1, ato.process-model-contract/v1, ato.environment-policy/v1, ato.environment-value/v1, ato.filesystem-topology/v1, ato.network-policy/v1, ato.capability-policy/v1, ato.filesystem-policy/v1. The algorithm is not a producer choice: a sha256-spelled value is NOT a valid opaque sub-contract digest and MUST be rejected before hashing. Only the payload schema behind each digest is versioned separately from v1 (RFC 4.5); the algorithm, domain, and preimage rule are frozen. Pinned by the invalid-sha256-*-digest vectors.".to_string(),
         guest_path_ordering: "Guest-path lists (filesystem.writable_paths) are sorted segment-wise, and WITHIN each segment by UTF-8 byte lexicographic order (equivalently Unicode code-point order). TypeScript implementations MUST compare UTF-8 bytes, NOT UTF-16 code units — the two orders diverge for astral-plane characters: e.g. U+E000 precedes U+10000 by UTF-8/code point, but follows it by UTF-16 (the astral char's lead surrogate U+D800 sorts before the single unit U+E000). Guest paths also reject every Unicode control character (char::is_control: the C0 range incl. NUL, DEL, and the C1 range U+0080..U+009F), not only C0/DEL. Pinned by guest-path-utf8-order (valid, correctly ordered), invalid-guest-path-utf16-order (same pair reversed into UTF-16 order), and invalid-c1-control-target (U+0085 NEL).".to_string(),
         baseline: "baseline".to_string(),
