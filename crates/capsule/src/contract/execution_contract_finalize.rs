@@ -581,6 +581,101 @@ impl ExecutionObservationV1 {
         })
     }
 
+    /// The first facet that is MEASURED and disagrees with `expected`, ignoring
+    /// facets that are not measured yet.
+    ///
+    /// Deliberately tolerant of an incomplete observation: its whole purpose is
+    /// to surface drift that is already provable, before completeness is
+    /// demanded.
+    fn first_measured_disagreement(
+        &self,
+        expected: &ExecutionContractV1,
+    ) -> Result<Option<String>, FinalizationError> {
+        if let Some(digest) = self.source_digest
+            && digest != expected.source.digest
+        {
+            return Ok(Some("source.digest".to_string()));
+        }
+        if let Some(payload) = self.source_projection_payload.as_ref()
+            && self.commit(
+                "source.projection_digest",
+                OpaqueContractDomainV1::SourceProjection,
+                Some(payload),
+            )? != expected.source.projection_digest
+        {
+            return Ok(Some("source.projection_digest".to_string()));
+        }
+        if let Some(target) = self.target.as_ref()
+            && *target != expected.target
+        {
+            return Ok(Some("target".to_string()));
+        }
+        if let Some(kind) = self.runtime_kind.as_ref()
+            && *kind != expected.runtime.kind
+        {
+            return Ok(Some("runtime".to_string()));
+        }
+        if let Some(digest) = self.runtime_digest
+            && digest != expected.runtime.digest
+        {
+            return Ok(Some("runtime".to_string()));
+        }
+        if let Some(dependencies) = self.dependencies.as_ref() {
+            let measured: Vec<ResolvedDependencyContract> = dependencies
+                .iter()
+                .map(|d| ResolvedDependencyContract {
+                    name: d.name.clone(),
+                    derivation_digest: d.derivation_digest,
+                    output_digest: d.output_digest,
+                })
+                .collect();
+            if measured != expected.dependencies {
+                return Ok(Some("dependencies".to_string()));
+            }
+        }
+        if let Some(argv) = self.launch_argv.as_ref()
+            && *argv != expected.launch.argv
+        {
+            return Ok(Some("launch.argv".to_string()));
+        }
+        if let Some(cwd) = self.launch_cwd.as_ref()
+            && *cwd != expected.launch.cwd
+        {
+            return Ok(Some("launch.argv".to_string()));
+        }
+        if let Some(bindings) = self.secret_bindings.as_ref()
+            && *bindings != expected.launch.secret_bindings
+        {
+            return Ok(Some("launch.secret_bindings".to_string()));
+        }
+        if let Some(digest) = self.filesystem_view_digest
+            && digest != expected.filesystem.view_digest
+        {
+            return Ok(Some("filesystem.view_digest".to_string()));
+        }
+        if let Some(layers) = self.filesystem_readonly_layers.as_ref()
+            && *layers != expected.filesystem.readonly_layers
+        {
+            return Ok(Some("filesystem.readonly_layers".to_string()));
+        }
+        if let Some(paths) = self.filesystem_writable_paths.as_ref()
+            && *paths != expected.filesystem.writable_paths
+        {
+            return Ok(Some("filesystem.writable_paths".to_string()));
+        }
+        if let Some(surface) = self.guest_surface.as_ref()
+            && *surface != expected.guest_surface
+        {
+            return Ok(Some("guest_surface".to_string()));
+        }
+        if let Some(state) = self.external_state.as_ref()
+            && *state != expected.external_state
+        {
+            return Ok(Some("external_state".to_string()));
+        }
+        Ok(None)
+    }
+
     /// Commit one measured opaque payload under the field's own domain.
     fn commit(
         &self,
@@ -617,27 +712,51 @@ impl ExecutionObservationV1 {
         &self,
         expected: &ExecutionContractV1,
     ) -> Result<FinalizedExecution, FinalizationError> {
-        let measured = self.into_contract()?;
-        // The one check the MINT cannot make: `expected` names secret bindings
-        // the observation does not, and a name bound as a secret THERE must
-        // never arrive as a measured non-secret value. Reported as the secret
-        // violation it is rather than as the `launch.secret_bindings` mismatch
-        // it would otherwise collapse into — the two call for different actions.
+        // Secret refusals come first, and in this order: a secret-bearing NAME is
+        // wrong on its own terms, independently of what any binding set says.
+        if let Some(measured) = self.environment.as_ref()
+            && let Some(name) = measured
+                .iter()
+                .map(|variable| &variable.name)
+                .find(|name| is_sensitive_env_key(name))
+        {
+            return Err(FinalizationError::SecretEnvValue(name.clone()));
+        }
+
+        // Then the cross-check, ahead of every other refusal. A name bound as a
+        // secret in `expected` that arrives as a measured non-secret value is a
+        // security violation, not a difference of opinion about a field — and
+        // reporting it as a `launch.secret_bindings` mismatch would describe the
+        // symptom while hiding what actually happened.
         let expected_secrets: BTreeSet<&str> = expected
             .launch
             .secret_bindings
             .iter()
             .map(String::as_str)
             .collect();
-        if let Some(name) = measured
-            .launch
-            .environment
-            .iter()
-            .map(|variable| &variable.name)
-            .find(|name| expected_secrets.contains(name.as_str()))
+        if let Some(measured) = self.environment.as_ref()
+            && let Some(name) = measured
+                .iter()
+                .map(|variable| &variable.name)
+                .find(|name| expected_secrets.contains(name.as_str()))
         {
             return Err(FinalizationError::SecretBoundEnvValue(name.clone()));
         }
+
+        // A DISAGREEMENT outranks incompleteness. Both are refusals, but they
+        // mean opposite things: an unmeasured facet says "ask again when the
+        // build is further along", while a measured facet that disagrees is
+        // PROOF of drift — and a caller that treats the first as "not yet" would
+        // silently swallow the second. Checking what is measured before
+        // requiring everything is what keeps caught drift caught.
+        //
+        // This scan does not define the contract — `into_contract` does, and
+        // still does. It answers a different question: does anything I already
+        // measured disagree with what was expected?
+        if let Some(facet) = self.first_measured_disagreement(expected)? {
+            return Err(mismatch(&facet));
+        }
+        let measured = self.into_contract()?;
         if let Some(facet) = first_facet_difference(&measured, expected) {
             return Err(mismatch(&facet));
         }
