@@ -1086,34 +1086,41 @@ fn the_short_execution_id_is_a_recognizable_prefix() {
     assert_ne!(outcome.short_execution_id(), outcome.execution_id);
 }
 
-/// Two builds of the same workspace mint the same identity — the guard that
-/// keeps every `assert_ne!` on execution ids above from being vacuous.
+/// `source.digest` is a pure function of the program source, and GIVEN a
+/// reproducible guest image the lane adds no other instability.
+///
+/// Read the second half precisely, because the double is what makes it hold:
+/// `FakeProducer::pack` writes bytes that are a function of the projection, so
+/// an equal `execution_id` here says every OTHER input the lane feeds the mint
+/// is stable across two builds. It does NOT say the real producer is
+/// reproducible — see `KNOWN: the packed guest image is not reproducible` in
+/// the module doc. `source_digest` is asserted separately because that one IS
+/// guaranteed end to end, double or not.
 #[test]
-fn the_same_workspace_mints_the_same_identity_twice() {
+fn source_digest_is_stable_and_the_lane_adds_no_other_instability() {
     let workspace = Workspace::new(&minimal_manifest(""));
     let first = workspace.build(&FakeProducer::healthy()).expect("build");
     let second = workspace.build(&FakeProducer::healthy()).expect("rebuild");
-    assert_eq!(first.execution_id, second.execution_id);
     assert_eq!(first.source_digest, second.source_digest);
+    assert_eq!(first.execution_id, second.execution_id);
 }
 
-/// A workspace at a different host path is the same execution: nothing about
-/// where the checkout lives reaches the identity.
+/// Nothing about where the checkout lives reaches the identity.
+///
+/// `source_digest` is the load-bearing assertion — it holds against the real
+/// producer too. The `execution_id` half again depends on the double being
+/// reproducible; what it adds is that no host path leaks into any other facet.
 #[test]
-fn the_same_project_at_another_path_is_the_same_execution() {
+fn nothing_about_the_host_path_reaches_the_identity() {
     let manifest = minimal_manifest("");
     let one = Workspace::new(&manifest);
     let two = Workspace::new(&manifest);
     assert_ne!(one.dir.path(), two.dir.path());
 
-    assert_eq!(
-        one.build(&FakeProducer::healthy())
-            .expect("build")
-            .execution_id,
-        two.build(&FakeProducer::healthy())
-            .expect("build")
-            .execution_id
-    );
+    let first = one.build(&FakeProducer::healthy()).expect("build");
+    let second = two.build(&FakeProducer::healthy()).expect("build");
+    assert_eq!(first.source_digest, second.source_digest);
+    assert_eq!(first.execution_id, second.execution_id);
 }
 
 /// A build that never reached the mint leaves no envelope and no artifact

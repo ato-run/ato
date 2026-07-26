@@ -27,6 +27,26 @@
 //! Identity that no measurement produced, and the identity's only claim is that
 //! every value in it was measured. A v1 build that cannot complete fails.
 //!
+//! # KNOWN: the packed guest image is not reproducible, so `execution_id` is not
+//!
+//! `filesystem.view_digest` and `filesystem.readonly_layers` are blake3 over the
+//! packed ext4, and that file differs on every run of the real producer:
+//! `mkfs.ext4 -q -F` writes a random UUID, a random directory-hash seed and
+//! wall-clock mkfs timestamps, and the exported rootfs carries build-time
+//! mtimes. So two builds of a byte-identical workspace mint two different
+//! execution ids, and `capsule.lock` is rewritten every time.
+//!
+//! Everything ELSE the mint consumes is a function of the program source and
+//! the pinned base image — `source.digest`, the withheld-control-file set,
+//! `runtime.digest`, `target`, `launch.argv`, `launch.cwd`. The lane holds that
+//! property (its tests pin it, with a deterministic producer standing in for
+//! the two host-privileged steps); the packing does not.
+//!
+//! Closing it means a reproducible pack — `SOURCE_DATE_EPOCH` plus a pinned
+//! `-U`/`hash_seed` and normalized mtimes, which `mke2fs -d` supports — and it
+//! cannot be verified anywhere `mkfs.ext4` does not run, so it belongs with the
+//! on-hardware step rather than here.
+//!
 //! # Host-privileged steps
 //!
 //! Assembling the app image needs `docker`; packing it into a bootable ext4
