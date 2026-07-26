@@ -59,6 +59,7 @@ struct ProducerLog {
     resolved_images: Vec<String>,
     measured_images: Vec<String>,
     assembled_argv: Vec<Vec<String>>,
+    filesystem_uuids: Vec<String>,
     packed: bool,
     discarded: Vec<String>,
 }
@@ -190,7 +191,12 @@ impl V1GuestProducer for FakeProducer {
         _spec: &RootfsBuildSpecV1,
         out: &Path,
         _size_mib: u64,
+        filesystem_uuid: &str,
     ) -> Result<u64, String> {
+        self.log
+            .borrow_mut()
+            .filesystem_uuids
+            .push(filesystem_uuid.to_string());
         let bytes = self.image_bytes.borrow().clone();
         std::fs::write(out, &bytes).map_err(|error| error.to_string())?;
         self.log.borrow_mut().packed = true;
@@ -1282,4 +1288,51 @@ fn a_work_root_inside_the_workspace_is_refused() {
         format!("{error}").contains("inside the workspace"),
         "{error}"
     );
+}
+
+/// The lane derives the filesystem UUID from the build's own inputs and hands
+/// it to the pack, rather than letting `mke2fs` draw one at random.
+///
+/// It lands in the packed bytes that `filesystem.view_digest` commits, so a
+/// random one would put entropy into the Execution Identity. Stable for one
+/// program source, and moved by a change the guest would see.
+#[test]
+fn the_pack_is_given_a_uuid_derived_from_the_build() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+
+    let first = FakeProducer::healthy();
+    workspace.build(&first).expect("build");
+    let second = FakeProducer::healthy();
+    workspace.build(&second).expect("rebuild");
+
+    let uuid = |producer: &FakeProducer| producer.log().filesystem_uuids[0].clone();
+    assert_eq!(uuid(&first), uuid(&second), "stable across builds");
+    assert_eq!(
+        uuid(&first),
+        v1_filesystem_uuid(
+            &first_source_digest(&workspace),
+            &pinned_ref(PYTHON_SLIM, 'c'),
+            &["python3".to_string(), "app.py".to_string()],
+        ),
+        "and it is the derivation, not an unrelated constant"
+    );
+
+    // A change the guest would see moves it.
+    workspace.write("app.py", "print('changed')\n");
+    let third = FakeProducer::healthy();
+    workspace
+        .build(&third)
+        .expect("build after a source change");
+    assert_ne!(uuid(&first), uuid(&third));
+}
+
+fn first_source_digest(workspace: &Workspace) -> String {
+    workspace
+        .lock()
+        .execution_contract
+        .expect("a published contract")
+        .execution_contract
+        .source
+        .digest
+        .to_string()
 }

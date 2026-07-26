@@ -77,6 +77,7 @@ use snapshot::docker_import::{
 use snapshot::rootfs_builder::{
     AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
     assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, pack_app_image_v1,
+    v1_filesystem_uuid,
 };
 
 use super::observe_v1::{V1BuildObservation, observe_v1};
@@ -242,6 +243,7 @@ pub(crate) trait V1GuestProducer {
         spec: &RootfsBuildSpecV1,
         out: &Path,
         size_mib: u64,
+        filesystem_uuid: &str,
     ) -> Result<u64, String>;
 
     /// Drop an assembled image that will not be packed.
@@ -293,8 +295,9 @@ impl V1GuestProducer for HostV1GuestProducer {
         spec: &RootfsBuildSpecV1,
         out: &Path,
         size_mib: u64,
+        filesystem_uuid: &str,
     ) -> Result<u64, String> {
-        pack_app_image_v1(image, spec, out, size_mib)
+        pack_app_image_v1(image, spec, out, size_mib, filesystem_uuid)
     }
 
     fn discard(&self, image: AssembledGuestImage) {
@@ -385,6 +388,9 @@ pub(crate) fn run(
         })?;
     verify_resolution_matches_recipe(&spec, &runtime)?;
 
+    let source_digest =
+        ContentDigest::new(DigestAlgorithm::Sha256, projected.contract.digest.bytes());
+
     // 6. Assemble the guest image from the projection.
     let image = producer
         .assemble(
@@ -412,12 +418,22 @@ pub(crate) fn run(
     }
 
     // 8. Pack it. `pack` consumes the image, so there is nothing left to leak.
+    //
+    // The filesystem UUID and hash seed are derived from inputs already fixed —
+    // the projected source, the pinned base, the exact argv — rather than left
+    // to `mke2fs`'s entropy, because they land in the bytes step 9 commits.
+    let filesystem_uuid = v1_filesystem_uuid(
+        &source_digest.to_string(),
+        &runtime.resolved_ref,
+        &spec.resolved_argv,
+    );
     let guest_image_bytes = producer
         .pack(
             image,
             &spec,
             request.guest_image_path,
             request.rootfs_size_mib,
+            &filesystem_uuid,
         )
         .map_err(|reason| V1BuildError::RecipeBuildFailed { reason })?;
     let guest_image_digest =
@@ -435,10 +451,7 @@ pub(crate) fn run(
     // construction — there is no "9 of 10" state to count.
     let observation = observe_v1(V1BuildObservation {
         manifest: &manifest,
-        source_digest: ContentDigest::new(
-            DigestAlgorithm::Sha256,
-            projected.contract.digest.bytes(),
-        ),
+        source_digest,
         excluded_control_files: withheld_control_files(&projected, &lock_path),
         runtime_kind: runtime_kind_name(&spec).to_string(),
         runtime: &runtime,

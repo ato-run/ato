@@ -579,32 +579,107 @@ docker build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
     )
 }
 
-/// Pack the already-assembled `$ATO_IMAGE` into a read-only-bootable ext4.
+/// The timestamp every file in a v1 guest image carries.
 ///
-/// The create → export → init → pack half of [`build_rootfs_script`], shared
-/// verbatim through [`rootfs_pack_script`] with an empty acquire section (the
-/// image already exists). It differs from v0.3 only in that the init launches
-/// an argv instead of a shell string, and that there is no build command — the
-/// Step-4 subset rejects `[[build.steps]]`, so there is nothing to run.
+/// A constant, not the clock. `filesystem.view_digest` is blake3 over the packed
+/// image and is committed by the Execution Identity, so any wall-clock value
+/// reaching those bytes makes the identity a function of WHEN the build ran —
+/// two builds of one program source would be two executions, `capsule.lock`
+/// would be rewritten every time, and two builder hosts would never agree.
 ///
-/// env: `ATO_IMAGE`, `ATO_OUT`.
+/// `1` rather than `0` because a zero mtime reads as "unset" to some tooling,
+/// and the distinction costs nothing. It is exported as `SOURCE_DATE_EPOCH`
+/// for `mke2fs`, which honours it for the superblock timestamps (e2fsprogs
+/// 1.45.7+), and applied to the tree with `touch` for the inode timestamps,
+/// which nothing else normalizes.
+pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
+
+/// Pack the already-assembled `$ATO_IMAGE` into a read-only-bootable ext4,
+/// reproducibly.
+///
+/// Same create → export → init → pack shape as [`build_rootfs_script`], and it
+/// differs from v0.3 in the two ways v1 needs:
+///
+/// **The init launches an argv** rather than a shell string, and there is no
+/// build command — the Step-4 subset rejects `[[build.steps]]`.
+///
+/// **The image is a function of its inputs, not of the clock or the allocator.**
+/// v0.3 does `mkfs.ext4` on an empty file, `mount -o loop`, then `cp -a`. That
+/// produces a different image every run — `mkfs.ext4` writes a random UUID, a
+/// random directory-hash seed and wall-clock superblock timestamps, the exported
+/// rootfs carries build-time mtimes, and copying into a mounted filesystem
+/// leaves allocation to the running kernel. v0.3 can afford that because nothing
+/// claims what its image IS. v1 commits blake3 of these bytes as
+/// `filesystem.view_digest`, so each of those becomes part of the identity.
+///
+/// So: timestamps are normalized to [`V1_GUEST_IMAGE_EPOCH`], the UUID and hash
+/// seed are passed in (derived by the caller from the build's own inputs, so
+/// they are stable per program but distinct per capsule), and the filesystem is
+/// POPULATED BY `mke2fs -d` instead of by a mount-and-copy — which fixes the
+/// allocation order and, incidentally, removes the loop mount from this half
+/// entirely.
+///
+/// env: `ATO_IMAGE`, `ATO_OUT`, `ATO_FS_UUID`.
 pub(crate) fn pack_app_image_script_v1(spec: &RootfsBuildSpecV1, size_mib: u64) -> String {
-    rootfs_pack_script(&PackScriptInputs {
-        tool: "docker",
-        tag_init: "TAG=\"$ATO_IMAGE\"".into(),
-        acquire: String::new(),
-        agent_prep: String::new(),
-        launch: launch_argv_line(&spec.resolved_argv),
-        init_cwd: V1_GUEST_WORKING_DIRECTORY,
-        port: spec.port,
-        // Cosmetic in the emitted script (it appears in a comment); a v1
-        // capsule declares no readiness probe, and inventing one here would be
-        // a default nobody authored.
-        healthcheck: "/".to_string(),
-        size_mib,
-        extra_mounts: String::new(),
-        extra_prelaunch: String::new(),
-    })
+    format!(
+        r#"set -euo pipefail
+TAG="$ATO_IMAGE"
+CID=""
+BUILD=$(mktemp -d)
+# Failure-safe cleanup: on ANY exit leave no container, image, or temp dir
+# behind (Phase 8 orphan-hardening parity). No mount to unwind — `mke2fs -d`
+# populates the filesystem without one.
+cleanup() {{
+  [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1 || true
+  docker rmi -f "$TAG" >/dev/null 2>&1 || true
+  [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
+}}
+trap cleanup EXIT
+CID=$(docker create "$TAG")
+mkdir -p "$BUILD/rootfs"
+docker export "$CID" | tar -x -C "$BUILD/rootfs"
+docker rm -f "$CID" >/dev/null; CID=""
+# Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
+# pseudo + tmpfs filesystems, then run the capsule start command in the background
+# (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
+# single-quoted, so the guest shell parses back EXACTLY the argv the contract commits.
+rm -f "$BUILD/rootfs/sbin/init"
+cat > "$BUILD/rootfs/sbin/init" <<'INIT'
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+mount -t tmpfs tmpfs /var/tmp 2>/dev/null
+cd {init_cwd}
+{launch}
+while true; do sleep 1000; done
+INIT
+chmod +x "$BUILD/rootfs/sbin/init"
+# Every inode timestamp becomes a constant. `-h` so a symlink's own timestamps
+# are set rather than its target's being set twice.
+find "$BUILD/rootfs" -exec touch -h -d @{epoch} {{}} +
+rm -f "$ATO_OUT"
+dd if=/dev/zero of="$ATO_OUT" bs=1M count={size} status=none
+# `-d` populates at mkfs time: no loop mount, and the allocation order is
+# mke2fs's own rather than the running kernel's. `-U` and `-E hash_seed` replace
+# the two random values; SOURCE_DATE_EPOCH replaces the superblock clock reads.
+SOURCE_DATE_EPOCH={epoch} mkfs.ext4 -q -F \
+  -U "$ATO_FS_UUID" \
+  -E hash_seed="$ATO_FS_UUID" \
+  -d "$BUILD/rootfs" \
+  "$ATO_OUT"
+# BUILD is removed by the EXIT trap (also on any failure above).
+"#,
+        launch = launch_argv_line(&spec.resolved_argv),
+        init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        port = spec.port,
+        size = size_mib,
+        epoch = V1_GUEST_IMAGE_EPOCH,
+    )
 }
 
 /// A guest image that exists on the builder host and has not been packed yet.
@@ -685,7 +760,15 @@ pub fn pack_app_image_v1(
     spec: &RootfsBuildSpecV1,
     out_ext4: &Path,
     size_mib: u64,
+    filesystem_uuid: &str,
 ) -> Result<u64, String> {
+    // Interpolated nowhere, but it reaches `mke2fs` as two arguments, so a
+    // malformed value is refused rather than passed on.
+    if !is_uuid(filesystem_uuid) {
+        return Err(format!(
+            "filesystem uuid {filesystem_uuid:?} is not a canonical 8-4-4-4-12 hex UUID"
+        ));
+    }
     let script = pack_app_image_script_v1(spec, size_mib);
     run_builder_script(
         "pack app image",
@@ -693,6 +776,7 @@ pub fn pack_app_image_v1(
         &[
             ("ATO_IMAGE", image.image_ref.as_str().into()),
             ("ATO_OUT", out_ext4.as_os_str().to_os_string()),
+            ("ATO_FS_UUID", filesystem_uuid.into()),
         ],
     )?;
     std::fs::metadata(out_ext4)
@@ -710,6 +794,57 @@ pub fn discard_app_image_v1(image: AssembledGuestImage) {
     let _ = Command::new("docker")
         .args(["rmi", "-f", &image.image_ref])
         .output();
+}
+
+/// The filesystem UUID and directory-hash seed a v1 guest image is built with.
+///
+/// `mke2fs` would generate both at random, and both land in the packed bytes
+/// that `filesystem.view_digest` commits — so they have to be a function of the
+/// build rather than of entropy. Deriving them from inputs fixed BEFORE the pack
+/// (the projected source, the pinned base image, the exact argv) keeps them
+/// stable for one program and distinct between programs, which is what a
+/// filesystem UUID is for: a constant shared by every capsule would make two
+/// different images collide for anything resolving a device by UUID.
+///
+/// Domain-separated so this can never coincide with another blake3 the identity
+/// also commits. It is NOT itself an identity input — the contract commits the
+/// packed bytes, and this is one of the things that determines them.
+#[must_use]
+pub fn v1_filesystem_uuid(source_digest: &str, pinned_base_ref: &str, argv: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ato.v1-guest-image-uuid/v1\0");
+    hasher.update(source_digest.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(pinned_base_ref.as_bytes());
+    for word in argv {
+        hasher.update(b"\0");
+        hasher.update(word.as_bytes());
+    }
+    let bytes = hasher.finalize();
+    let hex = bytes.to_hex();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// A canonical 8-4-4-4-12 lowercase-hex UUID.
+fn is_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    groups.len() == 5
+        && [8usize, 4, 4, 4, 12]
+            .iter()
+            .zip(&groups)
+            .all(|(width, group)| {
+                group.len() == *width
+                    && group
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
 }
 
 /// Run one generated builder script under `bash -c`, reporting the stderr tail
@@ -2612,6 +2747,112 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
             "COPY . would ship the generated Dockerfile to the guest: {script}"
         );
+    }
+
+    /// The pack half must not leave a source of entropy or a clock read in the
+    /// bytes the Execution Identity commits.
+    ///
+    /// Asserted against the emitted script because `mkfs.ext4` does not run on
+    /// every host this suite does. That makes this a check on the RECIPE, not a
+    /// proof of byte-equality — the proof is two real builds agreeing, which is
+    /// `scripts/ready-state/verify-v1-pack-reproducible.sh` on a Linux host.
+    #[test]
+    fn the_v1_pack_leaves_no_clock_or_entropy_in_the_image() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = pack_app_image_script_v1(&spec, 512);
+
+        // The two values mke2fs would otherwise draw at random.
+        assert!(script.contains(r#"-U "$ATO_FS_UUID""#), "{script}");
+        assert!(
+            script.contains(r#"-E hash_seed="$ATO_FS_UUID""#),
+            "{script}"
+        );
+        // The superblock clock reads, and the inode timestamps nothing else
+        // normalizes.
+        assert!(
+            script.contains(&format!(
+                "SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} mkfs.ext4"
+            )),
+            "{script}"
+        );
+        assert!(
+            script.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
+            "{script}"
+        );
+        // And the allocation order: populated by mke2fs, not by the running
+        // kernel through a loop mount.
+        assert!(script.contains(r#"-d "$BUILD/rootfs""#), "{script}");
+        assert!(
+            !script.contains("mount -o loop"),
+            "a loop mount leaves allocation to the running kernel: {script}"
+        );
+        assert!(!script.contains(r#"cp -a "$BUILD/rootfs/.""#), "{script}");
+    }
+
+    /// v0.3 keeps its mount-and-copy pack, byte for byte. It makes no claim
+    /// about what its image IS, so the determinism work does not apply to it —
+    /// and changing a working producer to share one would be a regression risk
+    /// taken for nothing.
+    #[test]
+    fn the_v03_pack_is_unchanged() {
+        let manifest = CapsuleManifest::from_toml(&base_toml()).expect("v0.3 manifest");
+        let script = build_rootfs_script(
+            &derive_build_spec(&manifest, &python_probe()).expect("derives"),
+            512,
+        );
+        assert!(script.contains("mkfs.ext4 -q -F \"$ATO_OUT\""), "{script}");
+        assert!(script.contains("mount -o loop"), "{script}");
+        assert!(!script.contains("SOURCE_DATE_EPOCH"), "{script}");
+    }
+
+    /// The UUID is a function of the build's inputs: stable for one program,
+    /// distinct between programs. A constant shared by every capsule would make
+    /// two different images collide for anything resolving a device by UUID;
+    /// a random one would put entropy into the identity.
+    #[test]
+    fn the_filesystem_uuid_is_derived_from_the_builds_own_inputs() {
+        let argv = vec!["python3".to_string(), "app.py".to_string()];
+        let uuid =
+            |source: &str, base: &str, argv: &[String]| v1_filesystem_uuid(source, base, argv);
+
+        let baseline = uuid("sha256:aa", PINNED_BASE, &argv);
+        assert_eq!(baseline, uuid("sha256:aa", PINNED_BASE, &argv), "stable");
+        assert!(is_uuid(&baseline), "{baseline}");
+
+        // Each input moves it.
+        assert_ne!(baseline, uuid("sha256:bb", PINNED_BASE, &argv));
+        assert_ne!(baseline, uuid("sha256:aa", "docker.io/x@sha256:ff", &argv));
+        assert_ne!(
+            baseline,
+            uuid("sha256:aa", PINNED_BASE, &["python3".to_string()])
+        );
+        // And argv boundaries are not lost to concatenation.
+        assert_ne!(
+            uuid("sha256:aa", PINNED_BASE, &["a".into(), "b".into()]),
+            uuid("sha256:aa", PINNED_BASE, &["ab".into()])
+        );
+    }
+
+    /// A malformed UUID is refused rather than handed to `mke2fs`.
+    #[test]
+    fn the_pack_refuses_a_uuid_it_did_not_derive() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let out = tempfile::tempdir().expect("tempdir");
+        let error = pack_app_image_v1(
+            AssembledGuestImage::adopt("ato-v1-test".into()),
+            &spec,
+            &out.path().join("guest.img"),
+            512,
+            "not-a-uuid",
+        )
+        .expect_err("refused");
+        assert!(error.contains("canonical"), "{error}");
+        assert!(is_uuid("0123abcd-4567-89ef-0123-456789abcdef"));
+        assert!(
+            !is_uuid("0123ABCD-4567-89ef-0123-456789abcdef"),
+            "uppercase"
+        );
+        assert!(!is_uuid("0123abcd-4567-89ef-0123-456789abcde"), "short");
     }
 
     /// The assemble half must leave the image behind — the whole reason the
