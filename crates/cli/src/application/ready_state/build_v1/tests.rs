@@ -1130,3 +1130,71 @@ fn the_withheld_set_does_not_depend_on_build_history() {
         ["ato.lock.json", "capsule.toml"]
     );
 }
+
+/// A build output written INSIDE the workspace would be hashed as program
+/// source by the next build.
+///
+/// The archive that freezes the workspace walks everything under it, so a
+/// guest image left in the tree becomes part of the next build's
+/// `source.digest` — and since the image is itself a function of the source,
+/// there is no fixed point: every build would mint a new identity. This is the
+/// same feedback the withheld-lock rule closes, arriving through the artifact
+/// instead of the lock, and the fixtures elsewhere in this file cannot see it
+/// because they write the image to a separate directory.
+///
+/// The lane refuses the path rather than quietly excluding it: `.ato/` is not
+/// on ADR-014 §1's control-file list, and widening that list is a normative
+/// change to what a Capsule Program's source IS.
+#[test]
+fn a_guest_image_path_inside_the_workspace_is_refused() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let inside = workspace.dir.path().join(".ato/build/guest.img");
+    std::fs::create_dir_all(inside.parent().unwrap()).expect("create the output directory");
+
+    let error = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            work_root: workspace.work.path(),
+            guest_image_path: &inside,
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-test",
+        },
+        &FakeProducer::healthy(),
+    )
+    .expect_err("an output inside the source tree is refused");
+
+    assert!(
+        matches!(error, V1BuildError::SourceNotPinnable { .. }),
+        "{error:?}"
+    );
+    assert!(
+        format!("{error}").contains("inside the workspace"),
+        "{error}"
+    );
+}
+
+/// The scratch directory is refused inside the workspace for the same reason:
+/// the frozen archive and the materialized projection would both be hashed as
+/// program source.
+#[test]
+fn a_work_root_inside_the_workspace_is_refused() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let inside = workspace.dir.path().join("build-scratch");
+    std::fs::create_dir_all(&inside).expect("create the scratch directory");
+
+    let error = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            work_root: &inside,
+            guest_image_path: &workspace.guest_image_path(),
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-test",
+        },
+        &FakeProducer::healthy(),
+    )
+    .expect_err("scratch inside the source tree is refused");
+    assert!(
+        format!("{error}").contains("inside the workspace"),
+        "{error}"
+    );
+}

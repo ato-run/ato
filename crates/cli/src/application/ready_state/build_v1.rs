@@ -304,6 +304,24 @@ pub(crate) fn run(
     request: V1BuildRequest<'_>,
     producer: &dyn V1GuestProducer,
 ) -> Result<V1BuildOutcome, V1BuildError> {
+    // Neither the scratch nor the output may live inside the workspace. The
+    // archive that freezes the workspace walks everything under it, so a guest
+    // image or a materialized projection left in the tree becomes part of the
+    // NEXT build's `source.digest` — and since both are functions of the
+    // source, there is no fixed point: every build would mint a new identity.
+    //
+    // Refused rather than quietly excluded. `.ato/` is not on ADR-014 §1's
+    // control-file list ("the manifest and the ONE resolved lock, nothing
+    // else"), and widening that list is a normative change to what a Capsule
+    // Program's source IS — the same reason a root-level `.git` is refused
+    // instead of being skipped.
+    refuse_path_inside_workspace(request.workspace_root, request.work_root, "the work root")?;
+    refuse_path_inside_workspace(
+        request.workspace_root,
+        request.guest_image_path,
+        "the guest image",
+    )?;
+
     // The lock's NAME is resolved before anything else runs: it decides which
     // control file the projection withholds (below), and its fail-closed rules
     // — a workspace carrying both spellings has no single authoritative lock —
@@ -621,6 +639,60 @@ fn persist_execution_contract(
             reason: source.to_string(),
         }
     })
+}
+
+/// Refuse a build path that lives inside the source tree.
+///
+/// Compared after canonicalizing both sides, so a symlink or a `..` cannot
+/// smuggle a path back in. `path` may not exist yet (the output file is created
+/// by the pack), so its nearest existing ancestor is what gets canonicalized —
+/// a directory that will hold a file inside the workspace is itself inside it.
+fn refuse_path_inside_workspace(
+    workspace_root: &Path,
+    path: &Path,
+    what: &str,
+) -> Result<(), V1BuildError> {
+    let refuse = |reason: String| V1BuildError::SourceNotPinnable { reason };
+
+    let workspace = workspace_root.canonicalize().map_err(|source| {
+        refuse(format!(
+            "resolve the workspace {}: {source}",
+            workspace_root.display()
+        ))
+    })?;
+
+    // Walk up to the nearest ancestor that exists — the output file does not
+    // yet, and neither does a directory a caller is about to create.
+    let mut existing = path;
+    let resolved = loop {
+        match existing.canonicalize() {
+            Ok(resolved) => break resolved,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                match existing.parent() {
+                    Some(parent) if parent != existing => existing = parent,
+                    // Nothing on this path exists, so it cannot be under the
+                    // workspace, which does.
+                    _ => return Ok(()),
+                }
+            }
+            Err(source) => {
+                return Err(refuse(format!(
+                    "resolve {what} {}: {source}",
+                    path.display()
+                )));
+            }
+        }
+    };
+
+    if resolved.starts_with(&workspace) {
+        return Err(refuse(format!(
+            "{what} ({}) is inside the workspace, so the next build would freeze it as \
+             program source and hash it into source.digest. A build output is not part of \
+             the program it was built from — put it somewhere outside the source tree.",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Which file this build will publish its lock to.

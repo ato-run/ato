@@ -713,18 +713,24 @@ fn manifest_declares_schema_v1(dir: &Path, injected_manifest: Option<&str>) -> R
 /// adapter that gives it a work directory, an output path, a process-unique
 /// image tag, and a host producer, then turns its outcome into a `BuildResult`.
 fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<BuildResult> {
-    use crate::application::ready_state::build_v1;
+    use crate::application::ready_state::{self, build_v1};
 
     // Scratch: the frozen source archive and the materialized projection. Both
     // are intermediates, so they go to a temp dir that is removed when this
-    // returns — including on the failure paths, which is why it is not under
-    // the workspace.
+    // returns — including on the failure paths.
     let work = tempfile::tempdir().context("create the v1 build work directory")?;
 
-    let guest_image_dir = dir.join(V1_BUILD_OUTPUT_DIR);
+    // The guest image goes to the Ready-State root, NOT beside the source the
+    // way v0.3 leaves its `.capsule`. Two reasons, and the first is
+    // load-bearing: a build output inside the workspace would be frozen as
+    // program source by the next build and hashed into `source.digest`, so the
+    // identity would never reach a fixed point (`build_v1::run` refuses such a
+    // path outright). The second is size — this is a bootable filesystem image,
+    // not a small archive.
+    let guest_image_dir = ready_state::state_root().join(V1_BUILD_OUTPUT_DIR);
     fs::create_dir_all(&guest_image_dir)
         .with_context(|| format!("create {}", guest_image_dir.display()))?;
-    let guest_image_path = guest_image_dir.join(V1_GUEST_IMAGE_FILE_NAME);
+    let guest_image_path = guest_image_dir.join(v1_guest_image_file_name(dir));
 
     let producer = build_v1::HostV1GuestProducer::probe()
         .map_err(|reason| anyhow::anyhow!("a v1 build needs a container tool: {reason}"))?;
@@ -746,13 +752,14 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
     // in `--json`; a terminal needs to recognize the build, not to be able to
     // quote its identity from a scrollback.
     futures::executor::block_on(reporter.notify(format!(
-        "Built capsule revision\nExecution ID: {}\nLock: {}\nVerified: yes",
+        "Built capsule revision\nExecution ID: {}\nLock: {}\nVerified: yes\nGuest image: {}",
         outcome.short_execution_id(),
         outcome
             .lock_path
             .file_name()
             .unwrap_or(outcome.lock_path.as_os_str())
             .to_string_lossy(),
+        outcome.guest_image_path.display(),
     )))?;
 
     Ok(BuildResult {
@@ -780,10 +787,22 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
     })
 }
 
-/// Where a v1 build leaves its bootable guest image. Under the workspace's own
-/// `.ato/`, which is already per-workspace runtime state and already ignored.
-const V1_BUILD_OUTPUT_DIR: &str = ".ato/build";
-const V1_GUEST_IMAGE_FILE_NAME: &str = "guest.img";
+/// Where a v1 build leaves its bootable guest image, under the Ready-State
+/// root. Never inside the workspace — see `run_v1_build_lane`.
+const V1_BUILD_OUTPUT_DIR: &str = "v1-build";
+
+/// One image file per workspace, named by a digest of the workspace's own path.
+///
+/// The output root is shared across workspaces, so a fixed name would have two
+/// projects overwrite each other's image — and the second one's `capsule.lock`
+/// would then name a file holding the first one's bytes. The path is hashed
+/// rather than slugified because a workspace path is not a filename: it can be
+/// long, non-UTF-8, or differ from another only in a separator.
+fn v1_guest_image_file_name(workspace_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(workspace_root.as_os_str().as_encoded_bytes());
+    format!("{:x}.img", hasher.finalize())
+}
 /// Matches the `rootfs_build` dev tool's default. A v1 manifest has no size
 /// field yet, and the Step-4 subset installs at most one dependency set.
 const V1_GUEST_IMAGE_SIZE_MIB: u64 = 1024;
