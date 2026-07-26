@@ -20,6 +20,10 @@ use serde::Serialize;
 
 pub(crate) mod checks;
 pub(crate) mod doctor;
+/// Transactional activation of a rendered ingress generation (slice 2): the
+/// three-state model that keeps a swapped-but-never-reloaded generation from
+/// being mistaken for a no-op.
+pub(crate) mod ingress_activation;
 pub(crate) mod official_preview;
 pub(crate) mod setup;
 pub(crate) mod smoke;
