@@ -29,6 +29,9 @@ pub(crate) mod doctor;
 pub(crate) mod ingress_activation;
 /// The durable [`ingress_activation::GenerationStore`]: generation directories,
 /// atomic markers and the `current` symlink, over a real directory tree.
+/// Slice 3B — the two-stage probe that confirms a generation is actually being
+/// SERVED, and the only place the activated marker may move.
+pub(crate) mod ingress_probe;
 pub(crate) mod ingress_store;
 pub(crate) mod official_preview;
 pub(crate) mod setup;
