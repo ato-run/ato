@@ -929,26 +929,75 @@ fn a_persisted_envelope_describing_another_execution_is_named_and_refused() {
         .expect("an envelope agrees with itself");
 }
 
-/// A lock that was written but does not describe this build is removed rather
-/// than left for the next reader, which would have no way to tell.
+/// A lock that was written but does not describe this build is taken back, and
+/// the workspace is left exactly as it was found.
+///
+/// Both directions matter. With no previous lock the file is removed, because
+/// leaving one that verifies against its own contract while describing another
+/// execution is undetectable downstream. With a previous lock the EXACT bytes
+/// go back: `persist_execution_contract` merges into the existing file, so a
+/// plain removal would take the caller's other sections with it — sections this
+/// lane neither owns nor can reconstruct.
 #[test]
-fn a_lock_that_does_not_verify_is_removed() {
+fn an_unverifiable_lock_is_taken_back_without_destroying_the_previous_one() {
     let directory = TempDir::new().expect("tempdir");
     let lock_path = directory.path().join("capsule.lock");
-    std::fs::write(&lock_path, "{}").expect("write");
-
-    let cause = V1BuildError::PersistedEnvelopeMismatch {
+    let cause = || V1BuildError::PersistedEnvelopeMismatch {
         path: lock_path.clone(),
         field: "target",
         minted: "linux/x86_64/gnu".into(),
         persisted: "linux/aarch64/musl".into(),
     };
-    let returned = discard_unverifiable_lock(&lock_path, cause);
 
+    // No previous lock: the file this lane wrote is removed.
+    std::fs::write(&lock_path, "{}").expect("write");
+    let returned = unpublish(&lock_path, None, cause());
     assert!(!lock_path.exists(), "the unverifiable lock is gone");
     assert!(
         matches!(returned, V1BuildError::PersistedEnvelopeMismatch { .. }),
         "the original cause is what the caller sees: {returned:?}"
+    );
+
+    // A previous lock: its bytes come back verbatim, not just its existence.
+    let previous = br#"{"schema_version":1,"resolution":{"kept":true}}"#;
+    std::fs::write(&lock_path, b"this build's merged output").expect("write");
+    unpublish(&lock_path, Some(previous), cause());
+    assert_eq!(
+        std::fs::read(&lock_path).expect("the previous lock is back"),
+        previous
+    );
+}
+
+/// A build whose read-back fails must not cost the workspace the lock it had.
+///
+/// The end-to-end version of the property above: the lane merges into the
+/// existing lock, so the failure path has to restore rather than remove.
+#[test]
+fn a_failed_read_back_leaves_the_workspace_its_previous_lock() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let lock_path = workspace.dir.path().join("capsule.lock");
+
+    // A lock this lane did not write, carrying a section it does not own.
+    let seed = CapsuleLock {
+        generated_at: Some("2026-01-01T00:00:00Z".to_string()),
+        ..CapsuleLock::default()
+    };
+    capsule_lock::write_pretty_to_path(&seed, &lock_path).expect("seed a lock");
+    let before = std::fs::read(&lock_path).expect("read the seeded lock");
+
+    let cause = V1BuildError::TrustedLoadFailed {
+        path: lock_path.clone(),
+        reason: "simulated".into(),
+    };
+    // Stand in for the merged write the lane performs before its read-back.
+    std::fs::write(&lock_path, b"merged output that will not verify").expect("write");
+    unpublish(&lock_path, Some(&before), cause);
+
+    assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+    assert_eq!(
+        workspace.lock().generated_at.as_deref(),
+        Some("2026-01-01T00:00:00Z"),
+        "and it still verifies, so the workspace is genuinely unchanged"
     );
 }
 
@@ -979,12 +1028,14 @@ fn each_produced_facet_names_the_producer_it_came_from() {
         ("source.digest", "projection"),
         ("source.projection_digest", "projection"),
         ("target", "measure_guest_target"),
-        ("runtime.kind", "resolve_runtime_artifact"),
+        // Only the DIGEST comes from the registry resolution. The family is
+        // decided by the source probe over the projection, and the dynamic
+        // contract is built from the family plus the recipe's observed prefix —
+        // pointing an operator at the registry for either would be exactly the
+        // misdirection this table exists to prevent.
         ("runtime.digest", "resolve_runtime_artifact"),
-        (
-            "runtime.dynamic_contract_digest",
-            "resolve_runtime_artifact",
-        ),
+        ("runtime.kind", "recipe derivation"),
+        ("runtime.dynamic_contract_digest", "recipe derivation"),
         ("launch.argv", "launch descriptor"),
         ("launch.cwd", "launch descriptor"),
         ("filesystem.view_digest", "packed guest image"),
@@ -1171,6 +1222,33 @@ fn a_guest_image_path_inside_the_workspace_is_refused() {
         format!("{error}").contains("inside the workspace"),
         "{error}"
     );
+}
+
+/// A relative path is refused rather than resolved against the process CWD.
+///
+/// Resolving it would make the answer depend on where the user was standing: a
+/// path that is outside the workspace from one directory is inside it from
+/// another. The hole this closes is a path NONE of whose components exist yet —
+/// there is nothing to canonicalize, so an ancestor walk finds no answer and
+/// would otherwise fall through to "not inside".
+#[test]
+fn a_relative_build_path_is_refused() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+
+    let error = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            work_root: workspace.work.path(),
+            // Nothing on this path exists, and it is relative — so under the
+            // process CWD it could land straight back inside the workspace.
+            guest_image_path: Path::new("out/guest.img"),
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-test",
+        },
+        &FakeProducer::healthy(),
+    )
+    .expect_err("a relative build path is refused");
+    assert!(format!("{error}").contains("relative path"), "{error}");
 }
 
 /// The scratch directory is refused inside the workspace for the same reason:

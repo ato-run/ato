@@ -687,13 +687,24 @@ pub fn execute_pack_command_with_injected_manifest(
 /// A workspace with no manifest at all is not v1: `--init` and zero-config
 /// inference are v0.3 surfaces, and the v1 authoring surface has no inference
 /// (ADR-015 — only a v1 manifest mints an identity).
+///
+/// An on-disk `capsule.toml` OUTRANKS an injected draft, which is the same
+/// precedence both lanes apply: the v0.3 lane only falls back to the injected
+/// text when no manifest exists, and `build_v1::run` reads the workspace's
+/// manifest directly. Routing on the draft instead would send a v1 repository
+/// installed from a store — whose install draft is v0.3 — into the v0.3 lane,
+/// which would then load the on-disk v1 manifest and fail on a schema complaint
+/// about the one thing the author got right.
 fn manifest_declares_schema_v1(dir: &Path, injected_manifest: Option<&str>) -> Result<bool> {
     let manifest_path = dir.join("capsule.toml");
-    let text = match injected_manifest {
-        Some(text) => text.to_string(),
-        None if manifest_path.exists() => fs::read_to_string(&manifest_path)
-            .with_context(|| format!("read {}", manifest_path.display()))?,
-        None => return Ok(false),
+    let text = if manifest_path.exists() {
+        fs::read_to_string(&manifest_path)
+            .with_context(|| format!("read {}", manifest_path.display()))?
+    } else {
+        match injected_manifest {
+            Some(text) => text.to_string(),
+            None => return Ok(false),
+        }
     };
     // A manifest that does not parse as TOML is not this function's problem to
     // report: the lane it belongs to will say so with the context it has.
@@ -791,17 +802,28 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
 /// root. Never inside the workspace — see `run_v1_build_lane`.
 const V1_BUILD_OUTPUT_DIR: &str = "v1-build";
 
-/// One image file per workspace, named by a digest of the workspace's own path.
+/// The image file for one build, named by a digest of the workspace path plus
+/// this process's id.
 ///
-/// The output root is shared across workspaces, so a fixed name would have two
-/// projects overwrite each other's image — and the second one's `capsule.lock`
-/// would then name a file holding the first one's bytes. The path is hashed
-/// rather than slugified because a workspace path is not a filename: it can be
-/// long, non-UTF-8, or differ from another only in a separator.
+/// The workspace digest is because the output root is shared across workspaces:
+/// a fixed name would have two projects overwrite each other's image, and the
+/// second one's `capsule.lock` would name a file holding the first one's bytes.
+/// The path is hashed rather than slugified because a workspace path is not a
+/// filename — it can be long, non-UTF-8, or differ from another only in a
+/// separator.
+///
+/// The pid is because two builds of the SAME workspace can run at once (a
+/// watcher beside a manual run, a CI job beside an editor task) and the pack
+/// script does `rm -f "$ATO_OUT"; dd …; mkfs.ext4 …; mount -o loop "$ATO_OUT"`.
+/// Two simultaneous loop mounts of one file corrupt it, and the digest each
+/// build then commits would describe bytes the other build wrote — an
+/// unmeasured value in the identity, which is the one thing this lane exists to
+/// prevent. Each build gets its own file; it is the caller's, and cleaning up
+/// old ones is not yet automated.
 fn v1_guest_image_file_name(workspace_root: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(workspace_root.as_os_str().as_encoded_bytes());
-    format!("{:x}.img", hasher.finalize())
+    format!("{:x}-{}.img", hasher.finalize(), std::process::id())
 }
 /// Matches the `rootfs_build` dev tool's default. A v1 manifest has no size
 /// field yet, and the Step-4 subset installs at most one dependency set.
@@ -3046,25 +3068,43 @@ args = ["--force", "--sign", "-", "MyApp.app"]
         assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
     }
 
-    /// An injected manifest routes on its own declaration, not on whatever the
-    /// directory happens to contain.
+    /// Routing follows the SAME manifest precedence both lanes apply: an
+    /// on-disk `capsule.toml` outranks an injected draft, and the draft is
+    /// consulted only when there is no manifest.
+    ///
+    /// This is not a preference — it is the precedence the destinations already
+    /// have. The v0.3 lane falls back to the injected text only when no manifest
+    /// exists, and `build_v1::run` reads the workspace's manifest directly. If
+    /// routing used the draft instead, a v1 repository installed from a store
+    /// (whose install draft is v0.3) would be sent to the v0.3 lane, which would
+    /// then load the on-disk v1 manifest and complain about its
+    /// `schema_version` — the one thing the author got right.
     #[test]
-    fn an_injected_manifest_routes_on_its_own_schema() {
+    fn routing_follows_the_same_manifest_precedence_as_the_lanes() {
         let workspace = tempfile::tempdir().expect("tempdir");
+        let v03_draft = "schema_version = \"0.3\"\nname = \"draft\"\n";
+        let v1_draft = "schema_version = \"1\"\nname = \"draft\"\n";
+
+        // A v1 manifest on disk wins over a v0.3 draft — the store-install case.
+        std::fs::write(
+            workspace.path().join("capsule.toml"),
+            "schema_version = \"1\"\nname = \"on-disk\"\n",
+        )
+        .expect("write");
+        assert!(manifest_declares_schema_v1(workspace.path(), Some(v03_draft)).unwrap());
+
+        // And the mirror: a v0.3 manifest on disk is not overridden by a v1 draft.
         std::fs::write(
             workspace.path().join("capsule.toml"),
             "schema_version = \"0.3\"\nname = \"on-disk\"\n",
         )
         .expect("write");
+        assert!(!manifest_declares_schema_v1(workspace.path(), Some(v1_draft)).unwrap());
 
-        assert!(
-            manifest_declares_schema_v1(
-                workspace.path(),
-                Some("schema_version = \"1\"\nname = \"injected\"\n")
-            )
-            .unwrap()
-        );
-        assert!(!manifest_declares_schema_v1(workspace.path(), None).unwrap());
+        // With no manifest, the draft is what there is to route on.
+        std::fs::remove_file(workspace.path().join("capsule.toml")).expect("remove");
+        assert!(manifest_declares_schema_v1(workspace.path(), Some(v1_draft)).unwrap());
+        assert!(!manifest_declares_schema_v1(workspace.path(), Some(v03_draft)).unwrap());
     }
 
     /// A workspace with no manifest is not v1 — `--init` and zero-config

@@ -542,6 +542,19 @@ pub(crate) fn assemble_app_image_script_v1(
     pinned_base_ref: &str,
 ) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    // The projection goes in a SUBDIRECTORY of the build context, and the
+    // generated Dockerfile sits beside it rather than inside it.
+    //
+    // v0.3 copies the source to the context root and writes its Dockerfile
+    // there, which is harmless when nothing claims what the guest contains. It
+    // is not harmless here: a repository carrying its own `Dockerfile` would
+    // have it overwritten by the generated one and then shipped to `/app` by
+    // `COPY .`, so `source.digest` would commit a tree — the one holding the
+    // AUTHOR's Dockerfile — that the guest does not have. Editing that file
+    // would move the execution id without changing anything the guest sees, and
+    // a repository with no Dockerfile would still get one at `/app` that is not
+    // in the projection. Copying `src/.` makes the guest's `{workdir}` exactly
+    // the projection, byte for byte.
     format!(
         r#"set -euo pipefail
 BUILD=$(mktemp -d)
@@ -549,12 +562,13 @@ cleanup() {{
   [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
 }}
 trap cleanup EXIT
-cp -a "$ATO_SRC/." "$BUILD/"
+mkdir -p "$BUILD/src"
+cp -a "$ATO_SRC/." "$BUILD/src/"
 # QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
 cat > "$BUILD/Dockerfile" <<'DOCKER'
 FROM {base}
 WORKDIR {workdir}
-COPY . {workdir}
+COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
 DOCKER
 docker build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
@@ -2562,6 +2576,41 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert!(
             !script.contains("FROM python:3.11-slim"),
             "the mutable tag must not reach the Dockerfile: {script}"
+        );
+    }
+
+    /// The author's own `Dockerfile` must reach the guest unchanged, and the
+    /// generated one must not reach it at all.
+    ///
+    /// Writing the generated Dockerfile into the copied tree — which is what
+    /// v0.3 does, harmlessly, because it claims nothing about the guest's
+    /// contents — would overwrite an author's file and then ship Ato's
+    /// three-liner to `/app`. `source.digest` would then commit a tree the
+    /// guest does not have.
+    #[test]
+    fn the_generated_dockerfile_never_enters_the_guest() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE);
+
+        // The projection lands in a subdirectory; the Dockerfile sits beside it.
+        assert!(
+            script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/src/""#),
+            "{script}"
+        );
+        assert!(script.contains(r#"cat > "$BUILD/Dockerfile""#), "{script}");
+        assert!(
+            !script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/""#),
+            "the projection must not be copied to the context root, where the \
+             generated Dockerfile would overwrite the author's: {script}"
+        );
+        // And only the projection is copied into the guest.
+        assert!(
+            script.contains(&format!("COPY src/. {V1_GUEST_WORKING_DIRECTORY}/")),
+            "{script}"
+        );
+        assert!(
+            !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
+            "COPY . would ship the generated Dockerfile to the guest: {script}"
         );
     }
 

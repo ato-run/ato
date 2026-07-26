@@ -133,8 +133,12 @@ fn facet_provenance(facet: &str) -> &'static str {
             "the materialized program-source projection"
         }
         "target" => "measure_guest_target over the assembled guest image",
-        "runtime.kind" | "runtime.digest" | "runtime.dynamic_contract_digest" => {
-            "resolve_runtime_artifact over the recipe's base image"
+        "runtime.digest" => "resolve_runtime_artifact over the recipe's base image",
+        // NOT the registry resolution: the family is decided by the source
+        // probe over the projection, and the dynamic contract is built from the
+        // family plus the recipe's observed invocation prefix.
+        "runtime.kind" | "runtime.dynamic_contract_digest" => {
+            "the recipe derivation over the projected source"
         }
         "launch.argv" | "launch.cwd" => "the recipe's guest launch descriptor",
         facet if facet.starts_with("filesystem.") => "the packed guest image",
@@ -434,26 +438,37 @@ pub(crate) fn run(
 
     // 10. Publish. Atomic: a reader sees the whole old lock or the whole new
     // one, and a crash leaves the previous one intact.
+    // Captured before the write so a failed read-back can put back exactly what
+    // was there. `persist_execution_contract` MERGES into the existing lock, so
+    // deleting the merged file on failure would take the caller's other
+    // sections with it — worse than the stale lock the removal exists to avoid.
+    let previous_lock_bytes = std::fs::read(&lock_path).ok();
     persist_execution_contract(&lock_path, &manifest, &minted)?;
 
     // 11. Read it back from disk through the trusted path — not from the value
     // still in memory, which would prove nothing about what was written.
-    let persisted = capsule_lock::load_verified_from_path(&lock_path).map_err(|source| {
-        V1BuildError::TrustedLoadFailed {
+    //
+    // EVERY failure from here on goes through `unpublish`. This lane wrote the
+    // file, so a lock it cannot vouch for is its own output and must not be
+    // left where the next reader will trust it — and that includes the two
+    // failures that are about READING rather than comparing. A lock that will
+    // not load is no more publishable than one describing another build.
+    let verified = capsule_lock::load_verified_from_path(&lock_path)
+        .map_err(|source| V1BuildError::TrustedLoadFailed {
             path: lock_path.clone(),
             reason: source.to_string(),
-        }
-    })?;
-    let read_back =
-        persisted
-            .execution_contract
-            .as_ref()
-            .ok_or_else(|| V1BuildError::TrustedLoadFailed {
-                path: lock_path.clone(),
-                reason: "the lock read back without an execution contract".to_string(),
+        })
+        .and_then(|persisted| {
+            let read_back = persisted.execution_contract.as_ref().ok_or_else(|| {
+                V1BuildError::TrustedLoadFailed {
+                    path: lock_path.clone(),
+                    reason: "the lock read back without an execution contract".to_string(),
+                }
             })?;
-    if let Err(error) = compare_persisted_to_minted(&lock_path, &minted, read_back) {
-        return Err(discard_unverifiable_lock(&lock_path, error));
+            compare_persisted_to_minted(&lock_path, &minted, read_back)
+        });
+    if let Err(error) = verified {
+        return Err(unpublish(&lock_path, previous_lock_bytes.as_deref(), error));
     }
 
     Ok(V1BuildOutcome {
@@ -653,6 +668,20 @@ fn refuse_path_inside_workspace(
     what: &str,
 ) -> Result<(), V1BuildError> {
     let refuse = |reason: String| V1BuildError::SourceNotPinnable { reason };
+
+    // A relative path is refused rather than resolved. The comparison below is
+    // between canonical paths, and a relative one only becomes comparable by
+    // resolving it against the process CWD — which for `ato build` is wherever
+    // the user happened to be standing, so a path that is outside the workspace
+    // from one directory is inside it from another. Refusing keeps the answer a
+    // property of the arguments.
+    if path.is_relative() {
+        return Err(refuse(format!(
+            "{what} ({}) is a relative path; it must be absolute so that whether it lies \
+             inside the workspace does not depend on the current directory",
+            path.display()
+        )));
+    }
 
     let workspace = workspace_root.canonicalize().map_err(|source| {
         refuse(format!(
@@ -898,21 +927,40 @@ fn describe_target(target: &ResolvedTargetContract) -> String {
     )
 }
 
-/// A lock that was written but does not read back as this build is not a
-/// product — remove it, and say so if it cannot be removed.
+/// Take back a lock this lane wrote but cannot vouch for, leaving the workspace
+/// as it found it.
 ///
-/// Leaving it would leave the workspace holding a lock that verifies (its id
-/// matches its own contract) while describing an execution this build did not
-/// produce. The next reader has no way to tell.
-fn discard_unverifiable_lock(lock_path: &Path, cause: V1BuildError) -> V1BuildError {
-    match std::fs::remove_file(lock_path) {
+/// Leaving the file would leave a lock that VERIFIES — its id matches its own
+/// contract — while describing an execution this build did not produce, and the
+/// next reader has no way to tell. But plain removal is wrong too:
+/// `persist_execution_contract` merges into the existing lock, so deleting the
+/// merged file would take the caller's `resolution`, `binding` and `policy`
+/// sections with it, which this lane neither owns nor can reconstruct.
+///
+/// So: restore the exact bytes that were there before the write, or remove the
+/// file if there were none. Either way the returned error is the original
+/// cause — the failure to report is why the lock is untrustworthy, not the
+/// bookkeeping that followed.
+fn unpublish(lock_path: &Path, previous: Option<&[u8]>, cause: V1BuildError) -> V1BuildError {
+    let restored = match previous {
+        Some(bytes) => std::fs::write(lock_path, bytes),
+        None => match std::fs::remove_file(lock_path) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    match restored {
         Ok(()) => cause,
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => cause,
         Err(source) => V1BuildError::LockPersistFailed {
             path: lock_path.to_path_buf(),
             reason: format!(
-                "the lock did not verify ({cause}), and removing it failed too: {source}. \
-                 It is still on disk and must not be trusted."
+                "the lock did not verify ({cause}), and {} failed too: {source}. The file \
+                 on disk is this build's output and must not be trusted.",
+                if previous.is_some() {
+                    "restoring the previous one"
+                } else {
+                    "removing it"
+                }
             ),
         },
     }
