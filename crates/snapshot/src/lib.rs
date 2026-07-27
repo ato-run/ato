@@ -59,6 +59,10 @@ mod scanner;
 /// read from the COMMIT tree, because an uninitialised submodule is invisible
 /// on the filesystem.
 pub mod source_eligibility;
+/// The two receipts a source materialization produces — WHAT was resolved, and
+/// WHERE it was stored. Their canonical bytes are pinned by shared fixtures
+/// because the verifier is TypeScript in another repository.
+pub mod source_receipt;
 // Build-time screenshot capture (store thumbnail automation) — internal to
 // `firecracker.rs`'s `build_ready_state`, no public API of its own.
 mod screenshot;
