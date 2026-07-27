@@ -55,6 +55,10 @@ mod qemu;
 pub mod rootfs_builder;
 mod scan_cache;
 mod scanner;
+/// Whether a checked-out source is one the v1 submission lane can carry —
+/// read from the COMMIT tree, because an uninitialised submodule is invisible
+/// on the filesystem.
+pub mod source_eligibility;
 // Build-time screenshot capture (store thumbnail automation) — internal to
 // `firecracker.rs`'s `build_ready_state`, no public API of its own.
 mod screenshot;
