@@ -454,22 +454,49 @@ docker                  29.1.3
 e2fsprogs               mke2fs 1.47.0 (5-Feb-2023)
 /dev/kvm                present
 
-execution ID            blake3:5e717c80bc4e55424fcb9ac6985fd4efa04cd736c9c884b01ec0557ca4994770
-  second build          blake3:5e717c80bc4e55424fcb9ac6985fd4efa04cd736c9c884b01ec0557ca4994770   (equal)
-filesystem view digest  blake3:2f773f948ad651c3ec87a744e5a187a29c98bed30baba928697babd7a1d33107
-  second build          blake3:2f773f948ad651c3ec87a744e5a187a29c98bed30baba928697babd7a1d33107   (equal)
-source digest           sha256:4740d0ba7415091e7d0ae8664e13eff702ac2500c4cc4ffbf26b253bb4cbe8c9
-rootfs artifact digest  blake3:2f0444dc912c7c4c33ded68f2d873bad6a30f0f322af5543906531192576cf33
-  second build          blake3:03b7cba86e23cc57595e86da7d15f0143d9951d241702ae021d2b8b0166119fc   (recorded; differs by design)
+execution ID            blake3:684a00f8966c13a1ce8a012ac25d3b28f60c6f272d5caffd5ca75a289da4e0cf
+  second build          blake3:684a00f8966c13a1ce8a012ac25d3b28f60c6f272d5caffd5ca75a289da4e0cf   (equal)
+filesystem view digest  blake3:081e788df89306e8307b3fc15cbd3f6580f17684397c2218569db41a51d18b0a
+  second build          blake3:081e788df89306e8307b3fc15cbd3f6580f17684397c2218569db41a51d18b0a   (equal)
+source digest           sha256:f63d4ae3f2952c4632cd313e17d5ee8a31ed911f4746d4dee4d4379e6557707a
+rootfs artifact digest  blake3:f17bd5d605f17cef2c2ef6b4b6e56cb2571dddf24efc35f478f7df0a8c53d736
+  second build          blake3:c2257d0d86fcbcb2980b6b07111bd8fef81ae6a907154ef508ee31fb35a06153   (recorded; differs by design)
 target                  linux/amd64/gnu
 runtime                 python@sha256:db3ff2e1800a8581e2c48a27c3995339d47bdf046da21c7627accd3d51053a93
 
 boot result             booted
 readiness result        ready
-exact argv (committed)  ["python3", "server.py", "--label", "step 6"]
-exact argv (observed)   ["server.py", "--label", "step 6"]
-working directory       /app  (observed: /app)
+
+exact exec argv
+  committed             ["python3", "server.py", "--label", "step 6"]
+  /proc/self/cmdline    ["python3", "server.py", "--label", "step 6"]
+application sys.argv    ["server.py", "--label", "step 6"]   (auxiliary; excludes the interpreter)
+working directory
+  committed             /app
+  initial getcwd()      /app
+  /proc/self/cwd        /app
 ```
+
+`launch.argv` is compared against `/proc/self/cmdline` — the vector the kernel
+was handed — and not against `sys.argv`. Python drops the interpreter from
+`sys.argv`, so that reading can only ever show the application's own arguments:
+it demonstrates that `"step 6"` survived as ONE argument, which is worth having,
+but it cannot show that `resolved_argv[0]` was honoured at all. Only the full
+vector does, and it is what the harness gates on. `sys.argv` is kept above as
+auxiliary evidence of the same boundary from the application's side.
+
+`/proc/self/cmdline` is NUL-delimited AND NUL-terminated, so exactly one
+trailing empty piece is the terminator and every other one is a real empty
+argument. Dropping them all would make `["a", "", "b"]` and `["a", "b"]`
+indistinguishable. This capsule has no empty argument — the contract refuses one
+— so the harness runs its decoder over crafted input before it builds anything,
+and that self-test is what keeps the claim from resting on a reading of the
+code.
+
+The working directory is read twice for the same reason: `getcwd()` as the
+fixture's first statement is where the process STARTED, `/proc/self/cwd` is
+where it IS. A workload that `chdir`'d between them would show as a
+disagreement rather than as a pass.
 
 The guest reports its own `sys.argv` and `os.getcwd()`, and the harness compares
 them to what `capsule.lock` committed. Not "something answered on :8080" — a
