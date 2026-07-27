@@ -23,9 +23,15 @@
 //!
 //! # Lifetime
 //!
-//! [`HoldIngress::stop`] is explicit, and `Drop` runs the same teardown, so a
-//! forgotten relay cannot outlive the hold that owns it and keep a port bound
-//! against the next one.
+//! The relay is owned by the hold and torn down by `Drop`, so it cannot outlive
+//! the hold that owns it and keep a port bound against the next one — including
+//! on the hold's early-return paths, which is why teardown is `Drop` rather than
+//! an explicit call somebody has to reach.
+//!
+//! [`HoldIngress::gate_for_verification`] is the one explicit transition: it
+//! stops relaying and answers 503 instead, at the point the held guest is
+//! released for acceptance. See its doc for why continuing to relay there would
+//! be actively wrong rather than merely useless.
 
 use std::io::{self};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -36,10 +42,17 @@ use std::time::Duration;
 /// How long a connect to the guest may take before the relay gives up on it.
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a gated client is told to wait before retrying.
+///
+/// Advisory only. It is sized to one cold disposable restore plus the author's
+/// `seal_at` command, which is the window the gate is open for.
+const VERIFICATION_RETRY_AFTER_SECS: u32 = 15;
+
 /// A running relay: `listen` -> the held guest.
 pub struct HoldIngress {
     listen: SocketAddr,
     stopping: Arc<AtomicBool>,
+    gated: Arc<AtomicBool>,
     accept_thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -66,16 +79,45 @@ impl HoldIngress {
 
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stopping);
+        let gated = Arc::new(AtomicBool::new(false));
+        let gate_flag = Arc::clone(&gated);
         let upstream_owned = upstream.to_string();
         let accept_thread = std::thread::Builder::new()
             .name("ato-hold-ingress".to_string())
-            .spawn(move || accept_loop(listener, upstream_addr, upstream_owned, stop_flag))?;
+            .spawn(move || {
+                accept_loop(
+                    listener,
+                    upstream_addr,
+                    upstream_owned,
+                    stop_flag,
+                    gate_flag,
+                )
+            })?;
 
         Ok(Self {
             listen: bound,
             stopping,
+            gated,
             accept_thread: Some(accept_thread),
         })
+    }
+
+    /// Stop relaying to the guest and answer 503 instead, permanently.
+    ///
+    /// Called immediately before the held guest is released for verification.
+    /// Relaying past that point is not merely useless, it is WRONG: the
+    /// upstream is a fixed guest address, so once the hold's guest is gone the
+    /// relay would carry the author's browser into whatever occupies that
+    /// address next — during acceptance, the disposable guest being verified.
+    /// That would feed real input to the guest whose behaviour `seal_at` is
+    /// judging.
+    ///
+    /// A 503 rather than a closed port because the author is watching: a
+    /// refused connection renders as a broken preview, while a 503 with
+    /// `Retry-After` is a state the wizard can explain alongside
+    /// `WizardStage::Accepting`.
+    pub fn gate_for_verification(&self) {
+        self.gated.store(true, Ordering::SeqCst);
     }
 
     /// The address actually bound (useful when `listen` asked for port 0).
@@ -87,6 +129,14 @@ impl HoldIngress {
     ///
     /// In-flight connections are not force-closed: they end when either side
     /// does. The hold's teardown kills the guest, which closes them.
+    ///
+    /// Production no longer calls this — the relay is owned by the hold and
+    /// `Drop` runs the same teardown on every exit path, which is what makes the
+    /// early returns safe. It is kept as the explicit counterpart to `Drop` and
+    /// is what this module's tests drive, since a test needs teardown to have
+    /// finished before it asserts. (`snapshot-builder` is a binary crate, so a
+    /// `pub` item reached only from tests still reads as dead to the bin target.)
+    #[allow(dead_code)]
     pub fn stop(mut self) {
         self.shutdown();
     }
@@ -115,12 +165,21 @@ fn accept_loop(
     upstream_addr: SocketAddr,
     upstream: String,
     stopping: Arc<AtomicBool>,
+    gated: Arc<AtomicBool>,
 ) {
     for incoming in listener.incoming() {
         if stopping.load(Ordering::SeqCst) {
             return;
         }
         let Ok(client) = incoming else { continue };
+        // Gated: answer here and never dial upstream. Checked per connection
+        // rather than once, because the gate closes while the loop is parked in
+        // `accept()` and every connection after that point must be refused.
+        if gated.load(Ordering::SeqCst) {
+            let _ = write_verification_gate_response(&client);
+            let _ = client.shutdown(Shutdown::Both);
+            continue;
+        }
         let upstream = upstream.clone();
         // One thread per connection, detached: a stuck peer must never block the
         // accept loop (and therefore every other viewer of the preview).
@@ -139,6 +198,31 @@ fn accept_loop(
             continue;
         }
     }
+}
+
+/// The canned answer while the hold is being verified.
+///
+/// Deliberately a complete, self-contained HTTP/1.1 response with
+/// `Connection: close` and a fixed `Content-Length`: the client is a browser
+/// that may be mid-keepalive, and a partial or unframed reply would render as a
+/// network error — the exact thing the gate exists to avoid.
+fn write_verification_gate_response(client: &TcpStream) -> io::Result<()> {
+    use std::io::Write;
+    const BODY: &str = "Verifying this capsule's snapshot. The preview returns when it finishes.";
+    let response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\n\
+         Retry-After: {VERIFICATION_RETRY_AFTER_SECS}\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {BODY}",
+        BODY.len()
+    );
+    let mut w = client;
+    w.write_all(response.as_bytes())?;
+    w.flush()
 }
 
 /// Pipe one client connection to the guest, both directions, until either ends.
@@ -247,5 +331,71 @@ mod tests {
     fn refuses_an_upstream_that_is_not_an_ip_port() {
         let started = HoldIngress::start("127.0.0.1:0".parse().unwrap(), "evil.example.com:80");
         assert!(started.is_err());
+    }
+
+    /// Once gated, the relay answers 503 and never dials the guest.
+    ///
+    /// The "never dials" half is the correctness one. The relay's upstream is a
+    /// fixed guest address, so after the hold's guest is released that address
+    /// belongs to whatever occupies the slot next — during acceptance, the
+    /// disposable guest under verification. Relaying there would feed the
+    /// author's browser into the guest whose behaviour `seal_at` is judging.
+    #[test]
+    fn a_gated_relay_answers_503_without_reaching_the_upstream() {
+        let (upstream, _up) = spawn_echo_upstream();
+        let ingress = HoldIngress::start("127.0.0.1:0".parse().unwrap(), &upstream.to_string())
+            .expect("start ingress");
+
+        ingress.gate_for_verification();
+
+        let mut client = TcpStream::connect(ingress.listen_addr()).expect("connect via ingress");
+        client.write_all(b"GET / HTTP/1.0\r\n\r\n").expect("write");
+        let mut got = String::new();
+        client.read_to_string(&mut got).expect("read");
+
+        assert!(
+            got.starts_with("HTTP/1.1 503 "),
+            "expected a 503 status line, got {got:?}"
+        );
+        assert!(
+            got.contains("Retry-After:"),
+            "a gated response must tell the client when to come back: {got:?}"
+        );
+        assert!(
+            !got.contains("hello"),
+            "the gate must not reach the upstream at all: {got:?}"
+        );
+        ingress.stop();
+    }
+
+    /// The gate applies to connections that arrive AFTER it closes.
+    ///
+    /// It is checked per accepted connection rather than once, because the gate
+    /// closes while the accept loop is parked in `accept()`.
+    #[test]
+    fn the_gate_applies_to_connections_accepted_after_it_closes() {
+        let (upstream, _up) = spawn_echo_upstream();
+        let ingress = HoldIngress::start("127.0.0.1:0".parse().unwrap(), &upstream.to_string())
+            .expect("start ingress");
+
+        // Before the gate: a normal relayed response.
+        let mut first = TcpStream::connect(ingress.listen_addr()).expect("connect");
+        first.write_all(b"GET / HTTP/1.0\r\n\r\n").expect("write");
+        let mut before = String::new();
+        first.read_to_string(&mut before).expect("read");
+        assert!(before.contains("hello"), "pre-gate body: {before:?}");
+
+        ingress.gate_for_verification();
+
+        // After: refused, on a connection the loop accepted later.
+        let mut second = TcpStream::connect(ingress.listen_addr()).expect("connect");
+        second.write_all(b"GET / HTTP/1.0\r\n\r\n").expect("write");
+        let mut after = String::new();
+        second.read_to_string(&mut after).expect("read");
+        assert!(
+            after.starts_with("HTTP/1.1 503 "),
+            "post-gate response: {after:?}"
+        );
+        ingress.stop();
     }
 }

@@ -2952,7 +2952,7 @@ fn process_interactive_capture_job(
                 .to_string(),
         )
     })?;
-    let acceptance_config = snapshot::acceptance::acceptance_config_for_seal_at(&seal_at);
+    let mut acceptance_config = snapshot::acceptance::acceptance_config_for_seal_at(&seal_at);
 
     // The Capsule v1 identity the control plane pinned on this claim. It is what
     // the eligibility proof is minted from and what `accept` binds every
@@ -2987,6 +2987,29 @@ fn process_interactive_capture_job(
         CasStore::open(jobdir.join("cas")).map_err(|e| fail("build_ready_state", e.to_string()))?;
     // Same per-job boot budget the seal lane applies, for the same boot.
     let job_backend = backend.with_boot_timeout(produced.boot_timeout_s.map(u64::from));
+
+    // The acceptance restore on THIS lane is cold by construction, and
+    // `acceptance_config_for_seal_at` does not know that.
+    //
+    // It allots a fixed `total_deadline - verification_timeout` — 30s — for
+    // create + restore + teardown. That is sized for a warm restore. Here the
+    // hold sealed into this job's own CAS and its teardown deleted the rootfs
+    // cache entry it had written, so acceptance must rehydrate mem + vmstate +
+    // rootfs from CapsuleFS and boot the guest to health before the author's
+    // `seal_at` command may run at all — and `restore()`'s health wait alone is
+    // bounded by `boot_timeout`, which is 30s by default and up to 600s per job.
+    //
+    // `accept()` checks the budget immediately after `restore_candidate`
+    // returns, and `maximum_attempts` is 1, so an over-budget restore rejects
+    // the candidate with `DeadlineExceeded` WITHOUT ever running the command it
+    // was supposed to be judging. Nothing has ever spent this budget: every
+    // acceptance on this lane died on the slot lock first, which is why the
+    // shortfall has been invisible.
+    //
+    // `verification_timeout` and `maximum_attempts` are deliberately untouched,
+    // so `[seal_at] timeout_seconds` still means exactly what the author wrote.
+    const INTERACTIVE_REHYDRATE_SLACK: Duration = Duration::from_secs(120);
+    acceptance_config.total_deadline += job_backend.boot_timeout() + INTERACTIVE_REHYDRATE_SLACK;
 
     report_hold_progress(&api, fencing, wizard_wire::WizardStage::Launch);
     // The boot half of `build_ready_state`, stopping at the seal point: the
@@ -3107,7 +3130,12 @@ fn run_hold_session(
         ingress.listen_addr()
     );
 
-    let outcome = drive_hold(
+    // The relay moves INTO the hold. It has to be gated at a point only the
+    // hold knows — the instant before the guest is released for verification —
+    // and gating it from out here could only happen after the whole hold
+    // returned, which is far too late. `HoldIngress::Drop` still covers every
+    // early return in there, so this is about WHERE it is closed, not whether.
+    drive_hold(
         cfg,
         api,
         job,
@@ -3120,12 +3148,8 @@ fn run_hold_session(
         guest_port,
         execution_id,
         acceptance_config,
-    );
-    // Relay first: it must not accept a connection into a guest that is going
-    // away. Both also tear down on `Drop`, so this is about ORDER, not about
-    // whether it happens.
-    ingress.stop();
-    outcome
+        ingress,
+    )
 }
 
 /// Assemble the hold's seams and run it. The guest is consumed by the capture
@@ -3144,6 +3168,7 @@ fn drive_hold(
     guest_port: u16,
     execution_id: capsule::execution_contract::ExecutionId,
     acceptance_config: snapshot::acceptance::AcceptanceConfig,
+    ingress: hold_ingress::HoldIngress,
 ) -> std::result::Result<(), (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
 
@@ -3218,7 +3243,9 @@ fn drive_hold(
     ) {
         Ok(lease) => lease,
         Err(lost) => {
-            capture.release();
+            // Nothing was captured, so there is nothing to verify and the token
+            // has no consumer.
+            let _released = capture.release();
             // A lease that is already unusable at hold entry sends NO ack — the
             // same rule every lease loss on this lane follows (§3.8 has no
             // reason for it; expiry is server-owned).
@@ -3234,31 +3261,61 @@ fn drive_hold(
     let cancellation = snapshot::acceptance::AcceptanceCancellation::default();
     let clock = snapshot::acceptance::SystemClock;
 
-    let termination = {
+    let outcome = {
         let mut phase = hold_phase::HoldPhase::new(
             &mut control,
             &mut capture,
             &mut eligibility,
             &mut extend,
-            &mut lifecycle,
             &clock,
-            &cancellation,
             fencing.clone(),
-            acceptance_config,
             hold_phase::DEFAULT_HOLD_TTL,
         );
         phase.run()
     };
+
+    // Close the author's relay to the guest BEFORE the guest goes away. Its
+    // upstream is a fixed guest address, so anything still relayed from here on
+    // would reach whatever occupies that address next — during verification,
+    // the disposable guest under test. The gate answers 503 rather than
+    // dropping the connection, so the wizard can say what is happening instead
+    // of showing a dead frame.
+    ingress.gate_for_verification();
+
     // The guest goes down before the ack: the attempt is over either way, and
     // holding a VM (and this builder's only build slot) open across a network
-    // call to say so would be pure cost.
-    capture.release();
+    // call to say so would be pure cost. The token this returns is what opens
+    // `verify_captured_candidate` — acceptance restores a second guest, and the
+    // backend admits one VMM per network identity.
+    let released = capture.release();
 
-    let termination = match termination {
-        Ok(termination) => termination,
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
         // A receipt-less internal fault. It is NOT a rejection, so it must not
         // be acked as one; report it as the build failure it is.
         Err(fatal) => return Err(fail("acceptance", fatal.to_string())),
+    };
+
+    let termination = match outcome {
+        hold_phase::HoldOutcome::Terminal(termination) => termination,
+        hold_phase::HoldOutcome::CapturedPendingVerification(pending) => {
+            // The author's preview is down for the length of one cold restore
+            // plus `seal_at`. Reporting the stage is what makes that legible as
+            // progress rather than as a failure.
+            report_hold_progress(api, fencing, wizard_wire::WizardStage::Accepting);
+            hold_phase::verify_captured_candidate(
+                &mut control,
+                &mut lifecycle,
+                &mut eligibility,
+                &acceptance_config,
+                &cancellation,
+                &clock,
+                fencing,
+                pending,
+                &released,
+            )
+            .map_err(|fatal| fail("acceptance", fatal.to_string()))?
+        }
     };
     eprintln!(
         "[builder] interactive_capture {} hold ended: {termination:?}",

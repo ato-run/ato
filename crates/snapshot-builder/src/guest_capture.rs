@@ -74,8 +74,45 @@ impl<'a> GuestCaptureAction<'a> {
     }
 
     /// Tear the hold down. Consumes the action, so no capture can follow.
-    pub fn release(self) {
+    ///
+    /// Returns the [`ReleasedHold`] token that acceptance requires: by the time
+    /// this returns, the VMM is killed and reaped, `net_down()` has run, and the
+    /// slot lock is unlinked.
+    pub fn release(self) -> ReleasedHold {
         self.guest.release();
+        ReleasedHold(())
+    }
+}
+
+/// Proof that the held guest is gone and its slot is free.
+///
+/// Minted only by [`GuestCaptureAction::release`], which takes `self` by value
+/// and calls `HeldGuest::release` — that kills and reaps the VMM, runs
+/// `net_down()`, and drops the `BuildLock`, unlinking `work_root/{netns|tap}.lock`.
+///
+/// [`crate::hold_phase::verify_captured_candidate`] demands one because the
+/// Firecracker backend admits exactly ONE VMM per network identity, and the
+/// consequences of ignoring that are not confined to the lock:
+///
+/// * the restore takes the same lock and fails
+///   `single-session backend busy` (`firecracker.rs` `acquire_lock`);
+/// * `net_up_root`'s FIRST statement is `ip link del <tap>`, which would delete
+///   the tap the author's guest is attached to;
+/// * both guests carry the same `guest_ip`, baked into the restored memory image
+///   by the kernel cmdline, so readiness cannot tell them apart — a verify could
+///   be satisfied by the HELD guest and accept a candidate it never probed;
+/// * the per-capsule vsock UDS path is deterministic, so the restore unlinks the
+///   live hold's socket.
+///
+/// Only the first of those fails loudly. Requiring this token makes the ordering
+/// a compile-time obligation rather than a comment somebody has to find.
+pub struct ReleasedHold(());
+
+#[cfg(test)]
+impl ReleasedHold {
+    /// TEST-ONLY: stand in for a release that a fake harness performed itself.
+    pub(crate) fn for_test() -> Self {
+        Self(())
     }
 }
 

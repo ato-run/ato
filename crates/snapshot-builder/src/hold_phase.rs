@@ -51,6 +51,39 @@
 //! orchestration below stays pure and is still exercised in full by this
 //! module's own KVM-free unit tests.
 //!
+//! # The hold does not verify
+//!
+//! [`HoldPhase`] owns nothing that can reach `backend.restore`, and that is a
+//! correctness property rather than tidiness. Acceptance restores the captured
+//! candidate into a DISPOSABLE guest, while the Firecracker backend admits one
+//! VMM per network identity: the tap name, the host and guest IPs and the
+//! per-capsule vsock path are all per-slot constants, and the slot lock is held
+//! for the whole hold. Driven from inside the loop — as it used to be — the
+//! restore took the lock its own hold was holding and failed
+//! `single-session backend busy` on every real builder, which is why the
+//! interactive acceptance loop had never once completed on hardware.
+//!
+//! So the loop ENDS on a successful capture, returning
+//! [`HoldOutcome::CapturedPendingVerification`]. The caller releases the guest —
+//! killing the VMM, running `net_down()`, dropping the lock — and only then may
+//! call [`verify_captured_candidate`], which demands the
+//! [`crate::guest_capture::ReleasedHold`] that release mints. The ordering is
+//! therefore checked by the compiler.
+//!
+//! Two consequences, both deliberate:
+//!
+//! * the author's preview is down for the length of one cold restore plus
+//!   `seal_at`. The relay answers 503 with `Retry-After` instead of vanishing
+//!   (`HoldIngress::gate_for_verification`), and the builder reports
+//!   `WizardStage::Accepting`, so the wizard can say what is happening.
+//! * a REJECTED candidate ends the attempt instead of returning to holding.
+//!   ADR-012 `accepting_source_available` re-capture and RFC §8.2 repeated
+//!   captures need a guest that is still alive, which is exactly what this
+//!   ordering gives up. Restoring them is the `VacatedHold` follow-up: yield the
+//!   slot rather than tear the hold down, and resume after a rejection. No new
+//!   §3.8 reason is introduced — `AttemptEnded` is what `Accepted` already
+//!   projects to, and the per-candidate verdict still reaches the author on §3.7.
+//!
 //! **Dead-code allow (scoped to this module):** `snapshot-builder` is a *binary*
 //! crate, so `pub` items count as dead unless reached from `fn main`. Several
 //! items here exist for the seams' contracts (and are exercised by the tests
@@ -331,6 +364,33 @@ pub enum HoldTermination {
     },
 }
 
+/// What the hold loop produced.
+///
+/// The loop no longer verifies. A successful capture ENDS it and hands the
+/// candidate back for verification, because acceptance restores a disposable
+/// guest and the backend admits one VMM per network identity — see
+/// [`crate::guest_capture::ReleasedHold`]. Splitting the outcome is what makes
+/// "verify only after the guest is released" expressible in the type system
+/// instead of in a comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldOutcome {
+    /// The hold ended without producing a candidate to verify.
+    Terminal(HoldTermination),
+    /// A candidate was captured and reported (§3.6). Acceptance has NOT run.
+    CapturedPendingVerification(CapturedPendingVerification),
+}
+
+/// A sealed, reported candidate awaiting acceptance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedPendingVerification {
+    /// The §3.6 report already sent for this candidate.
+    pub report: CandidateReportRequest,
+    /// The epoch that drove the capture (echoed into the §3.7 verdict).
+    pub capture_epoch: u64,
+    /// ADR-012: the source guest was already gone when it was captured.
+    pub source_lost: bool,
+}
+
 impl HoldTermination {
     /// Project to the ONLY legal wizard job-terminal reasons (SSOT §3.8), or
     /// `None` when this outcome must send **no ack at all**.
@@ -457,38 +517,39 @@ impl<L: DisposableAcceptanceLifecycle + ?Sized> DisposableAcceptanceLifecycle
     }
 }
 
-/// The pure hold-phase driver. Generic only over the acceptance lifecycle `L`
-/// (which [`RunningSnapshotAcceptance::accept`] takes as a `Sized` `impl`); every
-/// other seam is a `&mut dyn` trait object to keep the type small.
-pub struct HoldPhase<'a, L: DisposableAcceptanceLifecycle> {
+/// The pure hold-phase driver.
+///
+/// It deliberately owns NOTHING that can reach `backend.restore`. The
+/// acceptance lifecycle used to live here, and that is precisely what made the
+/// defect expressible: the loop called the disposable restore while its own
+/// guest was still live, holding the slot. Verification moved out to
+/// [`verify_captured_candidate`], which cannot be called without a
+/// [`crate::guest_capture::ReleasedHold`].
+pub struct HoldPhase<'a> {
     control: &'a mut dyn ControlSource,
     capture: &'a mut dyn CaptureAction,
     eligibility: &'a mut dyn EligibilitySource,
     extend: &'a mut dyn ExtendPolicy,
-    lifecycle: &'a mut L,
     clock: &'a dyn MonotonicClock,
-    cancellation: &'a snapshot::acceptance::AcceptanceCancellation,
     fencing: Fencing4,
-    acceptance_config: AcceptanceConfig,
     hold_ttl: Duration,
 }
 
-impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
+impl<'a> HoldPhase<'a> {
     /// Assemble a hold phase from its seams. `fencing` is the attempt's FENCING-4
-    /// identity (echoed into candidate reports); `acceptance_config` is the #1088
-    /// config (exact `seal_at` argv + bounds); `hold_ttl` is the hold deadline
+    /// identity (echoed into candidate reports); `hold_ttl` is the hold deadline
     /// budget ([`DEFAULT_HOLD_TTL`] by default).
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// The acceptance config, cancellation token and lifecycle are NOT taken:
+    /// they belong to [`verify_captured_candidate`], which runs after the guest
+    /// is released.
     pub fn new(
         control: &'a mut dyn ControlSource,
         capture: &'a mut dyn CaptureAction,
         eligibility: &'a mut dyn EligibilitySource,
         extend: &'a mut dyn ExtendPolicy,
-        lifecycle: &'a mut L,
         clock: &'a dyn MonotonicClock,
-        cancellation: &'a snapshot::acceptance::AcceptanceCancellation,
         fencing: Fencing4,
-        acceptance_config: AcceptanceConfig,
         hold_ttl: Duration,
     ) -> Self {
         Self {
@@ -496,11 +557,8 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
             capture,
             eligibility,
             extend,
-            lifecycle,
             clock,
-            cancellation,
             fencing,
-            acceptance_config,
             hold_ttl,
         }
     }
@@ -518,36 +576,32 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
     ///    newer than the last captured epoch (ADR-008 monotonicity: a stale or
     ///    duplicate command never re-drives capture, e.g. after a source-available
     ///    return to holding).
-    /// 4. On capture, run the capture-action, then #1088 acceptance — both with
-    ///    the claim's lease kept alive across them ([`LeaseKeepalive`]), and both
-    ///    ending the hold as [`HoldTermination::TornDownWithoutAck`] the moment
-    ///    the lease is lost, ahead of whatever they themselves returned:
-    ///    - accepted → terminal ([`HoldTermination::Accepted`]);
-    ///    - acceptance failed + source available → return to holding (re-capture);
-    ///    - source lost (capture failure or acceptance failure) → terminal
-    ///      ([`HoldTermination::AcceptanceFailedSourceLost`], no re-capture).
-    ///
-    /// A [`FatalInternalError`] from the acceptance loop is surfaced (it is a
-    /// genuinely receipt-less fault, distinct from a receipted rejection).
-    pub fn run(&mut self) -> Result<HoldTermination, FatalInternalError> {
+    /// 4. On capture, run the capture-action with the claim's lease kept alive
+    ///    across it ([`LeaseKeepalive`]), ending the hold as
+    ///    [`HoldTermination::TornDownWithoutAck`] the moment the lease is lost,
+    ///    ahead of whatever the capture itself returned. A capture FAILURE keeps
+    ///    the author's preview alive and returns to holding unless the source is
+    ///    lost (ADR-012), exactly as before.
+    /// 5. A capture SUCCESS ends the loop with
+    ///    [`HoldOutcome::CapturedPendingVerification`]. Acceptance does not run
+    ///    here — see the type's doc and [`verify_captured_candidate`].
+    pub fn run(&mut self) -> Result<HoldOutcome, FatalInternalError> {
         // (1) Entry eligibility gate — fail CLOSED before any hold/poll/capture so
         // an ineligible capsule (External State / restore-time bindings, #1090)
-        // can never reach a capture. Keep the first proof to seed the first
-        // acceptance without re-analyzing.
-        let mut pending_eligibility = match self.eligibility.eligibility() {
-            Ok(proof) => Some(proof),
-            Err(failure) => {
-                return Ok(HoldTermination::FailedClosed {
-                    failure_reason: failure.to_string(),
-                });
-            }
-        };
+        // can never reach a capture.
+        //
+        // The proof is discarded rather than carried to acceptance: acceptance no
+        // longer runs in this loop, and `ClaimContractEligibility::eligibility`
+        // is a pure re-analysis of the pinned contract, so minting a fresh proof
+        // at verification time costs one analysis and removes a value that would
+        // otherwise have to outlive the guest that justified it.
+        if let Err(failure) = self.eligibility.eligibility() {
+            return Ok(HoldOutcome::Terminal(HoldTermination::FailedClosed {
+                failure_reason: failure.to_string(),
+            }));
+        }
 
         let mut observed_epoch: u64 = 0;
-        // The highest epoch that has already driven a capture (ADR-008). Guards
-        // against a stale/duplicate Capture command re-driving capture after a
-        // source-available return to holding. `None` until the first capture.
-        let mut last_captured_epoch: Option<u64> = None;
         let mut deadline = self.clock.now() + self.hold_ttl;
 
         loop {
@@ -559,7 +613,7 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         deadline = self.clock.now() + extra;
                         continue;
                     }
-                    None => return Ok(HoldTermination::AttemptEnded),
+                    None => return Ok(HoldOutcome::Terminal(HoldTermination::AttemptEnded)),
                 }
             }
 
@@ -569,9 +623,9 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
             let response = match self.control.poll(observed_epoch) {
                 Ok(response) => response,
                 Err(fault) => {
-                    return Ok(HoldTermination::TornDownWithoutAck {
+                    return Ok(HoldOutcome::Terminal(HoldTermination::TornDownWithoutAck {
                         failure_reason: fault.message,
-                    });
+                    }));
                 }
             };
             // Adopt the authoritative server epoch as the observed command cursor
@@ -580,7 +634,9 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
 
             match response.directive {
                 ControlDirective::Hold => continue,
-                ControlDirective::Discard => return Ok(HoldTermination::Discarded),
+                ControlDirective::Discard => {
+                    return Ok(HoldOutcome::Terminal(HoldTermination::Discarded));
+                }
                 ControlDirective::Capture => {
                     // (3) ADR-007 causality: refuse capture until the quiesced ack
                     // has set pause_permitted. No capture before the quiesced ack.
@@ -589,20 +645,22 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     }
                     let epoch = response.server_capture_epoch;
 
-                    // (3a) ADR-008 capture-epoch monotonicity: the epoch is a
-                    // monotonic command cursor, enforced on capture (not just on
-                    // polling). A stale or duplicate Capture whose epoch is `<=`
-                    // the last epoch already captured must never re-drive capture
-                    // — in particular, after an ADR-012 source-available
-                    // acceptance failure returns to holding, a replayed command
-                    // with the same (or an older) epoch is ignored. Only a
-                    // strictly-newer epoch proceeds. Checked AFTER the
-                    // `pause_permitted` gate so an unpermitted directive never
-                    // consumes an epoch (a later permitted retry of the same epoch
-                    // must still capture).
-                    if matches!(last_captured_epoch, Some(last) if epoch <= last) {
-                        continue;
-                    }
+                    // (3a) ADR-008 capture-epoch monotonicity used to be enforced
+                    // here, guarding against a stale or duplicate Capture
+                    // re-driving capture after an ADR-012 source-available
+                    // acceptance failure returned the loop to holding.
+                    //
+                    // REMOVED with that path, not forgotten. A successful capture
+                    // now ENDS this loop, so no directive after it is ever
+                    // consumed and the guard had no reachable case — it read a
+                    // value the code below could only write on its way out.
+                    // Keeping an unreachable comparison would have been a
+                    // standing invitation to reason about a state the loop cannot
+                    // be in.
+                    //
+                    // The `VacatedHold` follow-up restores return-to-holding, and
+                    // MUST restore this guard with it: once a second capture is
+                    // possible again, a replayed epoch can drive one.
 
                     // The lease, live across BOTH long steps below. Neither polls,
                     // and together they run for minutes — long enough to outlive
@@ -619,12 +677,12 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                     // `ControlResponse::validate`; this is the same refusal for
                     // any other `ControlSource`.
                     let Some(candidate_id) = response.candidate_id.clone() else {
-                        return Ok(HoldTermination::FailedClosed {
+                        return Ok(HoldOutcome::Terminal(HoldTermination::FailedClosed {
                             failure_reason: format!(
                                 "control delivered `capture` for epoch {epoch} with no \
                                  candidate_id: the candidate could never be reported"
                             ),
-                        });
+                        }));
                     };
 
                     // (4) Firecracker-concrete capture for this epoch. The lease
@@ -639,9 +697,11 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         // every call that would carry it is a 409, and §3.8 has
                         // no ack for a dead lease.
                         if let Some(fault) = lease.fault() {
-                            return Ok(HoldTermination::TornDownWithoutAck {
-                                failure_reason: fault.message.clone(),
-                            });
+                            return Ok(HoldOutcome::Terminal(
+                                HoldTermination::TornDownWithoutAck {
+                                    failure_reason: fault.message.clone(),
+                                },
+                            ));
                         }
                         captured
                     };
@@ -651,17 +711,15 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                             // No candidate report (SSOT §3.6). Source alive →
                             // return to holding; source lost → terminal (ADR-012).
                             if err.source_lost {
-                                return Ok(HoldTermination::AcceptanceFailedSourceLost {
-                                    failure_reason: err.message,
-                                });
+                                return Ok(HoldOutcome::Terminal(
+                                    HoldTermination::AcceptanceFailedSourceLost {
+                                        failure_reason: err.message,
+                                    },
+                                ));
                             }
                             continue;
                         }
                     };
-                    // Record the captured epoch (ADR-008): a later return to
-                    // holding must not let a stale/duplicate command re-capture it.
-                    last_captured_epoch = Some(epoch);
-
                     // (5) §3.6 BEFORE the acceptance run, not after it. Three
                     // reasons, and the first two are correctness:
                     //
@@ -685,94 +743,27 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
                         // report fails (fenced, superseded epoch, an exchange
                         // that broke the contract) are the reasons a builder may
                         // not assert a job-terminal state either.
-                        return Ok(HoldTermination::TornDownWithoutAck {
+                        return Ok(HoldOutcome::Terminal(HoldTermination::TornDownWithoutAck {
                             failure_reason: format!("candidate report: {}", fault.message),
-                        });
+                        }));
                     }
 
-                    // Fresh eligibility proof to seed accept() (it consumes the
-                    // proof by value); re-analysis on later captures fails closed.
-                    let eligibility = match pending_eligibility.take() {
-                        Some(proof) => proof,
-                        None => match self.eligibility.eligibility() {
-                            Ok(proof) => proof,
-                            Err(failure) => {
-                                return Ok(HoldTermination::FailedClosed {
-                                    failure_reason: failure.to_string(),
-                                });
-                            }
+                    // (6) The hold ends HERE, with the candidate sealed, uploaded
+                    // and reported but NOT yet verified.
+                    //
+                    // Acceptance restores the candidate into a disposable guest,
+                    // and the backend admits one VMM per network identity — so it
+                    // cannot run while this loop's guest is live. Returning the
+                    // candidate instead of verifying it in place is what makes
+                    // that orderable: the caller releases the guest, and only a
+                    // `ReleasedHold` opens `verify_captured_candidate`.
+                    return Ok(HoldOutcome::CapturedPendingVerification(
+                        CapturedPendingVerification {
+                            report,
+                            capture_epoch: epoch,
+                            source_lost: held.source_lost,
                         },
-                    };
-
-                    // #1088 acceptance via the EXISTING disposable-restore
-                    // lifecycle, wrapped so the same lease is renewed between its
-                    // phases (see `LeaseKeptLifecycle`) — the run's own
-                    // `total_deadline` is minutes, which is longer than a lease
-                    // window, so an unwrapped run routinely finishes on a lease
-                    // that died under it.
-                    let run = {
-                        let mut lease = HoldLease::new(&mut *self.control);
-                        let run = RunningSnapshotAcceptance::accept(
-                            &mut LeaseKeptLifecycle {
-                                inner: &mut *self.lifecycle,
-                                lease: &mut lease,
-                            },
-                            eligibility,
-                            &self.acceptance_config,
-                            self.cancellation,
-                            self.clock,
-                        )?;
-                        // Again the lease's verdict first: a run that was refused
-                        // phase-by-phase because the lease died reports as a
-                        // rejection, and a rejection is an ACK — exactly the claim
-                        // a builder with no lease may not make.
-                        if let Some(fault) = lease.fault() {
-                            return Ok(HoldTermination::TornDownWithoutAck {
-                                failure_reason: fault.message.clone(),
-                            });
-                        }
-                        run
-                    };
-
-                    // (6) §3.7 — the verdict for THIS candidate, accepted or
-                    // rejected. Sent on both branches: a rejected candidate that
-                    // is never told to the server leaves the author's wizard
-                    // showing a validation that is still running, when in fact it
-                    // finished and failed.
-                    let acceptance = match acceptance_request(&self.fencing, epoch, &run) {
-                        Ok(request) => request,
-                        Err(reason) => {
-                            // The run happened; its receipt could not be put on
-                            // the wire. Ending the attempt fail-closed is the
-                            // honest outcome — the alternative is holding on with
-                            // a candidate whose verdict nobody will ever hear.
-                            return Ok(HoldTermination::FailedClosed {
-                                failure_reason: reason,
-                            });
-                        }
-                    };
-                    if let Err(fault) = self.control.report_acceptance(&acceptance) {
-                        return Ok(HoldTermination::TornDownWithoutAck {
-                            failure_reason: format!("candidate acceptance: {}", fault.message),
-                        });
-                    }
-
-                    if run.is_accepted() {
-                        return Ok(HoldTermination::Accepted { report });
-                    }
-
-                    // Acceptance failed. ADR-012 branch on source availability.
-                    if held.source_lost {
-                        let reason = run
-                            .failure()
-                            .map(|f| f.to_string())
-                            .unwrap_or_else(|| "acceptance rejected".to_string());
-                        return Ok(HoldTermination::AcceptanceFailedSourceLost {
-                            failure_reason: reason,
-                        });
-                    }
-                    // accepting_source_available → return to holding, re-capture
-                    // possible (ADR-012). Keep polling.
+                    ));
                 }
             }
         }
@@ -806,6 +797,120 @@ impl<'a, L: DisposableAcceptanceLifecycle> HoldPhase<'a, L> {
 /// `Err` when the receipt cannot be represented on the wire — which the §3.7
 /// envelope's "is an object" rule makes a real (if remote) possibility, and a
 /// silently-empty receipt would be an accepted candidate with no evidence.
+/// Verify a captured candidate, AFTER the held guest has been released.
+///
+/// This is the acceptance run that used to live inside the hold loop. It moved
+/// out because it restores a disposable guest, and the Firecracker backend
+/// admits one VMM per network identity: run from inside the loop it took the
+/// same slot lock its own hold was holding and failed
+/// `single-session backend busy` — every time, on every real builder.
+///
+/// The `_released` token is the whole point. It can only come from
+/// [`GuestCaptureAction::release`], which kills and reaps the VMM, runs
+/// `net_down()` and drops the slot lock, so "verify only after the guest is
+/// gone" is checked by the compiler rather than remembered by a reader. See
+/// [`ReleasedHold`] for the three failures beyond the lock that ordering also
+/// prevents — including the one that does NOT fail loudly, where readiness
+/// probes the held guest and accepts a candidate it never touched.
+///
+/// Deliberate semantic change: a REJECTED candidate ends the attempt
+/// ([`HoldTermination::AttemptEnded`]) instead of returning to holding.
+/// ADR-012 `accepting_source_available` re-capture needs a guest that is still
+/// alive, which is exactly what this ordering gives up. The branch was
+/// unreachable in practice anyway (every acceptance failed on the slot lock
+/// before reaching it). Restoring it is the `VacatedHold` follow-up: yield the
+/// slot instead of tearing the hold down, and resume after a rejection.
+///
+/// No new §3.8 reason: `AttemptEnded` is the same terminal reason `Accepted`
+/// projects to, and the per-candidate verdict already reached the author on §3.7.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_captured_candidate(
+    control: &mut dyn ControlSource,
+    lifecycle: &mut impl DisposableAcceptanceLifecycle,
+    eligibility: &mut dyn EligibilitySource,
+    config: &AcceptanceConfig,
+    cancellation: &snapshot::acceptance::AcceptanceCancellation,
+    clock: &dyn MonotonicClock,
+    fencing: &Fencing4,
+    pending: CapturedPendingVerification,
+    _released: &crate::guest_capture::ReleasedHold,
+) -> Result<HoldTermination, FatalInternalError> {
+    // A fresh proof: `accept()` consumes one by value, and re-analysing the
+    // pinned contract fails closed if anything about it stopped qualifying.
+    let proof = match eligibility.eligibility() {
+        Ok(proof) => proof,
+        Err(failure) => {
+            return Ok(HoldTermination::FailedClosed {
+                failure_reason: failure.to_string(),
+            });
+        }
+    };
+
+    // The lease is still kept alive across the run: acceptance's own
+    // `total_deadline` is minutes, longer than a lease window, so an unwrapped
+    // run routinely finishes on a lease that died under it.
+    let run = {
+        let mut lease = HoldLease::new(control);
+        let run = RunningSnapshotAcceptance::accept(
+            &mut LeaseKeptLifecycle {
+                inner: lifecycle,
+                lease: &mut lease,
+            },
+            proof,
+            config,
+            cancellation,
+            clock,
+        )?;
+        // The lease's verdict outranks the run's: a run refused phase-by-phase
+        // because the lease died reports as a rejection, and a rejection is an
+        // ACK — the one claim a builder with no lease may not make.
+        if let Some(fault) = lease.fault() {
+            return Ok(HoldTermination::TornDownWithoutAck {
+                failure_reason: fault.message.clone(),
+            });
+        }
+        run
+    };
+
+    // §3.7 — the verdict for THIS candidate, accepted or rejected. Sent on both
+    // branches: a rejected candidate nobody is told about leaves the author's
+    // wizard showing a validation that is still running when it already failed.
+    let acceptance = match acceptance_request(fencing, pending.capture_epoch, &run) {
+        Ok(request) => request,
+        Err(reason) => {
+            return Ok(HoldTermination::FailedClosed {
+                failure_reason: reason,
+            });
+        }
+    };
+    if let Err(fault) = control.report_acceptance(&acceptance) {
+        return Ok(HoldTermination::TornDownWithoutAck {
+            failure_reason: format!("candidate acceptance: {}", fault.message),
+        });
+    }
+
+    if run.is_accepted() {
+        return Ok(HoldTermination::Accepted {
+            report: pending.report,
+        });
+    }
+
+    // ADR-012: a lost source is still its own terminal reason, because the
+    // author cannot retry from a guest that is gone.
+    if pending.source_lost {
+        return Ok(HoldTermination::AcceptanceFailedSourceLost {
+            failure_reason: run
+                .failure()
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "acceptance rejected".to_string()),
+        });
+    }
+    // Rejected with the source nominally available. There is no guest to return
+    // to — this function was only reachable because it was released — so the
+    // attempt ends. The §3.7 verdict above already carried the reason.
+    Ok(HoldTermination::AttemptEnded)
+}
+
 fn acceptance_request(
     fencing: &Fencing4,
     capture_epoch: u64,
@@ -870,6 +975,9 @@ mod tests {
         AcceptanceBudget, AcceptanceCancellation, CandidateSnapshot, DisposableSessionHandle,
         VerificationOutcome,
     };
+
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     use super::*;
 
@@ -971,6 +1079,79 @@ mod tests {
                 captures: 0,
                 executes: 0,
             }
+        }
+    }
+
+    /// A lifecycle that models the ONE behaviour the real Firecracker backend
+    /// has and [`FakeLifecycle`] does not: it REFUSES a restore while a VMM is
+    /// live on the same network identity.
+    ///
+    /// `boot_and_hold` holds `work_root/{netns|tap}.lock` for the whole hold and
+    /// `restore` acquires the same path, so on real hardware a restore driven
+    /// from inside the hold loop returns `single-session backend busy`. Because
+    /// `FakeLifecycle::restore_candidate` returns `Ok(())` unconditionally, it
+    /// cannot express that rule — which is exactly why every hold test passed on
+    /// a tree whose production ordering was wrong.
+    struct SingleSlotLifecycle {
+        inner: FakeLifecycle,
+        guest_live: Rc<Cell<bool>>,
+    }
+
+    impl DisposableAcceptanceLifecycle for SingleSlotLifecycle {
+        fn capture_candidate(
+            &mut self,
+            attempt: u32,
+            budget: &AcceptanceBudget,
+        ) -> Result<CandidateSnapshot, String> {
+            self.inner.capture_candidate(attempt, budget)
+        }
+
+        fn create_disposable_session(
+            &mut self,
+            candidate: &CandidateSnapshot,
+            budget: &AcceptanceBudget,
+        ) -> Result<DisposableSessionHandle, String> {
+            self.inner.create_disposable_session(candidate, budget)
+        }
+
+        fn restore_candidate(
+            &mut self,
+            session: &DisposableSessionHandle,
+            candidate: &CandidateSnapshot,
+            budget: &AcceptanceBudget,
+        ) -> Result<(), String> {
+            if self.guest_live.get() {
+                return Err(
+                    "single-session backend busy: tap 'fctap0' is held by another session"
+                        .to_string(),
+                );
+            }
+            self.inner.restore_candidate(session, candidate, budget)
+        }
+
+        fn execute_exact_argv(
+            &mut self,
+            session: &DisposableSessionHandle,
+            argv: &[String],
+            timeout: Duration,
+            budget: &AcceptanceBudget,
+        ) -> Result<VerificationOutcome, String> {
+            self.inner
+                .execute_exact_argv(session, argv, timeout, budget)
+        }
+
+        fn terminate_process_tree(
+            &mut self,
+            session: &DisposableSessionHandle,
+        ) -> Result<(), String> {
+            self.inner.terminate_process_tree(session)
+        }
+
+        fn destroy_disposable_session(
+            &mut self,
+            session: DisposableSessionHandle,
+        ) -> Result<(), String> {
+            self.inner.destroy_disposable_session(session)
         }
     }
 
@@ -1356,8 +1537,63 @@ mod tests {
         }
     }
 
-    /// Assemble a hold phase over the given seams and run it. Returns the terminal
-    /// plus the seams' call counts for assertions.
+    /// Drive a hold and, if it captured, verify the candidate — mirroring the
+    /// production ordering in `main.rs` exactly, including the release between
+    /// the two.
+    ///
+    /// The release is what the fix is about, so the helper performs it rather
+    /// than letting each test remember to: `guest_live` flips to `false` at the
+    /// same point `capture.release()` happens for real. A helper that verified
+    /// without flipping it would reproduce the bug in the harness and hide it
+    /// again.
+    #[allow(clippy::too_many_arguments)]
+    fn run_hold_then_verify(
+        control: &mut dyn ControlSource,
+        capture: &mut ScriptedCapture,
+        eligibility: &mut dyn EligibilitySource,
+        extend: &mut dyn ExtendPolicy,
+        lifecycle: &mut impl DisposableAcceptanceLifecycle,
+        clock: &FakeClock,
+        cancellation: &AcceptanceCancellation,
+        hold_ttl: Duration,
+        guest_live: Option<&Rc<Cell<bool>>>,
+    ) -> HoldTermination {
+        let outcome = {
+            let mut phase = HoldPhase::new(
+                control,
+                capture,
+                eligibility,
+                extend,
+                clock,
+                fencing(),
+                hold_ttl,
+            );
+            phase.run().expect("no fatal internal error")
+        };
+        match outcome {
+            HoldOutcome::Terminal(termination) => termination,
+            HoldOutcome::CapturedPendingVerification(pending) => {
+                // THE RELEASE. Everything the token stands for happens here.
+                if let Some(flag) = guest_live {
+                    flag.set(false);
+                }
+                verify_captured_candidate(
+                    control,
+                    lifecycle,
+                    eligibility,
+                    &config(),
+                    cancellation,
+                    clock,
+                    &fencing(),
+                    pending,
+                    &crate::guest_capture::ReleasedHold::for_test(),
+                )
+                .expect("no fatal internal error")
+            }
+        }
+    }
+
+    /// Back-compat shim for the tests that do not care about the slot rule.
     #[allow(clippy::too_many_arguments)]
     fn run_hold(
         control: &mut dyn ControlSource,
@@ -1369,7 +1605,7 @@ mod tests {
         cancellation: &AcceptanceCancellation,
         hold_ttl: Duration,
     ) -> HoldTermination {
-        let mut phase = HoldPhase::new(
+        run_hold_then_verify(
             control,
             capture,
             eligibility,
@@ -1377,11 +1613,9 @@ mod tests {
             lifecycle,
             clock,
             cancellation,
-            fencing(),
-            config(),
             hold_ttl,
-        );
-        phase.run().expect("no fatal internal error")
+            None,
+        )
     }
 
     // ── (i) no capture before pause_permitted (ADR-007) ─────────────────────
@@ -1592,10 +1826,18 @@ mod tests {
     /// hold without saying anything leaves that spinner running against a
     /// verification that already finished and failed.
     #[test]
-    fn a_rejected_candidate_reports_its_rejection_and_keeps_holding() {
+    fn a_rejected_candidate_reports_its_rejection_before_the_attempt_ends() {
         let clock = FakeClock::new();
         let cancel = AcceptanceCancellation::default();
-        // Capture once, then hold; the TTL ends the attempt after the rejection.
+        // Capture once; the rejection ends the attempt directly. The trailing
+        // `hold` directive is never consumed.
+        //
+        // RENAMED: this used to be `..._and_keeps_holding` and reached
+        // `AttemptEnded` via the TTL. It now reaches it directly, so the old
+        // name and message described behaviour the code no longer has while the
+        // assertions still passed — the shape of test that hides the next
+        // regression. What it actually pins is the §3.7 contract: a rejection is
+        // reported, with a reason and no receipt.
         let mut control = ScriptedControl::advancing(
             clock.clone(),
             Duration::from_secs(11 * 60),
@@ -1619,7 +1861,7 @@ mod tests {
 
         assert!(
             matches!(outcome, HoldTermination::AttemptEnded),
-            "a rejection with the source alive returns to holding, not to a terminal state: {outcome:?}"
+            "a rejection with the source alive ends the attempt: {outcome:?}"
         );
         assert_eq!(control.candidate_reports().len(), 1);
         let acceptance = control.acceptance_reports();
@@ -1818,11 +2060,12 @@ mod tests {
 
     // ── (iv) acceptance failure + source available → back to holding ────────
     #[test]
-    fn acceptance_failure_with_source_available_returns_to_holding() {
+    fn acceptance_failure_with_source_available_ends_the_attempt() {
         let clock = FakeClock::new();
         let cancel = AcceptanceCancellation::default();
-        // Capture (permitted, source alive), acceptance rejects (exit 1); the phase
-        // must return to holding — the NEXT directive (discard) then ends it.
+        // Capture (permitted, source alive), acceptance rejects (exit 1). The
+        // second directive is scripted but must never be reached: the hold is
+        // over once the candidate is captured.
         let mut control = ScriptedControl::new(vec![capture(1, "cand_1", true), discard()]);
         let mut cap = ScriptedCapture::ok("cand_1", false);
         let mut elig = OkEligibility;
@@ -1842,9 +2085,22 @@ mod tests {
 
         assert_eq!(cap.calls, 1, "captured once");
         assert_eq!(lifecycle.executes, 1, "acceptance ran once, then rejected");
+        // CHANGED, deliberately. This used to assert `Discarded` — the loop
+        // returned to holding after a rejection and ended on the next
+        // directive (ADR-012 `accepting_source_available`).
+        //
+        // Verification now runs after the guest is released, because acceptance
+        // restores a second guest and the backend admits one VMM per network
+        // identity. There is no live guest to return to, so a rejection ends the
+        // attempt. The author still gets the verdict on §3.7; what they lose is
+        // re-capture, which is the `VacatedHold` follow-up.
+        //
+        // The old behaviour was unreachable in production anyway: every
+        // acceptance failed `single-session backend busy` before it could reject
+        // for a reason the author caused.
         assert!(
-            matches!(outcome, HoldTermination::Discarded),
-            "returned to holding and ended on the next discard, got {outcome:?}"
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "a rejection ends the attempt, got {outcome:?}"
         );
     }
 
@@ -1892,25 +2148,21 @@ mod tests {
     //    after a source-available acceptance failure is ignored; a strictly
     //    newer epoch DOES drive a fresh capture.
     #[test]
-    fn stale_capture_epoch_after_source_available_failure_is_ignored() {
+    fn a_later_capture_directive_cannot_re_drive_a_hold_that_already_captured() {
         let clock = FakeClock::new();
         let cancel = AcceptanceCancellation::default();
-        // Epoch 1 captures (permitted, source alive) → acceptance rejects
-        // (exit 1) → return to holding. A DUPLICATE Capture with the SAME epoch 1
-        // must be IGNORED (no second capture). A strictly-greater epoch 2 then
-        // DOES drive a second capture, which is accepted (exit 0).
+        // Epoch 1 captures. The duplicate epoch-1 and the newer epoch-2
+        // directives behind it are scripted precisely so that consuming either
+        // would show up as a second capture.
         let mut control = ScriptedControl::new(vec![
             capture(1, "cand_1", true),
-            capture(1, "cand_1", true), // stale/duplicate epoch → ignored
-            capture(2, "cand_2", true), // newer epoch → captures
+            capture(1, "cand_1", true),
+            capture(2, "cand_2", true),
         ]);
         let mut cap = ScriptedCapture::ok("cand_1", false);
         let mut elig = OkEligibility;
         let mut extend = NoExtend;
-        let mut lifecycle = FakeLifecycle::new(vec![
-            VerificationOutcome::Exited(1),
-            VerificationOutcome::Exited(0),
-        ]);
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(1)]);
 
         let outcome = run_hold(
             &mut control,
@@ -1923,17 +2175,24 @@ mod tests {
             DEFAULT_HOLD_TTL,
         );
 
-        // Exactly two captures — epoch 1 and epoch 2. The duplicate epoch-1
-        // directive between them drove NO capture.
+        // CHANGED, deliberately. This used to assert two captures across a
+        // return-to-holding, exercising the ADR-008 epoch guard. That path is
+        // gone: the loop ends on the first successful capture because the guest
+        // must be released before acceptance can restore anything.
+        //
+        // The property that MATTERS survives and is what is asserted now — a
+        // capture happens at most once per hold — but it is enforced by the loop
+        // ending rather than by the epoch comparison. The guard itself is kept
+        // and documented as unreachable, for the `VacatedHold` follow-up.
         assert_eq!(
-            cap.calls, 2,
-            "duplicate/stale epoch ignored; only a strictly-newer epoch captures"
+            cap.calls, 1,
+            "a hold captures at most once; later directives are never consumed"
         );
-        assert_eq!(
-            lifecycle.executes, 2,
-            "acceptance ran once per distinct capture"
+        assert_eq!(lifecycle.executes, 1, "acceptance ran once");
+        assert!(
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "the rejected candidate ends the attempt, got {outcome:?}"
         );
-        assert!(matches!(outcome, HoldTermination::Accepted { .. }));
     }
 
     // ── (vi) external-state capsule → eligibility fails closed, never captures ─
@@ -2154,5 +2413,474 @@ mod tests {
             other => panic!("expected TornDownWithoutAck, got {other:?}"),
         }
         assert_eq!(outcome.terminal_ack_reason(), None);
+    }
+
+    // ── the slot rule: verify only after the guest is released ──────────────
+    //
+    // These are the regression tests for the defect where the hold loop drove
+    // the disposable restore while its own guest still held the slot. They need
+    // no hardware: `SingleSlotLifecycle` models the one rule the real backend
+    // enforces and `FakeLifecycle` cannot express.
+
+    /// A candidate is verified only after the held guest is released.
+    ///
+    /// FAILS on the pre-fix tree and passes after, which is the whole point.
+    /// Before the fix `run()` called `restore_candidate` from inside the loop
+    /// with the guest still live, so the restore errs `single-session backend
+    /// busy`, the run rejects, §3.7 reports `Rejected`, and the loop continues
+    /// to its TTL and returns `AttemptEnded` — both assertions below fail.
+    #[test]
+    fn a_candidate_is_verified_only_after_the_held_guest_is_released() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_1", true)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        // The guest really is live while the hold loop runs.
+        let guest_live = Rc::new(Cell::new(true));
+        let mut lifecycle = SingleSlotLifecycle {
+            inner: FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]),
+            guest_live: Rc::clone(&guest_live),
+        };
+
+        let outcome = run_hold_then_verify(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+            Some(&guest_live),
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::Accepted { .. }),
+            "expected an accepted candidate, got {outcome:?}"
+        );
+        let acceptance = control.acceptance_reports()[0];
+        assert_eq!(
+            acceptance.status,
+            AcceptanceStatus::Accepted,
+            "the §3.7 verdict must say accepted, not merely the local outcome"
+        );
+        assert!(
+            !guest_live.get(),
+            "the guest must have been released before the restore"
+        );
+    }
+
+    /// A restore attempted while the guest is live is refused — the failure the
+    /// production tree exhibits today.
+    ///
+    /// Pins the harness itself. If `SingleSlotLifecycle` ever stopped modelling
+    /// the slot rule, the test above would pass for the wrong reason and the
+    /// regression would be invisible again.
+    #[test]
+    fn a_restore_while_the_guest_is_live_is_refused() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_1", true)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let guest_live = Rc::new(Cell::new(true));
+        let mut lifecycle = SingleSlotLifecycle {
+            inner: FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]),
+            guest_live: Rc::clone(&guest_live),
+        };
+
+        // Deliberately do NOT release: pass `None` so the helper leaves the
+        // guest live across the verify, reproducing the pre-fix ordering.
+        let outcome = run_hold_then_verify(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+            None,
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "a refused restore rejects the candidate, got {outcome:?}"
+        );
+        let acceptance = control.acceptance_reports()[0];
+        assert_eq!(
+            acceptance.status,
+            AcceptanceStatus::Rejected,
+            "a restore that could not take the slot must reject, never accept"
+        );
+    }
+
+    /// A successful capture ends the hold loop; no second capture is attempted.
+    ///
+    /// Pins the deliberate semantic change (a rejection no longer returns to
+    /// holding) so a future reader sees it as a decision rather than assuming
+    /// re-capture still works. Restoring re-capture is the `VacatedHold`
+    /// follow-up.
+    #[test]
+    fn a_capture_ends_the_hold_loop_and_no_second_capture_is_attempted() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control =
+            ScriptedControl::new(vec![capture(1, "cand_1", true), capture(2, "cand_2", true)]);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let guest_live = Rc::new(Cell::new(true));
+        // Rejected by the author's own command, not by the slot.
+        let mut lifecycle = SingleSlotLifecycle {
+            inner: FakeLifecycle::new(vec![VerificationOutcome::Exited(1)]),
+            guest_live: Rc::clone(&guest_live),
+        };
+
+        let outcome = run_hold_then_verify(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+            Some(&guest_live),
+        );
+
+        assert!(
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "a rejected candidate ends the attempt, got {outcome:?}"
+        );
+        assert_eq!(
+            cap.calls, 1,
+            "the loop must not return to holding and capture again"
+        );
+        let acceptance = control.acceptance_reports()[0];
+        assert_eq!(
+            acceptance.status,
+            AcceptanceStatus::Rejected,
+            "the author still receives the per-candidate verdict on §3.7"
+        );
+    }
+
+    // ── KVM: the PRODUCTION ordering, on real hardware ──────────────────────
+    //
+    // The KVM-free tests above prove the ORDERING. This one proves the ordering
+    // holds when the guest is a real Firecracker VM, driven through the same
+    // objects `main.rs` uses — `GuestCaptureAction` -> `HoldPhase` ->
+    // `ReleasedHold` -> `verify_captured_candidate` -> `BackendDisposableLifecycle`.
+    //
+    // It deliberately does NOT call `backend.restore()` directly. A test that
+    // did would re-prove what `fc_kvm_hold_candidate_restores_and_serves`
+    // already proves (that the backend restores a candidate after a release) and
+    // would say nothing about the ownership move that is the actual fix.
+    //
+    // Every collision-capable resource is taken from the environment so the
+    // caller can make them run-unique; the harness script refuses to start if
+    // any of them collides with a live service. Nothing here kills a process it
+    // did not start or deletes a resource it did not create.
+
+    /// The Execution Identity this E2E's candidate is sealed and verified under.
+    ///
+    /// One constant for both the seal and the acceptance side: they must agree,
+    /// and two literals would let them drift into an identity mismatch that
+    /// reads as an acceptance failure.
+    #[cfg(test)]
+    const E2E_CAPSULE_HASH: &str = "blake3:e2e-acceptance";
+
+    #[cfg(test)]
+    const E2E_EXECUTION_ID: &str =
+        "blake3:e2e000000000000000000000000000000000000000000000000000000000acce";
+
+    /// Env knob or skip: these tests must be inert on a machine without the
+    /// isolated fixture wired up, including CI.
+    #[cfg(test)]
+    fn kvm_env(name: &str) -> Option<String> {
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Some(v),
+            _ => {
+                eprintln!("SKIP: {name} not set");
+                None
+            }
+        }
+    }
+
+    /// Is anything answering on `addr` right now?
+    #[cfg(test)]
+    fn addr_answers(addr: &str) -> bool {
+        use std::net::TcpStream;
+        let Ok(sock) = addr.parse() else { return false };
+        TcpStream::connect_timeout(&sock, Duration::from_millis(400)).is_ok()
+    }
+
+    /// The full production path on a real guest, with the restored guest's
+    /// identity PROVEN rather than assumed.
+    ///
+    /// The attribution argument, in order:
+    ///
+    /// 1. before release, the held guest answers — so the address is live;
+    /// 2. after release, the held VMM pid is gone, the slot lock is gone, the
+    ///    vsock UDS is gone, and the address REFUSES repeatedly — so nothing is
+    ///    serving there;
+    /// 3. after `verify_captured_candidate` restores, the address answers again
+    ///    and echoes a fresh 128-bit request-scoped nonce.
+    ///
+    /// Step 2 is what makes step 3 attributable. A nonce baked into the guest
+    /// could not do this: restore resumes identical memory, so the held guest
+    /// and the restored guest would answer it the same way. Only "dead in the
+    /// gap, alive after" distinguishes them.
+    #[test]
+    #[ignore]
+    fn fc_kvm_production_hold_release_verify_attributes_the_restored_guest() {
+        let Some(rootfs_path) = kvm_env("ATO_FC_TEST_ROOTFS") else {
+            return;
+        };
+        let Some(guest_ip) = kvm_env("ATO_FC_GUEST_IP") else {
+            return;
+        };
+        if !snapshot::FirecrackerBackend::kvm_present() {
+            eprintln!("SKIP: /dev/kvm absent");
+            return;
+        }
+        let rootfs = std::fs::read(&rootfs_path).expect("read ATO_FC_TEST_ROOTFS");
+        let guest_addr = format!("{guest_ip}:8080");
+
+        let backend = snapshot::FirecrackerBackend::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            capsulefs::CasStore::open(dir.path().join("cas")).expect("open the run-scoped CAS");
+
+        // ── boot and hold, exactly as `process_interactive_capture_job` does ──
+        let t_hold = Instant::now();
+        let guest = backend
+            .boot_and_hold(snapshot::BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: E2E_CAPSULE_HASH.to_string(),
+                runner_class: None,
+                surface_requirement: None,
+                layers: snapshot::BuildLayers {
+                    rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: snapshot::RestoreContract {
+                    ports: vec![8080],
+                    healthcheck: Some("/health".to_string()),
+                    expected_ready_ms: Some(8000),
+                    ..Default::default()
+                },
+                sanitizer_contract: snapshot::SanitizerContract::default(),
+                declared_secret_markers: vec![],
+                // Sealed under `exec_id()` — the SAME identity `OkEligibility`
+                // proves. Acceptance refuses a candidate whose Execution
+                // Identity differs from the verified eligibility proof
+                // ("Snapshot candidate Execution Identity does not match the
+                // verified eligibility proof"), so a bespoke constant here
+                // rejected every run. Deriving both from one function makes the
+                // agreement structural instead of a thing to remember.
+                //
+                // REQUIRED, not optional decoration: `GuestCaptureAction::capture`
+                // refuses a sealed candidate whose manifest cannot name its
+                // Execution Identity ("sealed candidate has no execution_id"),
+                // because §3.6 has nowhere to put one it would have to invent.
+                // Passing `None` here makes every capture fail with
+                // `source_lost = false`, which returns the loop to holding and —
+                // since the control script re-issues the same directive — spins
+                // it through a fresh full snapshot per iteration until the
+                // 30-minute TTL. Measured: 356 snapshots in one run.
+                execution_id: Some(exec_id().as_str().to_string()),
+                supervisor: None,
+            })
+            .expect("boot and hold");
+        eprintln!("### E2E hold_ready_ms={}", t_hold.elapsed().as_millis());
+
+        let vmm_pid = guest
+            .vmm_pid()
+            .expect("a held guest owns a firecracker pid");
+        let lock_path = backend.slot_lock_path();
+        assert!(
+            addr_answers(&guest_addr),
+            "the held guest must answer before anything else is asserted"
+        );
+
+        // ── capture through the production seams ─────────────────────────────
+        let captured: crate::guest_capture::CapturedCandidateCell =
+            Rc::new(std::cell::RefCell::new(None));
+        let mut capture_action = crate::guest_capture::GuestCaptureAction::new(
+            guest,
+            crate::guest_capture::CaptureContext {
+                job_id: "e2e".to_string(),
+                jobdir: dir.path().to_path_buf(),
+            },
+            Rc::clone(&captured),
+        );
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_e2e", true)]);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let clock = snapshot::acceptance::SystemClock;
+
+        let t_capture = Instant::now();
+        let outcome = {
+            let mut phase = HoldPhase::new(
+                &mut control,
+                &mut capture_action,
+                &mut elig,
+                &mut extend,
+                &clock,
+                fencing(),
+                DEFAULT_HOLD_TTL,
+            );
+            phase.run().expect("no fatal internal error")
+        };
+        eprintln!("### E2E capture_ms={}", t_capture.elapsed().as_millis());
+
+        let HoldOutcome::CapturedPendingVerification(pending) = outcome else {
+            panic!("expected a captured candidate, got {outcome:?}");
+        };
+
+        // ── release, then PROVE nothing is serving ───────────────────────────
+        let t_release = Instant::now();
+        let released = capture_action.release();
+        eprintln!("### E2E release_ms={}", t_release.elapsed().as_millis());
+
+        let mut pid_gone = false;
+        for _ in 0..100 {
+            if !std::path::Path::new(&format!("/proc/{vmm_pid}")).exists() {
+                pid_gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            pid_gone,
+            "### E2E FAIL held vmm pid {vmm_pid} still present"
+        );
+        eprintln!("### E2E held_pid_gone=true pid={vmm_pid}");
+
+        assert!(
+            !lock_path.exists(),
+            "### E2E FAIL slot lock still held: {}",
+            lock_path.display()
+        );
+        eprintln!("### E2E lock_released=true path={}", lock_path.display());
+
+        // The vsock UDS is per-CAPSULE and deterministic, so a second VMM on
+        // this slot would have unlinked the live hold's socket out from under
+        // it. Assert the release took it down.
+        //
+        // MEASURED, and not what one would assume: `release()` does NOT unlink
+        // the socket file. It kills and reaps the VMM, runs `net_down()` and
+        // drops the slot lock — the socket is left on disk with nothing behind
+        // it. So the invariant asserted here is the one that actually matters
+        // for a following restore: nothing is LISTENING. A stale path with no
+        // listener is inert, and the restore unlinks it before Firecracker
+        // recreates it.
+        //
+        // The leaked file is still a leak — a hold that ends with no restore
+        // after it leaves the path behind for good — but it belongs to the
+        // resource-ownership follow-up, not to this ordering fix, and asserting
+        // absence here would fail on correct behaviour.
+        let vsock = snapshot::firecracker_vsock_uds_path_for_capsule(E2E_CAPSULE_HASH);
+        let vsock_listening = std::os::unix::net::UnixStream::connect(&vsock).is_ok();
+        assert!(
+            !vsock_listening,
+            "### E2E FAIL something is still listening on the hold's vsock UDS: {}",
+            vsock.display()
+        );
+        eprintln!(
+            "### E2E vsock_no_listener=true file_remains={} path={}",
+            vsock.exists(),
+            vsock.display()
+        );
+
+        // Repeatedly, not once: a single refusal could be a transient bind race.
+        for attempt in 0..5 {
+            assert!(
+                !addr_answers(&guest_addr),
+                "### E2E FAIL {guest_addr} still answered after release (probe {attempt})"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("### E2E pre_restore_connect_failed=true probes=5");
+
+        // ── verify: the production entry point, gated on the token ───────────
+        let mut lifecycle = snapshot::disposable_lifecycle::BackendDisposableLifecycle {
+            backend: &backend,
+            store: &store,
+            candidate: crate::guest_capture::HeldCandidateSource::new(
+                Rc::clone(&captured),
+                &backend,
+                exec_id(),
+            ),
+            overlay_root: dir.path().join("acceptance-overlay"),
+            session: None,
+            last_candidate: None,
+        };
+        let cancellation = snapshot::acceptance::AcceptanceCancellation::default();
+
+        // A fresh 128-bit value per run. `seal_at` runs HOST-side, so this is the
+        // command that reaches into the restored guest and demands it back.
+        let nonce = kvm_env("ATO_E2E_NONCE").unwrap_or_else(|| "0".repeat(32));
+        let probe = format!(
+            "curl -fsS --max-time 20 'http://{guest_addr}/echo-nonce?value={nonce}' \
+             | grep -Fxq '{nonce}'"
+        );
+        let acceptance_config = AcceptanceConfig {
+            seal_at_argv: vec!["/bin/sh".to_string(), "-c".to_string(), probe],
+            verification_timeout: Duration::from_secs(60),
+            total_deadline: Duration::from_secs(600),
+            maximum_attempts: 1,
+        };
+
+        let t_verify = Instant::now();
+        let termination = verify_captured_candidate(
+            &mut control,
+            &mut lifecycle,
+            &mut elig,
+            &acceptance_config,
+            &cancellation,
+            &clock,
+            &fencing(),
+            pending,
+            &released,
+        )
+        .expect("no fatal internal error");
+        eprintln!("### E2E verify_ms={}", t_verify.elapsed().as_millis());
+
+        // The seal_at command IS the nonce check, so an accepted candidate is
+        // proof the restored guest echoed it. A readiness pass alone would not
+        // be: the acceptance run reports `Accepted` only when the command exits 0.
+        match &termination {
+            HoldTermination::Accepted { .. } => {
+                eprintln!("### E2E acceptance=accepted nonce_matched=true");
+            }
+            other => {
+                // The §3.7 verdict carries WHY. Without it a rejection reads as
+                // "acceptance failed" and every cause looks alike.
+                let why = control
+                    .acceptance_reports()
+                    .first()
+                    .and_then(|r| r.failure_reason.clone())
+                    .unwrap_or_else(|| "<no failure_reason on the §3.7 verdict>".to_string());
+                panic!("### E2E FAIL acceptance did not accept: {other:?} reason={why}");
+            }
+        }
+
+        let acceptance = control.acceptance_reports();
+        assert_eq!(acceptance.len(), 1, "### E2E FAIL missing §3.7 verdict");
+        assert_eq!(
+            acceptance[0].status,
+            AcceptanceStatus::Accepted,
+            "### E2E FAIL §3.7 verdict was not accepted"
+        );
+        eprintln!("### E2E ok=true");
     }
 }
