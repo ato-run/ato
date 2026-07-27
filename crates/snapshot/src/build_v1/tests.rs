@@ -282,6 +282,7 @@ impl Workspace {
         run(
             V1BuildRequest {
                 workspace_root: self.dir.path(),
+                pinned_source_archive: None,
                 work_root: &work,
                 guest_image_path: &guest_image_path,
                 rootfs_size_mib: 512,
@@ -325,6 +326,65 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
 /// The whole point of 5-3: a v1 workspace goes in, and a `capsule.lock`
 /// carrying an execution identity minted from real measurements comes out —
 /// verified by reading it back off disk, not by trusting the value in memory.
+/// A pinned build projects the ARCHIVE it was handed, not the workspace it
+/// reads the manifest from.
+///
+/// The two are the same tree on a builder host — the workspace IS the
+/// extraction — so the only way to show which one the identity came from is to
+/// make them differ. If the lane ever went back to re-freezing the workspace,
+/// this is the test that fails: the identity would follow the mutated file
+/// instead of the bytes that were proved.
+#[test]
+fn a_pinned_archive_is_what_the_identity_is_minted_over() {
+    let workspace = Workspace::new(&minimal_manifest(""));
+    let producer = FakeProducer::healthy();
+
+    // Freeze the workspace, then change it. From here the archive and the
+    // workspace disagree about `app.py`.
+    let frozen = TempDir::new().expect("archive dir");
+    let archive = frozen.path().join("pinned.tar.zst");
+    capsule::blob::materialize_source_archive(workspace.dir.path(), &archive)
+        .expect("freeze the workspace");
+    workspace.write("app.py", "print('a different program')\n");
+
+    let unpinned_work = workspace.work.path().join("unpinned");
+    std::fs::create_dir_all(&unpinned_work).expect("work root");
+    let unpinned = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            pinned_source_archive: None,
+            work_root: &unpinned_work,
+            guest_image_path: &workspace.out.path().join("unpinned.img"),
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-test-unpinned",
+        },
+        &producer,
+    )
+    .expect("the workspace build completes");
+
+    let pinned_work = workspace.work.path().join("pinned");
+    std::fs::create_dir_all(&pinned_work).expect("work root");
+    let pinned = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            pinned_source_archive: Some(&archive),
+            work_root: &pinned_work,
+            guest_image_path: &workspace.out.path().join("pinned.img"),
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-test-pinned",
+        },
+        &producer,
+    )
+    .expect("the pinned build completes");
+
+    assert_ne!(
+        pinned.source_digest, unpinned.source_digest,
+        "a pinned build that agreed with the mutated workspace would be minting \
+         its identity over source nothing proved"
+    );
+    assert_ne!(pinned.execution_id, unpinned.execution_id);
+}
+
 #[test]
 fn a_v1_build_mints_publishes_and_reads_back() {
     let workspace = Workspace::new(&minimal_manifest(""));
@@ -1126,6 +1186,8 @@ fn the_short_execution_id_is_a_recognizable_prefix() {
         runtime_resolved_ref: pinned_ref(PYTHON_SLIM, 'c'),
         target: linux_gnu_x86_64(),
         trusted_load_verified: true,
+        port: 8080,
+        authored_argv: vec!["python3".to_string(), "app.py".to_string()],
     };
     assert_eq!(
         outcome.short_execution_id(),
@@ -1259,6 +1321,7 @@ fn a_guest_image_path_inside_the_workspace_is_refused() {
     let error = run(
         V1BuildRequest {
             workspace_root: workspace.dir.path(),
+            pinned_source_archive: None,
             work_root: workspace.work.path(),
             guest_image_path: &inside,
             rootfs_size_mib: 512,
@@ -1292,6 +1355,7 @@ fn a_relative_build_path_is_refused() {
     let error = run(
         V1BuildRequest {
             workspace_root: workspace.dir.path(),
+            pinned_source_archive: None,
             work_root: workspace.work.path(),
             // Nothing on this path exists, and it is relative — so under the
             // process CWD it could land straight back inside the workspace.
@@ -1317,6 +1381,7 @@ fn a_work_root_inside_the_workspace_is_refused() {
     let error = run(
         V1BuildRequest {
             workspace_root: workspace.dir.path(),
+            pinned_source_archive: None,
             work_root: &inside,
             guest_image_path: &workspace.guest_image_path(),
             rootfs_size_mib: 512,
