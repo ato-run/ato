@@ -31,6 +31,46 @@ pub enum SessionSurfaceKind {
     Unknown,
 }
 
+/// The surface kinds an internal submission can currently be published with.
+///
+/// [`SessionSurfaceKind`] is what this contract can DESCRIBE. This is the
+/// narrower set the submission pipeline can carry end to end — build, preview,
+/// operate, capture, disposable-restore acceptance, publish. The two are not
+/// the same thing and drift apart on purpose: a surface can be describable,
+/// renderable and have a production-wired transport while no submission lane
+/// can actually produce one.
+///
+/// `PixelStream` is exactly that case today, and is deliberately absent. The
+/// wizard's interactive lane admits only the `recipe` job kind, and the recipe
+/// lane in turn refuses a pixel surface requirement and directs the caller to
+/// `dockerfile_import`. Both refusals are real code, not gaps in test coverage,
+/// so admitting the kind here would advertise a lane that does not exist and
+/// move the failure from submission time to capture time.
+///
+/// Widening this slice is how Pixel is turned on. The envelope, the descriptor,
+/// the access rules and the client renderer are all already pixel-capable, so
+/// nothing else in the contract changes when it is.
+pub const V1_SUBMISSION_SURFACE_KINDS: &[SessionSurfaceKind] = &[SessionSurfaceKind::Web];
+
+/// Narrows a negotiated surface kind to the submission subset, or refuses.
+///
+/// Fail-closed by construction: a kind is admitted because it is LISTED, not
+/// because it failed to match a refusal arm. A kind added to
+/// [`SessionSurfaceKind`] later is therefore refused here until somebody
+/// deliberately admits it, which is the opposite of the default a `match` with
+/// a catch-all would give.
+pub fn v1_submission_surface_kind(
+    kind: SessionSurfaceKind,
+) -> Result<SessionSurfaceKind, SessionSurfaceContractError> {
+    if V1_SUBMISSION_SURFACE_KINDS.contains(&kind) {
+        Ok(kind)
+    } else {
+        Err(SessionSurfaceContractError::SurfaceNotInSubmissionSubset(
+            kind,
+        ))
+    }
+}
+
 /// Transport selected for a concrete surface profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -714,6 +754,12 @@ pub enum SessionSurfaceContractError {
     PixelAuthExchangeMustUseHttps,
     #[error("legacy app_url response is missing app_expires_at")]
     LegacyWebMissingExpiry,
+    /// The surface is well-formed and describable, but no submission lane can
+    /// produce one. Distinct from [`Self::UnsupportedDescriptorKind`], which
+    /// means the surface itself cannot be interpreted — here it can, and the
+    /// operator's next step is a different one.
+    #[error("session surface kind {0:?} is not admitted by the v1 submission subset")]
+    SurfaceNotInSubmissionSubset(SessionSurfaceKind),
 }
 
 /// Principal kind bound into a gateway assertion. `Guest` is a wire
