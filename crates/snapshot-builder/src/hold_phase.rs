@@ -2679,6 +2679,14 @@ mod tests {
                 },
                 sanitizer_contract: snapshot::SanitizerContract::default(),
                 declared_secret_markers: vec![],
+                // Sealed under `exec_id()` — the SAME identity `OkEligibility`
+                // proves. Acceptance refuses a candidate whose Execution
+                // Identity differs from the verified eligibility proof
+                // ("Snapshot candidate Execution Identity does not match the
+                // verified eligibility proof"), so a bespoke constant here
+                // rejected every run. Deriving both from one function makes the
+                // agreement structural instead of a thing to remember.
+                //
                 // REQUIRED, not optional decoration: `GuestCaptureAction::capture`
                 // refuses a sealed candidate whose manifest cannot name its
                 // Execution Identity ("sealed candidate has no execution_id"),
@@ -2688,7 +2696,7 @@ mod tests {
                 // since the control script re-issues the same directive — spins
                 // it through a fresh full snapshot per iteration until the
                 // 30-minute TTL. Measured: 356 snapshots in one run.
-                execution_id: Some(E2E_EXECUTION_ID.to_string()),
+                execution_id: Some(exec_id().as_str().to_string()),
                 supervisor: None,
             })
             .expect("boot and hold");
@@ -2810,8 +2818,7 @@ mod tests {
             candidate: crate::guest_capture::HeldCandidateSource::new(
                 Rc::clone(&captured),
                 &backend,
-                capsule::execution_contract::ExecutionId::new(E2E_EXECUTION_ID.to_string())
-                    .expect("execution id"),
+                exec_id(),
             ),
             overlay_root: dir.path().join("acceptance-overlay"),
             session: None,
