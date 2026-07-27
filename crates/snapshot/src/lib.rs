@@ -67,6 +67,7 @@ mod uffd;
 // module doc for scope. Real, tested, deliberately unused until U2+.
 #[allow(dead_code)]
 mod uffd_page_server;
+pub mod v1_materialization;
 
 pub use artifact_envelope::{
     ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactAcceptance,
