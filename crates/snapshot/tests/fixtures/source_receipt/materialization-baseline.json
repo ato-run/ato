@@ -1,0 +1,14 @@
+{
+  "canonical_json": "{\"archive_format_version\":\"ato.source-archive/v1\",\"object_key\":\"source-archives/blake3/6666666666666666666666666666666666666666666666666666666666666666\",\"schema\":\"ato.source-materialization-receipt/v1\",\"size_bytes\":1048576,\"source_archive_digest\":\"blake3:6666666666666666666666666666666666666666666666666666666666666666\",\"source_tree_digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"}",
+  "description": "the artifact locator receipt",
+  "digest": "blake3:ce5ac099626b3837249b17f1180d97fac0cb64b3356ce5954345145e03a27532",
+  "kind": "source-materialization-receipt",
+  "receipt": {
+    "archive_format_version": "ato.source-archive/v1",
+    "object_key": "source-archives/blake3/6666666666666666666666666666666666666666666666666666666666666666",
+    "schema": "ato.source-materialization-receipt/v1",
+    "size_bytes": 1048576,
+    "source_archive_digest": "blake3:6666666666666666666666666666666666666666666666666666666666666666",
+    "source_tree_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}
