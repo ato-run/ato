@@ -95,6 +95,10 @@ mod hold_ingress;
 /// (hold → capture → #1088 accept). Driven by injected seams; unreachable in prod
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
 mod hold_phase;
+/// Getting the frozen source archive off this builder's disk: authorize one
+/// upload with the API, PUT it, and report the object key the API derived. The
+/// builder holds no storage credential and never names the object.
+mod source_archive_upload;
 mod upload;
 /// ADR-015 slice 7A — the gate a v1 `ato build` output passes before any later
 /// phase may act on it: trusted-load the lock, re-derive the Execution
@@ -696,13 +700,16 @@ struct SourceMaterializeOk {
     file_count: u64,
     uncompressed_bytes: u64,
     compressed_bytes: u64,
-    /// TODO(ato-api follow-up): SOURCE_MATERIALIZATION_SPEC §3.3 step 6 uploads the
-    /// archive to R2 at `source-archives/v1/sha256/{source_archive_hash}.tar.zst` via
-    /// an API-mediated write (the builder holds no R2 credentials). That transport does
-    /// not exist yet, so this builder-side slice leaves the frozen archive on local disk
-    /// and reports its path here; the follow-up wires the API-mediated upload + records
-    /// the R2 object, then this field can be dropped.
-    archive_path: String,
+    /// Where the archive is STORED — the content-addressed key the API derived
+    /// from `source_archive_hash` and returned with the upload authorization.
+    ///
+    /// This replaces the local `archive_path` that used to be reported here. A
+    /// builder-local path is meaningless to anyone else: the moment this process
+    /// exits or another builder claims the follow-up build, it names nothing.
+    /// The path stays inside the builder (see `source_archive_upload::LocalArchive`,
+    /// whose path field is private and absent from its Debug output) and only
+    /// facts about the BYTES cross the wire.
+    object_key: String,
 }
 
 /// SOURCE_MATERIALIZATION_SPEC §4.2: the failure ack for a `source_materialize` job —
@@ -2630,15 +2637,43 @@ fn process_source_materialize_job(
     let ms = materialize_source_archive(&checkout, &out)
         .map_err(|e| SourceMaterializeFail::from_materialize_error(&e))?;
 
+    // 3. Get it OFF this disk. Until this step existed the job ended here and
+    //    reported a local path, which names nothing once the process exits or
+    //    another builder claims the follow-up build — so a submission could never
+    //    reach a third party.
+    //
+    //    The builder holds no storage credential: it asks the API to authorize
+    //    one upload and receives a short-lived URL for one object whose key the
+    //    API derives from the archive digest. The local file is kept until the
+    //    upload succeeds, because deleting it on the first error would make the
+    //    bounded retry impossible.
+    let archive = source_archive_upload::LocalArchive::new(
+        out,
+        ms.source_archive_hash.clone(),
+        ms.compressed_bytes,
+    );
+    let transport = source_archive_upload::HttpArchiveUploadTransport {
+        api_url: &cfg.api_url,
+        token: &cfg.token,
+        agent_id: &cfg.agent_id,
+    };
+    let object_key = source_archive_upload::upload_source_archive(
+        &transport,
+        &job.id,
+        archive.path(),
+        archive.digest(),
+    )
+    .map_err(|e| SourceMaterializeFail::internal(e.code(), e.to_string()))?;
+
     Ok(SourceMaterializeOk {
         materialized_source_tree_hash: ms.materialized_source_tree_hash,
         source_archive_hash: ms.source_archive_hash,
         file_count: ms.file_count,
         uncompressed_bytes: ms.uncompressed_bytes,
         compressed_bytes: ms.compressed_bytes,
-        // TODO(ato-api follow-up): left on local disk until the API-mediated R2 upload
-        // exists (see `ack_source_materialized`).
-        archive_path: out.display().to_string(),
+        // The API's key, not one this builder invented. The local path stays in
+        // `archive`, which is dropped with the job directory.
+        object_key,
     })
 }
 
@@ -5436,15 +5471,14 @@ targets = ["web"]
     #[test]
     fn source_materialized_ack_carries_exactly_the_result_fields() {
         // SOURCE_MATERIALIZATION_SPEC §4.1: success ack = the A1v2 identity, the
-        // archive byte identity, and the observed sizes/count (+ the local archive
-        // path until the R2 upload follow-up lands).
+        // archive byte identity, the observed sizes/count, and WHERE it is stored.
         let ok = SourceMaterializeOk {
             materialized_source_tree_hash: "sha256:aa".into(),
             source_archive_hash: "sha256:bb".into(),
             file_count: 42,
             uncompressed_bytes: 4096,
             compressed_bytes: 1024,
-            archive_path: "/work/job_x/source.tar.zst".into(),
+            object_key: "source-archives/sha256/bb".into(),
         };
         let v = serde_json::to_value(&ok).unwrap();
         assert_eq!(v["materialized_source_tree_hash"], "sha256:aa");
@@ -5452,10 +5486,36 @@ targets = ["web"]
         assert_eq!(v["file_count"], 42);
         assert_eq!(v["uncompressed_bytes"], 4096);
         assert_eq!(v["compressed_bytes"], 1024);
-        assert_eq!(v["archive_path"], "/work/job_x/source.tar.zst");
+        assert_eq!(v["object_key"], "source-archives/sha256/bb");
         // No stray fields leak into the ack.
         let obj = v.as_object().unwrap();
         assert_eq!(obj.len(), 6, "unexpected ack fields: {v}");
+    }
+
+    #[test]
+    fn the_ack_never_carries_a_builder_local_path() {
+        // The regression this replaces: the ack used to report `archive_path`,
+        // a path on THIS host. It named nothing to anyone else — not to another
+        // builder, not to the API, not after this process exits — so a
+        // submission could never reach a third party through it.
+        //
+        // Asserted on the serialized ack rather than on the struct, because the
+        // ack is the contract and a private field that still serializes is
+        // still a leak.
+        let ok = SourceMaterializeOk {
+            materialized_source_tree_hash: "sha256:aa".into(),
+            source_archive_hash: "sha256:bb".into(),
+            file_count: 1,
+            uncompressed_bytes: 1,
+            compressed_bytes: 1,
+            object_key: "source-archives/sha256/bb".into(),
+        };
+        let rendered = serde_json::to_string(&ok).unwrap();
+        assert!(!rendered.contains("archive_path"));
+        assert!(
+            !rendered.contains('/') || !rendered.contains("/work/"),
+            "the ack must carry a content-addressed key, never a host path"
+        );
     }
 
     #[test]
