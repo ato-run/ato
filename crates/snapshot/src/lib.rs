@@ -59,6 +59,9 @@ mod scanner;
 /// read from the COMMIT tree, because an uninitialised submodule is invisible
 /// on the filesystem.
 pub mod source_eligibility;
+/// Turning a pinned commit into a frozen, re-fetchable source archive, with the
+/// round trip verified before anything is stored.
+pub mod source_materialization;
 /// The two receipts a source materialization produces — WHAT was resolved, and
 /// WHERE it was stored. Their canonical bytes are pinned by shared fixtures
 /// because the verifier is TypeScript in another repository.
