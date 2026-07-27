@@ -20,7 +20,9 @@ use std::process::{Command, Stdio};
 
 use tracing::{debug, info, warn};
 
-use crate::launcher::{LaunchRequest, LaunchResult, RuntimeError, SourceTarget};
+use crate::launcher::{
+    LaunchRequest, LaunchResult, RuntimeError, SourceTarget, bwrap_namespace_args,
+};
 use crate::system::sandbox::{filter_sensitive_paths, sensitive_paths};
 
 use super::SourceRuntime;
@@ -359,20 +361,10 @@ pub async fn launch_with_bubblewrap(
     // Build bwrap command
     let mut cmd = Command::new("bwrap");
 
-    // Namespace isolation — network policy from IsolationPolicy or dev_mode
-    let share_network = if target.dev_mode {
-        true // Dev mode always shares network
-    } else if let Some(ref iso) = target.isolation {
-        iso.network_enabled
-    } else {
-        false // Default: no network in production
-    };
-
-    if share_network {
-        cmd.args(["--unshare-all", "--share-net"]);
-    } else {
-        cmd.args(["--unshare-all"]); // No --share-net → network isolated
-    }
+    // Namespace isolation — network policy from IsolationPolicy or dev_mode.
+    // The decision itself lives in `launcher::shares_host_network` so it is
+    // unit-testable without a toolchain or a Linux host (ato#786).
+    cmd.args(bwrap_namespace_args(target).iter().copied());
     cmd.args(["--die-with-parent"]);
 
     // Basic filesystem setup

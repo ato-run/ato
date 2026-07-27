@@ -462,19 +462,29 @@ fn resolved_targets(lock: &CapsuleLock) -> Result<&[Value], AtoExecutionError> {
 }
 
 fn network_from_lock(lock: &CapsuleLock, metadata: &LockContractMetadata) -> Option<NetworkConfig> {
+    let declared: Option<NetworkConfig> = lock
+        .contract
+        .entries
+        .get("network")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok());
+
     if metadata
         .capsule_type
         .as_deref()
         .is_some_and(|value| value.eq_ignore_ascii_case("job"))
     {
-        return None;
+        // A job capsule serves nothing, so its inferred `contract.network`
+        // (an ingress/port hint) is dropped — that is what 43899fb1 "tighten
+        // single-script job run semantics" intended. The *egress posture* is a
+        // different question: dropping the whole section made an authored
+        // `[network] enabled = false` vanish for `type = "job"` too (ato#786).
+        // Keep the posture, keep dropping everything else, and stay a no-op
+        // for every job that declares no posture.
+        return declared.as_ref().and_then(NetworkConfig::posture_only);
     }
 
-    lock.contract
-        .entries
-        .get("network")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
+    declared
 }
 
 fn json_string_array(value: &Value) -> Option<Vec<String>> {
@@ -682,6 +692,132 @@ mod tests {
 
         let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
         assert!(model.network.is_none());
+    }
+
+    // ── [network] enabled round trip (ato#786) ───────────────────────────
+    //
+    // The escape: `[network] enabled = false` was compiled into
+    // `contract.network` by the compatibility importer, read back here, and
+    // re-synthesized into the manifest the source executor sees — but
+    // `NetworkConfig` had no `enabled` field, so the deny evaporated somewhere
+    // inside that loop and the executor filled in `enabled = true`, which the
+    // Linux launcher lowers to `bwrap --share-net`. Anything that asserts only
+    // at the parse site would still have passed. These tests walk the whole
+    // loop.
+
+    fn job_metadata() -> Value {
+        json!({
+            "name": "demo",
+            "version": "0.1.0",
+            "default_target": "web",
+            "capsule_type": "job"
+        })
+    }
+
+    /// `contract.network` exactly as `compat_import::manifest_import` writes it:
+    /// `serde_json::to_value` of the manifest's own `[network]` model.
+    fn contract_network_from_manifest(manifest_toml: &str) -> Value {
+        let manifest = crate::types::CapsuleManifest::from_toml(manifest_toml)
+            .expect("manifest parses")
+            .network
+            .expect("[network] present");
+        serde_json::to_value(&manifest).expect("network serializable")
+    }
+
+    const DENY_MANIFEST: &str = r#"
+schema_version = "0.3"
+name = "net-canary"
+version = "0.1.0"
+type = "app"
+runtime = "source"
+runtime_version = "3.11"
+run = "payload.py"
+
+[network]
+enabled = false
+"#;
+
+    #[test]
+    fn declared_network_deny_survives_the_lock_round_trip() {
+        let mut lock = sample_lock();
+        lock.contract.entries.insert(
+            "network".to_string(),
+            contract_network_from_manifest(DENY_MANIFEST),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        assert_eq!(
+            model.network.as_ref().and_then(|network| network.enabled),
+            Some(false),
+            "the lock read must not re-default an authored deny"
+        );
+
+        // ... and back out through the manifest the source executor consumes.
+        let bridge = crate::router::CompatManifestBridge::from_lock(&lock, &model)
+            .expect("compat bridge from lock");
+        assert_eq!(
+            bridge
+                .manifest_model()
+                .network
+                .as_ref()
+                .and_then(|network| network.enabled),
+            Some(false),
+            "the lock-synthesized manifest must still carry the deny"
+        );
+        let raw = bridge.raw_value().expect("raw manifest value");
+        assert_eq!(
+            raw.get("network")
+                .and_then(|network| network.get("enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(false),
+            "the raw synthesized TOML is what the executor reads: {raw:?}"
+        );
+    }
+
+    #[test]
+    fn undeclared_network_posture_stays_absent_through_the_lock_round_trip() {
+        // No posture authored ⇒ nothing appears in the lock or the
+        // re-synthesized manifest, so locks for existing capsules are
+        // unchanged and the default is applied in exactly one place.
+        let lock = sample_lock();
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        assert_eq!(
+            model.network.as_ref().and_then(|network| network.enabled),
+            None
+        );
+
+        let bridge = crate::router::CompatManifestBridge::from_lock(&lock, &model)
+            .expect("compat bridge from lock");
+        let raw = bridge.raw_value().expect("raw manifest value");
+        assert!(
+            raw.get("network")
+                .and_then(|network| network.get("enabled"))
+                .is_none(),
+            "an undeclared posture must not be materialized into the manifest: {raw:?}"
+        );
+    }
+
+    #[test]
+    fn job_capsule_type_keeps_a_declared_network_deny() {
+        let mut lock = sample_lock();
+        lock.contract
+            .entries
+            .insert("metadata".to_string(), job_metadata());
+        lock.contract.entries.insert(
+            "network".to_string(),
+            contract_network_from_manifest(DENY_MANIFEST),
+        );
+
+        let model = resolve_lock_runtime_model(&lock, None).expect("resolved");
+        let network = model
+            .network
+            .as_ref()
+            .expect("job keeps its declared posture");
+        assert_eq!(network.enabled, Some(false));
+        assert!(
+            network.egress_allow.is_empty(),
+            "the job strip still drops everything but the posture"
+        );
     }
 
     #[test]
