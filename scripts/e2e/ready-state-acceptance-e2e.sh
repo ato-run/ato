@@ -45,6 +45,18 @@ MASK="${ATO_FC_GUEST_MASK:-255.255.255.252}"
 
 abort() { echo "ABORT: $*" >&2; exit 2; }
 
+# The KVM host is typically a runner box with firecracker and /dev/kvm but NO
+# cargo. Build the test binary elsewhere (`cargo test --no-run`) and point
+# ATO_E2E_TEST_BIN at it; otherwise fall back to cargo when it is present.
+if [ -n "${ATO_E2E_TEST_BIN:-}" ]; then
+  [ -x "$ATO_E2E_TEST_BIN" ] || abort "ATO_E2E_TEST_BIN '$ATO_E2E_TEST_BIN' is not executable"
+  RUNNER=("$ATO_E2E_TEST_BIN")
+elif command -v cargo >/dev/null 2>&1; then
+  RUNNER=(cargo test -p snapshot-builder --bin snapshot-builder --)
+else
+  abort "no cargo on this host: set ATO_E2E_TEST_BIN to a prebuilt test binary"
+fi
+
 # ── pre-flight: refuse to touch anything that is not ours ────────────────────
 [ "${#TAP}" -le 15 ] || abort "tap name '$TAP' exceeds the 15-char IFNAMSIZ limit"
 case "$TAP" in
@@ -89,8 +101,8 @@ for i in $(seq 1 "$RUNS"); do
       ATO_FC_HOST_IP="$HOST_IP" ATO_FC_GUEST_IP="$GUEST_IP" ATO_FC_GUEST_MASK="$MASK" \
       ATO_FC_ROOTFS_READONLY=1 ATO_FC_VSOCK=1 \
       ATO_E2E_NONCE="$nonce" \
-      cargo test -p snapshot-builder --bin snapshot-builder \
-        fc_kvm_production_hold_release_verify -- --ignored --test-threads=1 --nocapture 2>&1)"
+      "${RUNNER[@]}" fc_kvm_production_hold_release_verify \
+        --ignored --test-threads=1 --nocapture 2>&1)"
   end_ms=$(date +%s%3N)
   echo "$out" | grep -aE '^### E2E|test result:'
   if echo "$out" | grep -aq '### E2E ok=true'; then

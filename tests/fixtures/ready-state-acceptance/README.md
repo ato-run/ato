@@ -34,20 +34,32 @@ responder is live and serving *this* request rather than a cache or a proxy.
 ## Why the launch vector looks strange
 
 ```toml
-command = ["python3", "server.py", "--label", "boundary probe", "--empty", ""]
+command = ["python3", "server.py", "--label", "boundary probe"]
 ```
 
-Both odd arguments are aimed at the comparison, not the app:
-
-- `"boundary probe"` contains a space, so a shell that re-split the vector shows
-  up as two arguments instead of one;
-- `""` is an **empty argument**, which separates a correct `/proc/self/cmdline`
-  decoder — drop exactly one trailing NUL terminator — from one that drops every
-  empty piece and therefore cannot tell `["a", "", "b"]` from `["a", "b"]`.
+`"boundary probe"` contains a space, so a shell that re-split the vector shows up
+as two arguments instead of one.
 
 `sys.argv` is recorded as auxiliary evidence only. Python drops the interpreter
 from it, so it can never show that `resolved_argv[0]` was honoured; only the
 full cmdline vector can.
+
+### An empty argument cannot be tested from a capsule
+
+It was tried. The v1 producer refuses it:
+
+```text
+no v1 recipe covers this capsule: [run] command argv[5] is empty; every word of
+an exact argv must resolve to something, so an empty argument cannot be committed
+```
+
+That is `launch.argv` being *resolved* by definition — an empty word is an
+unresolved one, so it never reaches a contract. The `/proc/self/cmdline` decoder
+still has to handle empty arguments correctly (drop exactly one trailing NUL
+terminator, not every empty piece, or `["a", "", "b"]` and `["a", "b"]` become
+indistinguishable), but that property is pinned by a unit test over crafted input
+because no real capsule can produce it. Recorded so nobody re-adds it expecting
+the build to work.
 
 ## Building the guest image
 
