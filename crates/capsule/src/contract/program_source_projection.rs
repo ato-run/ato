@@ -677,7 +677,16 @@ fn safe_archive_entry_path(raw: &Path) -> Result<PathBuf, String> {
 /// them (`0o755` when the owner-execute bit is set, else `0o644`), which is the
 /// only permission state A1 folds into the tree identity — so a round trip
 /// through the archive preserves the digest.
-fn extract_source_archive(archive_tar_zst: &Path, dest: &Path) -> Result<(), CapsuleProgramError> {
+/// Extract a frozen source archive into `dest`.
+///
+/// Public so a producer can verify the ROUND TRIP: archive the tree, extract it
+/// back, and re-derive the digest from the extracted bytes. Verifying against
+/// the live directory instead would re-read the thing that may have changed,
+/// which is what the round trip exists to detect.
+pub fn extract_source_archive(
+    archive_tar_zst: &Path,
+    dest: &Path,
+) -> Result<(), CapsuleProgramError> {
     let tar_bytes = decode_source_archive(archive_tar_zst)?;
     let mut archive = tar::Archive::new(tar_bytes.as_slice());
     let entries = archive.entries().map_err(|source| {
