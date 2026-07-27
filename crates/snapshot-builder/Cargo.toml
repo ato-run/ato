@@ -30,6 +30,12 @@ ureq = { version = "2.12.1", features = ["json"] }
 chrono = { version = "0.4", default-features = true }
 blake3 = "1"
 sha2 = "0.10"
+# v1 intake refusals (`v1_intake::V1IntakeRefusal`) are a typed enum rather than
+# this file's usual `(stage, reason)` tuple: each variant is a distinct thing
+# wrong with the world that a test asserts on by shape, and the operator's next
+# action differs between them. Same 2.0 the rest of the workspace pins
+# (capsule/snapshot/cli).
+thiserror = "2.0"
 
 [dev-dependencies]
 tempfile = "3"
