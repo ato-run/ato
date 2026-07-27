@@ -18,6 +18,8 @@
 //! that says `/srv` for a build that puts the source at `/app`, and the manifest
 //! would be the thing that was wrong. So it is supplied by the build.
 
+use crate::docker_import::ResolvedRuntimeArtifact;
+use crate::rootfs_builder::ObservedInvocationPrefix;
 use anyhow::{Context, Result};
 use capsule::execution_contract::{
     ContentDigest, ExternalStateContract, GuestPath, GuestSurfaceContract, ResolvedTargetContract,
@@ -29,8 +31,6 @@ use capsule::execution_payloads::{
     RuntimeDynamicPayloadV1, SourceProjectionPayloadV1,
 };
 use capsule::types::manifest_v1::{CapsuleManifestV1, ConfigKindV1};
-use snapshot::docker_import::ResolvedRuntimeArtifact;
-use snapshot::rootfs_builder::ObservedInvocationPrefix;
 
 /// The Ato surface-contract profile a `[web]` capsule serves.
 ///
@@ -38,7 +38,7 @@ use snapshot::rootfs_builder::ObservedInvocationPrefix;
 /// it names Ato's own contract, not an application-layer choice the author
 /// makes.
 ///
-pub(crate) const WEB_SURFACE_PROTOCOL: &str = "ato.web-surface.v1";
+pub const WEB_SURFACE_PROTOCOL: &str = "ato.web-surface.v1";
 
 /// Everything measured about one concrete build.
 ///
@@ -46,7 +46,7 @@ pub(crate) const WEB_SURFACE_PROTOCOL: &str = "ato.web-surface.v1";
 /// observation that exists at all carries every input `observe_v1` needs. There
 /// is no partially-filled state to count facets in and no `Option` to forget —
 /// a producer that has not measured something cannot construct this.
-pub(crate) struct V1BuildObservation<'a> {
+pub struct V1BuildObservation<'a> {
     pub manifest: &'a CapsuleManifestV1,
     /// A1v2 tree hash of the PROJECTED source (control files already withheld).
     pub source_digest: ContentDigest,
@@ -70,7 +70,7 @@ pub(crate) struct V1BuildObservation<'a> {
     /// measured: `mke2fs` stamps every inode it creates with the wall clock and
     /// ignores `SOURCE_DATE_EPOCH`, so hashing the packed image made a rebuild
     /// of one program source a different execution. See
-    /// `snapshot::guest_filesystem_digest` for what is committed and what is
+    /// `crate::guest_filesystem_digest` for what is committed and what is
     /// deliberately not.
     pub filesystem_view_digest: ContentDigest,
     pub target: ResolvedTargetContract,
@@ -92,7 +92,7 @@ const SEALED_WRITABLE_PATHS: &[&str] = &["/run", "/tmp", "/var/tmp"];
 
 /// Assemble the observation. Every facet is set — `into_contract` requires all
 /// of them, and a facet left unset would refuse the mint rather than default.
-pub(crate) fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV1> {
+pub fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV1> {
     // The subset gate has already run, so these are genuinely empty rather than
     // unmeasured: the manifest declares no dependencies, no build outputs and
     // no external state, and a manifest that did would have been refused.
@@ -268,7 +268,7 @@ command = ["true"]
         }
     }
 
-    /// Stand-in for `snapshot::guest_filesystem_digest`, which takes the same
+    /// Stand-in for `crate::guest_filesystem_digest`, which takes the same
     /// kind of value over the exported rootfs TREE.
     fn view_digest(bytes: &[u8]) -> ContentDigest {
         ContentDigest::new(DigestAlgorithm::Blake3, *blake3::hash(bytes).as_bytes())

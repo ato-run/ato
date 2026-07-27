@@ -51,6 +51,7 @@ use capsule::foundation::blob::{
     SourceMaterializeError, materialize_source_archive, materialized_source_tree_hash,
 };
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
+use capsule::foundation::types::ready_state::SealAtConfig;
 use capsule::foundation::types::ready_state::{
     DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES,
 };
@@ -60,6 +61,7 @@ use protocol::session_surface::{
     PIXEL_STREAM_PROFILE, SessionSurfaceKind,
 };
 use serde::{Deserialize, Serialize};
+use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
     DockerImportSpec, DockerfileImportRequest, EphemeralMountSeed, EphemeralMountSource,
@@ -108,15 +110,11 @@ mod upload;
 /// Identity, refuse every facet outside the §7 subset, and bind the contract to
 /// the artifact actually on disk. Verification only; boots nothing.
 ///
-/// Not yet called from the claim loop, and deliberately so: no ato-api
-/// deployment hands this daemon a lock-plus-receipt today (the claim carries a
-/// contract pinned by the control plane — see `ClaimedJob::execution_contract`).
-/// Slice 7B introduces the caller, which takes a `VerifiedV1BuildInput` and
-/// nothing else. Wiring it into a lane that cannot supply the inputs would make
-/// the gate look exercised when it is not, so it is `dead_code` until the
-/// producer side reaches this daemon — the same treatment `uffd_page_server`
-/// carries in `snapshot`. Its own tests exercise every path below.
-#[allow(dead_code)]
+/// Called from the pinned lane ([`produce_pinned_v1_build`]): the v1 producer
+/// runs, and its lock, receipt and guest image pass through here before the
+/// shared Ready-State tail is allowed to touch any of them. Nothing downstream
+/// takes a lock path or a receipt — they take a `VerifiedV1BuildInput`, which
+/// only this module can mint.
 mod v1_intake;
 /// Submission Wizard PR-2 (slice 2) — the builder-lane api client: the
 /// FENCING-4 transport split, the lease-renew driver, and the production
@@ -1062,8 +1060,9 @@ fn produce_build(
     // There is no fallback arm. If the archive cannot be obtained and verified,
     // the job fails; it does not clone, and it does not read a recipe.
     if let Some(pinned) = job.pinned_source.as_ref() {
-        let verified = obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
-        return produce_pinned_v1_build(cfg, job, jobdir, verified);
+        let (input, verified) =
+            obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
+        return produce_pinned_v1_build(cfg, job, jobdir, &input, verified);
     }
 
     match job.kind.as_str() {
@@ -2735,8 +2734,14 @@ fn obtain_pinned_source(
     job: &ClaimedJob,
     pinned: &ClaimedPinnedSource,
     workdir: &std::path::Path,
-) -> std::result::Result<source_archive_download::TreeVerifiedArchive, (String, String)> {
-    let input = snapshot::archive_only_build::ArchiveOnlyBuildInput::new(
+) -> std::result::Result<
+    (
+        ArchiveOnlyBuildInput,
+        source_archive_download::TreeVerifiedArchive,
+    ),
+    (String, String),
+> {
+    let input = ArchiveOnlyBuildInput::new(
         &pinned.source_revision_id,
         &pinned.source_archive_digest,
         &pinned.source_archive_object_key,
@@ -2749,36 +2754,325 @@ fn obtain_pinned_source(
         token: &cfg.token,
         agent_id: &cfg.agent_id,
     };
-    source_archive_download::download_pinned_source(&transport, &job.id, &input, workdir)
-        // The failure's own code, so the ack says which step refused rather than
-        // flattening every terminal source failure into one stage.
-        .map_err(|e| (e.code().to_string(), e.to_string()))
+    let archive =
+        source_archive_download::download_pinned_source(&transport, &job.id, &input, workdir)
+            // The failure's own code, so the ack says which step refused rather than
+            // flattening every terminal source failure into one stage.
+            .map_err(|e| (e.code().to_string(), e.to_string()))?;
+    Ok((input, archive))
+}
+
+/// Serves the ONE archive this job already downloaded and proved.
+///
+/// An adapter onto the existing [`SourceArchiveFetch`] seam, not a second way
+/// to get source: it holds a path to bytes that are already known to be the
+/// pinned archive, so `acquire_pinned_source` runs its verify-and-project over
+/// the same bytes without a second network round trip.
+///
+/// It still refuses a key other than the one it holds. The trait's contract is
+/// "produce the object at `object_key`", and an implementation that ignored the
+/// key would silently answer every request with one archive — which is exactly
+/// how a build for revision B gets the source of revision A.
+struct DownloadedArchiveFetch<'a> {
+    object_key: &'a str,
+    archive: &'a Path,
+}
+
+impl snapshot::archive_only_build::SourceArchiveFetch for DownloadedArchiveFetch<'_> {
+    fn fetch(&self, object_key: &str, destination: &Path) -> std::result::Result<(), String> {
+        if object_key != self.object_key {
+            return Err(format!(
+                "this builder holds the archive for {}, not for {object_key}; it has no \
+                 store to fetch another from",
+                self.object_key
+            ));
+        }
+        std::fs::copy(self.archive, destination)
+            .map(|_| ())
+            .map_err(|e| format!("copy the downloaded archive: {e}"))
+    }
+}
+
+/// The program source the build actually minted its identity from must be the
+/// program source the claimed Source Revision names.
+///
+/// Split out as a pure comparison so the refusal is testable without docker,
+/// KVM or a network. It is the last gate between "an archive was proved" and
+/// "an artifact is attributed to a revision": everything before it proves the
+/// BYTES are the pinned ones, and this proves the identity that was minted
+/// commits the projection of those bytes and not of something else.
+///
+/// A mismatch is terminal. There is deliberately no arm that re-runs the build,
+/// adopts the built digest, or re-reads the revision — an artifact whose
+/// contract names a source the revision does not contain is not a weaker
+/// result, it is a wrong one.
+fn refuse_source_revision_mismatch(
+    source_revision_id: &str,
+    expected_source_digest: &str,
+    built_source_digest: &str,
+) -> std::result::Result<(), (String, String)> {
+    if expected_source_digest == built_source_digest {
+        return Ok(());
+    }
+    Err((
+        "build".to_string(),
+        format!(
+            "the build minted an identity over source {built_source_digest}, but source \
+             revision {source_revision_id} is {expected_source_digest}; an artifact is \
+             never attributed to a revision it was not built from"
+        ),
+    ))
+}
+
+/// Map a v1 intake refusal onto the ack's (stage, reason).
+///
+/// The stage is the operator's next action, not the code's shape: a facet the
+/// subset does not cover and a target this builder cannot boot are both things
+/// the AUTHOR must change, so they are reported against the manifest, while a
+/// lock or artifact that disagrees with itself is this builder's own output
+/// going wrong.
+fn v1_intake_failure(refusal: v1_intake::V1IntakeRefusal) -> (String, String) {
+    let stage = match refusal {
+        v1_intake::V1IntakeRefusal::UnsupportedFacet { .. }
+        | v1_intake::V1IntakeRefusal::UnsupportedGuestTarget { .. } => "manifest",
+        _ => "build",
+    };
+    (stage.to_string(), refusal.to_string())
+}
+
+/// A docker image tag that cannot be anything but a tag.
+///
+/// The job id is server-issued and today is `[A-Za-z0-9_-]`, but it reaches a
+/// shell command line, so it is filtered rather than trusted: anything outside
+/// the safe set becomes `-`.
+fn v1_image_ref(job_id: &str) -> String {
+    let slug: String = job_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // The pid too: two builds of one job (a retried claim) must not pack each
+    // other's image.
+    format!("ato-v1-build-{slug}-{}", std::process::id())
 }
 
 /// Build from a verified pinned archive.
 ///
 /// Takes a `TreeVerifiedArchive` and nothing else that could name source: no
-/// path, no URL, no repository coordinate. The type is the argument, so this
-/// function cannot be called with source that has not been through both the
-/// byte and the tree check.
+/// URL, no repository coordinate, no host checkout. The type is the argument,
+/// so this function cannot be called with source that has not been through both
+/// the byte and the tree check.
 ///
-/// Not yet complete: the projection and `v1_intake` handoff land with the
-/// execution-contract wiring. What IS established here is the shape — the only
-/// way in is a verified value.
+/// The chain, in full:
+///
+/// ```text
+/// TreeVerifiedArchive
+///   → acquire_pinned_source (verify + project)   the EXPECTED source identity
+///   → extract into a workspace                    the manifest and the lock
+///   → build_v1::run over the SAME archive         guest image + minted contract
+///   → source-revision gate                        built == pinned, or refuse
+///   → v1_intake                                   lock + receipt + artifact agree
+///   → ProducedBuild                               the shared Ready-State tail
+/// ```
+///
+/// Every step is fail-closed and none has a fallback arm. In particular there
+/// is no branch that clones the repository, reads a recipe, or reuses the
+/// latest build: a pinned build with no verified archive has no source at all.
 fn produce_pinned_v1_build(
-    _cfg: &Config,
-    _job: &ClaimedJob,
-    _jobdir: &Path,
+    cfg: &Config,
+    job: &ClaimedJob,
+    jobdir: &Path,
+    input: &ArchiveOnlyBuildInput,
     verified: source_archive_download::TreeVerifiedArchive,
 ) -> std::result::Result<ProducedBuild, (String, String)> {
-    Err((
-        "build".to_string(),
-        format!(
-            "the pinned v1 build path is not wired to v1_intake yet; the archive at \
-             {} is verified and ready for it",
-            verified.path().display()
-        ),
-    ))
+    let fail = |stage: &str, e: String| (stage.to_string(), e);
+
+    // The v1 lane refuses a relative work/output path outright (whether a path
+    // is inside the workspace must not depend on where the daemon was started),
+    // so the job directory is made absolute before anything is derived from it.
+    let jobdir = std::path::absolute(jobdir)
+        .map_err(|e| fail("build", format!("resolve the job directory: {e}")))?;
+
+    // 1. The program-source identity this revision COMMITS, derived from the
+    //    proved archive through the shared archive-only path. Taken before the
+    //    build so the comparison below is against a value the build did not
+    //    produce.
+    let acquired = snapshot::archive_only_build::acquire_pinned_source(
+        input,
+        &DownloadedArchiveFetch {
+            object_key: input.source_archive_object_key(),
+            archive: verified.path(),
+        },
+        &jobdir.join("pinned-acquire"),
+    )
+    .map_err(|e| fail("fetch", format!("{} ({})", e, e.code())))?;
+    let expected_source_digest = ContentDigest::new(
+        DigestAlgorithm::Sha256,
+        acquired.materialized().contract.digest.bytes(),
+    )
+    .to_string();
+
+    // 2. The workspace is the EXTRACTION of that same archive — never a
+    //    checkout. It exists because the manifest and the lock are control
+    //    files, which the projection withholds by definition, and the lane has
+    //    to read one and write the other.
+    let workspace = jobdir.join("pinned-workspace");
+    std::fs::create_dir_all(&workspace)
+        .map_err(|e| fail("build", format!("create the pinned workspace: {e}")))?;
+    capsule::contract::program_source_projection::extract_source_archive(
+        verified.path(),
+        &workspace,
+    )
+    .map_err(|e| fail("build", format!("extract the pinned source archive: {e}")))?;
+
+    // The manifest, read from that workspace. Parsed here as well as inside the
+    // lane because the ack carries values the lane has no reason to report —
+    // the manifest hash the registry keys on, and the authored acceptance
+    // program the interactive HOLD needs.
+    let manifest_path = workspace.join("capsule.toml");
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
+        fail(
+            "manifest",
+            format!("the pinned source carries no capsule.toml: {e}"),
+        )
+    })?;
+    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+        &String::from_utf8_lossy(&manifest_bytes),
+    )
+    .map_err(|e| fail("manifest", e.to_string()))?;
+    // The authored `[seal_at]`, validated by the SAME function the v0.3 lane
+    // uses so both refuse the same argv — and validated BEFORE a rootfs is
+    // built, so an authoring typo does not cost a full build.
+    let seal_at = manifest.seal_at.as_ref().map(|s| SealAtConfig {
+        command: s.command.clone(),
+        timeout_seconds: s.timeout_seconds,
+    });
+    if let Some(seal_at) = seal_at.as_ref() {
+        capsule::types::validate_seal_at(seal_at).map_err(|e| fail("manifest", e))?;
+    }
+
+    // 3. The v1 producer lane — the same code `ato build` runs, over the same
+    //    verified archive. `pinned_source_archive` is what keeps the projection
+    //    on the proved bytes instead of a re-freeze of the extraction.
+    let producer = snapshot::build_v1::HostV1GuestProducer::probe().map_err(|reason| {
+        fail(
+            "build",
+            format!("a v1 build needs a container tool: {reason}"),
+        )
+    })?;
+    let work_root = jobdir.join("v1-work");
+    std::fs::create_dir_all(&work_root)
+        .map_err(|e| fail("build", format!("create the v1 work directory: {e}")))?;
+    let guest_image_path = jobdir.join("guest.img");
+    let outcome = snapshot::build_v1::run(
+        snapshot::build_v1::V1BuildRequest {
+            workspace_root: &workspace,
+            pinned_source_archive: Some(verified.path()),
+            work_root: &work_root,
+            guest_image_path: &guest_image_path,
+            rootfs_size_mib: cfg.rootfs_size_mib,
+            image_ref: &v1_image_ref(&job.id),
+        },
+        &producer,
+    )
+    .map_err(|e| fail("build", e.to_string()))?;
+
+    // 4. The identity that was minted must be over the pinned revision's source.
+    refuse_source_revision_mismatch(
+        input.source_revision_id(),
+        &expected_source_digest,
+        &outcome.source_digest,
+    )?;
+
+    // 5. The intake gate: trusted-load the lock, re-derive the Execution
+    //    Identity from the contract's canonical bytes, refuse every facet
+    //    outside the ADR-015 §7 subset, and bind the contract to the artifact
+    //    actually on disk. The receipt is the lane's own, so nothing here
+    //    attests on the producer's behalf.
+    let intake = v1_intake::V1BuildIntake::from_build_output(
+        outcome.lock_path.clone(),
+        outcome.guest_image_path.clone(),
+        outcome.materialization_receipt(),
+    );
+    let built = intake.verify().map_err(v1_intake_failure)?;
+
+    // Provenance, once, for the operator reading a builder log. Paths and
+    // digests only — a contract carries no secret value, and the argv is
+    // already in the sealed manifest.
+    eprintln!(
+        "[builder] pinned v1 build: revision={} execution_id={} view={} source={} \
+         runtime={} (ref {}) target={}/{}/{} libc={:?} cwd={} artifact={} ({} bytes, \
+         digest {}, producer wrote {})",
+        input.source_revision_id(),
+        built.execution_id().as_str(),
+        built.filesystem_view_digest(),
+        built.contract().source.digest,
+        built.contract().runtime.digest,
+        built.materialization_receipt().as_receipt().runtime,
+        built.target().os(),
+        built.target().architecture(),
+        built.target().abi(),
+        built.target().libc(),
+        built.launch().cwd().as_str(),
+        built.guest_artifact().path().display(),
+        built.guest_artifact().bytes(),
+        built.guest_artifact().digest(),
+        built
+            .materialization_receipt()
+            .producer_guest_image_path()
+            .display(),
+    );
+
+    // 6. Hand the shared Ready-State tail exactly what it needs. The rootfs is
+    //    read from the VERIFIED artifact's own path, not from the path the
+    //    producer reported: the two are normally the same file, and when they
+    //    are not it is the verified one that was measured.
+    let rootfs = std::fs::read(built.guest_artifact().path())
+        .map_err(|e| fail("build", format!("read the verified guest image: {e}")))?;
+
+    Ok(ProducedBuild {
+        rootfs,
+        port: outcome.port,
+        // A v1 manifest authors no readiness path — `[web]` is a port and a
+        // bind address. `/` is the probe, and `synthesized_probe` says so
+        // rather than letting the ack imply the author chose it.
+        healthcheck: "/".to_string(),
+        // Re-derived from the contract's canonical bytes by the intake, never
+        // read out of the lock's stored field.
+        execution_id: built.execution_id().as_str().to_string(),
+        capsule_manifest_hash: format!("blake3:{}", blake3::hash(&manifest_bytes).to_hex()),
+        // The v1 subset has no surface requirement to seal, and the pixel lane
+        // is a different job kind entirely.
+        surface_requirement: None,
+        endpoints: Vec::new(),
+        // The §7 subset refuses `launch.secret_bindings`, so a pinned v1 build
+        // that reached here has none. Not "none found" — none representable.
+        supervisor: None,
+        supervisor_ack: None,
+        manifest_source: "pinned_v1_capsule_toml".to_string(),
+        synthesized_probe: true,
+        declared_command: outcome.authored_argv.join(" "),
+        // The EXACT argv the contract commits, including argv[0]. v1 rewrites
+        // no word, so this differs from the declared command only when the
+        // runtime family prepends an invocation prefix.
+        normalized_guest_command: built.launch().argv().join(" "),
+        docker_import_receipt: None,
+        oci_import_receipt: None,
+        compose_import_receipt: None,
+        boot_timeout_s: None,
+        seal_at,
+        // A v1 manifest has no `[snapshot]` table, so the backend applies its
+        // own warmup fallback — the same as a v0.3 capsule that authored none.
+        warmup_paths: Vec::new(),
+        stable_successes: None,
+        stable_interval_ms: None,
+        content_ready_path: None,
+    })
 }
 
 fn process_job(
@@ -5921,5 +6215,151 @@ targets = ["web"]
         });
         let job: ClaimedJob = serde_json::from_value(raw).expect("parse without the new field");
         assert!(job.execution_contract.is_none());
+    }
+
+    // ── the pinned v1 lane ──────────────────────────────────────────────────
+    //
+    // These cover the three refusals that decide whether an artifact may be
+    // attributed to a Source Revision. The docker/KVM half of the lane is not
+    // reachable here by design: what is under test is which inputs are
+    // REFUSED, and a refusal that needed a container tool to observe would not
+    // be a refusal a builder host could rely on.
+
+    const PINNED_REV: &str = "srev_000000000000000000000001";
+
+    fn pinned_input(archive_digest: &str, tree_digest: &str) -> ArchiveOnlyBuildInput {
+        let key = snapshot::source_materialization::object_key_for_archive(archive_digest)
+            .expect("well-formed digest");
+        ArchiveOnlyBuildInput::new(PINNED_REV, archive_digest, key, tree_digest)
+            .expect("valid pinned input")
+    }
+
+    /// The adapter serves ONE object, and says so rather than answering with
+    /// the archive it happens to hold. An implementation that ignored the key
+    /// is how a build for revision B gets the source of revision A.
+    #[test]
+    fn the_downloaded_archive_fetch_refuses_a_key_it_does_not_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("source.tar.zst");
+        std::fs::write(&archive, b"pinned bytes").expect("write");
+
+        let fetch = DownloadedArchiveFetch {
+            object_key: "source-archives/sha256/aaaa",
+            archive: &archive,
+        };
+        let destination = dir.path().join("out.tar.zst");
+
+        let refused = snapshot::archive_only_build::SourceArchiveFetch::fetch(
+            &fetch,
+            "source-archives/sha256/bbbb",
+            &destination,
+        )
+        .expect_err("a key this builder does not hold must be refused");
+        assert!(
+            refused.contains("has no store to fetch another from"),
+            "{refused}"
+        );
+        assert!(
+            !destination.exists(),
+            "nothing may be written for a refused key"
+        );
+
+        snapshot::archive_only_build::SourceArchiveFetch::fetch(
+            &fetch,
+            "source-archives/sha256/aaaa",
+            &destination,
+        )
+        .expect("the key it holds is served");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"pinned bytes");
+    }
+
+    /// Step 1 of the pinned lane, with bytes that are not the pinned archive.
+    /// Nothing is projected, so no later step can read unverified source.
+    #[test]
+    fn an_archive_whose_digest_does_not_match_never_projects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let archive = dir.path().join("source.tar.zst");
+        std::fs::write(&archive, b"not the pinned archive").expect("write");
+
+        let input = pinned_input(
+            &format!("sha256:{}", "1".repeat(64)),
+            &format!("blake3:{}", "2".repeat(64)),
+        );
+        let refusal = snapshot::archive_only_build::acquire_pinned_source(
+            &input,
+            &DownloadedArchiveFetch {
+                object_key: input.source_archive_object_key(),
+                archive: &archive,
+            },
+            &dir.path().join("work"),
+        )
+        .expect_err("bytes that are not the pinned archive must not project");
+        assert_eq!(refusal.code(), "SOURCE_ARCHIVE_IDENTITY_MISMATCH");
+        assert!(!dir.path().join("work").join("projected-source").exists());
+    }
+
+    /// The gate between "an archive was proved" and "an artifact is attributed
+    /// to a revision". A build that minted its identity over some other source
+    /// is not a weaker result — it is a wrong one — so there is no arm that
+    /// adopts the built digest.
+    #[test]
+    fn a_source_revision_mismatch_is_terminal() {
+        let expected = format!("sha256:{}", "a".repeat(64));
+        let built = format!("sha256:{}", "b".repeat(64));
+
+        let (stage, reason) = refuse_source_revision_mismatch(PINNED_REV, &expected, &built)
+            .expect_err("a build over other source must be refused");
+        assert_eq!(stage, "build");
+        // Both values, so an operator can see WHICH source was built without
+        // re-running anything.
+        assert!(reason.contains(&expected), "{reason}");
+        assert!(reason.contains(&built), "{reason}");
+        assert!(reason.contains(PINNED_REV), "{reason}");
+    }
+
+    #[test]
+    fn a_build_over_the_pinned_source_passes_the_revision_gate() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        refuse_source_revision_mismatch(PINNED_REV, &digest, &digest)
+            .expect("the pinned source is exactly what was built");
+    }
+
+    /// A facet outside the ADR-015 §7 subset is the AUTHOR's to change, so it
+    /// is reported against the manifest — and by name, never as a generic
+    /// build failure, because "this builder cannot honour secret bindings yet"
+    /// and "the build broke" call for completely different next actions.
+    #[test]
+    fn an_unsupported_v1_facet_is_refused_against_the_manifest() {
+        let (stage, reason) = v1_intake_failure(v1_intake::V1IntakeRefusal::UnsupportedFacet {
+            feature: "launch.secret_bindings",
+            why: "a restore-time binding would be sealed into bytes many users restore",
+        });
+        assert_eq!(stage, "manifest");
+        assert!(reason.contains("launch.secret_bindings"), "{reason}");
+
+        // A target this builder cannot boot is the same kind of problem.
+        let (stage, _) = v1_intake_failure(v1_intake::V1IntakeRefusal::UnsupportedGuestTarget {
+            detail: "os windows".to_string(),
+        });
+        assert_eq!(stage, "manifest");
+
+        // Anything else is this builder's own output going wrong.
+        let (stage, _) =
+            v1_intake_failure(v1_intake::V1IntakeRefusal::ReceiptNotTrustedLoadVerified);
+        assert_eq!(stage, "build");
+    }
+
+    /// The image tag reaches a shell command line, so it is filtered rather
+    /// than trusted — a job id is server-issued, but "server-issued" is not a
+    /// character class.
+    #[test]
+    fn the_v1_image_ref_carries_only_tag_safe_characters() {
+        let tag = v1_image_ref("job_A1; rm -rf /");
+        assert!(
+            tag.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
+            "{tag}"
+        );
+        assert!(tag.starts_with("ato-v1-build-job_a1-"), "{tag}");
     }
 }
