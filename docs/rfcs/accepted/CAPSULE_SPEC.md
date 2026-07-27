@@ -351,7 +351,7 @@ ATO_ORCH_REQUIRED_ENVS = "OPENAI_API_KEY,DATABASE_URL"
 | --- | --- | --- |
 | `[metadata]` | UI / publish 用メタデータ | `display_name`, `description`, `author`, `icon`, `tags`。publish 系では `metadata.repository` も参照する |
 | `[requirements]` | 実行要件 | `platform`, `vram_min`, `vram_recommended`, `disk`, `dependencies` |
-| `[network]` | outbound allowlist | `egress_allow`, `egress_id_allow` |
+| `[network]` | egress posture + outbound allowlist | `enabled`, `egress_allow`, `egress_id_allow`。`enabled = false` は egress を実際に遮断する（Linux では network namespace、macOS では Seatbelt）。`enabled` 省略時は「有効」= 現在のプラットフォーム既定（`NETWORK_ENABLED_WHEN_UNDECLARED`）。省略時を fail-closed にするかは未決（ato#786） |
 | `[pack]` | パッキング include / exclude | 空文字 pattern は拒否する |
 | `[isolation]` | host env passthrough allowlist | `allow_env` |
 | `[state]` | host-managed filesystem state | service `state_bindings` の参照元 |

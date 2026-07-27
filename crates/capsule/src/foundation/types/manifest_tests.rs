@@ -4442,3 +4442,109 @@ run = "./desktop"
         );
     }
 }
+
+// ── [network] enabled posture (ato#786) ──────────────────────────────────
+//
+// A `source/python` capsule that declared `[network] enabled = false` still
+// got full outbound network on Linux because `NetworkConfig` had no `enabled`
+// field: the key parsed into nothing and every downstream hop re-defaulted the
+// posture to "enabled". These tests pin the parse end of that chain; the lock
+// round trip is pinned in `contract::lock_runtime`.
+
+const NET_POSTURE_BASE: &str = r#"
+schema_version = "0.3"
+name = "net-canary"
+version = "0.1.0"
+type = "app"
+runtime = "source"
+runtime_version = "3.11"
+run = "payload.py"
+"#;
+
+#[test]
+fn network_enabled_false_survives_manifest_parse() {
+    let manifest =
+        CapsuleManifest::from_toml(&format!("{NET_POSTURE_BASE}\n[network]\nenabled = false\n"))
+            .expect("manifest parses");
+    let network = manifest.network.expect("[network] present");
+    assert_eq!(
+        network.enabled,
+        Some(false),
+        "an authored deny must be readable as a deny, not dropped"
+    );
+    assert!(
+        !network.network_enabled(),
+        "effective posture must be deny when the author declared deny"
+    );
+}
+
+#[test]
+fn network_enabled_true_survives_manifest_parse() {
+    let manifest =
+        CapsuleManifest::from_toml(&format!("{NET_POSTURE_BASE}\n[network]\nenabled = true\n"))
+            .expect("manifest parses");
+    let network = manifest.network.expect("[network] present");
+    assert_eq!(network.enabled, Some(true));
+    assert!(network.network_enabled());
+}
+
+#[test]
+fn undeclared_network_posture_falls_back_to_the_platform_default() {
+    let manifest = CapsuleManifest::from_toml(&format!(
+        "{NET_POSTURE_BASE}\n[network]\negress_allow = [\"example.com\"]\n"
+    ))
+    .expect("manifest parses");
+    let network = manifest.network.expect("[network] present");
+    assert_eq!(
+        network.enabled, None,
+        "absent must stay absent so the default is applied in one place"
+    );
+    assert_eq!(
+        network.network_enabled(),
+        super::NETWORK_ENABLED_WHEN_UNDECLARED
+    );
+}
+
+/// Pins the platform default so flipping an absent `[network]` to fail-closed
+/// is a deliberate, reviewed edit (it changes runtime behavior for every
+/// already-published capsule that fetches anything) and not a side effect.
+#[test]
+fn undeclared_network_posture_default_is_enabled() {
+    // Pinned through the observable behavior rather than the constant, so the
+    // assertion is about what a capsule gets rather than about a literal.
+    assert!(
+        super::NetworkConfig::default().network_enabled(),
+        "changing this default is a compatibility break for every published \
+         capsule with no [network] section — see ato#786"
+    );
+}
+
+#[test]
+fn posture_only_view_keeps_the_posture_and_drops_the_allowlist() {
+    let manifest = CapsuleManifest::from_toml(&format!(
+        "{NET_POSTURE_BASE}\n[network]\nenabled = false\negress_allow = [\"example.com\"]\n"
+    ))
+    .expect("manifest parses");
+    let posture = manifest
+        .network
+        .expect("[network] present")
+        .posture_only()
+        .expect("declared posture");
+    assert_eq!(posture.enabled, Some(false));
+    assert!(posture.egress_allow.is_empty());
+}
+
+#[test]
+fn posture_only_view_is_none_when_nothing_was_declared() {
+    let manifest = CapsuleManifest::from_toml(&format!(
+        "{NET_POSTURE_BASE}\n[network]\negress_allow = [\"example.com\"]\n"
+    ))
+    .expect("manifest parses");
+    assert!(
+        manifest
+            .network
+            .expect("[network] present")
+            .posture_only()
+            .is_none()
+    );
+}

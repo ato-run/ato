@@ -55,6 +55,17 @@ At runtime:
 >   `network.enabled = false` (deny-all) is enforced on both platforms, but a
 >   hostname/IP `egress_allow` list is advisory only on source runtimes — there
 >   is no enforcing SOCKS sidecar yet.
+> - **The deny must be declared; it is not the default.** An absent
+>   `[network] enabled` means *enabled* — a capsule that says nothing about
+>   network gets egress. Only an explicit `[network] enabled = false` denies.
+>   Whether the absent case should instead fail closed is an open decision
+>   (ato#786): flipping it changes runtime behavior for every already-published
+>   capsule that fetches anything. The single source of that default is
+>   `capsule::types::NETWORK_ENABLED_WHEN_UNDECLARED`.
+> - **`[isolation.network]` is not an authoring surface.** Network policy is
+>   authored at the top-level `[network]`; `[isolation.network]` is the internal
+>   wire format the CLI synthesizes for nacelle, and authoring it in
+>   `capsule.toml` has no effect.
 > - **The build / prepare phase is not sandboxed.** Dependency installs and
 >   `build` / `prepare` lifecycle commands run as ordinary host processes with
 >   the host environment, secrets, and network. Only the run phase is isolated.
