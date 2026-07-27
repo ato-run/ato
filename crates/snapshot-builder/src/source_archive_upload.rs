@@ -141,13 +141,26 @@ pub trait ArchiveUploadTransport {
 pub fn upload_source_archive(
     transport: &dyn ArchiveUploadTransport,
     job_id: &str,
-    archive: &Path,
-    digest: &str,
+    archive: &LocalArchive,
 ) -> Result<String, UploadFailure> {
-    let body = std::fs::read(archive).map_err(|e| UploadFailure::ArchiveUnreadable {
+    let digest = archive.digest();
+    let body = std::fs::read(archive.path()).map_err(|e| UploadFailure::ArchiveUnreadable {
         detail: format!("{e}"),
     })?;
     let size_bytes = body.len() as u64;
+
+    // What the archive step measured, against what is on disk now. A mismatch
+    // means the file changed after it was frozen, so the digest that authorizes
+    // the upload no longer describes the bytes being sent — and the API would
+    // store them under a key that lies about them.
+    if size_bytes != archive.size_bytes() {
+        return Err(UploadFailure::NotStored {
+            detail: format!(
+                "the local archive is {size_bytes} bytes but was frozen at {}",
+                archive.size_bytes()
+            ),
+        });
+    }
 
     let mut last = String::new();
     for attempt in 1..=MAX_UPLOAD_ATTEMPTS {
@@ -414,6 +427,12 @@ mod tests {
         }
     }
 
+    /// A `LocalArchive` whose recorded size matches the file on disk.
+    fn local(path: &Path) -> LocalArchive {
+        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        LocalArchive::new(path.to_path_buf(), DIGEST.to_string(), size)
+    }
+
     fn archive(dir: &TempDir, bytes: &[u8]) -> PathBuf {
         let p = dir.path().join("source.tar.zst");
         let mut f = std::fs::File::create(&p).expect("create");
@@ -427,7 +446,7 @@ mod tests {
         let path = archive(&dir, b"archive bytes");
         let transport = FakeTransport::with(vec![Ok(200)]);
 
-        let key = upload_source_archive(&transport, "job_1", &path, DIGEST).expect("upload");
+        let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
 
         // The key comes from the API, not from anything the builder computed.
         assert_eq!(key, KEY);
@@ -444,7 +463,7 @@ mod tests {
         let path = archive(&dir, b"bytes");
         let transport = FakeTransport::with(vec![Ok(503), Err("reset".into()), Ok(200)]);
 
-        let key = upload_source_archive(&transport, "job_1", &path, DIGEST).expect("upload");
+        let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
 
         assert_eq!(key, KEY);
         assert_eq!(*transport.authorize_calls.borrow(), 3);
@@ -460,7 +479,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = archive(&dir, b"bytes");
         let transport = FakeTransport::with(vec![Ok(500), Ok(200)]);
-        let key = upload_source_archive(&transport, "job_1", &path, DIGEST).expect("upload");
+        let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
         assert_eq!(key, KEY);
     }
 
@@ -473,7 +492,7 @@ mod tests {
         let transport = FakeTransport::with(vec![Ok(500), Ok(500), Ok(500), Ok(200)]);
 
         let failure =
-            upload_source_archive(&transport, "job_1", &path, DIGEST).expect_err("must give up");
+            upload_source_archive(&transport, "job_1", &local(&path)).expect_err("must give up");
 
         assert_eq!(failure.code(), "upload_transfer_failed");
         assert_eq!(
@@ -492,7 +511,7 @@ mod tests {
         let transport = FakeTransport::refusing();
 
         let failure =
-            upload_source_archive(&transport, "job_1", &path, DIGEST).expect_err("must refuse");
+            upload_source_archive(&transport, "job_1", &local(&path)).expect_err("must refuse");
 
         assert_eq!(failure.code(), "upload_authorization_refused");
         assert!(transport.bodies.borrow().is_empty(), "nothing was sent");
@@ -505,8 +524,7 @@ mod tests {
         let failure = upload_source_archive(
             &transport,
             "job_1",
-            &dir.path().join("absent.tar.zst"),
-            DIGEST,
+            &LocalArchive::new(dir.path().join("absent.tar.zst"), DIGEST.to_string(), 5),
         )
         .expect_err("must fail");
         assert_eq!(failure.code(), "archive_unreadable");
@@ -520,7 +538,7 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = archive(&dir, b"bytes");
         let transport = FakeTransport::with(vec![Ok(500), Ok(500), Ok(500)]);
-        let failure = upload_source_archive(&transport, "job_1", &path, DIGEST).expect_err("fail");
+        let failure = upload_source_archive(&transport, "job_1", &local(&path)).expect_err("fail");
         let rendered = failure.to_string();
         assert!(!rendered.contains("X-Amz-Signature"));
         assert!(!rendered.contains("https://store.example"));
@@ -560,8 +578,24 @@ mod tests {
         let dir = TempDir::new().expect("tempdir");
         let path = archive(&dir, b"bytes");
         let transport = FakeTransport::with(vec![Ok(500), Ok(500), Ok(500)]);
-        let _ = upload_source_archive(&transport, "job_1", &path, DIGEST);
+        let _ = upload_source_archive(&transport, "job_1", &local(&path));
         assert!(path.exists(), "the local archive must remain for a retry");
+    }
+
+    #[test]
+    fn refuses_to_upload_bytes_that_are_not_the_ones_that_were_frozen() {
+        // The digest authorizing the upload describes the bytes as frozen. If the
+        // file changed since, sending it would have the API store bytes under a
+        // key that lies about them.
+        let dir = TempDir::new().expect("tempdir");
+        let path = archive(&dir, b"bytes");
+        let transport = FakeTransport::with(vec![Ok(200)]);
+        let stale = LocalArchive::new(path, DIGEST.to_string(), 99);
+
+        let failure = upload_source_archive(&transport, "job_1", &stale).expect_err("must refuse");
+
+        assert_eq!(failure.code(), "upload_not_stored");
+        assert!(transport.bodies.borrow().is_empty(), "nothing was sent");
     }
 
     #[test]
