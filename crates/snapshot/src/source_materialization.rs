@@ -43,6 +43,7 @@ use capsule::blob::{
     materialized_source_tree_hash,
 };
 
+use crate::rootfs_builder::PinnedSourceCheckout;
 use crate::source_eligibility::{SourceIneligible, verify_source_eligibility};
 use crate::source_receipt::{
     SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA, SOURCE_RECEIPT_V1_SCHEMA,
@@ -149,28 +150,46 @@ pub fn materialize_pinned_source(
     //     unexpanded submodule is invisible on the filesystem, so this cannot be
     //     folded into the archive walk below.
     verify_source_eligibility(checkout, &pinned.resolved_commit_sha)?;
+    materialize_verified_source(checkout, pinned, archive_path)
+}
 
-    // (2) A1v2 admissibility + identity, then the deterministic archive.
-    //     `materialize_source_archive` hashes BEFORE it writes a byte, so an
-    //     inadmissible tree leaves no partial archive.
-    let materialized: MaterializedSource = materialize_source_archive(checkout, archive_path)?;
+/// Freeze a builder checkout without losing the Git evidence required by the
+/// eligibility gate.
+///
+/// Eligibility is evaluated against the repository root. Only after it passes
+/// is the checkout's root `.git` removed, and the selected materialization root
+/// (which may be a subdirectory) is archived.
+pub fn materialize_pinned_checkout(
+    checkout: &PinnedSourceCheckout,
+    pinned: &PinnedSource,
+    archive_path: &Path,
+) -> Result<MaterializedSourceOutcome, SourceMaterializationError> {
+    verify_source_eligibility(checkout.repository_root(), &pinned.resolved_commit_sha)?;
+    checkout
+        .strip_root_git_metadata()
+        .map_err(|reason| SourceMaterializationError::Io {
+            stage: "strip_git_metadata",
+            reason,
+        })?;
 
-    // (3) The round trip. Extract what was just written and re-derive the tree
-    //     digest from the EXTRACTED bytes — not from the live directory, which
-    //     is the thing that could have changed underneath.
+    materialize_verified_source(checkout.materialization_root(), pinned, archive_path)
+}
+
+fn materialize_verified_source(
+    source_root: &Path,
+    pinned: &PinnedSource,
+    archive_path: &Path,
+) -> Result<MaterializedSourceOutcome, SourceMaterializationError> {
+    let materialized: MaterializedSource = materialize_source_archive(source_root, archive_path)?;
     let reconstructed = reconstruct_tree_digest(archive_path)?;
     if reconstructed != materialized.materialized_source_tree_hash {
-        // The archive is not what the receipt would have claimed. Remove it so a
-        // later stage cannot pick up a file that failed verification.
         let _ = std::fs::remove_file(archive_path);
         return Err(SourceMaterializationError::RoundTripMismatch {
             archived: materialized.materialized_source_tree_hash,
             reconstructed,
         });
     }
-
     let object_key = object_key_for_archive(&materialized.source_archive_hash)?;
-
     Ok(MaterializedSourceOutcome {
         receipt: SourceReceiptV1 {
             canonical_repository: pinned.canonical_repository.clone(),

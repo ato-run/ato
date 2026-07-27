@@ -47,9 +47,7 @@ use capsule::execution_contract::{
     ContentDigest, DigestAlgorithm, ExecutionContractEnvelopeV1, ExecutionContractV1,
 };
 use capsule::execution_contract_finalize::{ExecutionObservationV1, FinalizationError};
-use capsule::foundation::blob::{
-    SourceMaterializeError, materialize_source_archive, materialized_source_tree_hash,
-};
+use capsule::foundation::blob::{SourceMaterializeError, materialized_source_tree_hash};
 use capsule::foundation::types::manifest::{CapsuleManifest, SessionSurfaceRequirement};
 use capsule::foundation::types::ready_state::SealAtConfig;
 use capsule::foundation::types::ready_state::{
@@ -71,9 +69,12 @@ use snapshot::docker_import::{
     validate_ephemeral_mounts, validate_image_ref,
 };
 use snapshot::rootfs_builder::{
-    RootfsBuildSpec, SourceProbe, build_rootfs, checkout_source_tree, derive_build_spec,
-    derive_supervisor_build_spec, materialize_source, reject_control_chars, valid_github_owner,
-    valid_github_repo,
+    RootfsBuildSpec, SourceProbe, build_rootfs, checkout_source_tree_with_metadata,
+    derive_build_spec, derive_supervisor_build_spec, materialize_source, reject_control_chars,
+    valid_github_owner, valid_github_repo,
+};
+use snapshot::source_materialization::{
+    PinnedSource, SourceMaterializationError, materialize_pinned_checkout,
 };
 use snapshot::state_volume::DurableVolumeSpec;
 use snapshot::{
@@ -277,12 +278,26 @@ struct ClaimedPinnedSource {
     source_tree_digest: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ClaimedSource {
+    source_kind: Option<String>,
     github_owner: String,
     github_repo: String,
     commit_sha: String,
     subdirectory: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceMaterializeParams {
+    schema: String,
+    provider: String,
+    canonical_repository: String,
+    commit_algorithm: String,
+    resolved_commit_sha: String,
+    resolver_contract_version: String,
+    source: ClaimedSource,
+    downstream_params: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -715,23 +730,14 @@ fn ack_failed(cfg: &Config, job_id: &str, stage: &str, reason: &str) -> Result<(
 /// SOURCE_MATERIALIZATION_SPEC §4.1: the success ack for a `source_materialize` job —
 /// the frozen source's A1v2 identity, the archive byte identity, and the observed
 /// sizes/count. All non-secret build provenance.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug)]
 struct SourceMaterializeOk {
-    materialized_source_tree_hash: String,
-    source_archive_hash: String,
-    file_count: u64,
-    uncompressed_bytes: u64,
-    compressed_bytes: u64,
-    /// Where the archive is STORED — the content-addressed key the API derived
-    /// from `source_archive_hash` and returned with the upload authorization.
-    ///
-    /// This replaces the local `archive_path` that used to be reported here. A
-    /// builder-local path is meaningless to anyone else: the moment this process
-    /// exits or another builder claims the follow-up build, it names nothing.
-    /// The path stays inside the builder (see `source_archive_upload::LocalArchive`,
-    /// whose path field is private and absent from its Debug output) and only
-    /// facts about the BYTES cross the wire.
-    object_key: String,
+    source_receipt: snapshot::source_receipt::SourceReceiptV1,
+    source_receipt_digest: String,
+    materialization_receipt: snapshot::source_receipt::SourceMaterializationReceiptV1,
+    materialization_receipt_digest: String,
+    /// Kept until ato-api accepts the report and HEAD-verifies the object.
+    archive: source_archive_upload::LocalArchive,
 }
 
 /// SOURCE_MATERIALIZATION_SPEC §4.2: the failure ack for a `source_materialize` job —
@@ -767,6 +773,19 @@ impl SourceMaterializeFail {
             error_detail: wizard_api::truncate_failure_reason(&err.to_string()),
         }
     }
+
+    fn from_source_materialization_error(err: &SourceMaterializationError) -> Self {
+        match err {
+            SourceMaterializationError::Ineligible(inner) => Self {
+                pipeline_state: "blocked_repo".to_string(),
+                error_code: inner.code().to_string(),
+                error_detail: wizard_api::truncate_failure_reason(&err.to_string()),
+            },
+            SourceMaterializationError::Materialize(inner) => Self::from_materialize_error(inner),
+            SourceMaterializationError::RoundTripMismatch { .. }
+            | SourceMaterializationError::Io { .. } => Self::internal(err.code(), err.to_string()),
+        }
+    }
 }
 
 /// Ack a materialized source on the shared claim/ack lease lane.
@@ -778,23 +797,39 @@ impl SourceMaterializeFail {
 /// result to the existing ack endpoint; the follow-up adds the server-side handler that
 /// persists the hashes/caps on the candidate, uploads the archive to R2, and advances
 /// the candidate to `analyzing`.
-fn ack_source_materialized(cfg: &Config, job_id: &str, ok: &SourceMaterializeOk) -> Result<()> {
+fn report_source_materialized(cfg: &Config, job_id: &str, ok: SourceMaterializeOk) -> Result<()> {
     let res = ureq::post(&format!(
-        "{}/v1/capsule-snapshots/jobs/{job_id}/ack",
+        "{}/v1/capsule-snapshots/jobs/{job_id}/source-materialization",
         cfg.api_url
     ))
     .set("authorization", &format!("Bearer {}", cfg.token))
-    .send_json(
-        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialized", "source_materialized": ok }),
-    );
+    .send_json(source_materialization_report_body(&cfg.agent_id, &ok));
     match res {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            ok.archive.discard();
+            Ok(())
+        }
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(anyhow!("source_materialize ack: status {code}: {body}"))
+            Err(anyhow!(
+                "source_materialization report: status {code}: {body}"
+            ))
         }
-        Err(e) => Err(anyhow!("source_materialize ack: {e}")),
+        Err(e) => Err(anyhow!("source_materialization report: {e}")),
     }
+}
+
+fn source_materialization_report_body(
+    agent_id: &str,
+    ok: &SourceMaterializeOk,
+) -> serde_json::Value {
+    ureq::json!({
+        "agent_id": agent_id,
+        "source_receipt": ok.source_receipt,
+        "source_receipt_digest": ok.source_receipt_digest,
+        "materialization_receipt": ok.materialization_receipt,
+        "materialization_receipt_digest": ok.materialization_receipt_digest,
+    })
 }
 
 /// Ack a `source_materialize` failure (blocked / internal) on the shared lane.
@@ -2659,7 +2694,55 @@ fn process_source_materialize_job(
             "source_materialize job carries no server-resolved source".to_string(),
         )
     })?;
-    let checkout = checkout_source_tree(
+    let params: SourceMaterializeParams =
+        serde_json::from_value(job.params.clone().ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_missing",
+                "source_materialize job carries no exact-source params".to_string(),
+            )
+        })?)
+        .map_err(|e| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                format!("source_materialize params are invalid: {e}"),
+            )
+        })?;
+    if params.schema != "ato.source-materialize-job/v1"
+        || params.source != *source
+        || params.source.source_kind.as_deref() != Some("github")
+        || params.resolved_commit_sha != source.commit_sha
+    {
+        return Err(SourceMaterializeFail::internal(
+            "source_plan_mismatch",
+            "the claimed source and exact-source params disagree".to_string(),
+        ));
+    }
+    let expected_repository = format!(
+        "https://github.com/{}/{}",
+        source.github_owner, source.github_repo
+    )
+    .to_lowercase();
+    if params.canonical_repository != expected_repository
+        || params.provider != "github"
+        || params.commit_algorithm != "sha1"
+        || params.resolver_contract_version != "ato.capsule-program-source-projection/v1"
+    {
+        return Err(SourceMaterializeFail::internal(
+            "source_plan_identity_invalid",
+            "the exact-source plan carries unsupported identity metadata".to_string(),
+        ));
+    }
+    // The downstream plan is intentionally inert here. It belongs to the build
+    // enqueued only after this report is accepted.
+    let _downstream_plan = &params.downstream_params;
+    let pinned = PinnedSource {
+        provider: params.provider,
+        canonical_repository: params.canonical_repository,
+        commit_algorithm: params.commit_algorithm,
+        resolved_commit_sha: params.resolved_commit_sha,
+        resolver_contract_version: params.resolver_contract_version,
+    };
+    let checkout = checkout_source_tree_with_metadata(
         &source.github_owner,
         &source.github_repo,
         &source.commit_sha,
@@ -2672,8 +2755,8 @@ fn process_source_materialize_job(
     //    inadmissible tree / cap violation maps to blocked_repo; an archive IO error to
     //    failed_internal — both via SourceMaterializeError::pipeline_state.
     let out = jobdir.join("source.tar.zst");
-    let ms = materialize_source_archive(&checkout, &out)
-        .map_err(|e| SourceMaterializeFail::from_materialize_error(&e))?;
+    let outcome = materialize_pinned_checkout(&checkout, &pinned, &out)
+        .map_err(|e| SourceMaterializeFail::from_source_materialization_error(&e))?;
 
     // 3. Get it OFF this disk. Until this step existed the job ended here and
     //    reported a local path, which names nothing once the process exits or
@@ -2686,9 +2769,9 @@ fn process_source_materialize_job(
     //    upload succeeds, because deleting it on the first error would make the
     //    bounded retry impossible.
     let archive = source_archive_upload::LocalArchive::new(
-        out,
-        ms.source_archive_hash.clone(),
-        ms.compressed_bytes,
+        outcome.archive_path.clone(),
+        outcome.materialization.source_archive_digest.clone(),
+        outcome.materialization.size_bytes,
     );
     let transport = source_archive_upload::HttpArchiveUploadTransport {
         api_url: &cfg.api_url,
@@ -2697,23 +2780,22 @@ fn process_source_materialize_job(
     };
     let object_key = source_archive_upload::upload_source_archive(&transport, &job.id, &archive)
         .map_err(|e| SourceMaterializeFail::internal(e.code(), e.to_string()))?;
-
-    // The bytes are in the store now, so the local copy serves nothing. It is
-    // discarded only HERE — after a successful upload — because keeping it
-    // through the transfer is what makes the bounded retry possible, and a
-    // failed report re-materializes from scratch anyway (the job directory is
-    // wiped at the top of this function).
-    archive.discard();
+    if object_key != outcome.materialization.object_key {
+        return Err(SourceMaterializeFail::internal(
+            "upload_object_key_mismatch",
+            format!(
+                "the API stored {object_key}, but the canonical receipt requires {}",
+                outcome.materialization.object_key
+            ),
+        ));
+    }
 
     Ok(SourceMaterializeOk {
-        materialized_source_tree_hash: ms.materialized_source_tree_hash,
-        source_archive_hash: ms.source_archive_hash,
-        file_count: ms.file_count,
-        uncompressed_bytes: ms.uncompressed_bytes,
-        compressed_bytes: ms.compressed_bytes,
-        // The API's key, not one this builder invented. The local path stays in
-        // `archive`, which is dropped with the job directory.
-        object_key,
+        source_receipt_digest: outcome.receipt.digest(),
+        materialization_receipt_digest: outcome.materialization.digest(),
+        source_receipt: outcome.receipt,
+        materialization_receipt: outcome.materialization,
+        archive,
     })
 }
 
@@ -3374,13 +3456,17 @@ fn process_interactive_capture_job(
     let jobdir = cfg.work.join(&job.id);
     let _ = std::fs::remove_dir_all(&jobdir);
 
-    // The RECIPE producer directly, NOT `produce_build`: that dispatches on
-    // `job.kind`, which is `interactive_capture` here and would fail the job
-    // closed at `claim_kind`. The api enqueues this lane with no `params` and a
-    // server-resolved pinned source + approved recipe manifest (the same inputs
-    // a recipe job gets), so the recipe branch is not a default — it is the one
-    // producer whose inputs this kind actually carries.
-    let produced = produce_recipe_build(cfg, job, &jobdir)?;
+    // Wizard capture is pinned-only. `produce_build` chooses the archive lane
+    // before dispatching on kind, so `interactive_capture` can reach v1 only
+    // when the claim carries a Source Revision + materialization. A legacy
+    // claim has no fallback to clone/latest recipe.
+    if job.pinned_source.is_none() {
+        return Err(fail(
+            "claim_kind",
+            "interactive_capture requires a pinned source archive".to_string(),
+        ));
+    }
+    let produced = produce_build(cfg, job, &jobdir)?;
     eprintln!(
         "[builder] interactive_capture {} produced build (execution {})",
         job.id, produced.execution_id
@@ -3865,9 +3951,9 @@ fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
                 Ok(ok) => {
                     eprintln!(
                         "[builder] materialized source {} (archive {})",
-                        job.id, ok.source_archive_hash
+                        job.id, ok.materialization_receipt.source_archive_digest
                     );
-                    ack_source_materialized(cfg, &job.id, &ok)?;
+                    report_source_materialized(cfg, &job.id, ok)?;
                 }
                 Err(fail) => {
                     eprintln!(
@@ -4804,6 +4890,7 @@ targets = ["web"]
             target_label: "app".into(),
             profile: "default".into(),
             source: Some(ClaimedSource {
+                source_kind: Some("github".into()),
                 github_owner: "acme".into(),
                 github_repo: "app".into(),
                 commit_sha: "a".repeat(40),
@@ -5185,6 +5272,7 @@ targets = ["web"]
     #[test]
     fn import_clone_rejects_invalid_identities_before_any_git() {
         let src = |owner: &str, repo: &str, commit: &str, sub: Option<&str>| ClaimedSource {
+            source_kind: Some("github".into()),
             github_owner: owner.into(),
             github_repo: repo.into(),
             commit_sha: commit.into(),
@@ -5868,53 +5956,64 @@ targets = ["web"]
     // ── SOURCE_MATERIALIZATION_SPEC: source_materialize ack payloads ─────────
 
     #[test]
-    fn source_materialized_ack_carries_exactly_the_result_fields() {
-        // SOURCE_MATERIALIZATION_SPEC §4.1: success ack = the A1v2 identity, the
-        // archive byte identity, the observed sizes/count, and WHERE it is stored.
-        let ok = SourceMaterializeOk {
-            materialized_source_tree_hash: "sha256:aa".into(),
-            source_archive_hash: "sha256:bb".into(),
-            file_count: 42,
-            uncompressed_bytes: 4096,
-            compressed_bytes: 1024,
-            object_key: "source-archives/sha256/bb".into(),
+    fn source_materialization_report_carries_canonical_receipts() {
+        use snapshot::source_receipt::{
+            SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA, SOURCE_RECEIPT_V1_SCHEMA,
+            SourceMaterializationReceiptV1, SourceReceiptV1,
         };
-        let v = serde_json::to_value(&ok).unwrap();
-        assert_eq!(v["materialized_source_tree_hash"], "sha256:aa");
-        assert_eq!(v["source_archive_hash"], "sha256:bb");
-        assert_eq!(v["file_count"], 42);
-        assert_eq!(v["uncompressed_bytes"], 4096);
-        assert_eq!(v["compressed_bytes"], 1024);
-        assert_eq!(v["object_key"], "source-archives/sha256/bb");
-        // No stray fields leak into the ack.
+        let source_receipt = SourceReceiptV1 {
+            canonical_repository: "https://github.com/acme/app".into(),
+            commit_algorithm: "sha1".into(),
+            provider: "github".into(),
+            resolved_commit_sha: "a".repeat(40),
+            resolver_contract_version: "ato.capsule-program-source-projection/v1".into(),
+            schema: SOURCE_RECEIPT_V1_SCHEMA.into(),
+            source_tree_digest: format!("sha256:{}", "1".repeat(64)),
+        };
+        let materialization_receipt = SourceMaterializationReceiptV1 {
+            archive_format_version: "ato.source-archive/v1".into(),
+            object_key: format!("source-archives/sha256/{}", "2".repeat(64)),
+            schema: SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA.into(),
+            size_bytes: 1024,
+            source_archive_digest: format!("sha256:{}", "2".repeat(64)),
+            source_tree_digest: source_receipt.source_tree_digest.clone(),
+        };
+        let ok = SourceMaterializeOk {
+            source_receipt_digest: source_receipt.digest(),
+            materialization_receipt_digest: materialization_receipt.digest(),
+            source_receipt,
+            materialization_receipt,
+            archive: source_archive_upload::LocalArchive::new(
+                PathBuf::from("/not-a-reported-path"),
+                format!("sha256:{}", "2".repeat(64)),
+                1024,
+            ),
+        };
+        let v = source_materialization_report_body("builder-1", &ok);
+        assert_eq!(v["agent_id"], "builder-1");
+        assert_eq!(v["source_receipt"]["schema"], SOURCE_RECEIPT_V1_SCHEMA);
+        assert_eq!(
+            v["materialization_receipt"]["schema"],
+            SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA
+        );
+        assert_eq!(v["source_receipt_digest"], ok.source_receipt.digest());
+        assert_eq!(
+            v["materialization_receipt_digest"],
+            ok.materialization_receipt.digest()
+        );
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 6, "unexpected ack fields: {v}");
+        assert_eq!(obj.len(), 5, "unexpected report fields: {v}");
     }
 
     #[test]
-    fn the_ack_never_carries_a_builder_local_path() {
-        // The regression this replaces: the ack used to report `archive_path`,
-        // a path on THIS host. It named nothing to anyone else — not to another
-        // builder, not to the API, not after this process exits — so a
-        // submission could never reach a third party through it.
-        //
-        // Asserted on the serialized ack rather than on the struct, because the
-        // ack is the contract and a private field that still serializes is
-        // still a leak.
-        let ok = SourceMaterializeOk {
-            materialized_source_tree_hash: "sha256:aa".into(),
-            source_archive_hash: "sha256:bb".into(),
-            file_count: 1,
-            uncompressed_bytes: 1,
-            compressed_bytes: 1,
-            object_key: "source-archives/sha256/bb".into(),
-        };
-        let rendered = serde_json::to_string(&ok).unwrap();
-        assert!(!rendered.contains("archive_path"));
-        assert!(
-            !rendered.contains('/') || !rendered.contains("/work/"),
-            "the ack must carry a content-addressed key, never a host path"
+    fn local_archive_debug_never_carries_its_path() {
+        let archive = source_archive_upload::LocalArchive::new(
+            PathBuf::from("/work/secret/source.tar.zst"),
+            "sha256:bb".into(),
+            1,
         );
+        let rendered = format!("{archive:?}");
+        assert!(!rendered.contains("/work/secret"));
     }
 
     #[test]
