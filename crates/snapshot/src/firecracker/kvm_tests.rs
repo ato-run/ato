@@ -2337,3 +2337,94 @@ fn fc_kvm_hold_drop_tears_the_guest_down() {
         "a dropped hold leaked its slot lock: {text}"
     );
 }
+
+/// A restore attempted WHILE a hold is live is refused.
+///
+/// This is the hardware statement of the defect that made the interactive
+/// acceptance lane unrunnable: the hold holds `work_root/{netns|tap}.lock` for
+/// its whole life, and `restore` takes the same path. The existing
+/// `fc_kvm_hold_drop_tears_the_guest_down` cannot see this — it asserts the lock
+/// is free AFTER the hold drops, so it exercises the ordering that already
+/// worked.
+///
+/// The assertion is deliberately on the lock, not on the restore's own error
+/// text: what must never regress is that a SECOND VMM cannot be started on a
+/// slot that already has one. The consequences beyond the lock do not fail
+/// loudly — `net_up_root` deletes the tap the live guest is on, and both guests
+/// answer at the same address, so a readiness probe can be satisfied by the
+/// wrong VM.
+#[test]
+#[ignore]
+fn fc_kvm_restore_while_a_hold_is_live_is_refused() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+
+    // The hold owns the slot: its lockfile exists for as long as the guest does.
+    assert!(
+        b.lock_path().exists(),
+        "a live hold must own its slot lock; without that this test proves nothing"
+    );
+
+    // A second VMM on the same slot must be refused while the hold is up.
+    let second = b.boot_and_hold(build_input(&store, Vec::new(), vec![]));
+    let text = format!("{:?}", second.err());
+    assert!(
+        text.contains("backend busy"),
+        "a second VMM was not refused while a hold was live: {text}"
+    );
+
+    held.release();
+    assert!(
+        !b.lock_path().exists(),
+        "release() must free the slot lock so verification can take it"
+    );
+}
+
+/// After a hold is released, the slot is genuinely free for a restore to take.
+///
+/// The other half of the ordering the fix depends on. `HeldGuest::release`
+/// takes `self` by value, kills and reaps the VMM, runs `net_down()` and drops
+/// the `BuildLock`; this asserts the postcondition the `ReleasedHold` token
+/// stands for, on real hardware rather than in a comment.
+#[test]
+#[ignore]
+fn fc_kvm_hold_release_frees_the_slot_for_a_restore() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+    let vmm_pid = held
+        .vmm_pid()
+        .expect("a held guest owns a firecracker process");
+    held.release();
+
+    // The VMM is gone, not merely detached.
+    let mut reaped = false;
+    for _ in 0..50 {
+        if !firecracker_pids().contains(&vmm_pid) {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(reaped, "release() leaked firecracker pid {vmm_pid}");
+
+    // And the slot admits a new VMM — an empty rootfs must fail for its OWN
+    // reason, never "backend busy", which would mean the lock outlived the hold.
+    let Err(err) = b.boot_and_hold(build_input(&store, Vec::new(), vec![])) else {
+        panic!("an empty rootfs must not boot");
+    };
+    let text = format!("{err:?}");
+    assert!(
+        !text.contains("backend busy"),
+        "the released hold left its slot lock behind: {text}"
+    );
+}
