@@ -16,16 +16,14 @@ pub(crate) mod binding_grants;
 pub(crate) mod binding_host;
 pub(crate) mod bindings;
 pub(crate) mod build;
-/// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
-/// builds a guest, measures it, mints an Execution Identity from those
-/// measurements, and publishes it into `capsule.lock` (ADR-015 step 5-3).
-pub(crate) mod build_v1;
+/// The v1 producer lane: `ato build`'s `schema_version = "1"` path. It moved
+/// into the `snapshot` crate when the snapshot builder daemon needed the same
+/// lane for a pinned wizard build — two copies of a lane that mints Execution
+/// Identity would be two identities. Re-exported here so this layer keeps one
+/// name for it.
+pub(crate) use snapshot::build_v1;
 pub(crate) mod diagnostics;
 pub(crate) mod flags;
-/// Collecting the measurements a v1 Execution Contract is minted from
-/// (ADR-015 step 4). Measuring lives here because the contract layer performs
-/// no host I/O by design.
-pub(crate) mod observe_v1;
 pub(crate) mod restore;
 pub(crate) mod restore_lease;
 pub(crate) mod runtime_adapter;
