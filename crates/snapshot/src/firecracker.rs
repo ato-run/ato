@@ -254,12 +254,27 @@ impl FirecrackerBackend {
     /// env/default. The override is CLAMPED to `[1, MAX_JOB_BOOT_TIMEOUT_S]` so a
     /// job can never pin the builder on a hung guest indefinitely. Cloning is
     /// cheap: `config` is small and the session/page-server maps are `Arc`s.
+    /// NOTE: the clone is NOT an independent slot. It shares the `sessions` and
+    /// `page_servers` maps, and — because [`Self::lock_path`] is derived from
+    /// `config.netns`/`config.tap_dev`, neither of which this touches — it has a
+    /// byte-identical lock path. Two VMMs cannot be run from a backend and its
+    /// clone any more than from one backend twice; nothing in the type says so,
+    /// which is exactly how that mistake stayed invisible once.
     pub fn with_boot_timeout(&self, secs: Option<u64>) -> Self {
         let mut b = self.clone();
         if let Some(s) = secs {
             b.config.boot_timeout = Duration::from_secs(s.clamp(1, MAX_JOB_BOOT_TIMEOUT_S));
         }
         b
+    }
+
+    /// The readiness budget this backend will ACTUALLY honour — the env default,
+    /// or the per-job [`Self::with_boot_timeout`] override after clamping.
+    ///
+    /// A caller that has to fit a restore inside an outer deadline needs the
+    /// resolved value, not the default it started from.
+    pub fn boot_timeout(&self) -> Duration {
+        self.config.boot_timeout
     }
 
     pub fn kvm_present() -> bool {
