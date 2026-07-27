@@ -305,3 +305,85 @@ fn pixel_rfb_requires_first_frame_readiness() {
     };
     ready.validate().expect("private RFB first-frame endpoint");
 }
+
+// ── the v1 submission subset ────────────────────────────────────────────────
+//
+// What the contract can DESCRIBE and what a submission can PUBLISH are
+// different sets, and these pin the difference so widening one does not
+// silently widen the other.
+
+/// Web is the surface the submission pipeline can carry end to end today.
+#[test]
+fn web_is_admitted_by_the_v1_submission_subset() {
+    assert_eq!(
+        v1_submission_surface_kind(SessionSurfaceKind::Web),
+        Ok(SessionSurfaceKind::Web)
+    );
+}
+
+/// Pixel is describable and renderable but not submittable.
+///
+/// Not an oversight: the wizard's interactive lane admits only the `recipe` job
+/// kind, and the recipe lane refuses a pixel surface requirement outright. If
+/// this test starts failing because someone added `PixelStream` to the slice,
+/// the two refusals above must have been lifted first — otherwise the failure
+/// simply moves from submission time to capture time, which is strictly worse.
+#[test]
+fn pixel_stream_is_refused_by_the_v1_submission_subset() {
+    assert_eq!(
+        v1_submission_surface_kind(SessionSurfaceKind::PixelStream),
+        Err(SessionSurfaceContractError::SurfaceNotInSubmissionSubset(
+            SessionSurfaceKind::PixelStream
+        ))
+    );
+}
+
+/// A reserved-but-unimplemented kind is refused.
+#[test]
+fn terminal_is_refused_by_the_v1_submission_subset() {
+    assert!(v1_submission_surface_kind(SessionSurfaceKind::Terminal).is_err());
+}
+
+/// The fail-closed arm: a kind this build cannot even name is refused.
+///
+/// `Unknown` is what `#[serde(other)]` produces when a newer producer emits a
+/// kind this build has never heard of. Admitting it would let an unrecognised
+/// surface through as though it had been negotiated.
+#[test]
+fn an_unknown_kind_is_refused_by_the_v1_submission_subset() {
+    assert!(v1_submission_surface_kind(SessionSurfaceKind::Unknown).is_err());
+}
+
+/// Every kind the contract can describe is either admitted or refused with the
+/// subset's own error — never with a generic one.
+///
+/// This is the test that makes the subset fail-closed in practice: adding a
+/// variant to `SessionSurfaceKind` without deciding about it lands here.
+#[test]
+fn every_describable_kind_gets_an_explicit_subset_verdict() {
+    for kind in [
+        SessionSurfaceKind::Web,
+        SessionSurfaceKind::PixelStream,
+        SessionSurfaceKind::Terminal,
+        SessionSurfaceKind::Unknown,
+    ] {
+        match v1_submission_surface_kind(kind) {
+            Ok(admitted) => assert_eq!(admitted, kind, "an admitted kind must round-trip"),
+            Err(SessionSurfaceContractError::SurfaceNotInSubmissionSubset(refused)) => {
+                assert_eq!(refused, kind, "a refusal must name the kind it refused")
+            }
+            Err(other) => panic!("{kind:?} was refused with an unrelated error: {other}"),
+        }
+    }
+}
+
+/// The subset does not admit duplicates or an empty set by accident.
+#[test]
+fn the_v1_submission_subset_is_a_non_empty_set() {
+    assert!(!V1_SUBMISSION_SURFACE_KINDS.is_empty());
+    let mut seen = Vec::new();
+    for kind in V1_SUBMISSION_SURFACE_KINDS {
+        assert!(!seen.contains(kind), "{kind:?} is listed twice");
+        seen.push(*kind);
+    }
+}
