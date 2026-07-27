@@ -85,6 +85,9 @@ pub use compose_plan::{
     ServiceDependency, ServiceMount, compose_to_graph,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
+/// TEST-ONLY (`test-support`): see the function's own doc.
+#[cfg(any(test, feature = "test-support"))]
+pub use firecracker::vsock_uds_path_for_capsule as firecracker_vsock_uds_path_for_capsule;
 pub use firecracker::{
     FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCandidate,
     HeldCaptureFailure, HeldGuest,

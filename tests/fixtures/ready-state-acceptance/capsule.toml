@@ -1,0 +1,29 @@
+schema_version = "1"
+name = "ready-state-acceptance"
+version = "0.1.0"
+
+# The launch vector is EXACT — no interpreter is inferred and no word is
+# rewritten (ADR-015 §9.4). Two of these words are chosen to be adversarial for
+# the harness's comparison rather than for the app:
+#
+#   "boundary probe"  contains a space, so a shell that re-split the vector
+#                     would show up as two arguments instead of one;
+#   ""                is an EMPTY argument, which is what distinguishes a
+#                     correct /proc/self/cmdline decoder (drop exactly one
+#                     trailing NUL terminator) from one that drops every empty
+#                     piece and so cannot tell ["a", "", "b"] from ["a", "b"].
+#
+# The fixture ignores both; they exist to be compared.
+[run]
+command = ["python3", "server.py", "--label", "boundary probe", "--empty", ""]
+
+[web]
+port = 8080
+bind = "0.0.0.0"
+
+# Runs HOST-side against the restored guest. `SealAtConfig` has no {addr}/{port}
+# templating today, so the harness rewrites this line with the run-unique guest
+# IP before building — see README.md. That rewrite is exactly the reason
+# templating is filed as a follow-up.
+[seal_at]
+command = ["curl", "-fsS", "http://172.16.0.2:8080/health"]
