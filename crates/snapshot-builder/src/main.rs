@@ -2657,13 +2657,15 @@ fn process_source_materialize_job(
         token: &cfg.token,
         agent_id: &cfg.agent_id,
     };
-    let object_key = source_archive_upload::upload_source_archive(
-        &transport,
-        &job.id,
-        archive.path(),
-        archive.digest(),
-    )
-    .map_err(|e| SourceMaterializeFail::internal(e.code(), e.to_string()))?;
+    let object_key = source_archive_upload::upload_source_archive(&transport, &job.id, &archive)
+        .map_err(|e| SourceMaterializeFail::internal(e.code(), e.to_string()))?;
+
+    // The bytes are in the store now, so the local copy serves nothing. It is
+    // discarded only HERE — after a successful upload — because keeping it
+    // through the transfer is what makes the bounded retry possible, and a
+    // failed report re-materializes from scratch anyway (the job directory is
+    // wiped at the top of this function).
+    archive.discard();
 
     Ok(SourceMaterializeOk {
         materialized_source_tree_hash: ms.materialized_source_tree_hash,
