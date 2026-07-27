@@ -161,6 +161,18 @@ pub fn upload_source_archive(
             ),
         });
     }
+    let actual_digest = capsule::blob::source_archive_hash(&body);
+    if actual_digest != digest {
+        return Err(UploadFailure::NotStored {
+            detail: format!(
+                "the local archive digest changed after freeze: expected {digest}, measured {actual_digest}"
+            ),
+        });
+    }
+    let expected_object_key = snapshot::source_materialization::object_key_for_archive(digest)
+        .map_err(|e| UploadFailure::NotStored {
+            detail: format!("derive the content-addressed object key: {e}"),
+        })?;
 
     let mut last = String::new();
     for attempt in 1..=MAX_UPLOAD_ATTEMPTS {
@@ -168,6 +180,14 @@ pub fn upload_source_archive(
         // retrying against a grant that may already have expired, and holding a
         // URL across retries is how a short TTL becomes a long one.
         let authorization = transport.authorize(job_id, digest, size_bytes)?;
+        if authorization.object_key != expected_object_key {
+            return Err(UploadFailure::NotStored {
+                detail: format!(
+                    "the API authorized object key {} but the archive digest requires {expected_object_key}",
+                    authorization.object_key
+                ),
+            });
+        }
 
         match transport.put(&authorization.url, &body) {
             Ok(status) if (200..300).contains(&status) => {
@@ -392,7 +412,7 @@ mod tests {
         fn authorize(
             &self,
             _job_id: &str,
-            _digest: &str,
+            digest: &str,
             _size_bytes: u64,
         ) -> Result<UploadAuthorization, UploadFailure> {
             if self.refuse_authorization {
@@ -407,11 +427,13 @@ mod tests {
                 *calls
             };
             // A different URL each time, as a real API issues.
-            let url = format!("https://store.example/{KEY}?X-Amz-Signature=sig{n}");
+            let object_key =
+                snapshot::source_materialization::object_key_for_archive(digest).unwrap();
+            let url = format!("https://store.example/{object_key}?X-Amz-Signature=sig{n}");
             self.urls_issued.borrow_mut().push(url.clone());
             Ok(UploadAuthorization {
                 url,
-                object_key: KEY.to_string(),
+                object_key,
                 expires_in_seconds: 300,
             })
         }
@@ -430,7 +452,19 @@ mod tests {
     /// A `LocalArchive` whose recorded size matches the file on disk.
     fn local(path: &Path) -> LocalArchive {
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-        LocalArchive::new(path.to_path_buf(), DIGEST.to_string(), size)
+        let bytes = std::fs::read(path).unwrap();
+        LocalArchive::new(
+            path.to_path_buf(),
+            capsule::blob::source_archive_hash(&bytes),
+            size,
+        )
+    }
+
+    fn key_for(bytes: &[u8]) -> String {
+        snapshot::source_materialization::object_key_for_archive(
+            &capsule::blob::source_archive_hash(bytes),
+        )
+        .unwrap()
     }
 
     fn archive(dir: &TempDir, bytes: &[u8]) -> PathBuf {
@@ -449,7 +483,7 @@ mod tests {
         let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
 
         // The key comes from the API, not from anything the builder computed.
-        assert_eq!(key, KEY);
+        assert_eq!(key, key_for(b"archive bytes"));
         assert_eq!(*transport.authorize_calls.borrow(), 1);
         assert_eq!(transport.bodies.borrow().as_slice(), &[13]);
     }
@@ -465,7 +499,7 @@ mod tests {
 
         let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
 
-        assert_eq!(key, KEY);
+        assert_eq!(key, key_for(b"bytes"));
         assert_eq!(*transport.authorize_calls.borrow(), 3);
         let urls = transport.urls_issued.borrow();
         assert_eq!(urls.len(), 3);
@@ -480,7 +514,7 @@ mod tests {
         let path = archive(&dir, b"bytes");
         let transport = FakeTransport::with(vec![Ok(500), Ok(200)]);
         let key = upload_source_archive(&transport, "job_1", &local(&path)).expect("upload");
-        assert_eq!(key, KEY);
+        assert_eq!(key, key_for(b"bytes"));
     }
 
     #[test]
@@ -595,6 +629,21 @@ mod tests {
         let failure = upload_source_archive(&transport, "job_1", &stale).expect_err("must refuse");
 
         assert_eq!(failure.code(), "upload_not_stored");
+        assert!(transport.bodies.borrow().is_empty(), "nothing was sent");
+    }
+
+    #[test]
+    fn refuses_same_size_bytes_with_a_different_digest() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = archive(&dir, b"first");
+        let frozen = local(&path);
+        std::fs::write(&path, b"other").expect("replace with same-size bytes");
+        let transport = FakeTransport::with(vec![Ok(200)]);
+
+        let failure = upload_source_archive(&transport, "job_1", &frozen).expect_err("must refuse");
+
+        assert_eq!(failure.code(), "upload_not_stored");
+        assert_eq!(*transport.authorize_calls.borrow(), 0);
         assert!(transport.bodies.borrow().is_empty(), "nothing was sent");
     }
 
