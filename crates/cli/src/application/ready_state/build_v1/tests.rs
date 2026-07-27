@@ -1397,7 +1397,7 @@ fn the_artifact_digest_is_recorded_and_never_committed() {
     // The receipt names the file on disk.
     assert_eq!(
         outcome.guest_image_digest,
-        materialization_digest(&workspace.guest_image_path())
+        measure_guest_artifact(&workspace.guest_image_path())
             .expect("hash the artifact")
             .to_string()
     );

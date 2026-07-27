@@ -96,6 +96,21 @@ mod hold_ingress;
 /// (the interactive_capture kind is never advertised on the claim). See its doc.
 mod hold_phase;
 mod upload;
+/// ADR-015 slice 7A — the gate a v1 `ato build` output passes before any later
+/// phase may act on it: trusted-load the lock, re-derive the Execution
+/// Identity, refuse every facet outside the §7 subset, and bind the contract to
+/// the artifact actually on disk. Verification only; boots nothing.
+///
+/// Not yet called from the claim loop, and deliberately so: no ato-api
+/// deployment hands this daemon a lock-plus-receipt today (the claim carries a
+/// contract pinned by the control plane — see `ClaimedJob::execution_contract`).
+/// Slice 7B introduces the caller, which takes a `VerifiedV1BuildInput` and
+/// nothing else. Wiring it into a lane that cannot supply the inputs would make
+/// the gate look exercised when it is not, so it is `dead_code` until the
+/// producer side reaches this daemon — the same treatment `uffd_page_server`
+/// carries in `snapshot`. Its own tests exercise every path below.
+#[allow(dead_code)]
+mod v1_intake;
 /// Submission Wizard PR-2 (slice 2) — the builder-lane api client: the
 /// FENCING-4 transport split, the lease-renew driver, and the production
 /// control-poll [`ControlSource`](hold_phase::ControlSource). Transport only;

@@ -80,6 +80,7 @@ use snapshot::rootfs_builder::{
     assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
     mkfs_guest_rootfs_v1, v1_filesystem_uuid,
 };
+use snapshot::v1_materialization::measure_guest_artifact;
 
 use super::observe_v1::{V1BuildObservation, observe_v1};
 
@@ -350,22 +351,6 @@ impl V1GuestProducer for HostV1GuestProducer {
     }
 }
 
-/// Blake3 over a packed artifact, streamed.
-///
-/// A MATERIALIZATION measurement, never an identity input — the name says so
-/// because the two are one `ContentDigest` apart and the whole point of
-/// `guest_filesystem_digest` is that this value is not stable across builds.
-/// Streamed because the artifact is a filesystem image sized in gigabytes.
-fn materialization_digest(path: &Path) -> std::io::Result<ContentDigest> {
-    let mut hasher = blake3::Hasher::new();
-    let mut file = std::fs::File::open(path)?;
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(ContentDigest::new(
-        DigestAlgorithm::Blake3,
-        *hasher.finalize().as_bytes(),
-    ))
-}
-
 /// Run the v1 producer lane end to end.
 ///
 /// The step order is load-bearing and is the ADR-015 §5-3 order verbatim: the
@@ -509,7 +494,7 @@ pub(crate) fn run(
     // filesystem differ here, which is exactly why the identity commits the
     // contents above instead.
     let guest_image_digest =
-        materialization_digest(request.guest_image_path).map_err(|source| {
+        measure_guest_artifact(request.guest_image_path).map_err(|source| {
             V1BuildError::RecipeBuildFailed {
                 reason: format!(
                     "hash the packed guest image at {}: {source}",
