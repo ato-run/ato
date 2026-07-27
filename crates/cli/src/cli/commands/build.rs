@@ -10,6 +10,7 @@ use capsule::routing::input_resolver::resolve_canonical_lock_path;
 use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use snapshot::v1_materialization::{V1MaterializationReceipt, target_triple};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::IsTerminal;
@@ -50,34 +51,12 @@ pub struct BuildResult {
     /// Present only for a `schema_version = "1"` build. The terminal prints a
     /// short id; this carries the whole one, for anything that consumes
     /// `--json`.
+    ///
+    /// This is the materialization receipt a Snapshot Builder takes as intake,
+    /// which is why the type is defined once in `snapshot` and shared rather
+    /// than mirrored on each side of the boundary.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub v1: Option<V1BuildSummary>,
-}
-
-/// The result of the v1 producer lane, as `--json` reports it.
-///
-/// `trusted_load_verified` is always `true` here: the lane has no path that
-/// returns success without having read the lock back off disk, recomputed the
-/// execution id from what it read, and found it equal to what it minted. It is
-/// serialized anyway because a consumer should be able to see the claim rather
-/// than infer it from the field's absence.
-#[derive(Debug, Serialize)]
-pub struct V1BuildSummary {
-    pub execution_id: String,
-    pub lock: PathBuf,
-    pub guest_image: PathBuf,
-    pub guest_image_bytes: u64,
-    /// The packed artifact's digest — a materialization receipt naming WHICH
-    /// file this build wrote. Not an identity input: see
-    /// `V1BuildOutcome::guest_image_digest`.
-    pub guest_image_digest: String,
-    /// The identity-bearing digest of the guest's contents, as
-    /// `filesystem.view_digest` commits it.
-    pub filesystem_view_digest: String,
-    pub source_digest: String,
-    pub runtime: String,
-    pub target: String,
-    pub trusted_load_verified: bool,
+    pub v1: Option<V1MaterializationReceipt>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -789,7 +768,7 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
         schema_version: Some(capsule::types::manifest_v1::MANIFEST_SCHEMA_V1.to_string()),
         target: None,
         derived_from: None,
-        v1: Some(V1BuildSummary {
+        v1: Some(V1MaterializationReceipt {
             execution_id: outcome.execution_id,
             lock: outcome.lock_path,
             guest_image: outcome.guest_image_path,
@@ -798,10 +777,7 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
             filesystem_view_digest: outcome.filesystem_view_digest,
             source_digest: outcome.source_digest,
             runtime: outcome.runtime_resolved_ref,
-            target: format!(
-                "{}/{}/{}",
-                outcome.target.os, outcome.target.architecture, outcome.target.abi
-            ),
+            target: target_triple(&outcome.target),
             trusted_load_verified: outcome.trusted_load_verified,
         }),
     })
