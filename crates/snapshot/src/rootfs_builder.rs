@@ -2074,9 +2074,9 @@ pub fn materialize_source(
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
-    git_checkout_pinned(owner, repo, commit, dest)?;
-
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
     let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
+    remove_checkout_git_metadata(dest)?;
     if let Some(toml) = manifest_override {
         // The recipe manifest is authoritative for Store-recipe jobs: write it at the
         // contained root (overwriting a repo capsule.toml if one exists) so every later
@@ -2111,8 +2111,62 @@ pub fn checkout_source_tree(
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
-    git_checkout_pinned(owner, repo, commit, dest)?;
-    contained_source_root(dest, subdir, false)
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
+    let root = contained_source_root(dest, subdir, false)?;
+    remove_checkout_git_metadata(dest)?;
+    Ok(root)
+}
+
+/// A pinned checkout whose Git metadata is deliberately still present.
+///
+/// Source eligibility must inspect the commit tree (`HEAD`, `ls-tree`, and
+/// `check-attr`) before the working tree is frozen. The repository root and the
+/// materialization root are distinct when `subdirectory` is selected.
+#[derive(Debug)]
+pub struct PinnedSourceCheckout {
+    repository_root: PathBuf,
+    materialization_root: PathBuf,
+}
+
+impl PinnedSourceCheckout {
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub fn materialization_root(&self) -> &Path {
+        &self.materialization_root
+    }
+
+    /// Remove only the checkout's root `.git`, after Git-backed eligibility has
+    /// completed. Nested metadata remains visible to the archive admissibility
+    /// gate and is never silently stripped.
+    pub fn strip_root_git_metadata(&self) -> Result<(), String> {
+        remove_checkout_git_metadata(&self.repository_root)
+    }
+}
+
+/// Checkout an exact commit for source materialization while retaining `.git`
+/// long enough for the authoritative eligibility checks.
+pub fn checkout_source_tree_with_metadata(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+    dest: &Path,
+) -> Result<PinnedSourceCheckout, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
+    let materialization_root = contained_source_root(dest, subdir, false)?;
+    let repository_root = dest
+        .canonicalize()
+        .map_err(|e| format!("canonicalize checkout: {e}"))?;
+    Ok(PinnedSourceCheckout {
+        repository_root,
+        materialization_root,
+    })
 }
 
 /// Validate the server-resolved source identity as an input boundary: `owner`/`repo`
@@ -2139,9 +2193,15 @@ fn validate_source_identity(owner: &str, repo: &str, commit: &str) -> Result<(),
 /// (source_materialize lane); callers validate the identity (`validate_source_identity`)
 /// and any subdir before calling, and resolve/contain the source root afterward.
 ///
-/// The checkout's own `.git` is removed before returning ([`remove_checkout_git_metadata`]),
-/// so what every caller receives is a materialized source tree, never a working tree.
-fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
+/// The checkout's own `.git` remains until the caller has completed any
+/// Git-backed validation. Callers that expose a materialized tree must invoke
+/// [`remove_checkout_git_metadata`] before using it as build input.
+fn git_checkout_pinned_with_metadata(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    dest: &Path,
+) -> Result<(), String> {
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
         let mut c = Command::new("git");
@@ -2165,11 +2225,10 @@ fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Re
         &["fetch", "-q", "--depth", "1", "origin", commit],
         Some(dest),
     )?;
-    run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
-    remove_checkout_git_metadata(dest)
+    run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))
 }
 
-/// Delete the `.git` that [`git_checkout_pinned`]'s `git init` created, turning the
+/// Delete the `.git` that [`git_checkout_pinned_with_metadata`]'s `git init` created, turning the
 /// checkout into a plain materialized source tree. Fail-closed: an IO error here is an
 /// error, never a silently retained working tree.
 ///
