@@ -2585,6 +2585,15 @@ mod tests {
     // any of them collides with a live service. Nothing here kills a process it
     // did not start or deletes a resource it did not create.
 
+    /// The Execution Identity this E2E's candidate is sealed and verified under.
+    ///
+    /// One constant for both the seal and the acceptance side: they must agree,
+    /// and two literals would let them drift into an identity mismatch that
+    /// reads as an acceptance failure.
+    #[cfg(test)]
+    const E2E_EXECUTION_ID: &str =
+        "blake3:e2e000000000000000000000000000000000000000000000000000000000acce";
+
     /// Env knob or skip: these tests must be inert on a machine without the
     /// isolated fixture wired up, including CI.
     #[cfg(test)]
@@ -2667,7 +2676,16 @@ mod tests {
                 },
                 sanitizer_contract: snapshot::SanitizerContract::default(),
                 declared_secret_markers: vec![],
-                execution_id: None,
+                // REQUIRED, not optional decoration: `GuestCaptureAction::capture`
+                // refuses a sealed candidate whose manifest cannot name its
+                // Execution Identity ("sealed candidate has no execution_id"),
+                // because §3.6 has nowhere to put one it would have to invent.
+                // Passing `None` here makes every capture fail with
+                // `source_lost = false`, which returns the loop to holding and —
+                // since the control script re-issues the same directive — spins
+                // it through a fresh full snapshot per iteration until the
+                // 30-minute TTL. Measured: 356 snapshots in one run.
+                execution_id: Some(E2E_EXECUTION_ID.to_string()),
                 supervisor: None,
             })
             .expect("boot and hold");
@@ -2771,7 +2789,7 @@ mod tests {
             candidate: crate::guest_capture::HeldCandidateSource::new(
                 Rc::clone(&captured),
                 &backend,
-                capsule::execution_contract::ExecutionId::new(format!("blake3:{}", "a".repeat(64)))
+                capsule::execution_contract::ExecutionId::new(E2E_EXECUTION_ID.to_string())
                     .expect("execution id"),
             ),
             overlay_root: dir.path().join("acceptance-overlay"),

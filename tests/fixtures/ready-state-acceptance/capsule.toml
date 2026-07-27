@@ -3,19 +3,23 @@ name = "ready-state-acceptance"
 version = "0.1.0"
 
 # The launch vector is EXACT — no interpreter is inferred and no word is
-# rewritten (ADR-015 §9.4). Two of these words are chosen to be adversarial for
-# the harness's comparison rather than for the app:
+# rewritten (ADR-015 §9.4). `"boundary probe"` carries a space so that a shell
+# which re-split the vector shows up as two arguments instead of one.
 #
-#   "boundary probe"  contains a space, so a shell that re-split the vector
-#                     would show up as two arguments instead of one;
-#   ""                is an EMPTY argument, which is what distinguishes a
-#                     correct /proc/self/cmdline decoder (drop exactly one
-#                     trailing NUL terminator) from one that drops every empty
-#                     piece and so cannot tell ["a", "", "b"] from ["a", "b"].
+# An EMPTY argument was tried here and CANNOT be used: the v1 producer refuses
+# it outright —
 #
-# The fixture ignores both; they exist to be compared.
+#     no v1 recipe covers this capsule: [run] command argv[5] is empty; every
+#     word of an exact argv must resolve to something, so an empty argument
+#     cannot be committed
+#
+# — which is `ExecutionContractError::UnresolvedField("launch.argv")` enforced at
+# authoring time. So the empty-argument case cannot be exercised end to end from
+# a real capsule, and the decoder's handling of it is pinned by the unit test
+# over crafted input instead. Recorded here so nobody re-adds it expecting the
+# build to work.
 [run]
-command = ["python3", "server.py", "--label", "boundary probe", "--empty", ""]
+command = ["python3", "server.py", "--label", "boundary probe"]
 
 [web]
 port = 8080
