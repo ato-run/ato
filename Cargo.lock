@@ -6516,6 +6516,7 @@ dependencies = [
  "blake3",
  "capsule",
  "capsulefs",
+ "hex",
  "libc",
  "protocol",
  "serde",
