@@ -2567,4 +2567,265 @@ mod tests {
             "the author still receives the per-candidate verdict on §3.7"
         );
     }
+
+    // ── KVM: the PRODUCTION ordering, on real hardware ──────────────────────
+    //
+    // The KVM-free tests above prove the ORDERING. This one proves the ordering
+    // holds when the guest is a real Firecracker VM, driven through the same
+    // objects `main.rs` uses — `GuestCaptureAction` -> `HoldPhase` ->
+    // `ReleasedHold` -> `verify_captured_candidate` -> `BackendDisposableLifecycle`.
+    //
+    // It deliberately does NOT call `backend.restore()` directly. A test that
+    // did would re-prove what `fc_kvm_hold_candidate_restores_and_serves`
+    // already proves (that the backend restores a candidate after a release) and
+    // would say nothing about the ownership move that is the actual fix.
+    //
+    // Every collision-capable resource is taken from the environment so the
+    // caller can make them run-unique; the harness script refuses to start if
+    // any of them collides with a live service. Nothing here kills a process it
+    // did not start or deletes a resource it did not create.
+
+    /// Env knob or skip: these tests must be inert on a machine without the
+    /// isolated fixture wired up, including CI.
+    #[cfg(test)]
+    fn kvm_env(name: &str) -> Option<String> {
+        match std::env::var(name) {
+            Ok(v) if !v.is_empty() => Some(v),
+            _ => {
+                eprintln!("SKIP: {name} not set");
+                None
+            }
+        }
+    }
+
+    /// Is anything answering on `addr` right now?
+    #[cfg(test)]
+    fn addr_answers(addr: &str) -> bool {
+        use std::net::TcpStream;
+        let Ok(sock) = addr.parse() else { return false };
+        TcpStream::connect_timeout(&sock, Duration::from_millis(400)).is_ok()
+    }
+
+    /// The full production path on a real guest, with the restored guest's
+    /// identity PROVEN rather than assumed.
+    ///
+    /// The attribution argument, in order:
+    ///
+    /// 1. before release, the held guest answers — so the address is live;
+    /// 2. after release, the held VMM pid is gone, the slot lock is gone, the
+    ///    vsock UDS is gone, and the address REFUSES repeatedly — so nothing is
+    ///    serving there;
+    /// 3. after `verify_captured_candidate` restores, the address answers again
+    ///    and echoes a fresh 128-bit request-scoped nonce.
+    ///
+    /// Step 2 is what makes step 3 attributable. A nonce baked into the guest
+    /// could not do this: restore resumes identical memory, so the held guest
+    /// and the restored guest would answer it the same way. Only "dead in the
+    /// gap, alive after" distinguishes them.
+    #[test]
+    #[ignore]
+    fn fc_kvm_production_hold_release_verify_attributes_the_restored_guest() {
+        let Some(rootfs_path) = kvm_env("ATO_FC_TEST_ROOTFS") else {
+            return;
+        };
+        let Some(guest_ip) = kvm_env("ATO_FC_GUEST_IP") else {
+            return;
+        };
+        if !snapshot::FirecrackerBackend::kvm_present() {
+            eprintln!("SKIP: /dev/kvm absent");
+            return;
+        }
+        let rootfs = std::fs::read(&rootfs_path).expect("read ATO_FC_TEST_ROOTFS");
+        let guest_addr = format!("{guest_ip}:8080");
+
+        let backend = snapshot::FirecrackerBackend::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store =
+            capsulefs::CasStore::open(dir.path().join("cas")).expect("open the run-scoped CAS");
+
+        // ── boot and hold, exactly as `process_interactive_capture_job` does ──
+        let t_hold = Instant::now();
+        let guest = backend
+            .boot_and_hold(snapshot::BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: "blake3:e2e-acceptance".to_string(),
+                runner_class: None,
+                surface_requirement: None,
+                layers: snapshot::BuildLayers {
+                    rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: snapshot::RestoreContract {
+                    ports: vec![8080],
+                    healthcheck: Some("/health".to_string()),
+                    expected_ready_ms: Some(8000),
+                    ..Default::default()
+                },
+                sanitizer_contract: snapshot::SanitizerContract::default(),
+                declared_secret_markers: vec![],
+                execution_id: None,
+                supervisor: None,
+            })
+            .expect("boot and hold");
+        eprintln!("### E2E hold_ready_ms={}", t_hold.elapsed().as_millis());
+
+        let vmm_pid = guest
+            .vmm_pid()
+            .expect("a held guest owns a firecracker pid");
+        let lock_path = backend.slot_lock_path();
+        assert!(
+            addr_answers(&guest_addr),
+            "the held guest must answer before anything else is asserted"
+        );
+
+        // ── capture through the production seams ─────────────────────────────
+        let captured: crate::guest_capture::CapturedCandidateCell =
+            Rc::new(std::cell::RefCell::new(None));
+        let mut capture_action = crate::guest_capture::GuestCaptureAction::new(
+            guest,
+            crate::guest_capture::CaptureContext {
+                job_id: "e2e".to_string(),
+                jobdir: dir.path().to_path_buf(),
+            },
+            Rc::clone(&captured),
+        );
+        let mut control = ScriptedControl::new(vec![capture(1, "cand_e2e", true)]);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let clock = snapshot::acceptance::SystemClock;
+
+        let t_capture = Instant::now();
+        let outcome = {
+            let mut phase = HoldPhase::new(
+                &mut control,
+                &mut capture_action,
+                &mut elig,
+                &mut extend,
+                &clock,
+                fencing(),
+                DEFAULT_HOLD_TTL,
+            );
+            phase.run().expect("no fatal internal error")
+        };
+        eprintln!("### E2E capture_ms={}", t_capture.elapsed().as_millis());
+
+        let HoldOutcome::CapturedPendingVerification(pending) = outcome else {
+            panic!("expected a captured candidate, got {outcome:?}");
+        };
+
+        // ── release, then PROVE nothing is serving ───────────────────────────
+        let t_release = Instant::now();
+        let released = capture_action.release();
+        eprintln!("### E2E release_ms={}", t_release.elapsed().as_millis());
+
+        let mut pid_gone = false;
+        for _ in 0..100 {
+            if !std::path::Path::new(&format!("/proc/{vmm_pid}")).exists() {
+                pid_gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            pid_gone,
+            "### E2E FAIL held vmm pid {vmm_pid} still present"
+        );
+        eprintln!("### E2E held_pid_gone=true pid={vmm_pid}");
+
+        assert!(
+            !lock_path.exists(),
+            "### E2E FAIL slot lock still held: {}",
+            lock_path.display()
+        );
+        eprintln!("### E2E lock_released=true path={}", lock_path.display());
+
+        // The vsock UDS is per-CAPSULE and deterministic, so a second VMM on
+        // this slot would have unlinked the live hold's socket out from under
+        // it. Assert the release took it down.
+        let vsock = snapshot::firecracker_vsock_uds_path_for_capsule("blake3:e2e-acceptance");
+        assert!(
+            !vsock.exists(),
+            "### E2E FAIL vsock UDS still present: {}",
+            vsock.display()
+        );
+        eprintln!("### E2E vsock_released=true path={}", vsock.display());
+
+        // Repeatedly, not once: a single refusal could be a transient bind race.
+        for attempt in 0..5 {
+            assert!(
+                !addr_answers(&guest_addr),
+                "### E2E FAIL {guest_addr} still answered after release (probe {attempt})"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        eprintln!("### E2E pre_restore_connect_failed=true probes=5");
+
+        // ── verify: the production entry point, gated on the token ───────────
+        let mut lifecycle = snapshot::disposable_lifecycle::BackendDisposableLifecycle {
+            backend: &backend,
+            store: &store,
+            candidate: crate::guest_capture::HeldCandidateSource::new(
+                Rc::clone(&captured),
+                &backend,
+                capsule::execution_contract::ExecutionId::new(format!("blake3:{}", "a".repeat(64)))
+                    .expect("execution id"),
+            ),
+            overlay_root: dir.path().join("acceptance-overlay"),
+            session: None,
+            last_candidate: None,
+        };
+        let cancellation = snapshot::acceptance::AcceptanceCancellation::default();
+
+        // A fresh 128-bit value per run. `seal_at` runs HOST-side, so this is the
+        // command that reaches into the restored guest and demands it back.
+        let nonce = kvm_env("ATO_E2E_NONCE").unwrap_or_else(|| "0".repeat(32));
+        let probe = format!(
+            "curl -fsS --max-time 20 'http://{guest_addr}/echo-nonce?value={nonce}' \
+             | grep -Fxq '{nonce}'"
+        );
+        let acceptance_config = AcceptanceConfig {
+            seal_at_argv: vec!["/bin/sh".to_string(), "-c".to_string(), probe],
+            verification_timeout: Duration::from_secs(60),
+            total_deadline: Duration::from_secs(600),
+            maximum_attempts: 1,
+        };
+
+        let t_verify = Instant::now();
+        let termination = verify_captured_candidate(
+            &mut control,
+            &mut lifecycle,
+            &mut elig,
+            &acceptance_config,
+            &cancellation,
+            &clock,
+            &fencing(),
+            pending,
+            &released,
+        )
+        .expect("no fatal internal error");
+        eprintln!("### E2E verify_ms={}", t_verify.elapsed().as_millis());
+
+        // The seal_at command IS the nonce check, so an accepted candidate is
+        // proof the restored guest echoed it. A readiness pass alone would not
+        // be: the acceptance run reports `Accepted` only when the command exits 0.
+        match &termination {
+            HoldTermination::Accepted { .. } => {
+                eprintln!("### E2E acceptance=accepted nonce_matched=true");
+            }
+            other => panic!("### E2E FAIL acceptance did not accept: {other:?}"),
+        }
+
+        let acceptance = control.acceptance_reports();
+        assert_eq!(acceptance.len(), 1, "### E2E FAIL missing §3.7 verdict");
+        assert_eq!(
+            acceptance[0].status,
+            AcceptanceStatus::Accepted,
+            "### E2E FAIL §3.7 verdict was not accepted"
+        );
+        eprintln!("### E2E ok=true");
+    }
 }

@@ -268,6 +268,18 @@ impl FirecrackerBackend {
         b
     }
 
+    /// TEST-ONLY: the per-slot lock file this backend keys on.
+    ///
+    /// The E2E asserts this path is gone after a hold is released, because that
+    /// is the postcondition the whole verify-after-release ordering rests on.
+    /// Re-deriving the path in the test instead would let the two drift apart —
+    /// and a test asserting on the WRONG lock file would pass while proving
+    /// nothing. Same `test-support` terms as [`Self::vmm_pid`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn slot_lock_path(&self) -> PathBuf {
+        self.lock_path()
+    }
+
     /// The readiness budget this backend will ACTUALLY honour — the env default,
     /// or the per-job [`Self::with_boot_timeout`] override after clamping.
     ///
@@ -1446,6 +1458,18 @@ fn ensure_private_dir(dir: &Path, _mode: u32) -> std::io::Result<()> {
 /// the snapshot) and restore (which re-creates it) agree on the same-host developer
 /// preview. Firecracker does not allow overriding the vsock uds at load, so the path is
 /// derived from the capsule hash, not the ephemeral overlay.
+/// TEST-ONLY: where a capsule's vsock UDS lives.
+///
+/// The E2E asserts this is gone after a hold is released. It is one of the four
+/// resources a second VMM on the same slot would have collided on, and the only
+/// one whose name is derived rather than configured — so a test that computed it
+/// itself could drift from the real rule and then assert on a path nothing ever
+/// created. Same `test-support` terms as [`FirecrackerBackend::vmm_pid`].
+#[cfg(any(test, feature = "test-support"))]
+pub fn vsock_uds_path_for_capsule(capsule_manifest_hash: &str) -> PathBuf {
+    vsock_uds_path(capsule_manifest_hash)
+}
+
 fn vsock_uds_path(capsule_manifest_hash: &str) -> PathBuf {
     let safe: String = capsule_manifest_hash
         .chars()
@@ -1758,8 +1782,14 @@ impl<'a> HeldGuest<'a> {
     /// snapshot builder share a host), so a test that takes the first pgrep hit
     /// can watch someone else's guest — and report "reaped" for it while the
     /// dropped hold leaks its own. `FcProcess` stays private; only the pid leaves.
-    #[cfg(test)]
-    pub(crate) fn vmm_pid(&self) -> Option<u32> {
+    ///
+    /// Exposed to sibling crates' tests through the non-default `test-support`
+    /// feature, on the same dev-dependency-only terms as the eligibility test
+    /// constructors: the interactive-capture E2E has to assert the held VMM is
+    /// GONE before a restore may start, and "gone" is a statement about this
+    /// hold's own process, not about firecracker in general.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn vmm_pid(&self) -> Option<u32> {
         self.fc
             .as_ref()
             .and_then(|fc| fc.child.as_ref())
