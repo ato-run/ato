@@ -279,6 +279,11 @@ pub struct StateV03Input {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkV03Input {
+    /// `[network] enabled` — the on/off egress posture. Part of the structural
+    /// gate because `deny_unknown_fields` would otherwise reject the very
+    /// declaration ato#786 makes load-bearing.
+    #[serde(default)]
+    pub enabled: Option<toml::Value>,
     #[serde(default)]
     pub egress_allow: Option<toml::Value>,
     #[serde(default)]
@@ -1906,6 +1911,14 @@ fn network_intent(
     network: &NetworkConfig,
 ) -> Result<Option<NormalizedNetworkIntent>, CapsuleProgramError> {
     omit_if_default(NormalizedNetworkIntent {
+        // ADR-014 §2.3: absent ≡ explicit default, one canonical spelling
+        // (omitted). An authored `enabled = <current default>` therefore
+        // normalizes away, so adding this field cannot change the
+        // capsule_program_id of any capsule that did not author a
+        // non-default posture.
+        enabled: network
+            .enabled
+            .filter(|enabled| *enabled != crate::types::NETWORK_ENABLED_WHEN_UNDECLARED),
         egress_allow: sorted_set(
             network
                 .egress_allow
@@ -3487,6 +3500,50 @@ entrypoint = "node server.js"
             ir_json(&intent(BASE, root.path())),
             ir_json(&intent(&with_defaults, root.path())),
             "authored explicit defaults must not change the IR"
+        );
+    }
+
+    // ── [network] enabled posture (ato#786) ──────────────────────────────
+
+    #[test]
+    fn declared_network_deny_is_recorded_in_the_program_intent() {
+        let root = tmp();
+        let manifest = format!("{BASE}\n[network]\nenabled = false\n");
+        let network = intent(&manifest, root.path())
+            .network
+            .expect("[network] intent present");
+        assert_eq!(
+            network.enabled,
+            Some(false),
+            "a non-default posture is authored intent and must be in the IR"
+        );
+    }
+
+    /// ADR-014 §2.3: absent ≡ explicit default, one canonical spelling
+    /// (omitted). This is also what keeps `capsule_program_id` stable for every
+    /// capsule that did not author a non-default posture.
+    #[test]
+    fn authored_default_network_posture_collapses_to_the_absent_spelling() {
+        let root = tmp();
+        let with_default = format!(
+            "{BASE}\n[network]\nenabled = {}\n",
+            crate::types::NETWORK_ENABLED_WHEN_UNDECLARED
+        );
+        assert_eq!(
+            ir_json(&intent(BASE, root.path())),
+            ir_json(&intent(&with_default, root.path())),
+            "authoring the platform default must not change the IR"
+        );
+    }
+
+    #[test]
+    fn declared_network_deny_changes_the_program_intent() {
+        let root = tmp();
+        let deny = format!("{BASE}\n[network]\nenabled = false\n");
+        assert_ne!(
+            ir_json(&intent(BASE, root.path())),
+            ir_json(&intent(&deny, root.path())),
+            "a capsule granted no network is not the same program as one granted network"
         );
     }
 

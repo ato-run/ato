@@ -1376,7 +1376,7 @@ absent_key_deserializers! {
         bytes, capabilities, class, component, content_ready_path, context,
         context_length, contract, cwd, database, default, default_target,
         degraded, delivery, dependencies, description, digest, disk, driver,
-        engine, engine_variant, engine_version, entrypoint, env, exec,
+        enabled, engine, engine_variant, engine_version, entrypoint, env, exec,
         execution, expect_status, exports, foundation_requirements, fs_writes,
         generator, gid, health_check, http_get, image, ingress, initial_delay_seconds,
         inputs, install_command, interval_seconds, isolation, kill, label,
@@ -1898,6 +1898,17 @@ pub struct NormalizedStateIntent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NormalizedNetworkIntent {
+    /// The authored network posture, present only when it differs from
+    /// `types::NETWORK_ENABLED_WHEN_UNDECLARED` — ADR-014 §2.3, "absent ≡
+    /// explicit default (one canonical spelling: omitted)". Capsules that do
+    /// not author a posture, and capsules that author the current default,
+    /// hash exactly as they did before ato#786 added this field.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_not_null::enabled"
+    )]
+    pub enabled: Option<bool>,
     /// Set-like: sorted + deduplicated (ADR-014 §2.3 names this list).
     #[serde(
         default,
