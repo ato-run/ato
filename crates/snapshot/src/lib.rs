@@ -38,6 +38,16 @@ pub mod archive_only_build;
 pub mod artifact_envelope;
 mod backend;
 pub mod bench;
+/// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
+/// builds a guest, measures it, mints an Execution Identity from those
+/// measurements, and publishes it into `capsule.lock` (ADR-015 step 5-3).
+///
+/// It lives here rather than in the CLI because it composes THIS crate's
+/// [`rootfs_builder`], [`docker_import`], [`guest_filesystem_digest`] and
+/// [`v1_materialization`] and has no CLI-specific input — and because the
+/// snapshot builder daemon runs the same lane for a pinned wizard build. Two
+/// copies of a lane that mints Execution Identity would be two identities.
+pub mod build_v1;
 pub mod compose_plan;
 #[cfg(test)]
 mod contract_fixtures;
@@ -54,6 +64,10 @@ mod kata;
 mod manifest;
 pub mod mem_backend_selector;
 pub mod no_secret_scan;
+/// Collecting the measurements a v1 Execution Contract is minted from
+/// (ADR-015 step 4). Measuring lives here because the contract layer performs
+/// no host I/O by design.
+pub mod observe_v1;
 mod placement;
 mod qemu;
 pub mod rootfs_builder;
