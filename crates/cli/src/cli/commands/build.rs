@@ -10,7 +10,7 @@ use capsule::routing::input_resolver::resolve_canonical_lock_path;
 use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use snapshot::v1_materialization::{V1MaterializationReceipt, target_triple};
+use snapshot::v1_materialization::V1MaterializationReceipt;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::IsTerminal;
@@ -735,6 +735,10 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
     let outcome = build_v1::run(
         build_v1::V1BuildRequest {
             workspace_root: dir,
+            // `ato build` is pointed at a live checkout, so the freeze happens
+            // inside the lane. Only the pinned builder lane arrives holding an
+            // archive that has already been proved.
+            pinned_source_archive: None,
             work_root: work.path(),
             guest_image_path: &guest_image_path,
             rootfs_size_mib: V1_GUEST_IMAGE_SIZE_MIB,
@@ -744,6 +748,11 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
         },
         &producer,
     )?;
+
+    // The receipt is the lane's own, not one assembled here: the snapshot
+    // builder checks a build against the same value, and two hand-written
+    // copies could disagree about what the build reported.
+    let receipt = outcome.materialization_receipt();
 
     // Deliberately small. The full execution id, the digests and the target are
     // in `--json`; a terminal needs to recognize the build, not to be able to
@@ -768,18 +777,7 @@ fn run_v1_build_lane(dir: &Path, reporter: &reporters::CliReporter) -> Result<Bu
         schema_version: Some(capsule::types::manifest_v1::MANIFEST_SCHEMA_V1.to_string()),
         target: None,
         derived_from: None,
-        v1: Some(V1MaterializationReceipt {
-            execution_id: outcome.execution_id,
-            lock: outcome.lock_path,
-            guest_image: outcome.guest_image_path,
-            guest_image_bytes: outcome.guest_image_bytes,
-            guest_image_digest: outcome.guest_image_digest,
-            filesystem_view_digest: outcome.filesystem_view_digest,
-            source_digest: outcome.source_digest,
-            runtime: outcome.runtime_resolved_ref,
-            target: target_triple(&outcome.target),
-            trusted_load_verified: outcome.trusted_load_verified,
-        }),
+        v1: Some(receipt),
     })
 }
 

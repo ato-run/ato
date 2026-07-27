@@ -3,7 +3,7 @@
 //!
 //! ADR-015 step 5-3. Before this, `ato build`'s only relationship with a v1
 //! Execution Contract was to READ one out of `capsule.lock` and check the three
-//! facets it could measure ([`crate::cli::commands::build`]'s
+//! facets it could measure (the CLI `build` command's
 //! `attempt_v1_execution_identity`). Nothing anywhere MINTED one, and the
 //! reason was structural rather than missing plumbing: the Ready-State seal
 //! path hands the fake backend the `.capsule` archive's bytes, so there was no
@@ -40,7 +40,7 @@
 //! e2fsprogs: an `apt upgrade` on a builder that changed block allocation would
 //! change every capsule's id with no source change. So the lane exports the
 //! guest filesystem, digests its CONTENTS with
-//! [`snapshot::guest_filesystem_digest`], and packs afterwards. The ext4 is an
+//! [`crate::guest_filesystem_digest`], and packs afterwards. The ext4 is an
 //! artifact, not the identity.
 //!
 //! That digest is taken HERE rather than in [`V1GuestProducer`] on purpose: the
@@ -58,6 +58,16 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::docker_import::{
+    BuildTool, ResolvedRuntimeArtifact, measure_guest_target, resolve_runtime_artifact,
+};
+use crate::guest_filesystem_digest::guest_filesystem_digest;
+use crate::rootfs_builder::{
+    AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
+    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
+    mkfs_guest_rootfs_v1, v1_filesystem_uuid,
+};
+use crate::v1_materialization::{V1MaterializationReceipt, measure_guest_artifact, target_triple};
 use capsule::capsule_lock::{self, CapsuleLock, LockEnvironmentValue, LockLaunchSection};
 use capsule::common::lock_presence::CAPSULE_LOCK_FILE_NAME;
 use capsule::execution_contract::{
@@ -71,18 +81,8 @@ use capsule::program_source_projection::{
 };
 use capsule::routing::input_resolver::resolve_canonical_lock_path;
 use capsule::types::manifest_v1::CapsuleManifestV1;
-use snapshot::docker_import::{
-    BuildTool, ResolvedRuntimeArtifact, measure_guest_target, resolve_runtime_artifact,
-};
-use snapshot::guest_filesystem_digest::guest_filesystem_digest;
-use snapshot::rootfs_builder::{
-    AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
-    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
-    mkfs_guest_rootfs_v1, v1_filesystem_uuid,
-};
-use snapshot::v1_materialization::measure_guest_artifact;
 
-use super::observe_v1::{V1BuildObservation, observe_v1};
+use crate::observe_v1::{V1BuildObservation, observe_v1};
 
 /// Where in the lane a v1 build stopped.
 ///
@@ -97,7 +97,7 @@ use super::observe_v1::{V1BuildObservation, observe_v1};
 /// interpolated below are paths inside the workspace, image references, facet
 /// names, and digests.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum V1BuildError {
+pub enum V1BuildError {
     #[error("this workspace cannot be pinned for a v1 build: {reason}")]
     SourceNotPinnable { reason: String },
 
@@ -170,9 +170,25 @@ fn facet_provenance(facet: &str) -> &'static str {
 }
 
 /// A v1 build's inputs.
-pub(crate) struct V1BuildRequest<'a> {
+pub struct V1BuildRequest<'a> {
     /// The workspace `ato build` was pointed at. Read only.
     pub workspace_root: &'a Path,
+    /// An ALREADY-FROZEN source archive to project, instead of freezing the
+    /// workspace here.
+    ///
+    /// `ato build` leaves this `None`: it is pointed at a live checkout, and
+    /// the freeze is what turns that into something `source.digest` can name.
+    /// The snapshot builder's pinned lane sets it, because by the time it gets
+    /// here the archive has already been proved to be the one the Source
+    /// Revision names (both the byte digest and the reconstructed tree digest),
+    /// and re-freezing an extraction of it would mint the identity from bytes
+    /// nothing checked rather than from the bytes that were checked.
+    ///
+    /// It does NOT widen where source can come from: `workspace_root` is still
+    /// required and is still where the manifest and the lock are read and
+    /// written, so a caller supplying this must supply the extraction of that
+    /// same archive.
+    pub pinned_source_archive: Option<&'a Path>,
     /// A directory this lane may use for the frozen source archive, the
     /// materialized projection, and the packed image. Must exist.
     pub work_root: &'a Path,
@@ -191,7 +207,7 @@ pub(crate) struct V1BuildRequest<'a> {
 /// because there is no path that returns this without the read-back having
 /// agreed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct V1BuildOutcome {
+pub struct V1BuildOutcome {
     pub execution_id: String,
     pub lock_path: PathBuf,
     pub guest_image_path: PathBuf,
@@ -213,6 +229,18 @@ pub(crate) struct V1BuildOutcome {
     pub runtime_resolved_ref: String,
     pub target: ResolvedTargetContract,
     pub trusted_load_verified: bool,
+    /// The `[web] port` the recipe built the guest to serve on.
+    ///
+    /// Reported rather than re-read from the manifest by a consumer: the
+    /// Ready-State tail has to health-probe the port this build actually
+    /// wired into the guest's init, and a second read of the manifest is a
+    /// second opinion that can drift from the one the image was built with.
+    pub port: u16,
+    /// The AUTHORED `[run] command`, before the runtime's invocation prefix.
+    ///
+    /// Provenance only — the launch contract commits `resolved_argv`. Carried
+    /// so a consumer can report both without re-parsing the manifest.
+    pub authored_argv: Vec<String>,
 }
 
 impl V1BuildOutcome {
@@ -225,6 +253,28 @@ impl V1BuildOutcome {
             .map(|(algorithm, hex)| format!("{algorithm}:{}", &hex[..hex.len().min(12)]))
             .unwrap_or_else(|| self.execution_id.clone())
     }
+
+    /// The materialization receipt this build publishes.
+    ///
+    /// One constructor, because a receipt is what a CONSUMER checks the build
+    /// against ([`crate::v1_materialization`] and the snapshot builder's v1
+    /// intake) — and two hand-assembled copies of it would let one of them
+    /// drift into attesting something the build did not report.
+    #[must_use]
+    pub fn materialization_receipt(&self) -> V1MaterializationReceipt {
+        V1MaterializationReceipt {
+            execution_id: self.execution_id.clone(),
+            lock: self.lock_path.clone(),
+            guest_image: self.guest_image_path.clone(),
+            guest_image_bytes: self.guest_image_bytes,
+            guest_image_digest: self.guest_image_digest.clone(),
+            filesystem_view_digest: self.filesystem_view_digest.clone(),
+            source_digest: self.source_digest.clone(),
+            runtime: self.runtime_resolved_ref.clone(),
+            target: target_triple(&self.target),
+            trusted_load_verified: self.trusted_load_verified,
+        }
+    }
 }
 
 /// The two operations this lane cannot perform without docker and root.
@@ -232,7 +282,7 @@ impl V1BuildOutcome {
 /// The seam is here rather than around the whole build because everything else
 /// — projection, resolution, observation, mint, persist, read-back — is
 /// host-independent and must run identically in a test and on a builder.
-pub(crate) trait V1GuestProducer {
+pub trait V1GuestProducer {
     /// Build the app image from the PROJECTED source tree, `FROM` the pinned
     /// base reference. Must leave the image addressable: the guest target is
     /// measured from it before it is packed.
@@ -284,8 +334,8 @@ pub(crate) trait V1GuestProducer {
 /// base image and measuring the guest go through one tool's local image store,
 /// and building through another's would look up a digest in a store that does
 /// not hold the image the build produced.
-pub(crate) struct HostV1GuestProducer {
-    runner: snapshot::docker_import::build::SystemImportCommandRunner,
+pub struct HostV1GuestProducer {
+    runner: crate::docker_import::build::SystemImportCommandRunner,
     tool: BuildTool,
 }
 
@@ -293,8 +343,8 @@ impl HostV1GuestProducer {
     /// Probe the builder host for its container tool. Fails closed when none is
     /// available rather than deferring the discovery to a half-run build.
     pub fn probe() -> Result<Self, String> {
-        let runner = snapshot::docker_import::build::SystemImportCommandRunner;
-        let probe = snapshot::docker_import::build::probe_build_tool(&runner)?;
+        let runner = crate::docker_import::build::SystemImportCommandRunner;
+        let probe = crate::docker_import::build::probe_build_tool(&runner)?;
         Ok(Self {
             runner,
             tool: probe.tool,
@@ -358,7 +408,7 @@ impl V1GuestProducer for HostV1GuestProducer {
 /// a measurement of that image or of the projection that went into it, and the
 /// lock cannot be published ahead of the mint, because what it publishes IS the
 /// mint. Reordering either would let a lock name a build that does not exist.
-pub(crate) fn run(
+pub fn run(
     request: V1BuildRequest<'_>,
     producer: &dyn V1GuestProducer,
 ) -> Result<V1BuildOutcome, V1BuildError> {
@@ -394,7 +444,12 @@ pub(crate) fn run(
             reason: format!("create the projection directory: {source}"),
         }
     })?;
-    let projected = project_workspace(request.workspace_root, request.work_root, &projection_root)?;
+    let projected = project_pinned_source(
+        request.workspace_root,
+        request.pinned_source_archive,
+        request.work_root,
+        &projection_root,
+    )?;
 
     // The manifest is read from the WORKSPACE, not from the projection: the
     // projection is precisely the tree with the manifest removed.
@@ -572,6 +627,8 @@ pub(crate) fn run(
         runtime_resolved_ref: runtime.resolved_ref,
         target,
         trusted_load_verified: true,
+        port: spec.port,
+        authored_argv: manifest.run.command.clone(),
     })
 }
 
@@ -585,17 +642,28 @@ pub(crate) fn run(
 /// `.git` is neither a control file the projection may withhold nor content
 /// whose bytes are reproducible, so a checkout is not a source a v1 identity
 /// can be minted from.
-fn project_workspace(
+fn project_pinned_source(
     workspace_root: &Path,
+    pinned_source_archive: Option<&Path>,
     work_root: &Path,
     destination: &Path,
 ) -> Result<MaterializedProgramSource, V1BuildError> {
-    let archive = work_root.join("source.tar.zst");
-    capsule::blob::materialize_source_archive(workspace_root, &archive).map_err(|source| {
-        V1BuildError::SourceNotPinnable {
-            reason: source.to_string(),
+    // One projection, two ways of getting the archive it reads — and only the
+    // archive step differs. A caller that already holds a PROVED archive hands
+    // it in; a caller pointed at a live checkout freezes it here. Neither can
+    // reach the projection with a tree that was never frozen.
+    let archive = match pinned_source_archive {
+        Some(archive) => archive.to_path_buf(),
+        None => {
+            let archive = work_root.join("source.tar.zst");
+            capsule::blob::materialize_source_archive(workspace_root, &archive).map_err(
+                |source| V1BuildError::SourceNotPinnable {
+                    reason: source.to_string(),
+                },
+            )?;
+            archive
         }
-    })?;
+    };
     let pinned =
         VerifiedPinnedSourceMaterialization::from_source_archive(&archive).map_err(|source| {
             V1BuildError::SourceNotPinnable {
@@ -623,7 +691,7 @@ fn read_v1_manifest(workspace_root: &Path) -> Result<CapsuleManifestV1, V1BuildE
 /// The runtime family name the contract records. Resolved from the recipe, so
 /// it can never disagree with the base image the recipe chose.
 fn runtime_kind_name(spec: &RootfsBuildSpecV1) -> &'static str {
-    use snapshot::rootfs_builder::RuntimeKind;
+    use crate::rootfs_builder::RuntimeKind;
     match spec.runtime {
         RuntimeKind::Python => "python",
         RuntimeKind::Node => "node",

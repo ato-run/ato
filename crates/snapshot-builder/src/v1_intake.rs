@@ -244,10 +244,6 @@ impl VerifiedGuestTarget {
     pub fn libc(&self) -> Option<&str> {
         self.target.libc.as_deref()
     }
-
-    pub fn as_contract(&self) -> &ResolvedTargetContract {
-        &self.target
-    }
 }
 
 /// The receipt, once every value it shares with the lock has been shown to
