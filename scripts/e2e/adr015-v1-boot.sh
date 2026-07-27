@@ -63,6 +63,32 @@ printf '/dev/kvm     %s\n'  "$KVM"
 printf 'ato          %s\n'  "$("$ATO_BIN" --version 2>&1 | head -1)"
 [[ "$KVM" == "present" ]] || fail "/dev/kvm is absent; the boot half cannot run here"
 
+# The decoder the guest uses, run here over crafted input. This capsule has no
+# empty argument (the contract refuses one), so without this the claim "an empty
+# argument would have been caught" rests on reading the code. It does not.
+note "cmdline decoder self-test"
+python3 - <<'DECODER_SELFTEST'
+def decode(raw: bytes):
+    if raw.endswith(b"\0"):
+        raw = raw[:-1]
+    return [] if not raw else [p.decode("utf-8") for p in raw.split(b"\0")]
+
+cases = [
+    (b"a\0\0b\0", ["a", "", "b"]),   # an empty argument in the middle
+    (b"a\0b\0", ["a", "b"]),         # and the vector it must not collapse to
+    (b"a\0b\0\0", ["a", "b", ""]),   # a trailing empty argument
+    (b"a\0", ["a"]),
+    (b"", []),
+    (b"python3\0app.py\0--label\0step 6\0",
+     ["python3", "app.py", "--label", "step 6"]),
+]
+for raw, expected in cases:
+    got = decode(raw)
+    assert got == expected, f"{raw!r} decoded to {got!r}, expected {expected!r}"
+assert decode(b"a\0\0b\0") != decode(b"a\0b\0"), "an empty argument must be visible"
+print("  decoder distinguishes an empty argument from an absent one")
+DECODER_SELFTEST
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -102,10 +128,41 @@ TOML
   # Echoes its own argv and cwd, so the boot check can compare what the guest
   # ACTUALLY ran against what the contract committed — rather than inferring it
   # from the fact that something answered.
+  # Reports the REAL exec argv, not `sys.argv`: Python drops the interpreter,
+  # so `sys.argv` can only ever show the application's own arguments and could
+  # never demonstrate that `resolved_argv[0]` was honoured. `/proc/self/cmdline`
+  # is the vector the kernel was handed.
+  #
+  # The cwd is captured as the first statement, before anything can `chdir`, and
+  # cross-checked against `/proc/self/cwd` (which the kernel maintains and a
+  # later `chdir` would move).
   cat > "$FIXTURE/server.py" <<'PY'
 import http.server, json, os, socketserver, sys
+from pathlib import Path
 
-BODY = json.dumps({"argv": sys.argv, "cwd": os.getcwd()}).encode()
+INITIAL_CWD = os.getcwd()
+PROC_CWD = os.readlink("/proc/self/cwd")
+
+def exec_argv():
+    """The exec argv, decoded from a NUL-delimited, NUL-TERMINATED vector.
+
+    Dropping every empty element would make ["a", "", "b"] and ["a", "b"]
+    indistinguishable. Exactly one trailing NUL is the terminator; every other
+    empty piece is a real empty argument.
+    """
+    raw = Path("/proc/self/cmdline").read_bytes()
+    if raw.endswith(b"\0"):
+        raw = raw[:-1]
+    if not raw:
+        return []
+    return [part.decode("utf-8") for part in raw.split(b"\0")]
+
+BODY = json.dumps({
+    "exec_argv": exec_argv(),
+    "sys_argv": sys.argv,
+    "initial_cwd": INITIAL_CWD,
+    "proc_cwd": PROC_CWD,
+}).encode()
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -256,24 +313,40 @@ done
 [[ "$READY_RESULT" == "ready" ]] || { BOOT_RESULT="no-readiness"; fail "the guest never answered $GUEST_URL"; }
 BOOT_RESULT="booted"
 
-OBSERVED_ARGV="$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["argv"]))')"
-OBSERVED_CWD="$(printf '%s' "$BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["cwd"])')"
+field() { printf '%s' "$BODY" | python3 -c "import json,sys; v=json.load(sys.stdin)['$1']; print(json.dumps(v) if isinstance(v,list) else v)"; }
+OBSERVED_ARGV="$(field exec_argv)"
+OBSERVED_SYS_ARGV="$(field sys_argv)"
+OBSERVED_CWD="$(field initial_cwd)"
+OBSERVED_PROC_CWD="$(field proc_cwd)"
 
-# The guest reports argv[0] as the script name python resolved, so compare the
-# committed argv's TAIL — every word the author wrote after the interpreter.
-python3 - "$ARGV_COMMITTED" "$OBSERVED_ARGV" <<'PYEOF' || fail "the guest ran a different argv than the contract committed"
+# The FULL vector, element by element. `sys.argv` will not do: Python drops the
+# interpreter, so it can only ever show the application's own arguments and
+# could never demonstrate that `resolved_argv[0]` was honoured. It is kept in
+# the evidence below as auxiliary, never as the proof.
+python3 - "$ARGV_COMMITTED" "$OBSERVED_ARGV" <<'ARGV_COMPARE' || fail "the guest's exec argv is not the one the contract committed"
 import json, sys
 committed = json.loads(sys.argv[1])
 observed = json.loads(sys.argv[2])
-# committed: ["python3", "server.py", "--label", "step 6"]
-# observed : ["server.py", "--label", "step 6"]  (python drops the interpreter)
-tail = committed[1:]
-if observed != tail:
-    print(f"committed tail {tail!r} != observed {observed!r}", file=sys.stderr)
+if committed != observed:
+    print(f"committed {committed!r}", file=sys.stderr)
+    print(f"observed  {observed!r}", file=sys.stderr)
+    for index, (c, o) in enumerate(zip(committed, observed)):
+        if c != o:
+            print(f"  first difference at [{index}]: {c!r} != {o!r}", file=sys.stderr)
+            break
+    else:
+        print(f"  lengths differ: {len(committed)} vs {len(observed)}", file=sys.stderr)
     sys.exit(1)
-PYEOF
+ARGV_COMPARE
+
+# Both readings of the working directory, because they answer different
+# questions: `getcwd()` taken as the first statement is where the process
+# STARTED, and `/proc/self/cwd` is where it is NOW. A workload that chdir'd
+# between them shows up as a disagreement rather than as a pass.
 [[ "$OBSERVED_CWD" == "$CWD_COMMITTED" ]] || \
-  fail "the guest ran in $OBSERVED_CWD, the contract committed $CWD_COMMITTED"
+  fail "the guest started in $OBSERVED_CWD, the contract committed $CWD_COMMITTED"
+[[ "$OBSERVED_PROC_CWD" == "$CWD_COMMITTED" ]] || \
+  fail "/proc/self/cwd is $OBSERVED_PROC_CWD, the contract committed $CWD_COMMITTED"
 
 # ── evidence ─────────────────────────────────────────────────────────────────
 cat <<EVIDENCE
@@ -297,9 +370,14 @@ runtime                 $RUNTIME_ONE
 
 boot result             $BOOT_RESULT
 readiness result        $READY_RESULT
-exact argv (committed)  $ARGV_COMMITTED
-exact argv (observed)   $OBSERVED_ARGV
-working directory       $CWD_COMMITTED  (observed: $OBSERVED_CWD)
+exact exec argv
+  committed             $ARGV_COMMITTED
+  /proc/self/cmdline    $OBSERVED_ARGV
+application sys.argv    $OBSERVED_SYS_ARGV   (auxiliary; excludes the interpreter)
+working directory
+  committed             $CWD_COMMITTED
+  initial getcwd()      $OBSERVED_CWD
+  /proc/self/cwd        $OBSERVED_PROC_CWD
 =========================================================
 EVIDENCE
 echo "PASS: one program source, one execution identity, and the guest ran it"
