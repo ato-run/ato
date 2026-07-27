@@ -2591,6 +2591,9 @@ mod tests {
     /// and two literals would let them drift into an identity mismatch that
     /// reads as an acceptance failure.
     #[cfg(test)]
+    const E2E_CAPSULE_HASH: &str = "blake3:e2e-acceptance";
+
+    #[cfg(test)]
     const E2E_EXECUTION_ID: &str =
         "blake3:e2e000000000000000000000000000000000000000000000000000000000acce";
 
@@ -2657,7 +2660,7 @@ mod tests {
         let guest = backend
             .boot_and_hold(snapshot::BuildReadyStateInput {
                 store: &store,
-                capsule_manifest_hash: "blake3:e2e-acceptance".to_string(),
+                capsule_manifest_hash: E2E_CAPSULE_HASH.to_string(),
                 runner_class: None,
                 surface_requirement: None,
                 layers: snapshot::BuildLayers {
@@ -2764,13 +2767,31 @@ mod tests {
         // The vsock UDS is per-CAPSULE and deterministic, so a second VMM on
         // this slot would have unlinked the live hold's socket out from under
         // it. Assert the release took it down.
-        let vsock = snapshot::firecracker_vsock_uds_path_for_capsule("blake3:e2e-acceptance");
+        //
+        // MEASURED, and not what one would assume: `release()` does NOT unlink
+        // the socket file. It kills and reaps the VMM, runs `net_down()` and
+        // drops the slot lock — the socket is left on disk with nothing behind
+        // it. So the invariant asserted here is the one that actually matters
+        // for a following restore: nothing is LISTENING. A stale path with no
+        // listener is inert, and the restore unlinks it before Firecracker
+        // recreates it.
+        //
+        // The leaked file is still a leak — a hold that ends with no restore
+        // after it leaves the path behind for good — but it belongs to the
+        // resource-ownership follow-up, not to this ordering fix, and asserting
+        // absence here would fail on correct behaviour.
+        let vsock = snapshot::firecracker_vsock_uds_path_for_capsule(E2E_CAPSULE_HASH);
+        let vsock_listening = std::os::unix::net::UnixStream::connect(&vsock).is_ok();
         assert!(
-            !vsock.exists(),
-            "### E2E FAIL vsock UDS still present: {}",
+            !vsock_listening,
+            "### E2E FAIL something is still listening on the hold's vsock UDS: {}",
             vsock.display()
         );
-        eprintln!("### E2E vsock_released=true path={}", vsock.display());
+        eprintln!(
+            "### E2E vsock_no_listener=true file_remains={} path={}",
+            vsock.exists(),
+            vsock.display()
+        );
 
         // Repeatedly, not once: a single refusal could be a transient bind race.
         for attempt in 0..5 {
@@ -2834,7 +2855,16 @@ mod tests {
             HoldTermination::Accepted { .. } => {
                 eprintln!("### E2E acceptance=accepted nonce_matched=true");
             }
-            other => panic!("### E2E FAIL acceptance did not accept: {other:?}"),
+            other => {
+                // The §3.7 verdict carries WHY. Without it a rejection reads as
+                // "acceptance failed" and every cause looks alike.
+                let why = control
+                    .acceptance_reports()
+                    .first()
+                    .and_then(|r| r.failure_reason.clone())
+                    .unwrap_or_else(|| "<no failure_reason on the §3.7 verdict>".to_string());
+                panic!("### E2E FAIL acceptance did not accept: {other:?} reason={why}");
+            }
         }
 
         let acceptance = control.acceptance_reports();

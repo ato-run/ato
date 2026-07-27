@@ -69,8 +69,21 @@ case "$WORK" in
 esac
 ip link show "$TAP" >/dev/null 2>&1 && abort "tap '$TAP' already exists — not deleting someone else's interface"
 [ -e "$WORK" ] && abort "work root '$WORK' already exists — refusing to reuse"
-ip route get "$GUEST_IP" 2>/dev/null | grep -qv "dev $TAP" && \
-  ip -br addr | grep -q "${GUEST_IP%.*}\." && abort "subnet ${GUEST_IP%.*}.0 appears to be in use"
+
+# The host IP must not already be assigned ANYWHERE. Checking only the tap NAME
+# is not enough and this cost a run: a previous run killed by a timeout left its
+# tap behind, DOWN but still holding 172.31.99.1/24. The next run created its own
+# tap with the same address, so the route to the guest was ambiguous and the
+# health probe reached the dead interface — surfacing as "guest never became
+# healthy within timeout", which reads like a product bug and is not one.
+#
+# Report the offender instead of deleting it: an address we did not assign may
+# belong to something we must not touch.
+EXISTING_IF="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$HOST_IP" '$4 ~ "^"ip"/" {print $2}' | head -1)"
+[ -n "$EXISTING_IF" ] && abort "host ip $HOST_IP is already assigned to '$EXISTING_IF' — remove it deliberately, this script will not"
+EXISTING_GUEST_IF="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$GUEST_IP" '$4 ~ "^"ip"/" {print $2}' | head -1)"
+[ -n "$EXISTING_GUEST_IF" ] && abort "guest ip $GUEST_IP is already assigned to '$EXISTING_GUEST_IF'"
+
 (echo >/dev/tcp/"$GUEST_IP"/8080) >/dev/null 2>&1 && abort "$GUEST_IP:8080 already answers — something is live there"
 
 echo "=== isolation ==="
