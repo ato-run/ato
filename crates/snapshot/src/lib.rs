@@ -31,6 +31,10 @@
 
 pub mod acceptance;
 pub mod agent_channel;
+/// Building from a Source Revision that was already materialized, and from
+/// nothing else — the input type carries no repository coordinate, so a clone
+/// or a branch re-resolution has nothing to work from.
+pub mod archive_only_build;
 pub mod artifact_envelope;
 mod backend;
 pub mod bench;
