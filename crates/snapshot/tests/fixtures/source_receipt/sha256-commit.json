@@ -1,0 +1,15 @@
+{
+  "canonical_json": "{\"canonical_repository\":\"https://github.com/acme/menuflow\",\"commit_algorithm\":\"sha256\",\"provider\":\"github\",\"resolved_commit_sha\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"resolver_contract_version\":\"ato.capsule-program-source-projection/v1\",\"schema\":\"ato.source-receipt/v1\",\"source_tree_digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\"}",
+  "description": "a sha256 repository — 64 hex, not 40",
+  "digest": "blake3:0565ccc7e2700851760b62dde183611d83dd794dd4f7d5fcbbd66fec73be5d27",
+  "kind": "source-receipt",
+  "receipt": {
+    "canonical_repository": "https://github.com/acme/menuflow",
+    "commit_algorithm": "sha256",
+    "provider": "github",
+    "resolved_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "resolver_contract_version": "ato.capsule-program-source-projection/v1",
+    "schema": "ato.source-receipt/v1",
+    "source_tree_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  }
+}

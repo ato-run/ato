@@ -1,0 +1,15 @@
+{
+  "canonical_json": "{\"canonical_repository\":\"https://github.com/acme/menuflow\",\"commit_algorithm\":\"sha1\",\"provider\":\"github\",\"resolved_commit_sha\":\"dddddddddddddddddddddddddddddddddddddddd\",\"resolver_contract_version\":\"ato.projection/v1-日本語-café-🌍\",\"schema\":\"ato.source-receipt/v1\",\"source_tree_digest\":\"sha256:4444444444444444444444444444444444444444444444444444444444444444\"}",
+  "description": "non-ASCII stays literal, exactly as JSON.stringify leaves it",
+  "digest": "blake3:a949ab6bc028fbaeda5b87e9d62e461cc84091fa87b1e937e91212569e713434",
+  "kind": "source-receipt",
+  "receipt": {
+    "canonical_repository": "https://github.com/acme/menuflow",
+    "commit_algorithm": "sha1",
+    "provider": "github",
+    "resolved_commit_sha": "dddddddddddddddddddddddddddddddddddddddd",
+    "resolver_contract_version": "ato.projection/v1-日本語-café-🌍",
+    "schema": "ato.source-receipt/v1",
+    "source_tree_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  }
+}
