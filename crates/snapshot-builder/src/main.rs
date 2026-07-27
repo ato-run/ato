@@ -98,6 +98,9 @@ mod hold_phase;
 /// Getting the frozen source archive off this builder's disk: authorize one
 /// upload with the API, PUT it, and report the object key the API derived. The
 /// builder holds no storage credential and never names the object.
+/// Bringing a pinned source archive down and PROVING it before anything builds
+/// from it. The states are types, so an unverified path cannot reach the build.
+mod source_archive_download;
 mod source_archive_upload;
 mod upload;
 /// ADR-015 slice 7A — the gate a v1 `ato build` output passes before any later
@@ -264,6 +267,18 @@ impl Config {
 
 /// The server-resolved source identity on a claimed job (owner/repo/commit) — the only
 /// authoritative source. A client-provided `source_ref` never appears here.
+/// The pinned source a v1 build must use, exactly as ato-api resolved it.
+///
+/// Carries no repository coordinate — no owner, no repo, no ref — because a
+/// pinned build has no use for one and a builder holding one could clone.
+#[derive(Debug, Clone, Deserialize)]
+struct ClaimedPinnedSource {
+    source_revision_id: String,
+    source_archive_digest: String,
+    source_archive_object_key: String,
+    source_tree_digest: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ClaimedSource {
     github_owner: String,
@@ -290,6 +305,15 @@ struct ClaimedJob {
     /// job with no source fails closed at the `source` stage.
     #[serde(default)]
     source: Option<ClaimedSource>,
+    /// The pinned source for a v1 wizard submission build (ato-api#360).
+    ///
+    /// Present means: fetch THIS archive and build from it. Absent means this is
+    /// a legacy job and `source` + `recipe_toml` are what it builds from. The two
+    /// are NOT a preference order — a builder must never treat one as a fallback
+    /// for the other, which is why they are separate fields rather than one
+    /// nullable source that could be "topped up" from the other.
+    #[serde(default)]
+    pinned_source: Option<ClaimedPinnedSource>,
     /// #932: the APPROVED store recipe manifest (`capsule_source_recipes.recipe_toml`),
     /// server-resolved with `source`. When present it is AUTHORITATIVE — materialized
     /// as `capsule.toml` at the source root (upstream repos deliberately carry none).
@@ -1027,6 +1051,21 @@ fn produce_build(
     job: &ClaimedJob,
     jobdir: &Path,
 ) -> std::result::Result<ProducedBuild, (String, String)> {
+    // ── The pinned lane is chosen by what the CLAIM carries, not by kind ──
+    //
+    // A job that carries a pinned source builds from THAT archive and from
+    // nothing else. This is checked before the kind dispatch because the kind
+    // ("recipe") is the same for a pinned wizard build and a legacy one — only
+    // the presence of the pinned source distinguishes them, and dispatching on
+    // kind first would send a pinned job down the checkout path.
+    //
+    // There is no fallback arm. If the archive cannot be obtained and verified,
+    // the job fails; it does not clone, and it does not read a recipe.
+    if let Some(pinned) = job.pinned_source.as_ref() {
+        let verified = obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
+        return produce_pinned_v1_build(cfg, job, jobdir, verified);
+    }
+
     match job.kind.as_str() {
         "recipe" => produce_recipe_build(cfg, job, jobdir),
         "dockerfile_import" => produce_import_build(cfg, job, jobdir),
@@ -2677,6 +2716,69 @@ fn process_source_materialize_job(
         // `archive`, which is dropped with the job directory.
         object_key,
     })
+}
+
+/// Obtain the pinned source for a v1 build, or fail the job.
+///
+/// The ONLY way a pinned build gets source. Every failure here is terminal:
+/// there is no arm that clones the repository, reuses a local materialization
+/// directory from an earlier job, or reads a recipe. Each of those would
+/// substitute source that was never verified for source that was, at exactly
+/// the moment the verified path is unavailable.
+///
+/// Returns a `TreeVerifiedArchive`, which is the only type the archive-only
+/// build path accepts — not because a caller would remember to verify first,
+/// but because no value of that type exists which has not been through both the
+/// byte and the tree check.
+fn obtain_pinned_source(
+    cfg: &Config,
+    job: &ClaimedJob,
+    pinned: &ClaimedPinnedSource,
+    workdir: &std::path::Path,
+) -> std::result::Result<source_archive_download::TreeVerifiedArchive, (String, String)> {
+    let input = snapshot::archive_only_build::ArchiveOnlyBuildInput::new(
+        &pinned.source_revision_id,
+        &pinned.source_archive_digest,
+        &pinned.source_archive_object_key,
+        &pinned.source_tree_digest,
+    )
+    .map_err(|e| ("source".to_string(), e.to_string()))?;
+
+    let transport = source_archive_download::HttpArchiveDownloadTransport {
+        api_url: &cfg.api_url,
+        token: &cfg.token,
+        agent_id: &cfg.agent_id,
+    };
+    source_archive_download::download_pinned_source(&transport, &job.id, &input, workdir)
+        // The failure's own code, so the ack says which step refused rather than
+        // flattening every terminal source failure into one stage.
+        .map_err(|e| (e.code().to_string(), e.to_string()))
+}
+
+/// Build from a verified pinned archive.
+///
+/// Takes a `TreeVerifiedArchive` and nothing else that could name source: no
+/// path, no URL, no repository coordinate. The type is the argument, so this
+/// function cannot be called with source that has not been through both the
+/// byte and the tree check.
+///
+/// Not yet complete: the projection and `v1_intake` handoff land with the
+/// execution-contract wiring. What IS established here is the shape — the only
+/// way in is a verified value.
+fn produce_pinned_v1_build(
+    _cfg: &Config,
+    _job: &ClaimedJob,
+    _jobdir: &Path,
+    verified: source_archive_download::TreeVerifiedArchive,
+) -> std::result::Result<ProducedBuild, (String, String)> {
+    Err((
+        "build".to_string(),
+        format!(
+            "the pinned v1 build path is not wired to v1_intake yet; the archive at \
+             {} is verified and ready for it",
+            verified.path().display()
+        ),
+    ))
 }
 
 fn process_job(
@@ -4402,6 +4504,7 @@ targets = ["web"]
 
     fn import_job(kind: &str, params: Option<serde_json::Value>) -> ClaimedJob {
         ClaimedJob {
+            pinned_source: None,
             id: "job_x".into(),
             capsule_id: "cap_x".into(),
             target_label: "app".into(),
