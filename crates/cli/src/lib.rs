@@ -211,9 +211,20 @@ pub(crate) use utils::hash as artifact_hash;
 pub(crate) use utils::local_input;
 pub(crate) use utils::payload_guard;
 
+fn install_default_rustls_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // CONTEXT: The CLI dependency graph enables both Ring and AWS-LC.
+        // Rustls cannot choose implicitly when both are present, so install
+        // one provider before any worker thread can construct a TLS client.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
+
 /// Runs the CLI entry flow and converts failures into the user-facing output
 /// format selected by the original raw arguments.
 pub fn main_entry() {
+    install_default_rustls_crypto_provider();
+
     // Activate the tracing pipeline before any guest-runtime path can fire
     // a `tracing::*!` event. Without this, every event in the executors
     // would be a no-op (no global subscriber) and `ATO_CLI_LOG=...` would

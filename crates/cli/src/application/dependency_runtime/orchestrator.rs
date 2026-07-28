@@ -702,6 +702,7 @@ fn start_one(
             cmd.env(k, v);
         }
     }
+    crate::common::host_shell::sanitize_untrusted_environment(&mut cmd);
     let mut child = cmd.spawn().map_err(|err| OrchestratorError::SpawnFailed {
         alias: alias.to_string(),
         detail: format!("spawn {}: {}", argv[0], err),

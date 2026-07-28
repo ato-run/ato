@@ -10,6 +10,12 @@ use std::collections::VecDeque;
 use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, ExitStatus, Stdio};
 
+// The definition moved to `snapshot::acceptance`, beside the acceptance protocol
+// it protects, so the CLI's build path and the builder's hold path — which run
+// the SAME `seal_at.command` — scrub the same namespace from one definition
+// (RFC §8.4). Re-exported here so this module's callers are unchanged.
+pub use snapshot::acceptance::sanitize_untrusted_environment;
+
 /// The deterministic Windows shell invocation for a command string:
 /// `cmd.exe /D /S /C "<command>"`.
 ///
@@ -26,6 +32,7 @@ pub fn windows_cmd_shell_command(command: &str) -> Command {
     let mut cmd = Command::new("cmd.exe");
     cmd.arg("/D").arg("/S").arg("/C");
     cmd.raw_arg(format!("\"{command}\""));
+    sanitize_untrusted_environment(&mut cmd);
     cmd
 }
 
@@ -41,6 +48,7 @@ pub fn lifecycle_shell_command(command: &str) -> Command {
     {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", command]);
+        sanitize_untrusted_environment(&mut cmd);
         cmd
     }
 }
@@ -68,6 +76,7 @@ pub fn cmd_shim_command(program: &str, args: &[&str]) -> Command {
     {
         let mut cmd = Command::new(program);
         cmd.args(args);
+        sanitize_untrusted_environment(&mut cmd);
         cmd
     }
 }
@@ -85,6 +94,7 @@ pub struct StreamedCommandOutput {
 /// (preserving the interactive progress UX of `Stdio::inherit`) while
 /// retaining a bounded tail of each stream for failure reporting.
 pub fn run_streaming_with_tails(cmd: &mut Command) -> io::Result<StreamedCommandOutput> {
+    sanitize_untrusted_environment(cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     let stdout_thread = child
@@ -185,6 +195,23 @@ mod tests {
             "inner quotes must survive: {payload}"
         );
         assert!(payload.contains("&&"), "operators must survive: {payload}");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn untrusted_shell_cannot_read_snapshot_acceptance_credentials() {
+        let mut cmd = lifecycle_shell_command(
+            "test -z \"$ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY\" && test -z \"$ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER\"",
+        );
+        cmd.env("ATO_SNAPSHOT_ACCEPTANCE_MAC_KEY", "leaked-key")
+            .env(
+                "ATO_SNAPSHOT_ACCEPTANCE_SIGNER_HELPER",
+                "/protected/acceptance-signer",
+            );
+        sanitize_untrusted_environment(&mut cmd);
+
+        let status = cmd.status().expect("spawn malicious lifecycle command");
+        assert!(status.success(), "acceptance credentials reached child");
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{CapsuleError, Result};
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::common::paths::{manifest_dir, workspace_derived_dir};
 use crate::lock_runtime::{LockCompilerOverlay, ResolvedLockRuntimeModel};
 use crate::manifest;
@@ -188,7 +188,7 @@ pub fn generate_config_from_compat_input(
 }
 
 pub fn generate_config_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     resolved: &ResolvedLockRuntimeModel,
     overlay: &LockCompilerOverlay,
     enforcement_override: Option<String>,
@@ -317,14 +317,14 @@ fn sort_json_object_keys(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ato_lock::AtoLock;
+    use crate::capsule_lock::CapsuleLock;
     use crate::lock_runtime::{LockCompilerOverlay, resolve_lock_runtime_model};
     use serde_json::json;
     use std::collections::HashMap;
     use tempfile::tempdir;
 
-    fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn sample_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "svc-demo", "version": "0.1.0", "default_target": "api"}),
@@ -385,8 +385,8 @@ mod tests {
         lock
     }
 
-    fn sample_python_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn sample_python_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "python-demo", "version": "0.1.0", "default_target": "cli"}),

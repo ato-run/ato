@@ -78,7 +78,7 @@ pub struct ManifestSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ExistingAtoLockSummary {
+pub struct ExistingCapsuleLockSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -115,8 +115,13 @@ pub struct LockDraftInput {
     pub file_text_map: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_source: Option<ManifestSource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub existing_ato_lock_summary: Option<ExistingAtoLockSummary>,
+    // Wire key keeps the historical `ato_lock` name: this JSON contract is
+    // exported over the wasm boundary and must stay byte-compatible.
+    #[serde(
+        rename = "existing_ato_lock_summary",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub existing_capsule_lock_summary: Option<ExistingCapsuleLockSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub external_dependency_hints: Vec<LockDraftExternalDependency>,
 }

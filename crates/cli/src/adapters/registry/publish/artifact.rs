@@ -462,7 +462,9 @@ fn extract_manifest_from_capsule(bytes: &[u8]) -> Result<String> {
     bail!("Invalid artifact: capsule.toml not found in .capsule archive")
 }
 
-fn extract_capsule_lock_from_capsule(bytes: &[u8]) -> Result<Option<capsule::ato_lock::AtoLock>> {
+fn extract_capsule_lock_from_capsule(
+    bytes: &[u8],
+) -> Result<Option<capsule::capsule_lock::CapsuleLock>> {
     let mut archive = tar::Archive::new(Cursor::new(bytes));
     let entries = archive
         .entries()
@@ -1224,7 +1226,7 @@ run = "main.ts""#
     }
 
     fn build_native_source_lock_bytes() -> Vec<u8> {
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             serde_json::json!({

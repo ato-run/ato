@@ -11,7 +11,8 @@ use capsule::AtoError;
 use capsule::CapsuleReporter;
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::input_resolver::{
-    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
+    CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME, ResolveInputOptions,
+    ResolvedInput, resolve_authoritative_input,
 };
 use capsule::smoke::SmokeFailureClass;
 use tracing::debug;
@@ -1802,7 +1803,10 @@ pub(crate) fn agent_local_root_for_path(path: &Path) -> Option<PathBuf> {
         return path.parent().map(PathBuf::from);
     }
 
-    if path.file_name().and_then(|name| name.to_str()) == Some(ATO_LOCK_FILE_NAME) {
+    if path.file_name().and_then(|name| name.to_str()) == Some(CAPSULE_LOCK_FILE_NAME)
+        || path.file_name().and_then(|name| name.to_str())
+            == Some(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+    {
         return path.parent().map(PathBuf::from);
     }
 
@@ -2990,18 +2994,17 @@ fn run_github_python_lock_repair(target: &GitHubPythonLockRepairTarget, json: bo
         );
     }
 
-    let output = Command::new("uv")
-        .args(&args)
-        .current_dir(&target.working_dir)
-        .output()
-        .map_err(|error| {
-            github_python_lock_auto_fix_error(format!(
-                "failed to run `{}` in {}: {}",
-                description,
-                target.working_dir.display(),
-                error
-            ))
-        })?;
+    let mut command = Command::new("uv");
+    command.args(&args).current_dir(&target.working_dir);
+    crate::common::host_shell::sanitize_untrusted_environment(&mut command);
+    let output = command.output().map_err(|error| {
+        github_python_lock_auto_fix_error(format!(
+            "failed to run `{}` in {}: {}",
+            description,
+            target.working_dir.display(),
+            error
+        ))
+    })?;
     if output.status.success() {
         return Ok(());
     }

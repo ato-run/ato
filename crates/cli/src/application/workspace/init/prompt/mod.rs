@@ -25,7 +25,7 @@ pub fn execute(
         Ok(ResolvedInput::CanonicalLock { canonical, .. }) => {
             anyhow::bail!(
                 "{} already exists at {}. `ato init` prompt generation applies to source-only projects in this migration stage.",
-                capsule::input_resolver::ATO_LOCK_FILE_NAME,
+                capsule::input_resolver::CAPSULE_LOCK_FILE_NAME,
                 canonical.path.display()
             );
         }

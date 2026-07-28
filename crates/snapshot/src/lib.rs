@@ -29,22 +29,64 @@
 //! * **Fail-closed restore class** — `restore` rejects a host whose
 //!   `runner_class_id` differs from the one the snapshot was built for.
 
+pub mod acceptance;
 pub mod agent_channel;
+/// Building from a Source Revision that was already materialized, and from
+/// nothing else — the input type carries no repository coordinate, so a clone
+/// or a branch re-resolution has nothing to work from.
+pub mod archive_only_build;
+pub mod artifact_envelope;
 mod backend;
 pub mod bench;
+/// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
+/// builds a guest, measures it, mints an Execution Identity from those
+/// measurements, and publishes it into `capsule.lock` (ADR-015 step 5-3).
+///
+/// It lives here rather than in the CLI because it composes THIS crate's
+/// [`rootfs_builder`], [`docker_import`], [`guest_filesystem_digest`] and
+/// [`v1_materialization`] and has no CLI-specific input — and because the
+/// snapshot builder daemon runs the same lane for a pinned wizard build. Two
+/// copies of a lane that mints Execution Identity would be two identities.
+pub mod build_v1;
 pub mod compose_plan;
+#[cfg(test)]
+mod contract_fixtures;
+pub mod disposable_lifecycle;
 pub mod docker_import;
+pub mod external_state;
 mod fake;
 mod firecracker;
+/// What a guest filesystem CONTAINS, as one digest — the value
+/// `filesystem.view_digest` commits. Content rather than the ext4
+/// serialization, because `mke2fs` stamps every inode with the wall clock.
+pub mod guest_filesystem_digest;
 mod kata;
 mod manifest;
 pub mod mem_backend_selector;
 pub mod no_secret_scan;
+/// Collecting the measurements a v1 Execution Contract is minted from
+/// (ADR-015 step 4). Measuring lives here because the contract layer performs
+/// no host I/O by design.
+pub mod observe_v1;
 mod placement;
 mod qemu;
 pub mod rootfs_builder;
 mod scan_cache;
 mod scanner;
+/// Whether a checked-out source is one the v1 submission lane can carry —
+/// read from the COMMIT tree, because an uninitialised submodule is invisible
+/// on the filesystem.
+pub mod source_eligibility;
+/// Turning a pinned commit into a frozen, re-fetchable source archive, with the
+/// round trip verified before anything is stored.
+pub mod source_materialization;
+/// The two receipts a source materialization produces — WHAT was resolved, and
+/// WHERE it was stored. Their canonical bytes are pinned by shared fixtures
+/// because the verifier is TypeScript in another repository.
+pub mod source_receipt;
+// Build-time screenshot capture (store thumbnail automation) — internal to
+// `firecracker.rs`'s `build_ready_state`, no public API of its own.
+mod screenshot;
 mod seal;
 pub mod state_volume;
 pub mod state_volume_persistence;
@@ -54,7 +96,13 @@ mod uffd;
 // module doc for scope. Real, tested, deliberately unused until U2+.
 #[allow(dead_code)]
 mod uffd_page_server;
+pub mod v1_materialization;
 
+pub use artifact_envelope::{
+    ARTIFACT_ENVELOPE_V1_FILENAME, ARTIFACT_ENVELOPE_V1_SCHEMA, ArtifactAcceptance,
+    ArtifactAcceptanceStatus, ArtifactEnvelopeError, ArtifactEnvelopeV1,
+    SNAPSHOT_MANIFEST_V1_FILENAME,
+};
 pub use backend::{
     BackendCapabilities, BindingCapabilities, BuildLayers, BuildReadyStateInput,
     BuildReadyStateReceipt, DeviceProfile, FilesystemModel, GpuMode, IsolationBoundary,
@@ -67,12 +115,18 @@ pub use compose_plan::{
     ServiceDependency, ServiceMount, compose_to_graph,
 };
 pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
-pub use firecracker::{FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig};
+/// TEST-ONLY (`test-support`): see the function's own doc.
+#[cfg(any(test, feature = "test-support"))]
+pub use firecracker::vsock_uds_path_for_capsule as firecracker_vsock_uds_path_for_capsule;
+pub use firecracker::{
+    FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCandidate,
+    HeldCaptureFailure, HeldGuest,
+};
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
     LayerScanCoverage, NoSecretProof, READY_STATE_SCHEMA, ReadyStateLayers, ReadyStateManifest,
     RestoreContract, SanitizerContract, SanitizerLayer, SanitizerStep, SnapshotBackendInfo,
-    SupervisorBuildReceipt,
+    SupervisorBuildReceipt, WarmupRecipe,
 };
 pub use placement::{
     BackendRequirements, PlacementError, matches, ready_state_safe, select_ready_state_backend,

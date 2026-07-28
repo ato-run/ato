@@ -76,6 +76,10 @@ fn main() {
             .unwrap_or_else(|_| fail("args", format!("--port {p:?} is not a u16")))
     });
     let readiness_http_path = arg(&["--readiness-path"]);
+    let pixel_rfb_port: Option<u16> = arg(&["--pixel-rfb-port"]).map(|p| {
+        p.parse()
+            .unwrap_or_else(|_| fail("args", format!("--pixel-rfb-port {p:?} is not a u16")))
+    });
     let policy = if has_flag("--convert-placeholder-secrets") {
         SecretEnvPolicy::ConvertPlaceholders
     } else {
@@ -101,6 +105,7 @@ fn main() {
         volume_policy: Default::default(),
         ephemeral_mounts: Vec::new(),
         host_bind_relay: false,
+        pixel_rfb_port,
         image_tag,
         out_ext4: &out,
         size_mib,

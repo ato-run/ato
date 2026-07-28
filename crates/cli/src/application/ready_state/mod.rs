@@ -16,6 +16,12 @@ pub(crate) mod binding_grants;
 pub(crate) mod binding_host;
 pub(crate) mod bindings;
 pub(crate) mod build;
+/// The v1 producer lane: `ato build`'s `schema_version = "1"` path. It moved
+/// into the `snapshot` crate when the snapshot builder daemon needed the same
+/// lane for a pinned wizard build — two copies of a lane that mints Execution
+/// Identity would be two identities. Re-exported here so this layer keeps one
+/// name for it.
+pub(crate) use snapshot::build_v1;
 pub(crate) mod diagnostics;
 pub(crate) mod flags;
 pub(crate) mod restore;
@@ -34,6 +40,7 @@ mod kvm_smoke;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use capsule::execution_contract::VerifiedExecutionId;
 use capsule::foundation::install_lifecycle::RunnerClassId;
 use capsule::types::CapsuleManifest;
 
@@ -111,10 +118,21 @@ pub(crate) fn assemble_build_layers(
 /// restore instead of cold-spawn. Present only when the flag is on, the capsule
 /// is Ready-State-eligible, and a sealed artifact exists — otherwise the run
 /// falls through to the legacy cold path.
-#[derive(Debug)]
 pub(crate) struct ReadyStateRunPlan {
     /// The sealed artifact to restore.
     pub(crate) manifest: snapshot::ReadyStateManifest,
+    /// Capsule-v1 identity/compatibility sidecar for the same immutable
+    /// layers, when this plan was resolved by exact `execution_id` lookup.
+    pub(crate) v1_manifest: Option<capsule::snapshot_manifest::SnapshotManifestV1>,
+    /// Authenticated acceptance/sidecar envelope for a Capsule-v1 Snapshot.
+    pub(crate) v1_envelope: Option<snapshot::ArtifactEnvelopeV1>,
+    /// Directory containing this exact Snapshot's manifest files and CAS
+    /// (the v1 artifact directory when resolved via `execution_id`; the
+    /// legacy `capsule_manifest_hash`-keyed directory otherwise).
+    pub(crate) artifact_dir: PathBuf,
+    /// Backend used to prove v1 compatibility during candidate selection.
+    /// Legacy plans defer backend selection until the existing run gate.
+    pub(crate) selected_backend: Option<Box<dyn snapshot::SnapshotBackend>>,
     /// State root holding the `ready-state/<hash>/cas` store.
     pub(crate) state_root: PathBuf,
     /// `blake3:<hex>` of the capsule manifest (the artifact key).
@@ -128,18 +146,44 @@ pub(crate) struct ReadyStateRunPlan {
     pub(crate) host_runner_class: Option<RunnerClassId>,
 }
 
+impl std::fmt::Debug for ReadyStateRunPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadyStateRunPlan")
+            .field("manifest", &self.manifest)
+            .field("v1_manifest", &self.v1_manifest)
+            .field("v1_envelope", &self.v1_envelope)
+            .field("artifact_dir", &self.artifact_dir)
+            .field(
+                "selected_backend",
+                &self.selected_backend.as_ref().map(|b| b.id().to_string()),
+            )
+            .field("state_root", &self.state_root)
+            .field("capsule_manifest_hash", &self.capsule_manifest_hash)
+            .field("sanitize_after_restore", &self.sanitize_after_restore)
+            .field("host_runner_class", &self.host_runner_class)
+            .finish()
+    }
+}
+
 /// Decide whether this run is a Ready-State restore.
 ///
 /// - flag **off** → `None` (legacy cold path, unchanged).
 /// - flag **on**, capsule **not** Ready-State-eligible → `None` (legacy).
-/// - flag **on**, eligible, **no sealed artifact** → **`Err`** (fail closed): the
-///   user explicitly enabled Ready-State as a validation mode, so a missing
-///   artifact must NOT silently degrade to a cold run.
-/// - flag **on**, eligible, artifact exists → `Some(plan)` (restore).
+/// - flag **on**, eligible, no `expected_v1_execution_id` (legacy lookup by
+///   `capsule_manifest_hash`), **no sealed artifact** → **`Err`** (fail
+///   closed): the user explicitly enabled Ready-State as a validation mode,
+///   so a missing artifact must NOT silently degrade to a cold run.
+/// - flag **on**, eligible, `expected_v1_execution_id` given → look up every
+///   locally-authenticated Snapshot v1 candidate for that identity and select
+///   the one this host's backend can prove it restores; **no compatible
+///   candidate** → `Err` (a v1 lock can never fall back to reinterpreting an
+///   unrelated legacy artifact).
+/// - artifact resolved → `Some(plan)` (restore).
 pub(crate) fn decide_ready_state_run(
     manifest: &CapsuleManifest,
     capsule_manifest_hash: &str,
     state_root: &Path,
+    expected_v1_execution_id: Option<&VerifiedExecutionId>,
 ) -> anyhow::Result<Option<ReadyStateRunPlan>> {
     if !flags::ready_state_enabled() {
         return Ok(None);
@@ -147,15 +191,80 @@ pub(crate) fn decide_ready_state_run(
     if !manifest.is_ready_state_eligible() {
         return Ok(None);
     }
-    let Some(sealed) = store::load_manifest(state_root, capsule_manifest_hash)? else {
-        anyhow::bail!(
-            "Ready-State artifact not found for {capsule_manifest_hash}. Run `ato build` with \
-             ATO_READY_STATE_ENABLED=1 first, or unset ATO_READY_STATE_ENABLED to use the legacy \
-             cold path."
-        );
-    };
+    let (sealed, v1_manifest, v1_envelope, artifact_dir, selected_backend) =
+        match expected_v1_execution_id {
+            Some(expected) => {
+                let backend = backend::select_backend()?;
+                let host_contract = backend
+                    .snapshot_compatibility_contract()
+                    .map_err(anyhow::Error::new)?;
+                // Shared with `restore::verify_v1_candidate`'s gate — ONE
+                // derivation of "this host, right now, as itself".
+                let host_capability = restore::exact_host_capability(&host_contract);
+                let candidates = store::load_v1_snapshots(state_root, expected.as_execution_id())?;
+                let catalog = candidates
+                    .iter()
+                    .map(|candidate| capsule::snapshot_manifest::SnapshotCandidate {
+                        manifest: candidate.snapshot_manifest.clone(),
+                        status: capsule::snapshot_manifest::AcceptanceStatus::Accepted,
+                        ranking: capsule::snapshot_manifest::SnapshotRankingSignals::default(),
+                    })
+                    .collect::<Vec<_>>();
+                let selected = capsule::snapshot_manifest::select_snapshots(
+                    expected,
+                    &host_capability,
+                    &catalog,
+                )
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no compatible Snapshot v1 artifact found for execution_id {}; \
+                     rebuild the artifact for backend {} instead of reinterpreting the legacy \
+                     Ready-State manifest",
+                        expected.as_execution_id(),
+                        backend.id()
+                    )
+                })?;
+                let selected_index = catalog
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, selected))
+                    .expect("selected candidate came from the loaded catalog");
+                let candidate = candidates
+                    .into_iter()
+                    .nth(selected_index)
+                    .expect("selected index came from the same-length candidates vec");
+                (
+                    candidate.legacy_manifest,
+                    Some(candidate.snapshot_manifest),
+                    Some(candidate.envelope),
+                    candidate.artifact_dir,
+                    Some(backend),
+                )
+            }
+            None => {
+                let sealed = store::load_manifest(state_root, capsule_manifest_hash)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Ready-State artifact not found for {capsule_manifest_hash}. Run `ato build` \
+                     with ATO_READY_STATE_ENABLED=1 first, or unset ATO_READY_STATE_ENABLED to use \
+                     the legacy cold path."
+                )
+            })?;
+                (
+                    sealed,
+                    None,
+                    None,
+                    store::artifact_dir(state_root, capsule_manifest_hash),
+                    None,
+                )
+            }
+        };
     Ok(Some(ReadyStateRunPlan {
         manifest: sealed,
+        v1_manifest,
+        v1_envelope,
+        artifact_dir,
+        selected_backend,
         state_root: state_root.to_path_buf(),
         capsule_manifest_hash: capsule_manifest_hash.to_string(),
         sanitize_after_restore: manifest.snapshot_config().sanitize_after_restore,
@@ -231,6 +340,7 @@ port = 8080
             &eligible_manifest(),
             layers,
             &backend,
+            None,
         )
         .unwrap();
     }
@@ -252,7 +362,7 @@ port = 8080
         // flag OFF → None (legacy), even for an eligible capsule with no artifact.
         set(None);
         assert!(
-            decide_ready_state_run(&eligible_manifest(), "blake3:x", root)
+            decide_ready_state_run(&eligible_manifest(), "blake3:x", root, None)
                 .unwrap()
                 .is_none()
         );
@@ -260,13 +370,14 @@ port = 8080
         // flag ON, NOT eligible → None (legacy).
         set(Some("1"));
         assert!(
-            decide_ready_state_run(&non_eligible_manifest(), "blake3:x", root)
+            decide_ready_state_run(&non_eligible_manifest(), "blake3:x", root, None)
                 .unwrap()
                 .is_none()
         );
 
         // flag ON, eligible, NO artifact → Err (fail closed, no silent cold run).
-        let err = decide_ready_state_run(&eligible_manifest(), "blake3:missing", root).unwrap_err();
+        let err =
+            decide_ready_state_run(&eligible_manifest(), "blake3:missing", root, None).unwrap_err();
         assert!(
             err.to_string().contains("Ready-State artifact not found"),
             "{err}"
@@ -277,7 +388,7 @@ port = 8080
         // the backend at restore time (same contract as `runner serve`).
         let hash = "blake3:present";
         seal_fake_artifact(root, hash);
-        let plan = decide_ready_state_run(&eligible_manifest(), hash, root)
+        let plan = decide_ready_state_run(&eligible_manifest(), hash, root, None)
             .unwrap()
             .expect("sealed artifact must yield a restore plan");
         assert!(

@@ -617,7 +617,7 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Materialize a durable ato.lock.json baseline for a local workspace"
+        about = "Materialize a durable capsule.lock baseline for a local workspace"
     )]
     Init {
         /// Local workspace path to initialize
@@ -938,9 +938,11 @@ pub(crate) enum Commands {
         token: Option<String>,
         #[arg(long, default_value_t = false)]
         headless: bool,
-        /// Emit NDJSON events instead of opening a browser (used by ato-desktop).
-        #[arg(long = "desktop-webview", hide = true, default_value_t = false)]
-        desktop_webview: bool,
+        /// Non-interactive login with NDJSON progress on stdout (used when
+        /// ato-desktop spawns this as a child process with no TTY). Opens
+        /// the OS default browser exactly like plain `ato login`.
+        #[arg(long = "desktop", hide = true, default_value_t = false)]
+        desktop: bool,
     },
 
     #[command(hide = true, about = "Logout")]

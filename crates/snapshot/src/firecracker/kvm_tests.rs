@@ -68,6 +68,36 @@ fn build_input<'a>(
     }
 }
 
+/// What a `build_input` fixture's no-secret proof can honestly be asserted to be.
+///
+/// **Not `is_clean()`.** That checks the BLOCKING findings only, and blocking is
+/// `ProviderKeyPrefix | EnvAssignment` confined to `HEURISTIC_BLOCKING_LAYERS =
+/// ["app", "dependency"]` (`scanner.rs`) plus declared markers. `build_input` sets
+/// `app: None`, `dependency: None` and every caller passes no markers, so the
+/// blocking set is empty BY CONSTRUCTION regardless of what the real rootfs
+/// contains — `is_clean()` reads as a gate here and is not one.
+///
+/// What is real for this fixture is that a proof was produced and covers the layer
+/// that actually carries bytes. The refusal gate itself is proven host-independently
+/// in CI by `build_preflight_rejects_declared_marker_before_kvm_and_store`, which
+/// feeds a declared marker and asserts the build is refused.
+fn assert_no_secret_proof_shape(proof: &crate::manifest::NoSecretProof) {
+    assert_eq!(proof.verdict, "clean");
+    assert!(
+        proof.scanned_layers.iter().any(|l| l == "rootfs"),
+        "the sealed rootfs must appear in scanned_layers: {:?}",
+        proof.scanned_layers
+    );
+    assert!(
+        proof
+            .coverage
+            .iter()
+            .any(|c| c.layer == "rootfs" && c.declared_checked),
+        "the rootfs coverage row must record a declared-marker scan: {:?}",
+        proof.coverage
+    );
+}
+
 #[test]
 #[ignore]
 fn fc_kvm_probe_available() {
@@ -117,7 +147,7 @@ fn fc_kvm_build_restore_roundtrip() {
     let receipt = b
         .build_ready_state(build_input(&store, rootfs, vec![]))
         .expect("build");
-    assert!(receipt.no_secret_proof.is_clean());
+    assert_no_secret_proof_shape(&receipt.no_secret_proof);
     assert!(receipt.manifest.layers.memory.is_some());
     assert!(receipt.manifest.runner_class_id.is_some());
     let m = receipt.manifest.clone();
@@ -160,6 +190,21 @@ fn fc_kvm_build_restore_roundtrip() {
 // ── U1 (#854): UFFD page-server handshake smokes ───────────────────────────────
 // These set the process-global ATO_FC_UFFD gate, so run the KVM suite with
 // --test-threads=1 (as documented for the fc_kvm_* tests).
+
+/// Absolute ceiling for a corrupt-CAS fail-closed (U5 / U13), deliberately NOT
+/// derived from `boot_timeout`.
+///
+/// The designed failure is Firecracker's 15 s API read timeout plus restore prep
+/// (a `cas` restore materializes no memory image, so prep is vmstate + rootfs
+/// only). This bound's job is to catch an UNBOUNDED hang — the API read timeout
+/// being removed, say — so it is generous rather than tight.
+///
+/// It deliberately does NOT try to catch the other regression, a full
+/// `boot_timeout` health-wait burn: `boot_timeout` defaults to 30 s
+/// (`ATO_FC_BOOT_TIMEOUT_S`, 60 s in `run-uffd-kvm-smokes.sh`), so any timing bound
+/// loose enough to absorb prep variance is also loose enough to admit that burn.
+/// The error-TEXT assertions separate those two exactly, with no timing at all.
+const FAIL_CLOSED_CEILING: Duration = Duration::from_secs(90);
 
 fn read_uffd_receipt(overlay: &std::path::Path) -> crate::uffd_page_server::UffdRestoreReceipt {
     let text =
@@ -670,10 +715,28 @@ fn fc_kvm_uffd_hotset_prefetch_cuts_demand_faults() {
     assert_clean_teardown(&ov2);
 }
 
-/// U5 (#858): a corrupt/missing memory chunk in CAS must FAIL CLOSED — the page-
-/// server's read_range fails the hash check, so the guest can never fault its memory
-/// in; restore returns Err (fast, not a full-timeout hang) and leaves no orphan
+/// U5 (#858) — the INTEGRITY half: a **corrupt** memory chunk in CAS must FAIL
+/// CLOSED. The page-server's `read_range` re-hashes what it reads, so the guest can
+/// never fault that memory in; restore returns `Err` and leaves no orphan
 /// firecracker/tap. Never silently boots a VM on corrupt memory.
+///
+/// The fixture rewrites the chunk FILES in place, so they still EXIST — that is
+/// deliberate, not an oversight. Presence is what carries the corruption past every
+/// residency check (`CasStore::has_chunk` is a `stat`) and onto the page-server serve
+/// path this test is about. The AVAILABILITY half — a chunk that is *absent* — is a
+/// different mechanism and a different test:
+/// [`fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot`]. This docstring
+/// used to say "corrupt/missing"; nothing here has ever removed a chunk.
+///
+/// **Not fast.** Every chunk is corrupted, so the guest's first fault lands inside
+/// `PUT /snapshot/load` (`resume_vm: true`) — strictly before `wait_health_until`
+/// can poll the page-server failure flag — and the restore fails on Firecracker's
+/// 15 s API read timeout instead of the designed abort. That is the ~15 s
+/// `docs/ready-state/uffd-readiness-report.md` records under "safe but slow".
+///
+/// So the assertions pin WHICH failure this is. `is_err()` alone would also pass if
+/// the page server were deleted outright and `LoadSnapshot` merely hung, or if the
+/// restore had quietly run on the File backend.
 #[test]
 #[ignore]
 fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
@@ -698,6 +761,14 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
     let overlay = dir.path().join("ov");
     let started = std::time::Instant::now();
     unsafe { std::env::set_var("ATO_FC_UFFD", "cas") };
+    // Positive control: the env gate really resolves to the local-CAS page-server
+    // path for this run, so the `Err` below is attributable to THAT backend and
+    // not to a silent File restore that happened to reject the same bytes.
+    assert_eq!(
+        uffd_mode(),
+        Some(UffdMode::Cas),
+        "ATO_FC_UFFD=cas must select the page-server path"
+    );
     let r = b.restore(RestoreReadyStateInput {
         store: &store,
         manifest: m,
@@ -706,16 +777,37 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
         uffd_preview: false,
     });
     unsafe { std::env::remove_var("ATO_FC_UFFD") };
+    let elapsed = started.elapsed();
 
+    let err = match r {
+        Ok(_) => panic!("corrupt CAS memory chunk must fail closed, got Ok"),
+        Err(e) => e.to_string(),
+    };
+    // The page server was actually bound (its socket is only ever created under
+    // `uffd`), so the failure came from the demand-paging path. Nothing unlinks
+    // this socket on the restore error path.
     assert!(
-        r.is_err(),
-        "corrupt CAS memory chunk must fail closed, got Ok"
+        overlay.join(".page-server.sock").exists(),
+        "no page-server socket in {} — this Err says nothing about demand paging",
+        overlay.display()
     );
-    eprintln!(
-        "### U5 fail-closed in {}ms: {}",
-        started.elapsed().as_millis(),
-        r.unwrap_err()
+    // WHICH failure: either the designed page-server abort (`wait_health_until`
+    // sees `PageServerHandle::failed`) or the LoadSnapshot call the corrupt first
+    // fault stalls. What must NOT happen is the health wait burning its whole
+    // budget on a VM booted over memory that can never be served.
+    assert!(
+        err.contains("restore failed closed") || err.contains("/snapshot/load"),
+        "expected the page-server abort or a LoadSnapshot failure, got: {err}"
     );
+    assert!(
+        !err.contains("never became healthy"),
+        "fail-closed degraded into a full boot-timeout hang: {err}"
+    );
+    assert!(
+        elapsed < FAIL_CLOSED_CEILING,
+        "fail-closed took {elapsed:?}, past the {FAIL_CLOSED_CEILING:?} ceiling"
+    );
+    eprintln!("### U5 fail-closed in {}ms: {err}", elapsed.as_millis());
     // No orphan VM/tap left behind by the failed restore.
     let tap = FirecrackerConfig::default().tap_dev;
     let taps = std::process::Command::new("ip")
@@ -740,10 +832,26 @@ fn fc_kvm_uffd_corrupt_cas_chunk_fails_closed() {
     );
 }
 
-/// U13 (#880): the **product preview path** (`uffd_preview: true`, no env gate) must
-/// fail closed on corrupt CAS exactly like U5 — restore returns Err, no orphan
-/// firecracker/tap. Promotes the U5 fail-closed invariant to the path `ato run
-/// --experimental-uffd` actually takes.
+/// U13 (#880) — the INTEGRITY half on the **product preview path**
+/// (`uffd_preview: true`, no env gate): a **corrupt** memory chunk must fail closed
+/// exactly like U5 — restore returns `Err`, no orphan firecracker/tap. Promotes the
+/// U5 invariant to the path the `ATO_RUNNER_UFFD_PREVIEW` lease actually takes.
+///
+/// Since #1127 the preview gate refuses UFFD unless the memory image is fully
+/// resident (`CasStore::has_all_chunks`), so on this lane "corrupt" can only mean
+/// *present with the wrong bytes*: the chunk files stay in place, sail past the
+/// `stat`-based residency sweep, and fail in the page server's hash-verified
+/// `read_range`. A chunk that were simply REMOVED is refused pre-boot and never
+/// reaches a page server at all — that is the availability half, covered by
+/// [`fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot`]. The two halves
+/// of "CAS miss/corrupt → fail closed" now fail by different mechanisms, and neither
+/// test may be turned into the other by swapping its fixture.
+///
+/// `is_err()` alone proves nothing here: the File path rejects the same corrupt bytes
+/// pre-boot (`CasStore::get_chunk` re-hashes), and `uffd_preview_mode_for` fails
+/// *toward* File silently on every refusal. So the backend is pinned on both ends —
+/// the gate is asserted to choose UFFD for this exact store+manifest before the
+/// restore, and the page-server socket must exist afterwards.
 #[test]
 #[ignore]
 fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
@@ -763,6 +871,15 @@ fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
     for c in &mem.chunks {
         std::fs::write(blobs.join(c.hash.hex()), b"CORRUPT").unwrap();
     }
+    // Positive control, and the reason the fixture rewrites rather than removes:
+    // corrupting CONTENTS leaves every chunk file present, so #1127's residency
+    // sweep still passes and the preview really is on the UFFD path. This is the
+    // exact call `restore()` makes, with the same store + manifest.
+    assert_eq!(
+        b.uffd_preview_mode(&store, mem, m.supervisor_build.as_ref()),
+        Some(UffdMode::Cas),
+        "the preview gate must still choose UFFD for a present-but-corrupt image"
+    );
     let overlay = dir.path().join("ov");
     // No ATO_FC_UFFD env — the INPUT preview flag drives the UFFD path.
     assert!(std::env::var("ATO_FC_UFFD").is_err());
@@ -774,14 +891,37 @@ fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
         host_runner_class: None,
         uffd_preview: true,
     });
+    let elapsed = started.elapsed();
+    let err = match r {
+        Ok(_) => panic!("preview path must fail closed on corrupt CAS, got Ok"),
+        Err(e) => e.to_string(),
+    };
+    // The page server is bound only under `uffd`, and nothing unlinks its socket
+    // on the restore error path — so its presence is the post-hoc witness that
+    // this restore demand-paged instead of silently falling back to File.
     assert!(
-        r.is_err(),
-        "preview path must fail closed on corrupt CAS, got Ok"
+        overlay.join(".page-server.sock").exists(),
+        "no page-server socket in {} — the preview restore never took the UFFD \
+         path, so this Err proves nothing about demand paging",
+        overlay.display()
+    );
+    // Same two designed shapes as U5 (page-server abort, or the LoadSnapshot the
+    // corrupt first fault stalls) — and NOT a full boot-timeout hang.
+    assert!(
+        err.contains("restore failed closed") || err.contains("/snapshot/load"),
+        "expected the page-server abort or a LoadSnapshot failure, got: {err}"
+    );
+    assert!(
+        !err.contains("never became healthy"),
+        "fail-closed degraded into a full boot-timeout hang: {err}"
+    );
+    assert!(
+        elapsed < FAIL_CLOSED_CEILING,
+        "preview fail-closed took {elapsed:?}, past the {FAIL_CLOSED_CEILING:?} ceiling"
     );
     eprintln!(
-        "### U13 preview fail-closed in {}ms: {}",
-        started.elapsed().as_millis(),
-        r.unwrap_err()
+        "### U13 preview fail-closed in {}ms: {err}",
+        elapsed.as_millis()
     );
     let tap = FirecrackerConfig::default().tap_dev;
     let taps = std::process::Command::new("ip")
@@ -803,6 +943,125 @@ fn fc_kvm_uffd_preview_corrupt_cas_fails_closed() {
             .count(),
         0,
         "orphan firecracker after failed preview restore"
+    );
+}
+
+/// U13 (#880) — the AVAILABILITY half on the product preview path: a memory chunk
+/// that is **absent** from the local CAS must also fail closed, but by a different
+/// mechanism than corruption, and this test asserts the mechanism rather than merely
+/// `Err`.
+///
+/// Post-#1127 semantics, which nothing had recorded: `uffd_preview_mode` sweeps
+/// `CasStore::has_all_chunks` and REFUSES UFFD (returns `None` → fall back to File)
+/// when the image is not fully resident. The restore then materializes memory on the
+/// File path and dies in `rehydrate_atomic` with a `MissingChunk` — a clean PRE-BOOT
+/// error: no page server, no userfaultfd, no Firecracker, no tap, nothing to leak
+/// (the rehydrate runs before `net_up` / `start_fc`).
+///
+/// So "CAS miss → fail closed" is now enforced *before* the VMM starts, which is
+/// strictly better than the post-boot page-fault abort it used to mean — and is why
+/// this cannot be written as a fixture swap inside the corrupt test above: removing a
+/// chunk there would leave a green test with no UFFD anywhere in it, the same
+/// silent-coverage-loss shape this test exists to close.
+///
+/// Only the LAST chunk is removed, so a gate that regressed to the first-chunk probe
+/// (`memory.chunks.first()` — still what both `ato run` UFFD lanes do) is caught.
+///
+/// CI note: the gate's decision alone is covered host-independently by
+/// `uffd_preview_requires_a_resident_memory_image_not_just_an_openable_cas`. What
+/// needs hardware is the half this test adds — that a refused preview then fails the
+/// whole restore pre-boot instead of proceeding.
+#[test]
+#[ignore]
+fn fc_kvm_uffd_preview_missing_cas_chunk_fails_closed_pre_boot() {
+    let Some((b, rootfs)) = skip() else { return };
+    if std::env::consts::ARCH != "x86_64" || !crate::uffd::host_userfaultfd_present() {
+        eprintln!("SKIP: uffd preview residency gate needs x86_64 + userfaultfd");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+    let m = b
+        .build_ready_state(build_input(&store, rootfs, vec![]))
+        .expect("build")
+        .manifest;
+    let mem = m.layers.memory.as_ref().expect("memory layer");
+    assert!(
+        mem.chunks.len() > 1,
+        "a single-chunk memory image cannot distinguish a full sweep from a \
+         first-chunk probe"
+    );
+    // Control: fully resident ⇒ the gate chooses UFFD. Without this the refusal
+    // below could be any of the gate's other preconditions.
+    assert_eq!(
+        b.uffd_preview_mode(&store, mem, m.supervisor_build.as_ref()),
+        Some(UffdMode::Cas),
+        "a fully resident memory image must be eligible for the preview"
+    );
+    let blobs = dir.path().join("cas").join("blobs").join("blake3");
+    let gone = &mem.chunks.last().expect("memory has chunks").hash;
+    std::fs::remove_file(blobs.join(gone.hex())).expect("remove one memory chunk");
+    assert_eq!(
+        b.uffd_preview_mode(&store, mem, m.supervisor_build.as_ref()),
+        None,
+        "one absent chunk must refuse UFFD and fall back to File"
+    );
+    // The shared content-addressed mem cache is the one way the File path could
+    // satisfy this restore without touching CAS (a previous restore of the same
+    // image left a valid file). Drop it so the missing chunk is actually reached.
+    let _ = std::fs::remove_file(b.cache_path("mem", mem, "mem"));
+
+    let overlay = dir.path().join("ov");
+    // No ATO_FC_UFFD env — the INPUT preview flag is what the gate refuses.
+    assert!(std::env::var("ATO_FC_UFFD").is_err());
+    let started = std::time::Instant::now();
+    let r = b.restore(RestoreReadyStateInput {
+        store: &store,
+        manifest: m,
+        overlay_root: overlay.clone(),
+        host_runner_class: None,
+        uffd_preview: true,
+    });
+    let elapsed = started.elapsed();
+    let err = match r {
+        Ok(_) => panic!("an absent CAS memory chunk must fail closed, got Ok"),
+        Err(e) => e.to_string(),
+    };
+    // The mechanism: `CapsuleFsError::MissingChunk` out of `rehydrate_atomic`.
+    assert!(
+        err.contains("not found in store"),
+        "expected a pre-boot MissingChunk, got: {err}"
+    );
+    // ...and it really was pre-boot on File: the page server is bound only when
+    // the gate returns Some, so its socket must NOT exist.
+    assert!(
+        !overlay.join(".page-server.sock").exists(),
+        "a page server was bound — the residency gate did not refuse UFFD"
+    );
+    eprintln!(
+        "### U13 preview miss fail-closed pre-boot in {}ms: {err}",
+        elapsed.as_millis()
+    );
+    let tap = FirecrackerConfig::default().tap_dev;
+    let taps = std::process::Command::new("ip")
+        .args(["link", "show", &tap])
+        .output()
+        .unwrap();
+    assert!(
+        !taps.status.success(),
+        "tap {tap} leaked after a pre-boot failed restore"
+    );
+    let out = std::process::Command::new("pgrep")
+        .args(["-af", "firecracker --api-sock"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .count(),
+        0,
+        "firecracker started despite a pre-boot fail-closed"
     );
 }
 
@@ -1056,9 +1315,28 @@ fn fc_kvm_state_leak_regression() {
     assert_eq!(fresh, "", "STATE LEAK: marker survived to fresh restore");
 }
 
+/// The sealed memory/vmstate are immutable and PREDATE anything the restored guest
+/// does: a value POSTed to the live workload after restore cannot appear in them.
+///
+/// **This is an ordering property, not the no-secret guard** — the old name
+/// (`fc_kvm_no_secret_invariant`) claimed otherwise. The sentinel is injected AFTER
+/// `build_ready_state` sealed the blobs, and CAS chunks are content-addressed and
+/// never rewritten (`CasStore::put_chunk` returns early when the path exists), so no
+/// code path in the system can make the two assertions below fail — deleting every
+/// sanitizer would not. It is process-id-scoped too, so it cannot have pre-existed in
+/// the image.
+///
+/// What it does prove is still worth having: restore never re-seals, so a runtime
+/// write cannot travel backwards into the artifact other sessions launch from.
+///
+/// The real host-artifact no-secret guard is `fc_kvm_binding_lease_live_e2e`, which
+/// scans CAS + work dir + overlay (`scan_for_secret`) for a secret actually delivered
+/// to the guest. It is deliberately NOT duplicated here: this fixture's `/secret`
+/// endpoint has no defined storage, so scanning the guest's own writable rootfs copy
+/// for it would flag the guest legitimately keeping its own data.
 #[test]
 #[ignore]
-fn fc_kvm_no_secret_invariant() {
+fn fc_kvm_sealed_bytes_predate_runtime_writes() {
     let Some((b, rootfs)) = skip() else { return };
     let dir = tempfile::tempdir().unwrap();
     let store = CasStore::open(dir.path().join("cas")).unwrap();
@@ -1085,7 +1363,8 @@ fn fc_kvm_no_secret_invariant() {
         "post-restore injection did not take"
     );
     b.stop(r.session).expect("stop");
-    // The sealed memory/vmstate were captured BEFORE the secret existed → absent.
+    // The sealed memory/vmstate were captured BEFORE the secret existed, and CAS
+    // blobs are immutable, so these are ordering assertions — see the docstring.
     let mem = LazyBlobReader::new(&store, m.layers.memory.as_ref().unwrap())
         .read_all()
         .unwrap();
@@ -1870,4 +2149,282 @@ fn fc_kvm_binding_negative_paths() {
 
     b.stop(r.session).expect("stop");
     assert_clean_teardown(&overlay);
+}
+
+/// True when the workload accepts a connection AND answers HTTP at `addr`.
+///
+/// Deliberately stronger than a TCP connect: a resumed VMM whose app is wedged
+/// still accepts.
+fn probe_serving(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    let Ok(sock) = addr.parse::<std::net::SocketAddr>() else {
+        return false;
+    };
+    for _ in 0..50 {
+        if let Ok(mut s) = std::net::TcpStream::connect_timeout(&sock, Duration::from_millis(500)) {
+            let _ = s.set_read_timeout(Some(Duration::from_millis(500)));
+            if s.write_all(b"GET /health HTTP/1.0\r\n\r\n").is_ok() {
+                let mut buf = [0u8; 16];
+                if let Ok(n) = s.read(&mut buf)
+                    && n > 0
+                {
+                    return true;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// PIDs of every running firecracker process, for leak assertions.
+fn firecracker_pids() -> Vec<u32> {
+    let out = std::process::Command::new("pgrep")
+        .arg("-x")
+        .arg("firecracker")
+        .output();
+    match out {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.trim().parse::<u32>().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+// ── interactive HOLD (submission wizard PR-2, RFC §8.3 `running`) ────────────
+//
+// These prove the property the whole hold lane rests on and that no unit test
+// can reach without hardware: the guest is STILL SERVING after a capture.
+
+/// A held guest answers health, survives a capture, and answers health again.
+///
+/// This is the difference between `build_ready_state` (pause, seal, kill) and a
+/// hold: the author must be able to keep operating the app after Ato has taken a
+/// candidate, so `capture_running_candidate`'s resume has to actually work.
+#[test]
+#[ignore]
+fn fc_kvm_hold_survives_capture_and_keeps_serving() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+
+    // The address a host-side proxy would front, reachable because the boot path
+    // just health-probed it.
+    let addr = held.workload_addr();
+    assert!(addr.ends_with(":8080"), "workload_addr = {addr}");
+
+    let first = held.capture_candidate().expect("first capture");
+    assert!(
+        !first.source_lost,
+        "the source guest must resume after a capture"
+    );
+    assert_no_secret_proof_shape(&first.receipt.no_secret_proof);
+    assert!(first.receipt.manifest.layers.memory.is_some());
+
+    // RFC §8.2: a hold may capture more than once — a failed validation does not
+    // end the session, the author adjusts the app and saves again.
+    let Ok(second) = held.capture_candidate() else {
+        panic!("second capture failed");
+    };
+    assert!(!second.source_lost);
+    assert!(
+        probe_serving(&addr),
+        "the workload must still answer after a SECOND capture"
+    );
+    assert!(second.receipt.manifest.layers.memory.is_some());
+
+    held.release();
+}
+
+/// A candidate captured from a live guest restores and serves.
+///
+/// The candidate is what users will actually launch from, so "it sealed" is not
+/// enough — it has to come back up.
+#[test]
+#[ignore]
+fn fc_kvm_hold_candidate_restores_and_serves() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let mut held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+    let Ok(candidate) = held.capture_candidate() else {
+        panic!("capture failed");
+    };
+    held.release();
+
+    let r = b
+        .restore(RestoreReadyStateInput {
+            store: &store,
+            manifest: candidate.receipt.manifest.clone(),
+            overlay_root: dir.path().join("ov"),
+            host_runner_class: None,
+            uffd_preview: false,
+        })
+        .expect("restore the held candidate");
+    assert_eq!(r.session.guest_port, Some(8080));
+    assert!(r.session.restored_bytes > 0);
+    let overlay = r.session.overlay_root.clone();
+    b.stop(r.session).expect("stop");
+    assert_clean_teardown(&overlay);
+}
+
+/// Dropping a hold without calling `release` still kills the guest.
+///
+/// A forgotten hold must never leave a VM (or its slot lock) behind — the whole
+/// point of owning the process in the handle.
+///
+/// The watched pid comes from [`HeldGuest::vmm_pid`], i.e. THIS hold's child. It used
+/// to be `firecracker_pids().next()` — pgrep's first line, the lowest pid on the
+/// whole machine — so on any host that already ran a firecracker (the staging runner
+/// and the snapshot builder share one) it watched an unrelated VM and could report
+/// "reaped" for that one dying while this hold leaked its own.
+#[test]
+#[ignore]
+fn fc_kvm_hold_drop_tears_the_guest_down() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let vmm_pid = {
+        // Bound so the hold stays alive until the end of this scope, where the
+        // implicit drop is exactly what the test is about.
+        let held = b
+            .boot_and_hold(build_input(&store, rootfs, vec![]))
+            .expect("boot and hold");
+        // Probing the workload address after the drop would prove nothing: the
+        // teardown also runs `net_down()`, so the route to the guest disappears
+        // and a connect fails with ENETUNREACH whether or not the VMM was reaped.
+        // Watch the PROCESS instead — that is the thing that must not leak — and
+        // take it from the handle, so it is provably the process THIS hold owns.
+        let pid = held
+            .vmm_pid()
+            .expect("a held guest must own a running firecracker process");
+        assert!(
+            firecracker_pids().contains(&pid),
+            "the hold's firecracker pid {pid} is not running"
+        );
+        pid
+        // dropped here without release()
+    };
+
+    let mut reaped = false;
+    for _ in 0..50 {
+        if !firecracker_pids().contains(&vmm_pid) {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(reaped, "a dropped hold leaked firecracker pid {vmm_pid}");
+
+    // And the slot lock is free again, so the next hold can take it. An empty
+    // rootfs must fail for its OWN reason — a "backend busy" here would mean the
+    // lock leaked, which is precisely what this asserts is not happening.
+    let Err(err) = b.boot_and_hold(build_input(&store, Vec::new(), vec![])) else {
+        panic!("an empty rootfs must not boot");
+    };
+    let text = format!("{err:?}");
+    assert!(
+        !text.contains("backend busy"),
+        "a dropped hold leaked its slot lock: {text}"
+    );
+}
+
+/// A restore attempted WHILE a hold is live is refused.
+///
+/// This is the hardware statement of the defect that made the interactive
+/// acceptance lane unrunnable: the hold holds `work_root/{netns|tap}.lock` for
+/// its whole life, and `restore` takes the same path. The existing
+/// `fc_kvm_hold_drop_tears_the_guest_down` cannot see this — it asserts the lock
+/// is free AFTER the hold drops, so it exercises the ordering that already
+/// worked.
+///
+/// The assertion is deliberately on the lock, not on the restore's own error
+/// text: what must never regress is that a SECOND VMM cannot be started on a
+/// slot that already has one. The consequences beyond the lock do not fail
+/// loudly — `net_up_root` deletes the tap the live guest is on, and both guests
+/// answer at the same address, so a readiness probe can be satisfied by the
+/// wrong VM.
+#[test]
+#[ignore]
+fn fc_kvm_restore_while_a_hold_is_live_is_refused() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+
+    // The hold owns the slot: its lockfile exists for as long as the guest does.
+    assert!(
+        b.lock_path().exists(),
+        "a live hold must own its slot lock; without that this test proves nothing"
+    );
+
+    // A second VMM on the same slot must be refused while the hold is up.
+    let second = b.boot_and_hold(build_input(&store, Vec::new(), vec![]));
+    let text = format!("{:?}", second.err());
+    assert!(
+        text.contains("backend busy"),
+        "a second VMM was not refused while a hold was live: {text}"
+    );
+
+    held.release();
+    assert!(
+        !b.lock_path().exists(),
+        "release() must free the slot lock so verification can take it"
+    );
+}
+
+/// After a hold is released, the slot is genuinely free for a restore to take.
+///
+/// The other half of the ordering the fix depends on. `HeldGuest::release`
+/// takes `self` by value, kills and reaps the VMM, runs `net_down()` and drops
+/// the `BuildLock`; this asserts the postcondition the `ReleasedHold` token
+/// stands for, on real hardware rather than in a comment.
+#[test]
+#[ignore]
+fn fc_kvm_hold_release_frees_the_slot_for_a_restore() {
+    let Some((b, rootfs)) = skip() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let store = CasStore::open(dir.path().join("cas")).unwrap();
+
+    let held = b
+        .boot_and_hold(build_input(&store, rootfs, vec![]))
+        .expect("boot and hold");
+    let vmm_pid = held
+        .vmm_pid()
+        .expect("a held guest owns a firecracker process");
+    held.release();
+
+    // The VMM is gone, not merely detached.
+    let mut reaped = false;
+    for _ in 0..50 {
+        if !firecracker_pids().contains(&vmm_pid) {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(reaped, "release() leaked firecracker pid {vmm_pid}");
+
+    // And the slot admits a new VMM — an empty rootfs must fail for its OWN
+    // reason, never "backend busy", which would mean the lock outlived the hold.
+    let Err(err) = b.boot_and_hold(build_input(&store, Vec::new(), vec![])) else {
+        panic!("an empty rootfs must not boot");
+    };
+    let text = format!("{err:?}");
+    assert!(
+        !text.contains("backend busy"),
+        "the released hold left its slot lock behind: {text}"
+    );
 }

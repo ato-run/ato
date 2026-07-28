@@ -581,7 +581,7 @@ fn provider_shorthand_kind(target: &str) -> Option<&'static str> {
 mod tests {
     use std::path::PathBuf;
 
-    use capsule::ato_lock::{self, AtoLock};
+    use capsule::capsule_lock::{self, CapsuleLock};
     use serde_json::json;
 
     use super::{
@@ -725,13 +725,13 @@ mod tests {
                 .expect("run");
         assert_eq!(outcome, LocalRunManifestPreparationOutcome::Ready);
         assert!(!tmp.path().join("capsule.toml").exists());
-        assert!(!tmp.path().join("ato.lock.json").exists());
+        assert!(!tmp.path().join("capsule.lock").exists());
     }
 
     #[test]
     fn canonical_lock_input_skips_legacy_manifest_generation() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "node", "cmd": ["index.js"]}),
@@ -754,9 +754,9 @@ mod tests {
             "closure".to_string(),
             json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
-        ato_lock::write_pretty_to_path(&lock, &tmp.path().join("ato.lock.json")).expect("lock");
+        capsule_lock::write_pretty_to_path(&lock, &tmp.path().join("capsule.lock")).expect("lock");
         let resolved = ResolvedRunTarget {
-            path: tmp.path().join("ato.lock.json"),
+            path: tmp.path().join("capsule.lock"),
             agent_local_root: Some(tmp.path().to_path_buf()),
             desktop_open_path: None,
             export_request: None,

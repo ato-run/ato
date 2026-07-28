@@ -106,6 +106,13 @@ fn semver_prefers_highest_stable_release() {
 }
 
 #[test]
+fn cli_startup_installs_a_rustls_crypto_provider() {
+    install_default_rustls_crypto_provider();
+
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
+#[test]
 fn select_capsule_file_is_deterministic() {
     let tmp = tempfile::tempdir().unwrap();
     let version_dir = tmp.path().join("1.0.0");
@@ -320,6 +327,66 @@ fn run_command_parses_agent_mode() {
 
     match cli.command {
         Commands::Run { agent, .. } => assert_eq!(agent, RunAgentMode::Force),
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn login_command_defaults_to_plain_interactive_flow() {
+    let cli = parse_cli(["ato", "login"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token, None);
+            assert!(!headless);
+            assert!(!desktop);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn login_command_parses_hidden_desktop_flag() {
+    // Regression guard for ato#1077: `ato-desktop` spawns `ato login --desktop`
+    // as a non-interactive child process (dispatch/mod.rs routes this to
+    // `login_with_store_device_flow_desktop`, not the plain interactive flow).
+    // If this flag were ever renamed/dropped without updating the spawn site
+    // in `ato_dock::trigger_login`, ato-desktop's login button would silently
+    // fall through to the interactive flow instead. This test only proves the
+    // flag still parses to `desktop: true`; it does not exercise dispatch's
+    // routing (that arm calls straight into networked async auth code) or the
+    // spawn site itself.
+    let cli = parse_cli(["ato", "login", "--desktop"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token, None);
+            assert!(!headless);
+            assert!(desktop);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn login_command_desktop_and_token_are_independent_flags() {
+    let cli = parse_cli(["ato", "login", "--token", "abc123", "--headless"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token.as_deref(), Some("abc123"));
+            assert!(headless);
+            assert!(!desktop);
+        }
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 }

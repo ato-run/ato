@@ -11,15 +11,24 @@
 
 use std::path::Path;
 
+use capsule::snapshot_manifest::{
+    PortabilityTier, SNAPSHOT_COMPATIBILITY_V1_SCHEMA, SnapshotBackendKind,
+    SnapshotCompatibilityContractV1,
+};
 use capsulefs::{CasStore, HotsetRecorder};
 
 use crate::backend::{
     BackendCapabilities, BuildReadyStateInput, BuildReadyStateReceipt, DeviceProfile,
     FilesystemModel, GpuMode, IsolationBoundary, RestoreReadyStateInput, RestoreReceipt,
     RestoredSession, SnapshotBackend, SnapshotError, SnapshotInspection, SnapshotKind,
+    compatibility_class_identity,
 };
 use crate::manifest::{NoSecretProof, READY_STATE_SCHEMA, ReadyStateManifest, SnapshotBackendInfo};
 use crate::scanner;
+
+/// Fake backend's fixed Snapshot-v1 format generation. Kept in lock-step with
+/// the "fake-v1" spelling used in its legacy [`SnapshotBackendInfo`].
+const FAKE_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
 /// Backend id reported by [`FakeSnapshotBackend`].
 pub const FAKE_BACKEND_ID: &str = "fake";
@@ -65,6 +74,43 @@ impl SnapshotBackend for FakeSnapshotBackend {
             uffd_reason: Some("fake backend has no Firecracker UFFD mem-backend".to_string()),
             binding: Default::default(),
         }
+    }
+
+    fn snapshot_compatibility_contract(
+        &self,
+    ) -> Result<SnapshotCompatibilityContractV1, SnapshotError> {
+        // Real (not placeholder) facts for a backend that captures no VM state:
+        // fixed identity strings matching its legacy `SnapshotBackendInfo`
+        // (kind="fake", version="fake-0.1.0", format="fake-v1"), a fixed "raw"
+        // codec (no additional encoding layer), no CPU template (it boots
+        // nothing), and a runner-restore-contract scoped by the host's real
+        // architecture (mirrors the legacy `ato-fake-runner/<arch>/v1` id).
+        let vmm_identity = "fake-0.1.0".to_string();
+        let state_codec = "raw".to_string();
+        let guest_kernel_identity = "none:fake-backend".to_string();
+        let cpu_template = "none".to_string();
+        let runner_restore_contract = format!("ato-fake-runner/{}/v1", std::env::consts::ARCH);
+        let compatibility_class_identity = compatibility_class_identity(
+            SnapshotBackendKind::Fake,
+            FAKE_SNAPSHOT_FORMAT_VERSION,
+            &vmm_identity,
+            &state_codec,
+            &guest_kernel_identity,
+            &cpu_template,
+            &runner_restore_contract,
+        )?;
+        Ok(SnapshotCompatibilityContractV1 {
+            schema: SNAPSHOT_COMPATIBILITY_V1_SCHEMA.to_string(),
+            backend: SnapshotBackendKind::Fake,
+            format_version: FAKE_SNAPSHOT_FORMAT_VERSION,
+            vmm_identity,
+            state_codec,
+            guest_kernel_identity,
+            cpu_template,
+            runner_restore_contract,
+            portability_tier: PortabilityTier::ClassPortable,
+            compatibility_class_identity,
+        })
     }
 
     fn build_ready_state(
@@ -131,6 +177,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
             has_vsock: false, // Fake backend has no vsock device
             runner_class_id: input.runner_class,
             execution_id: input.execution_id.clone(),
+            // `BuildReadyStateInput` does not yet carry a schema tag for the
+            // declared execution id — that wiring is later, separate work.
+            // Until then every sealed manifest is honestly legacy.
+            execution_identity_schema: None,
             surface_requirement: input.surface_requirement,
             layers,
             hotset_profile,
@@ -165,6 +215,9 @@ impl SnapshotBackend for FakeSnapshotBackend {
             manifest,
             sealed_bytes,
             no_secret_proof,
+            // The Fake backend boots nothing, so there is no live guest to
+            // screenshot — honestly `None`.
+            screenshot_png_base64: None,
         })
     }
 
@@ -173,14 +226,10 @@ impl SnapshotBackend for FakeSnapshotBackend {
         store: &CasStore,
         manifest: &ReadyStateManifest,
     ) -> Result<SnapshotInspection, SnapshotError> {
-        let mut all_present = true;
-        for (_, blob) in manifest.layers.iter() {
-            for chunk in &blob.chunks {
-                if !store.has_chunk(&chunk.hash) {
-                    all_present = false;
-                }
-            }
-        }
+        let all_present = manifest
+            .layers
+            .iter()
+            .all(|(_, blob)| store.has_all_chunks(blob));
         Ok(SnapshotInspection {
             manifest_id: manifest.id(),
             backend_kind: manifest.snapshot_backend.kind.clone(),
@@ -258,6 +307,8 @@ impl SnapshotBackend for FakeSnapshotBackend {
         Ok(RestoreReceipt {
             session,
             ready_state_manifest_id: manifest_id,
+            // Fake never boots a guest, so nothing HTTP-probes a content-ready path.
+            content_ready_ms: None,
         })
     }
 

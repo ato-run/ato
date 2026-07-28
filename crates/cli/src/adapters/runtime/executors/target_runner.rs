@@ -480,7 +480,7 @@ mod tests {
         compute_policy_segment_hash, compute_provisioning_policy_hash,
     };
     use capsule::launch_spec::derive_launch_spec;
-    use capsule::lockfile::{CapsuleLock, LockMeta};
+    use capsule::lockfile::{LegacyCapsuleLock, LockMeta};
     use capsule::router::{self, ExecutionProfile};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -765,7 +765,7 @@ run = "node server.js"
         )
         .await
         .expect("ensure compatibility lock");
-        let lock: CapsuleLock =
+        let lock: LegacyCapsuleLock =
             serde_json::from_slice(&std::fs::read(&lock_path).expect("read compatibility lock"))
                 .expect("parse compatibility lock");
 
@@ -990,7 +990,7 @@ run = "index.js""#,
         )
         .expect("write manifest");
         let legacy_lock_path = temp_dir.path().join("capsule.lock.json");
-        let lock = CapsuleLock {
+        let lock = LegacyCapsuleLock {
             version: "1".to_string(),
             meta: LockMeta {
                 created_at: "2026-03-25T00:00:00Z".to_string(),

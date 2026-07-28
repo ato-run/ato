@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Error as AnyhowError, Result};
-use capsule::ato_lock::{AtoLock, UnresolvedValue, closure_info};
+use capsule::capsule_lock::{CapsuleLock, UnresolvedValue, closure_info};
 use capsule::common::paths::ato_runs_dir;
 use capsule::execution_identity::{
     ExecutionReceipt, ExecutionReceiptDocument, ReproducibilityCause, ReproducibilityClass,
     Tracked, TrackingStatus,
 };
 use capsule::input_resolver::{
-    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
+    CAPSULE_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
 };
 use capsule::manifest;
 use capsule::types::{
@@ -472,7 +472,7 @@ struct InspectionSnapshot {
     binding_seed_path: Option<PathBuf>,
     run_attempt_root: PathBuf,
     input_kind: String,
-    lock: AtoLock,
+    lock: CapsuleLock,
     provenance: Vec<StoredProvenanceRecord>,
     diagnostics: Vec<StoredDiagnosticRecord>,
     infer_unresolved: Vec<String>,
@@ -694,7 +694,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                 provenance.selected_kind.as_str().to_string(),
                 project.project_root.clone(),
                 Some(project.manifest.path.clone()),
-                project.project_root.join(ATO_LOCK_FILE_NAME),
+                project.project_root.join(CAPSULE_LOCK_FILE_NAME),
                 Some(
                     project
                         .project_root
@@ -737,7 +737,7 @@ fn load_inspection_snapshot(path: &Path) -> Result<InspectionSnapshot> {
                 provenance.selected_kind.as_str().to_string(),
                 source.project_root.clone(),
                 None,
-                source.project_root.join(ATO_LOCK_FILE_NAME),
+                source.project_root.join(CAPSULE_LOCK_FILE_NAME),
                 Some(
                     source
                         .project_root
@@ -920,7 +920,7 @@ fn build_preview_view(snapshot: &InspectionSnapshot) -> PreviewLockView {
                         path: snapshot
                             .run_attempt_root
                             .join("<attempt>")
-                            .join(ATO_LOCK_FILE_NAME)
+                            .join(CAPSULE_LOCK_FILE_NAME)
                             .display()
                             .to_string(),
                     },
@@ -1266,7 +1266,7 @@ fn remediation_action(lock_path: &str, reason_class: &str) -> String {
             "declare runtime-target metadata explicitly and regenerate the lock-first baseline".to_string()
         }
         ("resolution.closure", _) => {
-            "materialize dependency closure state such as package lockfiles before regenerating ato.lock.json".to_string()
+            "materialize dependency closure state such as package lockfiles before regenerating capsule.lock".to_string()
         }
         _ if lock_path == "binding" || lock_path.starts_with("binding.") => {
             "populate workspace-local binding seed entries or accept the host-local binding prompt".to_string()
@@ -1334,7 +1334,7 @@ fn default_provenance(snapshot: &InspectionSnapshot, field: &str) -> Vec<StoredP
         .collect()
 }
 
-fn lock_field_entries(lock: &AtoLock) -> BTreeMap<String, Option<Value>> {
+fn lock_field_entries(lock: &CapsuleLock) -> BTreeMap<String, Option<Value>> {
     let mut fields = BTreeMap::new();
     if !lock.features.declared.is_empty() {
         fields.insert(

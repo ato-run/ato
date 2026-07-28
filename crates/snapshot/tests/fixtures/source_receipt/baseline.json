@@ -1,0 +1,15 @@
+{
+  "canonical_json": "{\"canonical_repository\":\"https://github.com/acme/menuflow\",\"commit_algorithm\":\"sha1\",\"provider\":\"github\",\"resolved_commit_sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"resolver_contract_version\":\"ato.capsule-program-source-projection/v1\",\"schema\":\"ato.source-receipt/v1\",\"source_tree_digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\"}",
+  "description": "the ordinary case",
+  "digest": "blake3:1b5da526c6c878e70a8ac750a360cc242de614194d2ab5dccdd39af42b6c53fb",
+  "kind": "source-receipt",
+  "receipt": {
+    "canonical_repository": "https://github.com/acme/menuflow",
+    "commit_algorithm": "sha1",
+    "provider": "github",
+    "resolved_commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resolver_contract_version": "ato.capsule-program-source-projection/v1",
+    "schema": "ato.source-receipt/v1",
+    "source_tree_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}

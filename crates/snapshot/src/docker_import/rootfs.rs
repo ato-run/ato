@@ -518,6 +518,7 @@ pub(crate) fn imported_pack_script(
     plan: &ImportedServicePlan,
     seed_contents: &[super::seed_files::RenderedMountSeeds],
     size_mib: u64,
+    pixel_rfb_port: Option<u16>,
 ) -> String {
     let (agent_prep, launch) = supervisor_prep_and_launch(
         Some(&plan.supervisor),
@@ -568,7 +569,7 @@ pub(crate) fn imported_pack_script(
     // init heredoc is safe. Unlike the standard /tmp /run /var/tmp compat
     // mounts, these are MANAGED state mounts — a failed mount/copy/write MUST
     // fail guest boot (exit 1), never `2>/dev/null`.
-    let extra_mounts: String = plan
+    let mut extra_mounts: String = plan
         .ephemeral_mounts
         .iter()
         .enumerate()
@@ -581,6 +582,16 @@ pub(crate) fn imported_pack_script(
             render_ephemeral_mount(i, m, seeds)
         })
         .collect();
+    // Pixel Stream v1: a terminal-class GUI workload allocates ptys (xterm →
+    // /dev/ptmx), and the minimal guest init never mounts devpts. Mount it ONLY
+    // for a pixel build — fail-closed like the managed mounts above (a pixel
+    // guest without ptys boots into a torn-down fixture) — so every Web import
+    // keeps a byte-identical init (same rootfs digest, same identity).
+    if pixel_rfb_port.is_some() {
+        extra_mounts.push_str(
+            "mkdir -p /dev/pts\nmount -t devpts devpts /dev/pts || { echo \"required devpts mount failed: /dev/pts\" >&2; exit 1; }\n",
+        );
+    }
     // ato#1026: start the localhost→guest-IP relay BEFORE the app launch. The
     // guest-agent resolves its own IP from /proc/cmdline (no shell IP-parsing,
     // no iproute2 in the app image) and the relay retries the loopback target
@@ -624,9 +635,17 @@ pub fn pack_imported_rootfs(
     seed_contents: &[super::seed_files::RenderedMountSeeds],
     out_ext4: &Path,
     size_mib: u64,
+    pixel_rfb_port: Option<u16>,
 ) -> Result<u64, String> {
     validate_mount_seed_alignment(plan, seed_contents)?;
-    let script = imported_pack_script(tool.as_str(), image_tag, plan, seed_contents, size_mib);
+    let script = imported_pack_script(
+        tool.as_str(),
+        image_tag,
+        plan,
+        seed_contents,
+        size_mib,
+        pixel_rfb_port,
+    );
     let out = Command::new("bash")
         .arg("-c")
         .arg(&script)
@@ -944,7 +963,7 @@ mod tests {
                 content: b"port: 3000\n".to_vec(),
             }],
         }];
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024, None);
         // Mount + copy-up + guarded seed write render together, all fail-closed.
         assert!(
             script.contains("mount -t tmpfs -o size=16m tmpfs /config"),
@@ -1005,7 +1024,7 @@ mod tests {
                 content: b"x".to_vec(),
             }],
         }];
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &seeds, 1024, None);
         // Pack-time staging (runs against $BUILD/rootfs, before mkfs+copy).
         assert!(
             script.contains("mkdir -p \"$BUILD/rootfs/downloads\""),
@@ -1213,7 +1232,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024, None);
         let init = script
             .split("<<'INIT'")
             .nth(1)
@@ -1252,7 +1271,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024, None);
         let init = script
             .split("<<'INIT'")
             .nth(1)
@@ -1290,7 +1309,11 @@ mod tests {
     fn no_mounts_keeps_the_legacy_init_shape() {
         let plain =
             derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
-        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, &[], 1024);
+        let plain_script = imported_pack_script("docker", "ato-import-x", &plain, &[], 1024, None);
+        assert!(
+            !plain_script.contains("devpts"),
+            "a Web import must not mount devpts (init byte-stability)"
+        );
         assert!(
             !plain_script.contains("cp -a \"$seed/."),
             "no copy-up when no mounts"
@@ -1299,6 +1322,22 @@ mod tests {
             plain_script.matches("mount -t tmpfs").count(),
             3,
             "only the standard /tmp /run /var/tmp mounts"
+        );
+    }
+
+    #[test]
+    fn pixel_import_mounts_devpts_fail_closed() {
+        // Pixel Stream v1: a terminal-class workload allocates ptys; the pixel
+        // opt-in (and ONLY the pixel opt-in) mounts devpts, and a failed mount
+        // fails guest boot instead of booting a pty-less fixture.
+        let plan =
+            derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024, Some(5900));
+        assert!(
+            script.contains(
+                "mount -t devpts devpts /dev/pts || { echo \"required devpts mount failed: /dev/pts\" >&2; exit 1; }"
+            ),
+            "{script}"
         );
     }
 
@@ -1316,7 +1355,7 @@ mod tests {
         )
         .unwrap();
         assert!(plan.host_bind_relay);
-        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024);
+        let script = imported_pack_script("docker", "ato-import-x", &plan, &[], 1024, None);
         let init = script
             .split("<<'INIT'")
             .nth(1)
@@ -1346,7 +1385,7 @@ mod tests {
             derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
         assert!(!plain.host_bind_relay);
         assert!(
-            !imported_pack_script("docker", "ato-import-x", &plain, &[], 1024)
+            !imported_pack_script("docker", "ato-import-x", &plain, &[], 1024, None)
                 .contains("tcp-relay")
         );
     }
@@ -1437,7 +1476,7 @@ mod tests {
     fn imported_pack_script_shares_the_pipeline_but_not_the_build() {
         let plan =
             derive_imported_service_plan(&config(), SecretEnvPolicy::Reject, None, None).unwrap();
-        let script = imported_pack_script("podman", "ato-import-abc123", &plan, &[], 1024);
+        let script = imported_pack_script("podman", "ato-import-abc123", &plan, &[], 1024, None);
         // Imported tag, single-quoted; chosen tool drives create/export/cleanup.
         assert!(script.contains("TAG='ato-import-abc123'"), "{script}");
         assert!(script.contains("CID=$(podman create \"$TAG\")"), "{script}");
