@@ -3396,6 +3396,18 @@ fn report_hold_progress(
     }
 }
 
+/// The identity written into an interactive candidate's Snapshot manifest.
+///
+/// `ProducedBuild::execution_id` is the producer's legacy declared identity.
+/// The control plane claim carries the finalized Capsule v1 execution contract
+/// identity. Snapshot selection, acceptance, and publication all key on the
+/// latter, so the candidate must inherit the claim identity before capture.
+fn interactive_snapshot_execution_id(
+    claim_execution_id: &capsule::execution_contract::ExecutionId,
+) -> String {
+    claim_execution_id.as_str().to_string()
+}
+
 /// Submission Wizard PR-2 — the `interactive_capture` lane, end to end.
 ///
 /// Shares the RECIPE build with the seal lane (materialize + manifest + rootfs +
@@ -3576,7 +3588,7 @@ fn process_interactive_capture_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id.clone()),
+            execution_id: Some(interactive_snapshot_execution_id(&execution_id)),
             supervisor: produced.supervisor.clone(),
         })
         .map_err(|e| fail("launch", e.to_string()))?;
@@ -4034,6 +4046,21 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_candidate_uses_the_claim_execution_identity() {
+        let claim = capsule::execution_contract::ExecutionId::new(
+            "blake3:6c379f78b877c137e5119b7e058678f741116bf3113077e68fe984c14e71d27b".to_string(),
+        )
+        .expect("canonical claim identity");
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity = interactive_snapshot_execution_id(&claim);
+
+        assert_eq!(snapshot_identity, claim.as_str());
+        assert_ne!(snapshot_identity, producer_declared_identity);
+    }
 
     /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a
     /// SUPERVISOR build (the guest generates + injects at run — vsock channel,
