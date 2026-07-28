@@ -189,6 +189,19 @@ impl AuthoringApiClient<'_> {
             .map_err(|error| format!("decode setup control: {error}"))
     }
 
+    pub fn mark_setup_stopped(&self, work: &AuthoringWork) -> Result<(), String> {
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/stopped",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({ "builder_id": self.builder_id }))
+        .map_err(|error| http_error("report setup stopped", error))?;
+        Ok(())
+    }
+
     pub fn complete_clean_replay(
         &self,
         work: &AuthoringWork,
