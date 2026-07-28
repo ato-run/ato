@@ -4259,6 +4259,9 @@ struct BuilderCleanReplayAdapter<'a> {
 }
 
 const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
+const LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA: &str = "ato.local-authoring-artifact-identity/v1";
+const LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE: &str = ".authoring-artifact-identity.json";
+const LOCAL_AUTHORING_ARTIFACT_RETENTION: &str = "api-receipt-bound";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4274,6 +4277,19 @@ struct CleanReplayBuilderArtifact {
     execution_id: String,
     port: u16,
     healthcheck: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LocalAuthoringArtifactIdentity {
+    schema: String,
+    job_id: String,
+    authoring_session_id: String,
+    clean_replay_receipt_digest: String,
+    /// Local GC must not infer liveness from directory age. Candidate versus
+    /// published state is owned by the API receipt chain; both remain referenced
+    /// until that control-plane record releases them.
+    retention: String,
 }
 
 fn validate_work_directory_identity(id: &str) -> Result<(), String> {
@@ -4295,6 +4311,46 @@ fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf
 fn local_artifact_work_directory(root: &Path, job_id: &str) -> Result<PathBuf, String> {
     validate_work_directory_identity(job_id)?;
     Ok(root.join(job_id))
+}
+
+fn prepare_local_authoring_artifact_directory(
+    root: &Path,
+    identity: &LocalAuthoringArtifactIdentity,
+) -> Result<PathBuf, String> {
+    validate_work_directory_identity(&identity.job_id)?;
+    validate_work_directory_identity(&identity.authoring_session_id)?;
+    if identity.schema != LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA
+        || identity.retention != LOCAL_AUTHORING_ARTIFACT_RETENTION
+        || identity.clean_replay_receipt_digest.trim().is_empty()
+    {
+        return Err("local Authoring artifact identity is invalid".to_string());
+    }
+    let directory = local_artifact_work_directory(root, &identity.job_id)?;
+    let marker = directory.join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE);
+    if directory.exists() {
+        let existing: LocalAuthoringArtifactIdentity =
+            serde_json::from_slice(&std::fs::read(&marker).map_err(|_| {
+                "refusing to reuse an unowned local path as a Ready-State artifact".to_string()
+            })?)
+            .map_err(|_| {
+                "refusing to reuse a malformed local path as a Ready-State artifact".to_string()
+            })?;
+        if existing != *identity {
+            return Err("local Ready-State artifact job/session ownership collision".to_string());
+        }
+        std::fs::remove_dir_all(&directory)
+            .map_err(|error| format!("clear receipt-bound Seal workspace: {error}"))?;
+    }
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create receipt-bound Seal workspace: {error}"))?;
+    let marker_bytes = serde_jcs::to_vec(identity)
+        .map_err(|error| format!("canonicalize local artifact identity: {error}"))?;
+    std::fs::write(
+        directory.join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE),
+        marker_bytes,
+    )
+    .map_err(|error| format!("persist local artifact identity: {error}"))?;
+    Ok(directory)
 }
 
 fn clean_replay_directory(cfg: &Config, authoring_session_id: &str) -> Result<PathBuf, String> {
@@ -4584,13 +4640,16 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
         // `<work>/<job_id>/{manifest.json,cas/}`. Keep the on-disk directory
         // identical to that public locator instead of using the private
         // authoring workspace prefix.
-        let seal_dir = local_artifact_work_directory(&self.cfg.work, &self.work.work_id)?;
-        if seal_dir.exists() {
-            std::fs::remove_dir_all(&seal_dir)
-                .map_err(|error| format!("clear Seal workspace: {error}"))?;
-        }
-        std::fs::create_dir_all(&seal_dir)
-            .map_err(|error| format!("create Seal workspace: {error}"))?;
+        let seal_dir = prepare_local_authoring_artifact_directory(
+            &self.cfg.work,
+            &LocalAuthoringArtifactIdentity {
+                schema: LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA.to_string(),
+                job_id: self.work.work_id.clone(),
+                authoring_session_id: clean_payload.authoring_session_id.clone(),
+                clean_replay_receipt_digest: clean_digest.clone(),
+                retention: LOCAL_AUTHORING_ARTIFACT_RETENTION.to_string(),
+            },
+        )?;
         let store = CasStore::open(seal_dir.join("cas"))
             .map_err(|error| format!("open Seal CAS: {error}"))?;
         let mut guest = self
@@ -7500,5 +7559,48 @@ targets = ["web"]
             local_artifact_work_directory(root, "abjob_01ABC").expect("safe"),
             root.join("abjob_01ABC"),
         );
+    }
+
+    #[test]
+    fn local_authoring_artifact_directory_is_receipt_bound_and_collision_safe() {
+        let root = tempfile::tempdir().expect("artifact root");
+        let identity = LocalAuthoringArtifactIdentity {
+            schema: LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA.to_string(),
+            job_id: "abjob_01ABC".to_string(),
+            authoring_session_id: "auth_01ABC".to_string(),
+            clean_replay_receipt_digest: "blake3:receipt-a".to_string(),
+            retention: LOCAL_AUTHORING_ARTIFACT_RETENTION.to_string(),
+        };
+        let directory = prepare_local_authoring_artifact_directory(root.path(), &identity)
+            .expect("prepare bound artifact directory");
+        assert_eq!(directory, root.path().join("abjob_01ABC"));
+        assert!(
+            directory
+                .join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE)
+                .is_file()
+        );
+
+        std::fs::write(directory.join("stale-capture"), b"retry scratch").expect("write scratch");
+        prepare_local_authoring_artifact_directory(root.path(), &identity)
+            .expect("the same receipt-bound retry may rebuild");
+        assert!(!directory.join("stale-capture").exists());
+
+        let different_session = LocalAuthoringArtifactIdentity {
+            authoring_session_id: "auth_01OTHER".to_string(),
+            ..identity.clone()
+        };
+        let collision = prepare_local_authoring_artifact_directory(root.path(), &different_session)
+            .expect_err("another session must not reuse this job-scoped CAS");
+        assert!(collision.contains("ownership collision"), "{collision}");
+
+        let unowned = root.path().join("abjob_01UNOWNED");
+        std::fs::create_dir(&unowned).expect("create unowned authoring workspace");
+        let unowned_identity = LocalAuthoringArtifactIdentity {
+            job_id: "abjob_01UNOWNED".to_string(),
+            ..identity
+        };
+        let masquerade = prepare_local_authoring_artifact_directory(root.path(), &unowned_identity)
+            .expect_err("an arbitrary writable workspace must not become a Seal artifact");
+        assert!(masquerade.contains("unowned local path"), "{masquerade}");
     }
 }
