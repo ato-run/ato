@@ -46,6 +46,9 @@ fn baseline_normalization_matches_shared_canonical_vector() {
     let mut expected =
         fs::read(fixture_dir().join("baseline-normalized.canonical.json")).expect("read vector");
     assert_eq!(expected.pop(), Some(b'\n'));
+    if expected.last() == Some(&b'\r') {
+        expected.pop();
+    }
 
     assert_eq!(
         serde_jcs::to_vec(&envelope.intent).expect("canonical"),
