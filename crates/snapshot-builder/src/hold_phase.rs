@@ -91,7 +91,7 @@
 //! rather than crate-wide.
 #![allow(dead_code)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use snapshot::acceptance::{
     AcceptanceBudget, AcceptanceConfig, AcceptanceFailure, CandidateSnapshot,
@@ -108,6 +108,40 @@ use crate::wizard_wire::{
 /// Default hold TTL (USER DECISION): 30 minutes, with explicit extend via the
 /// [`ExtendPolicy`] seam.
 pub const DEFAULT_HOLD_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// #1160 — how many capture attempts ONE hold may spend.
+///
+/// A capture that fails with the source alive returns to holding, and the
+/// control channel keeps delivering `capture` until a candidate is reported.
+/// Unbounded, that pair is an amplifier: every poll drove a fresh pause + full
+/// memory/vmstate seal, each writing a *new* content-addressed memory blob into
+/// the job CAS (the bytes differ per capture, so nothing dedupes). Measured on
+/// staging: 356 full snapshots in 15 minutes, and the capsule chooses its own
+/// memory size, so the submitter picks the multiplier.
+///
+/// Three is the budget because the failures worth retrying are transient
+/// (a stalled upload, a momentary disk or api hiccup) and those clear inside one
+/// or two retries; a fourth attempt is not diagnosis, it is the amplifier.
+pub const MAX_CAPTURE_ATTEMPTS: u32 = 3;
+
+/// #1160 — the absolute wall the capture sequence may not cross, measured from
+/// the FIRST attempt of the hold.
+///
+/// The attempt cap already bounds the count; this bounds the *duration*, and the
+/// two fail closed independently. A capture that hangs for a long time in the
+/// backend (a stuck upload retrying its own backoff, an unresponsive VMM) burns
+/// wall-clock rather than attempts, and without this the hold would keep a slot,
+/// a tap and a live VM occupied until the 30-minute TTL for a capture sequence
+/// that has already proved it is not converging.
+pub const CAPTURE_RETRY_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// #1160 — the delay before the first retry, doubled for each retry after it
+/// (15s, then 30s).
+///
+/// It is spent by REFUSING captures while the loop keeps polling, not by
+/// sleeping: the poll is what renews the lease (§3.2), and a hold that slept
+/// through its backoff would come back to a claim it no longer holds.
+pub const CAPTURE_RETRY_BACKOFF: Duration = Duration::from_secs(15);
 
 /// A control-poll fault that ENDS the hold locally, WITHOUT a terminal ack.
 ///
@@ -328,6 +362,119 @@ pub struct CaptureError {
     pub message: String,
 }
 
+/// #1160 — what the [`CaptureBudget`] says about capturing *right now*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CaptureAdmission {
+    /// Spend an attempt: run the capture.
+    Go,
+    /// A retry is due later. Keep holding (and keep polling, which is what keeps
+    /// the lease alive) — do NOT capture.
+    BackingOff,
+    /// The budget is spent. The hold is over; carries the reason for the ack.
+    Exhausted(String),
+}
+
+/// #1160 — the bounded capture retry budget for ONE hold.
+///
+/// Both bounds are checked by the single [`CaptureBudget::exhausted`] predicate,
+/// deliberately: the loop consults it from two places (before spending an
+/// attempt, and immediately after a failure so a spent budget ends the hold
+/// without waiting for another directive), and two copies of "is the budget
+/// gone?" is two chances to disagree.
+#[derive(Debug, Clone)]
+struct CaptureBudget {
+    max_attempts: u32,
+    window: Duration,
+    backoff: Duration,
+    /// Attempts SPENT. Incremented when an attempt is admitted, never when it
+    /// completes — a capture that never returns a verdict has still spent one.
+    attempts: u32,
+    /// Set on the first admitted attempt, so a hold that never captures is never
+    /// on a capture clock.
+    window_closes_at: Option<Instant>,
+    /// Set after a failure; until it passes, `Capture` directives are refused.
+    next_attempt_at: Option<Instant>,
+    /// The last capture failure, quoted into the terminal reason so the author
+    /// is told what actually went wrong rather than only that it stopped.
+    last_failure: Option<String>,
+}
+
+impl CaptureBudget {
+    fn new(max_attempts: u32, window: Duration, backoff: Duration) -> Self {
+        Self {
+            max_attempts,
+            window,
+            backoff,
+            attempts: 0,
+            window_closes_at: None,
+            next_attempt_at: None,
+            last_failure: None,
+        }
+    }
+
+    /// Why the budget is spent, or `None` while it still has room.
+    ///
+    /// THE gate. Both bounds live here so that removing either one is a single,
+    /// visible edit — and so the mutation test that deletes the attempt cap has
+    /// exactly one place to bite.
+    fn exhausted(&self, now: Instant) -> Option<String> {
+        let last = self
+            .last_failure
+            .as_deref()
+            .map(|m| format!("; last failure: {m}"))
+            .unwrap_or_default();
+        if self.attempts >= self.max_attempts {
+            return Some(format!(
+                "capture budget spent: {} of {} attempts failed with the source \
+                 still alive{last}",
+                self.attempts, self.max_attempts
+            ));
+        }
+        if self
+            .window_closes_at
+            .is_some_and(|closes_at| now >= closes_at)
+        {
+            return Some(format!(
+                "capture retry window closed after {} attempt(s){last}",
+                self.attempts
+            ));
+        }
+        None
+    }
+
+    /// May a capture run now? Spends an attempt when it answers [`CaptureAdmission::Go`].
+    fn admit(&mut self, now: Instant) -> CaptureAdmission {
+        if let Some(reason) = self.exhausted(now) {
+            return CaptureAdmission::Exhausted(reason);
+        }
+        if self.next_attempt_at.is_some_and(|due_at| now < due_at) {
+            return CaptureAdmission::BackingOff;
+        }
+        // The window starts at the first attempt, not at hold entry: an author
+        // who spends 20 minutes on their app before pressing capture has not
+        // spent any of their retry window doing it.
+        self.window_closes_at.get_or_insert(now + self.window);
+        self.attempts += 1;
+        CaptureAdmission::Go
+    }
+
+    /// Record a capture that failed with the source alive, and arm the backoff.
+    fn record_failure(&mut self, now: Instant, message: String) {
+        self.last_failure = Some(message);
+        // 15s, 30s, 60s … — shifted by the attempts already spent. Saturating on
+        // both the shift and the multiply so a large budget can never wrap the
+        // delay round to zero, which would silently restore the amplifier.
+        let doubling = self.attempts.saturating_sub(1).min(16);
+        let delay = self.backoff.saturating_mul(1u32 << doubling);
+        self.next_attempt_at = Some(now + delay);
+    }
+
+    /// Attempts spent so far.
+    fn attempts_spent(&self) -> u32 {
+        self.attempts
+    }
+}
+
 /// The terminal outcome of a hold phase, projected to the wizard terminal-ack
 /// reason (SSOT §3.8) via [`Self::terminal_ack_reason`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +493,21 @@ pub enum HoldTermination {
     /// failed — no re-capture.
     AcceptanceFailedSourceLost {
         /// Diagnostic detail (≤ 1800 chars once truncated by the ack builder).
+        failure_reason: String,
+    },
+    /// #1160 — every capture attempt this hold was allowed failed with the
+    /// source ALIVE, or the retry window closed before one succeeded.
+    ///
+    /// Distinct from [`Self::AcceptanceFailedSourceLost`] on purpose: the guest
+    /// survived every one of these failures, so ADR-012's terminal branch does
+    /// not apply and the author's next move is a NEW attempt, not a lost source.
+    /// It is a failure rather than an orderly [`Self::AttemptEnded`] because the
+    /// author asked for a capture and did not get one — saying "attempt ended"
+    /// would hide that.
+    CaptureBudgetExhausted {
+        /// How many attempts were spent.
+        attempts: u32,
+        /// Which bound was hit, and the last capture failure behind it.
         failure_reason: String,
     },
     /// Fail-closed refusal before ever entering capture — e.g. an ineligible
@@ -410,6 +572,12 @@ impl HoldTermination {
             HoldTermination::AcceptanceFailedSourceLost { .. } => {
                 Some(TerminalAckReason::AcceptanceFailedSourceLost)
             }
+            // #1160. `build_failed` is the only failure reason §3.8 offers that
+            // does not claim the source was lost — and the source was NOT lost
+            // here, which is the whole distinction. `failure_stage` carries what
+            // `build_failed` alone would blur: the build succeeded and the hold
+            // reached `holding`; it is the capture that could not be sealed.
+            HoldTermination::CaptureBudgetExhausted { .. } => Some(TerminalAckReason::BuildFailed),
             HoldTermination::FailedClosed { .. } => Some(TerminalAckReason::BuildFailed),
             HoldTermination::TornDownWithoutAck { .. } => None,
         }
@@ -421,6 +589,7 @@ impl HoldTermination {
             HoldTermination::AcceptanceFailedSourceLost { .. } => {
                 Some(WizardFailureStage::Acceptance)
             }
+            HoldTermination::CaptureBudgetExhausted { .. } => Some(WizardFailureStage::CaptureSeal),
             HoldTermination::FailedClosed { .. } => Some(WizardFailureStage::Holding),
             _ => None,
         }
@@ -603,6 +772,12 @@ impl<'a> HoldPhase<'a> {
 
         let mut observed_epoch: u64 = 0;
         let mut deadline = self.clock.now() + self.hold_ttl;
+        // #1160 — the bounded capture retry budget for this hold.
+        let mut budget = CaptureBudget::new(
+            MAX_CAPTURE_ATTEMPTS,
+            CAPTURE_RETRY_WINDOW,
+            CAPTURE_RETRY_BACKOFF,
+        );
 
         loop {
             // (2) Fail-closed deadline gate FIRST: never force a capture past the
@@ -685,6 +860,31 @@ impl<'a> HoldPhase<'a> {
                         }));
                     };
 
+                    // (3c) #1160 — the capture budget, checked AFTER the two
+                    // fail-closed refusals above and BEFORE any guest work.
+                    //
+                    // Its place in the order is the point: a directive refused
+                    // for missing `pause_permitted` or a missing candidate id
+                    // never reached a capture, so it must not spend one — the
+                    // budget counts captures the guest actually paid for, not
+                    // directives the server sent.
+                    match budget.admit(self.clock.now()) {
+                        CaptureAdmission::Go => {}
+                        // A retry is armed but not yet due. Fall back to holding
+                        // — the next poll renews the lease, and the deadline gate
+                        // at the top of the loop still owns the hold TTL, so a
+                        // backoff can never outlive the hold it is inside.
+                        CaptureAdmission::BackingOff => continue,
+                        CaptureAdmission::Exhausted(failure_reason) => {
+                            return Ok(HoldOutcome::Terminal(
+                                HoldTermination::CaptureBudgetExhausted {
+                                    attempts: budget.attempts_spent(),
+                                    failure_reason,
+                                },
+                            ));
+                        }
+                    }
+
                     // (4) Firecracker-concrete capture for this epoch. The lease
                     // is scoped to the step so the control seam is free again
                     // afterwards — the §3.6 report rides the same seam.
@@ -710,10 +910,33 @@ impl<'a> HoldPhase<'a> {
                         Err(err) => {
                             // No candidate report (SSOT §3.6). Source alive →
                             // return to holding; source lost → terminal (ADR-012).
+                            //
+                            // The ADR-012 branch is checked FIRST and is not
+                            // charged to the retry budget's exhaustion message:
+                            // a lost guest ends the attempt for a reason of its
+                            // own, and reporting it as a spent capture budget
+                            // would tell the author to try again against a guest
+                            // that no longer exists.
                             if err.source_lost {
                                 return Ok(HoldOutcome::Terminal(
                                     HoldTermination::AcceptanceFailedSourceLost {
                                         failure_reason: err.message,
+                                    },
+                                ));
+                            }
+                            // #1160 — arm the backoff, then end the hold HERE if
+                            // that was the last attempt. Waiting for another
+                            // `capture` directive to discover it would leave the
+                            // decision to the control channel, which is the party
+                            // that was driving the amplification: the failing
+                            // hold must terminate on its own budget.
+                            let now = self.clock.now();
+                            budget.record_failure(now, err.message);
+                            if let Some(failure_reason) = budget.exhausted(now) {
+                                return Ok(HoldOutcome::Terminal(
+                                    HoldTermination::CaptureBudgetExhausted {
+                                        attempts: budget.attempts_spent(),
+                                        failure_reason,
                                     },
                                 ));
                             }
@@ -1422,9 +1645,20 @@ mod tests {
     /// the capture's own return value to notice a dead lease.
     struct ScriptedCapture {
         result: Result<HeldCapture, CaptureError>,
+        /// #1160 — results consumed IN ORDER before falling back to `result`,
+        /// so a test can script "fails twice, then succeeds" and see which
+        /// attempt the budget actually let through.
+        head: Vec<Result<HeldCapture, CaptureError>>,
         calls: u32,
         lease_drives: u32,
         seen_candidate_ids: Vec<String>,
+        /// The clock, advanced by however long a capture is scripted to take —
+        /// how a test spends the retry WINDOW without spending real minutes.
+        clock: Option<FakeClock>,
+        takes: Duration,
+        /// When each attempt STARTED (needs `clock`). The gap between two of
+        /// these is the backoff, measured rather than assumed.
+        call_instants: Vec<Instant>,
     }
 
     impl ScriptedCapture {
@@ -1437,15 +1671,55 @@ mod tests {
                     artifact_location: "cas://held/candidate".to_string(),
                     source_lost,
                 }),
+                head: Vec::new(),
                 calls: 0,
                 lease_drives: 0,
                 seen_candidate_ids: Vec::new(),
+                clock: None,
+                takes: Duration::ZERO,
+                call_instants: Vec::new(),
+            }
+        }
+
+        /// #1160 — a capture that always fails with the GUEST STILL ALIVE: the
+        /// exact shape that used to return to holding forever (a seal that
+        /// worked and an upload that did not).
+        fn always_failing(message: &str) -> Self {
+            Self {
+                result: Err(CaptureError {
+                    source_lost: false,
+                    message: message.to_string(),
+                }),
+                ..Self::ok("unused", false)
+            }
+        }
+
+        /// #1160 — fails `n` times with the source alive, then succeeds.
+        fn failing_then_ok(n: usize, candidate_id: &str) -> Self {
+            let ok = Self::ok(candidate_id, false);
+            Self {
+                head: (0..n)
+                    .map(|i| {
+                        Err(CaptureError {
+                            source_lost: false,
+                            message: format!("upload stalled ({})", i + 1),
+                        })
+                    })
+                    .collect(),
+                ..ok
             }
         }
 
         /// A capture long enough to need `n` keepalives — a real one.
         fn driving_the_lease(mut self, n: u32) -> Self {
             self.lease_drives = n;
+            self
+        }
+
+        /// #1160 — each attempt burns `takes` of the shared clock.
+        fn taking(mut self, clock: FakeClock, takes: Duration) -> Self {
+            self.clock = Some(clock);
+            self.takes = takes;
             self
         }
     }
@@ -1465,7 +1739,15 @@ mod tests {
             for _ in 0..self.lease_drives {
                 let _ = lease.keepalive();
             }
-            self.result.clone()
+            if let Some(clock) = &self.clock {
+                self.call_instants.push(clock.now());
+                clock.advance(self.takes);
+            }
+            if self.head.is_empty() {
+                self.result.clone()
+            } else {
+                self.head.remove(0)
+            }
         }
     }
 
@@ -2152,6 +2434,412 @@ mod tests {
         assert_eq!(
             outcome.failure_stage(),
             Some(WizardFailureStage::Acceptance)
+        );
+    }
+
+    // ── #1160 the bounded capture retry budget ──────────────────────────────
+    //
+    // The defect these pin down: a capture that failed with the source ALIVE
+    // returned to holding, the control channel kept delivering `capture` until a
+    // candidate was reported, and nothing in between counted or waited. Every
+    // poll drove a fresh pause + full memory seal — 356 snapshots in 15 minutes
+    // on staging, at a memory size the SUBMITTER picks.
+    //
+    // Production defaults are what is exercised: `HoldPhase::run` reads
+    // `MAX_CAPTURE_ATTEMPTS` / `CAPTURE_RETRY_WINDOW` / `CAPTURE_RETRY_BACKOFF`
+    // directly and no fixture can inject a different bound, so a test that goes
+    // green here is a statement about the builder that ships.
+
+    /// The load-bearing one: three attempts, then the hold is over.
+    ///
+    /// The control channel offers `capture` FOREVER here (a `ScriptedControl`
+    /// clamps to its last response), and the hold TTL is the full 30 minutes, so
+    /// nothing but the budget itself can end this run. Deleting the attempt cap
+    /// leaves it polling for the whole simulated TTL and failing on the count.
+    #[test]
+    fn a_capture_that_keeps_failing_is_bounded_at_three_attempts() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // The production cadence: a control poll every 2s (HOLD_CONTROL_POLL_INTERVAL).
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        let mut cap = ScriptedCapture::always_failing("artifact upload to R2 failed")
+            .taking(clock.clone(), Duration::ZERO);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        // The literal 3, not `MAX_CAPTURE_ATTEMPTS`: asserting against the
+        // constant would stay green if the constant itself were raised, and the
+        // NUMBER is the mitigation.
+        assert_eq!(
+            cap.calls, 3,
+            "a hold spends at most three capture attempts; got {}",
+            cap.calls
+        );
+        assert_eq!(MAX_CAPTURE_ATTEMPTS, 3, "the shipped bound is three");
+        let HoldTermination::CaptureBudgetExhausted {
+            attempts,
+            failure_reason,
+        } = &outcome
+        else {
+            panic!("expected a spent capture budget, got {outcome:?}");
+        };
+        assert_eq!(*attempts, 3);
+        assert!(
+            failure_reason.contains("capture budget spent"),
+            "{failure_reason}"
+        );
+        // The author is told what actually broke, not just that it stopped.
+        assert!(
+            failure_reason.contains("artifact upload to R2 failed"),
+            "the last capture failure must survive into the terminal reason: \
+             {failure_reason}"
+        );
+        // §3.8: a real failure ack, refined to the stage that failed. NOT
+        // `attempt_ended` — the author asked for a capture and did not get one.
+        assert_eq!(
+            outcome.terminal_ack_reason(),
+            Some(TerminalAckReason::BuildFailed)
+        );
+        assert_eq!(
+            outcome.failure_stage(),
+            Some(WizardFailureStage::CaptureSeal)
+        );
+        // No candidate was ever reported (SSOT §3.6: a failed capture reports
+        // nothing), so nothing downstream can publish one of these.
+        assert!(control.candidate_reports().is_empty());
+        assert_eq!(lifecycle.executes, 0, "acceptance never ran");
+    }
+
+    /// The gap between two attempts is the backoff, and it is spent POLLING.
+    ///
+    /// Sleeping through it would be the obvious implementation and the wrong
+    /// one: the poll is what renews the lease (§3.2), so a hold that slept 15s
+    /// (then 30s) would come back to a claim it no longer holds — turning a
+    /// retryable capture failure into a torn-down attempt.
+    #[test]
+    fn the_backoff_is_spent_holding_and_polling_not_capturing() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        let mut cap =
+            ScriptedCapture::always_failing("seal failed").taking(clock.clone(), Duration::ZERO);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.call_instants.len(), 3);
+        let first_gap = cap.call_instants[1] - cap.call_instants[0];
+        let second_gap = cap.call_instants[2] - cap.call_instants[1];
+        assert!(
+            first_gap >= CAPTURE_RETRY_BACKOFF,
+            "first retry waited {first_gap:?}, expected at least {CAPTURE_RETRY_BACKOFF:?}"
+        );
+        assert!(
+            second_gap >= CAPTURE_RETRY_BACKOFF * 2,
+            "the backoff doubles: second retry waited {second_gap:?}, expected at \
+             least {:?}",
+            CAPTURE_RETRY_BACKOFF * 2
+        );
+        // Polls kept happening across those gaps — that is the lease staying
+        // alive. Three captures against ~23 polls, not one poll per capture.
+        assert!(
+            control.polls > cap.calls as usize * 3,
+            "the backoff must be spent polling ({} polls for {} captures)",
+            control.polls,
+            cap.calls
+        );
+    }
+
+    /// The budget is a BOUND, not a ban: the last attempt may still succeed, and
+    /// when it does the hold proceeds exactly as an unretried one would.
+    #[test]
+    fn a_retry_inside_the_budget_can_still_capture_and_accept() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        // Two transient failures, then the third attempt seals.
+        let mut cap =
+            ScriptedCapture::failing_then_ok(2, "cand_1").taking(clock.clone(), Duration::ZERO);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 3, "the third attempt is allowed to succeed");
+        assert_eq!(
+            control.candidate_reports().len(),
+            1,
+            "exactly the successful capture is reported (§3.6)"
+        );
+        assert!(
+            matches!(outcome, HoldTermination::Accepted { .. }),
+            "got {outcome:?}"
+        );
+    }
+
+    /// The window closes even with attempts left.
+    ///
+    /// Two independent bounds, and this is the one the attempt cap cannot cover:
+    /// a capture that hangs for minutes in the backend burns wall-clock instead
+    /// of attempts, holding a slot, a tap and a live VM the whole time.
+    #[test]
+    fn the_retry_window_closes_even_with_attempts_left() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        // Each attempt grinds for six minutes before failing, so the second one
+        // ends past the ten-minute window with a third attempt still unspent.
+        let mut cap = ScriptedCapture::always_failing("the upload hung")
+            .taking(clock.clone(), Duration::from_secs(6 * 60));
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(
+            cap.calls, 2,
+            "the window closed with an attempt still unspent"
+        );
+        let HoldTermination::CaptureBudgetExhausted { failure_reason, .. } = &outcome else {
+            panic!("expected a closed retry window, got {outcome:?}");
+        };
+        assert!(
+            failure_reason.contains("retry window closed"),
+            "{failure_reason}"
+        );
+    }
+
+    /// ADR-012 outranks the budget: a LOST guest is not a spent retry allowance.
+    ///
+    /// The two failures are told apart because the author's next move differs.
+    /// A spent budget leaves a live app they can capture again in a new attempt;
+    /// a lost source does not, and reporting one as the other would send them
+    /// back to a guest that no longer exists.
+    #[test]
+    fn a_lost_source_is_terminal_on_its_own_reason_not_the_capture_budget() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        let mut cap = ScriptedCapture {
+            result: Err(CaptureError {
+                source_lost: true,
+                message: "the guest could not be resumed".to_string(),
+            }),
+            ..ScriptedCapture::ok("cand_1", false)
+        };
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 1, "a lost source never retries");
+        assert!(
+            matches!(outcome, HoldTermination::AcceptanceFailedSourceLost { .. }),
+            "a lost guest keeps its own ADR-012 reason, got {outcome:?}"
+        );
+        assert_eq!(
+            outcome.terminal_ack_reason(),
+            Some(TerminalAckReason::AcceptanceFailedSourceLost)
+        );
+    }
+
+    /// The hold deadline still outranks a pending retry.
+    ///
+    /// A backoff armed for later must never resurrect a hold whose TTL has
+    /// passed: the deadline gate runs first on every iteration, so the retry is
+    /// simply never reached.
+    #[test]
+    fn a_retry_armed_past_the_hold_deadline_is_never_taken() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        let mut control = ScriptedControl::advancing(
+            clock.clone(),
+            Duration::from_secs(2),
+            vec![capture(1, "cand_1", true)],
+        );
+        let mut cap =
+            ScriptedCapture::always_failing("seal failed").taking(clock.clone(), Duration::ZERO);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![]);
+
+        // A 10s hold: the first failure arms a 15s backoff that the hold cannot
+        // outlive.
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(cap.calls, 1, "no retry after the hold deadline");
+        assert!(
+            matches!(outcome, HoldTermination::AttemptEnded),
+            "the hold ends on its own deadline, got {outcome:?}"
+        );
+    }
+
+    /// The budget unit itself, so the two bounds can be read in one place.
+    #[test]
+    fn the_capture_budget_bounds_count_and_duration_independently() {
+        let base = Instant::now();
+        let window = Duration::from_secs(600);
+        let backoff = Duration::from_secs(15);
+
+        // (a) the count. Three admissions, then exhausted — with the clock
+        // frozen, so only the count can be doing it.
+        let mut budget = CaptureBudget::new(3, window, backoff);
+        for i in 1..=3 {
+            assert_eq!(budget.admit(base), CaptureAdmission::Go, "attempt {i}");
+            // Failures are what arm the backoff, so clear it to isolate the count.
+            budget.record_failure(base, format!("failure {i}"));
+            budget.next_attempt_at = None;
+        }
+        assert_eq!(budget.attempts_spent(), 3);
+        assert!(matches!(budget.admit(base), CaptureAdmission::Exhausted(_)));
+
+        // (b) the duration, with attempts to spare.
+        let mut budget = CaptureBudget::new(3, window, backoff);
+        assert_eq!(budget.admit(base), CaptureAdmission::Go);
+        budget.record_failure(base, "failure".to_string());
+        assert!(
+            budget
+                .exhausted(base + window - Duration::from_secs(1))
+                .is_none(),
+            "inside the window"
+        );
+        assert!(
+            budget.exhausted(base + window).is_some(),
+            "the window closes ON its deadline, with one attempt still unspent"
+        );
+
+        // (c) the backoff refuses without spending anything.
+        let mut budget = CaptureBudget::new(3, window, backoff);
+        assert_eq!(budget.admit(base), CaptureAdmission::Go);
+        budget.record_failure(base, "failure".to_string());
+        assert_eq!(budget.admit(base), CaptureAdmission::BackingOff);
+        assert_eq!(
+            budget.attempts_spent(),
+            1,
+            "a refused directive costs no attempt"
+        );
+        assert_eq!(budget.admit(base + backoff), CaptureAdmission::Go);
+    }
+
+    /// A directive refused BEFORE any guest work costs no attempt.
+    ///
+    /// `pause_permitted == false` (ADR-007) and a missing candidate id (§3.6)
+    /// both return to holding without touching the guest. Charging them would
+    /// let a server that sends malformed directives burn the author's retries.
+    #[test]
+    fn a_directive_refused_before_the_guest_costs_no_attempt() {
+        let clock = FakeClock::new();
+        let cancel = AcceptanceCancellation::default();
+        // Ten refusals (no pause_permitted) ahead of the real capture: if any of
+        // them were charged, the budget would be gone before the guest is
+        // touched and the capture below would never run.
+        let mut responses: Vec<ControlResponse> =
+            (0..10).map(|_| capture(1, "cand_1", false)).collect();
+        responses.push(capture(1, "cand_1", true));
+        let mut control =
+            ScriptedControl::advancing(clock.clone(), Duration::from_secs(2), responses);
+        let mut cap = ScriptedCapture::ok("cand_1", false);
+        let mut elig = OkEligibility;
+        let mut extend = NoExtend;
+        let mut lifecycle = FakeLifecycle::new(vec![VerificationOutcome::Exited(0)]);
+
+        let outcome = run_hold(
+            &mut control,
+            &mut cap,
+            &mut elig,
+            &mut extend,
+            &mut lifecycle,
+            &clock,
+            &cancel,
+            DEFAULT_HOLD_TTL,
+        );
+
+        assert_eq!(cap.calls, 1);
+        assert!(
+            matches!(outcome, HoldTermination::Accepted { .. }),
+            "got {outcome:?}"
         );
     }
 
