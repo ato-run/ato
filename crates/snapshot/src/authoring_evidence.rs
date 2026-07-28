@@ -708,6 +708,27 @@ pub fn deduplicate_screenshot_candidates(
     deduplicated
 }
 
+/// Compute the SSOT screenshot duplicate key from compositor PNG bytes.
+///
+/// dHash intentionally ignores small encoding and color differences while
+/// retaining the coarse visual structure of the frame.
+pub fn screenshot_perceptual_hash_png(png: &[u8]) -> Result<String, AuthoringEvidenceError> {
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|_| AuthoringEvidenceError::InvalidScreenshot)?
+        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let mut hash = 0_u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash <<= 1;
+            if image.get_pixel(x, y)[0] > image.get_pixel(x + 1, y)[0] {
+                hash |= 1;
+            }
+        }
+    }
+    Ok(format!("dhash64:{hash:016x}"))
+}
+
 fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), AuthoringEvidenceError> {
     for (field, value) in [
         (
@@ -862,6 +883,8 @@ pub enum AuthoringEvidenceError {
     MissingPostRestoreScreenshot,
     #[error("a screenshot candidate must be selected")]
     ScreenshotNotSelected,
+    #[error("screenshot is not a decodable PNG")]
+    InvalidScreenshot,
     #[error("canonicalization failed: {0}")]
     Canonicalization(String),
     #[error("signed builder receipt payload is not valid base64-encoded JSON")]
@@ -1099,6 +1122,22 @@ mod tests {
         ]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].candidate_id, "a");
+    }
+
+    #[test]
+    fn screenshot_perceptual_hash_is_stable_for_the_same_frame() {
+        let mut frame = image::GrayImage::new(9, 8);
+        for (x, _, pixel) in frame.enumerate_pixels_mut() {
+            pixel.0[0] = (x * 20) as u8;
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(frame)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        assert_eq!(
+            screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
+            screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
+        );
     }
 
     #[test]

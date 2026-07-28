@@ -234,9 +234,28 @@ pub struct FirecrackerBackend {
     page_servers: Arc<Mutex<HashMap<String, crate::uffd_page_server::PageServerHandle>>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirecrackerCompatibilityMetadata {
+    pub runner_class_id: String,
+    pub guest_kernel: String,
+    pub vmm: String,
+    pub snapshot_format: String,
+}
+
 impl FirecrackerBackend {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Compatibility facts recorded in a builder-issued Ready-State Seal.
+    pub fn compatibility_metadata(&self) -> FirecrackerCompatibilityMetadata {
+        let facts = self.runner_facts();
+        FirecrackerCompatibilityMetadata {
+            runner_class_id: facts.id().to_string(),
+            guest_kernel: facts.guest_kernel_id,
+            vmm: format!("{}@{}", facts.vmm, facts.vmm_version),
+            snapshot_format: facts.snapshot_format,
+        }
     }
 
     pub fn with_config(config: FirecrackerConfig) -> Self {

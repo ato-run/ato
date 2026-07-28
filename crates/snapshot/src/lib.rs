@@ -88,6 +88,7 @@ pub mod source_receipt;
 // Build-time screenshot capture (store thumbnail automation) — internal to
 // `firecracker.rs`'s `build_ready_state`, no public API of its own.
 mod screenshot;
+pub use screenshot::capture_best_effort as capture_screenshot_best_effort;
 mod seal;
 pub mod state_volume;
 pub mod state_volume_persistence;
