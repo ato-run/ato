@@ -4171,6 +4171,9 @@ fn process_authoring_setup(
     }
     drop(gateway);
     guest.release();
+    client
+        .mark_setup_stopped(work)
+        .map_err(|error| fail("setup_stop", error))?;
     Ok(())
 }
 
