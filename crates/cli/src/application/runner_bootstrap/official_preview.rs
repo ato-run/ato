@@ -457,6 +457,10 @@ impl GenerationIdentity {
     }
 }
 
+fn escape_caddy_quoted_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Substitute the real marker into a rendered generation.
 ///
 /// Called AFTER the identity is derived, for the reason
@@ -468,7 +472,7 @@ pub(crate) fn finalize_generation(
     fragments: &[GeneratedFragment],
     identity: &GenerationIdentity,
 ) -> Vec<GeneratedFragment> {
-    let body = identity.marker_body();
+    let body = escape_caddy_quoted_string(&identity.marker_body());
     fragments
         .iter()
         .map(|fragment| GeneratedFragment {
@@ -1078,8 +1082,15 @@ mod tests {
         // probe pass while another origin still served the old routes.
         assert_eq!(preview.content.matches(GENERATION_MARKER_PATH).count(), 3);
         assert_eq!(wizard.content.matches(GENERATION_MARKER_PATH).count(), 2);
-        assert!(preview.content.contains(&identity.marker_body()));
-        assert!(wizard.content.contains(&identity.marker_body()));
+        let caddy_marker = escape_caddy_quoted_string(&identity.marker_body());
+        assert!(preview.content.contains(&caddy_marker));
+        assert!(wizard.content.contains(&caddy_marker));
+        assert!(
+            !preview
+                .content
+                .contains(&format!("respond \"{}\" 200", identity.marker_body())),
+            "raw JSON quotes would terminate the Caddy string"
+        );
     }
 
     /// The identity is derived from the routes, and substituting the marker
