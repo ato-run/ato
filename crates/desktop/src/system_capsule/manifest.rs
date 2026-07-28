@@ -167,11 +167,7 @@ const TABLE: &[SystemCapsuleDescriptor] = &[
         legacy_aliases: &["ato-dock"],
         display_name: "Dock",
         expected_origin: "capsule://desktop.ato.run/dock",
-        allowed_capabilities: &[
-            Capability::WebviewCreate,
-            Capability::WindowsClose,
-            Capability::LaunchSystemCapsule,
-        ],
+        allowed_capabilities: &[Capability::WindowsClose, Capability::LaunchSystemCapsule],
     },
     SystemCapsuleDescriptor {
         id: SystemCapsuleId::AtoOnboarding,

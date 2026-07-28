@@ -12,6 +12,9 @@
 //! `runner_class_id` and carries no secret.
 
 use capsule::foundation::install_lifecycle::RunnerClassId;
+use capsule::foundation::types::ready_state::{
+    DEFAULT_STABLE_INTERVAL_MS, DEFAULT_STABLE_SUCCESSES, SnapshotConfig,
+};
 use capsulefs::{BlobManifest, HotsetProfile};
 use protocol::session_surface::{
     EndpointContract, EndpointContractError, SessionSurfaceRequirement,
@@ -42,6 +45,10 @@ pub struct ReadyStateManifest {
     /// Declared execution id facet, if known (opaque digest string).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_id: Option<String>,
+    /// Explicit schema of `execution_id`. Hash prefixes are algorithms, not
+    /// schema discriminators; `None` therefore means legacy even for BLAKE3 ids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_identity_schema: Option<String>,
     /// Capsule-authored target presentation requirement copied from the lock/build
     /// input. A concrete descriptor and rotatable access data are session state,
     /// never artifact state.
@@ -114,6 +121,26 @@ impl ReadyStateManifest {
     /// Total bytes across all present layers.
     pub fn total_layer_bytes(&self) -> u64 {
         self.layers.iter().map(|(_, m)| m.total_len).sum()
+    }
+
+    /// Returns the typed Capsule-v1 execution id only when the artifact carries
+    /// the explicit v1 schema. A BLAKE3 prefix alone always remains legacy.
+    pub fn v1_execution_id(
+        &self,
+    ) -> Result<Option<capsule::execution_contract::ExecutionId>, String> {
+        match self.execution_identity_schema.as_deref() {
+            None => Ok(None),
+            Some(capsule::execution_contract::EXECUTION_CONTRACT_V1_SCHEMA) => {
+                let value = self.execution_id.clone().ok_or_else(|| {
+                    "v1 execution identity schema is present but execution_id is missing"
+                        .to_string()
+                })?;
+                capsule::execution_contract::ExecutionId::new(value)
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            }
+            Some(other) => Err(format!("unsupported execution identity schema {other:?}")),
+        }
     }
 }
 
@@ -188,6 +215,77 @@ pub struct RestoreContract {
     /// Healthcheck path, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub healthcheck: Option<String>,
+    /// User-facing paths the build must warm up before sealing the snapshot —
+    /// each receives an HTTP GET (2xx/3xx) AFTER the healthcheck answers and
+    /// BEFORE the Pause+Snapshot, so the snapshot memory already carries the
+    /// first-screen work (template generation, JIT, DB init, First Frame prep).
+    /// Empty ⇒ v1 behavior (healthcheck-only seal point).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmup_paths: Vec<String>,
+    /// Consecutive stable successes across `warmup_paths` before the Pause.
+    /// `1` (the default) ⇒ first 2xx/3xx of every path is enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_successes: Option<u32>,
+    /// Polling interval between stability checks, in milliseconds. Default 250.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_interval_ms: Option<u64>,
+    /// The path the runner hits to judge restore readiness — i.e. the path the
+    /// browser loads first. Defaults to `healthcheck`, then `/` when both are
+    /// absent. Sealing a snapshot only after `/health` answers means user-facing
+    /// `/` work is not in the snapshot, and a runner reports ready before the
+    /// user sees anything; `content_ready_path` closes that gap on both ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ready_path: Option<String>,
+}
+
+/// The first-screen warmup recipe, derived ONCE from either an author's
+/// `[snapshot]` table (recipe lane) or operator env (import lanes), so every
+/// lane freezes the same fields by the same rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WarmupRecipe {
+    pub warmup_paths: Vec<String>,
+    pub stable_successes: Option<u32>,
+    pub stable_interval_ms: Option<u64>,
+    pub content_ready_path: Option<String>,
+}
+
+impl WarmupRecipe {
+    /// `stable_*` ride the artifact only when there is warmup to stabilize. With
+    /// no `warmup_paths` they stay `None` so the backend's `effective_*` fallback
+    /// applies — an author-skipped field is never frozen as a value the build did
+    /// not actually use, and a pre-warmup manifest seals byte-identically.
+    pub fn new(
+        warmup_paths: Vec<String>,
+        stable_successes: u32,
+        stable_interval_ms: u64,
+        content_ready_path: Option<String>,
+    ) -> Self {
+        let warming = !warmup_paths.is_empty();
+        Self {
+            warmup_paths,
+            stable_successes: warming.then_some(stable_successes),
+            stable_interval_ms: warming.then_some(stable_interval_ms),
+            content_ready_path,
+        }
+    }
+
+    /// The recipe an author declared in `[snapshot]`.
+    pub fn from_snapshot_config(cfg: &SnapshotConfig) -> Self {
+        Self::new(
+            cfg.warmup_paths.clone(),
+            cfg.stable_successes,
+            cfg.stable_interval_ms,
+            cfg.content_ready_path.clone(),
+        )
+    }
+
+    /// Reject any probe path that would break the guest HTTP probe's request line.
+    pub fn validate(&self) -> Result<(), String> {
+        capsule::foundation::types::ready_state::validate_probe_paths(
+            &self.warmup_paths,
+            self.content_ready_path.as_deref(),
+        )
+    }
 }
 
 impl RestoreContract {
@@ -196,6 +294,45 @@ impl RestoreContract {
         self.endpoints
             .iter()
             .try_for_each(EndpointContract::validate)
+    }
+
+    /// Effective `stable_successes`, falling back to the v1 default. `0` is
+    /// clamped to `1`: a "stable" round count of zero would seal without ever
+    /// confirming the warmup path answered at all.
+    pub fn effective_stable_successes(&self) -> u32 {
+        self.stable_successes
+            .unwrap_or(DEFAULT_STABLE_SUCCESSES)
+            .max(1)
+    }
+
+    /// Effective `stable_interval_ms`, falling back to the v1 default.
+    pub fn effective_stable_interval_ms(&self) -> u64 {
+        self.stable_interval_ms
+            .unwrap_or(DEFAULT_STABLE_INTERVAL_MS)
+    }
+
+    /// Reject any probe path that would break the guest HTTP probe's request
+    /// line — see [`capsule::foundation::types::ready_state::is_valid_probe_path`].
+    pub fn validate_probe_paths(&self) -> Result<(), String> {
+        capsule::foundation::types::ready_state::validate_probe_paths(
+            &self.warmup_paths,
+            self.content_ready_path.as_deref(),
+        )
+    }
+
+    /// Effective stablecheck poll interval as a `Duration`, falling back to 250ms.
+    pub fn effective_stable_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.effective_stable_interval_ms())
+    }
+
+    /// The path the runner should hit to judge RESTORE readiness (the user's
+    /// first-screen): `content_ready_path` if set, else `healthcheck`, else the
+    /// supplied fallback.
+    pub fn content_ready_path_or(&self, fallback: &str) -> String {
+        self.content_ready_path
+            .clone()
+            .or_else(|| self.healthcheck.clone())
+            .unwrap_or_else(|| fallback.to_string())
     }
 }
 
@@ -319,6 +456,7 @@ mod tests {
             has_vsock: false,
             runner_class_id: None,
             execution_id: None,
+            execution_identity_schema: None,
             surface_requirement: None,
             layers: ReadyStateLayers {
                 rootfs: Some(rootfs),
@@ -428,6 +566,92 @@ mod tests {
         .expect("parse legacy restore contract");
 
         assert!(parsed.endpoints.is_empty());
+        // New Ready-State warmup/content_ready fields default cleanly on legacy
+        // manifests — a manifest sealed before the warmup-flight ships round-trips
+        // byte-for-byte and reads as v1 (no extra warmup, no override).
+        assert!(parsed.warmup_paths.is_empty());
+        assert_eq!(parsed.stable_successes, None);
+        assert_eq!(parsed.stable_interval_ms, None);
+        assert_eq!(parsed.content_ready_path, None);
+        assert_eq!(parsed.effective_stable_successes(), 1);
+        assert_eq!(parsed.effective_stable_interval_ms(), 250);
+        assert_eq!(
+            parsed.content_ready_path_or("/"),
+            "/health",
+            "without content_ready_path the existing healthcheck wins"
+        );
+    }
+
+    #[test]
+    fn warmup_recipe_carries_stable_fields_only_when_there_is_warmup() {
+        use capsule::foundation::types::ready_state::SnapshotConfig;
+
+        // No warmup ⇒ stable_* stay None so the backend's v1 fallback applies and
+        // a pre-warmup manifest seals byte-identically. This is what makes the
+        // whole feature additive; freezing 1/250 here would change sealed bytes.
+        let none = WarmupRecipe::from_snapshot_config(&SnapshotConfig::default());
+        assert!(none.warmup_paths.is_empty());
+        assert_eq!(none.stable_successes, None);
+        assert_eq!(none.stable_interval_ms, None);
+        assert_eq!(none.content_ready_path, None);
+
+        // An author who declares warmup gets their exact knobs frozen.
+        let cfg = SnapshotConfig {
+            warmup_paths: vec!["/".to_string()],
+            stable_successes: 3,
+            stable_interval_ms: 200,
+            content_ready_path: Some("/app".to_string()),
+            ..SnapshotConfig::default()
+        };
+        let w = WarmupRecipe::from_snapshot_config(&cfg);
+        assert_eq!(w.warmup_paths, vec!["/"]);
+        assert_eq!(w.stable_successes, Some(3));
+        assert_eq!(w.stable_interval_ms, Some(200));
+        assert_eq!(w.content_ready_path.as_deref(), Some("/app"));
+        assert!(w.validate().is_ok());
+
+        // content_ready_path alone (no warmup) still rides: it retargets the
+        // RESTORE readiness probe even when nothing is warmed at build.
+        let only_ready = WarmupRecipe::new(vec![], 3, 200, Some("/app".to_string()));
+        assert_eq!(only_ready.content_ready_path.as_deref(), Some("/app"));
+        assert_eq!(only_ready.stable_successes, None);
+
+        // A bad path is rejected wherever the recipe is built.
+        assert!(
+            WarmupRecipe::new(vec!["health".to_string()], 1, 250, None)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn effective_stable_successes_clamps_zero_to_one() {
+        // stable_successes = 0 would mean "seal without ever confirming the
+        // warmup path answered" — the one value that must not be honored.
+        let c = RestoreContract {
+            stable_successes: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(c.effective_stable_successes(), 1);
+    }
+
+    #[test]
+    fn restore_contract_warmup_fields_round_trip() {
+        let contract = RestoreContract {
+            ports: vec![8080],
+            healthcheck: Some("/health".to_string()),
+            warmup_paths: vec!["/".to_string(), "/api/health".to_string()],
+            stable_successes: Some(3),
+            stable_interval_ms: Some(200),
+            content_ready_path: Some("/".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&contract).expect("serialize");
+        let parsed: RestoreContract = serde_json::from_str(&json).expect("parse");
+        assert_eq!(parsed, contract);
+        assert_eq!(parsed.effective_stable_successes(), 3);
+        assert_eq!(parsed.effective_stable_interval_ms(), 200);
+        assert_eq!(parsed.content_ready_path_or("/"), "/");
     }
 
     #[test]

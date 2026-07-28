@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::execution_plan::canonical::{
     compute_policy_segment_hash, compute_provisioning_policy_hash, normalize_unordered_set,
 };
@@ -181,7 +181,7 @@ pub fn compile_execution_plan_with_validation_mode(
 }
 
 pub fn compile_execution_plan_from_lock(
-    _lock: &AtoLock,
+    _lock: &CapsuleLock,
     resolved: &ResolvedLockRuntimeModel,
     overlay: &LockCompilerOverlay,
     platform: &PlatformSnapshot,
@@ -613,13 +613,13 @@ fn build_oci_policy_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ato_lock::AtoLock;
+    use crate::capsule_lock::CapsuleLock;
     use crate::lock_runtime::{LockCompilerOverlay, resolve_lock_runtime_model};
     use serde_json::json;
     use std::fs;
 
-    fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock::default();
+    fn sample_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "metadata".to_string(),
             json!({"name": "demo", "version": "0.1.0", "default_target": "main"}),

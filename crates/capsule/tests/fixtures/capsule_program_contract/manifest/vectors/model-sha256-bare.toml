@@ -1,0 +1,13 @@
+schema_version = "0.3"
+name = "model-pin"
+version = "0.1.0"
+type = "app"
+default_target = "chat"
+
+[targets.chat]
+runtime = "native-inference"
+engine = "llama.cpp"
+engine_version = "b9754"
+model = "model.gguf"
+model_sha256 = "abababababababababababababababababababababababababababababababab"
+port = 8080

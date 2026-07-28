@@ -7,7 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use capsule::ato_lock::{AtoLock, compute_closure_digest, recompute_lock_id, to_pretty_json};
+use capsule::capsule_lock::{
+    CapsuleLock, compute_closure_digest, recompute_lock_id, to_pretty_json,
+};
 use capsule::packers::payload::compute_manifest_hash_without_signatures;
 use capsule::types::CapsuleManifest;
 use tempfile::TempDir;
@@ -126,7 +128,7 @@ fn write_canonical_static_publish_lock(
     let closure_digest = compute_closure_digest(&closure)?
         .context("compute closure digest for canonical publish fixture")?;
 
-    let mut lock = AtoLock::default();
+    let mut lock = CapsuleLock::default();
     lock.resolution.entries.insert(
         "runtime".to_string(),
         serde_json::json!({"kind": "web", "driver": "static"}),
@@ -168,7 +170,7 @@ fn write_canonical_static_publish_lock(
         .map(|value| value.as_str().to_string())
         .context("canonical lock id missing after recompute")?;
     std::fs::write(
-        workspace_root.join("ato.lock.json"),
+        workspace_root.join("capsule.lock"),
         to_pretty_json(&lock).context("serialize canonical lock")?,
     )?;
     Ok((lock_id, closure_digest))

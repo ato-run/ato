@@ -1,6 +1,6 @@
 [package]
 name = "cli"
-version = "0.7.9"
+version = "0.8.0"
 edition = "2024"
 description = "ato CLI (meta-runtime)"
 authors = ["ato-run"]
@@ -83,6 +83,7 @@ thiserror = "2.0"
 subtle = "2.6"
 zeroize = "1.7"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 rcgen = "0.13"
 urlencoding = "2.1"
 hickory-resolver = "0.24"

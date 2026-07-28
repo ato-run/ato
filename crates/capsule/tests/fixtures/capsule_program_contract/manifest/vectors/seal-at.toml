@@ -1,0 +1,17 @@
+schema_version = "0.3"
+name = "seal-at"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+port = 8080
+
+[snapshot]
+mode = "warm"
+
+[seal_at]
+command = ["sh", "-lc", "curl -fsS http://127.0.0.1:8080/ready", "--label", ""]
+timeout_seconds = 120

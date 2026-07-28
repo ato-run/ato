@@ -1,0 +1,17 @@
+{
+  "capsule_type": "app",
+  "default_target": "chat",
+  "schema": "ato.capsule-program-manifest-intent/v1",
+  "targets": {
+    "targets": {
+      "chat": {
+        "engine": "llama.cpp",
+        "engine_version": "b9754",
+        "model": "model.gguf",
+        "model_sha256": "abababababababababababababababababababababababababababababababab",
+        "port": 8080,
+        "runtime": "native-inference"
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Component, PathBuf};
 
 use anyhow::Result;
-use capsule::ato_lock::{AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::capsule_lock::{CapsuleLock, UnresolvedReason, UnresolvedValue};
 use serde_json::{Value, json};
 
 use crate::application::engine::build::native_delivery::{
@@ -17,7 +17,7 @@ use super::diagnostics::{
 use super::provenance::{CompilerOwnedField, ProvenanceKind, ProvenanceRecord};
 
 pub(super) struct ManifestImportResult {
-    pub(super) draft_lock: AtoLock,
+    pub(super) draft_lock: CapsuleLock,
     pub(super) diagnostics: Vec<CompatibilityDiagnostic>,
     pub(super) provenance: Vec<ProvenanceRecord>,
 }
@@ -26,7 +26,7 @@ pub(super) fn import_manifest(
     input: &CompatibilityCompilerInput<'_>,
 ) -> Result<ManifestImportResult> {
     let manifest = input.manifest;
-    let mut draft_lock = AtoLock::default();
+    let mut draft_lock = CapsuleLock::default();
     let mut diagnostics = Vec::new();
     let mut provenance = Vec::new();
 
@@ -177,7 +177,7 @@ fn import_native_delivery_contract(
 
 fn import_workloads(
     input: &CompatibilityCompilerInput<'_>,
-    draft_lock: &mut AtoLock,
+    draft_lock: &mut CapsuleLock,
     diagnostics: &mut Vec<CompatibilityDiagnostic>,
     provenance: &mut Vec<ProvenanceRecord>,
 ) -> Result<Vec<Value>> {
@@ -422,7 +422,7 @@ fn workload_from_named_target(label: &str, target: &capsule::types::NamedTarget)
 
 fn import_target_hints(
     input: &CompatibilityCompilerInput<'_>,
-    draft_lock: &mut AtoLock,
+    draft_lock: &mut CapsuleLock,
     diagnostics: &mut Vec<CompatibilityDiagnostic>,
     provenance: &mut Vec<ProvenanceRecord>,
 ) -> Result<Vec<Value>> {

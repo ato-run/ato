@@ -1,0 +1,18 @@
+{
+  "manifest_intent": {
+    "capsule_type": "web-app",
+    "schema": "ato.capsule-program-manifest-intent/v1",
+    "state": {
+      "scratch": {
+        "durability": "ephemeral",
+        "kind": "filesystem",
+        "purpose": "run scratch"
+      }
+    }
+  },
+  "schema": "ato.capsule-program/v1",
+  "source": {
+    "digest": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+    "projection_schema": "ato.capsule-program-source-projection/v1"
+  }
+}

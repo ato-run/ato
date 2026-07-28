@@ -41,6 +41,16 @@ impl CapsuleManifest {
             errors.push(ValidationError::InvalidHostCapability(message));
         }
 
+        // `[seal_at]` argv + timeout rules (CAPSULE_V1_EXECUTION_MODEL_SPEC.md
+        // §6.1/§6.3). Rejected here in every mode: an unusable acceptance command
+        // would otherwise surface only at Snapshot-acceptance time, after a full
+        // build guest boot and capture.
+        if let Some(seal_at) = &self.seal_at
+            && let Err(message) = crate::types::ready_state::validate_seal_at(seal_at)
+        {
+            errors.push(ValidationError::InvalidSealAt(message));
+        }
+
         // Reject capabilities that have no production host execution path. These
         // are schema-only (currently `open-editor`, see #468): declaring one
         // would otherwise pass validation and convert into a grant that nothing
@@ -2104,6 +2114,8 @@ pub enum ValidationError {
     },
     #[error("Invalid host capability: {0}")]
     InvalidHostCapability(String),
+    #[error("Invalid [seal_at]: {0}")]
+    InvalidSealAt(String),
     #[error(
         "Unsupported host capability '{name}': this Ato build does not yet implement a host \
          execution path or consent UI for it. Remove the [[host_capabilities]] entry or track \

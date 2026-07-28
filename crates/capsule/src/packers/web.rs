@@ -8,8 +8,9 @@ use tracing::debug;
 use zstd::stream::write::Encoder as ZstdEncoder;
 
 use crate::error::{CapsuleError, Result};
+use crate::input_resolver::{CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME};
 use crate::lockfile;
-use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use crate::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME;
 use crate::packers::payload::{
     build_distribution_manifest, normalize_relative_utf8_path, reconstruct_from_chunks,
 };
@@ -125,12 +126,12 @@ pub fn pack(
     )?;
     let packaged_lockfile_bytes =
         crate::lockfile::render_lockfile_for_manifest(&lockfile_path, &distribution_manifest)?;
-    let packaged_lockfile_path = temp_dir.path().join(CAPSULE_LOCK_FILE_NAME);
+    let packaged_lockfile_path = temp_dir.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
     fs::write(&packaged_lockfile_path, packaged_lockfile_bytes).map_err(CapsuleError::Io)?;
     append_regular_file_normalized(
         &mut outer,
         &packaged_lockfile_path,
-        CAPSULE_LOCK_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
         reproducible_mtime_epoch(),
     )?;
 
@@ -370,8 +371,9 @@ fn should_skip_entry(rel: &Path, is_dir: bool) -> bool {
     if matches!(
         file_name.as_str(),
         "capsule.toml"
+            | LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             | CAPSULE_LOCK_FILE_NAME
-            | LEGACY_CAPSULE_LOCK_FILE_NAME
+            | DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             | "config.json"
             | "signature.json"
             | "sbom.spdx.json"
@@ -460,7 +462,8 @@ mod tests {
 
     // internal
     use super::{
-        CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME, SBOM_PATH, WebPackOptions, pack,
+        CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, SBOM_PATH, WebPackOptions, pack,
     };
     use crate::common::hash::sha256_hex;
     use crate::reporter::NoOpReporter;
@@ -540,7 +543,10 @@ run = "dist""#,
                 entry
                     .read_to_end(&mut manifest_toml_bytes)
                     .expect("read manifest TOML");
-            } else if path == CAPSULE_LOCK_FILE_NAME || path == LEGACY_CAPSULE_LOCK_FILE_NAME {
+            } else if path == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
+                || path == CAPSULE_LOCK_FILE_NAME
+                || path == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
+            {
                 has_lock = true;
             } else if path == "signature.json" {
                 has_signature = true;
@@ -581,8 +587,17 @@ run = "dist""#,
 
         assert!(files.iter().any(|p| p == "dist/index.html"));
         assert!(files.iter().any(|p| p == "dist/assets/app.js"));
+        assert!(
+            !files
+                .iter()
+                .any(|p| p == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
+        );
         assert!(!files.iter().any(|p| p == CAPSULE_LOCK_FILE_NAME));
-        assert!(!files.iter().any(|p| p == LEGACY_CAPSULE_LOCK_FILE_NAME));
+        assert!(
+            !files
+                .iter()
+                .any(|p| p == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
+        );
         assert!(!files.iter().any(|p| p == "config.json"));
 
         let manifest_toml: CapsuleManifest =

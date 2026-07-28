@@ -1,0 +1,11 @@
+schema_version = "0.3"
+name = "unknown-top-level"
+version = "0.1.0"
+type = "app"
+default_target = "app"
+description = "marketing copy the tolerant model parser silently drops"
+
+[targets.app]
+runtime = "oci"
+image = "ghcr.io/example/app:1"
+port = 8080

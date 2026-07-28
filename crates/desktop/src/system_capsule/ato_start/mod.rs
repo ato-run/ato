@@ -511,7 +511,6 @@ pub fn build_start_snapshot(
                     crate::window::content_windows::ContentWindowKind::Onboarding => "Onboarding",
                     crate::window::content_windows::ContentWindowKind::Launch => "Launch",
                     crate::window::content_windows::ContentWindowKind::Import => "Import",
-                    crate::window::content_windows::ContentWindowKind::Auth => "Auth",
                 };
                 OpenWindowSnapshot {
                     id: e.handle.window_id().as_u64(),

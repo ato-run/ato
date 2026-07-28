@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use capsule::ato_lock::DeliveryEnvironment;
+use capsule::capsule_lock::DeliveryEnvironment;
 use capsule::ccp::SCHEMA_VERSION;
 use capsule::types::ServiceSpec;
 use chrono::Utc;
@@ -500,14 +500,14 @@ fn ato_desktop_delivery_environment() -> DeliveryEnvironment {
         strategy: "ato-managed".to_string(),
         target: Some("desktop".to_string()),
         services: vec![
-            capsule::ato_lock::DeliveryService {
+            capsule::capsule_lock::DeliveryService {
                 name: "ollama".to_string(),
                 from: "dependency:ollama".to_string(),
                 lifecycle: "managed".to_string(),
                 depends_on: Vec::new(),
                 healthcheck: None,
             },
-            capsule::ato_lock::DeliveryService {
+            capsule::capsule_lock::DeliveryService {
                 name: "opencode".to_string(),
                 from: "dependency:opencode".to_string(),
                 lifecycle: "on-demand".to_string(),
@@ -745,7 +745,7 @@ fn write_materialized_service_record(
 }
 
 fn evaluate_service_status(
-    service: &capsule::ato_lock::DeliveryService,
+    service: &capsule::capsule_lock::DeliveryService,
     helper_command: Option<&str>,
 ) -> String {
     let record = MaterializedServiceRecord {
@@ -1103,7 +1103,9 @@ fn known_service_binary_exists(name: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(binary).exists()))
 }
 
-fn default_service_helper_command(service: &capsule::ato_lock::DeliveryService) -> Option<String> {
+fn default_service_helper_command(
+    service: &capsule::capsule_lock::DeliveryService,
+) -> Option<String> {
     match service.name.to_ascii_lowercase().as_str() {
         "ollama" => Some("ollama serve".to_string()),
         "opencode" => Some("opencode serve".to_string()),

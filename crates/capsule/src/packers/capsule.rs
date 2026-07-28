@@ -15,7 +15,8 @@ use crate::common::paths::{
     path_contains_workspace_internal_subtree, path_contains_workspace_state_dir,
 };
 use crate::error::{CapsuleError, Result as CapsuleResult};
-use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use crate::input_resolver::{CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME};
+use crate::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME;
 use crate::packers::pack_filter::{PackFilter, PublishProfile};
 use crate::packers::payload::{
     build_distribution_manifest, manifest_hash, normalize_relative_utf8_path,
@@ -197,7 +198,7 @@ pub async fn pack(
     if !lockfile_path.exists() {
         return Err(CapsuleError::Pack(format!(
             "{} is missing: {}",
-            CAPSULE_LOCK_FILE_NAME,
+            LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
             lockfile_path.display()
         )));
     }
@@ -314,12 +315,12 @@ pub async fn pack(
     )?;
     let packaged_lockfile_bytes =
         crate::lockfile::render_lockfile_for_manifest(&lockfile_path, &distribution_manifest)?;
-    let packaged_lockfile_path = temp_dir.path().join(CAPSULE_LOCK_FILE_NAME);
+    let packaged_lockfile_path = temp_dir.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
     fs::write(&packaged_lockfile_path, packaged_lockfile_bytes)?;
     append_regular_file_normalized(
         &mut outer_ar,
         &packaged_lockfile_path,
-        CAPSULE_LOCK_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
         reproducible_mtime_epoch(),
     )?;
 
@@ -695,8 +696,9 @@ fn should_skip_reserved_file(rel: &Path) -> bool {
     if matches!(
         file_name.as_str(),
         "capsule.toml"
+            | LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             | CAPSULE_LOCK_FILE_NAME
-            | LEGACY_CAPSULE_LOCK_FILE_NAME
+            | DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             | "config.json"
             | "signature.json"
             | "sbom.spdx.json"

@@ -145,6 +145,41 @@ pub struct IsolationPolicy {
     pub egress_id_allow: Vec<String>,
 }
 
+/// Whether `target` gets to keep the host network namespace.
+///
+/// Platform-neutral policy, so it can be tested on any host even though only
+/// the Linux launcher lowers it to `bwrap` flags (`--share-net`) and only the
+/// macOS launcher lowers it to a Seatbelt `deny network*` line. Extracted from
+/// the Linux launcher by ato#786 so that "a capsule that denied network must
+/// not get `--share-net`" is a unit-testable claim rather than an inline
+/// expression inside a launcher that needs a real toolchain to reach.
+///
+/// `dev_mode` shares the network by design (it is the documented
+/// relax-everything switch). An absent [`IsolationPolicy`] denies: the policy is
+/// the only thing that can grant network, so "no policy" cannot mean "granted".
+pub fn shares_host_network(target: &SourceTarget) -> bool {
+    if target.dev_mode {
+        return true;
+    }
+    match target.isolation.as_ref() {
+        Some(isolation) => isolation.network_enabled,
+        None => false,
+    }
+}
+
+/// `bwrap` namespace arguments implementing [`shares_host_network`].
+///
+/// Without `--share-net`, `--unshare-all` leaves the child in a fresh network
+/// namespace holding only loopback, so any outbound `connect()` fails with
+/// `ENETUNREACH`.
+pub fn bwrap_namespace_args(target: &SourceTarget) -> &'static [&'static str] {
+    if shares_host_network(target) {
+        &["--unshare-all", "--share-net"]
+    } else {
+        &["--unshare-all"]
+    }
+}
+
 /// Result details returned after successful launch.
 #[derive(Debug, Clone)]
 pub struct LaunchResult {
@@ -235,5 +270,83 @@ mod tests {
         assert_eq!(RuntimeKind::from_str("source"), Some(RuntimeKind::Source));
         assert_eq!(RuntimeKind::from_str("SOURCE"), Some(RuntimeKind::Source));
         assert_eq!(RuntimeKind::from_str("oci"), None);
+    }
+
+    // ── network posture → bwrap namespace flags (ato#786) ─────────────────
+
+    fn target_with(network_enabled: bool, dev_mode: bool) -> SourceTarget {
+        SourceTarget {
+            language: "python".to_string(),
+            entrypoint: "payload.py".to_string(),
+            source_dir: PathBuf::from("/app"),
+            dev_mode,
+            isolation: Some(IsolationPolicy {
+                sandbox_enabled: true,
+                network_enabled,
+                ..IsolationPolicy::default()
+            }),
+            ..SourceTarget::default()
+        }
+    }
+
+    /// The actual `bwrap` argv the Linux launcher builds, assembled through the
+    /// same `Command::args` call site so this also type-checks that call shape
+    /// on hosts where `launcher::source::linux` is not compiled.
+    fn bwrap_argv(target: &SourceTarget) -> Vec<String> {
+        let mut cmd = std::process::Command::new("bwrap");
+        cmd.args(bwrap_namespace_args(target).iter().copied());
+        cmd.args(["--die-with-parent"]);
+        cmd.get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect()
+    }
+
+    /// The regression this issue is about: a capsule granted no network must
+    /// never be handed `--share-net`, because with it bwrap keeps the host
+    /// network namespace and outbound `connect()` succeeds.
+    #[test]
+    fn denied_network_never_emits_share_net() {
+        let target = target_with(false, false);
+        assert!(!shares_host_network(&target));
+        let argv = bwrap_argv(&target);
+        assert!(
+            !argv.iter().any(|arg| arg == "--share-net"),
+            "denied network must not share the host netns: {argv:?}"
+        );
+        assert_eq!(argv, vec!["--unshare-all", "--die-with-parent"]);
+    }
+
+    #[test]
+    fn granted_network_emits_share_net() {
+        let target = target_with(true, false);
+        assert!(shares_host_network(&target));
+        assert_eq!(
+            bwrap_argv(&target),
+            vec!["--unshare-all", "--share-net", "--die-with-parent"]
+        );
+    }
+
+    /// No policy cannot mean "granted": the policy is the only thing that can
+    /// grant network, so its absence denies.
+    #[test]
+    fn absent_isolation_policy_denies_network() {
+        let target = SourceTarget {
+            language: "python".to_string(),
+            entrypoint: "payload.py".to_string(),
+            isolation: None,
+            ..SourceTarget::default()
+        };
+        assert!(!shares_host_network(&target));
+        assert!(!bwrap_argv(&target).iter().any(|arg| arg == "--share-net"));
+    }
+
+    /// `dev_mode` is the documented relax-everything switch and keeps sharing,
+    /// even over an explicit deny — pinned so the fix above cannot quietly
+    /// change local development.
+    #[test]
+    fn dev_mode_shares_network_even_when_the_policy_denies() {
+        let target = target_with(false, true);
+        assert!(shares_host_network(&target));
+        assert!(bwrap_argv(&target).iter().any(|arg| arg == "--share-net"));
     }
 }

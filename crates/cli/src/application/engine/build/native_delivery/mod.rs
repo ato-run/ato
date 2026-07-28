@@ -2658,6 +2658,8 @@ fn configure_native_build_process(process: &mut Command, command: &NativeBuildCo
     if command_uses_electron_builder(command) {
         process.env("CSC_IDENTITY_AUTO_DISCOVERY", "false");
     }
+
+    crate::common::host_shell::sanitize_untrusted_environment(process);
 }
 
 fn command_uses_electron_builder(command: &NativeBuildCommand) -> bool {

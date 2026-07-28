@@ -233,27 +233,45 @@ pub fn extend_env_map(env: &mut HashMap<String, String>, proxy: &ProxyEnv) {
 mod tests {
     use super::*;
 
-    struct EnvGuard(&'static str, String);
+    struct EnvGuard {
+        key: &'static str,
+        original: String,
+        // Hold the crate-wide env lock for the guard's whole lifetime. `NO_PROXY`
+        // is a process-global variable, and the sibling
+        // `proxy_env_reads_existing_no_proxy` mutates it too; under libtest's
+        // parallel scheduler that guard's `remove_var`-on-drop could fire mid-read
+        // here, dropping `existing.com` and failing the assert. Sharing the one
+        // documented lock (`crate::tests::env_lock`) serializes every env-touching
+        // test across the crate. Declared last so it is released AFTER the env
+        // restore below: `Drop::drop` runs before fields are dropped, so the
+        // restore still happens while the lock is held.
+        _env_lock: std::sync::MutexGuard<'static, ()>,
+    }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             unsafe {
-                std::env::remove_var(self.0);
+                std::env::remove_var(self.key);
             }
-            if !self.1.is_empty() {
+            if !self.original.is_empty() {
                 unsafe {
-                    std::env::set_var(self.0, &self.1);
+                    std::env::set_var(self.key, &self.original);
                 }
             }
         }
     }
 
     fn env_guard(key: &'static str, value: &str) -> EnvGuard {
+        let env_lock = crate::tests::env_lock().lock().expect("env lock");
         let original = std::env::var(key).ok();
         unsafe {
             std::env::set_var(key, value);
         }
-        EnvGuard(key, original.unwrap_or_default())
+        EnvGuard {
+            key,
+            original: original.unwrap_or_default(),
+            _env_lock: env_lock,
+        }
     }
 
     #[test]

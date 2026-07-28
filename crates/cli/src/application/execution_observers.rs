@@ -315,12 +315,9 @@ pub(crate) fn observe_filesystem(
 }
 
 pub(crate) fn is_sensitive_env_key(key: &str) -> bool {
-    let upper = key.to_ascii_uppercase();
-    upper.contains("SECRET")
-        || upper.contains("TOKEN")
-        || upper.contains("PASSWORD")
-        || upper.contains("API_KEY")
-        || upper.contains("PRIVATE_KEY")
+    // Canonical classifier lives in the pure capsule contract layer so the
+    // persisted lock (D5) and the measured observation apply exactly one rule.
+    capsule::execution_contract_finalize::is_sensitive_env_key(key)
 }
 
 fn observe_dependency_output_hash(

@@ -8,7 +8,7 @@ use tar::{Builder, EntryType, Header};
 use super::runtime_fetcher::RuntimeFetcher;
 use crate::common::paths::workspace_artifacts_dir;
 use crate::error::{CapsuleError, Result};
-use crate::lockfile::{CAPSULE_LOCK_FILE_NAME, resolve_existing_lockfile_path};
+use crate::lockfile::{LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, resolve_existing_lockfile_path};
 use crate::packers::pack_filter::load_pack_filter_from_path;
 use crate::router::CompatProjectInput;
 use crate::runtime_config::resolve_existing_config_path;
@@ -595,7 +595,11 @@ fn create_bundle_archive(
         }
 
         if let Some(capsule_lock) = resolve_existing_lockfile_path(source_dir) {
-            append_file(&mut builder, &capsule_lock, CAPSULE_LOCK_FILE_NAME)?;
+            append_file(
+                &mut builder,
+                &capsule_lock,
+                LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
+            )?;
         }
 
         let uv_lock = source_dir.join("uv.lock");
