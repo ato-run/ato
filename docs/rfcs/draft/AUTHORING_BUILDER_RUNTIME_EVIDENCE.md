@@ -70,6 +70,24 @@ Authoring Session, all materialization inputs, execution contract, readiness,
 effective isolation posture, and replay diff. The API verifies this receipt;
 it never creates one.
 
+Every builder receipt is transported as the exact RFC 8785 JCS payload bytes,
+base64-encoded, plus the builder's Ed25519 authentication. The API verifies
+the signature over those decoded bytes and parses them; it must not reconstruct
+the signed payload with a second canonicalizer. Shared vectors under
+`crates/snapshot/tests/fixtures/authoring_evidence_v1/` pin the wire bytes.
+
+Clean Replay, restore verification, and Ready-State Seal receipts each bind:
+
+- receipt, Authoring Session, Capsule revision, source closure, and normalized
+  Program Intent identities;
+- the previous receipt digest in the evidence chain;
+- issued-at and expiry instants for freshness enforcement;
+- the builder key id and signature.
+
+The restore receipt directly follows the Clean Replay receipt. The Seal receipt
+directly follows the restore receipt and separately retains the Clean Replay
+reference, so omission or substitution of either hop fails closed.
+
 ### State classification
 
 Every replay path is classified as exactly one of:
@@ -116,4 +134,3 @@ and mutually bound:
 
 Legacy submission is never an implicit fallback. A compatibility lane, if
 retained, must be a separate route or explicit feature flag.
-
