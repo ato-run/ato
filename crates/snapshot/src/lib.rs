@@ -36,6 +36,7 @@ pub mod agent_channel;
 /// or a branch re-resolution has nothing to work from.
 pub mod archive_only_build;
 pub mod artifact_envelope;
+pub mod authoring_evidence;
 mod backend;
 pub mod bench;
 /// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
