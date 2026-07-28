@@ -40,6 +40,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
@@ -83,6 +85,7 @@ use snapshot::{
     no_secret_scan,
 };
 
+mod authoring_gateway;
 mod authoring_runtime;
 /// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
 /// from the contract the control plane pinned on the claim. Its module doc states
@@ -180,6 +183,7 @@ struct Config {
     /// origin fronting it — a builder with only some of that could claim a hold
     /// it cannot make reachable, so all three arrive together or not at all.
     hold_slot: Option<HoldSlotConfig>,
+    authoring_signer: Option<authoring_runtime::AuthoringSigner>,
 }
 
 /// One interactive-hold slot this daemon can serve.
@@ -242,6 +246,15 @@ impl Config {
         // a PARTIAL set is an operator error that must stop the daemon at
         // startup, never surface per-job (process_job re-reads the same env).
         upload::ArtifactStore::from_env().map_err(|e| anyhow!(e))?;
+        let hold_slot = hold_slot_from(&flag)?;
+        let authoring_signer =
+            authoring_runtime::AuthoringSigner::from_env().map_err(|error| anyhow!(error))?;
+        if hold_slot.is_some() && authoring_signer.is_none() {
+            return Err(anyhow!(
+                "a builder with an Authoring hold slot requires \
+                 ATO_AUTHORING_BUILDER_SIGNING_KEY_FILE and ATO_AUTHORING_BUILDER_KEY_ID"
+            ));
+        }
         Ok(Config {
             api_url: std::env::var("ATO_API_URL")
                 .ok()
@@ -260,7 +273,8 @@ impl Config {
             poll_secs: flag("--poll-secs")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(15),
-            hold_slot: hold_slot_from(&flag)?,
+            hold_slot,
+            authoring_signer,
         })
     }
 }
@@ -4017,7 +4031,14 @@ fn process_authoring_setup(
             "registered hold slot builder_id does not match --agent-id".to_string(),
         ));
     }
-    let jobdir = cfg.work.join(format!("authoring-{}", work.work_id));
+    if work.setup_mode.as_deref() != Some("suggested") {
+        return Err(fail(
+            "setup",
+            "this builder slice accepts only the suggested reproducible setup path".to_string(),
+        ));
+    }
+    let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
+        .map_err(|error| fail("setup", error))?;
     if jobdir.exists() {
         std::fs::remove_dir_all(&jobdir)
             .map_err(|error| fail("setup", format!("clear fresh setup workspace: {error}")))?;
@@ -4091,8 +4112,29 @@ fn process_authoring_setup(
         })
         .map_err(|error| fail("launch", error.to_string()))?;
     let workload_addr = guest.workload_addr();
-    let ingress = hold_ingress::HoldIngress::start(slot.proxy_listen, &workload_addr)
-        .map_err(|error| fail("launch", format!("front Authoring Preview: {error}")))?;
+    let gateway = match authoring_gateway::AuthoringGateway::start(
+        slot.proxy_listen,
+        &workload_addr,
+        &work.work_id,
+        &cfg.token,
+        vec![
+            format!("Source closure: {}", work.source_closure_id),
+            format!("Program Intent: {}", normalized.digest),
+            format!("Resolution lock: {resolution_lock_digest}"),
+            "Build: static Web source; no dependency steps".to_string(),
+            "Launch: python3 -m http.server 8000 --bind 0.0.0.0".to_string(),
+            "Readiness: HTTP / on port 8000 succeeded".to_string(),
+        ],
+    ) {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            guest.release();
+            return Err(fail(
+                "launch",
+                format!("front Authoring Preview and Terminal: {error}"),
+            ));
+        }
+    };
     client
         .mark_setup_ready(
             work,
@@ -4127,8 +4169,531 @@ fn process_authoring_setup(
             }
         }
     }
-    drop(ingress);
+    drop(gateway);
     guest.release();
+    Ok(())
+}
+
+struct BuilderCleanReplayAdapter<'a> {
+    cfg: &'a Config,
+    backend: &'a FirecrackerBackend,
+    client: &'a authoring_runtime::AuthoringApiClient<'a>,
+    work: &'a authoring_runtime::AuthoringWork,
+    signer: &'a authoring_runtime::AuthoringSigner,
+}
+
+const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanReplayBuilderArtifact {
+    schema: String,
+    authoring_session_id: String,
+    source_closure_id: String,
+    program_intent_digest: String,
+    resolution_lock_digest: String,
+    clean_replay_receipt_digest: Option<String>,
+    rootfs_digest: String,
+    capsule_manifest_hash: String,
+    execution_id: String,
+    port: u16,
+    healthcheck: String,
+}
+
+fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf, String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("Authoring work identity is not a safe path component".to_string());
+    }
+    Ok(root.join(format!("authoring-{kind}-{id}")))
+}
+
+fn clean_replay_directory(cfg: &Config, authoring_session_id: &str) -> Result<PathBuf, String> {
+    authoring_work_directory(&cfg.work, "clean", authoring_session_id)
+}
+
+fn clean_replay_artifact_path(jobdir: &Path) -> PathBuf {
+    jobdir.join("clean-replay-artifact.json")
+}
+
+fn persist_clean_replay_artifact(
+    jobdir: &Path,
+    artifact: &CleanReplayBuilderArtifact,
+) -> Result<(), String> {
+    let bytes = serde_jcs::to_vec(artifact)
+        .map_err(|error| format!("canonicalize Clean Replay artifact: {error}"))?;
+    std::fs::write(clean_replay_artifact_path(jobdir), bytes)
+        .map_err(|error| format!("write Clean Replay artifact: {error}"))
+}
+
+impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdapter<'_> {
+    fn replay(
+        &mut self,
+        request: &snapshot::authoring_evidence::CleanReplayRequestV1,
+    ) -> std::result::Result<snapshot::authoring_evidence::CleanReplayObservationV1, String> {
+        let started_at = chrono::Utc::now();
+        let jobdir = clean_replay_directory(self.cfg, &self.work.authoring_session_id)?;
+        if jobdir.exists() {
+            std::fs::remove_dir_all(&jobdir)
+                .map_err(|error| format!("clear Clean Replay workspace: {error}"))?;
+        }
+        std::fs::create_dir_all(&jobdir)
+            .map_err(|error| format!("create Clean Replay workspace: {error}"))?;
+        let input = authoring_runtime::archive_input(self.work)?;
+        let transport = authoring_runtime::AuthoringArchiveTransport {
+            client: self.client,
+            work: self.work,
+        };
+        let verified = source_archive_download::download_pinned_source(
+            &transport,
+            &self.work.work_id,
+            &input,
+            &jobdir.join("source-download"),
+        )
+        .map_err(|error| error.to_string())?;
+        let generated_manifest =
+            authoring_runtime::render_static_web_capsule_toml(&request.normalized_program_intent)?;
+        let produced = produce_pinned_v1_build(
+            self.cfg,
+            &self.work.work_id,
+            &jobdir,
+            &input,
+            verified,
+            Some(&generated_manifest),
+        )
+        .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
+        if produced.resolution_lock_digest.as_deref() != Some(&request.resolution_lock_digest) {
+            return Err(
+                "fresh resolver output does not match the Authoring Session lock".to_string(),
+            );
+        }
+        let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
+        std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
+            .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
+        persist_clean_replay_artifact(
+            &jobdir,
+            &CleanReplayBuilderArtifact {
+                schema: CLEAN_REPLAY_ARTIFACT_SCHEMA.to_string(),
+                authoring_session_id: request.authoring_session_id.clone(),
+                source_closure_id: request.source_closure_id.clone(),
+                program_intent_digest: request.normalized_program_intent.digest.clone(),
+                resolution_lock_digest: request.resolution_lock_digest.clone(),
+                clean_replay_receipt_digest: None,
+                rootfs_digest,
+                capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
+                execution_id: produced.execution_id.clone(),
+                port: produced.port,
+                healthcheck: produced.healthcheck.clone(),
+            },
+        )?;
+        let execution_contract_digest = produced.execution_id.clone();
+        let store =
+            CasStore::open(jobdir.join("cas")).map_err(|error| format!("open CAS: {error}"))?;
+        let guest = self
+            .backend
+            .boot_and_hold(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: produced.capsule_manifest_hash,
+                runner_class: None,
+                surface_requirement: produced.surface_requirement,
+                layers: BuildLayers {
+                    rootfs: produced.rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: RestoreContract {
+                    ports: vec![produced.port],
+                    healthcheck: Some(produced.healthcheck),
+                    expected_ready_ms: Some(8000),
+                    warmup_paths: produced.warmup_paths,
+                    stable_successes: produced.stable_successes,
+                    stable_interval_ms: produced.stable_interval_ms,
+                    content_ready_path: produced.content_ready_path,
+                    endpoints: produced.endpoints,
+                },
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(execution_contract_digest.clone()),
+                supervisor: None,
+            })
+            .map_err(|error| format!("Clean Replay readiness: {error}"))?;
+        guest.release();
+
+        let completed_at = chrono::Utc::now();
+        let expires_at = completed_at + chrono::Duration::minutes(15);
+        let materialization_inputs_digest = digest_authoring_parts(
+            b"ato.authoring-materialization-inputs/v1",
+            &[
+                &request.source_closure_id,
+                &request.normalized_program_intent.digest,
+                &request.resolution_lock_digest,
+            ],
+        );
+        Ok(snapshot::authoring_evidence::CleanReplayObservationV1 {
+            receipt_id: receipt_id("replay", &self.work.work_id),
+            builder_identity: format!("builder:{}", self.cfg.agent_id),
+            materialization_inputs_digest,
+            execution_contract_digest: execution_contract_digest.clone(),
+            readiness: snapshot::authoring_evidence::ReadinessResultV1 {
+                ready: true,
+                probe_digest: digest_authoring_parts(
+                    b"ato.authoring-readiness/v1",
+                    &[&execution_contract_digest, "/"],
+                ),
+                observed_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+            isolation: snapshot::authoring_evidence::EffectiveIsolationPostureV1 {
+                ephemeral_workspace: true,
+                host_filesystem_hidden: true,
+                host_environment_inherited: false,
+                host_credentials_inherited: false,
+                privileged: false,
+                network_observed: true,
+                workspace_provenance: format!("fresh:{}", self.work.work_id),
+            },
+            state_diff: Vec::new(),
+            started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            completed_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            issued_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })
+    }
+
+    fn authenticate(
+        &mut self,
+        payload: &[u8],
+    ) -> std::result::Result<snapshot::authoring_evidence::BuilderAuthenticationV1, String> {
+        Ok(self.signer.authenticate(payload))
+    }
+}
+
+fn digest_authoring_parts(domain: &[u8], parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    for part in parts {
+        hasher.update(&[0]);
+        hasher.update(part.as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn receipt_id(prefix: &str, work_id: &str) -> String {
+    let digest = blake3::hash(work_id.as_bytes()).to_hex();
+    format!("{prefix}_{}", &digest[..26])
+}
+
+fn process_authoring_clean_replay(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> Result<()> {
+    let normalized = work
+        .normalized_program_intent
+        .clone()
+        .context("Clean Replay claim omitted Normalized Program Intent")?;
+    let resolution_lock_digest = work
+        .resolution_lock_digest
+        .clone()
+        .context("Clean Replay claim omitted Resolution Lock")?;
+    let previous_receipt_digest = work
+        .previous_receipt_digest
+        .clone()
+        .context("Clean Replay claim omitted Source Resolution receipt")?;
+    let signer = cfg
+        .authoring_signer
+        .as_ref()
+        .context("Authoring receipt signer is unavailable")?;
+    let request = snapshot::authoring_evidence::CleanReplayRequestV1 {
+        authoring_session_id: work.authoring_session_id.clone(),
+        capsule_revision_id: work.capsule_revision_id.clone(),
+        source_closure_id: work.source_closure_id.clone(),
+        previous_receipt_digest,
+        source_overlays: Vec::new(),
+        normalized_program_intent: normalized,
+        resolution_lock_digest,
+        allowed_cache_digests: Vec::new(),
+    };
+    let mut adapter = BuilderCleanReplayAdapter {
+        cfg,
+        backend,
+        client,
+        work,
+        signer,
+    };
+    let (receipt, classified) =
+        snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
+            .map_err(|error| anyhow!("execute Clean Replay: {error}"))?;
+    let jobdir =
+        clean_replay_directory(cfg, &work.authoring_session_id).map_err(|error| anyhow!(error))?;
+    let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+        &std::fs::read(clean_replay_artifact_path(&jobdir))
+            .context("read Clean Replay builder artifact")?,
+    )
+    .context("decode Clean Replay builder artifact")?;
+    artifact.clean_replay_receipt_digest = Some(
+        receipt
+            .payload_digest()
+            .map_err(|error| anyhow!("digest Clean Replay receipt: {error}"))?,
+    );
+    persist_clean_replay_artifact(&jobdir, &artifact).map_err(|error| anyhow!(error))?;
+    client
+        .complete_clean_replay(work, &receipt, &classified)
+        .map_err(|error| anyhow!("report Clean Replay: {error}"))?;
+    eprintln!(
+        "[builder] Authoring Session {} Clean Replay complete (trace {})",
+        work.authoring_session_id, work.trace_id
+    );
+    Ok(())
+}
+
+struct BuilderReadyStateSealAdapter<'a> {
+    cfg: &'a Config,
+    backend: &'a FirecrackerBackend,
+    work: &'a authoring_runtime::AuthoringWork,
+    signer: &'a authoring_runtime::AuthoringSigner,
+    screenshot_png_base64: Option<String>,
+}
+
+impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSealAdapter<'_> {
+    fn capture_and_verify(
+        &mut self,
+        request: &snapshot::authoring_evidence::ReadyStateSealRequestV1,
+    ) -> std::result::Result<snapshot::authoring_evidence::SealCaptureObservationV1, String> {
+        let clean_payload = request
+            .clean_replay_receipt
+            .payload()
+            .map_err(|error| format!("decode Clean Replay receipt: {error}"))?;
+        let clean_digest = request
+            .clean_replay_receipt
+            .payload_digest()
+            .map_err(|error| format!("digest Clean Replay receipt: {error}"))?;
+        let clean_dir = clean_replay_directory(self.cfg, &clean_payload.authoring_session_id)?;
+        let artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+            &std::fs::read(clean_replay_artifact_path(&clean_dir))
+                .map_err(|error| format!("read Clean Replay artifact: {error}"))?,
+        )
+        .map_err(|error| format!("decode Clean Replay artifact: {error}"))?;
+        if artifact.schema != CLEAN_REPLAY_ARTIFACT_SCHEMA
+            || artifact.authoring_session_id != clean_payload.authoring_session_id
+            || artifact.source_closure_id != clean_payload.source_closure_id
+            || artifact.program_intent_digest != clean_payload.program_intent_digest
+            || artifact.resolution_lock_digest != clean_payload.resolution_lock_digest
+            || artifact.clean_replay_receipt_digest.as_deref() != Some(&clean_digest)
+        {
+            return Err("Clean Replay builder artifact receipt binding mismatch".to_string());
+        }
+        let rootfs = std::fs::read(clean_dir.join("clean-rootfs.img"))
+            .map_err(|error| format!("read Clean Replay rootfs: {error}"))?;
+        if format!("blake3:{}", blake3::hash(&rootfs).to_hex()) != artifact.rootfs_digest {
+            return Err("Clean Replay rootfs digest mismatch".to_string());
+        }
+        let seal_dir = authoring_work_directory(&self.cfg.work, "seal", &self.work.work_id)?;
+        if seal_dir.exists() {
+            std::fs::remove_dir_all(&seal_dir)
+                .map_err(|error| format!("clear Seal workspace: {error}"))?;
+        }
+        std::fs::create_dir_all(&seal_dir)
+            .map_err(|error| format!("create Seal workspace: {error}"))?;
+        let store = CasStore::open(seal_dir.join("cas"))
+            .map_err(|error| format!("open Seal CAS: {error}"))?;
+        let mut guest = self
+            .backend
+            .boot_and_hold(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: artifact.capsule_manifest_hash,
+                runner_class: None,
+                surface_requirement: None,
+                layers: BuildLayers {
+                    rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: RestoreContract {
+                    ports: vec![artifact.port],
+                    healthcheck: Some(artifact.healthcheck),
+                    expected_ready_ms: Some(8000),
+                    warmup_paths: Vec::new(),
+                    stable_successes: None,
+                    stable_interval_ms: None,
+                    content_ready_path: None,
+                    endpoints: Vec::new(),
+                },
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(artifact.execution_id.clone()),
+                supervisor: None,
+            })
+            .map_err(|error| format!("boot clean artifact for Seal: {error}"))?;
+        let captured = match guest.capture_candidate() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                guest.release();
+                return Err(format!("capture Ready-State Seal: {error}"));
+            }
+        };
+        guest.release();
+        if !captured.receipt.no_secret_proof.is_clean() {
+            return Err("Ready-State Seal no-secret proof is not clean".to_string());
+        }
+        let live_canaries = live_secret_canaries(self.cfg);
+        let scan = no_secret_scan::scan(
+            &no_secret_scan::ScanTargets {
+                cas: Some(seal_dir.join("cas")),
+                ..Default::default()
+            },
+            &live_canaries,
+        );
+        if !scan.clean {
+            return Err("builder credential was found in Ready-State Seal bytes".to_string());
+        }
+        let manifest = captured.receipt.manifest;
+        let manifest_id = manifest.id();
+        let artifact_location =
+            persist_and_locate_artifact(&manifest, &seal_dir, &self.work.work_id, &manifest_id)
+                .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
+        let runner_class = manifest
+            .runner_class_id
+            .clone()
+            .ok_or_else(|| "Seal omitted runner compatibility class".to_string())?;
+        let memory_artifact_ref = manifest
+            .layers
+            .memory
+            .as_ref()
+            .map(|layer| layer.id().to_string())
+            .ok_or_else(|| "Seal omitted memory artifact".to_string())?;
+        let restored = self
+            .backend
+            .restore(RestoreReadyStateInput {
+                store: &store,
+                manifest,
+                overlay_root: seal_dir.join("restore-verify-overlay"),
+                host_runner_class: Some(runner_class.clone()),
+                uffd_preview: false,
+            })
+            .map_err(|error| format!("restore Ready-State Seal: {error}"))?;
+        let restored_address = restored
+            .session
+            .workload_addr
+            .as_deref()
+            .ok_or_else(|| "restored Seal exposed no Web workload address".to_string())?
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "restored workload address is invalid".to_string())?;
+        let screenshot = snapshot::capture_screenshot_best_effort(restored_address);
+        let verified_at = chrono::Utc::now();
+        let stop_result = self.backend.stop(restored.session);
+        if let Err(error) = stop_result {
+            return Err(format!("stop restore-verification runtime: {error}"));
+        }
+        let screenshot =
+            screenshot.ok_or_else(|| "post-restore screenshot capture failed".to_string())?;
+        let screenshot_bytes = BASE64
+            .decode(&screenshot)
+            .map_err(|_| "post-restore screenshot was not valid base64".to_string())?;
+        let screenshot_digest = format!("blake3:{}", blake3::hash(&screenshot_bytes).to_hex());
+        let perceptual_hash =
+            snapshot::authoring_evidence::screenshot_perceptual_hash_png(&screenshot_bytes)
+                .map_err(|error| error.to_string())?;
+        self.screenshot_png_base64 = Some(screenshot);
+        let compatibility = self.backend.compatibility_metadata();
+        let expires_at = verified_at + chrono::Duration::minutes(15);
+        Ok(snapshot::authoring_evidence::SealCaptureObservationV1 {
+            receipt_id: receipt_id("seal", &self.work.work_id),
+            ready_before_capture: true,
+            quiesced: true,
+            rootfs_artifact_ref: artifact_location,
+            memory_artifact_ref,
+            runner_hardware_compatibility_class: compatibility.runner_class_id,
+            guest_kernel: compatibility.guest_kernel,
+            vmm: compatibility.vmm,
+            snapshot_format: compatibility.snapshot_format,
+            restore_verification: snapshot::authoring_evidence::RestoreVerificationObservationV1 {
+                receipt_id: receipt_id("restore", &self.work.work_id),
+                restored: true,
+                readiness_succeeded: true,
+                verified_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                issued_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+            post_restore_screenshot: snapshot::authoring_evidence::ScreenshotCandidateV1 {
+                candidate_id: receipt_id("shot", &self.work.work_id),
+                artifact_ref: screenshot_digest,
+                perceptual_hash,
+                capture_point:
+                    snapshot::authoring_evidence::ScreenshotCapturePointV1::RestoreVerification,
+                quality_score: 900,
+                possible_personal_data: false,
+            },
+            issued_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })
+    }
+
+    fn authenticate(
+        &mut self,
+        payload: &[u8],
+    ) -> std::result::Result<snapshot::authoring_evidence::BuilderAuthenticationV1, String> {
+        Ok(self.signer.authenticate(payload))
+    }
+}
+
+fn process_authoring_ready_state_seal(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> Result<()> {
+    let clean_replay_receipt = work
+        .clean_replay_receipt
+        .clone()
+        .context("Seal claim omitted Clean Replay receipt")?;
+    let classified_state_diff = work
+        .classified_state_diff
+        .clone()
+        .context("Seal claim omitted classified state diff")?;
+    let signer = cfg
+        .authoring_signer
+        .as_ref()
+        .context("Authoring receipt signer is unavailable")?;
+    let clean_payload = clean_replay_receipt
+        .payload()
+        .map_err(|error| anyhow!("decode Clean Replay receipt: {error}"))?;
+    let request = snapshot::authoring_evidence::ReadyStateSealRequestV1 {
+        capsule_revision_id: work.capsule_revision_id.clone(),
+        materialization_plan_id: clean_payload.execution_contract_digest,
+        clean_replay_receipt,
+        classified_state_diff,
+        selected_screenshot_candidate_id: "authoring-preview".to_string(),
+    };
+    let mut adapter = BuilderReadyStateSealAdapter {
+        cfg,
+        backend,
+        work,
+        signer,
+        screenshot_png_base64: None,
+    };
+    let receipt = snapshot::authoring_evidence::generate_ready_state_seal(&mut adapter, &request)
+        .map_err(|error| anyhow!("generate Ready-State Seal: {error}"))?;
+    let screenshot = adapter
+        .screenshot_png_base64
+        .as_deref()
+        .context("Ready-State Seal produced no post-restore screenshot bytes")?;
+    client
+        .complete_ready_state_seal(work, &receipt, screenshot)
+        .map_err(|error| anyhow!("report Ready-State Seal: {error}"))?;
+    eprintln!(
+        "[builder] Authoring Session {} Ready-State Seal complete (trace {})",
+        work.authoring_session_id, work.trace_id
+    );
     Ok(())
 }
 
@@ -4142,22 +4707,27 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
         builder_id: &cfg.agent_id,
     };
     let Some(work) = client
-        .claim(&["setup"])
+        .claim(&["setup", "clean_replay", "ready_state_seal"])
         .map_err(|error| anyhow!("claim Authoring Session work: {error}"))?
     else {
         return Ok(0);
     };
-    if work.kind != "setup" {
-        return Err(anyhow!(
-            "Authoring claim returned unsupported operation {:?}",
-            work.kind
-        ));
-    }
-    if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
-        return Err(anyhow!(
-            "Authoring Session {} failed at {stage}: {reason}",
-            work.authoring_session_id
-        ));
+    match work.kind.as_str() {
+        "setup" => {
+            if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
+                return Err(anyhow!(
+                    "Authoring Session {} failed at {stage}: {reason}",
+                    work.authoring_session_id
+                ));
+            }
+        }
+        "clean_replay" => process_authoring_clean_replay(cfg, backend, &client, &work)?,
+        "ready_state_seal" => process_authoring_ready_state_seal(cfg, backend, &client, &work)?,
+        other => {
+            return Err(anyhow!(
+                "Authoring claim returned unsupported operation {other:?}"
+            ));
+        }
     }
     Ok(1)
 }
@@ -5157,6 +5727,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         }
     }
 
@@ -5842,6 +6413,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         };
         // A real (long, random) token gates: an artifact containing it is dirty.
         let cfg = mk("0123456789abcdef0123456789abcdef");
@@ -5874,6 +6446,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         };
         let cas = std::env::temp_dir().join(format!("compat-planted-token-{}", std::process::id()));
         std::fs::create_dir_all(&cas).unwrap();
@@ -6738,5 +7311,18 @@ targets = ["web"]
             "{tag}"
         );
         assert!(tag.starts_with("ato-v1-build-job_a1-"), "{tag}");
+    }
+
+    #[test]
+    fn authoring_work_identity_cannot_escape_the_builder_workspace() {
+        let root = Path::new("/builder/work");
+        assert!(authoring_work_directory(root, "clean", "../host").is_err());
+        assert!(authoring_work_directory(root, "clean", "session/other").is_err());
+        assert_eq!(
+            authoring_work_directory(root, "clean", "as_01ABC")
+                .expect("safe")
+                .to_string_lossy(),
+            "/builder/work/authoring-clean-as_01ABC",
+        );
     }
 }

@@ -7,6 +7,8 @@
 use std::fmt;
 use std::path::Path;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
     ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, normalize_program_intent,
@@ -15,6 +17,9 @@ use capsule::authoring_intent::{
 use capsule::types::manifest_v1::SealAtV1;
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
+use snapshot::authoring_evidence::{
+    BuilderAuthenticationV1, ClassifiedStateDiffV1, CleanReplayReceiptV1, ReadyStateSealReceiptV1,
+};
 
 const AUTHORING_BASE_PATH: &str = "/v1/capsule-snapshots/authoring";
 
@@ -52,7 +57,8 @@ impl<'de> Deserialize<'de> for AuthoringLeaseToken {
 #[serde(deny_unknown_fields)]
 pub struct PinnedAuthoringSource {
     pub source_revision_id: String,
-    pub source_materialization_id: String,
+    #[serde(rename = "source_materialization_id")]
+    pub _source_materialization_id: String,
     pub source_archive_digest: String,
     pub source_archive_object_key: String,
     pub source_tree_digest: String,
@@ -77,9 +83,15 @@ pub struct AuthoringWork {
     #[serde(default)]
     pub resolution_lock_digest: Option<String>,
     #[serde(default)]
-    pub request: Option<serde_json::Value>,
+    #[serde(rename = "request")]
+    pub _request: Option<serde_json::Value>,
+    #[serde(default)]
+    pub clean_replay_receipt: Option<CleanReplayReceiptV1>,
+    #[serde(default)]
+    pub classified_state_diff: Option<ClassifiedStateDiffV1>,
     pub lease_token: AuthoringLeaseToken,
-    pub lease_expires_at: String,
+    #[serde(rename = "lease_expires_at")]
+    pub _lease_expires_at: String,
     pub trace_id: String,
 }
 
@@ -176,6 +188,59 @@ impl AuthoringApiClient<'_> {
             .into_json()
             .map_err(|error| format!("decode setup control: {error}"))
     }
+
+    pub fn complete_clean_replay(
+        &self,
+        work: &AuthoringWork,
+        receipt: &CleanReplayReceiptV1,
+        classified_state_diff: &ClassifiedStateDiffV1,
+    ) -> Result<(), String> {
+        let classified = serde_jcs::to_vec(classified_state_diff)
+            .map_err(|error| format!("canonicalize classified state diff: {error}"))?;
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/clean-replay",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "receipt": receipt,
+            "classified_state_diff_jcs_base64": BASE64.encode(classified),
+        }))
+        .map_err(|error| http_error("report Clean Replay completion", error))?;
+        Ok(())
+    }
+
+    pub fn complete_ready_state_seal(
+        &self,
+        work: &AuthoringWork,
+        receipt: &ReadyStateSealReceiptV1,
+        screenshot_png_base64: &str,
+    ) -> Result<(), String> {
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/ready-state-seal",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "seal_receipt": receipt,
+            "preview_run_id": format!("restore_{}", work.work_id),
+            "route": "/",
+            "viewport": {
+                "width": 1240,
+                "height": 698,
+                "device_scale_factor": 1,
+            },
+            "post_restore_screenshot_png_base64": screenshot_png_base64,
+        }))
+        .map_err(|error| http_error("report Ready-State Seal completion", error))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -250,6 +315,59 @@ pub fn archive_input(work: &AuthoringWork) -> Result<ArchiveOnlyBuildInput, Stri
         source.source_tree_digest.clone(),
     )
     .map_err(|error| error.to_string())
+}
+
+pub struct AuthoringSigner {
+    key_id: String,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+impl AuthoringSigner {
+    pub fn from_env() -> Result<Option<Self>, String> {
+        let Some(path) = std::env::var_os("ATO_AUTHORING_BUILDER_SIGNING_KEY_FILE") else {
+            return Ok(None);
+        };
+        let key_id = std::env::var("ATO_AUTHORING_BUILDER_KEY_ID")
+            .map_err(|_| "ATO_AUTHORING_BUILDER_KEY_ID is required with the signing key")?;
+        if key_id.trim().is_empty() {
+            return Err("ATO_AUTHORING_BUILDER_KEY_ID must not be empty".to_string());
+        }
+        let path = std::path::PathBuf::from(path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path)
+                .map_err(|error| format!("stat Authoring signing key: {error}"))?
+                .permissions()
+                .mode()
+                & 0o777;
+            if mode & 0o077 != 0 {
+                return Err("Authoring signing key must not be group/world accessible".to_string());
+            }
+        }
+        let encoded = std::fs::read_to_string(&path)
+            .map_err(|error| format!("read Authoring signing key: {error}"))?;
+        let bytes = BASE64
+            .decode(encoded.trim())
+            .map_err(|_| "Authoring signing key must be base64".to_string())?;
+        let secret: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "Authoring signing key must contain exactly 32 bytes".to_string())?;
+        Ok(Some(Self {
+            key_id,
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&secret),
+        }))
+    }
+
+    pub fn authenticate(&self, payload: &[u8]) -> BuilderAuthenticationV1 {
+        use ed25519_dalek::Signer as _;
+        let signature = self.signing_key.sign(payload);
+        BuilderAuthenticationV1 {
+            key_id: self.key_id.clone(),
+            algorithm: "ed25519".to_string(),
+            signature: BASE64.encode(signature.to_bytes()),
+        }
+    }
 }
 
 fn http_error(operation: &str, error: ureq::Error) -> String {
