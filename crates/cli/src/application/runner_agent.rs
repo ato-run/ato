@@ -2337,7 +2337,20 @@ pub async fn start_root_proxy_to(
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("failed to bind proxy listener on {listen}"))?;
-    let handle = tokio::spawn(async move {
+    Ok(serve_root_proxy(listener, upstream_addr))
+}
+
+/// Spawn the accept → forward loop on an ALREADY-BOUND listener. Split out of
+/// [`start_root_proxy_to`] so a caller that must know the bound port up front
+/// can bind `127.0.0.1:0`, read `local_addr()`, and hand the *live* listener
+/// straight in — with no bind → close → rebind gap in which another process
+/// could claim the ephemeral port. (That gap flaked the stop test: it bound a
+/// probe socket to learn a free port, dropped it, then rebound the same number.)
+fn serve_root_proxy(
+    listener: tokio::net::TcpListener,
+    upstream_addr: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
             let Ok((mut inbound, _)) = listener.accept().await else {
                 break;
@@ -2350,8 +2363,7 @@ pub async fn start_root_proxy_to(
                 let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
             });
         }
-    });
-    Ok(handle)
+    })
 }
 
 // ── Proxy readiness probe (v1.2 PR 3e-4) ──
@@ -2419,38 +2431,55 @@ pub async fn start_root_proxy_ready(
     probe_path: &str,
     timeout: Duration,
 ) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            return (
+                Err(anyhow::Error::new(e)
+                    .context(format!("failed to bind proxy listener on {listen}"))),
+                ProxyReadyProbe {
+                    attempts: 0,
+                    wait_ms: 0,
+                    ok: false,
+                },
+            );
+        }
+    };
+    serve_root_proxy_ready(listener, upstream_addr, probe_path, timeout).await
+}
+
+/// Prove readiness THROUGH an ALREADY-BOUND proxy listener before returning its
+/// accept handle. Split out of [`start_root_proxy_ready`] so a caller that must
+/// know the bound port up front can bind `127.0.0.1:0`, read `local_addr()`,
+/// and hand the live listener in — with no bind → close → rebind gap in which
+/// another process could claim the ephemeral port (a TOCTOU that flaked the
+/// proxy-readiness tests: `start_root_proxy_ready`'s internal bind could lose
+/// the pre-selected port and return before the probe loop ran a single attempt).
+async fn serve_root_proxy_ready(
+    listener: tokio::net::TcpListener,
+    upstream_addr: String,
+    probe_path: &str,
+    timeout: Duration,
+) -> (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe) {
     let started = std::time::Instant::now();
     let mut probe = ProxyReadyProbe {
         attempts: 0,
         wait_ms: 0,
         ok: false,
     };
-    let listener = match tokio::net::TcpListener::bind(listen).await {
-        Ok(l) => l,
+    // The probe connects to the listener's own address; capture it before the
+    // listener is moved into the accept loop.
+    let listen = match listener.local_addr() {
+        Ok(addr) => addr.to_string(),
         Err(e) => {
             probe.wait_ms = started.elapsed().as_millis() as u64;
             return (
-                Err(anyhow::Error::new(e)
-                    .context(format!("failed to bind proxy listener on {listen}"))),
+                Err(anyhow::Error::new(e).context("proxy listener has no local address")),
                 probe,
             );
         }
     };
-    let accept_upstream = upstream_addr.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut inbound, _)) = listener.accept().await else {
-                break;
-            };
-            let upstream_addr = accept_upstream.clone();
-            tokio::spawn(async move {
-                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
-            });
-        }
-    });
+    let handle = serve_root_proxy(listener, upstream_addr);
 
     let path = if probe_path.starts_with('/') {
         probe_path.to_string()
@@ -2467,7 +2496,7 @@ pub async fn start_root_proxy_ready(
         }
         probe.attempts += 1;
         let io_budget = remaining.min(Duration::from_millis(PROXY_READY_ATTEMPT_IO_MS));
-        if probe_once_via(listen, &request, io_budget).await {
+        if probe_once_via(&listen, &request, io_budget).await {
             probe.ok = true;
             break;
         }
@@ -4187,10 +4216,13 @@ async fn handle_restore_snapshot_lease(
     use crate::application::ready_state::flags::{
         artifact_fetch_max_bytes, binding_ttl_ms, proxy_ready_timeout_ms, runner_supervisor_enabled,
     };
-    use crate::application::ready_state::restore::{restore_and_expose, teardown};
+    use crate::application::ready_state::restore::{
+        RestoreVerification, restore_and_expose, teardown,
+    };
     use crate::application::ready_state::restore_lease::{
         RestoreArtifactClass, ensure_artifact_local,
-        load_and_verify_manifest_with_surface_capabilities, parse_restore_snapshot_command,
+        load_and_verify_manifest_with_surface_capabilities, load_verified_v1_artifact,
+        parse_restore_snapshot_command,
     };
     use crate::application::ready_state::secret_resolver::select_resolver;
     use capsulefs::CasStore;
@@ -4402,6 +4434,13 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
+    let surface_ready_timeout_ms = proxy_ready_timeout_ms().max(
+        manifest
+            .restore_contract
+            .expected_ready_ms
+            .map(u64::from)
+            .unwrap_or(0),
+    );
     // Binding names from the SEALED MANIFEST only (the single source of truth) —
     // captured now because `manifest` is moved into the restore below.
     let supervisor_names: Option<Vec<String>> = match &artifact_class {
@@ -4552,13 +4591,55 @@ async fn handle_restore_snapshot_lease(
         .join(&lease_id);
     // Drain any stale spans so `spans=` below carries THIS restore only.
     let _ = snapshot::bench::drain();
+    // P1 Ready-State optimization: the snapshot backend's UFFD demand-paging
+    // path skips the ~512MB eager rehydrate on the restore critical path. The
+    // operator opts in per-runner (`ATO_RUNNER_UFFD_PREVIEW=1`); the backend
+    // (`FirecrackerBackend::uffd_preview_mode_for`) gates the request on THREE
+    // things — no required bindings, host capability (userfaultfd), and the
+    // memory image being FULLY resident in the local CAS (`has_all_chunks`,
+    // #1127) — and degrades to the eager File path, logging why, whenever any of
+    // them fails. So a flag set on a wrong box costs latency, not leases, and a
+    // binding-required artifact is never demand-paged before Phase 8.
+    let uffd_preview = crate::application::ready_state::flags::runner_uffd_preview_enabled();
+    // Explicit Capsule v1 lease (`execution_identity_schema` present): load +
+    // authenticate the fetched Snapshot manifest/envelope sidecar against the
+    // ALREADY-verified legacy manifest — the same envelope boundary the local
+    // publication store uses. A legacy lease (no v1 metadata) falls back to
+    // the runner-lease gate (opaque `execution_id` + this host's real backend
+    // facts) `restore_and_expose` already applies.
+    let v1_artifact = match load_verified_v1_artifact(&paths, &manifest, &cmd) {
+        Ok(v1) => v1,
+        Err((code, message)) => {
+            fail(
+                client,
+                api_base,
+                runner_token,
+                &lease_id,
+                slot,
+                &code,
+                message,
+            )
+            .await;
+            return;
+        }
+    };
+    let verification = match v1_artifact {
+        Some(v1) => RestoreVerification::V1 {
+            manifest: Box::new(v1.manifest),
+            envelope: Box::new(v1.envelope),
+        },
+        None => RestoreVerification::RunnerLease {
+            expected_execution_id: cmd.execution_id.clone(),
+        },
+    };
     let receipt = match restore_and_expose(
         backend.as_ref(),
         &store,
         manifest,
+        verification,
         overlay_root,
         None,
-        false,
+        uffd_preview,
     ) {
         Ok(r) => r,
         Err(e) => {
@@ -4580,6 +4661,17 @@ async fn handle_restore_snapshot_lease(
         .into_iter()
         .map(|s| format!("{}={}ms", s.name, s.micros / 1000))
         .collect();
+    // P3 content-ready: how long after resume the user's first screen could
+    // actually be served (P0/P2 point this wait at `content_ready_path`, not
+    // just `/health`). Read from the receipt, which measures it on every
+    // restore — the `spans=` above only exist under ATO_READY_STATE_BENCH=1,
+    // which no product runner sets. `ungated` = no HTTP probe gated readiness
+    // (a supervisor artifact: its workload only re-launches after binding
+    // delivery, so the agent probe, not a GET, is the ready signal).
+    let content_ready_ms: String = receipt
+        .content_ready_ms
+        .map(|ms| ms.to_string())
+        .unwrap_or_else(|| "ungated".to_string());
     let session = receipt.session;
 
     let Some(guest_port) = session.guest_port else {
@@ -4732,10 +4824,6 @@ async fn handle_restore_snapshot_lease(
                 session_id: session_id.clone(),
                 surface_id: surface_id.to_string(),
             };
-            let readiness_assertion = runtime
-                .assertion_keyring
-                .issue_readiness_assertion(&scope)
-                .context("issue one-time pixel gateway readiness assertion")?;
             let probe_origin = runtime
                 .allowed_origins
                 .iter()
@@ -4745,24 +4833,57 @@ async fn handle_restore_snapshot_lease(
             let listen_addr = resolve_socket_addr(&slot.proxy_listen).await?;
             let mut private_rfb_addr = resolve_socket_addr(workload_addr).await?;
             private_rfb_addr.set_port(rfb_port);
-            let timeout = Duration::from_millis(proxy_ready_timeout_ms());
-            let (handle, frame) = netd::rfb_probe::start_ready_pixel_gateway(
-                netd::pixel_gateway::PixelGatewayConfig {
-                    listen_addr,
-                    private_rfb_addr,
-                    scope,
-                    allowed_origins: runtime.allowed_origins.clone(),
-                },
-                Arc::clone(&runtime.authorizer),
-                netd::rfb_probe::PixelGatewayProbeRequest::new(
-                    public_ready_url,
-                    probe_origin,
-                    readiness_assertion.as_str(),
-                ),
-                timeout,
-            )
-            .await
-            .context("authenticated public pixel gateway path did not become interactive")?;
+            // The surface budget is a TOTAL budget, not a single attempt (same
+            // discipline as the web path's proxy readiness probe). The gateway
+            // already retries a refused private-RFB dial internally, but a
+            // probe that fails PAST the dial — wss handshake, authentication,
+            // first-frame wait while the in-guest watchdog rebinds the RFB
+            // server — has consumed its one-use readiness assertion, so each
+            // attempt mints a FRESH assertion. `start_ready_pixel_gateway`
+            // stops the listener on probe failure, so a retry restarts it and
+            // callers can never report ready unproved. The gateway's own
+            // private-RFB connect timeout stays the FULL budget: it is the
+            // long-lived config real viewers dial through after readiness.
+            let timeout = Duration::from_millis(surface_ready_timeout_ms);
+            let deadline = std::time::Instant::now() + timeout;
+            const PIXEL_PROBE_RETRY_BACKOFF: Duration = Duration::from_millis(500);
+            let (handle, frame) = loop {
+                let readiness_assertion = runtime
+                    .assertion_keyring
+                    .issue_readiness_assertion(&scope)
+                    .context("issue one-time pixel gateway readiness assertion")?;
+                let attempt_budget = deadline
+                    .saturating_duration_since(std::time::Instant::now())
+                    .max(Duration::from_millis(250));
+                let attempt = netd::rfb_probe::start_ready_pixel_gateway(
+                    netd::pixel_gateway::PixelGatewayConfig {
+                        listen_addr,
+                        private_rfb_addr,
+                        private_rfb_connect_timeout: timeout,
+                        scope: scope.clone(),
+                        allowed_origins: runtime.allowed_origins.clone(),
+                    },
+                    Arc::clone(&runtime.authorizer),
+                    netd::rfb_probe::PixelGatewayProbeRequest::new(
+                        public_ready_url,
+                        probe_origin,
+                        readiness_assertion.as_str(),
+                    ),
+                    attempt_budget,
+                )
+                .await;
+                match attempt {
+                    Ok(ready) => break ready,
+                    Err(error) => {
+                        if std::time::Instant::now() + PIXEL_PROBE_RETRY_BACKOFF >= deadline {
+                            return Err(anyhow::Error::new(error).context(
+                                "authenticated public pixel gateway path did not become interactive",
+                            ));
+                        }
+                        tokio::time::sleep(PIXEL_PROBE_RETRY_BACKOFF).await;
+                    }
+                }
+            };
             Ok::<_, anyhow::Error>((handle, private_rfb_addr, frame))
         }
         .await;
@@ -4916,10 +5037,18 @@ async fn handle_restore_snapshot_lease(
     }
     prof_mark!("ready_ack_ms");
     // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
+    // P3 adds `content_ready_ms`: the restore's own measurement of how long
+    // until the user's first screen is serveable (so the PWA progress UI can
+    // interpolate p50 from real numbers, not just `proxy_ready_wait_ms`).
+    // Present on every restore — unlike `spans=`, it does not need
+    // ATO_READY_STATE_BENCH. "ungated" marks a supervisor artifact, where the
+    // workload only starts at bind time and no HTTP probe gates ready.
     println!(
-        "RESTORE_PROF lease={lease_id} snapshot={} {} total_ms={} spans=\"{}\"",
+        "RESTORE_PROF lease={lease_id} snapshot={} {} content_ready_ms={} total_ms={} \
+         spans=\"{}\"",
         cmd.snapshot_id,
         prof_parts.join(" "),
+        content_ready_ms,
         prof_total.elapsed().as_millis(),
         prof_spans.join(";"),
     );
@@ -7247,16 +7376,9 @@ mod tests {
             }
         });
 
-        // Proxy on its own ephemeral port: bind via port 0 is not expressible
-        // through start_root_proxy's listen string with assertions, so pick a
-        // free port first.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let listen = listener.local_addr().expect("addr").to_string();
-        drop(listener);
-
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy starts against a live upstream");
+        // Proxy on its own ephemeral port — bind the listener ONCE and serve it
+        // (no bind→drop→rebind window; see start_root_proxy_ephemeral).
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         let response = reqwest::Client::new()
             .get(format!("http://{listen}/anything"))
@@ -7287,13 +7409,50 @@ mod tests {
         );
     }
 
-    /// Pick a free loopback port + return a `listen` string for the proxy (the
-    /// proxy's listen arg is a string; bind-then-drop reserves a free port).
-    fn free_listen() -> String {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let a = l.local_addr().expect("addr").to_string();
-        drop(l);
-        a
+    /// Bring a root proxy up on an OS-chosen loopback port and return its
+    /// accept handle together with the `host:port` it listens on. Binds the
+    /// listener ONCE and serves that live socket — unlike the old
+    /// `free_listen()` + `start_root_proxy` dance it never drops and rebinds the
+    /// port number, so a concurrently-running test cannot claim it in between
+    /// (the ephemeral-port TOCTOU that intermittently failed these proxy tests
+    /// with "Address already in use"). Probes the upstream first, exactly as
+    /// `start_root_proxy_to` does, so a dead upstream is still refused.
+    async fn start_root_proxy_ephemeral(
+        upstream_port: u16,
+    ) -> (tokio::task::JoinHandle<()>, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy listener");
+        let listen = listener.local_addr().expect("addr").to_string();
+        let upstream_addr = format!("127.0.0.1:{upstream_port}");
+        tokio::net::TcpStream::connect(&upstream_addr)
+            .await
+            .expect("upstream is accepting");
+        (serve_root_proxy(listener, upstream_addr), listen)
+    }
+
+    /// Readiness-probing sibling of [`start_root_proxy_ephemeral`]: binds the
+    /// proxy listener to an OS-chosen port ONCE and drives the through-proxy
+    /// readiness probe on that live socket, returning the probe outcome plus the
+    /// `host:port`. Same rationale — no bind→drop→rebind window for another test
+    /// to steal the port, which previously flaked the `_ready` tests before the
+    /// probe loop ran a single attempt.
+    async fn start_root_proxy_ready_ephemeral(
+        upstream_addr: String,
+        probe_path: &str,
+        timeout: Duration,
+    ) -> (
+        (Result<tokio::task::JoinHandle<()>>, ProxyReadyProbe),
+        String,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy listener");
+        let listen = listener.local_addr().expect("addr").to_string();
+        (
+            serve_root_proxy_ready(listener, upstream_addr, probe_path, timeout).await,
+            listen,
+        )
     }
 
     /// v1.5 (ato#973): the runner proxy is a raw L4 `copy_bidirectional` pipe, so a
@@ -7334,10 +7493,7 @@ mod tests {
             }
         });
 
-        let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy up");
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut c = tokio::net::TcpStream::connect(&listen)
@@ -7413,10 +7569,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         });
 
-        let listen = free_listen();
-        let handle = start_root_proxy(&listen, upstream_port)
-            .await
-            .expect("proxy up");
+        let (handle, listen) = start_root_proxy_ephemeral(upstream_port).await;
 
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut c = tokio::net::TcpStream::connect(&listen)
@@ -7538,15 +7691,7 @@ mod tests {
                 let _ = stream.write_all(b"HTTP/1.0 200 OK\r\ncontent-length: 2\r\n\r\nok");
             }
         });
-        let listen = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-            let addr = l.local_addr().unwrap().to_string();
-            drop(l);
-            addr
-        };
-
-        let (result, probe) = start_root_proxy_ready(
-            &listen,
+        let ((result, probe), listen) = start_root_proxy_ready_ephemeral(
             format!("127.0.0.1:{upstream_port}"),
             "/health",
             Duration::from_secs(5),
@@ -7594,20 +7739,14 @@ mod tests {
             drop(l);
             p
         };
-        let listen = {
-            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-            let addr = l.local_addr().unwrap().to_string();
-            drop(l);
-            addr
-        };
         let started = std::time::Instant::now();
         // 2s (not 500ms): under a loaded/contended CI runner (observed on
         // windows-latest) a too-tight budget can be consumed almost entirely
         // by scheduling delay before this task's first poll, leaving room for
         // only one attempt instead of the several this test wants to prove.
         let budget = Duration::from_secs(2);
-        let (result, probe) =
-            start_root_proxy_ready(&listen, format!("127.0.0.1:{dead_port}"), "/health", budget)
+        let ((result, probe), _listen) =
+            start_root_proxy_ready_ephemeral(format!("127.0.0.1:{dead_port}"), "/health", budget)
                 .await;
         assert!(result.is_err(), "dead upstream must be a typed error");
         assert!(!probe.ok);
@@ -8525,9 +8664,23 @@ mod tests {
         );
     }
 
+    /// Fires its oneshot when dropped. Moved into a spawned task, it lets a test
+    /// observe that the task's *future* was actually dropped — a race-free signal
+    /// that the task (and everything it owned, e.g. a `TcpListener`) is gone,
+    /// with no dependence on probing a port number.
+    struct SendOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for SendOnDrop {
+        fn drop(&mut self) {
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
+        }
+    }
+
     #[tokio::test]
     async fn proxy_abort_must_be_awaited_before_clean_stop() {
-        // Live upstream so the proxy comes up (it refuses bring-up otherwise).
+        // Live upstream so a forwarded connection would have somewhere to go.
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let upstream_port = upstream_listener.local_addr().expect("addr").port();
         let upstream = std::thread::spawn(move || {
@@ -8539,26 +8692,79 @@ mod tests {
                 let _ = stream.read(&mut buf);
             }
         });
-        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe port");
-        let listen = probe.local_addr().expect("addr").to_string();
-        drop(probe);
 
-        let handle = start_root_proxy(&listen, upstream_port)
+        // A live proxy whose accept-loop future carries a drop sentinel. This is
+        // the same shape as `serve_root_proxy` (accept → copy_bidirectional), but
+        // the sentinel gives us a race-free way to observe the future's drop. The
+        // earlier version instead connected to the freed listen port and asserted
+        // the connect FAILED — unsound on a shared machine, where a stranger can
+        // grab the just-released ephemeral port in the window before the probe and
+        // flip the assert. We assert the actual invariant (the accept loop is
+        // gone) rather than "nothing happens to listen on this port number".
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("proxy starts against a live upstream");
+            .expect("bind proxy listener");
+        let upstream_addr = format!("127.0.0.1:{upstream_port}");
+        // Prove the proxy is actually live before we stop it.
+        tokio::net::TcpStream::connect(&upstream_addr)
+            .await
+            .expect("upstream is accepting");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let (gone_tx, gone_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            // Install the drop sentinel and announce the loop is live BEFORE any
+            // abort can land. On a current-thread runtime `stop_proxy`'s abort can
+            // otherwise fire before this task is ever polled, dropping the captured
+            // `gone_tx` WITHOUT the sentinel — the join still reports cancelled, so
+            // the leak would masquerade as a clean stop. The handshake (mirroring
+            // `cleanup_ack_reports_proxy_stopped_false_...`) guarantees the sentinel
+            // is armed and the loop parked at `accept` first.
+            let _alive = SendOnDrop(Some(gone_tx));
+            let _ = started_tx.send(());
+            loop {
+                let Ok((mut inbound, _)) = listener.accept().await else {
+                    break;
+                };
+                let upstream_addr = upstream_addr.clone();
+                tokio::spawn(async move {
+                    let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await
+                    else {
+                        return;
+                    };
+                    let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+                });
+            }
+        });
+        started_rx.await.expect("proxy accept loop started");
 
-        // stop_proxy AWAITS the aborted task, so by the time it returns true the
-        // listener has been dropped and the port refuses connections WITHOUT any
-        // retry/poll loop. If abort were treated as fire-and-forget, this
-        // immediate connect could still succeed — the whole point of the fix.
+        // stop_proxy ABORTS then AWAITS the JoinHandle, so it returns true only
+        // once the task future has resolved — and awaiting a cancelled task drops
+        // its future. If abort were treated as fire-and-forget, stop_proxy could
+        // return before the future dropped. That is the exact regression this test
+        // guards.
         let stopped = stop_proxy(Some(handle)).await;
         assert!(
             stopped,
             "a cleanly cancelled proxy task is a confirmed stop"
         );
+
+        // The sound invariant: by the time stop_proxy confirmed the stop, the
+        // accept loop's future was ALREADY dropped — proven by the sentinel having
+        // fired.
+        //
+        // This must be a NON-BLOCKING `try_recv`, not an awaited timeout. Awaiting
+        // (even briefly) only proves the future drops *eventually*, which a
+        // fire-and-forget `abort()` also satisfies — the runtime drops an aborted
+        // task's future moments later regardless. Verified: replacing stop_proxy's
+        // `timeout(grace, handle).await` with a non-awaiting stub still passed an
+        // awaited assertion here, so the awaited form did not test the ordering
+        // this test is named for. `try_recv` does: it can only succeed if the drop
+        // happened before stop_proxy returned.
+        let mut gone_rx = gone_rx;
         assert!(
-            tokio::net::TcpStream::connect(&listen).await.is_err(),
-            "once stop_proxy confirms termination the listen port must be released",
+            matches!(gone_rx.try_recv(), Ok(())),
+            "stop_proxy must await the abort so the accept loop is provably gone \
+             BEFORE it returns — the sentinel had not fired yet",
         );
         drop(upstream);
     }

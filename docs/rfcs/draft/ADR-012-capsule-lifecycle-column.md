@@ -5,7 +5,7 @@ date: 2026-07-13
 author: "@egamikohsuke"
 related:
   - "GITHUB_CAPSULE_REQUEST_PIPELINE.md"
-  - "EXECUTION_IDENTITY_SPEC.md"
+  - "../accepted/CAPSULE_V1_EXECUTION_MODEL_SPEC.md"
 ---
 
 # ADR-012: Capsule lifecycle vs revision lifecycle (two records)

@@ -18,12 +18,12 @@ use super::lockfile_support::{
     capsule_error_pack, create_atomic_temp_file, write_atomic_bytes_with_os_lock,
 };
 use super::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, ENV_STORE_API_URL, LOCKFILE_INPUT_SNAPSHOT_NAME, LockMeta,
-    LockedCapsuleDependency, LockedToolCapsule, LockedToolExports, RuntimeArtifact, RuntimeEntry,
-    RuntimeSection, SUPPORTED_RUNTIME_PLATFORMS, ToolArtifact, ToolSection, ToolTargets,
-    UV_VERSION, ensure_lockfile, ensure_lockfile_for_compat_input, generate_lockfile,
-    lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path, lockfile_output_path,
-    lockfile_runtime_platforms, lockfile_runtime_target_labels,
+    ENV_STORE_API_URL, LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, LOCKFILE_INPUT_SNAPSHOT_NAME,
+    LegacyCapsuleLock, LockMeta, LockedCapsuleDependency, LockedToolCapsule, LockedToolExports,
+    RuntimeArtifact, RuntimeEntry, RuntimeSection, SUPPORTED_RUNTIME_PLATFORMS, ToolArtifact,
+    ToolSection, ToolTargets, UV_VERSION, ensure_lockfile, ensure_lockfile_for_compat_input,
+    generate_lockfile, lockfile_has_required_platform_coverage, lockfile_inputs_snapshot_path,
+    lockfile_output_path, lockfile_runtime_platforms, lockfile_runtime_target_labels,
     orchestration_service_target_labels, read_lockfile, read_runtime_tools,
     read_selected_runtime_tool, required_runtime_version, resolve_external_capsule_dependencies,
     semantic_manifest_hash_from_text, surface_requirements_from_manifest,
@@ -62,7 +62,7 @@ impl Drop for EnvGuard {
 
 #[test]
 fn serialize_lockfile_with_allowlist() {
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -78,7 +78,7 @@ fn serialize_lockfile_with_allowlist() {
     };
 
     let json = serde_json::to_string(&lockfile).unwrap();
-    let parsed: CapsuleLock = serde_json::from_str(&json).unwrap();
+    let parsed: LegacyCapsuleLock = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.allowlist.unwrap()[0], "nodejs.org");
 }
 
@@ -86,7 +86,7 @@ fn serialize_lockfile_with_allowlist() {
 fn verify_lockfile_manifest_hash() {
     let temp = TempDir::new().unwrap();
     let manifest_path = temp.path().join("capsule.toml");
-    let lockfile_path = temp.path().join(CAPSULE_LOCK_FILE_NAME);
+    let lockfile_path = temp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
     let manifest_text = r#"schema_version = "0.3"
 name = "demo"
 version = "1.0.0"
@@ -94,7 +94,7 @@ type = "app"
 "#;
     fs::write(&manifest_path, manifest_text).unwrap();
 
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -129,7 +129,7 @@ external_dependencies = [
     )
     .unwrap();
 
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -227,7 +227,7 @@ contract = "service@1"
     )
     .unwrap();
 
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -584,7 +584,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
             version: Some("0.4.19".to_string()),
         },
     )]);
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -666,7 +666,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
             )
         })
         .collect();
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -765,7 +765,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
             )
         })
         .collect();
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -870,7 +870,7 @@ runtime_tools = { node = "20.11.0", python = "3.11.10" }
             )
         })
         .collect();
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -958,7 +958,7 @@ env = { ATO_ORCH_REQUIRED_ENVS = "LEGACY_ONE, LEGACY_TWO,API_TOKEN" }
 #[test]
 fn atomic_write_replaces_file_without_temp_leaks() {
     let temp = TempDir::new().unwrap();
-    let target = temp.path().join(CAPSULE_LOCK_FILE_NAME);
+    let target = temp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
 
     write_atomic_bytes_with_os_lock(&target, b"first", "test lockfile", capsule_error_pack)
         .unwrap();
@@ -982,7 +982,7 @@ fn atomic_temp_file_is_created_in_target_directory() {
     let temp = TempDir::new().unwrap();
     let tmp_path = create_atomic_temp_file(
         temp.path(),
-        CAPSULE_LOCK_FILE_NAME,
+        LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
         "test temp file",
         &capsule_error_pack,
     )
@@ -1069,7 +1069,12 @@ run = "main.sh""#;
 
     assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
-    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(
+        !temp
+            .path()
+            .join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
+            .exists()
+    );
     assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
     assert!(!temp.path().join("capsule.toml").exists());
     assert!(
@@ -1119,7 +1124,12 @@ run = "main.ts""#;
     assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
     assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
-    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(
+        !temp
+            .path()
+            .join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
+            .exists()
+    );
     assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
@@ -1163,7 +1173,12 @@ run = "uv run python3 main.py""#;
     assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
     assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
-    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(
+        !temp
+            .path()
+            .join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
+            .exists()
+    );
     assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
@@ -1215,7 +1230,12 @@ include = ["src/**", "fixtures/db.json", "package.json", "pnpm-lock.yaml"]
     assert_eq!(lock_path, lockfile_output_path(temp.path()));
     assert!(lock_path.exists());
     assert!(lockfile_inputs_snapshot_path(temp.path()).exists());
-    assert!(!temp.path().join(CAPSULE_LOCK_FILE_NAME).exists());
+    assert!(
+        !temp
+            .path()
+            .join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME)
+            .exists()
+    );
     assert!(!temp.path().join(LOCKFILE_INPUT_SNAPSHOT_NAME).exists());
 }
 
@@ -1337,8 +1357,8 @@ async fn run_command_inner_rejects_relative_program() {
 
 fn empty_lockfile_with_tool_capsules(
     tool_capsules: BTreeMap<String, LockedToolCapsule>,
-) -> CapsuleLock {
-    CapsuleLock {
+) -> LegacyCapsuleLock {
+    LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-05-06T00:00:00Z".to_string(),
@@ -1388,7 +1408,7 @@ fn lockfile_serializes_tool_capsule_entries() {
     assert!(json.contains("\"darwin-arm64\""));
     assert!(json.contains("\"ATO_TOOL_INITDB\""));
 
-    let parsed: CapsuleLock = serde_json::from_str(&json).unwrap();
+    let parsed: LegacyCapsuleLock = serde_json::from_str(&json).unwrap();
     let postgres = parsed
         .tool_capsules
         .get("postgres")
@@ -1608,7 +1628,7 @@ external_dependencies = [
     )
     .unwrap();
 
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -1683,7 +1703,7 @@ fn verify_lockfile_against_contracts_rejects_tampered_lock() {
         }],
     };
     // Lock claims a different source — must be rejected.
-    let mut bad_lockfile = CapsuleLock {
+    let mut bad_lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-01-20T00:00:00Z".to_string(),
@@ -1727,7 +1747,7 @@ fn lockfile_accepts_legacy_lockfile_without_tool_capsules() {
         "capsule_dependencies": [],
         "targets": {}
     }"#;
-    let parsed: CapsuleLock = serde_json::from_str(legacy).expect("parse legacy lockfile");
+    let parsed: LegacyCapsuleLock = serde_json::from_str(legacy).expect("parse legacy lockfile");
     assert!(parsed.tool_capsules.is_empty());
 }
 
@@ -1785,7 +1805,7 @@ fn tool_artifact_serializes_and_roundtrips_binary_sha256() {
 
 #[test]
 fn tool_artifact_roundtrips_through_full_lockfile() {
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -1816,7 +1836,7 @@ fn tool_artifact_roundtrips_through_full_lockfile() {
     };
 
     let json = serde_json::to_string(&lockfile).expect("serialize lockfile");
-    let parsed: CapsuleLock = serde_json::from_str(&json).expect("deserialize lockfile");
+    let parsed: LegacyCapsuleLock = serde_json::from_str(&json).expect("deserialize lockfile");
     let artifact = parsed
         .tools
         .and_then(|tools| tools.uv)
@@ -1836,7 +1856,7 @@ fn deno_serializes_under_runtimes_not_tools() {
     // Deno is a primary runtime: it belongs under `runtimes.deno`, never
     // `tools.deno`. `ToolSection` has no `deno` field at all. See #470 and
     // docs/dev-notes/runtime-vs-runtime-tools.md.
-    let lockfile = CapsuleLock {
+    let lockfile = LegacyCapsuleLock {
         version: "1".to_string(),
         meta: LockMeta {
             created_at: "2026-03-08T00:00:00Z".to_string(),
@@ -1881,7 +1901,7 @@ fn deno_serializes_under_runtimes_not_tools() {
     );
 
     // Round-trips back under runtimes.deno.
-    let parsed: CapsuleLock =
+    let parsed: LegacyCapsuleLock =
         serde_json::from_value(value).expect("deserialize lockfile from value");
     assert!(
         parsed.runtimes.and_then(|r| r.deno).is_some(),

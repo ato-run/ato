@@ -91,7 +91,7 @@ fn logged_log_path(mode: &ExecuteMode) -> Option<PathBuf> {
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     effective_state: Option<&EffectiveLockState>,
     nacelle_override: Option<PathBuf>,
     _reporter: std::sync::Arc<CliReporter>,
@@ -152,7 +152,7 @@ pub fn execute(
 
 pub fn execute_host(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     _reporter: std::sync::Arc<CliReporter>,
     mode: ExecuteMode,
     launch_ctx: &RuntimeLaunchContext,
@@ -561,7 +561,7 @@ enum ManagedRuntimeKind {
 
 fn resolve_host_managed_runtime_binary(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     runtime: ManagedRuntimeKind,
 ) -> Result<PathBuf> {
     match runtime {
@@ -592,14 +592,14 @@ fn executable_extensions() -> Vec<String> {
 #[allow(dead_code)]
 pub fn should_launch_desktop_native_with_host_open(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> bool {
     desktop_native_open_bundle_path(plan, authoritative_lock).is_some()
 }
 
 fn desktop_native_open_bundle_path(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -626,7 +626,7 @@ fn desktop_native_open_bundle_path_from_runtime_lock(manifest_dir: &Path) -> Opt
 #[cfg(target_os = "macos")]
 fn desktop_native_open_bundle_path_from_authoritative_lock(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
 ) -> Option<PathBuf> {
     let mut root = serde_json::Map::new();
     let mut contract = serde_json::Map::new();
@@ -1267,8 +1267,17 @@ fn write_normalized_manifest(
         .and_then(|value| value.as_table())
         .cloned()
         .unwrap_or_default();
+    // An author who declared a posture keeps it verbatim — that declaration is
+    // the only thing standing between an untrusted capsule and full egress, so
+    // it must never be overwritten here (ato#786). Only an UNDECLARED posture
+    // is filled in, and it is filled in from the single platform-wide default
+    // so that flipping the default to fail-closed is one edit in `capsule`,
+    // not a change to this executor.
     if !network_table.contains_key("enabled") {
-        network_table.insert("enabled".to_string(), toml::Value::Boolean(true));
+        network_table.insert(
+            "enabled".to_string(),
+            toml::Value::Boolean(capsule::types::NETWORK_ENABLED_WHEN_UNDECLARED),
+        );
     }
     if !dep_endpoints.is_empty() {
         let existing = network_table
@@ -1917,6 +1926,182 @@ mod tests {
         }
     }
 
+    // ── [network] enabled → nacelle isolation (ato#786) ───────────────────
+    //
+    // `ato run <path>` always resolves an authoritative input first, so the
+    // plan the executor sees is synthesized FROM `capsule.lock`, not from
+    // `capsule.toml`. That is why the escape only reproduced after a lock
+    // round trip, and why these tests build the plan through `route_lock`.
+
+    /// A lock shaped like the one the compatibility importer produces for a
+    /// single-file `source/python` capsule, with `contract.network` compiled
+    /// from `network_toml` exactly as `compat_import::manifest_import` does.
+    fn plan_from_lock(dir: &tempfile::TempDir, network_toml: Option<&str>) -> ManifestData {
+        use capsule::capsule_lock::CapsuleLock;
+        use serde_json::json;
+
+        let mut lock = CapsuleLock::default();
+        lock.contract.entries.insert(
+            "metadata".to_string(),
+            json!({"name": "net-canary", "version": "0.1.0", "default_target": "dev"}),
+        );
+        lock.contract.entries.insert(
+            "process".to_string(),
+            json!({"entrypoint": "payload.py", "cmd": ["python3", "payload.py"]}),
+        );
+        lock.contract.entries.insert(
+            "workloads".to_string(),
+            json!([{
+                "name": "main",
+                "target": "dev",
+                "process": {"entrypoint": "payload.py", "cmd": ["python3", "payload.py"]}
+            }]),
+        );
+        if let Some(network_toml) = network_toml {
+            let manifest = format!(
+                r#"
+schema_version = "0.3"
+name = "net-canary"
+version = "0.1.0"
+type = "app"
+runtime = "source"
+runtime_version = "3.11"
+run = "payload.py"
+
+{network_toml}
+"#
+            );
+            let network = capsule::types::CapsuleManifest::from_toml(&manifest)
+                .expect("manifest parses")
+                .network
+                .expect("[network] present");
+            lock.contract.entries.insert(
+                "network".to_string(),
+                serde_json::to_value(&network).expect("network serializable"),
+            );
+        }
+        lock.resolution.entries.insert(
+            "runtime".to_string(),
+            json!({"kind": "python", "selected_target": "dev"}),
+        );
+        lock.resolution.entries.insert(
+            "resolved_targets".to_string(),
+            json!([{
+                "label": "dev",
+                "runtime": "source",
+                "driver": "python",
+                "runtime_version": "3.11",
+                "entrypoint": "payload.py",
+                "cmd": ["python3", "payload.py"]
+            }]),
+        );
+        lock.resolution.entries.insert(
+            "closure".to_string(),
+            json!({"kind": "metadata_only", "status": "incomplete"}),
+        );
+
+        capsule::router::route_lock(
+            &dir.path().join("capsule.lock"),
+            &lock,
+            dir.path(),
+            capsule::router::ExecutionProfile::Dev,
+            Some("dev"),
+        )
+        .expect("route lock")
+        .plan
+    }
+
+    fn normalized_isolation_network(plan: &ManifestData) -> toml::Value {
+        let normalized_path = write_normalized_manifest(plan, &[], &[]).expect("write manifest");
+        let normalized: toml::Value = toml::from_str(
+            &fs::read_to_string(&normalized_path).expect("read normalized manifest"),
+        )
+        .expect("normalized manifest parses");
+        normalized
+            .get("isolation")
+            .and_then(|isolation| isolation.get("network"))
+            .cloned()
+            .expect("[isolation.network] present in the nacelle manifest")
+    }
+
+    /// The escape, end to end on the CLI side: an authored deny must reach
+    /// nacelle as `enabled = false`. nacelle lowers that to `bwrap` WITHOUT
+    /// `--share-net` (see `nacelle::launcher::bwrap_namespace_args`).
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_preserves_declared_network_deny_from_lock() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let dir = tempdir().unwrap();
+        let plan = plan_from_lock(&dir, Some("[network]\nenabled = false"));
+
+        let network = normalized_isolation_network(&plan);
+        assert_eq!(
+            network.get("enabled").and_then(toml::Value::as_bool),
+            Some(false),
+            "a lock-routed capsule that denied network must not be re-enabled: {network:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_preserves_declared_network_deny_with_egress_allow_from_lock() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let dir = tempdir().unwrap();
+        let plan = plan_from_lock(
+            &dir,
+            Some("[network]\nenabled = false\negress_allow = [\"example.com\"]"),
+        );
+
+        let network = normalized_isolation_network(&plan);
+        assert_eq!(
+            network.get("enabled").and_then(toml::Value::as_bool),
+            Some(false),
+            "an allowlist alongside a deny must not resurrect the network: {network:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_defaults_undeclared_network_posture_from_lock() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let dir = tempdir().unwrap();
+        let plan = plan_from_lock(&dir, None);
+
+        let network = normalized_isolation_network(&plan);
+        assert_eq!(
+            network.get("enabled").and_then(toml::Value::as_bool),
+            Some(capsule::types::NETWORK_ENABLED_WHEN_UNDECLARED),
+            "an undeclared posture keeps the platform default: {network:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn write_normalized_manifest_preserves_declared_network_deny_from_manifest() {
+        let _env_lock = crate::tests::env_lock().lock().expect("env lock");
+        let dir = tempdir().unwrap();
+        let plan = plan_from_manifest(
+            &dir,
+            r#"
+            [network]
+            enabled = false
+
+            [targets.dev]
+            runtime = "source"
+            language = "python"
+            entrypoint = "payload.py"
+            "#,
+            "dev",
+        );
+
+        let network = normalized_isolation_network(&plan);
+        assert_eq!(
+            network.get("enabled").and_then(toml::Value::as_bool),
+            Some(false),
+            "{network:?}"
+        );
+    }
+
     fn plan_from_manifest(dir: &tempfile::TempDir, manifest: &str, target: &str) -> ManifestData {
         let manifest_path = dir.path().join("capsule.toml");
         let mut parsed: toml::Value = toml::from_str(manifest).expect("manifest");
@@ -2012,11 +2197,34 @@ mod tests {
 
     #[test]
     fn resolve_host_command_path_absolutizes_existing_relative_commands() {
-        let resolved =
-            resolve_host_command_path(Path::new("tests/fixtures/native-shell-capsule"), "run.sh");
+        // Anchor the workspace on an ABSOLUTE path (the crate root) rather than a
+        // process-CWD-relative one. `resolve_host_command_path` probes
+        // `working_dir.join(command).exists()`, so a relative `working_dir`
+        // resolves against the process-global CWD — which other tests in this
+        // crate mutate via `set_current_dir` (the publish / install / preflight
+        // RAII chdir guards). Under libtest's parallel scheduler that made this
+        // test flake: when a sibling had chdir'd elsewhere, the fixture join
+        // missed, the command fell through un-canonicalized, and `is_absolute()`
+        // failed. An absolute working_dir removes the CWD dependence entirely.
+        //
+        // It is deliberately absolute but NOT canonical (note the `..` segment):
+        // an already-canonical absolute dir would make `working_dir.join(cmd)`
+        // absolute on its own, so `is_absolute()` would still hold even if
+        // `fs::canonicalize` were deleted — i.e. the canonicalization branch
+        // would silently lose its only coverage. Routing through `..` keeps that
+        // step load-bearing: without it the `..` survives into the result and
+        // the final assertion fails.
+        let working_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/../fixtures/native-shell-capsule");
+
+        let resolved = resolve_host_command_path(&working_dir, "run.sh");
 
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with(Path::new("tests/fixtures/native-shell-capsule/run.sh")));
+        assert!(
+            !resolved.components().any(|c| c.as_os_str() == ".."),
+            "resolved path must be canonicalized, not just absolute: {resolved:?}"
+        );
     }
 
     #[test]
@@ -3024,7 +3232,7 @@ mod tests {
             "desktop",
         );
 
-        let mut lock = capsule::ato_lock::AtoLock::default();
+        let mut lock = capsule::capsule_lock::CapsuleLock::default();
         lock.contract.entries.insert(
             "delivery".to_string(),
             json!({

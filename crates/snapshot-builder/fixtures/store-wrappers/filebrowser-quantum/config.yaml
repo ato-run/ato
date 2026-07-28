@@ -1,0 +1,33 @@
+server:
+  port: 80
+  baseURL: "/"
+  logging:
+    - levels: "info|warning|error"
+  sources:
+    - path: "/srv"
+      name: "demo"
+
+# Anonymous preview: no login. The preview run is throwaway (tmpfs-backed,
+# 180s cap), so noauth is safe and the whole point of the lane.
+auth:
+  methods:
+    noauth: true
+
+frontend:
+  name: "FileBrowser Quantum"
+
+userDefaults:
+  darkMode: true
+  preview:
+    image: true
+    video: true
+    popup: true
+  account:
+    permissions:
+      download: true
+      create: true
+      modify: true
+      delete: true
+      share: false
+      api: false
+      admin: false

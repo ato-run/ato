@@ -136,6 +136,7 @@ fn attempt(kind: &ReadyProbeKind) -> Result<(), String> {
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::piped());
+            crate::common::host_shell::sanitize_untrusted_environment(&mut cmd);
             let output = cmd
                 .output()
                 .map_err(|err| format!("spawn {} failed: {err}", argv[0]))?;

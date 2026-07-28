@@ -1,0 +1,11 @@
+schema_version = "0.3"
+name = "engine-path-reject"
+version = "0.1.0"
+type = "app"
+default_target = "chat"
+
+[targets.chat]
+runtime = "native-inference"
+engine_path = "/usr/local/bin/llama-server"
+model = "model.gguf"
+port = 8080

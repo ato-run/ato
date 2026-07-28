@@ -199,6 +199,16 @@ pub(crate) enum RunnerCommands {
         /// --official-preview. Default: /etc/caddy/Caddyfile.
         #[arg(long, value_name = "PATH", requires = "official_preview")]
         caddyfile: Option<String>,
+
+        /// Serve Submission-Wizard interactive holds from this runner:
+        /// `127.0.0.1:<port>` for slot 0's builder hold proxy, with later slots
+        /// taking consecutive ports. Generates the `w<N>.<base>` wizard origins
+        /// and registers them as ato-api ingress slots.
+        ///
+        /// Omit it and this runner serves no holds — no wizard origin is
+        /// generated and nothing is registered. Only with --official-preview.
+        #[arg(long, value_name = "HOST:PORT", requires = "official_preview")]
+        hold_proxy_listen: Option<String>,
     },
 
     /// Minimal local Ready-State smoke, no control plane involved: Docker→ext4

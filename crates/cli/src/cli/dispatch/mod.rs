@@ -799,6 +799,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     public_base_url,
                     max_slots,
                     caddyfile,
+                    hold_proxy_listen,
                 } => {
                     // clap enforces official_preview ⇔ public_base_url via `requires`.
                     let official = official_preview.then(|| {
@@ -809,6 +810,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                                 crate::application::runner_bootstrap::official_preview::DEFAULT_CADDYFILE_PATH
                                     .to_string()
                             }),
+                            hold_proxy_listen,
                         }
                     });
                     crate::application::runner_bootstrap::setup::run(
@@ -873,14 +875,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Login {
             token,
             headless,
-            desktop_webview,
+            desktop,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
             match token {
                 Some(token) => rt.block_on(auth::login_with_token(token)),
-                None if desktop_webview => {
-                    rt.block_on(auth::login_with_store_device_flow_desktop())
-                }
+                None if desktop => rt.block_on(auth::login_with_store_device_flow_desktop()),
                 None => rt.block_on(auth::login_with_store_device_flow(headless)),
             }
         }

@@ -54,7 +54,7 @@ struct PreparedCommand {
 
 pub fn execute(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -122,7 +122,7 @@ pub fn execute(
 
 pub fn spawn(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -249,7 +249,7 @@ fn run_provisioning(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,

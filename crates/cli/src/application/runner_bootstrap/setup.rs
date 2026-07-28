@@ -794,6 +794,7 @@ mod tests {
                 public_base_url: "https://runner-abc.runner.ato.run".into(),
                 max_slots: 2,
                 caddyfile_path: "/etc/caddy/Caddyfile".into(),
+                hold_proxy_listen: None,
             }),
             ..opts()
         }

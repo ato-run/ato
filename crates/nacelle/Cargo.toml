@@ -1,6 +1,6 @@
 [package]
 name = "nacelle"
-version = "0.7.9"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.96"
 license = "MPL-2.0"

@@ -190,7 +190,8 @@ async fn fetch_publisher_me(
 }
 
 /// Registers a new publisher record without any interactive prompts.
-/// Used in `--desktop-webview` mode where no TTY is available.
+/// Used when no TTY is available (e.g. `ato login --desktop`, spawned
+/// non-interactively by ato-desktop).
 /// Tries the canonical handle derived from `hint`; on conflict appends
 /// incrementing numeric suffixes (hint-2, hint-3, …) up to 5 attempts.
 async fn register_publisher_silently(
@@ -370,7 +371,7 @@ async fn register_publisher_with_prompt(
 pub(super) async fn run_publisher_onboarding_flow(
     session_token: &str,
     github_username: Option<&str>,
-    desktop_webview: bool,
+    non_interactive: bool,
 ) -> Result<PublisherOnboardingInfo> {
     let api_base = store_api_base_url();
     let client = reqwest::Client::builder()
@@ -390,8 +391,8 @@ pub(super) async fn run_publisher_onboarding_flow(
                 update_publisher_did(&client, &api_base, session_token, &local_key).await?;
             }
             existing
-        } else if desktop_webview {
-            // In desktop-webview mode there is no TTY for interactive prompts.
+        } else if non_interactive {
+            // No TTY for interactive prompts in this mode.
             // Try a silent registration with the supplied username hint; if it
             // fails (handle taken, network error, etc.) bail so the caller can
             // fall through to the Failure path — the session token is already
@@ -408,8 +409,8 @@ pub(super) async fn run_publisher_onboarding_flow(
             }
         };
 
-    let installation = if desktop_webview {
-        // In desktop-webview mode there is no TTY for interactive prompts.
+    let installation = if non_interactive {
+        // No TTY for interactive prompts in this mode.
         // Try to pick up an existing *active* installation; if none is found
         // or the lookup fails, leave it unset — the user can link a GitHub
         // App later via `ato publish`.

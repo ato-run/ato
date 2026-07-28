@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use capsule::ato_lock::{AtoLock, UnresolvedValue};
+use capsule::capsule_lock::{CapsuleLock, UnresolvedValue};
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::execution_plan::model::ExecutionPlan;
 use capsule::lock_runtime::LockCompilerOverlay;
@@ -140,7 +140,7 @@ pub(crate) fn write_default_policy_bundle(path: &Path) -> Result<()> {
 pub(crate) fn write_default_attestation_store(
     path: &Path,
     lock_path: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> Result<()> {
     let store = WorkspaceAttestationStore {
         schema_version: "1".to_string(),
@@ -157,7 +157,7 @@ pub(crate) fn write_default_attestation_store(
 
 pub(crate) fn resolve_effective_lock_state(
     project_root: &Path,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     cli_state_bindings: &[String],
 ) -> Result<EffectiveLockState> {
     // Binding and policy are resolved exactly once at this boundary so run,
@@ -208,7 +208,7 @@ pub(crate) fn resolve_effective_lock_state(
     })
 }
 
-pub(crate) fn sanitize_lock_for_distribution(lock: &AtoLock) -> AtoLock {
+pub(crate) fn sanitize_lock_for_distribution(lock: &CapsuleLock) -> CapsuleLock {
     // Distribution keeps the canonical lock plus embedded policy, but strips
     // mutable/local sections that must not be published by default.
     let mut sanitized = lock.clone();
@@ -358,7 +358,7 @@ fn load_workspace_attestation_store(path: &Path) -> Result<Option<WorkspaceAttes
 fn validate_workspace_binding_seed_affinity(
     path: &Path,
     seed: &WorkspaceBindingSeed,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> Result<WorkspaceBindingSeed> {
     if seed.entries.is_empty() && seed.unresolved.is_empty() {
         return Ok(seed.clone());
@@ -402,7 +402,7 @@ fn validate_workspace_binding_seed_affinity(
 fn validate_workspace_attestation_store_affinity(
     path: &Path,
     store: &WorkspaceAttestationStore,
-    lock: &AtoLock,
+    lock: &CapsuleLock,
 ) -> Result<WorkspaceAttestationStore> {
     if store.approvals.is_empty() && store.observations.is_empty() {
         return Ok(store.clone());
@@ -590,12 +590,12 @@ mod tests {
 
     use super::*;
 
-    fn sample_lock() -> AtoLock {
-        let mut lock = AtoLock {
-            lock_id: Some(capsule::ato_lock::LockId::new(
+    fn sample_lock() -> CapsuleLock {
+        let mut lock = CapsuleLock {
+            lock_id: Some(capsule::capsule_lock::LockId::new(
                 "blake3:1111111111111111111111111111111111111111111111111111111111111111",
             )),
-            ..AtoLock::default()
+            ..CapsuleLock::default()
         };
         lock.binding.entries.insert(
             "state_overrides".to_string(),
@@ -618,7 +618,7 @@ mod tests {
         let paths = workspace_state_paths(dir.path());
         let seed = WorkspaceBindingSeed {
             schema_version: "1".to_string(),
-            lock_path: dir.path().join("ato.lock.json"),
+            lock_path: dir.path().join("capsule.lock"),
             provenance_cache_path: dir
                 .path()
                 .join(".ato/source-inference/provenance-cache.json"),
@@ -718,7 +718,7 @@ mod tests {
         let paths = workspace_state_paths(dir.path());
         let seed = WorkspaceBindingSeed {
             schema_version: "1".to_string(),
-            lock_path: dir.path().join("ato.lock.json"),
+            lock_path: dir.path().join("capsule.lock"),
             provenance_cache_path: dir
                 .path()
                 .join(".ato/source-inference/provenance-cache.json"),
@@ -749,7 +749,7 @@ mod tests {
         let paths = workspace_state_paths(dir.path());
         let store = WorkspaceAttestationStore {
             schema_version: "1".to_string(),
-            lock_path: Some(dir.path().join("ato.lock.json")),
+            lock_path: Some(dir.path().join("capsule.lock")),
             lock_id: Some(
                 "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_string(),

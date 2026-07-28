@@ -32,7 +32,7 @@ pub enum StoreCommand {
     /// Request current session status. Desktop responds via
     /// evaluate_script with a CustomEvent.
     GetSessionStatus,
-    /// Trigger the desktop auth flow (ato login --desktop-webview).
+    /// Trigger the desktop auth flow (`ato login --desktop`).
     Login,
 }
 
@@ -97,9 +97,10 @@ pub fn dispatch(
         }
         StoreCommand::Login => {
             tracing::info!("ato_store: Login triggered — desktop auth flow");
-            // TODO: spawn ato login --desktop-webview as child process,
-            // open a second WebView for OAuth, on completion inject auth token
-            // and dispatch a CustomEvent to the store WebView.
+            // TODO: spawn `ato login --desktop` as a child process (see
+            // `ato_dock::trigger_login` for the pattern already used by the
+            // Dock's Login command), on completion inject auth token and
+            // dispatch a CustomEvent to the store WebView.
         }
         StoreCommand::BrowseUrl { url } => {
             if let Ok(parsed) = url::Url::parse(&url) {

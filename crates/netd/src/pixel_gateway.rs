@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -25,6 +25,7 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Mutex as AsyncMutex, mpsc, watch},
     task::JoinHandle,
+    time::sleep,
 };
 use tokio_tungstenite::{
     accept_hdr_async_with_config,
@@ -45,6 +46,7 @@ const OUTBOUND_QUEUE_DEPTH: usize = 8;
 const MAX_CONSUMED_GRANTS: usize = 4096;
 const RFB_CLIENT_HANDSHAKE_BYTES: usize = 14;
 const MAX_TRACKED_CLIENT_MESSAGE_BYTES: usize = MAX_CLIENT_MESSAGE_BYTES;
+const PRIVATE_RFB_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Immutable identity used to scope every access grant accepted by a gateway.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +83,7 @@ pub trait SurfaceAccessAuthorizer: Send + Sync + 'static {
 pub struct PixelGatewayConfig {
     pub listen_addr: SocketAddr,
     pub private_rfb_addr: SocketAddr,
+    pub private_rfb_connect_timeout: Duration,
     pub scope: PixelGatewayScope,
     pub allowed_origins: BTreeSet<String>,
 }
@@ -145,6 +148,11 @@ impl PixelGatewayConfig {
         if !is_private_rfb_address(self.private_rfb_addr) {
             return Err(PixelGatewayError::InvalidConfig(
                 "private RFB endpoint must use a private or loopback address",
+            ));
+        }
+        if self.private_rfb_connect_timeout.is_zero() {
+            return Err(PixelGatewayError::InvalidConfig(
+                "private RFB connect timeout must be greater than zero",
             ));
         }
         Ok(())
@@ -294,11 +302,30 @@ async fn serve_pixel_connection(
         .max_message_size(Some(MAX_CLIENT_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_CLIENT_MESSAGE_BYTES));
     let websocket = accept_hdr_async_with_config(stream, callback, Some(ws_config)).await?;
-    let rfb = TcpStream::connect(config.private_rfb_addr)
+    let rfb = connect_private_rfb(config.private_rfb_addr, config.private_rfb_connect_timeout)
         .await
         .map_err(PixelGatewayError::RfbConnect)?;
 
     relay_rfb(websocket, rfb, last_input_activity_unix_millis).await
+}
+
+async fn connect_private_rfb(
+    addr: SocketAddr,
+    connect_timeout: Duration,
+) -> Result<TcpStream, std::io::Error> {
+    let started = Instant::now();
+    loop {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ConnectionRefused
+                    && started.elapsed() < connect_timeout =>
+            {
+                sleep(PRIVATE_RFB_CONNECT_RETRY_INTERVAL).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// Parses the pinned RFB 3.8 client stream only far enough to distinguish
@@ -643,6 +670,7 @@ mod tests {
             PixelGatewayConfig {
                 listen_addr: "127.0.0.1:0".parse().unwrap(),
                 private_rfb_addr: upstream,
+                private_rfb_connect_timeout: Duration::from_secs(1),
                 scope: PixelGatewayScope {
                     session_id: "session-1".to_string(),
                     surface_id: "surface-1".to_string(),

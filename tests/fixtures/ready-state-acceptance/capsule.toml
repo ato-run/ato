@@ -1,0 +1,33 @@
+schema_version = "1"
+name = "ready-state-acceptance"
+version = "0.1.0"
+
+# The launch vector is EXACT — no interpreter is inferred and no word is
+# rewritten (ADR-015 §9.4). `"boundary probe"` carries a space so that a shell
+# which re-split the vector shows up as two arguments instead of one.
+#
+# An EMPTY argument was tried here and CANNOT be used: the v1 producer refuses
+# it outright —
+#
+#     no v1 recipe covers this capsule: [run] command argv[5] is empty; every
+#     word of an exact argv must resolve to something, so an empty argument
+#     cannot be committed
+#
+# — which is `ExecutionContractError::UnresolvedField("launch.argv")` enforced at
+# authoring time. So the empty-argument case cannot be exercised end to end from
+# a real capsule, and the decoder's handling of it is pinned by the unit test
+# over crafted input instead. Recorded here so nobody re-adds it expecting the
+# build to work.
+[run]
+command = ["python3", "server.py", "--label", "boundary probe"]
+
+[web]
+port = 8080
+bind = "0.0.0.0"
+
+# Runs HOST-side against the restored guest. `SealAtConfig` has no {addr}/{port}
+# templating today, so the harness rewrites this line with the run-unique guest
+# IP before building — see README.md. That rewrite is exactly the reason
+# templating is filed as a follow-up.
+[seal_at]
+command = ["curl", "-fsS", "http://172.16.0.2:8080/health"]

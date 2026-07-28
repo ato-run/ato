@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use capsule::ato_lock::AtoLock;
+use capsule::capsule_lock::CapsuleLock;
 use capsule::router::ManifestData;
 use sha2::Digest;
 
@@ -36,7 +36,7 @@ pub(crate) fn provider_resolution_metadata_path(path: &Path) -> Option<PathBuf> 
 
 pub(crate) fn ensure_provider_node_execution_inputs(
     plan: &ManifestData,
-    authoritative_lock: Option<&AtoLock>,
+    authoritative_lock: Option<&CapsuleLock>,
 ) -> Result<()> {
     if !is_provider_workspace(&plan.manifest_dir) {
         return Ok(());
@@ -94,7 +94,7 @@ pub(crate) fn ensure_provider_node_execution_inputs(
 
 pub(crate) fn ensure_provider_python_execution_inputs(
     plan: &ManifestData,
-    authoritative_lock: Option<&AtoLock>,
+    authoritative_lock: Option<&CapsuleLock>,
 ) -> Result<()> {
     if !is_provider_workspace(&plan.manifest_dir) {
         return Ok(());
@@ -155,7 +155,7 @@ fn materialize_provider_dependency_boundary(
     plan: &ManifestData,
     ecosystem: &str,
     runtime_name: &str,
-    authoritative_lock: Option<&AtoLock>,
+    authoritative_lock: Option<&CapsuleLock>,
 ) -> Result<()> {
     let lockfile_digest = first_digest(
         &plan.manifest_dir,

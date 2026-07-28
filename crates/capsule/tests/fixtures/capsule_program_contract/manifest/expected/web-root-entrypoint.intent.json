@@ -1,0 +1,18 @@
+{
+  "capsule_type": "app",
+  "default_target": "site",
+  "schema": "ato.capsule-program-manifest-intent/v1",
+  "targets": {
+    "targets": {
+      "site": {
+        "driver": "static",
+        "port": 8081,
+        "run_command": "index.html",
+        "runtime": "web",
+        "working_dir": {
+          "source_relative": "."
+        }
+      }
+    }
+  }
+}
