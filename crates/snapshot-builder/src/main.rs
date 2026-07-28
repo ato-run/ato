@@ -4510,7 +4510,7 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
             .backend
             .boot_and_hold(BuildReadyStateInput {
                 store: &store,
-                capsule_manifest_hash: artifact.capsule_manifest_hash,
+                capsule_manifest_hash: artifact.capsule_manifest_hash.clone(),
                 runner_class: None,
                 surface_requirement: None,
                 layers: BuildLayers {
@@ -4523,7 +4523,7 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
                 },
                 restore_contract: RestoreContract {
                     ports: vec![artifact.port],
-                    healthcheck: Some(artifact.healthcheck),
+                    healthcheck: Some(artifact.healthcheck.clone()),
                     expected_ready_ms: Some(8000),
                     warmup_paths: Vec::new(),
                     stable_successes: None,
@@ -4619,6 +4619,11 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
             guest_kernel: compatibility.guest_kernel,
             vmm: compatibility.vmm,
             snapshot_format: compatibility.snapshot_format,
+            snapshot_codec: "asc.raw-v1.v1".to_string(),
+            snapshot_backend: "firecracker".to_string(),
+            capsule_manifest_hash: artifact.capsule_manifest_hash,
+            artifact_manifest_hash: manifest_id,
+            healthcheck_url_path: artifact.healthcheck,
             restore_verification: snapshot::authoring_evidence::RestoreVerificationObservationV1 {
                 receipt_id: receipt_id("restore", &self.work.work_id),
                 restored: true,
