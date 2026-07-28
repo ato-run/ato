@@ -69,6 +69,10 @@ pub struct PinnedAuthoringSource {
 pub struct AuthoringWork {
     pub kind: String,
     pub work_id: String,
+    /// Per-claim fencing generation for queued builder jobs. Setup leases
+    /// predate job fencing and therefore legitimately omit this field.
+    #[serde(default, rename = "worker_claim_id")]
+    pub _worker_claim_id: Option<String>,
     pub authoring_session_id: String,
     pub capsule_revision_id: String,
     pub source_revision_id: String,
@@ -464,6 +468,57 @@ pub fn render_static_web_capsule_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoring_job_claim_accepts_worker_fencing_generation() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_01KYN2Z",
+            "worker_claim_id": "claim_01KYN2Z",
+            "authoring_session_id": "auth_01KYN2Z",
+            "capsule_revision_id": "caprev_01KYN2Z",
+            "source_revision_id": "srev_01KYN2Z",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_01KYN2Z",
+                "source_materialization_id": "smat_01KYN2Z",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_01KYN2Z.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_01KYN2Z"
+        }))
+        .expect("job claim");
+
+        assert_eq!(work._worker_claim_id.as_deref(), Some("claim_01KYN2Z"));
+    }
+
+    #[test]
+    fn setup_claim_may_omit_worker_fencing_generation() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_01KYN2Z",
+            "authoring_session_id": "auth_01KYN2Z",
+            "capsule_revision_id": "caprev_01KYN2Z",
+            "source_revision_id": "srev_01KYN2Z",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_01KYN2Z",
+                "source_materialization_id": "smat_01KYN2Z",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_01KYN2Z.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_01KYN2Z"
+        }))
+        .expect("setup claim");
+
+        assert_eq!(work._worker_claim_id, None);
+    }
 
     #[test]
     fn lease_token_debug_is_redacted() {
