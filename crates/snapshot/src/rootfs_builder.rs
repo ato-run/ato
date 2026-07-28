@@ -593,7 +593,9 @@ DOCKER
 /// and the distinction costs nothing. It is exported as `SOURCE_DATE_EPOCH`
 /// for `mke2fs`, which honours it for the superblock timestamps (e2fsprogs
 /// 1.45.7+), and applied to the tree with `touch` for the inode timestamps,
-/// which nothing else normalizes.
+/// which nothing else normalizes. The export script uses `touch -t` under UTC
+/// because that spelling is shared by GNU and BSD touch; GNU-only `-d @1`
+/// makes the v1 producer fail on macOS before it can mint the lock.
 pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 
 /// Export the assembled `$ATO_IMAGE` into `$ATO_ROOTFS` and install the init.
@@ -646,8 +648,9 @@ INIT
 chmod +x "$ATO_ROOTFS/sbin/init"
 # Not identity-bearing any more, but a guest that claims one mtime everywhere is
 # easier to reason about than one stamped with its builder's clock. `-h` so a
-# symlink's own timestamps are set rather than its target's twice.
-find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
+# symlink's own timestamps are set rather than its target's twice. `-t` under
+# UTC is accepted by both GNU and BSD touch and denotes Unix epoch second 1.
+find "$ATO_ROOTFS" -exec env TZ=UTC touch -h -t 197001010000.0{epoch} {{}} +
 "#,
         tool = tool,
         launch = launch_argv_line(&spec.resolved_argv),
@@ -2929,8 +2932,14 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         let export = export_guest_rootfs_script_v1(&spec, "docker");
         assert!(
-            export.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
+            export.contains(&format!(
+                r#"-exec env TZ=UTC touch -h -t 197001010000.0{V1_GUEST_IMAGE_EPOCH}"#
+            )),
             "{export}"
+        );
+        assert!(
+            !export.contains("touch -h -d"),
+            "GNU-only touch syntax breaks the host producer on macOS: {export}"
         );
         // And the allocation order: populated by mke2fs, not by the running
         // kernel through a loop mount.
