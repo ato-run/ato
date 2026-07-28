@@ -83,6 +83,7 @@ use snapshot::{
     no_secret_scan,
 };
 
+mod authoring_runtime;
 /// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
 /// from the contract the control plane pinned on the claim. Its module doc states
 /// exactly which guarantee that is, and which it deliberately is not.
@@ -1062,6 +1063,8 @@ struct ProducedBuild {
     /// stacks need a larger budget than the env default); other lanes leave it
     /// `None` and inherit the backend env/default. Clamped in the backend.
     boot_timeout_s: Option<u32>,
+    /// Resolver-owned lock identity. Present only for the strict v1 producer.
+    resolution_lock_digest: Option<String>,
     /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
     /// validated at produce time.
     ///
@@ -1097,7 +1100,7 @@ fn produce_build(
     if let Some(pinned) = job.pinned_source.as_ref() {
         let (input, verified) =
             obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
-        return produce_pinned_v1_build(cfg, job, jobdir, &input, verified);
+        return produce_pinned_v1_build(cfg, &job.id, jobdir, &input, verified, None);
     }
 
     match job.kind.as_str() {
@@ -1314,6 +1317,7 @@ fn produce_recipe_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // The authored acceptance program, validated above. Only the interactive
         // HOLD reads it.
         seal_at,
@@ -1681,6 +1685,7 @@ fn produce_import_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
@@ -1801,6 +1806,7 @@ fn produce_oci_image_import(
         oci_import_receipt: Some(oci_import_receipt),
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         warmup_paths: warmup.warmup_paths,
@@ -1902,6 +1908,7 @@ fn produce_compose_import(
         oci_import_receipt: None,
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
@@ -2967,10 +2974,11 @@ fn v1_image_ref(job_id: &str) -> String {
 /// latest build: a pinned build with no verified archive has no source at all.
 fn produce_pinned_v1_build(
     cfg: &Config,
-    job: &ClaimedJob,
+    build_id: &str,
     jobdir: &Path,
     input: &ArchiveOnlyBuildInput,
     verified: source_archive_download::TreeVerifiedArchive,
+    generated_manifest: Option<&str>,
 ) -> std::result::Result<ProducedBuild, (String, String)> {
     let fail = |stage: &str, e: String| (stage.to_string(), e);
 
@@ -3011,6 +3019,10 @@ fn produce_pinned_v1_build(
         &workspace,
     )
     .map_err(|e| fail("build", format!("extract the pinned source archive: {e}")))?;
+    if let Some(generated_manifest) = generated_manifest {
+        std::fs::write(workspace.join("capsule.toml"), generated_manifest)
+            .map_err(|e| fail("manifest", format!("write generated capsule.toml: {e}")))?;
+    }
 
     // The manifest, read from that workspace. Parsed here as well as inside the
     // lane because the ack carries values the lane has no reason to report —
@@ -3058,11 +3070,17 @@ fn produce_pinned_v1_build(
             work_root: &work_root,
             guest_image_path: &guest_image_path,
             rootfs_size_mib: cfg.rootfs_size_mib,
-            image_ref: &v1_image_ref(&job.id),
+            image_ref: &v1_image_ref(build_id),
         },
         &producer,
     )
     .map_err(|e| fail("build", e.to_string()))?;
+    let resolution_lock_digest = std::fs::read(&outcome.lock_path)
+        .map_err(|e| fail("build", format!("read resolver output lock: {e}")))
+        .and_then(|bytes| {
+            capsule::authoring_intent::resolution_lock_digest(&bytes)
+                .map_err(|e| fail("build", format!("digest resolver output lock: {e}")))
+        })?;
 
     // 4. The identity that was minted must be over the pinned revision's source.
     refuse_source_revision_mismatch(
@@ -3147,6 +3165,7 @@ fn produce_pinned_v1_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: Some(resolution_lock_digest),
         seal_at,
         // A v1 manifest has no `[snapshot]` table, so the backend applies its
         // own warmup fallback — the same as a v0.3 capsule that authored none.
@@ -3979,7 +3998,175 @@ fn dispatch_interactive_capture_job(
     }
 }
 
+fn process_authoring_setup(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let slot = cfg.hold_slot.as_ref().ok_or_else(|| {
+        fail(
+            "setup",
+            "Authoring Session setup requires a registered builder hold slot".to_string(),
+        )
+    })?;
+    if slot.builder_id != cfg.agent_id {
+        return Err(fail(
+            "setup",
+            "registered hold slot builder_id does not match --agent-id".to_string(),
+        ));
+    }
+    let jobdir = cfg.work.join(format!("authoring-{}", work.work_id));
+    if jobdir.exists() {
+        std::fs::remove_dir_all(&jobdir)
+            .map_err(|error| fail("setup", format!("clear fresh setup workspace: {error}")))?;
+    }
+    std::fs::create_dir_all(&jobdir)
+        .map_err(|error| fail("setup", format!("create fresh setup workspace: {error}")))?;
+    let input = authoring_runtime::archive_input(work).map_err(|error| fail("source", error))?;
+    let transport = authoring_runtime::AuthoringArchiveTransport { client, work };
+    let verified = source_archive_download::download_pinned_source(
+        &transport,
+        &work.work_id,
+        &input,
+        &jobdir.join("source-download"),
+    )
+    .map_err(|error| fail("source", error.to_string()))?;
+
+    let inference_root = jobdir.join("inference-source");
+    std::fs::create_dir_all(&inference_root)
+        .map_err(|error| fail("detect", format!("create inference workspace: {error}")))?;
+    capsule::contract::program_source_projection::extract_source_archive(
+        verified.path(),
+        &inference_root,
+    )
+    .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
+    let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
+        .map_err(|error| fail("detect", error))?;
+    let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
+        .map_err(|error| fail("detect", error))?;
+    let produced = produce_pinned_v1_build(
+        cfg,
+        &work.work_id,
+        &jobdir,
+        &input,
+        verified,
+        Some(&generated_manifest),
+    )?;
+    let resolution_lock_digest = produced
+        .resolution_lock_digest
+        .clone()
+        .ok_or_else(|| fail("build", "v1 resolver emitted no lock identity".to_string()))?;
+    let store =
+        CasStore::open(jobdir.join("cas")).map_err(|error| fail("launch", error.to_string()))?;
+    let guest = backend
+        .boot_and_hold(BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
+            runner_class: None,
+            surface_requirement: produced.surface_requirement.clone(),
+            layers: BuildLayers {
+                rootfs: produced.rootfs,
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![produced.port],
+                healthcheck: Some(produced.healthcheck.clone()),
+                expected_ready_ms: Some(8000),
+                warmup_paths: produced.warmup_paths,
+                stable_successes: produced.stable_successes,
+                stable_interval_ms: produced.stable_interval_ms,
+                content_ready_path: produced.content_ready_path,
+                endpoints: produced.endpoints,
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: Some(produced.execution_id),
+            supervisor: None,
+        })
+        .map_err(|error| fail("launch", error.to_string()))?;
+    let workload_addr = guest.workload_addr();
+    let ingress = hold_ingress::HoldIngress::start(slot.proxy_listen, &workload_addr)
+        .map_err(|error| fail("launch", format!("front Authoring Preview: {error}")))?;
+    client
+        .mark_setup_ready(
+            work,
+            &authoring_runtime::SetupReady {
+                builder_id: &cfg.agent_id,
+                builder_session_id: &work.work_id,
+                builder_slot_id: &slot.slot_id,
+                origin: "inferred",
+                normalized_program_intent: &normalized,
+                resolution_lock_digest: &resolution_lock_digest,
+                generated_capsule_toml: &generated_manifest,
+            },
+        )
+        .map_err(|error| fail("setup_ready", error))?;
+    eprintln!(
+        "[builder] Authoring Session {} ready on slot {} (trace {})",
+        work.authoring_session_id, slot.slot_id, work.trace_id
+    );
+
+    loop {
+        match client.setup_control(work) {
+            Ok(control) if control.action == "continue" => {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(_) => break,
+            Err(error) => {
+                eprintln!(
+                    "[builder] Authoring Session {} control poll failed: {error}",
+                    work.authoring_session_id
+                );
+                break;
+            }
+        }
+    }
+    drop(ingress);
+    guest.release();
+    Ok(())
+}
+
+fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
+    if cfg.hold_slot.is_none() {
+        return Ok(0);
+    }
+    let client = authoring_runtime::AuthoringApiClient {
+        api_url: &cfg.api_url,
+        builder_token: &cfg.token,
+        builder_id: &cfg.agent_id,
+    };
+    let Some(work) = client
+        .claim(&["setup"])
+        .map_err(|error| anyhow!("claim Authoring Session work: {error}"))?
+    else {
+        return Ok(0);
+    };
+    if work.kind != "setup" {
+        return Err(anyhow!(
+            "Authoring claim returned unsupported operation {:?}",
+            work.kind
+        ));
+    }
+    if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
+        return Err(anyhow!(
+            "Authoring Session {} failed at {stage}: {reason}",
+            work.authoring_session_id
+        ));
+    }
+    Ok(1)
+}
+
 fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
+    let authoring = run_authoring_once(cfg, backend)?;
+    if authoring > 0 {
+        return Ok(authoring);
+    }
     let jobs = claim(cfg)?;
     for job in &jobs {
         eprintln!("[builder] claimed {} (capsule {})", job.id, job.capsule_id);
