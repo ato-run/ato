@@ -7492,17 +7492,13 @@ targets = ["web"]
         assert!(authoring_work_directory(root, "clean", "../host").is_err());
         assert!(authoring_work_directory(root, "clean", "session/other").is_err());
         assert_eq!(
-            authoring_work_directory(root, "clean", "as_01ABC")
-                .expect("safe")
-                .to_string_lossy(),
-            "/builder/work/authoring-clean-as_01ABC",
+            authoring_work_directory(root, "clean", "as_01ABC").expect("safe"),
+            root.join("authoring-clean-as_01ABC"),
         );
         assert!(local_artifact_work_directory(root, "../host").is_err());
         assert_eq!(
-            local_artifact_work_directory(root, "abjob_01ABC")
-                .expect("safe")
-                .to_string_lossy(),
-            "/builder/work/abjob_01ABC",
+            local_artifact_work_directory(root, "abjob_01ABC").expect("safe"),
+            root.join("abjob_01ABC"),
         );
     }
 }
