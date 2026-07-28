@@ -415,6 +415,11 @@ pub struct SealCaptureObservationV1 {
     pub guest_kernel: String,
     pub vmm: String,
     pub snapshot_format: String,
+    pub snapshot_codec: String,
+    pub snapshot_backend: String,
+    pub capsule_manifest_hash: String,
+    pub artifact_manifest_hash: String,
+    pub healthcheck_url_path: String,
     pub restore_verification: RestoreVerificationObservationV1,
     pub post_restore_screenshot: ScreenshotCandidateV1,
     pub issued_at: String,
@@ -488,6 +493,11 @@ pub struct ReadyStateSealReceiptPayloadV1 {
     pub guest_kernel: String,
     pub vmm: String,
     pub snapshot_format: String,
+    pub snapshot_codec: String,
+    pub snapshot_backend: String,
+    pub capsule_manifest_hash: String,
+    pub artifact_manifest_hash: String,
+    pub healthcheck_url_path: String,
     pub rootfs_artifact_ref: String,
     pub memory_artifact_ref: String,
     pub clean_replay_receipt_digest: String,
@@ -584,6 +594,11 @@ pub fn generate_ready_state_seal(
         guest_kernel: observation.guest_kernel,
         vmm: observation.vmm,
         snapshot_format: observation.snapshot_format,
+        snapshot_codec: observation.snapshot_codec,
+        snapshot_backend: observation.snapshot_backend,
+        capsule_manifest_hash: observation.capsule_manifest_hash,
+        artifact_manifest_hash: observation.artifact_manifest_hash,
+        healthcheck_url_path: observation.healthcheck_url_path,
         rootfs_artifact_ref: observation.rootfs_artifact_ref,
         memory_artifact_ref: observation.memory_artifact_ref,
         clean_replay_receipt_digest: replay_digest,
@@ -706,6 +721,27 @@ pub fn deduplicate_screenshot_candidates(
         }
     }
     deduplicated
+}
+
+/// Compute the SSOT screenshot duplicate key from compositor PNG bytes.
+///
+/// dHash intentionally ignores small encoding and color differences while
+/// retaining the coarse visual structure of the frame.
+pub fn screenshot_perceptual_hash_png(png: &[u8]) -> Result<String, AuthoringEvidenceError> {
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|_| AuthoringEvidenceError::InvalidScreenshot)?
+        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let mut hash = 0_u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash <<= 1;
+            if image.get_pixel(x, y)[0] > image.get_pixel(x + 1, y)[0] {
+                hash |= 1;
+            }
+        }
+    }
+    Ok(format!("dhash64:{hash:016x}"))
 }
 
 fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), AuthoringEvidenceError> {
@@ -862,6 +898,8 @@ pub enum AuthoringEvidenceError {
     MissingPostRestoreScreenshot,
     #[error("a screenshot candidate must be selected")]
     ScreenshotNotSelected,
+    #[error("screenshot is not a decodable PNG")]
+    InvalidScreenshot,
     #[error("canonicalization failed: {0}")]
     Canonicalization(String),
     #[error("signed builder receipt payload is not valid base64-encoded JSON")]
@@ -990,6 +1028,11 @@ mod tests {
                 guest_kernel: "linux-6.12".to_string(),
                 vmm: "firecracker-1.12".to_string(),
                 snapshot_format: "fc-v1".to_string(),
+                snapshot_codec: "asc.raw-v1.v1".to_string(),
+                snapshot_backend: "firecracker".to_string(),
+                capsule_manifest_hash: "blake3:capsule".to_string(),
+                artifact_manifest_hash: "blake3:artifact".to_string(),
+                healthcheck_url_path: "/".to_string(),
                 restore_verification: RestoreVerificationObservationV1 {
                     receipt_id: "restore_1".to_string(),
                     restored: self.restored,
@@ -1099,6 +1142,22 @@ mod tests {
         ]);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].candidate_id, "a");
+    }
+
+    #[test]
+    fn screenshot_perceptual_hash_is_stable_for_the_same_frame() {
+        let mut frame = image::GrayImage::new(9, 8);
+        for (x, _, pixel) in frame.enumerate_pixels_mut() {
+            pixel.0[0] = (x * 20) as u8;
+        }
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(frame)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        assert_eq!(
+            screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
+            screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
+        );
     }
 
     #[test]

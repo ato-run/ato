@@ -14,6 +14,7 @@ use crate::types::manifest_v1::{BuildStepV1, BuildV1, CapsuleManifestV1, ConfigK
 pub const PROGRAM_INTENT_DRAFT_V1_SCHEMA: &str = "ato.program-intent-draft/v1";
 pub const NORMALIZED_PROGRAM_INTENT_V1_SCHEMA: &str = "ato.normalized-program-intent/v1";
 const NORMALIZED_PROGRAM_INTENT_V1_DOMAIN: &[u8] = b"ato.normalized-program-intent/v1";
+const RESOLUTION_LOCK_V1_DOMAIN: &[u8] = b"ato.resolution-lock/v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,6 +279,23 @@ pub fn normalize_program_intent(
     hasher.update(&canonical);
     let digest = format!("blake3:{}", hasher.finalize().to_hex());
     Ok(NormalizedProgramIntentEnvelopeV1 { intent, digest })
+}
+
+/// Digest resolver output as canonical JSON.
+///
+/// The lock is output, never author input. Canonicalizing the parsed JSON keeps
+/// its identity independent of writer whitespace while still binding every
+/// resolver-produced value.
+pub fn resolution_lock_digest(lock_json: &[u8]) -> Result<String, ProgramIntentError> {
+    let value: serde_json::Value = serde_json::from_slice(lock_json)
+        .map_err(|error| ProgramIntentError::Canonicalization(error.to_string()))?;
+    let canonical = serde_jcs::to_vec(&value)
+        .map_err(|error| ProgramIntentError::Canonicalization(error.to_string()))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(RESOLUTION_LOCK_V1_DOMAIN);
+    hasher.update(&[0]);
+    hasher.update(&canonical);
+    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
 }
 
 /// Adapt the already-strict v1 manifest into the same producer used by
@@ -688,6 +706,21 @@ command = ["node", "verify.js"]
                 .expect("normalizes");
         assert_eq!(from_manifest.intent.launch.argv, ["node", "server.js"]);
         assert_eq!(from_manifest.intent.toolchains[0].name, "node");
+    }
+
+    #[test]
+    fn resolution_lock_digest_ignores_formatting_but_binds_values() {
+        let compact = br#"{"runtime":{"ref":"python:3.11"},"version":1}"#;
+        let formatted = b"{\n  \"version\": 1,\n  \"runtime\": { \"ref\": \"python:3.11\" }\n}\n";
+        assert_eq!(
+            resolution_lock_digest(compact).expect("compact"),
+            resolution_lock_digest(formatted).expect("formatted"),
+        );
+        assert_ne!(
+            resolution_lock_digest(compact).expect("compact"),
+            resolution_lock_digest(br#"{"runtime":{"ref":"python:3.12"},"version":1}"#)
+                .expect("changed"),
+        );
     }
 
     #[test]
