@@ -4276,7 +4276,7 @@ struct CleanReplayBuilderArtifact {
     healthcheck: String,
 }
 
-fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf, String> {
+fn validate_work_directory_identity(id: &str) -> Result<(), String> {
     if id.is_empty()
         || !id
             .bytes()
@@ -4284,7 +4284,17 @@ fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf
     {
         return Err("Authoring work identity is not a safe path component".to_string());
     }
+    Ok(())
+}
+
+fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf, String> {
+    validate_work_directory_identity(id)?;
     Ok(root.join(format!("authoring-{kind}-{id}")))
+}
+
+fn local_artifact_work_directory(root: &Path, job_id: &str) -> Result<PathBuf, String> {
+    validate_work_directory_identity(job_id)?;
+    Ok(root.join(job_id))
 }
 
 fn clean_replay_directory(cfg: &Config, authoring_session_id: &str) -> Result<PathBuf, String> {
@@ -4570,7 +4580,11 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
         if format!("blake3:{}", blake3::hash(&rootfs).to_hex()) != artifact.rootfs_digest {
             return Err("Clean Replay rootfs digest mismatch".to_string());
         }
-        let seal_dir = authoring_work_directory(&self.cfg.work, "seal", &self.work.work_id)?;
+        // A local `cas://<job_id>/<manifest_id>` is restored from
+        // `<work>/<job_id>/{manifest.json,cas/}`. Keep the on-disk directory
+        // identical to that public locator instead of using the private
+        // authoring workspace prefix.
+        let seal_dir = local_artifact_work_directory(&self.cfg.work, &self.work.work_id)?;
         if seal_dir.exists() {
             std::fs::remove_dir_all(&seal_dir)
                 .map_err(|error| format!("clear Seal workspace: {error}"))?;
@@ -7482,6 +7496,13 @@ targets = ["web"]
                 .expect("safe")
                 .to_string_lossy(),
             "/builder/work/authoring-clean-as_01ABC",
+        );
+        assert!(local_artifact_work_directory(root, "../host").is_err());
+        assert_eq!(
+            local_artifact_work_directory(root, "abjob_01ABC")
+                .expect("safe")
+                .to_string_lossy(),
+            "/builder/work/abjob_01ABC",
         );
     }
 }
