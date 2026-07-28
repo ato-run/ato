@@ -7,18 +7,24 @@
 
 use std::collections::BTreeSet;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{NormalizedProgramIntentEnvelopeV1, WorkspacePathV1};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const CLEAN_REPLAY_RECEIPT_V1_SCHEMA: &str = "ato.clean-replay-receipt/v1";
+pub const RESTORE_VERIFICATION_RECEIPT_V1_SCHEMA: &str = "ato.restore-verification-receipt/v1";
 pub const READY_STATE_SEAL_RECEIPT_V1_SCHEMA: &str = "ato.ready-state-seal-receipt/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanReplayRequestV1 {
     pub authoring_session_id: String,
+    pub capsule_revision_id: String,
     pub source_closure_id: String,
+    pub previous_receipt_digest: String,
     #[serde(default)]
     pub source_overlays: Vec<SourceOverlayArtifactV1>,
     pub normalized_program_intent: NormalizedProgramIntentEnvelopeV1,
@@ -81,11 +87,21 @@ pub struct BuilderAuthenticationV1 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CleanReplayReceiptV1 {
+    pub payload_jcs_base64: String,
+    pub authentication: BuilderAuthenticationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanReplayReceiptPayloadV1 {
     pub schema: String,
+    pub receipt_id: String,
     pub authoring_session_id: String,
+    pub capsule_revision_id: String,
     pub source_closure_id: String,
-    pub normalized_program_intent_digest: String,
+    pub program_intent_digest: String,
     pub resolution_lock_digest: String,
+    pub previous_receipt_digest: String,
     pub builder_identity: String,
     pub materialization_inputs_digest: String,
     pub execution_contract_digest: String,
@@ -94,11 +110,13 @@ pub struct CleanReplayReceiptV1 {
     pub state_diff_digest: String,
     pub started_at: String,
     pub completed_at: String,
-    pub authentication: BuilderAuthenticationV1,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanReplayObservationV1 {
+    pub receipt_id: String,
     pub builder_identity: String,
     pub materialization_inputs_digest: String,
     pub execution_contract_digest: String,
@@ -107,6 +125,8 @@ pub struct CleanReplayObservationV1 {
     pub state_diff: Vec<StateDiffEntryV1>,
     pub started_at: String,
     pub completed_at: String,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 pub trait CleanReplayAdapter {
@@ -142,12 +162,15 @@ pub fn execute_clean_replay(
         &request.normalized_program_intent.intent.build_output_roots,
     )?;
     let state_diff_digest = canonical_digest(b"ato.classified-state-diff/v1", &classified)?;
-    let unsigned = UnsignedCleanReplayReceiptV1 {
+    let payload = CleanReplayReceiptPayloadV1 {
         schema: CLEAN_REPLAY_RECEIPT_V1_SCHEMA.to_string(),
+        receipt_id: observation.receipt_id,
         authoring_session_id: request.authoring_session_id.clone(),
+        capsule_revision_id: request.capsule_revision_id.clone(),
         source_closure_id: request.source_closure_id.clone(),
-        normalized_program_intent_digest: request.normalized_program_intent.digest.clone(),
+        program_intent_digest: request.normalized_program_intent.digest.clone(),
         resolution_lock_digest: request.resolution_lock_digest.clone(),
+        previous_receipt_digest: request.previous_receipt_digest.clone(),
         builder_identity: observation.builder_identity,
         materialization_inputs_digest: observation.materialization_inputs_digest,
         execution_contract_digest: observation.execution_contract_digest,
@@ -156,46 +179,40 @@ pub fn execute_clean_replay(
         state_diff_digest,
         started_at: observation.started_at,
         completed_at: observation.completed_at,
+        issued_at: observation.issued_at,
+        expires_at: observation.expires_at,
     };
-    let canonical = serde_jcs::to_vec(&unsigned)
-        .map_err(|error| AuthoringEvidenceError::Canonicalization(error.to_string()))?;
+    validate_receipt_chain(
+        &payload.receipt_id,
+        &payload.authoring_session_id,
+        &payload.capsule_revision_id,
+        &payload.source_closure_id,
+        &payload.previous_receipt_digest,
+        &payload.issued_at,
+        &payload.expires_at,
+    )?;
+    let canonical = canonical_payload(&payload)?;
     let authentication = adapter
         .authenticate(&canonical)
         .map_err(AuthoringEvidenceError::Adapter)?;
     let receipt = CleanReplayReceiptV1 {
-        schema: unsigned.schema,
-        authoring_session_id: unsigned.authoring_session_id,
-        source_closure_id: unsigned.source_closure_id,
-        normalized_program_intent_digest: unsigned.normalized_program_intent_digest,
-        resolution_lock_digest: unsigned.resolution_lock_digest,
-        builder_identity: unsigned.builder_identity,
-        materialization_inputs_digest: unsigned.materialization_inputs_digest,
-        execution_contract_digest: unsigned.execution_contract_digest,
-        readiness: unsigned.readiness,
-        effective_isolation_posture: unsigned.effective_isolation_posture,
-        state_diff_digest: unsigned.state_diff_digest,
-        started_at: unsigned.started_at,
-        completed_at: unsigned.completed_at,
+        payload_jcs_base64: BASE64.encode(canonical),
         authentication,
     };
     Ok((receipt, classified))
 }
 
-#[derive(Debug, Serialize)]
-struct UnsignedCleanReplayReceiptV1 {
-    schema: String,
-    authoring_session_id: String,
-    source_closure_id: String,
-    normalized_program_intent_digest: String,
-    resolution_lock_digest: String,
-    builder_identity: String,
-    materialization_inputs_digest: String,
-    execution_contract_digest: String,
-    readiness: ReadinessResultV1,
-    effective_isolation_posture: EffectiveIsolationPostureV1,
-    state_diff_digest: String,
-    started_at: String,
-    completed_at: String,
+impl CleanReplayReceiptV1 {
+    pub fn payload(&self) -> Result<CleanReplayReceiptPayloadV1, AuthoringEvidenceError> {
+        decode_payload(&self.payload_jcs_base64)
+    }
+
+    pub fn payload_digest(&self) -> Result<String, AuthoringEvidenceError> {
+        signed_payload_digest(
+            b"ato.clean-replay-receipt-reference/v1",
+            &self.payload_jcs_base64,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +406,7 @@ pub struct ReadyStateSealRequestV1 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SealCaptureObservationV1 {
+    pub receipt_id: String,
     pub ready_before_capture: bool,
     pub quiesced: bool,
     pub rootfs_artifact_ref: String,
@@ -397,17 +415,44 @@ pub struct SealCaptureObservationV1 {
     pub guest_kernel: String,
     pub vmm: String,
     pub snapshot_format: String,
-    pub restore_verification_receipt: RestoreVerificationReceiptV1,
+    pub restore_verification: RestoreVerificationObservationV1,
     pub post_restore_screenshot: ScreenshotCandidateV1,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreVerificationReceiptV1 {
+    pub payload_jcs_base64: String,
+    pub authentication: BuilderAuthenticationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoreVerificationReceiptPayloadV1 {
+    pub schema: String,
+    pub receipt_id: String,
+    pub authoring_session_id: String,
+    pub capsule_revision_id: String,
+    pub source_closure_id: String,
+    pub program_intent_digest: String,
+    pub previous_receipt_digest: String,
+    pub restored: bool,
+    pub readiness_succeeded: bool,
+    pub verified_at: String,
+    pub issued_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreVerificationObservationV1 {
     pub receipt_id: String,
     pub restored: bool,
     pub readiness_succeeded: bool,
     pub verified_at: String,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 pub trait ReadyStateSealAdapter {
@@ -421,9 +466,22 @@ pub trait ReadyStateSealAdapter {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReadyStateSealReceiptV1 {
+    pub payload_jcs_base64: String,
+    pub restore_verification_receipt: RestoreVerificationReceiptV1,
+    pub authentication: BuilderAuthenticationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyStateSealReceiptPayloadV1 {
     pub schema: String,
+    pub receipt_id: String,
     pub seal_id: String,
+    pub authoring_session_id: String,
     pub capsule_revision_id: String,
+    pub source_closure_id: String,
+    pub program_intent_digest: String,
+    pub previous_receipt_digest: String,
     pub materialization_plan_id: String,
     pub builder_identity: String,
     pub runner_hardware_compatibility_class: String,
@@ -433,9 +491,10 @@ pub struct ReadyStateSealReceiptV1 {
     pub rootfs_artifact_ref: String,
     pub memory_artifact_ref: String,
     pub clean_replay_receipt_digest: String,
-    pub restore_verification_receipt: RestoreVerificationReceiptV1,
+    pub restore_verification_receipt_digest: String,
     pub post_restore_screenshot: ScreenshotCandidateV1,
-    pub authentication: BuilderAuthenticationV1,
+    pub issued_at: String,
+    pub expires_at: String,
 }
 
 pub fn generate_ready_state_seal(
@@ -456,8 +515,8 @@ pub fn generate_ready_state_seal(
     if !observation.quiesced {
         return Err(AuthoringEvidenceError::NotQuiesced);
     }
-    if !observation.restore_verification_receipt.restored
-        || !observation.restore_verification_receipt.readiness_succeeded
+    if !observation.restore_verification.restored
+        || !observation.restore_verification.readiness_succeeded
     {
         return Err(AuthoringEvidenceError::RestoreVerificationFailed);
     }
@@ -466,15 +525,61 @@ pub fn generate_ready_state_seal(
     {
         return Err(AuthoringEvidenceError::MissingPostRestoreScreenshot);
     }
-    let replay_digest = canonical_digest(
-        b"ato.clean-replay-receipt-reference/v1",
-        &request.clean_replay_receipt,
+    let replay_payload = request.clean_replay_receipt.payload()?;
+    let replay_digest = request.clean_replay_receipt.payload_digest()?;
+    let restore_payload = RestoreVerificationReceiptPayloadV1 {
+        schema: RESTORE_VERIFICATION_RECEIPT_V1_SCHEMA.to_string(),
+        receipt_id: observation.restore_verification.receipt_id,
+        authoring_session_id: replay_payload.authoring_session_id.clone(),
+        capsule_revision_id: replay_payload.capsule_revision_id.clone(),
+        source_closure_id: replay_payload.source_closure_id.clone(),
+        program_intent_digest: replay_payload.program_intent_digest.clone(),
+        previous_receipt_digest: replay_digest.clone(),
+        restored: observation.restore_verification.restored,
+        readiness_succeeded: observation.restore_verification.readiness_succeeded,
+        verified_at: observation.restore_verification.verified_at,
+        issued_at: observation.restore_verification.issued_at,
+        expires_at: observation.restore_verification.expires_at,
+    };
+    validate_receipt_chain(
+        &restore_payload.receipt_id,
+        &restore_payload.authoring_session_id,
+        &restore_payload.capsule_revision_id,
+        &restore_payload.source_closure_id,
+        &restore_payload.previous_receipt_digest,
+        &restore_payload.issued_at,
+        &restore_payload.expires_at,
     )?;
-    let unsigned = UnsignedSealReceiptV1 {
+    let restore_canonical = canonical_payload(&restore_payload)?;
+    let restore_authentication = adapter
+        .authenticate(&restore_canonical)
+        .map_err(AuthoringEvidenceError::Adapter)?;
+    let restore_receipt = RestoreVerificationReceiptV1 {
+        payload_jcs_base64: BASE64.encode(&restore_canonical),
+        authentication: restore_authentication,
+    };
+    let restore_digest = restore_receipt.payload_digest()?;
+    let seal_id = canonical_digest(
+        b"ato.ready-state-seal/v1",
+        &SealIdentityMaterialV1 {
+            capsule_revision_id: &request.capsule_revision_id,
+            rootfs_artifact_ref: &observation.rootfs_artifact_ref,
+            memory_artifact_ref: &observation.memory_artifact_ref,
+            clean_replay_receipt_digest: &replay_digest,
+            restore_verification_receipt_digest: &restore_digest,
+        },
+    )?;
+    let payload = ReadyStateSealReceiptPayloadV1 {
         schema: READY_STATE_SEAL_RECEIPT_V1_SCHEMA.to_string(),
+        receipt_id: observation.receipt_id,
+        seal_id,
+        authoring_session_id: replay_payload.authoring_session_id,
         capsule_revision_id: request.capsule_revision_id.clone(),
+        source_closure_id: replay_payload.source_closure_id,
+        program_intent_digest: replay_payload.program_intent_digest,
+        previous_receipt_digest: restore_digest.clone(),
         materialization_plan_id: request.materialization_plan_id.clone(),
-        builder_identity: request.clean_replay_receipt.builder_identity.clone(),
+        builder_identity: replay_payload.builder_identity,
         runner_hardware_compatibility_class: observation.runner_hardware_compatibility_class,
         guest_kernel: observation.guest_kernel,
         vmm: observation.vmm,
@@ -482,49 +587,64 @@ pub fn generate_ready_state_seal(
         rootfs_artifact_ref: observation.rootfs_artifact_ref,
         memory_artifact_ref: observation.memory_artifact_ref,
         clean_replay_receipt_digest: replay_digest,
-        restore_verification_receipt: observation.restore_verification_receipt,
+        restore_verification_receipt_digest: restore_digest,
         post_restore_screenshot: observation.post_restore_screenshot,
+        issued_at: observation.issued_at,
+        expires_at: observation.expires_at,
     };
-    let payload = serde_jcs::to_vec(&unsigned)
-        .map_err(|error| AuthoringEvidenceError::Canonicalization(error.to_string()))?;
-    let seal_id = digest_bytes(b"ato.ready-state-seal/v1", &payload);
+    validate_receipt_chain(
+        &payload.receipt_id,
+        &payload.authoring_session_id,
+        &payload.capsule_revision_id,
+        &payload.source_closure_id,
+        &payload.previous_receipt_digest,
+        &payload.issued_at,
+        &payload.expires_at,
+    )?;
+    let canonical = canonical_payload(&payload)?;
     let authentication = adapter
-        .authenticate(&payload)
+        .authenticate(&canonical)
         .map_err(AuthoringEvidenceError::Adapter)?;
     Ok(ReadyStateSealReceiptV1 {
-        schema: unsigned.schema,
-        seal_id,
-        capsule_revision_id: unsigned.capsule_revision_id,
-        materialization_plan_id: unsigned.materialization_plan_id,
-        builder_identity: unsigned.builder_identity,
-        runner_hardware_compatibility_class: unsigned.runner_hardware_compatibility_class,
-        guest_kernel: unsigned.guest_kernel,
-        vmm: unsigned.vmm,
-        snapshot_format: unsigned.snapshot_format,
-        rootfs_artifact_ref: unsigned.rootfs_artifact_ref,
-        memory_artifact_ref: unsigned.memory_artifact_ref,
-        clean_replay_receipt_digest: unsigned.clean_replay_receipt_digest,
-        restore_verification_receipt: unsigned.restore_verification_receipt,
-        post_restore_screenshot: unsigned.post_restore_screenshot,
+        payload_jcs_base64: BASE64.encode(canonical),
+        restore_verification_receipt: restore_receipt,
         authentication,
     })
 }
 
 #[derive(Debug, Serialize)]
-struct UnsignedSealReceiptV1 {
-    schema: String,
-    capsule_revision_id: String,
-    materialization_plan_id: String,
-    builder_identity: String,
-    runner_hardware_compatibility_class: String,
-    guest_kernel: String,
-    vmm: String,
-    snapshot_format: String,
-    rootfs_artifact_ref: String,
-    memory_artifact_ref: String,
-    clean_replay_receipt_digest: String,
-    restore_verification_receipt: RestoreVerificationReceiptV1,
-    post_restore_screenshot: ScreenshotCandidateV1,
+struct SealIdentityMaterialV1<'a> {
+    capsule_revision_id: &'a str,
+    rootfs_artifact_ref: &'a str,
+    memory_artifact_ref: &'a str,
+    clean_replay_receipt_digest: &'a str,
+    restore_verification_receipt_digest: &'a str,
+}
+
+impl RestoreVerificationReceiptV1 {
+    pub fn payload(&self) -> Result<RestoreVerificationReceiptPayloadV1, AuthoringEvidenceError> {
+        decode_payload(&self.payload_jcs_base64)
+    }
+
+    pub fn payload_digest(&self) -> Result<String, AuthoringEvidenceError> {
+        signed_payload_digest(
+            b"ato.restore-verification-receipt-reference/v1",
+            &self.payload_jcs_base64,
+        )
+    }
+}
+
+impl ReadyStateSealReceiptV1 {
+    pub fn payload(&self) -> Result<ReadyStateSealReceiptPayloadV1, AuthoringEvidenceError> {
+        decode_payload(&self.payload_jcs_base64)
+    }
+
+    pub fn payload_digest(&self) -> Result<String, AuthoringEvidenceError> {
+        signed_payload_digest(
+            b"ato.ready-state-seal-receipt-reference/v1",
+            &self.payload_jcs_base64,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,6 +714,7 @@ fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), Authori
             "authoring_session_id",
             request.authoring_session_id.as_str(),
         ),
+        ("capsule_revision_id", request.capsule_revision_id.as_str()),
         ("source_closure_id", request.source_closure_id.as_str()),
     ] {
         if value.trim().is_empty() {
@@ -605,6 +726,7 @@ fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), Authori
         &request.normalized_program_intent.digest,
     )?;
     validate_digest("resolution_lock_digest", &request.resolution_lock_digest)?;
+    validate_digest("previous_receipt_digest", &request.previous_receipt_digest)?;
     for overlay in &request.source_overlays {
         validate_digest("source_overlay.content_digest", &overlay.content_digest)?;
     }
@@ -616,13 +738,39 @@ fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), Authori
 
 fn verify_replay_binding(request: &ReadyStateSealRequestV1) -> Result<(), AuthoringEvidenceError> {
     let receipt = &request.clean_replay_receipt;
-    if receipt.schema != CLEAN_REPLAY_RECEIPT_V1_SCHEMA
-        || !receipt.readiness.ready
+    let payload = receipt.payload()?;
+    if payload.schema != CLEAN_REPLAY_RECEIPT_V1_SCHEMA
+        || !payload.readiness.ready
         || receipt.authentication.signature.trim().is_empty()
+        || payload.capsule_revision_id != request.capsule_revision_id
     {
         return Err(AuthoringEvidenceError::InvalidCleanReplayReceipt);
     }
-    receipt.effective_isolation_posture.validate()
+    payload.effective_isolation_posture.validate()
+}
+
+fn validate_receipt_chain(
+    receipt_id: &str,
+    authoring_session_id: &str,
+    capsule_revision_id: &str,
+    source_closure_id: &str,
+    previous_receipt_digest: &str,
+    issued_at: &str,
+    expires_at: &str,
+) -> Result<(), AuthoringEvidenceError> {
+    for (field, value) in [
+        ("receipt_id", receipt_id),
+        ("authoring_session_id", authoring_session_id),
+        ("capsule_revision_id", capsule_revision_id),
+        ("source_closure_id", source_closure_id),
+        ("issued_at", issued_at),
+        ("expires_at", expires_at),
+    ] {
+        if value.trim().is_empty() {
+            return Err(AuthoringEvidenceError::Missing(field));
+        }
+    }
+    validate_digest("previous_receipt_digest", previous_receipt_digest)
 }
 
 fn validate_digest(field: &'static str, value: &str) -> Result<(), AuthoringEvidenceError> {
@@ -646,6 +794,30 @@ fn canonical_digest(
     let canonical = serde_jcs::to_vec(value)
         .map_err(|error| AuthoringEvidenceError::Canonicalization(error.to_string()))?;
     Ok(digest_bytes(domain, &canonical))
+}
+
+fn canonical_payload(value: &impl Serialize) -> Result<Vec<u8>, AuthoringEvidenceError> {
+    serde_jcs::to_vec(value)
+        .map_err(|error| AuthoringEvidenceError::Canonicalization(error.to_string()))
+}
+
+fn decode_payload<T: DeserializeOwned>(
+    payload_jcs_base64: &str,
+) -> Result<T, AuthoringEvidenceError> {
+    let bytes = BASE64
+        .decode(payload_jcs_base64)
+        .map_err(|_| AuthoringEvidenceError::InvalidSignedPayload)?;
+    serde_json::from_slice(&bytes).map_err(|_| AuthoringEvidenceError::InvalidSignedPayload)
+}
+
+fn signed_payload_digest(
+    domain: &[u8],
+    payload_jcs_base64: &str,
+) -> Result<String, AuthoringEvidenceError> {
+    let bytes = BASE64
+        .decode(payload_jcs_base64)
+        .map_err(|_| AuthoringEvidenceError::InvalidSignedPayload)?;
+    Ok(digest_bytes(domain, &bytes))
 }
 
 fn digest_bytes(domain: &[u8], payload: &[u8]) -> String {
@@ -692,6 +864,8 @@ pub enum AuthoringEvidenceError {
     ScreenshotNotSelected,
     #[error("canonicalization failed: {0}")]
     Canonicalization(String),
+    #[error("signed builder receipt payload is not valid base64-encoded JSON")]
+    InvalidSignedPayload,
 }
 
 #[cfg(test)]
@@ -709,7 +883,9 @@ mod tests {
     fn request() -> CleanReplayRequestV1 {
         CleanReplayRequestV1 {
             authoring_session_id: "as_1".to_string(),
+            capsule_revision_id: "revision_1".to_string(),
             source_closure_id: "sc_1".to_string(),
+            previous_receipt_digest: digest('9'),
             source_overlays: Vec::new(),
             normalized_program_intent: NormalizedProgramIntentEnvelopeV1 {
                 intent: NormalizedProgramIntentV1 {
@@ -745,6 +921,7 @@ mod tests {
     impl CleanReplayAdapter for ReplayAdapter {
         fn replay(&mut self, _: &CleanReplayRequestV1) -> Result<CleanReplayObservationV1, String> {
             Ok(CleanReplayObservationV1 {
+                receipt_id: "replay_1".to_string(),
                 builder_identity: "builder:test".to_string(),
                 materialization_inputs_digest: digest('d'),
                 execution_contract_digest: digest('e'),
@@ -757,6 +934,8 @@ mod tests {
                 state_diff: self.diff.clone(),
                 started_at: "2026-07-28T00:00:00Z".to_string(),
                 completed_at: "2026-07-28T00:00:02Z".to_string(),
+                issued_at: "2026-07-28T00:00:02Z".to_string(),
+                expires_at: "2026-07-28T00:15:02Z".to_string(),
             })
         }
 
@@ -802,6 +981,7 @@ mod tests {
             _: &ReadyStateSealRequestV1,
         ) -> Result<SealCaptureObservationV1, String> {
             Ok(SealCaptureObservationV1 {
+                receipt_id: "seal_receipt_1".to_string(),
                 ready_before_capture: self.ready,
                 quiesced: true,
                 rootfs_artifact_ref: "cas:rootfs".to_string(),
@@ -810,11 +990,13 @@ mod tests {
                 guest_kernel: "linux-6.12".to_string(),
                 vmm: "firecracker-1.12".to_string(),
                 snapshot_format: "fc-v1".to_string(),
-                restore_verification_receipt: RestoreVerificationReceiptV1 {
+                restore_verification: RestoreVerificationObservationV1 {
                     receipt_id: "restore_1".to_string(),
                     restored: self.restored,
                     readiness_succeeded: self.restored,
                     verified_at: "2026-07-28T00:01:00Z".to_string(),
+                    issued_at: "2026-07-28T00:01:00Z".to_string(),
+                    expires_at: "2026-07-28T00:16:00Z".to_string(),
                 },
                 post_restore_screenshot: ScreenshotCandidateV1 {
                     candidate_id: "shot_post_restore".to_string(),
@@ -824,6 +1006,8 @@ mod tests {
                     quality_score: 800,
                     possible_personal_data: false,
                 },
+                issued_at: "2026-07-28T00:01:01Z".to_string(),
+                expires_at: "2026-07-28T00:16:01Z".to_string(),
             })
         }
 
@@ -849,6 +1033,10 @@ mod tests {
         let (receipt, classified) =
             execute_clean_replay(&mut adapter, &request()).expect("receipt");
         assert_eq!(receipt.authentication.signature, "signed-by-builder");
+        let payload = receipt.payload().expect("payload");
+        assert_eq!(payload.receipt_id, "replay_1");
+        assert_eq!(payload.capsule_revision_id, "revision_1");
+        assert_eq!(payload.previous_receipt_digest, digest('9'));
         assert_eq!(classified.entries[0].class, StateDiffClassV1::BuildOutput);
         assert!(classified.entries[0].include_in_seal);
     }
@@ -962,9 +1150,25 @@ mod tests {
             restored: true,
         };
         let receipt = generate_ready_state_seal(&mut adapter, &request).expect("seal");
-        assert!(receipt.seal_id.starts_with("blake3:"));
+        let payload = receipt.payload().expect("seal payload");
+        assert!(payload.seal_id.starts_with("blake3:"));
+        let restore_payload = receipt
+            .restore_verification_receipt
+            .payload()
+            .expect("restore payload");
         assert_eq!(
-            receipt.post_restore_screenshot.capture_point,
+            payload.previous_receipt_digest,
+            receipt
+                .restore_verification_receipt
+                .payload_digest()
+                .expect("restore digest")
+        );
+        assert_eq!(
+            restore_payload.previous_receipt_digest,
+            payload.clean_replay_receipt_digest
+        );
+        assert_eq!(
+            payload.post_restore_screenshot.capture_point,
             ScreenshotCapturePointV1::RestoreVerification
         );
 
