@@ -871,6 +871,16 @@ pub fn verify_captured_candidate(
         }
         run
     };
+    if let Some(failure) = run.failure() {
+        // The control-plane candidate row intentionally stores no free-form
+        // rejection text. Keep one bounded, non-secret diagnostic at the
+        // builder boundary so a real disposable-restore rejection is
+        // distinguishable from the generic terminal `AttemptEnded` ack.
+        eprintln!(
+            "[builder] interactive_capture attempt {} candidate {} acceptance rejected: {failure}",
+            fencing.submission_attempt_id, pending.report.candidate_id
+        );
+    }
 
     // §3.7 — the verdict for THIS candidate, accepted or rejected. Sent on both
     // branches: a rejected candidate nobody is told about leaves the author's
