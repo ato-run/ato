@@ -3170,6 +3170,12 @@ fn process_job(
     // rootfs build (pre-#1002, byte-for-byte); dockerfile_import = clone + params +
     // Dockerfile import. Steps 4-7 below are SHARED and unchanged.
     let produced = produce_build(cfg, job, &jobdir)?;
+    let snapshot_execution_id = snapshot_execution_id_for_claim(
+        job.pinned_source.is_some(),
+        job.execution_id.as_deref(),
+        &produced.execution_id,
+    )
+    .map_err(|reason| fail("eligibility", reason))?;
 
     // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
     // a supervisor spec the backend drives the whole placeholder protocol itself
@@ -3219,7 +3225,7 @@ fn process_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id),
+            execution_id: Some(snapshot_execution_id),
             supervisor: produced.supervisor,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
@@ -3394,6 +3400,42 @@ fn report_hold_progress(
     if let Err(error) = api.report_progress(fencing, stage) {
         eprintln!("[builder] wizard progress {stage:?} not recorded: {error}");
     }
+}
+
+/// The identity written into a Snapshot manifest.
+///
+/// `ProducedBuild::execution_id` is the producer's legacy declared identity.
+/// The control plane claim carries the finalized Capsule v1 execution contract
+/// identity. Snapshot selection, acceptance, verification, and publication all
+/// key on the latter, so every pinned build must inherit the claim identity.
+/// Legacy, unpinned jobs keep their producer identity byte-for-byte.
+fn snapshot_execution_id_for_claim(
+    pinned_source: bool,
+    claim_execution_id: Option<&str>,
+    produced_execution_id: &str,
+) -> Result<String, String> {
+    if !pinned_source {
+        return Ok(produced_execution_id.to_string());
+    }
+    let raw = claim_execution_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            "a pinned-source claim carries no execution_id, so its Snapshot \
+             cannot be bound to the finalized execution contract"
+                .to_string()
+        })?;
+    capsule::execution_contract::ExecutionId::new(raw.to_string())
+        .map(|id| id.as_str().to_string())
+        .map_err(|error| format!("the pinned-source claim execution_id is invalid: {error}"))
+}
+
+/// Typed interactive-lane adapter for [`snapshot_execution_id_for_claim`].
+fn interactive_snapshot_execution_id(
+    claim_execution_id: &capsule::execution_contract::ExecutionId,
+) -> String {
+    snapshot_execution_id_for_claim(true, Some(claim_execution_id.as_str()), "")
+        .expect("a typed ExecutionId is a valid pinned claim identity")
 }
 
 /// Submission Wizard PR-2 — the `interactive_capture` lane, end to end.
@@ -3576,7 +3618,7 @@ fn process_interactive_capture_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id.clone()),
+            execution_id: Some(interactive_snapshot_execution_id(&execution_id)),
             supervisor: produced.supervisor.clone(),
         })
         .map_err(|e| fail("launch", e.to_string()))?;
@@ -4034,6 +4076,55 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_candidate_uses_the_claim_execution_identity() {
+        let claim = capsule::execution_contract::ExecutionId::new(
+            "blake3:6c379f78b877c137e5119b7e058678f741116bf3113077e68fe984c14e71d27b".to_string(),
+        )
+        .expect("canonical claim identity");
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity = interactive_snapshot_execution_id(&claim);
+
+        assert_eq!(snapshot_identity, claim.as_str());
+        assert_ne!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn pinned_sealed_build_uses_the_claim_execution_identity() {
+        let claim = "blake3:6c379f78b877c137e5119b7e058678f741116bf3113077e68fe984c14e71d27b";
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity =
+            snapshot_execution_id_for_claim(true, Some(claim), producer_declared_identity)
+                .expect("pinned claim identity");
+
+        assert_eq!(snapshot_identity, claim);
+        assert_ne!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn legacy_sealed_build_keeps_the_producer_execution_identity() {
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity =
+            snapshot_execution_id_for_claim(false, None, producer_declared_identity)
+                .expect("legacy producer identity");
+
+        assert_eq!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn pinned_sealed_build_refuses_a_missing_claim_identity() {
+        let error = snapshot_execution_id_for_claim(true, None, "legacy")
+            .expect_err("pinned claim without identity must fail closed");
+
+        assert!(error.contains("carries no execution_id"), "{error}");
+    }
 
     /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a
     /// SUPERVISOR build (the guest generates + injects at run — vsock channel,
