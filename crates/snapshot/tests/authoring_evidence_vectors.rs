@@ -24,6 +24,9 @@ fn clean_replay_payload_vector_is_exact_jcs() {
         Some(b'\n'),
         "repository JSON fixture uses one transport newline"
     );
+    if expected.last() == Some(&b'\r') {
+        expected.pop();
+    }
     let payload: CleanReplayReceiptPayloadV1 =
         serde_json::from_slice(&expected).expect("parse vector");
 
