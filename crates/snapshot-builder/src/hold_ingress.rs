@@ -176,8 +176,15 @@ fn accept_loop(
         // rather than once, because the gate closes while the loop is parked in
         // `accept()` and every connection after that point must be refused.
         if gated.load(Ordering::SeqCst) {
-            let _ = write_verification_gate_response(&client);
-            let _ = client.shutdown(Shutdown::Both);
+            // Drain the request before closing. Some TCP stacks reset a socket
+            // that is dropped with unread receive data, which can discard the
+            // complete 503 response the browser has already received.
+            let _ = std::thread::Builder::new()
+                .name("ato-hold-ingress-gate".to_string())
+                .spawn(move || {
+                    let _ = write_verification_gate_response(&client);
+                    let _ = client.shutdown(Shutdown::Write);
+                });
             continue;
         }
         let upstream = upstream.clone();
@@ -207,7 +214,36 @@ fn accept_loop(
 /// that may be mid-keepalive, and a partial or unframed reply would render as a
 /// network error — the exact thing the gate exists to avoid.
 fn write_verification_gate_response(client: &TcpStream) -> io::Result<()> {
-    use std::io::Write;
+    use std::io::{Read, Write};
+
+    const MAX_REQUEST_HEAD_BYTES: usize = 16 * 1024;
+    const REQUEST_READ_TIMEOUT: Duration = Duration::from_millis(500);
+
+    client.set_read_timeout(Some(REQUEST_READ_TIMEOUT))?;
+    let mut request_head = Vec::with_capacity(1024);
+    let mut buf = [0_u8; 1024];
+    let mut reader = client;
+    while request_head.len() < MAX_REQUEST_HEAD_BYTES {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                request_head.extend_from_slice(&buf[..n]);
+                if request_head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
     const BODY: &str = "Verifying this capsule's snapshot. The preview returns when it finishes.";
     let response = format!(
         "HTTP/1.1 503 Service Unavailable\r\n\

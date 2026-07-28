@@ -497,7 +497,7 @@ impl GenerationStore for FsGenerationStore {
             // A first-install rollback: there is no generation to point at, and
             // leaving the link on the candidate would keep publishing something
             // that was never confirmed.
-            match fs::remove_file(&link) {
+            match remove_symlink(&link) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -539,6 +539,17 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 fn symlink(target: &Path, link: &Path) -> Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
         .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))
+}
+
+#[cfg(unix)]
+fn remove_symlink(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_symlink(path: &Path) -> std::io::Result<()> {
+    // Directory symlinks are removed with RemoveDirectoryW on Windows.
+    fs::remove_dir(path)
 }
 
 #[cfg(test)]
