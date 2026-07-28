@@ -2964,6 +2964,60 @@ fn v1_image_ref(job_id: &str) -> String {
     format!("ato-v1-build-{slug}-{}", std::process::id())
 }
 
+/// Add a generated declaration as a source overlay without changing the
+/// immutable source closure it describes.
+///
+/// The API-provided archive is verified and extracted before this function is
+/// called. Re-materializing that workspace after creating `capsule.toml`
+/// produces the exact archive the shared v1 producer expects: its program
+/// source projection excludes the generated control file, so the resulting
+/// source digest must still equal the original config-less source closure.
+fn materialize_generated_manifest_overlay(
+    workspace: &Path,
+    input: &ArchiveOnlyBuildInput,
+    generated_manifest: &str,
+    archive_path: &Path,
+) -> std::result::Result<ArchiveOnlyBuildInput, (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let manifest_path = workspace.join("capsule.toml");
+    let mut manifest = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manifest_path)
+        .map_err(|error| {
+            fail(
+                "manifest",
+                format!("generated setup refuses to replace an existing capsule.toml: {error}"),
+            )
+        })?;
+    std::io::Write::write_all(&mut manifest, generated_manifest.as_bytes())
+        .map_err(|error| fail("manifest", format!("write generated capsule.toml: {error}")))?;
+    drop(manifest);
+
+    let materialized =
+        capsule::blob::materialize_source_archive(workspace, archive_path).map_err(|error| {
+            fail(
+                "source_overlay",
+                format!("materialize generated source overlay: {error}"),
+            )
+        })?;
+    let object_key =
+        snapshot::source_materialization::object_key_for_archive(&materialized.source_archive_hash)
+            .map_err(|error| {
+                fail(
+                    "source_overlay",
+                    format!("derive generated source overlay identity: {error}"),
+                )
+            })?;
+    ArchiveOnlyBuildInput::new(
+        input.source_revision_id(),
+        materialized.source_archive_hash,
+        object_key,
+        materialized.materialized_source_tree_hash,
+    )
+    .map_err(|error| fail("source_overlay", error.to_string()))
+}
+
 /// Build from a verified pinned archive.
 ///
 /// Takes a `TreeVerifiedArchive` and nothing else that could name source: no
@@ -3002,26 +3056,7 @@ fn produce_pinned_v1_build(
     let jobdir = std::path::absolute(jobdir)
         .map_err(|e| fail("build", format!("resolve the job directory: {e}")))?;
 
-    // 1. The program-source identity this revision COMMITS, derived from the
-    //    proved archive through the shared archive-only path. Taken before the
-    //    build so the comparison below is against a value the build did not
-    //    produce.
-    let acquired = snapshot::archive_only_build::acquire_pinned_source(
-        input,
-        &DownloadedArchiveFetch {
-            object_key: input.source_archive_object_key(),
-            archive: verified.path(),
-        },
-        &jobdir.join("pinned-acquire"),
-    )
-    .map_err(|e| fail("fetch", format!("{} ({})", e, e.code())))?;
-    let expected_source_digest = ContentDigest::new(
-        DigestAlgorithm::Sha256,
-        acquired.materialized().contract.digest.bytes(),
-    )
-    .to_string();
-
-    // 2. The workspace is the EXTRACTION of that same archive — never a
+    // 1. The workspace is the EXTRACTION of that same archive — never a
     //    checkout. It exists because the manifest and the lock are control
     //    files, which the projection withholds by definition, and the lane has
     //    to read one and write the other.
@@ -3033,9 +3068,47 @@ fn produce_pinned_v1_build(
         &workspace,
     )
     .map_err(|e| fail("build", format!("extract the pinned source archive: {e}")))?;
-    if let Some(generated_manifest) = generated_manifest {
-        std::fs::write(workspace.join("capsule.toml"), generated_manifest)
-            .map_err(|e| fail("manifest", format!("write generated capsule.toml: {e}")))?;
+
+    // 2. A config-less authoring source gets a typed Source Overlay containing
+    //    only the generated declaration. The shared v1 producer always sees an
+    //    archive with capsule.toml, while its projected source identity remains
+    //    the immutable closure from the API receipt.
+    let generated_archive_path = jobdir.join("generated-source-overlay.tar.zst");
+    let (build_input, build_archive_path) = match generated_manifest {
+        Some(generated_manifest) => (
+            materialize_generated_manifest_overlay(
+                &workspace,
+                input,
+                generated_manifest,
+                &generated_archive_path,
+            )?,
+            generated_archive_path,
+        ),
+        None => (input.clone(), verified.path().to_path_buf()),
+    };
+
+    // 3. The program-source identity this revision COMMITS, derived from the
+    //    exact archive the v1 producer will consume.
+    let acquired = snapshot::archive_only_build::acquire_pinned_source(
+        &build_input,
+        &DownloadedArchiveFetch {
+            object_key: build_input.source_archive_object_key(),
+            archive: &build_archive_path,
+        },
+        &jobdir.join("pinned-acquire"),
+    )
+    .map_err(|e| fail("fetch", format!("{} ({})", e, e.code())))?;
+    let expected_source_digest = ContentDigest::new(
+        DigestAlgorithm::Sha256,
+        acquired.materialized().contract.digest.bytes(),
+    )
+    .to_string();
+    if generated_manifest.is_some() {
+        refuse_source_revision_mismatch(
+            input.source_revision_id(),
+            input.expected_source_tree_digest(),
+            &expected_source_digest,
+        )?;
     }
 
     // The manifest, read from that workspace. Parsed here as well as inside the
@@ -3064,7 +3137,7 @@ fn produce_pinned_v1_build(
         capsule::types::validate_seal_at(seal_at).map_err(|e| fail("manifest", e))?;
     }
 
-    // 3. The v1 producer lane — the same code `ato build` runs, over the same
+    // 4. The v1 producer lane — the same code `ato build` runs, over the same
     //    verified archive. `pinned_source_archive` is what keeps the projection
     //    on the proved bytes instead of a re-freeze of the extraction.
     let producer = snapshot::build_v1::HostV1GuestProducer::probe().map_err(|reason| {
@@ -3080,7 +3153,7 @@ fn produce_pinned_v1_build(
     let outcome = snapshot::build_v1::run(
         snapshot::build_v1::V1BuildRequest {
             workspace_root: &workspace,
-            pinned_source_archive: Some(verified.path()),
+            pinned_source_archive: Some(&build_archive_path),
             work_root: &work_root,
             guest_image_path: &guest_image_path,
             rootfs_size_mib: cfg.rootfs_size_mib,
@@ -3096,14 +3169,14 @@ fn produce_pinned_v1_build(
                 .map_err(|e| fail("build", format!("digest resolver output lock: {e}")))
         })?;
 
-    // 4. The identity that was minted must be over the pinned revision's source.
+    // 5. The identity that was minted must be over the pinned revision's source.
     refuse_source_revision_mismatch(
         input.source_revision_id(),
         &expected_source_digest,
         &outcome.source_digest,
     )?;
 
-    // 5. The intake gate: trusted-load the lock, re-derive the Execution
+    // 6. The intake gate: trusted-load the lock, re-derive the Execution
     //    Identity from the contract's canonical bytes, refuse every facet
     //    outside the ADR-015 §7 subset, and bind the contract to the artifact
     //    actually on disk. The receipt is the lane's own, so nothing here
@@ -3142,7 +3215,7 @@ fn produce_pinned_v1_build(
             .display(),
     );
 
-    // 6. Hand the shared Ready-State tail exactly what it needs. The rootfs is
+    // 7. Hand the shared Ready-State tail exactly what it needs. The rootfs is
     //    read from the VERIFIED artifact's own path, not from the path the
     //    producer reported: the two are normally the same file, and when they
     //    are not it is the verified one that was measured.
@@ -7190,6 +7263,84 @@ targets = ["web"]
             .expect("well-formed digest");
         ArchiveOnlyBuildInput::new(PINNED_REV, archive_digest, key, tree_digest)
             .expect("valid pinned input")
+    }
+
+    #[test]
+    fn generated_manifest_overlay_preserves_configless_source_identity() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(
+            source.path().join("index.html"),
+            b"<!doctype html><title>Hextris</title>",
+        )
+        .expect("write source");
+        let raw_archive = source.path().join("raw-source.tar.zst");
+        let raw = capsule::blob::materialize_source_archive(source.path(), &raw_archive)
+            .expect("materialize raw source");
+        let input = pinned_input(&raw.source_archive_hash, &raw.materialized_source_tree_hash);
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        capsule::contract::program_source_projection::extract_source_archive(
+            &raw_archive,
+            workspace.path(),
+        )
+        .expect("extract verified raw source");
+        let normalized = authoring_runtime::infer_static_web_intent(workspace.path())
+            .expect("infer static Web intent");
+        let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
+            .expect("render generated manifest");
+        let overlay_archive = workspace.path().join("overlay.tar.zst");
+        let overlay_input = materialize_generated_manifest_overlay(
+            workspace.path(),
+            &input,
+            &generated_manifest,
+            &overlay_archive,
+        )
+        .expect("materialize generated overlay");
+
+        let acquired = snapshot::archive_only_build::acquire_pinned_source(
+            &overlay_input,
+            &DownloadedArchiveFetch {
+                object_key: overlay_input.source_archive_object_key(),
+                archive: &overlay_archive,
+            },
+            &workspace.path().join("acquired"),
+        )
+        .expect("project generated overlay");
+        let projected = ContentDigest::new(
+            DigestAlgorithm::Sha256,
+            acquired.materialized().contract.digest.bytes(),
+        )
+        .to_string();
+        assert_eq!(projected, raw.materialized_source_tree_hash);
+        assert!(
+            workspace.path().join("capsule.toml").is_file(),
+            "the generated declaration is materialized as a control-file overlay"
+        );
+    }
+
+    #[test]
+    fn generated_manifest_overlay_refuses_to_replace_source_declaration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("capsule.toml"), b"source declaration")
+            .expect("write source declaration");
+        let input = pinned_input(
+            &format!("sha256:{}", "1".repeat(64)),
+            &format!("sha256:{}", "2".repeat(64)),
+        );
+
+        let (stage, reason) = materialize_generated_manifest_overlay(
+            workspace.path(),
+            &input,
+            "generated declaration",
+            &workspace.path().join("overlay.tar.zst"),
+        )
+        .expect_err("a generated overlay must not overwrite source");
+        assert_eq!(stage, "manifest");
+        assert!(reason.contains("refuses to replace"), "{reason}");
+        assert_eq!(
+            std::fs::read(workspace.path().join("capsule.toml")).expect("read source declaration"),
+            b"source declaration"
+        );
     }
 
     /// The adapter serves ONE object, and says so rather than answering with
