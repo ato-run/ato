@@ -211,6 +211,7 @@ impl AuthoringApiClient<'_> {
         work: &AuthoringWork,
         receipt: &CleanReplayReceiptV1,
         classified_state_diff: &ClassifiedStateDiffV1,
+        execution_contract_jcs_base64: &str,
     ) -> Result<(), String> {
         let classified = serde_jcs::to_vec(classified_state_diff)
             .map_err(|error| format!("canonicalize classified state diff: {error}"))?;
@@ -225,6 +226,7 @@ impl AuthoringApiClient<'_> {
             "builder_id": self.builder_id,
             "receipt": receipt,
             "classified_state_diff_jcs_base64": BASE64.encode(classified),
+            "execution_contract_jcs_base64": execution_contract_jcs_base64,
         }))
         .map_err(|error| http_error("report Clean Replay completion", error))?;
         Ok(())
