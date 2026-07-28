@@ -960,12 +960,34 @@ pub fn ack_hold_termination(
     let Some(reason) = termination.terminal_ack_reason() else {
         return Ok(());
     };
+    // EXHAUSTIVE, not `_ => None`. The wildcard it replaces silently dropped the
+    // diagnostic of any variant added after it, and `failure_reason` is the only
+    // field of the ack that reaches a human — it is what the api stores as
+    // `error_summary` and what the wizard shows the author. A new failure whose
+    // reason vanishes would present as a bare `build_failed` with nothing to act
+    // on, so the compiler is made to ask about each one.
     let failure_reason = match termination {
         HoldTermination::AcceptanceFailedSourceLost { failure_reason }
         | HoldTermination::FailedClosed { failure_reason } => {
             Some(truncate(failure_reason, FAILURE_REASON_BUDGET))
         }
-        _ => None,
+        // #1160 — the count is part of the diagnosis ("it tried three times"),
+        // so it leads the reason rather than living only in a builder log.
+        HoldTermination::CaptureBudgetExhausted {
+            attempts,
+            failure_reason,
+        } => Some(truncate(
+            &format!("after {attempts} capture attempt(s): {failure_reason}"),
+            FAILURE_REASON_BUDGET,
+        )),
+        // No failure to describe: these ended cleanly.
+        HoldTermination::Accepted { .. }
+        | HoldTermination::Discarded
+        | HoldTermination::AttemptEnded => None,
+        // Unreachable: `terminal_ack_reason()` is `None` for it, so the early
+        // return above already sent nothing. Named rather than wildcarded so the
+        // next variant still has to be decided here.
+        HoldTermination::TornDownWithoutAck { .. } => None,
     };
     api.wizard_terminal_ack(
         fencing,
