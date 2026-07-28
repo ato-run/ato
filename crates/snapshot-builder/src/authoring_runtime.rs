@@ -391,16 +391,41 @@ fn http_error(operation: &str, error: ureq::Error) -> String {
     match error {
         ureq::Error::Status(status, response) => {
             let body = response.into_string().unwrap_or_default();
-            let code = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|value| value.get("error")?.as_str().map(str::to_owned))
-                .unwrap_or_else(|| format!("http_{status}"));
-            format!("{operation} was refused ({code}, HTTP {status})")
+            let (code, detail) = parse_http_rejection(&body, status);
+            match detail {
+                Some(detail) => {
+                    format!("{operation} was refused ({code}, HTTP {status}): {detail}")
+                }
+                None => format!("{operation} was refused ({code}, HTTP {status})"),
+            }
         }
         ureq::Error::Transport(transport) => {
             format!("{operation} transport failed ({})", transport.kind())
         }
     }
+}
+
+fn parse_http_rejection(body: &str, status: u16) -> (String, Option<String>) {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("http_{status}"));
+    let detail = parsed
+        .as_ref()
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(|message| {
+            message
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(512)
+                .collect::<String>()
+        })
+        .filter(|message| !message.trim().is_empty());
+    (code, detail)
 }
 
 /// Infer the narrow static-Web subset used by the first browser E2E.
@@ -518,6 +543,21 @@ mod tests {
         .expect("setup claim");
 
         assert_eq!(work._worker_claim_id, None);
+    }
+
+    #[test]
+    fn http_rejection_keeps_bounded_safe_diagnostic_detail() {
+        let body = serde_json::json!({
+            "error": "clean_replay_receipt_rejected",
+            "message": format!("binding mismatch\n{}", "x".repeat(600)),
+        })
+        .to_string();
+        let (code, detail) = parse_http_rejection(&body, 409);
+
+        assert_eq!(code, "clean_replay_receipt_rejected");
+        let detail = detail.expect("detail");
+        assert!(!detail.contains('\n'));
+        assert_eq!(detail.chars().count(), 512);
     }
 
     #[test]
