@@ -877,8 +877,9 @@ pub fn verify_captured_candidate(
         // builder boundary so a real disposable-restore rejection is
         // distinguishable from the generic terminal `AttemptEnded` ack.
         eprintln!(
-            "[builder] interactive_capture attempt {} candidate {} acceptance rejected: {failure}",
-            fencing.submission_attempt_id, pending.report.candidate_id
+            "[builder] interactive_capture attempt {} candidate {} acceptance rejected: \
+             {failure}; attempts={:?}",
+            fencing.submission_attempt_id, pending.report.candidate_id, run.receipt.attempts
         );
     }
 
