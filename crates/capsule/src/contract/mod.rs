@@ -1,4 +1,5 @@
 //! Layer 2: Contract — manifest, lockfile, and capsule.lock (canonical lock).
+pub mod authoring_intent;
 pub mod capsule_lock;
 pub mod capsule_program_contract;
 pub mod execution_contract;
@@ -11,5 +12,6 @@ pub mod manifest;
 pub mod oci_compose_lock;
 pub mod program_manifest_input;
 pub mod program_source_projection;
+pub mod setup_journal;
 pub mod snapshot_manifest;
 pub mod tools;
