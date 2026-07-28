@@ -778,14 +778,19 @@ pub(crate) enum RestoreArtifactClass {
     Supervisor { binding_names: Vec<String> },
 }
 
-/// v1.2 PR 3e: the NARROW supervisor exception to the "no vsock artifact" rule.
+/// v1.2 PR 3e: the NARROW supervisor restore gate.
 /// A BINDING-REQUIRED supervisor restore is allowed ONLY when every one of these
 /// holds — anything else fails closed:
 /// - the lease kind is `restore_snapshot_with_bindings` (the capability-gated kind);
 /// - this runner is opted in (`ATO_RUNNER_SUPERVISOR=1`);
-/// - `manifest.has_vsock == true` AND `manifest.supervisor_build` is present
-///   (either without the other = an inconsistent artifact, rejected);
+/// - `manifest.has_vsock == true` AND `manifest.supervisor_build` is present;
 /// - every `binding_names` entry parses as a `BindingName`.
+///
+/// `has_vsock` describes a Firecracker device, not a binding policy. Pinned-v1
+/// no-binding capsules use that device for the guest-agent control channel while
+/// carrying no `supervisor_build` receipt. They stay on the plain restore lane:
+/// the runner opens no binding service, and the with-bindings kind is rejected.
+/// A supervisor receipt without the required device remains inconsistent.
 ///
 /// v1.7 (ato#1002 D4): a supervisor artifact with an EMPTY `binding_names` — a
 /// Dockerfile import with no secrets, honestly registered as a supervisor build —
@@ -795,9 +800,8 @@ pub(crate) enum RestoreArtifactClass {
 /// `restore_snapshot_with_bindings` lease against it is a kind/artifact mismatch.
 ///
 /// The plain `restore_snapshot` kind otherwise still restores ONLY a no-binding
-/// artifact (`!has_vsock`, no supervisor receipt) — the old rejection is
-/// unchanged for it. (The backend binding capability is re-checked in the
-/// handler, where a backend exists to probe.)
+/// artifact (no supervisor receipt). The backend binding capability is
+/// re-checked in the handler, where a backend exists to probe.
 pub(crate) fn classify_restore_artifact(
     manifest: &ReadyStateManifest,
     with_bindings_kind: bool,
@@ -815,11 +819,16 @@ pub(crate) fn classify_restore_artifact(
             }
             Ok(RestoreArtifactClass::NoBinding)
         }
-        (None, true) => Err(err(
-            "artifact declares a vsock binding channel but carries no supervisor_build \
-             receipt; refusing to restore an inconsistent artifact"
-                .to_string(),
-        )),
+        (None, true) => {
+            if with_bindings_kind {
+                return Err(err(
+                    "restore_snapshot_with_bindings lease references a no-binding artifact \
+                     with a guest-agent vsock device (kind/artifact mismatch)"
+                        .to_string(),
+                ));
+            }
+            Ok(RestoreArtifactClass::NoBinding)
+        }
         (Some(_), false) => Err(err(
             "artifact carries a supervisor_build receipt but has_vsock=false; refusing to \
              restore an inconsistent artifact"
@@ -1451,21 +1460,25 @@ mod tests {
     }
 
     #[test]
-    fn inconsistent_vsock_supervisor_combinations_are_rejected_both_ways() {
-        // has_vsock without a supervisor receipt: the ORIGINAL rejection, kept.
+    fn guest_agent_vsock_without_supervisor_stays_on_the_no_binding_lane() {
+        // Pinned-v1 capsules use vsock for the guest-agent control channel. No
+        // supervisor receipt means there is no declared binding policy and the
+        // runner never opens a binding service.
         let m = manifest_with(None, true);
-        assert!(
-            classify_restore_artifact(&m, false, true)
-                .unwrap_err()
-                .1
-                .contains("no supervisor_build")
+        assert_eq!(
+            classify_restore_artifact(&m, false, true).unwrap(),
+            RestoreArtifactClass::NoBinding
         );
-        assert!(
-            classify_restore_artifact(&m, true, true)
-                .unwrap_err()
-                .1
-                .contains("no supervisor_build")
+        assert_eq!(
+            classify_restore_artifact(&m, false, false).unwrap(),
+            RestoreArtifactClass::NoBinding
         );
+        let e = classify_restore_artifact(&m, true, true).unwrap_err();
+        assert!(e.1.contains("kind/artifact mismatch"), "{}", e.1);
+    }
+
+    #[test]
+    fn supervisor_receipt_without_vsock_is_rejected() {
         // supervisor receipt without vsock: also inconsistent.
         let m = manifest_with(Some(vec!["openai_api_key"]), false);
         assert!(
