@@ -15,7 +15,7 @@ use super::lockfile_runtime::{
     run_command_inner, uv_artifact_url,
 };
 use super::lockfile_support::{
-    capsule_error_pack, create_atomic_temp_file, write_atomic_bytes_with_os_lock,
+    capsule_error_pack, create_atomic_temp_file, path_lock_target, write_atomic_bytes_with_os_lock,
 };
 use super::{
     ENV_STORE_API_URL, LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, LOCKFILE_INPUT_SNAPSHOT_NAME,
@@ -991,6 +991,21 @@ fn atomic_temp_file_is_created_in_target_directory() {
     assert_eq!(tmp_path.parent(), Some(temp.path()));
     assert!(tmp_path.exists());
     let _ = fs::remove_file(tmp_path);
+}
+
+#[test]
+fn atomic_write_lock_does_not_pin_the_windows_destination() {
+    let temp = TempDir::new().unwrap();
+    let target = temp.path().join(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME);
+    let lock_target = path_lock_target(&target).expect("lock target");
+
+    #[cfg(unix)]
+    assert_eq!(lock_target, temp.path());
+    #[cfg(not(unix))]
+    {
+        assert_eq!(lock_target.parent(), Some(temp.path()));
+        assert_ne!(lock_target, target);
+    }
 }
 
 #[test]
