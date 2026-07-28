@@ -26,9 +26,11 @@
 //! preserved on both outcomes, including a failure during sealing or upload.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use capsulefs::{CasStore, ContentHash};
 use snapshot::{HeldCaptureFailure, HeldGuest};
 
 use crate::hold_phase::{CaptureAction, CaptureError, HeldCapture, LeaseKeepalive};
@@ -124,6 +126,98 @@ fn capture_failed(source_lost: bool, message: String) -> CaptureError {
     }
 }
 
+/// The job CAS a hold seals into: `<jobdir>/cas`, the very store
+/// `process_interactive_capture_job` opens and hands to `boot_and_hold`.
+///
+/// Derived rather than plumbed because the cleanup below is a FAILURE path: it
+/// must work even when the attempt died before anything it could have carried a
+/// handle through, and the layout is already fixed by the caller.
+fn job_cas_root(jobdir: &Path) -> PathBuf {
+    jobdir.join("cas")
+}
+
+/// Every chunk resident in the job CAS right now — the set a failed attempt is
+/// expected to leave exactly as it found.
+///
+/// Taken at the START of each attempt, so it names the build's own layers
+/// (rootfs, runtime, dependency, app) plus anything an earlier attempt was
+/// allowed to keep. Best-effort: an unreadable store yields `None`, which
+/// disables the cleanup rather than risking a removal against an unknown
+/// baseline.
+fn resident_chunks(jobdir: &Path) -> Option<HashSet<ContentHash>> {
+    let store = CasStore::open(job_cas_root(jobdir)).ok()?;
+    Some(store.list_chunks().ok()?.into_iter().collect())
+}
+
+/// #1160 — drop the bytes a FAILED capture attempt wrote into the job CAS.
+///
+/// A capture seals a full memory + vmstate image into the job's content-addressed
+/// store, and guest memory differs on every capture, so nothing dedupes: each
+/// failed attempt adds another whole memory image that no manifest will ever
+/// reference. Bounding the attempt count (`MAX_CAPTURE_ATTEMPTS`) bounds how many
+/// can pile up; this removes them, so a hold that burns its whole budget costs
+/// the disk of ZERO candidates rather than three.
+///
+/// Safe by construction, and the two facts that make it so are worth stating:
+///
+/// * an attempt only reaches this path having produced NO reportable candidate,
+///   and a successful capture ENDS the hold — so at this moment there is no live
+///   candidate whose chunks could be caught in the sweep; and
+/// * `pinned` is the pre-attempt residency set, so the build's own layers (which
+///   the NEXT attempt still needs to seal against) are retained explicitly rather
+///   than by hoping they are referenced from somewhere.
+///
+/// Reuses `capsulefs::gc::collect_garbage` — the same reachability sweep the CAS
+/// already ships — with an empty live-manifest set, so "unreachable" means
+/// precisely "not pinned". Best-effort and never fatal: failing to reclaim disk
+/// must not convert a retryable capture failure into a lost hold.
+/// Run one capture attempt, reclaiming its scratch if it fails.
+///
+/// A free function taking the attempt as a closure, rather than three lines
+/// inside [`CaptureAction::capture`], for one reason: `capture` cannot be
+/// exercised without `/dev/kvm`, so as an inline `if outcome.is_err()` the
+/// DECISION to clean up would be the only part of #1160 no test could reach —
+/// and a mutation that deleted it would go green. Here the choice is testable
+/// against a real CAS with a scripted attempt, and what is left untestable is
+/// one call.
+fn with_attempt_scratch_reclaimed<T>(
+    jobdir: &Path,
+    attempt: impl FnOnce() -> Result<T, CaptureError>,
+) -> Result<T, CaptureError> {
+    // BEFORE the attempt: what the CAS is expected to still hold afterwards if
+    // this attempt fails.
+    let pinned = resident_chunks(jobdir);
+    let outcome = attempt();
+    // A failed attempt produced no candidate anyone can reference, so whatever
+    // it added to the CAS is already garbage. A SUCCESSFUL one is left alone:
+    // acceptance restores the candidate from those very chunks moments later.
+    if outcome.is_err()
+        && let Some(pinned) = &pinned
+    {
+        discard_failed_attempt_scratch(jobdir, pinned);
+    }
+    outcome
+}
+
+fn discard_failed_attempt_scratch(jobdir: &Path, pinned: &HashSet<ContentHash>) {
+    let Ok(store) = CasStore::open(job_cas_root(jobdir)) else {
+        return;
+    };
+    match capsulefs::gc::collect_garbage(&store, &[], pinned) {
+        Ok(report) if report.deleted_count() > 0 => {
+            eprintln!(
+                "[builder] discarded the scratch of a failed capture: {} chunk(s), {} bytes",
+                report.deleted_count(),
+                report.reclaimed_bytes
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("[builder] could not discard failed-capture scratch: {error}");
+        }
+    }
+}
+
 /// Renew the lease BEFORE the guest is touched.
 ///
 /// Everything after this point — pause, seal, upload — runs with no control poll
@@ -140,7 +234,29 @@ fn pre_capture_lease_gate(lease: &mut dyn LeaseKeepalive) -> Result<(), CaptureE
 }
 
 impl CaptureAction for GuestCaptureAction<'_> {
+    /// #1160 — the outcome is produced by [`Self::capture_once`] and this decides
+    /// what a FAILED one costs.
+    ///
+    /// The split exists so the cleanup cannot be forgotten on one error path:
+    /// `capture_once` has six of them (the lease gate, the guest capture, two
+    /// more lease drives, the missing execution id, and the upload), and four of
+    /// those run AFTER the seal has already written a full memory image into the
+    /// job CAS. Handling them one `?` at a time is how a leak gets reintroduced.
     fn capture(
+        &mut self,
+        capture_epoch: u64,
+        candidate_id: &str,
+        lease: &mut dyn LeaseKeepalive,
+    ) -> Result<HeldCapture, CaptureError> {
+        let jobdir = self.ctx.jobdir.clone();
+        with_attempt_scratch_reclaimed(&jobdir, || {
+            self.capture_once(capture_epoch, candidate_id, lease)
+        })
+    }
+}
+
+impl GuestCaptureAction<'_> {
+    fn capture_once(
         &mut self,
         _capture_epoch: u64,
         candidate_id: &str,
@@ -369,5 +485,142 @@ mod tests {
         let mut lease = CountingLease::never_fails();
         assert!(super::pre_capture_lease_gate(&mut lease).is_ok());
         assert_eq!(lease.drives, 1);
+    }
+
+    // ── #1160 per-attempt scratch ───────────────────────────────────────────
+
+    /// A failed attempt leaves the CAS exactly as it found it.
+    ///
+    /// This is where the DISK half of #1160 lives. Bounding the attempt count
+    /// bounds how many failed captures can pile up; this makes each one cost
+    /// nothing — a capture seals a full memory image into the job CAS before the
+    /// upload it is about to fail on, guest memory differs on every capture so
+    /// nothing dedupes, and no manifest will ever reference those bytes.
+    ///
+    /// The build's own layers are the thing that must NOT be swept: the next
+    /// attempt seals against them.
+    #[test]
+    fn a_failed_attempt_reclaims_its_own_bytes_and_keeps_the_builds() {
+        let jobdir = tempfile::tempdir().expect("tempdir");
+        let store = CasStore::open(super::job_cas_root(jobdir.path())).expect("cas");
+
+        // The build's layers, already in the CAS when the hold starts.
+        let rootfs = store.put_chunk(b"rootfs layer bytes").expect("put");
+        let app = store.put_chunk(b"app layer bytes").expect("put");
+
+        // The production shape of the failure: the seal WORKS (a full memory
+        // image and vmstate land in the CAS) and the upload after it does not.
+        let mut sealed = None;
+        let outcome: Result<(), CaptureError> =
+            super::with_attempt_scratch_reclaimed(jobdir.path(), || {
+                let memory = store.put_chunk(b"a whole memory image").expect("put");
+                let vmstate = store.put_chunk(b"vmstate for that capture").expect("put");
+                assert_eq!(store.list_chunks().expect("list").len(), 4);
+                sealed = Some((memory, vmstate));
+                Err(CaptureError {
+                    source_lost: false,
+                    message: "artifact upload failed".to_string(),
+                })
+            });
+
+        assert!(outcome.is_err(), "the attempt's verdict travels unchanged");
+        let (memory, vmstate) = sealed.expect("the attempt sealed");
+        assert!(store.has_chunk(&rootfs), "the build's rootfs must survive");
+        assert!(store.has_chunk(&app), "the build's app layer must survive");
+        assert!(
+            !store.has_chunk(&memory),
+            "the failed attempt's memory image is unreferenced garbage"
+        );
+        assert!(!store.has_chunk(&vmstate));
+        assert_eq!(store.list_chunks().expect("list").len(), 2);
+    }
+
+    /// A SUCCESSFUL capture's bytes are never swept.
+    ///
+    /// The other half of the same decision, and the one with teeth: acceptance
+    /// restores the candidate from these very chunks moments later, so a sweep
+    /// that ran on success would delete the artifact between sealing it and
+    /// verifying it. A cleanup wired to run unconditionally fails here.
+    #[test]
+    fn a_successful_attempt_keeps_every_byte_it_sealed() {
+        let jobdir = tempfile::tempdir().expect("tempdir");
+        let store = CasStore::open(super::job_cas_root(jobdir.path())).expect("cas");
+        let rootfs = store.put_chunk(b"rootfs layer bytes").expect("put");
+
+        let mut sealed = None;
+        let outcome: Result<&str, CaptureError> =
+            super::with_attempt_scratch_reclaimed(jobdir.path(), || {
+                sealed = Some(store.put_chunk(b"the accepted memory image").expect("put"));
+                Ok("candidate")
+            });
+
+        assert_eq!(outcome.expect("ok"), "candidate");
+        let candidate = sealed.expect("the attempt sealed");
+        assert!(
+            store.has_chunk(&candidate),
+            "the candidate about to be verified must still be on disk"
+        );
+        assert!(store.has_chunk(&rootfs));
+        assert_eq!(store.list_chunks().expect("list").len(), 2);
+    }
+
+    /// Three failed attempts cost the disk of zero candidates, not three.
+    ///
+    /// The measured defect was 356 captures; the attempt cap makes that three,
+    /// and this is what makes three cost nothing. Each attempt re-reads
+    /// residency first, so the baseline is per-attempt rather than per-hold.
+    #[test]
+    fn every_failed_attempt_is_reclaimed_not_just_the_first() {
+        let jobdir = tempfile::tempdir().expect("tempdir");
+        let store = CasStore::open(super::job_cas_root(jobdir.path())).expect("cas");
+        let build = store.put_chunk(b"rootfs layer bytes").expect("put");
+
+        for attempt in 0..crate::hold_phase::MAX_CAPTURE_ATTEMPTS {
+            let mut sealed = None;
+            let _: Result<(), CaptureError> =
+                super::with_attempt_scratch_reclaimed(jobdir.path(), || {
+                    // Distinct bytes per attempt: real guest memory never
+                    // repeats, which is exactly why the CAS cannot dedupe these
+                    // away by itself.
+                    sealed = Some(
+                        store
+                            .put_chunk(format!("memory image for attempt {attempt}").as_bytes())
+                            .expect("put"),
+                    );
+                    Err(CaptureError {
+                        source_lost: false,
+                        message: "upload failed".to_string(),
+                    })
+                });
+            let sealed = sealed.expect("sealed");
+            assert!(!store.has_chunk(&sealed), "attempt {attempt} left bytes");
+        }
+
+        assert!(store.has_chunk(&build));
+        assert_eq!(
+            store.list_chunks().expect("list").len(),
+            1,
+            "after a whole spent budget the CAS holds only the build's layers"
+        );
+    }
+
+    /// A CAS that cannot be read disables the sweep rather than guessing.
+    ///
+    /// `resident_chunks` is the baseline the whole cleanup is defined against
+    /// ("everything that was here before this attempt"). Without it there is no
+    /// safe answer to what is garbage — a sweep against an EMPTY baseline would
+    /// take the build's own layers with it and strand the hold — so the caller
+    /// skips the cleanup entirely. Losing disk is recoverable; deleting the
+    /// rootfs the next attempt seals against is not.
+    #[test]
+    fn an_unreadable_cas_yields_no_baseline_and_therefore_no_sweep() {
+        let jobdir = tempfile::tempdir().expect("tempdir");
+        // A FILE where `<jobdir>/cas` should be: `CasStore::open` create_dir_all's
+        // into it and fails.
+        std::fs::write(super::job_cas_root(jobdir.path()), b"not a directory").expect("write");
+        assert!(
+            super::resident_chunks(jobdir.path()).is_none(),
+            "no baseline ⇒ the caller must skip the sweep"
+        );
     }
 }
