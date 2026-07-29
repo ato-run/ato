@@ -5181,6 +5181,7 @@ targets = ["web"]
             has_pyproject: false,
             has_index_html: false,
             has_py_files: true,
+            ..SourceProbe::default()
         };
         // Supervisor disabled ⇒ the supervisor-prerequisite gate must fire (NOT the
         // silent v1 fallback that produced the inconsistent artifact).
@@ -5917,6 +5918,7 @@ targets = ["web"]
             has_pyproject: false,
             has_index_html: false,
             has_py_files: true,
+            ..SourceProbe::default()
         }
     }
 
