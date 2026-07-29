@@ -287,22 +287,34 @@ fn paths_with_lfs_filter(
             reason: format!("run git check-attr: {e}"),
         })?;
 
-    {
-        let mut stdin = child.stdin.take().ok_or(SourceIneligible::Uninspectable {
-            reason: "git check-attr stdin unavailable".to_string(),
-        })?;
-        for entry in &candidates {
-            let _ = stdin.write_all(entry.path.as_bytes());
-            let _ = stdin.write_all(b"\0");
-        }
-        // Dropped here so git sees EOF and can exit.
+    let stdin = child.stdin.take().ok_or(SourceIneligible::Uninspectable {
+        reason: "git check-attr stdin unavailable".to_string(),
+    })?;
+    let mut input = Vec::new();
+    for entry in &candidates {
+        input.extend_from_slice(entry.path.as_bytes());
+        input.push(0);
     }
 
-    let out = child
-        .wait_with_output()
-        .map_err(|e| SourceIneligible::Uninspectable {
-            reason: format!("wait for git check-attr: {e}"),
-        })?;
+    // `check-attr` emits one result triple for every input path. Writing every
+    // path before reading stdout deadlocks once both OS pipes fill: the parent
+    // waits for git to read stdin while git waits for the parent to drain
+    // stdout. Feed stdin on a worker while `wait_with_output` drains stdout and
+    // stderr concurrently. Dropping `stdin` at the end of the worker also gives
+    // git the EOF it needs to exit.
+    let (output_result, stdin_result) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            let mut stdin = stdin;
+            stdin.write_all(&input)
+        });
+        let output = child.wait_with_output();
+        let written = writer.join();
+        (output, written)
+    });
+
+    let out = output_result.map_err(|e| SourceIneligible::Uninspectable {
+        reason: format!("wait for git check-attr: {e}"),
+    })?;
     if !out.status.success() {
         return Err(SourceIneligible::Uninspectable {
             reason: format!(
@@ -311,6 +323,13 @@ fn paths_with_lfs_filter(
             ),
         });
     }
+    stdin_result
+        .map_err(|_| SourceIneligible::Uninspectable {
+            reason: "write git check-attr stdin worker panicked".to_string(),
+        })?
+        .map_err(|e| SourceIneligible::Uninspectable {
+            reason: format!("write git check-attr stdin: {e}"),
+        })?;
 
     // `-z` output is a flat NUL-separated stream of (path, attr, value) triples.
     let fields: Vec<String> = out
@@ -413,6 +432,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         repo(dir.path());
         assert!(verify_source_eligibility(dir.path(), &head(dir.path())).is_ok());
+    }
+
+    /// `git check-attr --stdin` answers each path before it has consumed the
+    /// complete input stream. With enough paths, a parent that writes all stdin
+    /// before reading stdout deadlocks when both pipes fill.
+    #[test]
+    fn a_large_path_set_does_not_deadlock_attribute_resolution() {
+        if !is_git_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        repo(dir.path());
+        for index in 0..2_048 {
+            fs::write(
+                dir.path().join(format!(
+                    "asset-{index:04}-with-a-long-enough-name-to-fill-the-pipes.txt"
+                )),
+                "ordinary\n",
+            )
+            .unwrap();
+        }
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-qm", "many paths"]);
+
+        let checkout = dir.path().to_path_buf();
+        let commit = head(dir.path());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(verify_source_eligibility(&checkout, &commit))
+                .expect("send eligibility result");
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .expect("attribute resolution must not deadlock");
+        worker.join().expect("eligibility worker");
+        assert!(result.is_ok(), "large ordinary source must be eligible");
     }
 
     /// THE case the filesystem cannot see.
