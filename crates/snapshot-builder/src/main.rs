@@ -4099,6 +4099,10 @@ fn dispatch_interactive_capture_job(
     }
 }
 
+fn authoring_readiness_terminal_line(port: u16, path: &str) -> String {
+    format!("Readiness: HTTP {path} on port {port} succeeded")
+}
+
 fn process_authoring_setup(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -4230,7 +4234,7 @@ fn process_authoring_setup(
                 normalized.intent.launch.required_tools.join(", ")
             ),
             format!("Launch: {}", normalized.intent.launch.argv.join(" ")),
-            "Readiness: HTTP / on port 8000 succeeded".to_string(),
+            authoring_readiness_terminal_line(produced.port, &produced.healthcheck),
         ],
     ) {
         Ok(gateway) => gateway,
@@ -5992,6 +5996,14 @@ targets = ["web"]
             hold_slot: None,
             authoring_signer: None,
         }
+    }
+
+    #[test]
+    fn authoring_terminal_reports_the_resolved_readiness_contract() {
+        assert_eq!(
+            authoring_readiness_terminal_line(5173, "/ready"),
+            "Readiness: HTTP /ready on port 5173 succeeded"
+        );
     }
 
     fn import_job(kind: &str, params: Option<serde_json::Value>) -> ClaimedJob {
