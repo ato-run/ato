@@ -694,6 +694,7 @@ fn runtime_kind_name(spec: &RootfsBuildSpecV1) -> &'static str {
     use crate::rootfs_builder::RuntimeKind;
     match spec.runtime {
         RuntimeKind::Python => "python",
+        RuntimeKind::Deno => "deno",
         RuntimeKind::Node => "node",
         RuntimeKind::StaticWeb => "static-web",
     }

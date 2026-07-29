@@ -4118,12 +4118,30 @@ fn process_authoring_setup(
             "registered hold slot builder_id does not match --agent-id".to_string(),
         ));
     }
-    if work.setup_mode.as_deref() != Some("suggested") {
-        return Err(fail(
-            "setup",
-            "this builder slice accepts only the suggested reproducible setup path".to_string(),
-        ));
+    match work.setup_mode.as_deref() {
+        Some("suggested") if work.source_overlay.is_none() => {}
+        Some("manual") if work.source_overlay.is_some() => {}
+        Some("suggested") => {
+            return Err(fail(
+                "setup",
+                "suggested setup must not carry a manual Source Overlay".to_string(),
+            ));
+        }
+        Some("manual") => {
+            return Err(fail(
+                "setup",
+                "manual setup requires a persisted Source Overlay".to_string(),
+            ));
+        }
+        _ => {
+            return Err(fail(
+                "setup",
+                "setup mode must be suggested or manual".to_string(),
+            ));
+        }
     }
+    let setup_origin =
+        authoring_runtime::authoring_recipe_origin(work).map_err(|error| fail("detect", error))?;
     let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
         .map_err(|error| fail("setup", error))?;
     if jobdir.exists() {
@@ -4150,10 +4168,9 @@ fn process_authoring_setup(
         &inference_root,
     )
     .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
-    let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
-        .map_err(|error| fail("detect", error))?;
-    let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
-        .map_err(|error| fail("detect", error))?;
+    let (normalized, generated_manifest) =
+        authoring_runtime::resolve_authoring_recipe(&inference_root, work)
+            .map_err(|error| fail("detect", error))?;
     let produced = produce_pinned_v1_build(
         cfg,
         &work.work_id,
@@ -4208,8 +4225,11 @@ fn process_authoring_setup(
             format!("Source closure: {}", work.source_closure_id),
             format!("Program Intent: {}", normalized.digest),
             format!("Resolution lock: {resolution_lock_digest}"),
-            "Build: static Web source; no dependency steps".to_string(),
-            "Launch: python3 -m http.server 8000 --bind 0.0.0.0".to_string(),
+            format!(
+                "Build: inferred source runtime; required tools {}",
+                normalized.intent.launch.required_tools.join(", ")
+            ),
+            format!("Launch: {}", normalized.intent.launch.argv.join(" ")),
             "Readiness: HTTP / on port 8000 succeeded".to_string(),
         ],
     ) {
@@ -4222,6 +4242,42 @@ fn process_authoring_setup(
             ));
         }
     };
+    let (readiness_port, readiness_path) = match &normalized.intent.readiness {
+        capsule::authoring_intent::ReadinessIntentV1::Http { port, path, .. } => {
+            (*port, path.clone())
+        }
+        _ => {
+            drop(gateway);
+            guest.release();
+            return Err(fail(
+                "readiness",
+                "Authoring setup requires HTTP readiness".to_string(),
+            ));
+        }
+    };
+    client
+        .append_setup_observation(
+            work,
+            work.setup_journal_sequence + 1,
+            serde_json::json!({
+                "kind": "process_observation",
+                "argv": normalized.intent.launch.argv,
+                "cwd": ".",
+            }),
+        )
+        .map_err(|error| fail("setup_journal", error))?;
+    client
+        .append_setup_observation(
+            work,
+            work.setup_journal_sequence + 2,
+            serde_json::json!({
+                "kind": "surface_observation",
+                "protocol": "http",
+                "port": readiness_port,
+                "readiness_path": readiness_path,
+            }),
+        )
+        .map_err(|error| fail("setup_journal", error))?;
     client
         .mark_setup_ready(
             work,
@@ -4229,7 +4285,7 @@ fn process_authoring_setup(
                 builder_id: &cfg.agent_id,
                 builder_session_id: &work.work_id,
                 builder_slot_id: &slot.slot_id,
-                origin: "inferred",
+                origin: setup_origin,
                 normalized_program_intent: &normalized,
                 resolution_lock_digest: &resolution_lock_digest,
                 generated_capsule_toml: &generated_manifest,
@@ -4412,7 +4468,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         )
         .map_err(|error| error.to_string())?;
         let generated_manifest =
-            authoring_runtime::render_static_web_capsule_toml(&request.normalized_program_intent)?;
+            authoring_runtime::replay_capsule_toml(self.work, &request.normalized_program_intent)?;
         let produced = produce_pinned_v1_build(
             self.cfg,
             &self.work.work_id,
@@ -4895,6 +4951,25 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
     match work.kind.as_str() {
         "setup" => {
             if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
+                let error_code = format!(
+                    "setup_{}_failed",
+                    stage
+                        .chars()
+                        .map(|character| if character.is_ascii_alphanumeric() {
+                            character.to_ascii_lowercase()
+                        } else {
+                            '_'
+                        })
+                        .collect::<String>()
+                );
+                if let Err(callback_error) =
+                    client.mark_setup_failed(&work, &stage, &error_code, &reason)
+                {
+                    return Err(anyhow!(
+                        "Authoring Session {} failed at {stage}: {reason}; failure callback: {callback_error}",
+                        work.authoring_session_id
+                    ));
+                }
                 return Err(anyhow!(
                     "Authoring Session {} failed at {stage}: {reason}",
                     work.authoring_session_id
@@ -5098,6 +5173,9 @@ targets = ["web"]
 "#;
         let manifest = CapsuleManifest::from_toml(toml).expect("manifest parses");
         let probe = SourceProbe {
+            has_deno_json: false,
+            has_deno_lock: false,
+            has_deno_fresh_entrypoints: false,
             has_package_json: false,
             has_requirements_txt: false,
             has_pyproject: false,
@@ -5831,6 +5909,9 @@ targets = ["web"]
 
     fn probe_python() -> SourceProbe {
         SourceProbe {
+            has_deno_json: false,
+            has_deno_lock: false,
+            has_deno_fresh_entrypoints: false,
             has_package_json: false,
             has_requirements_txt: false,
             has_pyproject: false,
@@ -7383,9 +7464,9 @@ targets = ["web"]
             workspace.path(),
         )
         .expect("extract verified raw source");
-        let normalized = authoring_runtime::infer_static_web_intent(workspace.path())
-            .expect("infer static Web intent");
-        let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
+        let normalized = authoring_runtime::infer_authoring_intent(workspace.path())
+            .expect("infer source intent");
+        let generated_manifest = authoring_runtime::render_inferred_capsule_toml(&normalized)
             .expect("render generated manifest");
         let overlay_archive = workspace.path().join("overlay.tar.zst");
         let overlay_input = materialize_generated_manifest_overlay(

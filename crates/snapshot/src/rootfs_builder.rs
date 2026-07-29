@@ -36,6 +36,7 @@ use crate::state_volume::{drive_id as state_drive_id, volume_label};
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeKind {
     StaticWeb,
+    Deno,
     Node,
     Python,
 }
@@ -44,6 +45,9 @@ pub enum RuntimeKind {
 /// without a real checkout. Populated by [`SourceProbe::scan`] over the materialized dir.
 #[derive(Debug, Clone, Default)]
 pub struct SourceProbe {
+    pub has_deno_json: bool,
+    pub has_deno_lock: bool,
+    pub has_deno_fresh_entrypoints: bool,
     pub has_package_json: bool,
     pub has_requirements_txt: bool,
     pub has_pyproject: bool,
@@ -63,6 +67,9 @@ impl SourceProbe {
             })
             .unwrap_or(false);
         SourceProbe {
+            has_deno_json: has("deno.json") || has("deno.jsonc"),
+            has_deno_lock: has("deno.lock"),
+            has_deno_fresh_entrypoints: has("main.ts") && has("dev.ts"),
             has_package_json: has("package.json"),
             has_requirements_txt: has("requirements.txt"),
             has_pyproject: has("pyproject.toml"),
@@ -480,7 +487,7 @@ pub fn derive_build_spec_v1(
         }
     }
 
-    // Measured, not assumed: none of the three families in the Step-4 subset
+    // Measured, not assumed: none of the runtime families in the Step-4 subset
     // wraps the authored argv — the generated init execs it directly.
     let runtime_invocation_prefix = ObservedInvocationPrefix::observed_none();
     let resolved_argv = runtime_invocation_prefix
@@ -612,6 +619,10 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 ///
 /// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
+    let runtime_environment = match spec.runtime {
+        RuntimeKind::Deno => "export DENO_DIR=/deno-dir",
+        _ => "",
+    };
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
@@ -633,6 +644,7 @@ cat > "$ATO_ROOTFS/sbin/init" <<'INIT'
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+{runtime_environment}
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
@@ -652,6 +664,7 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         tool = tool,
         launch = launch_argv_line(&spec.resolved_argv),
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        runtime_environment = runtime_environment,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
     )
@@ -928,7 +941,12 @@ pub(crate) fn detect_runtime_kind(
     language: &str,
     probe: &SourceProbe,
 ) -> Result<RuntimeKind, String> {
-    if driver == "node"
+    if driver == "deno"
+        || language == "deno"
+        || ((driver.is_empty() && language.is_empty()) && probe.has_deno_json)
+    {
+        Ok(RuntimeKind::Deno)
+    } else if driver == "node"
         || language == "javascript"
         || language == "typescript"
         || probe.has_package_json
@@ -944,7 +962,7 @@ pub(crate) fn detect_runtime_kind(
     } else if driver == "static" || probe.has_index_html {
         Ok(RuntimeKind::StaticWeb)
     } else {
-        Err("source runtime: no node (package.json/driver) or python (requirements.txt/pyproject/driver) detected".into())
+        Err("source runtime: no deno (deno.json), node (package.json/driver), python (requirements.txt/pyproject/driver), or static Web entrypoint detected".into())
     }
 }
 
@@ -958,6 +976,18 @@ pub(crate) fn base_image_and_install(
 ) -> (String, Option<String>) {
     match runtime {
         RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
+        RuntimeKind::Deno => (
+            "denoland/deno:alpine-1.38.2".to_string(),
+            Some(if probe.has_deno_fresh_entrypoints {
+                if probe.has_deno_lock {
+                    "deno cache --lock=deno.lock main.ts dev.ts".to_string()
+                } else {
+                    "deno cache main.ts dev.ts".to_string()
+                }
+            } else {
+                "true".to_string()
+            }),
+        ),
         RuntimeKind::Node => (
             "node:20-slim".to_string(),
             Some(if probe.has_package_json {
@@ -2696,6 +2726,40 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
     }
 
+    #[test]
+    fn a_v1_deno_fresh_spec_uses_the_pinned_deno_family() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["deno", "run", "-A", "--unstable", "--watch=static/,routes/", "dev.ts"]"#,
+        );
+        let probe = SourceProbe {
+            has_deno_json: true,
+            has_deno_lock: true,
+            has_deno_fresh_entrypoints: true,
+            ..SourceProbe::default()
+        };
+
+        let spec = derive_build_spec_v1(&v1(&manifest), &probe).expect("derives");
+
+        assert_eq!(spec.runtime, RuntimeKind::Deno);
+        assert_eq!(spec.base_image, "denoland/deno:alpine-1.38.2");
+        assert_eq!(
+            spec.install_cmd.as_deref(),
+            Some("deno cache --lock=deno.lock main.ts dev.ts")
+        );
+        assert_eq!(
+            spec.resolved_argv,
+            [
+                "deno",
+                "run",
+                "-A",
+                "--unstable",
+                "--watch=static/,routes/",
+                "dev.ts"
+            ]
+        );
+    }
+
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
     /// is a shell string that has to exec somehow. v1 argv is exact, so the same
     /// input must survive untouched — an author who wants an interpreter names
@@ -3195,7 +3259,10 @@ readiness_probe = { http_get = "/health" }
     fn source_without_a_detectable_language_fails_closed() {
         let m = parse(&base_toml());
         let err = derive_build_spec(&m, &SourceProbe::default()).unwrap_err();
-        assert!(err.contains("no node") && err.contains("python"), "{err}");
+        assert!(
+            err.contains("deno") && err.contains("node") && err.contains("python"),
+            "{err}"
+        );
     }
 
     #[test]
