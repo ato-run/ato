@@ -173,11 +173,21 @@ function getLifecycleBadge(capsule) {
 }
 
 function sourceOwner(capsule) {
-  if (capsule.sourceUrl.includes("github.com")) {
-    const parts = capsule.sourceUrl.replace(/^https?:\/\//, "").split("/");
-    return parts[1] ?? capsule.owner;
+  const rawSourceUrl = capsule.sourceUrl.trim();
+  const normalizedSourceUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(rawSourceUrl)
+    ? rawSourceUrl
+    : `https://${rawSourceUrl}`;
+  try {
+    const sourceUrl = new URL(normalizedSourceUrl);
+    const hostname = sourceUrl.hostname.toLowerCase();
+    if (hostname !== "github.com" && hostname !== "www.github.com") {
+      return "Local";
+    }
+    const [owner] = sourceUrl.pathname.split("/").filter(Boolean);
+    return owner ?? capsule.owner;
+  } catch {
+    return "Local";
   }
-  return "Local";
 }
 
 function getMissingSubmissionItems(capsule) {

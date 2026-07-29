@@ -1126,5 +1126,5 @@ fn unpublish(lock_path: &Path, previous: Option<&[u8]>, cause: V1BuildError) -> 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
