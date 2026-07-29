@@ -4937,6 +4937,30 @@ fn process_authoring_ready_state_seal(
     Ok(())
 }
 
+fn finish_authoring_job(
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+    error_code: &str,
+    result: Result<()>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let reason = format!("{error:#}");
+            if let Err(callback_error) = client.mark_job_failed(work, error_code, &reason) {
+                return Err(anyhow!(
+                    "Authoring Session {} failed: {reason}; failure callback: {callback_error}",
+                    work.authoring_session_id
+                ));
+            }
+            Err(anyhow!(
+                "Authoring Session {} failed: {reason}",
+                work.authoring_session_id
+            ))
+        }
+    }
+}
+
 fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
     if cfg.hold_slot.is_none() {
         return Ok(0);
@@ -4980,8 +5004,18 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
                 ));
             }
         }
-        "clean_replay" => process_authoring_clean_replay(cfg, backend, &client, &work)?,
-        "ready_state_seal" => process_authoring_ready_state_seal(cfg, backend, &client, &work)?,
+        "clean_replay" => finish_authoring_job(
+            &client,
+            &work,
+            "clean_replay_failed",
+            process_authoring_clean_replay(cfg, backend, &client, &work),
+        )?,
+        "ready_state_seal" => finish_authoring_job(
+            &client,
+            &work,
+            "ready_state_seal_failed",
+            process_authoring_ready_state_seal(cfg, backend, &client, &work),
+        )?,
         other => {
             return Err(anyhow!(
                 "Authoring claim returned unsupported operation {other:?}"
