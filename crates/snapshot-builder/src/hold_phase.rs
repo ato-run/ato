@@ -3333,6 +3333,7 @@ mod tests {
     /// could not do this: restore resumes identical memory, so the held guest
     /// and the restored guest would answer it the same way. Only "dead in the
     /// gap, alive after" distinguishes them.
+    #[cfg(target_os = "linux")]
     #[test]
     #[ignore]
     fn fc_kvm_production_hold_release_verify_attributes_the_restored_guest() {
