@@ -103,6 +103,10 @@ const DEFAULT_SANDBOX_UID: u32 = 61234;
 /// required post-restore evidence to be produced reliably.
 #[cfg(unix)]
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Let client-rendered applications hydrate and paint after the initial
+/// document load. This remains strictly below [`CAPTURE_TIMEOUT`], so a page
+/// that never settles is still killed by the outer wall-clock bound.
+const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(15);
 
 /// Reject a captured PNG bigger than this many raw bytes. The ato-api ack
 /// endpoint caps the base64 payload at 700_000 chars (~525_000 raw bytes) and
@@ -433,6 +437,11 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
     cmd.arg("--headless=new")
         .arg(format!("--screenshot={}", out_path.display()))
         .arg("--window-size=1280,800")
+        .arg(format!(
+            "--virtual-time-budget={}",
+            RENDER_SETTLE_BUDGET.as_millis()
+        ))
+        .arg("--run-all-compositor-stages-before-draw")
         // `--no-sandbox` is RETAINED deliberately (see module docs). Dropping it
         // needs Chromium's in-process sandbox to initialize as a NON-root uid,
         // which is not reliable across builder kernels (e.g. Ubuntu's
@@ -653,5 +662,11 @@ mod tests {
         let encoded = encode_if_within_cap(&path).expect("should encode");
         let decoded = BASE64.decode(encoded).unwrap();
         assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn client_render_budget_remains_below_the_capture_timeout() {
+        assert!(RENDER_SETTLE_BUDGET < CAPTURE_TIMEOUT);
+        assert_eq!(RENDER_SETTLE_BUDGET.as_millis(), 15_000);
     }
 }
