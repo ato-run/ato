@@ -1,0 +1,143 @@
+=== isolation ===
+  tap=atoe2e8000
+  work=/tmp/atoe2e-8000/fc-work
+  host_ip=172.31.99.1
+  guest_ip=172.31.99.2
+  runs=10
+=== live services (must stay active, untouched) ===
+active active
+  firecracker processes before: 0
+=== run 1/10 nonce=1f0e46c24b7b8522dd9af2b66a2ff5bf ===
+### E2E hold_ready_ms=5486
+### E2E capture_ms=6128
+### E2E release_ms=490
+### E2E held_pid_gone=true pid=3297168
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3298
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 19.10s
+  RESULT pass total_ms=19110
+=== run 2/10 nonce=0792dd70dd00461128a86c954c058f38 ===
+### E2E hold_ready_ms=4677
+### E2E capture_ms=5468
+### E2E release_ms=461
+### E2E held_pid_gone=true pid=3297357
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3239
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.52s
+  RESULT pass total_ms=17535
+=== run 3/10 nonce=abdff9456306677731d7a2dee3c5e690 ===
+### E2E hold_ready_ms=4616
+### E2E capture_ms=5415
+### E2E release_ms=491
+### E2E held_pid_gone=true pid=3297535
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3220
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.42s
+  RESULT pass total_ms=17439
+=== run 4/10 nonce=5f30368c87e347c3d6f230f8b0589ed3 ===
+### E2E hold_ready_ms=4688
+### E2E capture_ms=5650
+### E2E release_ms=467
+### E2E held_pid_gone=true pid=3297738
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3250
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.73s
+  RESULT pass total_ms=17747
+=== run 5/10 nonce=54eaf04c6b03d8e8a907e3bbbeb45e2b ===
+### E2E hold_ready_ms=4715
+### E2E capture_ms=5733
+### E2E release_ms=463
+### E2E held_pid_gone=true pid=3297912
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3211
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.80s
+  RESULT pass total_ms=17813
+=== run 6/10 nonce=f758f812911d0b5d1b61bd02345387aa ===
+### E2E hold_ready_ms=4640
+### E2E capture_ms=5792
+### E2E release_ms=469
+### E2E held_pid_gone=true pid=3298101
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3284
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.86s
+  RESULT pass total_ms=17877
+=== run 7/10 nonce=1ee36bfb9869b07703f7da8a6f83e11b ===
+### E2E hold_ready_ms=4668
+### E2E capture_ms=6662
+### E2E release_ms=473
+### E2E held_pid_gone=true pid=3298282
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3269
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 18.75s
+  RESULT pass total_ms=18766
+=== run 8/10 nonce=2a31dfd3a2855bd6bbf91e8d3707df5d ===
+### E2E hold_ready_ms=4643
+### E2E capture_ms=5319
+### E2E release_ms=461
+### E2E held_pid_gone=true pid=3298486
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3265
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.37s
+  RESULT pass total_ms=17379
+=== run 9/10 nonce=4c2cf947c10e9eee1976208b61f168a3 ===
+### E2E hold_ready_ms=4660
+### E2E capture_ms=5321
+### E2E release_ms=458
+### E2E held_pid_gone=true pid=3298658
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3236
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.36s
+  RESULT pass total_ms=17371
+=== run 10/10 nonce=fce319d7f62f1da709165dba058a6ad7 ===
+### E2E hold_ready_ms=4621
+### E2E capture_ms=5673
+### E2E release_ms=478
+### E2E held_pid_gone=true pid=3298829
+### E2E lock_released=true path=/tmp/atoe2e-8000/fc-work/atoe2e8000.lock
+### E2E vsock_no_listener=true file_remains=true path=/tmp/ato-vsock/blake3_e2e_acceptance.sock
+### E2E pre_restore_connect_failed=true probes=5
+### E2E verify_ms=3279
+### E2E acceptance=accepted nonce_matched=true
+### E2E ok=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 216 filtered out; finished in 17.73s
+  RESULT pass total_ms=17748
+=== summary ===
+  pass=10 fail=0 of 10
+  firecracker processes after: 0 (before 0)
+active active
