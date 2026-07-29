@@ -96,10 +96,13 @@ const SANDBOX_UID_ENV: &str = "ATO_SCREENSHOT_UID";
 const DEFAULT_SANDBOX_UID: u32 = 61234;
 
 /// Bounded wall-clock budget for one capture attempt (process launch +
-/// navigate + screenshot). Chosen to stay well inside a builder's boot
-/// timeout — a screenshot is a nice-to-have, never worth stalling a build for.
+/// navigate + screenshot). A restore-time capture runs while the builder is
+/// still under heavy rootfs/CAS I/O, and large JavaScript apps can take longer
+/// than eight seconds merely to start Chromium and paint their first frame.
+/// Thirty seconds remains well inside the authoring lease while allowing that
+/// required post-restore evidence to be produced reliably.
 #[cfg(unix)]
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Reject a captured PNG bigger than this many raw bytes. The ato-api ack
 /// endpoint caps the base64 payload at 700_000 chars (~525_000 raw bytes) and
