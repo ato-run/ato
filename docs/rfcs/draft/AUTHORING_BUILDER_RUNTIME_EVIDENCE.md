@@ -119,6 +119,24 @@ The Seal identity is distinct from a Capsule revision and from Execution
 Identity. A Seal always references its clean-replay and restore-verification
 receipts and remains reconstructible from source, normalized intent, and lock.
 
+### Published media repair completion
+
+A screenshot repair for an already-published Seal reuses that exact Seal and
+does not create a new execution or installation identity. The builder restores
+the Seal, performs readiness verification, captures and quality-checks a PNG,
+and signs a `MediaRepairReceiptV1` that binds the PNG digest and quality report
+to the existing Seal receipt.
+
+Completion is an idempotent evidence handoff. The builder serializes the signed
+receipt and PNG once, then resends those exact bytes while both the claim lease
+and receipt remain fresh. Transport failures, HTTP 5xx responses, and malformed
+success acknowledgements are retryable. HTTP 409 is a terminal domain refusal.
+If retryable completion cannot be acknowledged before the earlier deadline, the
+builder must not send the job-failed callback: the API retains the claimed
+state and immutable completion evidence remains safe for an exact resend. Logs
+may contain only a bounded error code and trace id, never response internals,
+lease tokens, receipt bytes, or screenshot bytes.
+
 ## Publish gate
 
 Publication remains fail-closed unless all of these are independently present
