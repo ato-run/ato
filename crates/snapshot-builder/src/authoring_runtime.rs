@@ -153,8 +153,6 @@ pub enum ScreenshotCompletionError {
     InvalidDeadline { field: &'static str },
     #[error("screenshot completion receipt is invalid")]
     InvalidReceipt,
-    #[error("screenshot completion request could not be encoded")]
-    InvalidRequest,
 }
 
 impl ScreenshotCompletionError {
@@ -183,7 +181,6 @@ impl ScreenshotCompletionError {
             | Self::RetryableTransport { code, trace_id } => (code, trace_id),
             Self::InvalidDeadline { .. } => ("invalid_completion_deadline", "none"),
             Self::InvalidReceipt => ("invalid_media_repair_receipt", "none"),
-            Self::InvalidRequest => ("invalid_media_repair_request", "none"),
         }
     }
 }
@@ -412,19 +409,14 @@ impl AuthoringApiClient<'_> {
             .map_err(|_| ScreenshotCompletionError::InvalidReceipt)?;
         let deadline =
             screenshot_completion_deadline(&work.lease_expires_at, &receipt_payload.expires_at)?;
-        let request_body = serde_json::to_value(serde_json::json!({
-            "builder_id": self.builder_id,
-            "media_repair_receipt": receipt,
-            "preview_run_id": format!("media_repair_{}", work.work_id),
-            "route": "/",
-            "viewport": {
-                "width": 1240,
-                "height": 698,
-                "device_scale_factor": 1,
-            },
-            "post_restore_screenshot_png_base64": screenshot_png_base64,
-        }))
-        .map_err(|_| ScreenshotCompletionError::InvalidRequest)?;
+        let request_body = screenshot_completion_request_body(
+            self.builder_id,
+            &work.work_id,
+            receipt,
+            screenshot_png_base64,
+            receipt_payload.screenshot_quality.width,
+            receipt_payload.screenshot_quality.height,
+        );
         let url = format!(
             "{}{AUTHORING_BASE_PATH}/jobs/{}/screenshot-capture",
             self.api_url.trim_end_matches('/'),
@@ -647,6 +639,28 @@ impl AuthoringSigner {
             signature: BASE64.encode(signature.to_bytes()),
         }
     }
+}
+
+fn screenshot_completion_request_body(
+    builder_id: &str,
+    work_id: &str,
+    receipt: &MediaRepairReceiptV1,
+    screenshot_png_base64: &str,
+    width: u32,
+    height: u32,
+) -> serde_json::Value {
+    serde_json::json!({
+        "builder_id": builder_id,
+        "media_repair_receipt": receipt,
+        "preview_run_id": format!("media_repair_{work_id}"),
+        "route": "/",
+        "viewport": {
+            "width": width,
+            "height": height,
+            "device_scale_factor": 1,
+        },
+        "post_restore_screenshot_png_base64": screenshot_png_base64,
+    })
 }
 
 fn screenshot_completion_deadline(
@@ -1260,6 +1274,37 @@ mod tests {
         assert_eq!(
             deadline.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "2026-07-29T10:00:04.000Z"
+        );
+    }
+
+    #[test]
+    fn screenshot_completion_reports_the_signed_png_dimensions() {
+        let receipt: MediaRepairReceiptV1 = serde_json::from_value(serde_json::json!({
+            "payload_jcs_base64": "e30=",
+            "authentication": {
+                "key_id": "builder-key",
+                "algorithm": "ed25519",
+                "signature": "signed",
+            },
+        }))
+        .expect("receipt envelope");
+
+        let body = screenshot_completion_request_body(
+            "builder-sugamo",
+            "abjob_viewport",
+            &receipt,
+            "png",
+            1280,
+            720,
+        );
+
+        assert_eq!(
+            body.pointer("/viewport/width"),
+            Some(&serde_json::json!(1280))
+        );
+        assert_eq!(
+            body.pointer("/viewport/height"),
+            Some(&serde_json::json!(720))
         );
     }
 
