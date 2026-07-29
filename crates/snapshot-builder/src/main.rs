@@ -4952,6 +4952,186 @@ fn process_authoring_ready_state_seal(
     Ok(())
 }
 
+struct BuilderMediaRepairSigner<'a> {
+    signer: &'a authoring_runtime::AuthoringSigner,
+}
+
+impl snapshot::authoring_evidence::MediaRepairAdapter for BuilderMediaRepairSigner<'_> {
+    fn authenticate(
+        &mut self,
+        payload: &[u8],
+    ) -> std::result::Result<snapshot::authoring_evidence::BuilderAuthenticationV1, String> {
+        Ok(self.signer.authenticate(payload))
+    }
+}
+
+fn local_seal_artifact(
+    cfg: &Config,
+    work: &authoring_runtime::AuthoringWork,
+    seal: &snapshot::authoring_evidence::ReadyStateSealReceiptPayloadV1,
+) -> Result<(PathBuf, CasStore, ReadyStateManifest)> {
+    let locator = seal
+        .rootfs_artifact_ref
+        .strip_prefix("cas://")
+        .context("media repair requires a builder-local Ready-State Seal")?;
+    let (job_id, manifest_id) = locator
+        .split_once('/')
+        .context("Ready-State Seal locator is malformed")?;
+    validate_work_directory_identity(job_id).map_err(|error| anyhow!(error))?;
+    if !manifest_id.starts_with("blake3:")
+        || manifest_id.len() != 71
+        || !manifest_id[7..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(anyhow!("Ready-State Seal manifest identity is malformed"));
+    }
+    if manifest_id != seal.artifact_manifest_hash {
+        return Err(anyhow!(
+            "Ready-State Seal locator and signed manifest identity differ"
+        ));
+    }
+    let directory =
+        local_artifact_work_directory(&cfg.work, job_id).map_err(|error| anyhow!(error))?;
+    let identity: LocalAuthoringArtifactIdentity = serde_json::from_slice(
+        &std::fs::read(directory.join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE))
+            .context("read local Ready-State Seal ownership")?,
+    )
+    .context("decode local Ready-State Seal ownership")?;
+    if identity.schema != LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA
+        || identity.retention != LOCAL_AUTHORING_ARTIFACT_RETENTION
+        || identity.job_id != job_id
+        || identity.authoring_session_id != work.authoring_session_id
+        || identity.clean_replay_receipt_digest != seal.clean_replay_receipt_digest
+    {
+        return Err(anyhow!(
+            "local Ready-State Seal ownership does not match the media repair claim"
+        ));
+    }
+    let manifest: ReadyStateManifest = serde_json::from_slice(
+        &std::fs::read(directory.join("manifest.json"))
+            .context("read Ready-State Seal manifest")?,
+    )
+    .context("decode Ready-State Seal manifest")?;
+    if manifest.id() != manifest_id {
+        return Err(anyhow!(
+            "local Ready-State Seal bytes do not match the signed manifest identity"
+        ));
+    }
+    let store = CasStore::open(directory.join("cas")).context("open Ready-State Seal CAS")?;
+    Ok((directory, store, manifest))
+}
+
+fn process_authoring_screenshot_capture(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> Result<()> {
+    let seal_receipt = work
+        .ready_state_seal_receipt
+        .as_ref()
+        .context("screenshot capture claim omitted the Ready-State Seal receipt")?;
+    let seal = seal_receipt
+        .payload()
+        .map_err(|error| anyhow!("decode Ready-State Seal receipt: {error}"))?;
+    if seal.authoring_session_id != work.authoring_session_id
+        || seal.capsule_revision_id != work.capsule_revision_id
+        || seal.source_closure_id != work.source_closure_id
+    {
+        return Err(anyhow!(
+            "Ready-State Seal receipt does not match the screenshot capture claim"
+        ));
+    }
+    let (seal_dir, store, manifest) = local_seal_artifact(cfg, work, &seal)?;
+    let runner_class = manifest
+        .runner_class_id
+        .clone()
+        .context("Ready-State Seal omitted runner compatibility class")?;
+    let restored = backend
+        .restore(RestoreReadyStateInput {
+            store: &store,
+            manifest,
+            overlay_root: seal_dir.join(format!("media-repair-{}", work.work_id)),
+            host_runner_class: Some(runner_class),
+            uffd_preview: false,
+        })
+        .context("restore exact Ready-State Seal for media repair")?;
+    let restored_address = restored
+        .session
+        .workload_addr
+        .as_deref()
+        .context("restored Seal exposed no Web workload address")?
+        .parse::<std::net::SocketAddr>()
+        .context("restored workload address is invalid")?;
+    let screenshot = snapshot::capture_screenshot_best_effort(restored_address);
+    let captured_at = chrono::Utc::now();
+    backend
+        .stop(restored.session)
+        .context("stop media-repair restore runtime")?;
+    let screenshot = screenshot.context("post-restore screenshot capture failed")?;
+    let screenshot_bytes = BASE64
+        .decode(&screenshot)
+        .context("post-restore screenshot was not valid base64")?;
+    let screenshot_quality =
+        snapshot::authoring_evidence::analyze_screenshot_png(&screenshot_bytes)
+            .map_err(|error| anyhow!(error.to_string()))?;
+    let screenshot_digest = format!("blake3:{}", blake3::hash(&screenshot_bytes).to_hex());
+    eprintln!(
+        "[builder] media repair screenshot accepted: dimensions={}x{} dhash={} \
+         luminance_variance={} dominant_pixel_ratio_per_mille={} \
+         alpha_coverage_per_mille={} edge_density_per_mille={} quality_score={}",
+        screenshot_quality.width,
+        screenshot_quality.height,
+        screenshot_quality.perceptual_hash,
+        screenshot_quality.luminance_variance,
+        screenshot_quality.dominant_pixel_ratio_per_mille,
+        screenshot_quality.alpha_coverage_per_mille,
+        screenshot_quality.edge_density_per_mille,
+        screenshot_quality.quality_score,
+    );
+    let expires_at = captured_at + chrono::Duration::minutes(15);
+    let observation = snapshot::authoring_evidence::MediaRepairObservationV1 {
+        receipt_id: receipt_id("media", &work.work_id),
+        seal_id: seal.seal_id.clone(),
+        artifact_manifest_hash: seal.artifact_manifest_hash.clone(),
+        rootfs_artifact_ref: seal.rootfs_artifact_ref.clone(),
+        restored: true,
+        readiness_succeeded: true,
+        post_restore_screenshot: snapshot::authoring_evidence::ScreenshotCandidateV1 {
+            candidate_id: receipt_id("shot", &work.work_id),
+            artifact_ref: screenshot_digest,
+            perceptual_hash: screenshot_quality.perceptual_hash.clone(),
+            capture_point:
+                snapshot::authoring_evidence::ScreenshotCapturePointV1::RestoreVerification,
+            quality_score: screenshot_quality.quality_score,
+            possible_personal_data: false,
+        },
+        screenshot_quality,
+        issued_at: captured_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    };
+    let signer = cfg
+        .authoring_signer
+        .as_ref()
+        .context("Authoring receipt signer is unavailable")?;
+    let mut signer = BuilderMediaRepairSigner { signer };
+    let receipt = snapshot::authoring_evidence::generate_media_repair_receipt(
+        &mut signer,
+        seal_receipt,
+        observation,
+    )
+    .map_err(|error| anyhow!("generate media repair receipt: {error}"))?;
+    client
+        .complete_screenshot_capture(work, &receipt, &screenshot)
+        .map_err(|error| anyhow!("report screenshot capture: {error}"))?;
+    eprintln!(
+        "[builder] Authoring Session {} media repair complete (trace {})",
+        work.authoring_session_id, work.trace_id
+    );
+    Ok(())
+}
+
 fn finish_authoring_job(
     client: &authoring_runtime::AuthoringApiClient<'_>,
     work: &authoring_runtime::AuthoringWork,
@@ -5000,7 +5180,12 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
         builder_id: &cfg.agent_id,
     };
     let Some(work) = client
-        .claim(&["setup", "clean_replay", "ready_state_seal"])
+        .claim(&[
+            "setup",
+            "clean_replay",
+            "ready_state_seal",
+            "screenshot_capture",
+        ])
         .map_err(|error| anyhow!("claim Authoring Session work: {error}"))?
     else {
         return Ok(0);
@@ -5044,6 +5229,12 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
             &work,
             "ready_state_seal_failed",
             process_authoring_ready_state_seal(cfg, backend, &client, &work),
+        )?,
+        "screenshot_capture" => finish_authoring_job(
+            &client,
+            &work,
+            "screenshot_capture_failed",
+            process_authoring_screenshot_capture(cfg, backend, &client, &work),
         )?,
         other => {
             return Err(anyhow!(

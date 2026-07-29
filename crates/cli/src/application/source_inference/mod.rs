@@ -5073,9 +5073,11 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_writes_lock_without_generated_manifest_bridge() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::write(
             dir.path().join("package.json"),
             r#"{"name":"demo","scripts":{"start":"node index.js"}}"#,
@@ -5102,9 +5104,11 @@ mod tests {
     }
 
     // LEIP emits `npm run dev`; the resolved script body is not inlined into run_command.
+    #[serial_test::serial]
     #[test]
     fn run_materialization_resolves_dev_script_as_npm_run_dev() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::write(
             dir.path().join("package.json"),
             r#"{"name":"demo","scripts":{"dev":"vite --host 127.0.0.1 --port 5175"},"devDependencies":{"vite":"5.4.2"}}"#,
@@ -5139,9 +5143,11 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_infers_node_driver_for_generic_js_source_only_project() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::write(dir.path().join("index.js"), "console.log('ok')").expect("write index");
 
         let source = ResolvedSourceOnly {
@@ -6129,9 +6135,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_source_only_tauri_routes_native_dev_command() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::write(
             dir.path().join("package.json"),
             r#"{"name":"my-tauri-app","version":"1.2.3","scripts":{"dev":"tauri dev"}}"#,
@@ -6169,12 +6177,14 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         assert_eq!(routed.plan.targets_oci_cmd(), vec!["run", "dev"]);
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_source_only_tauri_with_tauri_script_prefers_tauri_dev() {
         // When a Tauri app has a `tauri` npm script (the Tauri CLI wrapper),
         // `npm run tauri dev` (= tauri dev) should be preferred over `npm run dev`
         // which usually only starts the Vite frontend without the Rust backend.
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::write(
             dir.path().join("package.json"),
             r#"{"name":"vault","scripts":{"dev":"vite","tauri":"tauri"}}"#,
@@ -6216,9 +6226,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_source_only_app_bundle_routes_inner_executable() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         write_macos_app_bundle(&dir.path().join("dist/MyApp.app"));
 
         let source = ResolvedSourceOnly {
@@ -6244,9 +6256,11 @@ args = ["--deep", "--force", "--sign", "-", "src-tauri/target/release/bundle/mac
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn run_materialization_source_only_appimage_routes_native_artifact() {
         let dir = tempdir().expect("tempdir");
+        let (_env_lock, _ato_home_guard) = isolate_ato_home(&dir);
         fs::create_dir_all(dir.path().join("dist")).expect("create dist");
         fs::write(dir.path().join("dist/MyApp.AppImage"), "appimage").expect("write appimage");
 

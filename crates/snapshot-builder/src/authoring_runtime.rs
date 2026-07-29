@@ -18,7 +18,8 @@ use capsule::types::manifest_v1::SealAtV1;
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::authoring_evidence::{
-    BuilderAuthenticationV1, ClassifiedStateDiffV1, CleanReplayReceiptV1, ReadyStateSealReceiptV1,
+    BuilderAuthenticationV1, ClassifiedStateDiffV1, CleanReplayReceiptV1, MediaRepairReceiptV1,
+    ReadyStateSealReceiptV1,
 };
 
 const AUTHORING_BASE_PATH: &str = "/v1/capsule-snapshots/authoring";
@@ -108,6 +109,8 @@ pub struct AuthoringWork {
     pub clean_replay_receipt: Option<CleanReplayReceiptV1>,
     #[serde(default)]
     pub classified_state_diff: Option<ClassifiedStateDiffV1>,
+    #[serde(default)]
+    pub ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
     pub lease_token: AuthoringLeaseToken,
     #[serde(rename = "lease_expires_at")]
     pub _lease_expires_at: String,
@@ -330,6 +333,35 @@ impl AuthoringApiClient<'_> {
             "post_restore_screenshot_png_base64": screenshot_png_base64,
         }))
         .map_err(|error| http_error("report Ready-State Seal completion", error))?;
+        Ok(())
+    }
+
+    pub fn complete_screenshot_capture(
+        &self,
+        work: &AuthoringWork,
+        receipt: &MediaRepairReceiptV1,
+        screenshot_png_base64: &str,
+    ) -> Result<(), String> {
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/screenshot-capture",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "media_repair_receipt": receipt,
+            "preview_run_id": format!("media_repair_{}", work.work_id),
+            "route": "/",
+            "viewport": {
+                "width": 1240,
+                "height": 698,
+                "device_scale_factor": 1,
+            },
+            "post_restore_screenshot_png_base64": screenshot_png_base64,
+        }))
+        .map_err(|error| http_error("report screenshot capture completion", error))?;
         Ok(())
     }
 

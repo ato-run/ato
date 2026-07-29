@@ -17,6 +17,7 @@ use thiserror::Error;
 pub const CLEAN_REPLAY_RECEIPT_V1_SCHEMA: &str = "ato.clean-replay-receipt/v1";
 pub const RESTORE_VERIFICATION_RECEIPT_V1_SCHEMA: &str = "ato.restore-verification-receipt/v1";
 pub const READY_STATE_SEAL_RECEIPT_V1_SCHEMA: &str = "ato.ready-state-seal-receipt/v1";
+pub const MEDIA_REPAIR_RECEIPT_V1_SCHEMA: &str = "ato.media-repair-receipt/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -649,6 +650,133 @@ impl RestoreVerificationReceiptV1 {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaRepairReceiptV1 {
+    pub payload_jcs_base64: String,
+    pub authentication: BuilderAuthenticationV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaRepairReceiptPayloadV1 {
+    pub schema: String,
+    pub receipt_id: String,
+    pub authoring_session_id: String,
+    pub capsule_revision_id: String,
+    pub source_closure_id: String,
+    pub program_intent_digest: String,
+    pub previous_receipt_digest: String,
+    pub builder_identity: String,
+    pub seal_id: String,
+    pub artifact_manifest_hash: String,
+    pub rootfs_artifact_ref: String,
+    pub restored: bool,
+    pub readiness_succeeded: bool,
+    pub post_restore_screenshot: ScreenshotCandidateV1,
+    pub screenshot_quality: ScreenshotQualityReportV1,
+    pub issued_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaRepairObservationV1 {
+    pub receipt_id: String,
+    pub seal_id: String,
+    pub artifact_manifest_hash: String,
+    pub rootfs_artifact_ref: String,
+    pub restored: bool,
+    pub readiness_succeeded: bool,
+    pub post_restore_screenshot: ScreenshotCandidateV1,
+    pub screenshot_quality: ScreenshotQualityReportV1,
+    pub issued_at: String,
+    pub expires_at: String,
+}
+
+pub trait MediaRepairAdapter {
+    fn authenticate(&mut self, payload: &[u8]) -> Result<BuilderAuthenticationV1, String>;
+}
+
+pub fn generate_media_repair_receipt(
+    adapter: &mut impl MediaRepairAdapter,
+    seal_receipt: &ReadyStateSealReceiptV1,
+    observation: MediaRepairObservationV1,
+) -> Result<MediaRepairReceiptV1, AuthoringEvidenceError> {
+    let seal = seal_receipt.payload()?;
+    let seal_digest = seal_receipt.payload_digest()?;
+    if observation.seal_id != seal.seal_id
+        || observation.artifact_manifest_hash != seal.artifact_manifest_hash
+        || observation.rootfs_artifact_ref != seal.rootfs_artifact_ref
+    {
+        return Err(AuthoringEvidenceError::ReceiptBindingMismatch);
+    }
+    if !observation.restored || !observation.readiness_succeeded {
+        return Err(AuthoringEvidenceError::RestoreVerificationFailed);
+    }
+    if observation.post_restore_screenshot.capture_point
+        != ScreenshotCapturePointV1::RestoreVerification
+    {
+        return Err(AuthoringEvidenceError::MissingPostRestoreScreenshot);
+    }
+    if observation.post_restore_screenshot.perceptual_hash
+        != observation.screenshot_quality.perceptual_hash
+        || observation.post_restore_screenshot.quality_score
+            != observation.screenshot_quality.quality_score
+        || observation.post_restore_screenshot.possible_personal_data
+    {
+        return Err(AuthoringEvidenceError::ReceiptBindingMismatch);
+    }
+    let payload = MediaRepairReceiptPayloadV1 {
+        schema: MEDIA_REPAIR_RECEIPT_V1_SCHEMA.to_string(),
+        receipt_id: observation.receipt_id,
+        authoring_session_id: seal.authoring_session_id,
+        capsule_revision_id: seal.capsule_revision_id,
+        source_closure_id: seal.source_closure_id,
+        program_intent_digest: seal.program_intent_digest,
+        previous_receipt_digest: seal_digest,
+        builder_identity: seal.builder_identity,
+        seal_id: observation.seal_id,
+        artifact_manifest_hash: observation.artifact_manifest_hash,
+        rootfs_artifact_ref: observation.rootfs_artifact_ref,
+        restored: observation.restored,
+        readiness_succeeded: observation.readiness_succeeded,
+        post_restore_screenshot: observation.post_restore_screenshot,
+        screenshot_quality: observation.screenshot_quality,
+        issued_at: observation.issued_at,
+        expires_at: observation.expires_at,
+    };
+    validate_receipt_chain(
+        &payload.receipt_id,
+        &payload.authoring_session_id,
+        &payload.capsule_revision_id,
+        &payload.source_closure_id,
+        &payload.previous_receipt_digest,
+        &payload.issued_at,
+        &payload.expires_at,
+    )?;
+    let canonical = canonical_payload(&payload)?;
+    let authentication = adapter
+        .authenticate(&canonical)
+        .map_err(AuthoringEvidenceError::Adapter)?;
+    Ok(MediaRepairReceiptV1 {
+        payload_jcs_base64: BASE64.encode(canonical),
+        authentication,
+    })
+}
+
+impl MediaRepairReceiptV1 {
+    pub fn payload(&self) -> Result<MediaRepairReceiptPayloadV1, AuthoringEvidenceError> {
+        decode_payload(&self.payload_jcs_base64)
+    }
+
+    pub fn payload_digest(&self) -> Result<String, AuthoringEvidenceError> {
+        signed_payload_digest(
+            b"ato.media-repair-receipt-reference/v1",
+            &self.payload_jcs_base64,
+        )
+    }
+}
+
 impl ReadyStateSealReceiptV1 {
     pub fn payload(&self) -> Result<ReadyStateSealReceiptPayloadV1, AuthoringEvidenceError> {
         decode_payload(&self.payload_jcs_base64)
@@ -723,7 +851,8 @@ pub fn deduplicate_screenshot_candidates(
     deduplicated
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotQualityReportV1 {
     pub width: u32,
     pub height: u32,
@@ -1083,6 +1212,8 @@ pub enum AuthoringEvidenceError {
     RestoreVerificationFailed,
     #[error("post-restore screenshot is required")]
     MissingPostRestoreScreenshot,
+    #[error("builder receipt binding mismatch")]
+    ReceiptBindingMismatch,
     #[error("a screenshot candidate must be selected")]
     ScreenshotNotSelected,
     #[error("SCREENSHOT_DECODE_FAILED: screenshot is not a decodable PNG with valid dimensions")]
@@ -1269,6 +1400,18 @@ mod tests {
                 key_id: "key:test".to_string(),
                 algorithm: "ed25519".to_string(),
                 signature: "seal-signature".to_string(),
+            })
+        }
+    }
+
+    struct MediaSigner;
+
+    impl MediaRepairAdapter for MediaSigner {
+        fn authenticate(&mut self, _: &[u8]) -> Result<BuilderAuthenticationV1, String> {
+            Ok(BuilderAuthenticationV1 {
+                key_id: "key:test".to_string(),
+                algorithm: "ed25519".to_string(),
+                signature: "media-signed-by-builder".to_string(),
             })
         }
     }
@@ -1553,6 +1696,76 @@ mod tests {
         assert_eq!(
             generate_ready_state_seal(&mut failed_restore, &request),
             Err(AuthoringEvidenceError::RestoreVerificationFailed)
+        );
+    }
+
+    #[test]
+    fn media_repair_receipt_is_bound_to_the_existing_seal() {
+        let request = ReadyStateSealRequestV1 {
+            capsule_revision_id: "revision_1".to_string(),
+            materialization_plan_id: "plan_1".to_string(),
+            clean_replay_receipt: successful_replay_receipt(),
+            classified_state_diff: ClassifiedStateDiffV1 {
+                entries: Vec::new(),
+                seed_state_artifact_id: None,
+            },
+            selected_screenshot_candidate_id: "shot_before_save".to_string(),
+        };
+        let mut seal_adapter = SealAdapter {
+            ready: true,
+            restored: true,
+        };
+        let seal_receipt =
+            generate_ready_state_seal(&mut seal_adapter, &request).expect("seal receipt");
+        let seal = seal_receipt.payload().expect("seal payload");
+        let screenshot = ScreenshotCandidateV1 {
+            candidate_id: "shot_media_repair".to_string(),
+            artifact_ref: digest('8'),
+            perceptual_hash: "dhash64:0123456789abcdef".to_string(),
+            capture_point: ScreenshotCapturePointV1::RestoreVerification,
+            quality_score: 120,
+            possible_personal_data: false,
+        };
+        let quality = ScreenshotQualityReportV1 {
+            width: 1240,
+            height: 698,
+            perceptual_hash: screenshot.perceptual_hash.clone(),
+            luminance_variance: 320,
+            dominant_pixel_ratio_per_mille: 880,
+            alpha_coverage_per_mille: 1000,
+            edge_density_per_mille: 24,
+            meaningful_pixel_ratio_per_mille: 120,
+            quality_score: screenshot.quality_score,
+        };
+        let observation = MediaRepairObservationV1 {
+            receipt_id: "media_receipt_1".to_string(),
+            seal_id: seal.seal_id.clone(),
+            artifact_manifest_hash: seal.artifact_manifest_hash.clone(),
+            rootfs_artifact_ref: seal.rootfs_artifact_ref.clone(),
+            restored: true,
+            readiness_succeeded: true,
+            post_restore_screenshot: screenshot,
+            screenshot_quality: quality,
+            issued_at: "2026-07-28T00:02:00Z".to_string(),
+            expires_at: "2026-07-28T00:17:00Z".to_string(),
+        };
+        let mut signer = MediaSigner;
+        let receipt =
+            generate_media_repair_receipt(&mut signer, &seal_receipt, observation.clone())
+                .expect("media receipt");
+        let payload = receipt.payload().expect("media payload");
+        assert_eq!(payload.seal_id, seal.seal_id);
+        assert_eq!(
+            payload.previous_receipt_digest,
+            seal_receipt.payload_digest().expect("seal digest")
+        );
+        assert_eq!(receipt.authentication.signature, "media-signed-by-builder");
+
+        let mut mismatched = observation;
+        mismatched.seal_id = digest('7');
+        assert_eq!(
+            generate_media_repair_receipt(&mut signer, &seal_receipt, mismatched),
+            Err(AuthoringEvidenceError::ReceiptBindingMismatch)
         );
     }
 }
