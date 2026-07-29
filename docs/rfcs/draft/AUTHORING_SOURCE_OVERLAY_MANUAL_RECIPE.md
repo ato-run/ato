@@ -25,6 +25,16 @@ only producer. An author must also be able to:
 Both paths use a versioned Source Overlay owned by Ato. They do not create a
 fork and do not change the immutable upstream Source Revision.
 
+For a root `index.html`, inference chooses a server that is present in the
+materialized runtime. A repository with `package.json` receives a
+dependency-free Node static server; a repository without Node project evidence
+retains the Python standard-library server. The embedded Node server resolves
+and realpaths every request beneath the materialized source root, rejects
+backslashes, NUL, overlong URLs, and traversal, and does not expose directory
+listings. This prevents a source-based Node runtime from carrying a
+`python3` launch declaration that cannot become ready, without introducing a
+repository-specific recipe.
+
 ## 2. Boundaries
 
 The upstream repository URL and exact commit remain the provenance root. A
