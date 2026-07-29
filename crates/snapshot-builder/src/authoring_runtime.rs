@@ -82,8 +82,8 @@ pub struct AuthoringWork {
     pub work_id: String,
     /// Per-claim fencing generation for queued builder jobs. Setup leases
     /// predate job fencing and therefore legitimately omit this field.
-    #[serde(default, rename = "worker_claim_id")]
-    pub _worker_claim_id: Option<String>,
+    #[serde(default)]
+    pub worker_claim_id: Option<String>,
     pub authoring_session_id: String,
     pub capsule_revision_id: String,
     pub source_revision_id: String,
@@ -332,6 +332,47 @@ impl AuthoringApiClient<'_> {
         .map_err(|error| http_error("report Ready-State Seal completion", error))?;
         Ok(())
     }
+
+    pub fn mark_job_failed(
+        &self,
+        work: &AuthoringWork,
+        error_code: &str,
+        error_message: &str,
+    ) -> Result<(), String> {
+        let worker_claim_id = work
+            .worker_claim_id
+            .as_deref()
+            .ok_or_else(|| "authoring job claim omitted worker_claim_id".to_string())?;
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/failed",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "worker_claim_id": worker_claim_id,
+            "error_code": error_code,
+            "error_message": safe_failure_message(error_message),
+        }))
+        .map_err(|error| http_error("report authoring job failure", error))?;
+        Ok(())
+    }
+}
+
+fn safe_failure_message(message: &str) -> String {
+    message
+        .chars()
+        .map(|character| {
+            if character.is_control() && character != '\t' {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(2048)
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -845,7 +886,7 @@ mod tests {
         }))
         .expect("job claim");
 
-        assert_eq!(work._worker_claim_id.as_deref(), Some("claim_01KYN2Z"));
+        assert_eq!(work.worker_claim_id.as_deref(), Some("claim_01KYN2Z"));
     }
 
     #[test]
@@ -870,7 +911,17 @@ mod tests {
         }))
         .expect("setup claim");
 
-        assert_eq!(work._worker_claim_id, None);
+        assert_eq!(work.worker_claim_id, None);
+    }
+
+    #[test]
+    fn authoring_failure_diagnostic_is_api_safe_and_bounded() {
+        let safe = safe_failure_message(&format!("capture\nfailed\u{0000}{}", "x".repeat(4096)));
+
+        assert_eq!(safe.chars().count(), 2048);
+        assert!(!safe.contains('\n'));
+        assert!(!safe.contains('\u{0000}'));
+        assert!(safe.starts_with("capture failed "));
     }
 
     #[test]
