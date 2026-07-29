@@ -11,8 +11,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
-    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, normalize_program_intent,
-    to_capsule_manifest_v1,
+    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
+    normalize_program_intent, to_capsule_manifest_v1,
 };
 use capsule::types::manifest_v1::SealAtV1;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -66,6 +66,17 @@ pub struct PinnedAuthoringSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuthoringSourceOverlay {
+    #[serde(rename = "source_overlay_id")]
+    pub _source_overlay_id: String,
+    pub source_revision_id: String,
+    #[serde(rename = "overlay_digest")]
+    pub _overlay_digest: String,
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthoringWork {
     pub kind: String,
     pub work_id: String,
@@ -79,9 +90,13 @@ pub struct AuthoringWork {
     pub source_closure_id: String,
     pub pinned_source: PinnedAuthoringSource,
     #[serde(default)]
+    pub source_overlay: Option<AuthoringSourceOverlay>,
+    #[serde(default)]
     pub previous_receipt_digest: Option<String>,
     #[serde(default)]
     pub setup_mode: Option<String>,
+    #[serde(default)]
+    pub setup_journal_sequence: u64,
     #[serde(default)]
     pub normalized_program_intent: Option<NormalizedProgramIntentEnvelopeV1>,
     #[serde(default)]
@@ -203,6 +218,63 @@ impl AuthoringApiClient<'_> {
         .set("x-ato-authoring-lease-token", work.lease_token.expose())
         .send_json(serde_json::json!({ "builder_id": self.builder_id }))
         .map_err(|error| http_error("report setup stopped", error))?;
+        Ok(())
+    }
+
+    pub fn mark_setup_failed(
+        &self,
+        work: &AuthoringWork,
+        stage: &str,
+        error_code: &str,
+        error_message: &str,
+    ) -> Result<(), String> {
+        let safe_message = error_message
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .take(2048)
+            .collect::<String>();
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/failed",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "stage": stage,
+            "error_code": error_code,
+            "error_message": safe_message,
+        }))
+        .map_err(|error| http_error("report setup failure", error))?;
+        Ok(())
+    }
+
+    pub fn append_setup_observation(
+        &self,
+        work: &AuthoringWork,
+        sequence: u64,
+        event: serde_json::Value,
+    ) -> Result<(), String> {
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/observation",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "sequence": sequence,
+            "event": event,
+        }))
+        .map_err(|error| http_error("append setup observation", error))?;
         Ok(())
     }
 
@@ -430,16 +502,22 @@ fn parse_http_rejection(body: &str, status: u16) -> (String, Option<String>) {
     (code, detail)
 }
 
-/// Infer the narrow static-Web subset used by the first browser E2E.
+/// Infer the narrow source families supported by Authoring Model v1.
 ///
 /// The inference is intentionally source-based and fail-closed. A repository
-/// without a root `index.html` remains unresolved rather than being launched
-/// with a guessed framework command.
-pub fn infer_static_web_intent(
+/// without a recognized, explicit entrypoint remains unresolved rather than
+/// being launched with a guessed framework command.
+pub fn infer_authoring_intent(
     source_root: &Path,
 ) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    if source_root.join("deno.json").is_file() {
+        return infer_deno_fresh_intent(source_root);
+    }
     if !source_root.join("index.html").is_file() {
-        return Err("static Web inference requires a root index.html".to_string());
+        return Err(
+            "source inference requires either deno.json with a plain Fresh start task or a root index.html"
+                .to_string(),
+        );
     }
     normalize_program_intent(ProgramIntentDraftV1 {
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
@@ -471,22 +549,264 @@ pub fn infer_static_web_intent(
     .map_err(|error| error.to_string())
 }
 
-pub fn render_static_web_capsule_toml(
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum SourceOverlayManifestV1 {
+    CapsuleToml {
+        schema: String,
+        capsule_toml: String,
+    },
+    ManualCommand {
+        schema: String,
+        launch_argv: Vec<String>,
+        port: u16,
+        readiness_path: String,
+    },
+}
+
+pub fn resolve_authoring_recipe(
+    source_root: &Path,
+    work: &AuthoringWork,
+) -> Result<(NormalizedProgramIntentEnvelopeV1, String), String> {
+    let Some(overlay) = &work.source_overlay else {
+        let normalized = infer_authoring_intent(source_root)?;
+        let manifest = render_inferred_capsule_toml(&normalized)?;
+        return Ok((normalized, manifest));
+    };
+    if overlay.source_revision_id != work.source_revision_id {
+        return Err("Source Overlay targets a different immutable Source Revision".to_string());
+    }
+    let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
+        .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
+    match manifest {
+        SourceOverlayManifestV1::CapsuleToml {
+            schema,
+            capsule_toml,
+        } => {
+            require_overlay_schema(&schema)?;
+            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
+                .map_err(|error| format!("validate edited capsule.toml: {error}"))?;
+            parsed
+                .validate_for_interactive_capture()
+                .map_err(|error| format!("edited capsule.toml is outside Authoring v1: {error}"))?;
+            let normalized =
+                normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(
+                    |error| format!("derive Program Intent from edited capsule.toml: {error}"),
+                )?)
+                .map_err(|error| format!("normalize edited Program Intent: {error}"))?;
+            Ok((normalized, capsule_toml))
+        }
+        SourceOverlayManifestV1::ManualCommand {
+            schema,
+            launch_argv,
+            port,
+            readiness_path,
+        } => {
+            require_overlay_schema(&schema)?;
+            if launch_argv.is_empty() {
+                return Err("manual launch argv is empty".to_string());
+            }
+            let required_tools = vec![launch_argv[0].clone()];
+            let normalized = normalize_program_intent(ProgramIntentDraftV1 {
+                schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+                origin: ProgramIntentOrigin::ManualSetup,
+                toolchains: Vec::new(),
+                build_steps: Vec::new(),
+                launch: ProgramCommandDraftV1::Argv {
+                    argv: launch_argv,
+                    cwd: WorkspacePathV1::root(),
+                    requested_environment: Vec::new(),
+                    required_tools,
+                },
+                readiness: ReadinessIntentV1::Http {
+                    port,
+                    path: readiness_path,
+                    timeout_seconds: 60,
+                },
+                build_output_roots: Vec::new(),
+                bindings: Vec::new(),
+                unresolved: Vec::new(),
+            })
+            .map_err(|error| format!("normalize manual Program Intent: {error}"))?;
+            let capsule_toml = render_inferred_capsule_toml(&normalized)?;
+            Ok((normalized, capsule_toml))
+        }
+    }
+}
+
+pub fn authoring_recipe_origin(work: &AuthoringWork) -> Result<&'static str, String> {
+    let Some(overlay) = &work.source_overlay else {
+        return Ok("inferred");
+    };
+    match overlay
+        .manifest
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("capsule_toml") => Ok("existing_config"),
+        Some("manual_command") => Ok("manual_setup"),
+        _ => Err("Source Overlay recipe kind is missing or unsupported".to_string()),
+    }
+}
+
+pub fn replay_capsule_toml(
+    work: &AuthoringWork,
     normalized: &NormalizedProgramIntentEnvelopeV1,
 ) -> Result<String, String> {
-    let manifest = to_capsule_manifest_v1(
-        "hextris".to_string(),
-        "1.0.0".to_string(),
-        &normalized.intent,
-        SealAtV1 {
+    let Some(overlay) = &work.source_overlay else {
+        return render_inferred_capsule_toml(normalized);
+    };
+    if overlay.source_revision_id != work.source_revision_id {
+        return Err("Source Overlay targets a different immutable Source Revision".to_string());
+    }
+    let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
+        .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
+    match manifest {
+        SourceOverlayManifestV1::CapsuleToml {
+            schema,
+            capsule_toml,
+        } => {
+            require_overlay_schema(&schema)?;
+            Ok(capsule_toml)
+        }
+        SourceOverlayManifestV1::ManualCommand { schema, .. } => {
+            require_overlay_schema(&schema)?;
+            render_inferred_capsule_toml(normalized)
+        }
+    }
+}
+
+fn require_overlay_schema(schema: &str) -> Result<(), String> {
+    if schema == "ato.source-overlay/v1" {
+        Ok(())
+    } else {
+        Err("unsupported Source Overlay schema".to_string())
+    }
+}
+
+fn infer_deno_fresh_intent(
+    source_root: &Path,
+) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    if !source_root.join("main.ts").is_file() || !source_root.join("dev.ts").is_file() {
+        return Err("Deno Fresh inference requires main.ts and dev.ts entrypoints".to_string());
+    }
+    let config: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(source_root.join("deno.json"))
+            .map_err(|error| format!("read deno.json: {error}"))?,
+    )
+    .map_err(|error| format!("parse deno.json: {error}"))?;
+    let start = config
+        .get("tasks")
+        .and_then(|tasks| tasks.get("start"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Deno Fresh inference requires tasks.start in deno.json".to_string())?;
+    let argv = parse_plain_task_argv(start)?;
+    if argv.first().map(String::as_str) != Some("deno")
+        || argv.last().map(String::as_str) != Some("dev.ts")
+    {
+        return Err("Deno Fresh tasks.start must directly launch deno with dev.ts".to_string());
+    }
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv,
+            cwd: WorkspacePathV1::root(),
+            requested_environment: Vec::new(),
+            required_tools: vec!["deno".to_string()],
+        },
+        readiness: ReadinessIntentV1::Http {
+            port: 8000,
+            path: "/".to_string(),
+            timeout_seconds: 60,
+        },
+        build_output_roots: Vec::new(),
+        bindings: Vec::new(),
+        unresolved: Vec::new(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn parse_plain_task_argv(command: &str) -> Result<Vec<String>, String> {
+    if command.trim().is_empty()
+        || command.chars().any(|character| {
+            matches!(
+                character,
+                '\'' | '"' | '\\' | ';' | '|' | '&' | '$' | '<' | '>' | '(' | ')'
+            ) || character.is_control()
+        })
+    {
+        return Err(
+            "Deno Fresh tasks.start must be a non-empty plain argv without shell syntax"
+                .to_string(),
+        );
+    }
+    Ok(command
+        .split_ascii_whitespace()
+        .map(str::to_string)
+        .collect())
+}
+
+pub fn render_inferred_capsule_toml(
+    normalized: &NormalizedProgramIntentEnvelopeV1,
+) -> Result<String, String> {
+    let program = normalized
+        .intent
+        .launch
+        .argv
+        .first()
+        .map(String::as_str)
+        .ok_or_else(|| "Program Intent launch argv is empty".to_string())?;
+    let (port, path) = match &normalized.intent.readiness {
+        ReadinessIntentV1::Http { port, path, .. } => (*port, path.as_str()),
+        _ => {
+            return Err("Authoring v1 manifest generation requires HTTP readiness".to_string());
+        }
+    };
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let url_literal =
+        serde_json::to_string(&url).map_err(|error| format!("encode readiness URL: {error}"))?;
+    let seal_at = match program {
+        "deno" => SealAtV1 {
             command: vec![
-                "python3".to_string(),
-                "-c".to_string(),
-                "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/', timeout=10).read()"
-                    .to_string(),
+                "deno".to_string(),
+                "eval".to_string(),
+                format!("await fetch({url_literal})"),
             ],
             timeout_seconds: Some(30),
         },
+        "node" | "npm" | "npx" => SealAtV1 {
+            command: vec![
+                "node".to_string(),
+                "--input-type=module".to_string(),
+                "-e".to_string(),
+                format!("await fetch({url_literal})"),
+            ],
+            timeout_seconds: Some(30),
+        },
+        "python" | "python3" => SealAtV1 {
+            command: vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                format!(
+                    "import urllib.request; urllib.request.urlopen({url_literal}, timeout=10).read()"
+                ),
+            ],
+            timeout_seconds: Some(30),
+        },
+        _ => {
+            return Err(format!(
+                "no safe readiness command is available for manual runtime {program:?}"
+            ));
+        }
+    };
+    let manifest = to_capsule_manifest_v1(
+        "authored-capsule".to_string(),
+        "1.0.0".to_string(),
+        &normalized.intent,
+        seal_at,
     )
     .map_err(|error| error.to_string())?;
     toml::to_string(&manifest).map_err(|error| format!("serialize inferred capsule.toml: {error}"))
@@ -573,12 +893,12 @@ mod tests {
     fn hextris_static_inference_preserves_exact_argv() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
-        let normalized = infer_static_web_intent(root.path()).expect("intent");
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
         assert_eq!(
             normalized.intent.launch.argv,
             ["python3", "-m", "http.server", "8000", "--bind", "0.0.0.0",]
         );
-        let manifest = render_static_web_capsule_toml(&normalized).expect("manifest");
+        let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
         let parsed =
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
@@ -588,6 +908,111 @@ mod tests {
     #[test]
     fn inference_does_not_guess_without_a_root_entrypoint() {
         let root = tempfile::tempdir().expect("tempdir");
-        assert!(infer_static_web_intent(root.path()).is_err());
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn deno_fresh_inference_preserves_exact_plain_start_argv() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("main.ts"), "").expect("main");
+        std::fs::write(root.path().join("dev.ts"), "").expect("dev");
+        std::fs::write(
+            root.path().join("deno.json"),
+            r#"{"tasks":{"start":"deno run -A --unstable --watch=static/,routes/ dev.ts"}}"#,
+        )
+        .expect("config");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+        assert_eq!(
+            normalized.intent.launch.argv,
+            [
+                "deno",
+                "run",
+                "-A",
+                "--unstable",
+                "--watch=static/,routes/",
+                "dev.ts"
+            ]
+        );
+        assert_eq!(normalized.intent.launch.required_tools, ["deno"]);
+        let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
+        let parsed =
+            capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
+        assert_eq!(parsed.run.command, normalized.intent.launch.argv);
+        assert_eq!(parsed.seal_at.expect("seal_at").command[0], "deno");
+    }
+
+    #[test]
+    fn deno_fresh_inference_refuses_shell_task_syntax() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("main.ts"), "").expect("main");
+        std::fs::write(root.path().join("dev.ts"), "").expect("dev");
+        std::fs::write(
+            root.path().join("deno.json"),
+            r#"{"tasks":{"start":"PORT=8000 deno run -A dev.ts"}}"#,
+        )
+        .expect("config");
+
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn manual_command_overlay_generates_a_replayable_manifest() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("deno.json"), r#"{"tasks":{}}"#).expect("config");
+        std::fs::write(root.path().join("main.ts"), "").expect("main");
+        std::fs::write(root.path().join("dev.ts"), "").expect("dev");
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_manual",
+            "authoring_session_id": "auth_manual",
+            "capsule_revision_id": "caprev_manual",
+            "source_revision_id": "srev_manual",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_manual",
+                "source_materialization_id": "smat_manual",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_manual.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "source_overlay": {
+                "source_overlay_id": "overlay_manual",
+                "source_revision_id": "srev_manual",
+                "overlay_digest": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "manifest": {
+                    "schema": "ato.source-overlay/v1",
+                    "kind": "manual_command",
+                    "launch_argv": ["deno", "run", "-A", "dev.ts"],
+                    "port": 8000,
+                    "readiness_path": "/health"
+                }
+            },
+            "setup_mode": "manual",
+            "setup_journal_sequence": 4,
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_manual"
+        }))
+        .expect("manual claim");
+
+        let (normalized, capsule_toml) =
+            resolve_authoring_recipe(root.path(), &work).expect("manual recipe");
+
+        assert_eq!(
+            authoring_recipe_origin(&work).expect("origin"),
+            "manual_setup"
+        );
+        assert_eq!(
+            normalized.intent.launch.argv,
+            ["deno", "run", "-A", "dev.ts"]
+        );
+        let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
+            .expect("generated v1");
+        assert_eq!(parsed.web.expect("web").port, 8000);
+        assert_eq!(
+            replay_capsule_toml(&work, &normalized).expect("replay manifest"),
+            capsule_toml
+        );
     }
 }
