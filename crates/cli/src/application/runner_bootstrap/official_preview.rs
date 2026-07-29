@@ -369,7 +369,9 @@ fn parse_loopback_listen(listen: &str) -> Result<(String, u16)> {
 /// with the ato-admin console's generator (the console shows the same file):
 /// every vhost answers the well-known probe 200 REGARDLESS of slot app state,
 /// then reverse-proxies to its loopback slot port. The base hostname serves
-/// the runner root proxy (slot 0's port).
+/// the runner root proxy (slot 0's port). The short retry window absorbs a
+/// transient upstream EOF while a restored guest's TCP path settles; Caddy's
+/// default retry matcher remains GET-only, so mutating requests are not replayed.
 pub(crate) fn render_caddyfile(base_host: &str, max_slots: usize) -> String {
     let vhost = |hostname: &str, port: u16| {
         format!(
@@ -377,7 +379,10 @@ pub(crate) fn render_caddyfile(base_host: &str, max_slots: usize) -> String {
              \thandle {WELLKNOWN_PATH} {{\n\
              \t\trespond \"ok\" 200\n\
              \t}}\n\
-             \treverse_proxy 127.0.0.1:{port}\n\
+             \treverse_proxy 127.0.0.1:{port} {{\n\
+             \t\tlb_try_duration 2s\n\
+             \t\tlb_try_interval 50ms\n\
+             \t}}\n\
              }}\n"
         )
     };
@@ -429,7 +434,10 @@ fn vhost(hostname: &str, listen: &str) -> String {
          \t\theader Content-Type application/json\n\
          \t\trespond \"{MARKER_PLACEHOLDER}\" 200\n\
          \t}}\n\
-         \treverse_proxy {listen}\n\
+         \treverse_proxy {listen} {{\n\
+         \t\tlb_try_duration 2s\n\
+         \t\tlb_try_interval 50ms\n\
+         \t}}\n\
          }}\n"
     )
 }
@@ -1157,6 +1165,8 @@ mod tests {
             "s1.runner-abc.runner.ato.run {",
             "reverse_proxy 127.0.0.1:8420",
             "reverse_proxy 127.0.0.1:8421",
+            "lb_try_duration 2s",
+            "lb_try_interval 50ms",
             WELLKNOWN_PATH,
         ] {
             assert!(preview.content.contains(expected), "missing {expected}");
