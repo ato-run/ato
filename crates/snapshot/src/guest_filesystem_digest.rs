@@ -259,5 +259,5 @@ fn describe(path: &Path) -> Result<(Entry, bool), String> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

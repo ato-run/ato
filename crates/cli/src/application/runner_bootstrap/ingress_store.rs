@@ -143,11 +143,20 @@ fn validate_generation_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn fsync_dir(path: &Path) -> Result<()> {
     File::open(path)
         .with_context(|| format!("open {} to fsync it", path.display()))?
         .sync_all()
         .with_context(|| format!("fsync {}", path.display()))
+}
+
+#[cfg(windows)]
+fn fsync_dir(_path: &Path) -> Result<()> {
+    // Windows does not support opening a directory as a File. File contents
+    // are flushed before rename, but there is no portable directory fsync
+    // equivalent to perform here.
+    Ok(())
 }
 
 /// A temporary name in the same directory as its final one. Unique per process
@@ -488,7 +497,7 @@ impl GenerationStore for FsGenerationStore {
             // A first-install rollback: there is no generation to point at, and
             // leaving the link on the candidate would keep publishing something
             // that was never confirmed.
-            match fs::remove_file(&link) {
+            match remove_symlink(&link) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
@@ -530,6 +539,17 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 fn symlink(target: &Path, link: &Path) -> Result<()> {
     std::os::windows::fs::symlink_dir(target, link)
         .with_context(|| format!("symlink {} -> {}", link.display(), target.display()))
+}
+
+#[cfg(unix)]
+fn remove_symlink(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn remove_symlink(path: &Path) -> std::io::Result<()> {
+    // Directory symlinks are removed with RemoveDirectoryW on Windows.
+    fs::remove_dir(path)
 }
 
 #[cfg(test)]
@@ -776,6 +796,7 @@ mod tests {
     }
 
     /// A `current` pointing outside the store is refused rather than obeyed.
+    #[cfg(unix)]
     #[test]
     fn a_current_link_that_escapes_the_store_is_refused() {
         let (dir, store) = store();
