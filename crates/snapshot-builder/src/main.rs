@@ -40,6 +40,8 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::engine::execution_graph::{
     ReadyStateDeclaredEnvelope, declared_dependencies_from_manifest_toml, store_source_identifier,
 };
@@ -83,6 +85,8 @@ use snapshot::{
     no_secret_scan,
 };
 
+mod authoring_gateway;
+mod authoring_runtime;
 /// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
 /// from the contract the control plane pinned on the claim. Its module doc states
 /// exactly which guarantee that is, and which it deliberately is not.
@@ -179,6 +183,7 @@ struct Config {
     /// origin fronting it — a builder with only some of that could claim a hold
     /// it cannot make reachable, so all three arrive together or not at all.
     hold_slot: Option<HoldSlotConfig>,
+    authoring_signer: Option<authoring_runtime::AuthoringSigner>,
 }
 
 /// One interactive-hold slot this daemon can serve.
@@ -241,6 +246,15 @@ impl Config {
         // a PARTIAL set is an operator error that must stop the daemon at
         // startup, never surface per-job (process_job re-reads the same env).
         upload::ArtifactStore::from_env().map_err(|e| anyhow!(e))?;
+        let hold_slot = hold_slot_from(&flag)?;
+        let authoring_signer =
+            authoring_runtime::AuthoringSigner::from_env().map_err(|error| anyhow!(error))?;
+        if hold_slot.is_some() && authoring_signer.is_none() {
+            return Err(anyhow!(
+                "a builder with an Authoring hold slot requires \
+                 ATO_AUTHORING_BUILDER_SIGNING_KEY_FILE and ATO_AUTHORING_BUILDER_KEY_ID"
+            ));
+        }
         Ok(Config {
             api_url: std::env::var("ATO_API_URL")
                 .ok()
@@ -259,7 +273,8 @@ impl Config {
             poll_secs: flag("--poll-secs")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(15),
-            hold_slot: hold_slot_from(&flag)?,
+            hold_slot,
+            authoring_signer,
         })
     }
 }
@@ -1062,6 +1077,8 @@ struct ProducedBuild {
     /// stacks need a larger budget than the env default); other lanes leave it
     /// `None` and inherit the backend env/default. Clamped in the backend.
     boot_timeout_s: Option<u32>,
+    /// Resolver-owned lock identity. Present only for the strict v1 producer.
+    resolution_lock_digest: Option<String>,
     /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
     /// validated at produce time.
     ///
@@ -1097,7 +1114,7 @@ fn produce_build(
     if let Some(pinned) = job.pinned_source.as_ref() {
         let (input, verified) =
             obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
-        return produce_pinned_v1_build(cfg, job, jobdir, &input, verified);
+        return produce_pinned_v1_build(cfg, &job.id, jobdir, &input, verified, None);
     }
 
     match job.kind.as_str() {
@@ -1314,6 +1331,7 @@ fn produce_recipe_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // The authored acceptance program, validated above. Only the interactive
         // HOLD reads it.
         seal_at,
@@ -1681,6 +1699,7 @@ fn produce_import_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
@@ -1801,6 +1820,7 @@ fn produce_oci_image_import(
         oci_import_receipt: Some(oci_import_receipt),
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         warmup_paths: warmup.warmup_paths,
@@ -1902,6 +1922,7 @@ fn produce_compose_import(
         oci_import_receipt: None,
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
+        resolution_lock_digest: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
@@ -2943,6 +2964,60 @@ fn v1_image_ref(job_id: &str) -> String {
     format!("ato-v1-build-{slug}-{}", std::process::id())
 }
 
+/// Add a generated declaration as a source overlay without changing the
+/// immutable source closure it describes.
+///
+/// The API-provided archive is verified and extracted before this function is
+/// called. Re-materializing that workspace after creating `capsule.toml`
+/// produces the exact archive the shared v1 producer expects: its program
+/// source projection excludes the generated control file, so the resulting
+/// source digest must still equal the original config-less source closure.
+fn materialize_generated_manifest_overlay(
+    workspace: &Path,
+    input: &ArchiveOnlyBuildInput,
+    generated_manifest: &str,
+    archive_path: &Path,
+) -> std::result::Result<ArchiveOnlyBuildInput, (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let manifest_path = workspace.join("capsule.toml");
+    let mut manifest = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&manifest_path)
+        .map_err(|error| {
+            fail(
+                "manifest",
+                format!("generated setup refuses to replace an existing capsule.toml: {error}"),
+            )
+        })?;
+    std::io::Write::write_all(&mut manifest, generated_manifest.as_bytes())
+        .map_err(|error| fail("manifest", format!("write generated capsule.toml: {error}")))?;
+    drop(manifest);
+
+    let materialized =
+        capsule::blob::materialize_source_archive(workspace, archive_path).map_err(|error| {
+            fail(
+                "source_overlay",
+                format!("materialize generated source overlay: {error}"),
+            )
+        })?;
+    let object_key =
+        snapshot::source_materialization::object_key_for_archive(&materialized.source_archive_hash)
+            .map_err(|error| {
+                fail(
+                    "source_overlay",
+                    format!("derive generated source overlay identity: {error}"),
+                )
+            })?;
+    ArchiveOnlyBuildInput::new(
+        input.source_revision_id(),
+        materialized.source_archive_hash,
+        object_key,
+        materialized.materialized_source_tree_hash,
+    )
+    .map_err(|error| fail("source_overlay", error.to_string()))
+}
+
 /// Build from a verified pinned archive.
 ///
 /// Takes a `TreeVerifiedArchive` and nothing else that could name source: no
@@ -2967,10 +3042,11 @@ fn v1_image_ref(job_id: &str) -> String {
 /// latest build: a pinned build with no verified archive has no source at all.
 fn produce_pinned_v1_build(
     cfg: &Config,
-    job: &ClaimedJob,
+    build_id: &str,
     jobdir: &Path,
     input: &ArchiveOnlyBuildInput,
     verified: source_archive_download::TreeVerifiedArchive,
+    generated_manifest: Option<&str>,
 ) -> std::result::Result<ProducedBuild, (String, String)> {
     let fail = |stage: &str, e: String| (stage.to_string(), e);
 
@@ -2980,26 +3056,7 @@ fn produce_pinned_v1_build(
     let jobdir = std::path::absolute(jobdir)
         .map_err(|e| fail("build", format!("resolve the job directory: {e}")))?;
 
-    // 1. The program-source identity this revision COMMITS, derived from the
-    //    proved archive through the shared archive-only path. Taken before the
-    //    build so the comparison below is against a value the build did not
-    //    produce.
-    let acquired = snapshot::archive_only_build::acquire_pinned_source(
-        input,
-        &DownloadedArchiveFetch {
-            object_key: input.source_archive_object_key(),
-            archive: verified.path(),
-        },
-        &jobdir.join("pinned-acquire"),
-    )
-    .map_err(|e| fail("fetch", format!("{} ({})", e, e.code())))?;
-    let expected_source_digest = ContentDigest::new(
-        DigestAlgorithm::Sha256,
-        acquired.materialized().contract.digest.bytes(),
-    )
-    .to_string();
-
-    // 2. The workspace is the EXTRACTION of that same archive — never a
+    // 1. The workspace is the EXTRACTION of that same archive — never a
     //    checkout. It exists because the manifest and the lock are control
     //    files, which the projection withholds by definition, and the lane has
     //    to read one and write the other.
@@ -3011,6 +3068,48 @@ fn produce_pinned_v1_build(
         &workspace,
     )
     .map_err(|e| fail("build", format!("extract the pinned source archive: {e}")))?;
+
+    // 2. A config-less authoring source gets a typed Source Overlay containing
+    //    only the generated declaration. The shared v1 producer always sees an
+    //    archive with capsule.toml, while its projected source identity remains
+    //    the immutable closure from the API receipt.
+    let generated_archive_path = jobdir.join("generated-source-overlay.tar.zst");
+    let (build_input, build_archive_path) = match generated_manifest {
+        Some(generated_manifest) => (
+            materialize_generated_manifest_overlay(
+                &workspace,
+                input,
+                generated_manifest,
+                &generated_archive_path,
+            )?,
+            generated_archive_path,
+        ),
+        None => (input.clone(), verified.path().to_path_buf()),
+    };
+
+    // 3. The program-source identity this revision COMMITS, derived from the
+    //    exact archive the v1 producer will consume.
+    let acquired = snapshot::archive_only_build::acquire_pinned_source(
+        &build_input,
+        &DownloadedArchiveFetch {
+            object_key: build_input.source_archive_object_key(),
+            archive: &build_archive_path,
+        },
+        &jobdir.join("pinned-acquire"),
+    )
+    .map_err(|e| fail("fetch", format!("{} ({})", e, e.code())))?;
+    let expected_source_digest = ContentDigest::new(
+        DigestAlgorithm::Sha256,
+        acquired.materialized().contract.digest.bytes(),
+    )
+    .to_string();
+    if generated_manifest.is_some() {
+        refuse_source_revision_mismatch(
+            input.source_revision_id(),
+            input.expected_source_tree_digest(),
+            &expected_source_digest,
+        )?;
+    }
 
     // The manifest, read from that workspace. Parsed here as well as inside the
     // lane because the ack carries values the lane has no reason to report —
@@ -3038,7 +3137,7 @@ fn produce_pinned_v1_build(
         capsule::types::validate_seal_at(seal_at).map_err(|e| fail("manifest", e))?;
     }
 
-    // 3. The v1 producer lane — the same code `ato build` runs, over the same
+    // 4. The v1 producer lane — the same code `ato build` runs, over the same
     //    verified archive. `pinned_source_archive` is what keeps the projection
     //    on the proved bytes instead of a re-freeze of the extraction.
     let producer = snapshot::build_v1::HostV1GuestProducer::probe().map_err(|reason| {
@@ -3054,24 +3153,30 @@ fn produce_pinned_v1_build(
     let outcome = snapshot::build_v1::run(
         snapshot::build_v1::V1BuildRequest {
             workspace_root: &workspace,
-            pinned_source_archive: Some(verified.path()),
+            pinned_source_archive: Some(&build_archive_path),
             work_root: &work_root,
             guest_image_path: &guest_image_path,
             rootfs_size_mib: cfg.rootfs_size_mib,
-            image_ref: &v1_image_ref(&job.id),
+            image_ref: &v1_image_ref(build_id),
         },
         &producer,
     )
     .map_err(|e| fail("build", e.to_string()))?;
+    let resolution_lock_digest = std::fs::read(&outcome.lock_path)
+        .map_err(|e| fail("build", format!("read resolver output lock: {e}")))
+        .and_then(|bytes| {
+            capsule::authoring_intent::resolution_lock_digest(&bytes)
+                .map_err(|e| fail("build", format!("digest resolver output lock: {e}")))
+        })?;
 
-    // 4. The identity that was minted must be over the pinned revision's source.
+    // 5. The identity that was minted must be over the pinned revision's source.
     refuse_source_revision_mismatch(
         input.source_revision_id(),
         &expected_source_digest,
         &outcome.source_digest,
     )?;
 
-    // 5. The intake gate: trusted-load the lock, re-derive the Execution
+    // 6. The intake gate: trusted-load the lock, re-derive the Execution
     //    Identity from the contract's canonical bytes, refuse every facet
     //    outside the ADR-015 §7 subset, and bind the contract to the artifact
     //    actually on disk. The receipt is the lane's own, so nothing here
@@ -3110,7 +3215,7 @@ fn produce_pinned_v1_build(
             .display(),
     );
 
-    // 6. Hand the shared Ready-State tail exactly what it needs. The rootfs is
+    // 7. Hand the shared Ready-State tail exactly what it needs. The rootfs is
     //    read from the VERIFIED artifact's own path, not from the path the
     //    producer reported: the two are normally the same file, and when they
     //    are not it is the verified one that was measured.
@@ -3147,6 +3252,7 @@ fn produce_pinned_v1_build(
         oci_import_receipt: None,
         compose_import_receipt: None,
         boot_timeout_s: None,
+        resolution_lock_digest: Some(resolution_lock_digest),
         seal_at,
         // A v1 manifest has no `[snapshot]` table, so the backend applies its
         // own warmup fallback — the same as a v0.3 capsule that authored none.
@@ -3170,6 +3276,12 @@ fn process_job(
     // rootfs build (pre-#1002, byte-for-byte); dockerfile_import = clone + params +
     // Dockerfile import. Steps 4-7 below are SHARED and unchanged.
     let produced = produce_build(cfg, job, &jobdir)?;
+    let snapshot_execution_id = snapshot_execution_id_for_claim(
+        job.pinned_source.is_some(),
+        job.execution_id.as_deref(),
+        &produced.execution_id,
+    )
+    .map_err(|reason| fail("eligibility", reason))?;
 
     // 4. Ready-State build: boot → verify healthcheck → snapshot → seal (no UFFD). For
     // a supervisor spec the backend drives the whole placeholder protocol itself
@@ -3219,7 +3331,7 @@ fn process_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id),
+            execution_id: Some(snapshot_execution_id),
             supervisor: produced.supervisor,
         })
         .map_err(|e| fail("build_ready_state", e.to_string()))?;
@@ -3394,6 +3506,42 @@ fn report_hold_progress(
     if let Err(error) = api.report_progress(fencing, stage) {
         eprintln!("[builder] wizard progress {stage:?} not recorded: {error}");
     }
+}
+
+/// The identity written into a Snapshot manifest.
+///
+/// `ProducedBuild::execution_id` is the producer's legacy declared identity.
+/// The control plane claim carries the finalized Capsule v1 execution contract
+/// identity. Snapshot selection, acceptance, verification, and publication all
+/// key on the latter, so every pinned build must inherit the claim identity.
+/// Legacy, unpinned jobs keep their producer identity byte-for-byte.
+fn snapshot_execution_id_for_claim(
+    pinned_source: bool,
+    claim_execution_id: Option<&str>,
+    produced_execution_id: &str,
+) -> Result<String, String> {
+    if !pinned_source {
+        return Ok(produced_execution_id.to_string());
+    }
+    let raw = claim_execution_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            "a pinned-source claim carries no execution_id, so its Snapshot \
+             cannot be bound to the finalized execution contract"
+                .to_string()
+        })?;
+    capsule::execution_contract::ExecutionId::new(raw.to_string())
+        .map(|id| id.as_str().to_string())
+        .map_err(|error| format!("the pinned-source claim execution_id is invalid: {error}"))
+}
+
+/// Typed interactive-lane adapter for [`snapshot_execution_id_for_claim`].
+fn interactive_snapshot_execution_id(
+    claim_execution_id: &capsule::execution_contract::ExecutionId,
+) -> String {
+    snapshot_execution_id_for_claim(true, Some(claim_execution_id.as_str()), "")
+        .expect("a typed ExecutionId is a valid pinned claim identity")
 }
 
 /// Submission Wizard PR-2 — the `interactive_capture` lane, end to end.
@@ -3576,7 +3724,7 @@ fn process_interactive_capture_job(
             },
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: vec![],
-            execution_id: Some(produced.execution_id.clone()),
+            execution_id: Some(interactive_snapshot_execution_id(&execution_id)),
             supervisor: produced.supervisor.clone(),
         })
         .map_err(|e| fail("launch", e.to_string()))?;
@@ -3937,7 +4085,812 @@ fn dispatch_interactive_capture_job(
     }
 }
 
+fn process_authoring_setup(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let slot = cfg.hold_slot.as_ref().ok_or_else(|| {
+        fail(
+            "setup",
+            "Authoring Session setup requires a registered builder hold slot".to_string(),
+        )
+    })?;
+    if slot.builder_id != cfg.agent_id {
+        return Err(fail(
+            "setup",
+            "registered hold slot builder_id does not match --agent-id".to_string(),
+        ));
+    }
+    if work.setup_mode.as_deref() != Some("suggested") {
+        return Err(fail(
+            "setup",
+            "this builder slice accepts only the suggested reproducible setup path".to_string(),
+        ));
+    }
+    let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
+        .map_err(|error| fail("setup", error))?;
+    if jobdir.exists() {
+        std::fs::remove_dir_all(&jobdir)
+            .map_err(|error| fail("setup", format!("clear fresh setup workspace: {error}")))?;
+    }
+    std::fs::create_dir_all(&jobdir)
+        .map_err(|error| fail("setup", format!("create fresh setup workspace: {error}")))?;
+    let input = authoring_runtime::archive_input(work).map_err(|error| fail("source", error))?;
+    let transport = authoring_runtime::AuthoringArchiveTransport { client, work };
+    let verified = source_archive_download::download_pinned_source(
+        &transport,
+        &work.work_id,
+        &input,
+        &jobdir.join("source-download"),
+    )
+    .map_err(|error| fail("source", error.to_string()))?;
+
+    let inference_root = jobdir.join("inference-source");
+    std::fs::create_dir_all(&inference_root)
+        .map_err(|error| fail("detect", format!("create inference workspace: {error}")))?;
+    capsule::contract::program_source_projection::extract_source_archive(
+        verified.path(),
+        &inference_root,
+    )
+    .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
+    let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
+        .map_err(|error| fail("detect", error))?;
+    let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
+        .map_err(|error| fail("detect", error))?;
+    let produced = produce_pinned_v1_build(
+        cfg,
+        &work.work_id,
+        &jobdir,
+        &input,
+        verified,
+        Some(&generated_manifest),
+    )?;
+    let resolution_lock_digest = produced
+        .resolution_lock_digest
+        .clone()
+        .ok_or_else(|| fail("build", "v1 resolver emitted no lock identity".to_string()))?;
+    let store =
+        CasStore::open(jobdir.join("cas")).map_err(|error| fail("launch", error.to_string()))?;
+    let guest = backend
+        .boot_and_hold(BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
+            runner_class: None,
+            surface_requirement: produced.surface_requirement.clone(),
+            layers: BuildLayers {
+                rootfs: produced.rootfs,
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![produced.port],
+                healthcheck: Some(produced.healthcheck.clone()),
+                expected_ready_ms: Some(8000),
+                warmup_paths: produced.warmup_paths,
+                stable_successes: produced.stable_successes,
+                stable_interval_ms: produced.stable_interval_ms,
+                content_ready_path: produced.content_ready_path,
+                endpoints: produced.endpoints,
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: Some(produced.execution_id),
+            supervisor: None,
+        })
+        .map_err(|error| fail("launch", error.to_string()))?;
+    let workload_addr = guest.workload_addr();
+    let gateway = match authoring_gateway::AuthoringGateway::start(
+        slot.proxy_listen,
+        &workload_addr,
+        &work.work_id,
+        &cfg.token,
+        vec![
+            format!("Source closure: {}", work.source_closure_id),
+            format!("Program Intent: {}", normalized.digest),
+            format!("Resolution lock: {resolution_lock_digest}"),
+            "Build: static Web source; no dependency steps".to_string(),
+            "Launch: python3 -m http.server 8000 --bind 0.0.0.0".to_string(),
+            "Readiness: HTTP / on port 8000 succeeded".to_string(),
+        ],
+    ) {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            guest.release();
+            return Err(fail(
+                "launch",
+                format!("front Authoring Preview and Terminal: {error}"),
+            ));
+        }
+    };
+    client
+        .mark_setup_ready(
+            work,
+            &authoring_runtime::SetupReady {
+                builder_id: &cfg.agent_id,
+                builder_session_id: &work.work_id,
+                builder_slot_id: &slot.slot_id,
+                origin: "inferred",
+                normalized_program_intent: &normalized,
+                resolution_lock_digest: &resolution_lock_digest,
+                generated_capsule_toml: &generated_manifest,
+            },
+        )
+        .map_err(|error| fail("setup_ready", error))?;
+    eprintln!(
+        "[builder] Authoring Session {} ready on slot {} (trace {})",
+        work.authoring_session_id, slot.slot_id, work.trace_id
+    );
+
+    loop {
+        match client.setup_control(work) {
+            Ok(control) if control.action == "continue" => {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(_) => break,
+            Err(error) => {
+                eprintln!(
+                    "[builder] Authoring Session {} control poll failed: {error}",
+                    work.authoring_session_id
+                );
+                break;
+            }
+        }
+    }
+    drop(gateway);
+    guest.release();
+    client
+        .mark_setup_stopped(work)
+        .map_err(|error| fail("setup_stop", error))?;
+    Ok(())
+}
+
+struct BuilderCleanReplayAdapter<'a> {
+    cfg: &'a Config,
+    backend: &'a FirecrackerBackend,
+    client: &'a authoring_runtime::AuthoringApiClient<'a>,
+    work: &'a authoring_runtime::AuthoringWork,
+    signer: &'a authoring_runtime::AuthoringSigner,
+}
+
+const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
+const LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA: &str = "ato.local-authoring-artifact-identity/v1";
+const LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE: &str = ".authoring-artifact-identity.json";
+const LOCAL_AUTHORING_ARTIFACT_RETENTION: &str = "api-receipt-bound";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CleanReplayBuilderArtifact {
+    schema: String,
+    authoring_session_id: String,
+    source_closure_id: String,
+    program_intent_digest: String,
+    resolution_lock_digest: String,
+    clean_replay_receipt_digest: Option<String>,
+    rootfs_digest: String,
+    capsule_manifest_hash: String,
+    execution_id: String,
+    port: u16,
+    healthcheck: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct LocalAuthoringArtifactIdentity {
+    schema: String,
+    job_id: String,
+    authoring_session_id: String,
+    clean_replay_receipt_digest: String,
+    /// Local GC must not infer liveness from directory age. Candidate versus
+    /// published state is owned by the API receipt chain; both remain referenced
+    /// until that control-plane record releases them.
+    retention: String,
+}
+
+fn validate_work_directory_identity(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("Authoring work identity is not a safe path component".to_string());
+    }
+    Ok(())
+}
+
+fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf, String> {
+    validate_work_directory_identity(id)?;
+    Ok(root.join(format!("authoring-{kind}-{id}")))
+}
+
+fn local_artifact_work_directory(root: &Path, job_id: &str) -> Result<PathBuf, String> {
+    validate_work_directory_identity(job_id)?;
+    Ok(root.join(job_id))
+}
+
+fn prepare_local_authoring_artifact_directory(
+    root: &Path,
+    identity: &LocalAuthoringArtifactIdentity,
+) -> Result<PathBuf, String> {
+    validate_work_directory_identity(&identity.job_id)?;
+    validate_work_directory_identity(&identity.authoring_session_id)?;
+    if identity.schema != LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA
+        || identity.retention != LOCAL_AUTHORING_ARTIFACT_RETENTION
+        || identity.clean_replay_receipt_digest.trim().is_empty()
+    {
+        return Err("local Authoring artifact identity is invalid".to_string());
+    }
+    let directory = local_artifact_work_directory(root, &identity.job_id)?;
+    let marker = directory.join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE);
+    if directory.exists() {
+        let existing: LocalAuthoringArtifactIdentity =
+            serde_json::from_slice(&std::fs::read(&marker).map_err(|_| {
+                "refusing to reuse an unowned local path as a Ready-State artifact".to_string()
+            })?)
+            .map_err(|_| {
+                "refusing to reuse a malformed local path as a Ready-State artifact".to_string()
+            })?;
+        if existing != *identity {
+            return Err("local Ready-State artifact job/session ownership collision".to_string());
+        }
+        std::fs::remove_dir_all(&directory)
+            .map_err(|error| format!("clear receipt-bound Seal workspace: {error}"))?;
+    }
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create receipt-bound Seal workspace: {error}"))?;
+    let marker_bytes = serde_jcs::to_vec(identity)
+        .map_err(|error| format!("canonicalize local artifact identity: {error}"))?;
+    std::fs::write(
+        directory.join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE),
+        marker_bytes,
+    )
+    .map_err(|error| format!("persist local artifact identity: {error}"))?;
+    Ok(directory)
+}
+
+fn clean_replay_directory(cfg: &Config, authoring_session_id: &str) -> Result<PathBuf, String> {
+    authoring_work_directory(&cfg.work, "clean", authoring_session_id)
+}
+
+fn clean_replay_artifact_path(jobdir: &Path) -> PathBuf {
+    jobdir.join("clean-replay-artifact.json")
+}
+
+fn persist_clean_replay_artifact(
+    jobdir: &Path,
+    artifact: &CleanReplayBuilderArtifact,
+) -> Result<(), String> {
+    let bytes = serde_jcs::to_vec(artifact)
+        .map_err(|error| format!("canonicalize Clean Replay artifact: {error}"))?;
+    std::fs::write(clean_replay_artifact_path(jobdir), bytes)
+        .map_err(|error| format!("write Clean Replay artifact: {error}"))
+}
+
+impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdapter<'_> {
+    fn replay(
+        &mut self,
+        request: &snapshot::authoring_evidence::CleanReplayRequestV1,
+    ) -> std::result::Result<snapshot::authoring_evidence::CleanReplayObservationV1, String> {
+        let started_at = chrono::Utc::now();
+        let jobdir = clean_replay_directory(self.cfg, &self.work.authoring_session_id)?;
+        if jobdir.exists() {
+            std::fs::remove_dir_all(&jobdir)
+                .map_err(|error| format!("clear Clean Replay workspace: {error}"))?;
+        }
+        std::fs::create_dir_all(&jobdir)
+            .map_err(|error| format!("create Clean Replay workspace: {error}"))?;
+        let input = authoring_runtime::archive_input(self.work)?;
+        let transport = authoring_runtime::AuthoringArchiveTransport {
+            client: self.client,
+            work: self.work,
+        };
+        let verified = source_archive_download::download_pinned_source(
+            &transport,
+            &self.work.work_id,
+            &input,
+            &jobdir.join("source-download"),
+        )
+        .map_err(|error| error.to_string())?;
+        let generated_manifest =
+            authoring_runtime::render_static_web_capsule_toml(&request.normalized_program_intent)?;
+        let produced = produce_pinned_v1_build(
+            self.cfg,
+            &self.work.work_id,
+            &jobdir,
+            &input,
+            verified,
+            Some(&generated_manifest),
+        )
+        .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
+        if produced.resolution_lock_digest.as_deref() != Some(&request.resolution_lock_digest) {
+            return Err(
+                "fresh resolver output does not match the Authoring Session lock".to_string(),
+            );
+        }
+        let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
+        std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
+            .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
+        persist_clean_replay_artifact(
+            &jobdir,
+            &CleanReplayBuilderArtifact {
+                schema: CLEAN_REPLAY_ARTIFACT_SCHEMA.to_string(),
+                authoring_session_id: request.authoring_session_id.clone(),
+                source_closure_id: request.source_closure_id.clone(),
+                program_intent_digest: request.normalized_program_intent.digest.clone(),
+                resolution_lock_digest: request.resolution_lock_digest.clone(),
+                clean_replay_receipt_digest: None,
+                rootfs_digest,
+                capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
+                execution_id: produced.execution_id.clone(),
+                port: produced.port,
+                healthcheck: produced.healthcheck.clone(),
+            },
+        )?;
+        let execution_contract_digest = produced.execution_id.clone();
+        let store =
+            CasStore::open(jobdir.join("cas")).map_err(|error| format!("open CAS: {error}"))?;
+        let guest = self
+            .backend
+            .boot_and_hold(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: produced.capsule_manifest_hash,
+                runner_class: None,
+                surface_requirement: produced.surface_requirement,
+                layers: BuildLayers {
+                    rootfs: produced.rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: RestoreContract {
+                    ports: vec![produced.port],
+                    healthcheck: Some(produced.healthcheck),
+                    expected_ready_ms: Some(8000),
+                    warmup_paths: produced.warmup_paths,
+                    stable_successes: produced.stable_successes,
+                    stable_interval_ms: produced.stable_interval_ms,
+                    content_ready_path: produced.content_ready_path,
+                    endpoints: produced.endpoints,
+                },
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(execution_contract_digest.clone()),
+                supervisor: None,
+            })
+            .map_err(|error| format!("Clean Replay readiness: {error}"))?;
+        guest.release();
+
+        let completed_at = chrono::Utc::now();
+        let expires_at = completed_at + chrono::Duration::minutes(15);
+        let materialization_inputs_digest = digest_authoring_parts(
+            b"ato.authoring-materialization-inputs/v1",
+            &[
+                &request.source_closure_id,
+                &request.normalized_program_intent.digest,
+                &request.resolution_lock_digest,
+            ],
+        );
+        Ok(snapshot::authoring_evidence::CleanReplayObservationV1 {
+            receipt_id: receipt_id("replay", &self.work.work_id),
+            builder_identity: format!("builder:{}", self.cfg.agent_id),
+            materialization_inputs_digest,
+            execution_contract_digest: execution_contract_digest.clone(),
+            readiness: snapshot::authoring_evidence::ReadinessResultV1 {
+                ready: true,
+                probe_digest: digest_authoring_parts(
+                    b"ato.authoring-readiness/v1",
+                    &[&execution_contract_digest, "/"],
+                ),
+                observed_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+            isolation: snapshot::authoring_evidence::EffectiveIsolationPostureV1 {
+                ephemeral_workspace: true,
+                host_filesystem_hidden: true,
+                host_environment_inherited: false,
+                host_credentials_inherited: false,
+                privileged: false,
+                network_observed: true,
+                workspace_provenance: format!("fresh:{}", self.work.work_id),
+            },
+            state_diff: Vec::new(),
+            started_at: started_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            completed_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            issued_at: completed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })
+    }
+
+    fn authenticate(
+        &mut self,
+        payload: &[u8],
+    ) -> std::result::Result<snapshot::authoring_evidence::BuilderAuthenticationV1, String> {
+        Ok(self.signer.authenticate(payload))
+    }
+}
+
+fn digest_authoring_parts(domain: &[u8], parts: &[&str]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    for part in parts {
+        hasher.update(&[0]);
+        hasher.update(part.as_bytes());
+    }
+    format!("blake3:{}", hasher.finalize().to_hex())
+}
+
+fn receipt_id(prefix: &str, work_id: &str) -> String {
+    let digest = blake3::hash(work_id.as_bytes()).to_hex();
+    format!("{prefix}_{}", &digest[..26])
+}
+
+fn process_authoring_clean_replay(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> Result<()> {
+    let normalized = work
+        .normalized_program_intent
+        .clone()
+        .context("Clean Replay claim omitted Normalized Program Intent")?;
+    let resolution_lock_digest = work
+        .resolution_lock_digest
+        .clone()
+        .context("Clean Replay claim omitted Resolution Lock")?;
+    let previous_receipt_digest = work
+        .previous_receipt_digest
+        .clone()
+        .context("Clean Replay claim omitted Source Resolution receipt")?;
+    let signer = cfg
+        .authoring_signer
+        .as_ref()
+        .context("Authoring receipt signer is unavailable")?;
+    let request = snapshot::authoring_evidence::CleanReplayRequestV1 {
+        authoring_session_id: work.authoring_session_id.clone(),
+        capsule_revision_id: work.capsule_revision_id.clone(),
+        source_closure_id: work.source_closure_id.clone(),
+        previous_receipt_digest,
+        source_overlays: Vec::new(),
+        normalized_program_intent: normalized,
+        resolution_lock_digest,
+        allowed_cache_digests: Vec::new(),
+    };
+    let mut adapter = BuilderCleanReplayAdapter {
+        cfg,
+        backend,
+        client,
+        work,
+        signer,
+    };
+    let (receipt, classified) =
+        snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
+            .map_err(|error| anyhow!("execute Clean Replay: {error}"))?;
+    let jobdir =
+        clean_replay_directory(cfg, &work.authoring_session_id).map_err(|error| anyhow!(error))?;
+    let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+        &std::fs::read(clean_replay_artifact_path(&jobdir))
+            .context("read Clean Replay builder artifact")?,
+    )
+    .context("decode Clean Replay builder artifact")?;
+    artifact.clean_replay_receipt_digest = Some(
+        receipt
+            .payload_digest()
+            .map_err(|error| anyhow!("digest Clean Replay receipt: {error}"))?,
+    );
+    persist_clean_replay_artifact(&jobdir, &artifact).map_err(|error| anyhow!(error))?;
+    client
+        .complete_clean_replay(work, &receipt, &classified)
+        .map_err(|error| anyhow!("report Clean Replay: {error}"))?;
+    eprintln!(
+        "[builder] Authoring Session {} Clean Replay complete (trace {})",
+        work.authoring_session_id, work.trace_id
+    );
+    Ok(())
+}
+
+struct BuilderReadyStateSealAdapter<'a> {
+    cfg: &'a Config,
+    backend: &'a FirecrackerBackend,
+    work: &'a authoring_runtime::AuthoringWork,
+    signer: &'a authoring_runtime::AuthoringSigner,
+    screenshot_png_base64: Option<String>,
+}
+
+impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSealAdapter<'_> {
+    fn capture_and_verify(
+        &mut self,
+        request: &snapshot::authoring_evidence::ReadyStateSealRequestV1,
+    ) -> std::result::Result<snapshot::authoring_evidence::SealCaptureObservationV1, String> {
+        let clean_payload = request
+            .clean_replay_receipt
+            .payload()
+            .map_err(|error| format!("decode Clean Replay receipt: {error}"))?;
+        let clean_digest = request
+            .clean_replay_receipt
+            .payload_digest()
+            .map_err(|error| format!("digest Clean Replay receipt: {error}"))?;
+        let clean_dir = clean_replay_directory(self.cfg, &clean_payload.authoring_session_id)?;
+        let artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+            &std::fs::read(clean_replay_artifact_path(&clean_dir))
+                .map_err(|error| format!("read Clean Replay artifact: {error}"))?,
+        )
+        .map_err(|error| format!("decode Clean Replay artifact: {error}"))?;
+        if artifact.schema != CLEAN_REPLAY_ARTIFACT_SCHEMA
+            || artifact.authoring_session_id != clean_payload.authoring_session_id
+            || artifact.source_closure_id != clean_payload.source_closure_id
+            || artifact.program_intent_digest != clean_payload.program_intent_digest
+            || artifact.resolution_lock_digest != clean_payload.resolution_lock_digest
+            || artifact.clean_replay_receipt_digest.as_deref() != Some(&clean_digest)
+        {
+            return Err("Clean Replay builder artifact receipt binding mismatch".to_string());
+        }
+        let rootfs = std::fs::read(clean_dir.join("clean-rootfs.img"))
+            .map_err(|error| format!("read Clean Replay rootfs: {error}"))?;
+        if format!("blake3:{}", blake3::hash(&rootfs).to_hex()) != artifact.rootfs_digest {
+            return Err("Clean Replay rootfs digest mismatch".to_string());
+        }
+        // A local `cas://<job_id>/<manifest_id>` is restored from
+        // `<work>/<job_id>/{manifest.json,cas/}`. Keep the on-disk directory
+        // identical to that public locator instead of using the private
+        // authoring workspace prefix.
+        let seal_dir = prepare_local_authoring_artifact_directory(
+            &self.cfg.work,
+            &LocalAuthoringArtifactIdentity {
+                schema: LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA.to_string(),
+                job_id: self.work.work_id.clone(),
+                authoring_session_id: clean_payload.authoring_session_id.clone(),
+                clean_replay_receipt_digest: clean_digest.clone(),
+                retention: LOCAL_AUTHORING_ARTIFACT_RETENTION.to_string(),
+            },
+        )?;
+        let store = CasStore::open(seal_dir.join("cas"))
+            .map_err(|error| format!("open Seal CAS: {error}"))?;
+        let mut guest = self
+            .backend
+            .boot_and_hold(BuildReadyStateInput {
+                store: &store,
+                capsule_manifest_hash: artifact.capsule_manifest_hash.clone(),
+                runner_class: None,
+                surface_requirement: None,
+                layers: BuildLayers {
+                    rootfs,
+                    runtime: None,
+                    dependency: None,
+                    app: None,
+                    vmstate: Vec::new(),
+                    memory: Vec::new(),
+                },
+                restore_contract: RestoreContract {
+                    ports: vec![artifact.port],
+                    healthcheck: Some(artifact.healthcheck.clone()),
+                    expected_ready_ms: Some(8000),
+                    warmup_paths: Vec::new(),
+                    stable_successes: None,
+                    stable_interval_ms: None,
+                    content_ready_path: None,
+                    endpoints: Vec::new(),
+                },
+                sanitizer_contract: SanitizerContract::default(),
+                declared_secret_markers: Vec::new(),
+                execution_id: Some(artifact.execution_id.clone()),
+                supervisor: None,
+            })
+            .map_err(|error| format!("boot clean artifact for Seal: {error}"))?;
+        let captured = match guest.capture_candidate() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                guest.release();
+                return Err(format!("capture Ready-State Seal: {error}"));
+            }
+        };
+        guest.release();
+        if !captured.receipt.no_secret_proof.is_clean() {
+            return Err("Ready-State Seal no-secret proof is not clean".to_string());
+        }
+        let live_canaries = live_secret_canaries(self.cfg);
+        let scan = no_secret_scan::scan(
+            &no_secret_scan::ScanTargets {
+                cas: Some(seal_dir.join("cas")),
+                ..Default::default()
+            },
+            &live_canaries,
+        );
+        if !scan.clean {
+            return Err("builder credential was found in Ready-State Seal bytes".to_string());
+        }
+        let manifest = captured.receipt.manifest;
+        let manifest_id = manifest.id();
+        let artifact_location =
+            persist_and_locate_artifact(&manifest, &seal_dir, &self.work.work_id, &manifest_id)
+                .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
+        let runner_class = manifest
+            .runner_class_id
+            .clone()
+            .ok_or_else(|| "Seal omitted runner compatibility class".to_string())?;
+        let memory_artifact_ref = manifest
+            .layers
+            .memory
+            .as_ref()
+            .map(|layer| layer.id().to_string())
+            .ok_or_else(|| "Seal omitted memory artifact".to_string())?;
+        let restored = self
+            .backend
+            .restore(RestoreReadyStateInput {
+                store: &store,
+                manifest,
+                overlay_root: seal_dir.join("restore-verify-overlay"),
+                host_runner_class: Some(runner_class.clone()),
+                uffd_preview: false,
+            })
+            .map_err(|error| format!("restore Ready-State Seal: {error}"))?;
+        let restored_address = restored
+            .session
+            .workload_addr
+            .as_deref()
+            .ok_or_else(|| "restored Seal exposed no Web workload address".to_string())?
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "restored workload address is invalid".to_string())?;
+        let screenshot = snapshot::capture_screenshot_best_effort(restored_address);
+        let verified_at = chrono::Utc::now();
+        let stop_result = self.backend.stop(restored.session);
+        if let Err(error) = stop_result {
+            return Err(format!("stop restore-verification runtime: {error}"));
+        }
+        let screenshot =
+            screenshot.ok_or_else(|| "post-restore screenshot capture failed".to_string())?;
+        let screenshot_bytes = BASE64
+            .decode(&screenshot)
+            .map_err(|_| "post-restore screenshot was not valid base64".to_string())?;
+        let screenshot_digest = format!("blake3:{}", blake3::hash(&screenshot_bytes).to_hex());
+        let perceptual_hash =
+            snapshot::authoring_evidence::screenshot_perceptual_hash_png(&screenshot_bytes)
+                .map_err(|error| error.to_string())?;
+        self.screenshot_png_base64 = Some(screenshot);
+        let compatibility = self.backend.compatibility_metadata();
+        let expires_at = verified_at + chrono::Duration::minutes(15);
+        Ok(snapshot::authoring_evidence::SealCaptureObservationV1 {
+            receipt_id: receipt_id("seal", &self.work.work_id),
+            ready_before_capture: true,
+            quiesced: true,
+            rootfs_artifact_ref: artifact_location,
+            memory_artifact_ref,
+            runner_hardware_compatibility_class: compatibility.runner_class_id,
+            guest_kernel: compatibility.guest_kernel,
+            vmm: compatibility.vmm,
+            snapshot_format: compatibility.snapshot_format,
+            snapshot_codec: "asc.raw-v1.v1".to_string(),
+            snapshot_backend: "firecracker".to_string(),
+            capsule_manifest_hash: artifact.capsule_manifest_hash,
+            artifact_manifest_hash: manifest_id,
+            healthcheck_url_path: artifact.healthcheck,
+            restore_verification: snapshot::authoring_evidence::RestoreVerificationObservationV1 {
+                receipt_id: receipt_id("restore", &self.work.work_id),
+                restored: true,
+                readiness_succeeded: true,
+                verified_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                issued_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            },
+            post_restore_screenshot: snapshot::authoring_evidence::ScreenshotCandidateV1 {
+                candidate_id: receipt_id("shot", &self.work.work_id),
+                artifact_ref: screenshot_digest,
+                perceptual_hash,
+                capture_point:
+                    snapshot::authoring_evidence::ScreenshotCapturePointV1::RestoreVerification,
+                quality_score: 900,
+                possible_personal_data: false,
+            },
+            issued_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })
+    }
+
+    fn authenticate(
+        &mut self,
+        payload: &[u8],
+    ) -> std::result::Result<snapshot::authoring_evidence::BuilderAuthenticationV1, String> {
+        Ok(self.signer.authenticate(payload))
+    }
+}
+
+fn process_authoring_ready_state_seal(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> Result<()> {
+    let clean_replay_receipt = work
+        .clean_replay_receipt
+        .clone()
+        .context("Seal claim omitted Clean Replay receipt")?;
+    let classified_state_diff = work
+        .classified_state_diff
+        .clone()
+        .context("Seal claim omitted classified state diff")?;
+    let signer = cfg
+        .authoring_signer
+        .as_ref()
+        .context("Authoring receipt signer is unavailable")?;
+    let clean_payload = clean_replay_receipt
+        .payload()
+        .map_err(|error| anyhow!("decode Clean Replay receipt: {error}"))?;
+    let request = snapshot::authoring_evidence::ReadyStateSealRequestV1 {
+        capsule_revision_id: work.capsule_revision_id.clone(),
+        materialization_plan_id: clean_payload.execution_contract_digest,
+        clean_replay_receipt,
+        classified_state_diff,
+        selected_screenshot_candidate_id: "authoring-preview".to_string(),
+    };
+    let mut adapter = BuilderReadyStateSealAdapter {
+        cfg,
+        backend,
+        work,
+        signer,
+        screenshot_png_base64: None,
+    };
+    let receipt = snapshot::authoring_evidence::generate_ready_state_seal(&mut adapter, &request)
+        .map_err(|error| anyhow!("generate Ready-State Seal: {error}"))?;
+    let screenshot = adapter
+        .screenshot_png_base64
+        .as_deref()
+        .context("Ready-State Seal produced no post-restore screenshot bytes")?;
+    client
+        .complete_ready_state_seal(work, &receipt, screenshot)
+        .map_err(|error| anyhow!("report Ready-State Seal: {error}"))?;
+    eprintln!(
+        "[builder] Authoring Session {} Ready-State Seal complete (trace {})",
+        work.authoring_session_id, work.trace_id
+    );
+    Ok(())
+}
+
+fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
+    if cfg.hold_slot.is_none() {
+        return Ok(0);
+    }
+    let client = authoring_runtime::AuthoringApiClient {
+        api_url: &cfg.api_url,
+        builder_token: &cfg.token,
+        builder_id: &cfg.agent_id,
+    };
+    let Some(work) = client
+        .claim(&["setup", "clean_replay", "ready_state_seal"])
+        .map_err(|error| anyhow!("claim Authoring Session work: {error}"))?
+    else {
+        return Ok(0);
+    };
+    match work.kind.as_str() {
+        "setup" => {
+            if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
+                return Err(anyhow!(
+                    "Authoring Session {} failed at {stage}: {reason}",
+                    work.authoring_session_id
+                ));
+            }
+        }
+        "clean_replay" => process_authoring_clean_replay(cfg, backend, &client, &work)?,
+        "ready_state_seal" => process_authoring_ready_state_seal(cfg, backend, &client, &work)?,
+        other => {
+            return Err(anyhow!(
+                "Authoring claim returned unsupported operation {other:?}"
+            ));
+        }
+    }
+    Ok(1)
+}
+
 fn run_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
+    let authoring = run_authoring_once(cfg, backend)?;
+    if authoring > 0 {
+        return Ok(authoring);
+    }
     let jobs = claim(cfg)?;
     for job in &jobs {
         eprintln!("[builder] claimed {} (capsule {})", job.id, job.capsule_id);
@@ -4034,6 +4987,55 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interactive_candidate_uses_the_claim_execution_identity() {
+        let claim = capsule::execution_contract::ExecutionId::new(
+            "blake3:6c379f78b877c137e5119b7e058678f741116bf3113077e68fe984c14e71d27b".to_string(),
+        )
+        .expect("canonical claim identity");
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity = interactive_snapshot_execution_id(&claim);
+
+        assert_eq!(snapshot_identity, claim.as_str());
+        assert_ne!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn pinned_sealed_build_uses_the_claim_execution_identity() {
+        let claim = "blake3:6c379f78b877c137e5119b7e058678f741116bf3113077e68fe984c14e71d27b";
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity =
+            snapshot_execution_id_for_claim(true, Some(claim), producer_declared_identity)
+                .expect("pinned claim identity");
+
+        assert_eq!(snapshot_identity, claim);
+        assert_ne!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn legacy_sealed_build_keeps_the_producer_execution_identity() {
+        let producer_declared_identity =
+            "blake3:b5a310778d66c6365ceb50dd07cb348bb8cab7644a8bd350c762125da450415d";
+
+        let snapshot_identity =
+            snapshot_execution_id_for_claim(false, None, producer_declared_identity)
+                .expect("legacy producer identity");
+
+        assert_eq!(snapshot_identity, producer_declared_identity);
+    }
+
+    #[test]
+    fn pinned_sealed_build_refuses_a_missing_claim_identity() {
+        let error = snapshot_execution_id_for_claim(true, None, "legacy")
+            .expect_err("pinned claim without identity must fail closed");
+
+        assert!(error.contains("carries no execution_id"), "{error}");
+    }
 
     /// KVM acceptance Test I regression: a generated-bindings-ONLY manifest is a
     /// SUPERVISOR build (the guest generates + injects at run — vsock channel,
@@ -4879,6 +5881,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         }
     }
 
@@ -5564,6 +6567,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         };
         // A real (long, random) token gates: an artifact containing it is dirty.
         let cfg = mk("0123456789abcdef0123456789abcdef");
@@ -5596,6 +6600,7 @@ targets = ["web"]
             once: true,
             poll_secs: 15,
             hold_slot: None,
+            authoring_signer: None,
         };
         let cas = std::env::temp_dir().join(format!("compat-planted-token-{}", std::process::id()));
         std::fs::create_dir_all(&cas).unwrap();
@@ -6333,6 +7338,84 @@ targets = ["web"]
             .expect("valid pinned input")
     }
 
+    #[test]
+    fn generated_manifest_overlay_preserves_configless_source_identity() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(
+            source.path().join("index.html"),
+            b"<!doctype html><title>Hextris</title>",
+        )
+        .expect("write source");
+        let raw_archive = source.path().join("raw-source.tar.zst");
+        let raw = capsule::blob::materialize_source_archive(source.path(), &raw_archive)
+            .expect("materialize raw source");
+        let input = pinned_input(&raw.source_archive_hash, &raw.materialized_source_tree_hash);
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        capsule::contract::program_source_projection::extract_source_archive(
+            &raw_archive,
+            workspace.path(),
+        )
+        .expect("extract verified raw source");
+        let normalized = authoring_runtime::infer_static_web_intent(workspace.path())
+            .expect("infer static Web intent");
+        let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
+            .expect("render generated manifest");
+        let overlay_archive = workspace.path().join("overlay.tar.zst");
+        let overlay_input = materialize_generated_manifest_overlay(
+            workspace.path(),
+            &input,
+            &generated_manifest,
+            &overlay_archive,
+        )
+        .expect("materialize generated overlay");
+
+        let acquired = snapshot::archive_only_build::acquire_pinned_source(
+            &overlay_input,
+            &DownloadedArchiveFetch {
+                object_key: overlay_input.source_archive_object_key(),
+                archive: &overlay_archive,
+            },
+            &workspace.path().join("acquired"),
+        )
+        .expect("project generated overlay");
+        let projected = ContentDigest::new(
+            DigestAlgorithm::Sha256,
+            acquired.materialized().contract.digest.bytes(),
+        )
+        .to_string();
+        assert_eq!(projected, raw.materialized_source_tree_hash);
+        assert!(
+            workspace.path().join("capsule.toml").is_file(),
+            "the generated declaration is materialized as a control-file overlay"
+        );
+    }
+
+    #[test]
+    fn generated_manifest_overlay_refuses_to_replace_source_declaration() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("capsule.toml"), b"source declaration")
+            .expect("write source declaration");
+        let input = pinned_input(
+            &format!("sha256:{}", "1".repeat(64)),
+            &format!("sha256:{}", "2".repeat(64)),
+        );
+
+        let (stage, reason) = materialize_generated_manifest_overlay(
+            workspace.path(),
+            &input,
+            "generated declaration",
+            &workspace.path().join("overlay.tar.zst"),
+        )
+        .expect_err("a generated overlay must not overwrite source");
+        assert_eq!(stage, "manifest");
+        assert!(reason.contains("refuses to replace"), "{reason}");
+        assert_eq!(
+            std::fs::read(workspace.path().join("capsule.toml")).expect("read source declaration"),
+            b"source declaration"
+        );
+    }
+
     /// The adapter serves ONE object, and says so rather than answering with
     /// the archive it happens to hold. An implementation that ignored the key
     /// is how a build for revision B gets the source of revision A.
@@ -6460,5 +7543,64 @@ targets = ["web"]
             "{tag}"
         );
         assert!(tag.starts_with("ato-v1-build-job_a1-"), "{tag}");
+    }
+
+    #[test]
+    fn authoring_work_identity_cannot_escape_the_builder_workspace() {
+        let root = Path::new("/builder/work");
+        assert!(authoring_work_directory(root, "clean", "../host").is_err());
+        assert!(authoring_work_directory(root, "clean", "session/other").is_err());
+        assert_eq!(
+            authoring_work_directory(root, "clean", "as_01ABC").expect("safe"),
+            root.join("authoring-clean-as_01ABC"),
+        );
+        assert!(local_artifact_work_directory(root, "../host").is_err());
+        assert_eq!(
+            local_artifact_work_directory(root, "abjob_01ABC").expect("safe"),
+            root.join("abjob_01ABC"),
+        );
+    }
+
+    #[test]
+    fn local_authoring_artifact_directory_is_receipt_bound_and_collision_safe() {
+        let root = tempfile::tempdir().expect("artifact root");
+        let identity = LocalAuthoringArtifactIdentity {
+            schema: LOCAL_AUTHORING_ARTIFACT_IDENTITY_SCHEMA.to_string(),
+            job_id: "abjob_01ABC".to_string(),
+            authoring_session_id: "auth_01ABC".to_string(),
+            clean_replay_receipt_digest: "blake3:receipt-a".to_string(),
+            retention: LOCAL_AUTHORING_ARTIFACT_RETENTION.to_string(),
+        };
+        let directory = prepare_local_authoring_artifact_directory(root.path(), &identity)
+            .expect("prepare bound artifact directory");
+        assert_eq!(directory, root.path().join("abjob_01ABC"));
+        assert!(
+            directory
+                .join(LOCAL_AUTHORING_ARTIFACT_IDENTITY_FILE)
+                .is_file()
+        );
+
+        std::fs::write(directory.join("stale-capture"), b"retry scratch").expect("write scratch");
+        prepare_local_authoring_artifact_directory(root.path(), &identity)
+            .expect("the same receipt-bound retry may rebuild");
+        assert!(!directory.join("stale-capture").exists());
+
+        let different_session = LocalAuthoringArtifactIdentity {
+            authoring_session_id: "auth_01OTHER".to_string(),
+            ..identity.clone()
+        };
+        let collision = prepare_local_authoring_artifact_directory(root.path(), &different_session)
+            .expect_err("another session must not reuse this job-scoped CAS");
+        assert!(collision.contains("ownership collision"), "{collision}");
+
+        let unowned = root.path().join("abjob_01UNOWNED");
+        std::fs::create_dir(&unowned).expect("create unowned authoring workspace");
+        let unowned_identity = LocalAuthoringArtifactIdentity {
+            job_id: "abjob_01UNOWNED".to_string(),
+            ..identity
+        };
+        let masquerade = prepare_local_authoring_artifact_directory(root.path(), &unowned_identity)
+            .expect_err("an arbitrary writable workspace must not become a Seal artifact");
+        assert!(masquerade.contains("unowned local path"), "{masquerade}");
     }
 }

@@ -46,6 +46,7 @@ pub use foundation::types;
 
 // ── Layer 2: Contract ─────────────────────────────────────────────────────
 pub mod contract;
+pub use contract::authoring_intent;
 pub use contract::capsule_lock;
 pub use contract::capsule_program_contract;
 pub use contract::execution_contract;
@@ -57,6 +58,7 @@ pub use contract::manifest;
 pub use contract::oci_compose_lock;
 pub use contract::program_manifest_input;
 pub use contract::program_source_projection;
+pub use contract::setup_journal;
 pub use contract::snapshot_manifest;
 pub use contract::tools;
 

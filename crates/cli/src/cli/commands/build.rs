@@ -11,7 +11,7 @@ use capsule::types::{CapsuleManifest, MANIFEST_SCHEMA_V03, ValidationMode};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use snapshot::v1_materialization::V1MaterializationReceipt;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -1073,18 +1073,27 @@ fn attempt_v1_execution_identity(
 /// walk that would reject a symlink in `workspace_root` itself still rejects
 /// it here — silently dropping symlinks during the copy would make this
 /// measurement quietly accept a tree the frozen algorithm is specified to
-/// refuse).
+/// refuse). On Windows, the lock writer's stable sibling lock is excluded
+/// with the selected canonical lock. That sidecar is Ato synchronization
+/// metadata, not authored source, and must not make the same workspace measure
+/// differently from Unix.
 fn measure_workspace_source_digest(
     workspace_root: &Path,
     canonical_lock_path: Option<&Path>,
 ) -> Result<ContentDigest> {
     let excluded_top_level_entry = canonical_lock_path.and_then(|path| path.file_name());
+    #[cfg(not(unix))]
+    let excluded_lock_sidecar = excluded_top_level_entry
+        .map(|name| OsString::from(format!(".{}.write.lock", name.to_string_lossy())));
+    #[cfg(unix)]
+    let excluded_lock_sidecar: Option<OsString> = None;
     let scratch = tempfile::tempdir().context("create scratch directory for source hashing")?;
     copy_source_tree_excluding_top_level_lock(
         workspace_root,
         scratch.path(),
         true,
         excluded_top_level_entry,
+        excluded_lock_sidecar.as_deref(),
     )?;
     let source_hash = capsule::blob::materialized_source_tree_hash(scratch.path())
         .with_context(|| format!("hash workspace source tree at {}", workspace_root.display()))?;
@@ -1095,19 +1104,24 @@ fn measure_workspace_source_digest(
 /// Recursively mirrors `src` into the already-created, empty directory `dst`,
 /// skipping `excluded_top_level_entry` when `is_root` (i.e. only at the top
 /// level — a nested file that happens to share that name is ordinary source
-/// content, not this workspace's own lock). `None` skips nothing. See
-/// [`measure_workspace_source_digest`] for why this exclusion exists.
+/// content, not this workspace's own lock). The optional sidecar exclusion is
+/// likewise top-level-only and populated only on Windows. See
+/// [`measure_workspace_source_digest`] for why these exclusions exist.
 fn copy_source_tree_excluding_top_level_lock(
     src: &Path,
     dst: &Path,
     is_root: bool,
     excluded_top_level_entry: Option<&OsStr>,
+    excluded_lock_sidecar: Option<&OsStr>,
 ) -> Result<()> {
     for entry in fs::read_dir(src).with_context(|| format!("read directory {}", src.display()))? {
         let entry =
             entry.with_context(|| format!("read directory entry under {}", src.display()))?;
         let file_name = entry.file_name();
-        if is_root && excluded_top_level_entry == Some(file_name.as_os_str()) {
+        if is_root
+            && (excluded_top_level_entry == Some(file_name.as_os_str())
+                || excluded_lock_sidecar == Some(file_name.as_os_str()))
+        {
             continue;
         }
         let from = entry.path();
@@ -1117,7 +1131,13 @@ fn copy_source_tree_excluding_top_level_lock(
             .with_context(|| format!("stat {}", from.display()))?;
         if file_type.is_dir() {
             fs::create_dir(&to).with_context(|| format!("create directory {}", to.display()))?;
-            copy_source_tree_excluding_top_level_lock(&from, &to, false, excluded_top_level_entry)?;
+            copy_source_tree_excluding_top_level_lock(
+                &from,
+                &to,
+                false,
+                excluded_top_level_entry,
+                excluded_lock_sidecar,
+            )?;
         } else if file_type.is_symlink() {
             #[cfg(unix)]
             {
@@ -2985,6 +3005,9 @@ args = ["--force", "--sign", "-", "MyApp.app"]
 
             let lock_path = tmp.path().join(lock_name);
             std::fs::write(&lock_path, b"{\"schema_version\":1}\n").expect("write lock file");
+            #[cfg(not(unix))]
+            std::fs::write(tmp.path().join(format!(".{lock_name}.write.lock")), b"")
+                .expect("write Windows synchronization sidecar");
 
             let measured = measure_workspace_source_digest(tmp.path(), Some(&lock_path))
                 .expect("measure source digest");
