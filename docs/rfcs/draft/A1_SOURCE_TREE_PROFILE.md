@@ -2,6 +2,7 @@
 title: "A1v2 Source-Tree Profile: deterministic identity for materialized repository source"
 status: draft          # draft | accepted | archived
 date: 2026-07-13
+updated: 2026-07-30
 author: "@egamikohsuke"
 ssot:
   - "crates/capsule/src/foundation/blob/tree_hash.rs"
@@ -35,7 +36,8 @@ A1 v1 digest — it constrains which trees are *allowed* to be hashed as source.
   `materialized_source_tree_hash`.
 - The definition of `materialized_source_tree_hash` in terms of the A1 v1
   algorithm.
-- The MVP rejection rules and the byte-level `source_archive_hash`.
+- The repository-internal symlink rules and the byte-level
+  `source_archive_hash`.
 
 ### Out of scope
 
@@ -43,7 +45,7 @@ A1 v1 digest — it constrains which trees are *allowed* to be hashed as source.
   [SOURCE_MATERIALIZATION_SPEC.md](SOURCE_MATERIALIZATION_SPEC.md)).
 - Dependency-blob hashing and the derivation cache (unchanged; see
   [A1_BLOB_HASH.md](../accepted/A1_BLOB_HASH.md)).
-- Post-MVP support for symlinks, submodules, or LFS resolution.
+- Submodule or LFS resolution.
 
 ## 3. Design
 
@@ -52,19 +54,37 @@ A1 v1 digest — it constrains which trees are *allowed* to be hashed as source.
 A1 v1 is **frozen**: once a blob is published with `blob_hash`, the algorithm
 must not change. A1v2 respects that freeze completely.
 
-**Decision:** `materialized_source_tree_hash` reuses the A1 v1 per-node digests
-and the A1 v1 top-level fold **verbatim** — the same code
+**Decision:** a source tree with no symlink reuses the A1 v1 per-node digests
+and top-level fold **verbatim** — the same code
 (`crates/capsule/src/foundation/blob/tree_hash.rs`), the same
-`ato-blob-v1` prefix, the same `sha256:<hex>` wire form. A1v2 adds a
-*precondition profile*: a tree must pass the §3.3 admissibility rules before it
-may be hashed as source. Because those rules reject every exotic entry, an
-admissible source tree only ever exercises the `file:` and `dir:` node kinds
-(the `link:` kind is inherited from A1 but unused in the MVP).
+`ato-blob-v1` prefix, and the same `sha256:<hex>` wire value. This preserves
+every existing source identity byte-for-byte.
+
+For a tree containing an admitted symlink, A1v2 applies a domain-separated
+extension over the frozen A1 digest and the validated link records:
 
 ```text
-materialized_source_tree_hash = A1_blob_hash(tree)      # sha256, ato-blob-v1
-                                where tree ⊨ A1v2 admissibility profile
+regular tree:
+  materialized_source_tree_hash = A1_blob_hash(tree)
+
+tree containing symlinks:
+  materialized_source_tree_hash =
+    sha256(
+      "ato-source-tree-symlink-v1\0" ||
+      field(A1_blob_hash(tree)) ||
+      for each symlink in deterministic A1 walk order:
+        "symlink\0" ||
+        field(repository_relative_link_path) ||
+        field(raw_target_utf8) ||
+        field(normalized_repository_relative_resolved_target) ||
+        field(target_kind) # "file" or "dir"
+    )
 ```
+
+`field(x)` is the unsigned 64-bit big-endian byte length followed by `x`.
+The extension is necessary because the frozen A1 link node commits the raw
+target but not its normalized resolved target or terminal kind. A link is
+never flattened into the target bytes.
 
 Rationale for reusing the digest rather than minting a new prefix:
 
@@ -112,17 +132,53 @@ the following. A tree that violates any rule has **no**
    entry names are distinct but fold to the same value under Unicode simple
    case-folding, the tree is rejected. This prevents a tree that is valid on a
    case-sensitive filesystem from silently colliding on a case-insensitive one.
-4. **No symlinks (MVP).** *All* symlinks are rejected in the MVP. (A1 can hash
-   `link:` nodes; the source profile forbids them until a later revision defines
-   safe handling.)
+4. **Only closed repository-internal symlinks.** A link is admitted only when:
+   - its raw target is non-empty UTF-8 without NUL, is relative, and uses `/`
+     separators;
+   - it has no absolute root, Windows drive prefix, UNC/backslash form, empty
+     component, or trailing separator;
+   - resolving it relative to the link's parent stays within the repository;
+   - the entire link chain resolves to an existing regular file or directory;
+   - the chain contains no self-cycle, multi-node cycle, or directory recursion;
+   - resolution stays within 40 link expansions per chain and 100,000 total
+     expansions per tree;
+   - each path component is at most 255 UTF-8 bytes, each raw target at most
+     4,096 bytes, and each normalized resolved path at most 4,096 bytes.
+   Absolute links, escapes, dangling links, cycles, depth/expansion overflow,
+   ambiguous cross-platform spelling, and links that traverse a regular file
+   are typed `blocked_repo` failures.
 5. **No submodules.** A git submodule (gitlink entry) → reject.
 6. **No LFS pointers.** A Git-LFS pointer file (unresolved `version
    https://git-lfs...` stub) → reject. The MVP does not resolve LFS.
 7. **No unsupported node types.** Device files, sockets, and FIFOs are rejected
    (already an error in A1).
 
-These are *admissibility* rules, not hash inputs: they never change the digest
-of an admissible tree; they only decide whether a tree may be hashed at all.
+Except for the explicit symlink extension in §3.1, these are admissibility
+rules rather than hash inputs. In particular, lifting the blanket link refusal
+does not re-identify any already-admissible regular tree.
+
+### 3.3.1 One validator at every boundary
+
+`source_tree::validate_source_tree` is the single normalizer and resolver used
+by the checkout walk and deterministic archive writer. The archive extractor
+first admits only `Normal` entry paths and regular/directory/symlink entry
+kinds, delays creation of links until all content writes are complete, then
+re-runs the same whole-tree validator. Program-source staging copies validated
+links without dereferencing and validates the result again.
+
+This ordering closes the archive-link traversal class: no archive entry can
+redirect a later write outside the extraction root, and a link whose meaning
+would differ after extraction is rejected instead of normalized silently.
+
+### 3.3.2 Security rationale
+
+Repository-internal links are useful source structure, but following arbitrary
+filesystem links would cross Ato's source boundary. The policy therefore
+commits link structure to identity, resolves lexically from the repository
+root, never calls filesystem canonicalization through a link, and serializes
+the link itself. Explicit depth, expansion, entry, and byte limits bound
+adversarial chains. The result widens compatibility without widening the
+filesystem authority of the builder or runtime.
 
 ### 3.4 `source_archive_hash` (byte identity)
 
@@ -160,15 +216,18 @@ Both repos' CI must golden-test:
    byte-for-byte unchanged (proves the freeze held).
 2. **A1v2 conformant** — a fixed conformant source tree hashes to a pinned
    `materialized_source_tree_hash`.
-3. **A1v2 rejection** — one fixture per §3.3 rule (non-UTF-8, non-NFC,
-   case-fold collision, symlink, submodule, LFS pointer, device node), each of
-   which must be *rejected*, not hashed to a different value.
+3. **A1v2 symlink acceptance** — relative file, directory, nested-chain, and
+   JS Paint `tracky-mouse` fixtures, including archive round-trip identity.
+4. **A1v2 rejection** — non-UTF-8/NFC/case-collision paths; absolute, escaping,
+   dangling, cyclic, over-depth, over-length, or ambiguous links; submodule,
+   LFS pointer, and device node.
+5. **Identity separation** — raw target spelling changes the source identity,
+   and a regular file never shares identity with a symlink to identical bytes.
 
 ## 5. Known limitations
 
-- Symlinks, submodules, and LFS are unsupported in the MVP; a repo that needs
-  them is `blocked_repo`. Lifting any of these requires a new revision of this
-  profile with its own golden vectors.
+- Submodules and LFS remain unsupported; a repo that needs them is
+  `blocked_repo`.
 - NFC is required, not applied: the materializer rejects non-NFC paths rather
   than normalizing them, so that identity is never silently changed by the
   platform.
