@@ -35,7 +35,9 @@ The first supported overlay schema is `ato.source-overlay/v1`:
 
 - `kind = capsule_toml` stores the exact edited TOML bytes.
 - `kind = manual_command` stores exact launch argv, HTTP port, and readiness
-  path.
+  path. The current Capsule v1 surface synthesizes only the root (`/`) HTTP
+  probe, so other paths fail closed until readiness path becomes
+  identity-bearing in that schema.
 
 Manual argv is an array, never a shell string. The PWA uses one input line per
 argument so quoting and word boundaries are not reinterpreted.
