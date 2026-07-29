@@ -125,20 +125,17 @@ where
     E: Fn(String) -> CapsuleError,
     F: FnOnce() -> Result<T>,
 {
-    #[cfg(unix)]
-    let lock_target = path.parent().ok_or_else(|| {
+    let lock_target = path_lock_target(path).ok_or_else(|| {
         to_error(format!(
             "Failed to locate lock parent for {}",
             path.display()
         ))
     })?;
-    #[cfg(not(unix))]
-    let lock_target = path;
 
     #[cfg(unix)]
     let lock_file = fs::OpenOptions::new()
         .read(true)
-        .open(lock_target)
+        .open(&lock_target)
         .map_err(|e| {
             to_error(format!(
                 "Failed to open lock directory {} for {}: {}",
@@ -153,7 +150,7 @@ where
         .write(true)
         .create(true)
         .truncate(false)
-        .open(lock_target)
+        .open(&lock_target)
         .map_err(|e| {
             to_error(format!(
                 "Failed to open lock target {} for {}: {}",
@@ -184,6 +181,21 @@ where
             e
         ))),
         (Err(err), Err(_)) => Err(err),
+    }
+}
+
+pub(super) fn path_lock_target(path: &Path) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        path.parent().map(Path::to_path_buf)
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows does not allow an atomic replacement while the destination
+        // itself is held open. Lock a stable sibling instead so every writer
+        // serializes without pinning the file that rename must replace.
+        let file_name = path.file_name()?.to_string_lossy();
+        Some(path.with_file_name(format!(".{file_name}.write.lock")))
     }
 }
 

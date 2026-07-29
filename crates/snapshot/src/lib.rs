@@ -36,6 +36,7 @@ pub mod agent_channel;
 /// or a branch re-resolution has nothing to work from.
 pub mod archive_only_build;
 pub mod artifact_envelope;
+pub mod authoring_evidence;
 mod backend;
 pub mod bench;
 /// The v1 producer lane: `ato build`'s `schema_version = "1"` path, which
@@ -87,6 +88,7 @@ pub mod source_receipt;
 // Build-time screenshot capture (store thumbnail automation) — internal to
 // `firecracker.rs`'s `build_ready_state`, no public API of its own.
 mod screenshot;
+pub use screenshot::capture_best_effort as capture_screenshot_best_effort;
 mod seal;
 pub mod state_volume;
 pub mod state_volume_persistence;

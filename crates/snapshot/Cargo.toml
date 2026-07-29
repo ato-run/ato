@@ -38,6 +38,7 @@ capsule = { path = "../capsule" }
 # Hex encoding for the source-receipt digest label. Already a transitive dep via
 # capsule; declared directly because this crate now formats digests itself.
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 capsulefs = { path = "../capsulefs" }
 # BindingName: the rootfs_builder validates each secret's derived binding name against
 # the SAME canonical rule the guest-agent enforces, so an unbootable supervisor.json
