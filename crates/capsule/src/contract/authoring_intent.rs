@@ -342,8 +342,9 @@ pub fn draft_from_capsule_manifest_v1(
         })
         .collect();
     let readiness = match &manifest.web {
-        Some(web) => ReadinessIntentV1::Tcp {
+        Some(web) => ReadinessIntentV1::Http {
             port: web.port,
+            path: "/".to_string(),
             timeout_seconds: 60,
         },
         None => ReadinessIntentV1::ProcessRunning {
@@ -706,6 +707,14 @@ command = ["node", "verify.js"]
                 .expect("normalizes");
         assert_eq!(from_manifest.intent.launch.argv, ["node", "server.js"]);
         assert_eq!(from_manifest.intent.toolchains[0].name, "node");
+        assert_eq!(
+            from_manifest.intent.readiness,
+            ReadinessIntentV1::Http {
+                port: 8000,
+                path: "/".to_string(),
+                timeout_seconds: 60,
+            }
+        );
     }
 
     #[test]
