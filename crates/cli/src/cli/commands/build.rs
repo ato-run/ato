@@ -1149,9 +1149,7 @@ fn copy_source_tree_excluding_top_level_lock(
             #[cfg(not(unix))]
             {
                 anyhow::bail!(
-                    "cannot measure source.digest across a symlink at {} on this platform \
-                     (materialized_source_tree_hash rejects symlinks in the admissibility walk \
-                     regardless, so this tree could never yield a source.digest either way)",
+                    "cannot preserve the validated source symlink at {} on this platform",
                     from.display()
                 );
             }
