@@ -5022,6 +5022,11 @@ fn local_seal_artifact(
     Ok((directory, store, manifest))
 }
 
+fn media_repair_overlay_root(work_root: &Path, work_id: &str) -> PathBuf {
+    let digest = blake3::hash(work_id.as_bytes()).to_hex().to_string();
+    work_root.join(format!("media-repair-{}", &digest[..16]))
+}
+
 fn process_authoring_screenshot_capture(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -5043,7 +5048,7 @@ fn process_authoring_screenshot_capture(
             "Ready-State Seal receipt does not match the screenshot capture claim"
         ));
     }
-    let (seal_dir, store, manifest) = local_seal_artifact(cfg, work, &seal)?;
+    let (_seal_dir, store, manifest) = local_seal_artifact(cfg, work, &seal)?;
     let runner_class = manifest
         .runner_class_id
         .clone()
@@ -5052,7 +5057,7 @@ fn process_authoring_screenshot_capture(
         .restore(RestoreReadyStateInput {
             store: &store,
             manifest,
-            overlay_root: seal_dir.join(format!("media-repair-{}", work.work_id)),
+            overlay_root: media_repair_overlay_root(&cfg.work, &work.work_id),
             host_runner_class: Some(runner_class),
             uffd_preview: false,
         })
@@ -7996,5 +8001,20 @@ targets = ["web"]
         let masquerade = prepare_local_authoring_artifact_directory(root.path(), &unowned_identity)
             .expect_err("an arbitrary writable workspace must not become a Seal artifact");
         assert!(masquerade.contains("unowned local path"), "{masquerade}");
+    }
+
+    #[test]
+    fn media_repair_overlay_keeps_firecracker_api_socket_below_sun_len() {
+        let overlay = media_repair_overlay_root(
+            Path::new("/var/lib/ato/snapshots"),
+            "abjob_01KYPXJST4XT0KEQDTJ4W5Y79J",
+        );
+        let socket = overlay.join("api.sock");
+        assert!(
+            socket.as_os_str().len() < 108,
+            "Firecracker API socket path exceeds sockaddr_un::sun_path: {}",
+            socket.display()
+        );
+        assert_eq!(overlay.parent(), Some(Path::new("/var/lib/ato/snapshots")));
     }
 }
