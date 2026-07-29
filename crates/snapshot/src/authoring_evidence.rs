@@ -5,7 +5,7 @@
 //! while tests can prove ordering without KVM. Receipts are created only after
 //! the adapter authenticates the measured result.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -723,25 +723,212 @@ pub fn deduplicate_screenshot_candidates(
     deduplicated
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotQualityReportV1 {
+    pub width: u32,
+    pub height: u32,
+    pub perceptual_hash: String,
+    pub luminance_variance: u32,
+    pub dominant_pixel_ratio_per_mille: u16,
+    pub alpha_coverage_per_mille: u16,
+    pub edge_density_per_mille: u16,
+    pub meaningful_pixel_ratio_per_mille: u16,
+    pub quality_score: u16,
+}
+
+const TRANSPARENT_ALPHA_MAX: u8 = 8;
+const EDGE_LUMINANCE_DELTA: u8 = 16;
+const BLANK_ALPHA_COVERAGE_PER_MILLE: u16 = 5;
+const BLANK_DOMINANT_PIXEL_RATIO_PER_MILLE: u16 = 1000;
+const LOW_INFORMATION_DOMINANT_PIXEL_RATIO_PER_MILLE: u16 = 995;
+const LOW_INFORMATION_MEANINGFUL_PIXEL_RATIO_PER_MILLE: u16 = 5;
+const LOW_INFORMATION_EDGE_DENSITY_PER_MILLE: u16 = 1;
+const LOW_INFORMATION_LUMINANCE_VARIANCE: u32 = 64;
+const ZERO_DHASH: &str = "dhash64:0000000000000000";
+
+/// Decode and evaluate a public screenshot candidate before it can be attached
+/// to a Ready-State Seal receipt.
+///
+/// A zero dHash is only one signal. Solid-background applications remain valid
+/// when their text, controls, or canvas content produce enough luminance,
+/// dominant-color, or edge evidence.
+pub fn analyze_screenshot_png(
+    png: &[u8],
+) -> Result<ScreenshotQualityReportV1, AuthoringEvidenceError> {
+    let decoded = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|_| AuthoringEvidenceError::ScreenshotDecodeFailed)?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    if width == 0 || height == 0 {
+        return Err(AuthoringEvidenceError::ScreenshotDecodeFailed);
+    }
+
+    let pixel_count = u64::from(width) * u64::from(height);
+    let mut visible_pixels = 0_u64;
+    let mut luminance_sum = 0_u64;
+    let mut luminance_squared_sum = 0_u64;
+    let mut quantized_colors = HashMap::<u16, u64>::new();
+
+    for pixel in rgba.pixels() {
+        let [red, green, blue, alpha] = pixel.0;
+        if alpha <= TRANSPARENT_ALPHA_MAX {
+            continue;
+        }
+        visible_pixels += 1;
+        let luminance = u64::from(pixel_luminance(red, green, blue));
+        luminance_sum += luminance;
+        luminance_squared_sum += luminance * luminance;
+        *quantized_colors
+            .entry(quantized_color(red, green, blue))
+            .or_default() += 1;
+    }
+
+    let alpha_coverage_per_mille = ratio_per_mille(visible_pixels, pixel_count);
+    if alpha_coverage_per_mille <= BLANK_ALPHA_COVERAGE_PER_MILLE {
+        return Err(AuthoringEvidenceError::ScreenshotBlank);
+    }
+
+    let dominant_pixels = quantized_colors.values().copied().max().unwrap_or(0);
+    let dominant_pixel_ratio_per_mille = ratio_per_mille(dominant_pixels, visible_pixels);
+    let meaningful_pixel_ratio_per_mille = 1000_u16.saturating_sub(dominant_pixel_ratio_per_mille);
+    let luminance_variance = integer_variance(luminance_sum, luminance_squared_sum, visible_pixels);
+    let edge_density_per_mille = screenshot_edge_density(&rgba);
+    let perceptual_hash = perceptual_hash_rgba(&rgba);
+
+    if dominant_pixel_ratio_per_mille >= BLANK_DOMINANT_PIXEL_RATIO_PER_MILLE
+        && luminance_variance == 0
+        && edge_density_per_mille == 0
+    {
+        return Err(AuthoringEvidenceError::ScreenshotBlank);
+    }
+
+    let nearly_uniform = dominant_pixel_ratio_per_mille
+        >= LOW_INFORMATION_DOMINANT_PIXEL_RATIO_PER_MILLE
+        && meaningful_pixel_ratio_per_mille <= LOW_INFORMATION_MEANINGFUL_PIXEL_RATIO_PER_MILLE
+        && luminance_variance <= LOW_INFORMATION_LUMINANCE_VARIANCE
+        && edge_density_per_mille <= LOW_INFORMATION_EDGE_DENSITY_PER_MILLE;
+    let zero_hash_without_content = perceptual_hash == ZERO_DHASH
+        && luminance_variance <= LOW_INFORMATION_LUMINANCE_VARIANCE
+        && meaningful_pixel_ratio_per_mille <= LOW_INFORMATION_MEANINGFUL_PIXEL_RATIO_PER_MILLE
+        && edge_density_per_mille <= LOW_INFORMATION_EDGE_DENSITY_PER_MILLE;
+    if nearly_uniform || zero_hash_without_content {
+        return Err(AuthoringEvidenceError::ScreenshotLowInformation);
+    }
+
+    let quality_score = score_screenshot_frame(ScreenshotFrameSignalsV1 {
+        blank: false,
+        loading: false,
+        error_surface: false,
+        meaningful_pixel_ratio_per_mille,
+        possible_personal_data: false,
+    });
+    Ok(ScreenshotQualityReportV1 {
+        width,
+        height,
+        perceptual_hash,
+        luminance_variance,
+        dominant_pixel_ratio_per_mille,
+        alpha_coverage_per_mille,
+        edge_density_per_mille,
+        meaningful_pixel_ratio_per_mille,
+        quality_score,
+    })
+}
+
 /// Compute the SSOT screenshot duplicate key from compositor PNG bytes.
 ///
 /// dHash intentionally ignores small encoding and color differences while
 /// retaining the coarse visual structure of the frame.
 pub fn screenshot_perceptual_hash_png(png: &[u8]) -> Result<String, AuthoringEvidenceError> {
     let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
-        .map_err(|_| AuthoringEvidenceError::InvalidScreenshot)?
-        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
-        .to_luma8();
+        .map_err(|_| AuthoringEvidenceError::ScreenshotDecodeFailed)?
+        .to_rgba8();
+    Ok(perceptual_hash_rgba(&image))
+}
+
+fn perceptual_hash_rgba(image: &image::RgbaImage) -> String {
+    let image = image::imageops::resize(image, 9, 8, image::imageops::FilterType::Triangle);
     let mut hash = 0_u64;
     for y in 0..8 {
         for x in 0..8 {
             hash <<= 1;
-            if image.get_pixel(x, y)[0] > image.get_pixel(x + 1, y)[0] {
+            let left = image.get_pixel(x, y).0;
+            let right = image.get_pixel(x + 1, y).0;
+            if pixel_luminance(left[0], left[1], left[2])
+                > pixel_luminance(right[0], right[1], right[2])
+            {
                 hash |= 1;
             }
         }
     }
-    Ok(format!("dhash64:{hash:016x}"))
+    format!("dhash64:{hash:016x}")
+}
+
+fn screenshot_edge_density(image: &image::RgbaImage) -> u16 {
+    let (width, height) = image.dimensions();
+    let mut eligible_edges = 0_u64;
+    let mut content_edges = 0_u64;
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = image.get_pixel(x, y).0;
+            if pixel[3] <= TRANSPARENT_ALPHA_MAX {
+                continue;
+            }
+            let luminance = pixel_luminance(pixel[0], pixel[1], pixel[2]);
+            if x + 1 < width {
+                count_edge(
+                    image.get_pixel(x + 1, y).0,
+                    luminance,
+                    &mut eligible_edges,
+                    &mut content_edges,
+                );
+            }
+            if y + 1 < height {
+                count_edge(
+                    image.get_pixel(x, y + 1).0,
+                    luminance,
+                    &mut eligible_edges,
+                    &mut content_edges,
+                );
+            }
+        }
+    }
+    ratio_per_mille(content_edges, eligible_edges)
+}
+
+fn count_edge(neighbor: [u8; 4], luminance: u8, eligible_edges: &mut u64, content_edges: &mut u64) {
+    if neighbor[3] <= TRANSPARENT_ALPHA_MAX {
+        return;
+    }
+    *eligible_edges += 1;
+    let neighbor_luminance = pixel_luminance(neighbor[0], neighbor[1], neighbor[2]);
+    if luminance.abs_diff(neighbor_luminance) >= EDGE_LUMINANCE_DELTA {
+        *content_edges += 1;
+    }
+}
+
+fn pixel_luminance(red: u8, green: u8, blue: u8) -> u8 {
+    ((54_u32 * u32::from(red) + 183_u32 * u32::from(green) + 19_u32 * u32::from(blue)) >> 8) as u8
+}
+
+fn quantized_color(red: u8, green: u8, blue: u8) -> u16 {
+    (u16::from(red >> 4) << 8) | (u16::from(green >> 4) << 4) | u16::from(blue >> 4)
+}
+
+fn ratio_per_mille(numerator: u64, denominator: u64) -> u16 {
+    if denominator == 0 {
+        return 0;
+    }
+    ((u128::from(numerator) * 1000 / u128::from(denominator)).min(1000)) as u16
+}
+
+fn integer_variance(sum: u64, squared_sum: u64, count: u64) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    let count = u128::from(count);
+    let variance_numerator = u128::from(squared_sum) * count - u128::from(sum).pow(2);
+    (variance_numerator / count.pow(2)).min(u128::from(u32::MAX)) as u32
 }
 
 fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), AuthoringEvidenceError> {
@@ -898,12 +1085,27 @@ pub enum AuthoringEvidenceError {
     MissingPostRestoreScreenshot,
     #[error("a screenshot candidate must be selected")]
     ScreenshotNotSelected,
-    #[error("screenshot is not a decodable PNG")]
-    InvalidScreenshot,
+    #[error("SCREENSHOT_DECODE_FAILED: screenshot is not a decodable PNG with valid dimensions")]
+    ScreenshotDecodeFailed,
+    #[error("SCREENSHOT_BLANK: screenshot is blank or effectively transparent")]
+    ScreenshotBlank,
+    #[error("SCREENSHOT_LOW_INFORMATION: screenshot contains no meaningful visible content")]
+    ScreenshotLowInformation,
     #[error("canonicalization failed: {0}")]
     Canonicalization(String),
     #[error("signed builder receipt payload is not valid base64-encoded JSON")]
     InvalidSignedPayload,
+}
+
+impl AuthoringEvidenceError {
+    pub fn screenshot_failure_code(&self) -> Option<&'static str> {
+        match self {
+            Self::ScreenshotDecodeFailed => Some("SCREENSHOT_DECODE_FAILED"),
+            Self::ScreenshotBlank => Some("SCREENSHOT_BLANK"),
+            Self::ScreenshotLowInformation => Some("SCREENSHOT_LOW_INFORMATION"),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1006,6 +1208,14 @@ mod tests {
         execute_clean_replay(&mut adapter, &request())
             .expect("receipt")
             .0
+    }
+
+    fn encode_rgba_png(frame: image::RgbaImage) -> Vec<u8> {
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(frame)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        png.into_inner()
     }
 
     struct SealAdapter {
@@ -1158,6 +1368,111 @@ mod tests {
             screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
             screenshot_perceptual_hash_png(png.get_ref()).expect("hash"),
         );
+    }
+
+    #[test]
+    fn screenshot_quality_rejects_decode_failure() {
+        assert_eq!(
+            analyze_screenshot_png(b"not a png"),
+            Err(AuthoringEvidenceError::ScreenshotDecodeFailed)
+        );
+    }
+
+    #[test]
+    fn screenshot_quality_rejects_all_white_frame() {
+        let png = encode_rgba_png(image::RgbaImage::from_pixel(
+            128,
+            80,
+            image::Rgba([255, 255, 255, 255]),
+        ));
+        assert_eq!(
+            analyze_screenshot_png(&png),
+            Err(AuthoringEvidenceError::ScreenshotBlank)
+        );
+    }
+
+    #[test]
+    fn screenshot_quality_rejects_transparent_frame() {
+        let png = encode_rgba_png(image::RgbaImage::from_pixel(
+            128,
+            80,
+            image::Rgba([30, 80, 120, 0]),
+        ));
+        assert_eq!(
+            analyze_screenshot_png(&png),
+            Err(AuthoringEvidenceError::ScreenshotBlank)
+        );
+    }
+
+    #[test]
+    fn screenshot_quality_rejects_zero_hash_low_variance_frame() {
+        let mut frame = image::RgbaImage::from_pixel(200, 120, image::Rgba([248, 248, 248, 255]));
+        for x in 0..4 {
+            frame.put_pixel(x, 0, image::Rgba([235, 235, 235, 255]));
+        }
+        let png = encode_rgba_png(frame);
+        assert_eq!(
+            screenshot_perceptual_hash_png(&png).expect("hash"),
+            ZERO_DHASH
+        );
+        assert_eq!(
+            analyze_screenshot_png(&png),
+            Err(AuthoringEvidenceError::ScreenshotLowInformation)
+        );
+    }
+
+    #[test]
+    fn screenshot_quality_accepts_lines_and_canvas_content() {
+        let mut frame = image::RgbaImage::from_pixel(200, 120, image::Rgba([250, 250, 250, 255]));
+        for x in 30..170 {
+            frame.put_pixel(x, 30, image::Rgba([25, 25, 25, 255]));
+            frame.put_pixel(x, 90, image::Rgba([25, 25, 25, 255]));
+        }
+        for y in 30..=90 {
+            frame.put_pixel(30, y, image::Rgba([25, 25, 25, 255]));
+            frame.put_pixel(169, y, image::Rgba([25, 25, 25, 255]));
+        }
+        for offset in 0..40 {
+            frame.put_pixel(
+                70 + offset,
+                55 + offset / 3,
+                image::Rgba([36, 99, 235, 255]),
+            );
+        }
+        let report = analyze_screenshot_png(&encode_rgba_png(frame)).expect("meaningful frame");
+        assert!(report.edge_density_per_mille > 0);
+        assert!(report.luminance_variance > 0);
+        assert_eq!(report.alpha_coverage_per_mille, 1000);
+    }
+
+    #[test]
+    fn screenshot_quality_accepts_client_rendered_application_frame() {
+        let mut frame = image::RgbaImage::from_pixel(320, 180, image::Rgba([244, 247, 251, 255]));
+        for y in 0..28 {
+            for x in 0..320 {
+                frame.put_pixel(x, y, image::Rgba([31, 41, 55, 255]));
+            }
+        }
+        for y in 50..145 {
+            for x in 28..145 {
+                frame.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+            for x in 175..292 {
+                frame.put_pixel(x, y, image::Rgba([255, 255, 255, 255]));
+            }
+        }
+        for x in 45..125 {
+            frame.put_pixel(x, 75, image::Rgba([37, 99, 235, 255]));
+            frame.put_pixel(x, 105, image::Rgba([75, 85, 99, 255]));
+        }
+        for x in 192..272 {
+            frame.put_pixel(x, 75, image::Rgba([16, 185, 129, 255]));
+            frame.put_pixel(x, 105, image::Rgba([75, 85, 99, 255]));
+        }
+        let report = analyze_screenshot_png(&encode_rgba_png(frame)).expect("hydrated app");
+        assert!(report.meaningful_pixel_ratio_per_mille > 5);
+        assert!(report.dominant_pixel_ratio_per_mille < 995);
+        assert!(report.quality_score > 0);
     }
 
     #[test]
