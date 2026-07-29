@@ -5129,7 +5129,9 @@ fn process_authoring_screenshot_capture(
     .map_err(|error| anyhow!("generate media repair receipt: {error}"))?;
     client
         .complete_screenshot_capture(work, &receipt, &screenshot)
-        .map_err(|error| anyhow!("report screenshot capture: {error}"))?;
+        .map(|_| ())
+        .map_err(anyhow::Error::new)
+        .context("report screenshot capture")?;
     eprintln!(
         "[builder] Authoring Session {} media repair complete (trace {})",
         work.authoring_session_id, work.trace_id
@@ -5146,6 +5148,12 @@ fn finish_authoring_job(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
+            if retryable_screenshot_completion(&error) {
+                return Err(error.context(format!(
+                    "Authoring Session {} media repair completion remains retryable; server claim was not failed",
+                    work.authoring_session_id
+                )));
+            }
             let reason = format!("{error:#}");
             let error_code = authoring_failure_code(error_code, &reason);
             if let Err(callback_error) = client.mark_job_failed(work, error_code, &reason) {
@@ -5160,6 +5168,12 @@ fn finish_authoring_job(
             ))
         }
     }
+}
+
+fn retryable_screenshot_completion(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<authoring_runtime::ScreenshotCompletionError>()
+        .is_some_and(authoring_runtime::ScreenshotCompletionError::is_retryable)
 }
 
 fn authoring_failure_code<'a>(fallback: &'a str, reason: &str) -> &'a str {
@@ -5369,6 +5383,28 @@ mod tests {
             authoring_failure_code("ready_state_seal_failed", "restore failed"),
             "ready_state_seal_failed"
         );
+    }
+
+    #[test]
+    fn retryable_media_completion_does_not_enter_the_failure_callback_path() {
+        let error = anyhow::Error::new(
+            authoring_runtime::ScreenshotCompletionError::RetryableHttp {
+                status: 503,
+                code: "media_repair_storage_failed".to_string(),
+                trace_id: "request_01KYN2Z".to_string(),
+            },
+        )
+        .context("report screenshot capture");
+
+        assert!(retryable_screenshot_completion(&error));
+
+        let terminal = anyhow::Error::new(authoring_runtime::ScreenshotCompletionError::Refused {
+            status: 409,
+            code: "media_repair_receipt_mismatch".to_string(),
+            trace_id: "request_01KYN2Z".to_string(),
+        })
+        .context("report screenshot capture");
+        assert!(!retryable_screenshot_completion(&terminal));
     }
 
     #[test]
