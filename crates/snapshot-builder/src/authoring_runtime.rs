@@ -821,13 +821,19 @@ pub fn infer_authoring_intent(
                 .to_string(),
         );
     }
-    normalize_program_intent(ProgramIntentDraftV1 {
-        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
-        origin: ProgramIntentOrigin::Inference,
-        toolchains: Vec::new(),
-        build_steps: Vec::new(),
-        launch: ProgramCommandDraftV1::Argv {
-            argv: vec![
+    let (argv, required_tool) = if source_root.join("package.json").is_file() {
+        (
+            vec![
+                "node".to_string(),
+                "--input-type=module".to_string(),
+                "-e".to_string(),
+                NODE_STATIC_SERVER.to_string(),
+            ],
+            "node",
+        )
+    } else {
+        (
+            vec![
                 "python3".to_string(),
                 "-m".to_string(),
                 "http.server".to_string(),
@@ -835,9 +841,19 @@ pub fn infer_authoring_intent(
                 "--bind".to_string(),
                 "0.0.0.0".to_string(),
             ],
+            "python3",
+        )
+    };
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv,
             cwd: WorkspacePathV1::root(),
             requested_environment: Vec::new(),
-            required_tools: vec!["python3".to_string()],
+            required_tools: vec![required_tool.to_string()],
         },
         readiness: ReadinessIntentV1::Http {
             port: 8000,
@@ -850,6 +866,11 @@ pub fn infer_authoring_intent(
     })
     .map_err(|error| error.to_string())
 }
+
+/// Dependency-free static server for repositories already identified as Node
+/// projects. The path checks keep request resolution inside the materialized
+/// source root, including after following repository-internal symlinks.
+const NODE_STATIC_SERVER: &str = r#"import{createServer}from"node:http";import{readFile,realpath,stat}from"node:fs/promises";import{extname,relative,resolve,sep}from"node:path";const root=await realpath(".");const inside=p=>{const r=relative(root,p);return r===""||r!==".."&&!r.startsWith(".."+sep)};const types={".css":"text/css; charset=utf-8",".gif":"image/gif",".html":"text/html; charset=utf-8",".ico":"image/x-icon",".jpeg":"image/jpeg",".jpg":"image/jpeg",".js":"text/javascript; charset=utf-8",".json":"application/json; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".png":"image/png",".svg":"image/svg+xml",".wasm":"application/wasm",".webmanifest":"application/manifest+json; charset=utf-8",".webp":"image/webp",".wav":"audio/wav"};createServer(async(req,res)=>{try{if(req.method!=="GET"&&req.method!=="HEAD"){res.writeHead(405,{Allow:"GET, HEAD"}).end();return}if(!req.url||req.url.length>4096){res.writeHead(414).end();return}const url=new URL(req.url,"http://localhost");const pathname=decodeURIComponent(url.pathname);if(pathname.includes("\0")||pathname.includes("\\")){res.writeHead(400).end();return}let file=resolve(root,"."+pathname);if(!inside(file)){res.writeHead(403).end();return}if((await stat(file)).isDirectory())file=resolve(file,"index.html");file=await realpath(file);if(!inside(file)||(await stat(file)).isFile()===false){res.writeHead(403).end();return}const body=await readFile(file);res.writeHead(200,{"Content-Type":types[extname(file).toLowerCase()]??"application/octet-stream","Content-Length":body.length,"X-Content-Type-Options":"nosniff"});res.end(req.method==="HEAD"?undefined:body)}catch{res.writeHead(404).end()}}).listen(8000,"0.0.0.0");"#;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1329,6 +1350,31 @@ mod tests {
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn node_static_repository_uses_the_materialized_node_runtime() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
+        std::fs::write(root.path().join("package.json"), r#"{"name":"static-app"}"#)
+            .expect("package");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+
+        assert_eq!(
+            normalized.intent.launch.argv[..3],
+            ["node", "--input-type=module", "-e"]
+        );
+        assert_eq!(normalized.intent.launch.required_tools, ["node"]);
+        assert!(
+            normalized.intent.launch.argv[3].contains("createServer"),
+            "the inferred command embeds a dependency-free static server"
+        );
+        let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
+        let parsed =
+            capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
+        assert_eq!(parsed.run.command, normalized.intent.launch.argv);
+        assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
     }
 
     #[test]
