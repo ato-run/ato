@@ -4219,14 +4219,15 @@ model = "{path}"
     }
 
     /// A1v2 admissibility runs over the ORIGINAL tree before the manifest is
-    /// parsed (ADR-014 §1 step 1): an in-tree symlink is rejected even though
-    /// the manifest itself is perfectly valid.
+    /// parsed (ADR-014 §1 step 1): an unsafe absolute symlink is rejected even
+    /// though the manifest itself is perfectly valid.
     #[cfg(unix)]
     #[test]
     fn derive_entrypoint_gates_admissibility_before_parsing_the_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("capsule.toml"), DERIVE_MANIFEST).expect("manifest");
-        std::os::unix::fs::symlink("capsule.toml", root.path().join("link.toml")).expect("symlink");
+        std::os::unix::fs::symlink("/capsule.toml", root.path().join("link.toml"))
+            .expect("symlink");
 
         let error = derive_capsule_program_contract(&pinned(root.path())).unwrap_err();
         let CapsuleProgramError::SourceProjection(message) = &error else {
