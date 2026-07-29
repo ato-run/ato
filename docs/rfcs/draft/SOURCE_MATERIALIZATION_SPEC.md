@@ -2,6 +2,7 @@
 title: "Source Materialization Spec: the source_materialize builder job"
 status: draft          # draft | accepted | archived
 date: 2026-07-13
+updated: 2026-07-30
 author: "@egamikohsuke"
 ssot:
   - "crates/snapshot/src/rootfs_builder.rs"
@@ -72,12 +73,15 @@ Provided by ato-api when the candidate enters `fetching`:
    between listing and checkout, or content present that the listing did not
    describe) fails the job.
 3. **Enforce the A1v2 admissibility profile** (see the source-tree profile
-   §3.3): reject symlinks, submodules, LFS pointers, non-UTF-8/non-NFC paths,
-   case-fold collisions, and unsupported node types. A violation maps to
-   `blocked_repo` / `blocked_incompatible`.
+   §3.3): preserve only validated repository-internal relative symlinks; reject
+   external, dangling, cyclic, ambiguous, or over-limit links, as well as
+   submodules, LFS pointers, non-UTF-8/non-NFC paths, case-fold collisions, and
+   unsupported node types. A violation maps to `blocked_repo` /
+   `blocked_incompatible`.
 4. **Canonicalize → hash**: compute `materialized_source_tree_hash` (A1v2, the
    A1 `sha256` digest of the admissible tree).
-5. **Archive**: write a deterministic `tar.zst`; compute
+5. **Archive**: write a deterministic `tar.zst`, preserving each admitted
+   symlink as a symlink entry rather than dereferencing it; compute
    `source_archive_hash = sha256(exact tar.zst bytes)`.
 6. **Upload (API-mediated)**: the builder asks ato-api to authorize the write
    and receives a short-lived presigned `PUT` for exactly one object key. The
@@ -149,6 +153,10 @@ Enforced during checkout/walk; exceeding any cap fails the job (routes to
 | Expanded tree size | 250 MiB |
 | File count | 50,000 files |
 | Single file size | 50 MiB |
+| Total tree entries | 100,000 |
+| Symlink resolution depth | 40 |
+| Total symlink expansions | 100,000 |
+| Path component / link target / resolved path | 255 / 4,096 / 4,096 UTF-8 bytes |
 
 These bound builder resource use against a hostile or merely huge repo. The
 **50,000-file** cap is the enumeration limit the Worker enforces while assembling
@@ -177,7 +185,7 @@ sees byte-identical source and that `materialized_source_tree_hash` /
 
 - `materialized_source_tree_hash` — A1v2 `sha256` identity.
 - `source_archive_hash` — `sha256` of the `tar.zst` bytes.
-- R2 object at `source-archives/v1/sha256/{source_archive_hash}.tar.zst`.
+- R2 object at `source-archives/{algorithm}/{digest}`.
 - A materialize receipt (commit OID, hashes, caps, state).
 
 ### 4.2 Failure mapping
@@ -197,11 +205,18 @@ sees byte-identical source and that `materialized_source_tree_hash` /
 - **API-mediated R2 write** keeps R2 credentials off the builder.
 - The caps and the checkout-by-OID rule bound resource use and pin identity so a
   repo cannot swap content under the pipeline.
+- Checkout validation, archive creation, archive extraction, and program-source
+  staging share the same link normalizer. Links are created only after archive
+  content writes, so an archive member cannot redirect extraction outside the
+  destination.
+- Link identity includes its repository-relative path, raw target, normalized
+  resolved target, and terminal target kind. A link is not interchangeable with
+  a regular file containing the same bytes.
 
 ## 6. Known limitations
 
-- No LFS resolution and no symlink handling in the MVP — such repos are blocked
-  rather than materialized.
+- No submodule or LFS resolution — such repos are blocked rather than
+  materialized.
 - Idempotent upload by content hash depends on the R2 conditional-put question
   (pipeline spec §8): until resolved, a re-run may re-upload identical bytes to
   the same key.
