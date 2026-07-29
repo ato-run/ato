@@ -579,7 +579,7 @@ WORKDIR {workdir}
 COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
 DOCKER
-{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
+{tool} build -t "$ATO_IMAGE" "$BUILD" >/dev/null
 "#,
         tool = tool,
         base = pinned_base_ref,
@@ -2928,10 +2928,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         for tool in ["docker", "podman"] {
             let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, tool);
             let pack = export_guest_rootfs_script_v1(&spec, tool);
-            assert!(
-                assemble.contains(&format!("{tool} build -q -t")),
-                "{assemble}"
-            );
+            assert!(assemble.contains(&format!("{tool} build -t")), "{assemble}");
             for verb in ["create", "export", "rm -f", "rmi -f"] {
                 assert!(
                     pack.contains(&format!("{tool} {verb}")),
@@ -3099,7 +3096,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
         assert!(
             assemble_app_image_script_v1(&spec, PINNED_BASE, "docker")
-                .contains("docker build -q -t \"$ATO_IMAGE\""),
+                .contains("docker build -t \"$ATO_IMAGE\""),
         );
         assert!(export_guest_rootfs_script_v1(&spec, "docker").contains("TAG=\"$ATO_IMAGE\""));
     }
