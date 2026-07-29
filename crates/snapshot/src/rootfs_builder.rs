@@ -49,6 +49,9 @@ pub struct SourceProbe {
     pub has_deno_lock: bool,
     pub has_deno_fresh_entrypoints: bool,
     pub has_package_json: bool,
+    pub has_package_lock: bool,
+    pub has_yarn_lock: bool,
+    pub has_pnpm_lock: bool,
     pub has_requirements_txt: bool,
     pub has_pyproject: bool,
     pub has_index_html: bool,
@@ -71,6 +74,9 @@ impl SourceProbe {
             has_deno_lock: has("deno.lock"),
             has_deno_fresh_entrypoints: has("main.ts") && has("dev.ts"),
             has_package_json: has("package.json"),
+            has_package_lock: has("package-lock.json"),
+            has_yarn_lock: has("yarn.lock"),
+            has_pnpm_lock: has("pnpm-lock.yaml"),
             has_requirements_txt: has("requirements.txt"),
             has_pyproject: has("pyproject.toml"),
             has_index_html: has("index.html") || dir.join("public").join("index.html").exists(),
@@ -991,7 +997,15 @@ pub(crate) fn base_image_and_install(
         RuntimeKind::Node => (
             "node:20-slim".to_string(),
             Some(if probe.has_package_json {
-                "npm ci --omit=dev || npm install --omit=dev".to_string()
+                if probe.has_yarn_lock {
+                    "corepack enable && yarn install --frozen-lockfile".to_string()
+                } else if probe.has_pnpm_lock {
+                    "corepack enable && pnpm install --frozen-lockfile".to_string()
+                } else if probe.has_package_lock {
+                    "npm ci".to_string()
+                } else {
+                    "npm install".to_string()
+                }
             } else {
                 "true".to_string()
             }),
@@ -2758,6 +2772,54 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
                 "dev.ts"
             ]
         );
+    }
+
+    #[test]
+    fn a_v1_node_spec_materializes_the_lockfile_package_manager_with_dev_dependencies() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["yarn", "start", "--host", "0.0.0.0"]"#,
+        );
+        let yarn = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_yarn_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("yarn derives");
+        assert_eq!(yarn.runtime, RuntimeKind::Node);
+        assert_eq!(
+            yarn.install_cmd.as_deref(),
+            Some("corepack enable && yarn install --frozen-lockfile")
+        );
+        assert_eq!(yarn.resolved_argv, ["yarn", "start", "--host", "0.0.0.0"]);
+
+        let pnpm = derive_build_spec_v1(
+            &v1(&manifest.replace("yarn", "pnpm")),
+            &SourceProbe {
+                has_package_json: true,
+                has_pnpm_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("pnpm derives");
+        assert_eq!(
+            pnpm.install_cmd.as_deref(),
+            Some("corepack enable && pnpm install --frozen-lockfile")
+        );
+
+        let npm = derive_build_spec_v1(
+            &v1(&manifest.replace("yarn", "npm")),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("npm derives");
+        assert_eq!(npm.install_cmd.as_deref(), Some("npm ci"));
     }
 
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
