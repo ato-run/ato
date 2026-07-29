@@ -606,6 +606,12 @@ pub fn resolve_authoring_recipe(
             if launch_argv.is_empty() {
                 return Err("manual launch argv is empty".to_string());
             }
+            if readiness_path != "/" {
+                return Err(
+                    "manual Authoring v1 currently supports only the synthesized root readiness path"
+                        .to_string(),
+                );
+            }
             let required_tools = vec![launch_argv[0].clone()];
             let normalized = normalize_program_intent(ProgramIntentDraftV1 {
                 schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
@@ -985,7 +991,7 @@ mod tests {
                     "kind": "manual_command",
                     "launch_argv": ["deno", "run", "-A", "dev.ts"],
                     "port": 8000,
-                    "readiness_path": "/health"
+                    "readiness_path": "/"
                 }
             },
             "setup_mode": "manual",
