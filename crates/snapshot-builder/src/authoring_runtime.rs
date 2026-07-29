@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::path::Path;
+use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -23,6 +24,10 @@ use snapshot::authoring_evidence::{
 };
 
 const AUTHORING_BASE_PATH: &str = "/v1/capsule-snapshots/authoring";
+const SCREENSHOT_COMPLETION_INITIAL_RETRY_DELAY: Duration = Duration::from_millis(250);
+const SCREENSHOT_COMPLETION_MAX_RETRY_DELAY: Duration = Duration::from_secs(5);
+const SCREENSHOT_COMPLETION_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const SCREENSHOT_COMPLETION_DEADLINE_MARGIN: chrono::Duration = chrono::Duration::seconds(1);
 
 #[derive(Clone)]
 pub struct AuthoringLeaseToken(String);
@@ -112,8 +117,7 @@ pub struct AuthoringWork {
     #[serde(default)]
     pub ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
     pub lease_token: AuthoringLeaseToken,
-    #[serde(rename = "lease_expires_at")]
-    pub _lease_expires_at: String,
+    pub lease_expires_at: String,
     pub trace_id: String,
 }
 
@@ -127,6 +131,67 @@ struct ClaimResponse {
 struct ClaimRequest<'a> {
     builder_id: &'a str,
     supported_operations: &'a [&'a str],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ScreenshotCompletionError {
+    #[error("screenshot completion was refused ({code}, HTTP {status}, trace {trace_id})")]
+    Refused {
+        status: u16,
+        code: String,
+        trace_id: String,
+    },
+    #[error("screenshot completion remains retryable ({code}, HTTP {status}, trace {trace_id})")]
+    RetryableHttp {
+        status: u16,
+        code: String,
+        trace_id: String,
+    },
+    #[error("screenshot completion remains retryable ({code}, trace {trace_id})")]
+    RetryableTransport { code: String, trace_id: String },
+    #[error("screenshot completion deadline is invalid ({field})")]
+    InvalidDeadline { field: &'static str },
+    #[error("screenshot completion receipt is invalid")]
+    InvalidReceipt,
+    #[error("screenshot completion request could not be encoded")]
+    InvalidRequest,
+}
+
+impl ScreenshotCompletionError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::RetryableHttp { .. } | Self::RetryableTransport { .. }
+        )
+    }
+
+    fn retryable(status: Option<u16>, code: String, trace_id: String) -> ScreenshotCompletionError {
+        match status {
+            Some(status) => Self::RetryableHttp {
+                status,
+                code,
+                trace_id,
+            },
+            None => Self::RetryableTransport { code, trace_id },
+        }
+    }
+
+    fn diagnostic(&self) -> (&str, &str) {
+        match self {
+            Self::Refused { code, trace_id, .. }
+            | Self::RetryableHttp { code, trace_id, .. }
+            | Self::RetryableTransport { code, trace_id } => (code, trace_id),
+            Self::InvalidDeadline { .. } => ("invalid_completion_deadline", "none"),
+            Self::InvalidReceipt => ("invalid_media_repair_receipt", "none"),
+            Self::InvalidRequest => ("invalid_media_repair_request", "none"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ScreenshotCompletionAck {
+    pub accepted: bool,
+    pub already_completed: bool,
 }
 
 pub struct AuthoringApiClient<'a> {
@@ -341,15 +406,13 @@ impl AuthoringApiClient<'_> {
         work: &AuthoringWork,
         receipt: &MediaRepairReceiptV1,
         screenshot_png_base64: &str,
-    ) -> Result<(), String> {
-        ureq::post(&format!(
-            "{}{AUTHORING_BASE_PATH}/jobs/{}/screenshot-capture",
-            self.api_url.trim_end_matches('/'),
-            work.work_id
-        ))
-        .set("authorization", &format!("Bearer {}", self.builder_token))
-        .set("x-ato-authoring-lease-token", work.lease_token.expose())
-        .send_json(serde_json::json!({
+    ) -> Result<ScreenshotCompletionAck, ScreenshotCompletionError> {
+        let receipt_payload = receipt
+            .payload()
+            .map_err(|_| ScreenshotCompletionError::InvalidReceipt)?;
+        let deadline =
+            screenshot_completion_deadline(&work.lease_expires_at, &receipt_payload.expires_at)?;
+        let request_body = serde_json::to_value(serde_json::json!({
             "builder_id": self.builder_id,
             "media_repair_receipt": receipt,
             "preview_run_id": format!("media_repair_{}", work.work_id),
@@ -361,8 +424,60 @@ impl AuthoringApiClient<'_> {
             },
             "post_restore_screenshot_png_base64": screenshot_png_base64,
         }))
-        .map_err(|error| http_error("report screenshot capture completion", error))?;
-        Ok(())
+        .map_err(|_| ScreenshotCompletionError::InvalidRequest)?;
+        let url = format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/screenshot-capture",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        );
+        let mut retry_delay = SCREENSHOT_COMPLETION_INITIAL_RETRY_DELAY;
+
+        loop {
+            let now = chrono::Utc::now();
+            let remaining = deadline.signed_duration_since(now);
+            let request_timeout = remaining
+                .to_std()
+                .map_err(|_| {
+                    ScreenshotCompletionError::retryable(
+                        None,
+                        "media_repair_retry_deadline_exceeded".to_string(),
+                        work.trace_id.clone(),
+                    )
+                })?
+                .min(SCREENSHOT_COMPLETION_REQUEST_TIMEOUT);
+            let result = ureq::post(&url)
+                .timeout(request_timeout)
+                .set("authorization", &format!("Bearer {}", self.builder_token))
+                .set("x-ato-authoring-lease-token", work.lease_token.expose())
+                .send_json(request_body.clone())
+                .map_err(|error| screenshot_completion_http_error(error, &work.trace_id))
+                .and_then(decode_screenshot_completion_ack);
+
+            match result {
+                Ok(ack) => return Ok(ack),
+                Err(error) if !error.is_retryable() => return Err(error),
+                Err(error) => {
+                    let remaining = deadline.signed_duration_since(chrono::Utc::now());
+                    let Ok(remaining) = remaining.to_std() else {
+                        return Err(error);
+                    };
+                    let delay = retry_delay.min(remaining);
+                    if delay.is_zero() {
+                        return Err(error);
+                    }
+                    let (code, trace_id) = error.diagnostic();
+                    eprintln!(
+                        "[builder] media repair completion retry: code={code} trace={trace_id} delay_ms={}",
+                        delay.as_millis()
+                    );
+                    std::thread::sleep(delay);
+                    retry_delay = retry_delay
+                        .checked_mul(2)
+                        .unwrap_or(SCREENSHOT_COMPLETION_MAX_RETRY_DELAY)
+                        .min(SCREENSHOT_COMPLETION_MAX_RETRY_DELAY);
+                }
+            }
+        }
     }
 
     pub fn mark_job_failed(
@@ -531,6 +646,106 @@ impl AuthoringSigner {
             algorithm: "ed25519".to_string(),
             signature: BASE64.encode(signature.to_bytes()),
         }
+    }
+}
+
+fn screenshot_completion_deadline(
+    lease_expires_at: &str,
+    receipt_expires_at: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, ScreenshotCompletionError> {
+    let lease_deadline = chrono::DateTime::parse_from_rfc3339(lease_expires_at)
+        .map_err(|_| ScreenshotCompletionError::InvalidDeadline {
+            field: "lease_expires_at",
+        })?
+        .with_timezone(&chrono::Utc);
+    let receipt_deadline = chrono::DateTime::parse_from_rfc3339(receipt_expires_at)
+        .map_err(|_| ScreenshotCompletionError::InvalidDeadline {
+            field: "receipt_expires_at",
+        })?
+        .with_timezone(&chrono::Utc);
+    Ok(lease_deadline.min(receipt_deadline) - SCREENSHOT_COMPLETION_DEADLINE_MARGIN)
+}
+
+fn screenshot_completion_http_error(
+    error: ureq::Error,
+    fallback_trace_id: &str,
+) -> ScreenshotCompletionError {
+    match error {
+        ureq::Error::Status(status, response) => {
+            let body = response.into_string().unwrap_or_default();
+            let (code, trace_id) =
+                parse_screenshot_completion_rejection(&body, status, fallback_trace_id);
+            if status >= 500 || matches!(status, 408 | 429) {
+                ScreenshotCompletionError::retryable(Some(status), code, trace_id)
+            } else {
+                ScreenshotCompletionError::Refused {
+                    status,
+                    code,
+                    trace_id,
+                }
+            }
+        }
+        ureq::Error::Transport(_) => ScreenshotCompletionError::retryable(
+            None,
+            "media_repair_transport_failed".to_string(),
+            sanitize_completion_diagnostic(fallback_trace_id, 128, "none"),
+        ),
+    }
+}
+
+fn decode_screenshot_completion_ack(
+    response: ureq::Response,
+) -> Result<ScreenshotCompletionAck, ScreenshotCompletionError> {
+    let ack = response
+        .into_json::<ScreenshotCompletionAck>()
+        .map_err(|_| {
+            ScreenshotCompletionError::retryable(
+                Some(200),
+                "media_repair_response_invalid".to_string(),
+                "none".to_string(),
+            )
+        })?;
+    if !ack.accepted {
+        return Err(ScreenshotCompletionError::retryable(
+            Some(200),
+            "media_repair_response_not_accepted".to_string(),
+            "none".to_string(),
+        ));
+    }
+    Ok(ack)
+}
+
+fn parse_screenshot_completion_rejection(
+    body: &str,
+    status: u16,
+    fallback_trace_id: &str,
+) -> (String, String) {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let code = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| sanitize_completion_diagnostic(value, 128, &format!("http_{status}")))
+        .unwrap_or_else(|| format!("http_{status}"));
+    let trace_id = parsed
+        .as_ref()
+        .and_then(|value| value.get("trace_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(|value| sanitize_completion_diagnostic(value, 128, fallback_trace_id))
+        .unwrap_or_else(|| sanitize_completion_diagnostic(fallback_trace_id, 128, "none"));
+    (code, trace_id)
+}
+
+fn sanitize_completion_diagnostic(value: &str, limit: usize, fallback: &str) -> String {
+    let sanitized = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(limit)
+        .collect::<String>();
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
     }
 }
 
@@ -969,6 +1184,83 @@ mod tests {
         let detail = detail.expect("detail");
         assert!(!detail.contains('\n'));
         assert_eq!(detail.chars().count(), 512);
+    }
+
+    #[test]
+    fn screenshot_completion_retries_storage_failures_without_exposing_the_body() {
+        let body = serde_json::json!({
+            "error": "media_repair_storage_failed",
+            "message": "D1 internal query and secret details",
+            "trace_id": "request_01KYN2Z",
+        })
+        .to_string();
+        let response = ureq::Response::new(503, "Service Unavailable", &body).expect("response");
+
+        let error =
+            screenshot_completion_http_error(ureq::Error::Status(503, response), "claim_trace");
+
+        assert_eq!(
+            error,
+            ScreenshotCompletionError::RetryableHttp {
+                status: 503,
+                code: "media_repair_storage_failed".to_string(),
+                trace_id: "request_01KYN2Z".to_string(),
+            }
+        );
+        assert!(error.is_retryable());
+        assert!(!error.to_string().contains("D1 internal"));
+    }
+
+    #[test]
+    fn screenshot_completion_treats_domain_conflicts_as_terminal() {
+        let body = serde_json::json!({
+            "error": "media_repair_receipt_mismatch",
+            "trace_id": "request_01KYN2Z",
+        })
+        .to_string();
+        let response = ureq::Response::new(409, "Conflict", &body).expect("response");
+
+        let error =
+            screenshot_completion_http_error(ureq::Error::Status(409, response), "claim_trace");
+
+        assert_eq!(
+            error,
+            ScreenshotCompletionError::Refused {
+                status: 409,
+                code: "media_repair_receipt_mismatch".to_string(),
+                trace_id: "request_01KYN2Z".to_string(),
+            }
+        );
+        assert!(!error.is_retryable());
+    }
+
+    #[test]
+    fn screenshot_completion_retries_malformed_success_ack() {
+        let response = ureq::Response::new(200, "OK", r#"{"accepted":"yes"}"#).expect("response");
+
+        let error = decode_screenshot_completion_ack(response).expect_err("invalid ack");
+
+        assert!(error.is_retryable());
+        assert_eq!(
+            error,
+            ScreenshotCompletionError::RetryableHttp {
+                status: 200,
+                code: "media_repair_response_invalid".to_string(),
+                trace_id: "none".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn screenshot_completion_uses_the_earlier_lease_or_receipt_deadline() {
+        let deadline =
+            screenshot_completion_deadline("2026-07-29T10:00:05.000Z", "2026-07-29T10:00:10.000Z")
+                .expect("deadline");
+
+        assert_eq!(
+            deadline.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "2026-07-29T10:00:04.000Z"
+        );
     }
 
     #[test]
