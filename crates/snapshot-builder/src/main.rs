@@ -1041,6 +1041,10 @@ struct ProducedBuild {
     /// execution envelope — ato#1002 review D3). Always the Ato EXECUTION identity
     /// (what executes), never a rebuild-inputs / job identity.
     execution_id: String,
+    /// Rust-SSOT canonical execution contract bytes when the producer has an
+    /// exact v1 contract. Authoring Clean Replay forwards these bytes so the
+    /// API can verify and persist state policy without reconstructing it.
+    execution_contract_jcs: Option<Vec<u8>>,
     capsule_manifest_hash: String,
     surface_requirement: Option<SessionSurfaceRequirement>,
     /// Explicit restore endpoints sealed into the manifest's restore contract.
@@ -1318,6 +1322,7 @@ fn produce_recipe_build(
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
         execution_id: declared_execution_id,
+        execution_contract_jcs: None,
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&toml_bytes).to_hex()),
         surface_requirement: target.surface.clone(),
         endpoints: Vec::new(),
@@ -1686,6 +1691,7 @@ fn produce_import_build(
         port: outcome.plan.port,
         healthcheck,
         execution_id,
+        execution_contract_jcs: None,
         capsule_manifest_hash,
         surface_requirement,
         endpoints,
@@ -1807,6 +1813,7 @@ fn produce_oci_image_import(
             .clone()
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
+        execution_contract_jcs: None,
         capsule_manifest_hash,
         surface_requirement: None,
         endpoints: Vec::new(),
@@ -1907,6 +1914,7 @@ fn produce_compose_import(
             .clone()
             .unwrap_or_else(|| "/".to_string()),
         execution_id,
+        execution_contract_jcs: None,
         capsule_manifest_hash,
         surface_requirement: None,
         // A compose import is a Web artifact — no sealed restore endpoints; the
@@ -3232,6 +3240,12 @@ fn produce_pinned_v1_build(
         // Re-derived from the contract's canonical bytes by the intake, never
         // read out of the lock's stored field.
         execution_id: built.execution_id().as_str().to_string(),
+        execution_contract_jcs: Some(
+            built
+                .contract()
+                .canonical_bytes()
+                .map_err(|error| fail("execution_identity", error.to_string()))?,
+        ),
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&manifest_bytes).to_hex()),
         // The v1 subset has no surface requirement to seal, and the pixel lane
         // is a different job kind entirely.
@@ -4256,6 +4270,7 @@ struct BuilderCleanReplayAdapter<'a> {
     client: &'a authoring_runtime::AuthoringApiClient<'a>,
     work: &'a authoring_runtime::AuthoringWork,
     signer: &'a authoring_runtime::AuthoringSigner,
+    execution_contract_jcs_base64: Option<String>,
 }
 
 const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
@@ -4412,6 +4427,12 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 "fresh resolver output does not match the Authoring Session lock".to_string(),
             );
         }
+        self.execution_contract_jcs_base64 =
+            Some(BASE64.encode(
+                produced.execution_contract_jcs.as_deref().ok_or_else(|| {
+                    "Clean Replay produced no exact execution contract".to_string()
+                })?,
+            ));
         let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
         std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
             .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
@@ -4568,10 +4589,15 @@ fn process_authoring_clean_replay(
         client,
         work,
         signer,
+        execution_contract_jcs_base64: None,
     };
     let (receipt, classified) =
         snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
             .map_err(|error| anyhow!("execute Clean Replay: {error}"))?;
+    let execution_contract_jcs_base64 = adapter
+        .execution_contract_jcs_base64
+        .take()
+        .context("Clean Replay omitted exact execution contract evidence")?;
     let jobdir =
         clean_replay_directory(cfg, &work.authoring_session_id).map_err(|error| anyhow!(error))?;
     let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
@@ -4586,7 +4612,7 @@ fn process_authoring_clean_replay(
     );
     persist_clean_replay_artifact(&jobdir, &artifact).map_err(|error| anyhow!(error))?;
     client
-        .complete_clean_replay(work, &receipt, &classified)
+        .complete_clean_replay(work, &receipt, &classified, &execution_contract_jcs_base64)
         .map_err(|error| anyhow!("report Clean Replay: {error}"))?;
     eprintln!(
         "[builder] Authoring Session {} Clean Replay complete (trace {})",
