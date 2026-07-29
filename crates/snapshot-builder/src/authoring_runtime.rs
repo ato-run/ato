@@ -1021,4 +1021,77 @@ mod tests {
             capsule_toml
         );
     }
+
+    #[test]
+    fn edited_capsule_toml_rebuild_preserves_bytes_and_http_readiness() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
+        let capsule_toml = r#"schema_version = "1"
+name = "hextris"
+version = "1.0.0"
+
+[run]
+command = ["python3", "-m", "http.server", "8000", "--bind", "0.0.0.0"]
+
+[web]
+port = 8000
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["python3", "-c", "print('ready')"]
+timeout_seconds = 30
+"#;
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_edited",
+            "authoring_session_id": "auth_edited",
+            "capsule_revision_id": "caprev_edited",
+            "source_revision_id": "srev_edited",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_edited",
+                "source_materialization_id": "smat_edited",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_edited.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "source_overlay": {
+                "source_overlay_id": "overlay_edited",
+                "source_revision_id": "srev_edited",
+                "overlay_digest": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "manifest": {
+                    "schema": "ato.source-overlay/v1",
+                    "kind": "capsule_toml",
+                    "capsule_toml": capsule_toml
+                }
+            },
+            "setup_mode": "manual",
+            "setup_journal_sequence": 2,
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_edited"
+        }))
+        .expect("edited claim");
+
+        let (normalized, exact_toml) =
+            resolve_authoring_recipe(root.path(), &work).expect("edited recipe");
+
+        assert_eq!(
+            authoring_recipe_origin(&work).expect("origin"),
+            "existing_config"
+        );
+        assert_eq!(
+            normalized.intent.readiness,
+            ReadinessIntentV1::Http {
+                port: 8000,
+                path: "/".to_string(),
+                timeout_seconds: 60,
+            }
+        );
+        assert_eq!(exact_toml, capsule_toml);
+        assert_eq!(
+            replay_capsule_toml(&work, &normalized).expect("replay manifest"),
+            capsule_toml
+        );
+    }
 }
