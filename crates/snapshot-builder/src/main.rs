@@ -4834,10 +4834,25 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
         let screenshot_bytes = BASE64
             .decode(&screenshot)
             .map_err(|_| "post-restore screenshot was not valid base64".to_string())?;
+        let screenshot_quality =
+            match snapshot::authoring_evidence::analyze_screenshot_png(&screenshot_bytes) {
+                Ok(quality) => quality,
+                Err(error) => return Err(error.to_string()),
+            };
         let screenshot_digest = format!("blake3:{}", blake3::hash(&screenshot_bytes).to_hex());
-        let perceptual_hash =
-            snapshot::authoring_evidence::screenshot_perceptual_hash_png(&screenshot_bytes)
-                .map_err(|error| error.to_string())?;
+        eprintln!(
+            "[builder] post-restore screenshot accepted: dimensions={}x{} dhash={} \
+             luminance_variance={} dominant_pixel_ratio_per_mille={} \
+             alpha_coverage_per_mille={} edge_density_per_mille={} quality_score={}",
+            screenshot_quality.width,
+            screenshot_quality.height,
+            screenshot_quality.perceptual_hash,
+            screenshot_quality.luminance_variance,
+            screenshot_quality.dominant_pixel_ratio_per_mille,
+            screenshot_quality.alpha_coverage_per_mille,
+            screenshot_quality.edge_density_per_mille,
+            screenshot_quality.quality_score,
+        );
         self.screenshot_png_base64 = Some(screenshot);
         let compatibility = self.backend.compatibility_metadata();
         let expires_at = verified_at + chrono::Duration::minutes(15);
@@ -4867,10 +4882,10 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
             post_restore_screenshot: snapshot::authoring_evidence::ScreenshotCandidateV1 {
                 candidate_id: receipt_id("shot", &self.work.work_id),
                 artifact_ref: screenshot_digest,
-                perceptual_hash,
+                perceptual_hash: screenshot_quality.perceptual_hash,
                 capture_point:
                     snapshot::authoring_evidence::ScreenshotCapturePointV1::RestoreVerification,
-                quality_score: 900,
+                quality_score: screenshot_quality.quality_score,
                 possible_personal_data: false,
             },
             issued_at: verified_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
@@ -4947,6 +4962,7 @@ fn finish_authoring_job(
         Ok(()) => Ok(()),
         Err(error) => {
             let reason = format!("{error:#}");
+            let error_code = authoring_failure_code(error_code, &reason);
             if let Err(callback_error) = client.mark_job_failed(work, error_code, &reason) {
                 return Err(anyhow!(
                     "Authoring Session {} failed: {reason}; failure callback: {callback_error}",
@@ -4959,6 +4975,19 @@ fn finish_authoring_job(
             ))
         }
     }
+}
+
+fn authoring_failure_code<'a>(fallback: &'a str, reason: &str) -> &'a str {
+    for (marker, code) in [
+        ("SCREENSHOT_BLANK", "screenshot_blank"),
+        ("SCREENSHOT_LOW_INFORMATION", "screenshot_low_information"),
+        ("SCREENSHOT_DECODE_FAILED", "screenshot_decode_failed"),
+    ] {
+        if reason.contains(marker) {
+            return code;
+        }
+    }
+    fallback
 }
 
 fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
@@ -5126,6 +5155,25 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screenshot_quality_failures_keep_retryable_machine_codes() {
+        for (marker, error_code) in [
+            ("SCREENSHOT_BLANK", "screenshot_blank"),
+            ("SCREENSHOT_LOW_INFORMATION", "screenshot_low_information"),
+            ("SCREENSHOT_DECODE_FAILED", "screenshot_decode_failed"),
+        ] {
+            let reason = format!("generate Ready-State Seal: {marker}: rejected");
+            assert_eq!(
+                authoring_failure_code("ready_state_seal_failed", &reason),
+                error_code
+            );
+        }
+        assert_eq!(
+            authoring_failure_code("ready_state_seal_failed", "restore failed"),
+            "ready_state_seal_failed"
+        );
+    }
 
     #[test]
     fn interactive_candidate_uses_the_claim_execution_identity() {
