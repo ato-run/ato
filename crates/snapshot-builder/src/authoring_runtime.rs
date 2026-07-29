@@ -783,7 +783,7 @@ pub fn render_inferred_capsule_toml(
             ],
             timeout_seconds: Some(30),
         },
-        "node" | "npm" | "npx" => SealAtV1 {
+        "node" | "npm" | "npx" | "yarn" | "pnpm" => SealAtV1 {
             command: vec![
                 "node".to_string(),
                 "--input-type=module".to_string(),
@@ -1020,6 +1020,46 @@ mod tests {
             replay_capsule_toml(&work, &normalized).expect("replay manifest"),
             capsule_toml
         );
+    }
+
+    #[test]
+    fn manual_node_package_manager_commands_use_node_for_readiness_without_rewriting_argv() {
+        for program in ["yarn", "pnpm"] {
+            let normalized = normalize_program_intent(ProgramIntentDraftV1 {
+                schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+                origin: ProgramIntentOrigin::ManualSetup,
+                toolchains: Vec::new(),
+                build_steps: Vec::new(),
+                launch: ProgramCommandDraftV1::Argv {
+                    argv: vec![
+                        program.to_string(),
+                        "start".to_string(),
+                        "--host".to_string(),
+                        "0.0.0.0".to_string(),
+                    ],
+                    cwd: WorkspacePathV1::root(),
+                    requested_environment: Vec::new(),
+                    required_tools: vec![program.to_string()],
+                },
+                readiness: ReadinessIntentV1::Http {
+                    port: 5173,
+                    path: "/".to_string(),
+                    timeout_seconds: 60,
+                },
+                build_output_roots: Vec::new(),
+                bindings: Vec::new(),
+                unresolved: Vec::new(),
+            })
+            .expect("manual intent");
+
+            let capsule_toml =
+                render_inferred_capsule_toml(&normalized).expect("generated manifest");
+            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
+                .expect("v1 manifest");
+            assert_eq!(parsed.run.command, normalized.intent.launch.argv);
+            assert_eq!(parsed.web.expect("web").port, 5173);
+            assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
+        }
     }
 
     #[test]
