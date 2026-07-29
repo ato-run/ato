@@ -373,6 +373,15 @@ pub fn derive_build_spec(
 /// the generated Dockerfile's `WORKDIR` and the init's `cd` agree on it.
 pub const V1_GUEST_WORKING_DIRECTORY: &str = "/app";
 
+/// Read-only package-manager cache materialized into Node guest images.
+///
+/// The guest deliberately runs with `HOME=/tmp`. Leaving Corepack at its
+/// default `$HOME/.cache/node/corepack` would therefore hide the manager
+/// downloaded during the image build and make the first guest launch prompt
+/// for a network download. A fixed path makes the build-time and runtime view
+/// identical, and its bytes are committed by the filesystem view digest.
+pub const V1_COREPACK_HOME: &str = "/opt/ato/corepack";
+
 /// argv a runtime prepends to the authored command — and the fact that a
 /// producer looked.
 ///
@@ -627,6 +636,9 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
     let runtime_environment = match spec.runtime {
         RuntimeKind::Deno => "export DENO_DIR=/deno-dir",
+        RuntimeKind::Node => {
+            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
+        }
         _ => "",
     };
     format!(
@@ -998,9 +1010,19 @@ pub(crate) fn base_image_and_install(
             "node:20-slim".to_string(),
             Some(if probe.has_package_json {
                 if probe.has_yarn_lock {
-                    "corepack enable && yarn install --frozen-lockfile".to_string()
+                    format!(
+                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                         yarn install --frozen-lockfile"
+                    )
                 } else if probe.has_pnpm_lock {
-                    "corepack enable && pnpm install --frozen-lockfile".to_string()
+                    format!(
+                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                         pnpm install --frozen-lockfile"
+                    )
                 } else if probe.has_package_lock {
                     "npm ci".to_string()
                 } else {
@@ -2792,7 +2814,12 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert_eq!(yarn.runtime, RuntimeKind::Node);
         assert_eq!(
             yarn.install_cmd.as_deref(),
-            Some("corepack enable && yarn install --frozen-lockfile")
+            Some(
+                "corepack enable && COREPACK_HOME=/opt/ato/corepack \
+                 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                 COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                 yarn install --frozen-lockfile"
+            )
         );
         assert_eq!(yarn.resolved_argv, ["yarn", "start", "--host", "0.0.0.0"]);
 
@@ -2807,7 +2834,12 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         .expect("pnpm derives");
         assert_eq!(
             pnpm.install_cmd.as_deref(),
-            Some("corepack enable && pnpm install --frozen-lockfile")
+            Some(
+                "corepack enable && COREPACK_HOME=/opt/ato/corepack \
+                 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                 COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                 pnpm install --frozen-lockfile"
+            )
         );
 
         let npm = derive_build_spec_v1(
@@ -2920,6 +2952,38 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             !export.contains("/bin/sh -lc 'python3 app.py'"),
             "the v1 init must not re-parse a joined command: {export}"
         );
+    }
+
+    #[test]
+    fn a_node_guest_reuses_the_package_manager_materialized_during_build() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["yarn", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_yarn_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("node spec");
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(
+            assemble.contains("COREPACK_HOME=/opt/ato/corepack"),
+            "{assemble}"
+        );
+        assert!(assemble.contains("corepack install"), "{assemble}");
+        assert!(
+            export.contains(
+                "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
+            ),
+            "{export}"
+        );
+        assert!(export.contains("'yarn' 'start'"), "{export}");
     }
 
     const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
