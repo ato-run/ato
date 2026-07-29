@@ -710,10 +710,10 @@ SourceExistingPath:
   2. join onto the selected root
   3. the joined path MUST exist in the ProgramSourceProjection as a regular
      file or directory of the expected kind
-  4. no symlink traversal — guaranteed a priori because A1v2 admissibility
-     (which runs over the FULL tree before projection, §1) rejects every
-     in-tree symlink outright (source_tree.rs, admissibility rule 4); the
-     rule is stated here anyway so it survives any future relaxation of A1
+  4. no symlink traversal — A1v2 admits closed repository-internal symlinks,
+     but the projection's path index is built with lexical metadata and does
+     not follow them. A control or manifest field must resolve to a projected
+     regular file/directory itself, never through a link.
 
 SourceRelativeFuturePath:
   lexical validation only — the target may be produced by a later build
