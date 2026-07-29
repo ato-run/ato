@@ -849,10 +849,10 @@ fn source_materialization_report_body(
 
 /// Ack a `source_materialize` failure (blocked / internal) on the shared lane.
 ///
-/// TODO(ato-api follow-up): same missing server-side handler as
-/// [`ack_source_materialized`]. Posts `status = "materialize_failed"` +
-/// `{pipeline_state, error_code, error_detail}`; ato-api owns mapping `blocked_repo`
-/// (terminal) vs `failed_internal` (retry, max 3).
+/// Failure is a discriminated outcome, not a malformed success report:
+/// receipts, archives, and Source Revision fields are deliberately absent.
+/// ato-api owns the terminal/retry projection and persists this exact payload
+/// for strict idempotency.
 fn ack_source_materialize_failed(
     cfg: &Config,
     job_id: &str,
@@ -863,11 +863,28 @@ fn ack_source_materialize_failed(
         cfg.api_url
     ))
     .set("authorization", &format!("Bearer {}", cfg.token))
-    .send_json(
-        ureq::json!({ "agent_id": cfg.agent_id, "status": "materialize_failed", "source_materialize_failure": fail }),
-    )
+    .send_json(source_materialization_failure_ack_body(&cfg.agent_id, fail))
     .map_err(|e| anyhow!("source_materialize failed-ack: {e}"))?;
     Ok(())
+}
+
+fn source_materialization_failure_ack_body(
+    agent_id: &str,
+    fail: &SourceMaterializeFail,
+) -> serde_json::Value {
+    ureq::json!({
+        "agent_id": agent_id,
+        "outcome": "failed",
+        "failure": {
+            "stage": "source_materialization",
+            "code": fail.error_code,
+            "message": fail.error_detail,
+            "retryable": fail.pipeline_state == "failed_internal",
+            "details": {
+                "pipeline_state": fail.pipeline_state,
+            },
+        },
+    })
 }
 
 /// Resolve the registry identity fields from a SEALED manifest — **never synthesized**.
@@ -7458,11 +7475,13 @@ targets = ["web"]
 
     #[test]
     fn admissibility_failure_maps_to_terminal_blocked_repo() {
-        // An A1v2 admissibility violation (here: a symlink) is a terminal blocked_repo
-        // with a stable machine code; the ack carries pipeline_state/error_code/detail.
+        // An A1v2 admissibility violation (here: an absolute symlink) is a
+        // terminal blocked_repo with a stable machine code; the ack carries
+        // pipeline_state/error_code/detail.
         let err = SourceMaterializeError::Inadmissible(
-            capsule::foundation::blob::SourceAdmissibilityError::Symlink {
+            capsule::foundation::blob::SourceAdmissibilityError::AbsoluteOrPlatformSymlinkTarget {
                 path: std::path::PathBuf::from("link"),
+                target: "/etc/passwd".to_string(),
             },
         );
         let fail = SourceMaterializeFail::from_materialize_error(&err);
@@ -7523,6 +7542,24 @@ targets = ["web"]
         assert_eq!(fail.error_code, "source_missing");
         let v = serde_json::to_value(&fail).unwrap();
         assert_eq!(v["pipeline_state"], "failed_internal");
+    }
+
+    #[test]
+    fn source_materialization_failed_ack_is_a_typed_failure_union_arm() {
+        let fail = SourceMaterializeFail::internal("checkout", "git failed".into());
+        let body = source_materialization_failure_ack_body("builder-a", &fail);
+        assert_eq!(body["agent_id"], "builder-a");
+        assert_eq!(body["outcome"], "failed");
+        assert_eq!(body["failure"]["stage"], "source_materialization");
+        assert_eq!(body["failure"]["code"], "checkout");
+        assert_eq!(body["failure"]["message"], "git failed");
+        assert_eq!(body["failure"]["retryable"], true);
+        assert_eq!(
+            body["failure"]["details"]["pipeline_state"],
+            "failed_internal"
+        );
+        assert!(body.get("artifact").is_none());
+        assert!(body.get("source_receipt").is_none());
     }
 
     // ---- attempt_v1_execution_identity / content_digest_of ----

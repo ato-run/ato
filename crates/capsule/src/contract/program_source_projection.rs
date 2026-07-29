@@ -78,6 +78,7 @@
 //! lock-file rename migration and across lock rewrites that embed
 //! `program_identity`.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -97,7 +98,8 @@ use crate::common::lock_presence::{
 };
 use crate::foundation::blob::source_archive::{MAX_COMPRESSED_BYTES, MAX_UNCOMPRESSED_BYTES};
 use crate::foundation::blob::source_tree::{
-    MAX_FILE_COUNT, MAX_FILE_SIZE_BYTES, materialized_source_tree_hash,
+    MAX_FILE_COUNT, MAX_FILE_SIZE_BYTES, MAX_TREE_ENTRY_COUNT, materialized_source_tree_hash,
+    validate_source_tree, validate_symlink_target,
 };
 
 /// The Capsule manifest file name at the selected root.
@@ -643,21 +645,18 @@ fn safe_archive_entry_path(raw: &Path) -> Result<PathBuf, String> {
 /// rather than sanitizes and fails the whole archive on the first violation
 /// (the caller drops `dest`, so a rejected archive leaves nothing behind):
 ///
-/// * **entry kind** — only `Regular` and `Directory` are extracted. Symlink,
-///   hardlink, character/block device, FIFO, GNU sparse, pax global-header,
-///   `Continuous`, and any unknown type byte are rejected. No symlink is ever
-///   created, so no later entry can be redirected through one; no device or
-///   FIFO node is ever created, so extraction cannot produce a node A1v2 would
-///   have to reject later. A `Regular`/`Directory` entry that also carries a
-///   link-name field is malformed and rejected too.
+/// * **entry kind** — only `Regular`, `Directory`, and the source profile's
+///   validated `Symlink` are extracted. Hardlinks, devices, FIFOs, sparse
+///   entries and unknown types are rejected. Symlinks are created only after
+///   every regular file and directory has been written, so no archive member
+///   can redirect a later write through a link.
 /// * **path** — [`safe_archive_entry_path`] admits `Component::Normal` only,
 ///   so absolute paths, `..`, `.`, and drive prefixes are rejected rather than
 ///   stripped.
 /// * **containment** — the joined target is re-checked with
 ///   `starts_with(dest)`. With `Normal`-only components this is already
-///   lexically guaranteed and stays true on disk because no symlink is ever
-///   created inside `dest`; the check is a cheap belt to that argument's
-///   braces.
+///   lexically guaranteed. Delayed link creation preserves that guarantee
+///   throughout all content writes.
 /// * **no overwrite** — regular files are created with `create_new`, so two
 ///   entries claiming one path is a rejection instead of a silent
 ///   last-writer-wins.
@@ -697,7 +696,10 @@ pub fn extract_source_archive(
     })?;
 
     let mut file_count: usize = 0;
+    let mut entry_count: usize = 0;
     let mut total_bytes: u64 = 0;
+    let mut seen_paths = HashSet::new();
+    let mut pending_symlinks: Vec<(PathBuf, PathBuf)> = Vec::new();
     for entry in entries {
         let mut entry = entry.map_err(|source| {
             not_a_source_archive(
@@ -705,6 +707,13 @@ pub fn extract_source_archive(
                 format!("tar entry is unreadable: {source}"),
             )
         })?;
+        entry_count += 1;
+        if entry_count > MAX_TREE_ENTRY_COUNT {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                format!("archive holds more than {MAX_TREE_ENTRY_COUNT} entries"),
+            ));
+        }
 
         let entry_type = entry.header().entry_type();
         let mode = entry.header().mode().map_err(|source| {
@@ -725,17 +734,20 @@ pub fn extract_source_archive(
             })?
             .into_owned();
 
-        if !matches!(entry_type, EntryType::Regular | EntryType::Directory) {
+        if !matches!(
+            entry_type,
+            EntryType::Regular | EntryType::Directory | EntryType::Symlink
+        ) {
             return Err(not_a_source_archive(
                 archive_tar_zst,
                 format!(
-                    "entry {} has type {:?}; only regular files and directories may be extracted",
+                    "entry {} has type {:?}; only regular files, directories, and validated symlinks may be extracted",
                     raw_path.display(),
                     entry_type
                 ),
             ));
         }
-        if has_link_name {
+        if entry_type != EntryType::Symlink && has_link_name {
             return Err(not_a_source_archive(
                 archive_tar_zst,
                 format!("entry {} carries a link name", raw_path.display()),
@@ -751,13 +763,19 @@ pub fn extract_source_archive(
                 format!("entry {} escapes the extraction root", raw_path.display()),
             ));
         }
+        if !seen_paths.insert(relative.clone()) {
+            return Err(not_a_source_archive(
+                archive_tar_zst,
+                format!("entry {} is declared twice", raw_path.display()),
+            ));
+        }
 
         match entry_type {
             EntryType::Directory => {
                 fs::create_dir_all(&target)
                     .map_err(|source| projection_io("create directory", &target, source))?;
             }
-            _ => {
+            EntryType::Regular => {
                 // Before a byte is written: an archive this host could only
                 // give a platform-dependent identity is refused, not extracted.
                 let executable = match classify_extracted_file_mode(
@@ -826,9 +844,91 @@ pub fn extract_source_archive(
                 drop(file);
                 set_extracted_file_mode(&target, executable)?;
             }
+            EntryType::Symlink => {
+                if declared_size != 0 {
+                    return Err(not_a_source_archive(
+                        archive_tar_zst,
+                        format!(
+                            "symlink entry {} declares non-zero size {declared_size}",
+                            raw_path.display()
+                        ),
+                    ));
+                }
+                let link_name = entry
+                    .link_name()
+                    .map_err(|source| {
+                        not_a_source_archive(
+                            archive_tar_zst,
+                            format!(
+                                "symlink entry {} has an unreadable target: {source}",
+                                raw_path.display()
+                            ),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        not_a_source_archive(
+                            archive_tar_zst,
+                            format!("symlink entry {} has no target", raw_path.display()),
+                        )
+                    })?
+                    .into_owned();
+                let raw_target = link_name.to_str().ok_or_else(|| {
+                    not_a_source_archive(
+                        archive_tar_zst,
+                        format!(
+                            "symlink entry {} has a non-UTF-8 target",
+                            raw_path.display()
+                        ),
+                    )
+                })?;
+                validate_symlink_target(&relative, raw_target).map_err(|error| {
+                    not_a_source_archive(
+                        archive_tar_zst,
+                        format!("invalid symlink {}: {error}", raw_path.display()),
+                    )
+                })?;
+                pending_symlinks.push((relative, link_name));
+            }
+            _ => unreachable!("entry type was exhaustively allowlisted above"),
         }
     }
+    for (relative, link_name) in pending_symlinks {
+        let target = dest.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|source| projection_io("create directory", parent, source))?;
+        }
+        create_archive_symlink(&link_name, &target).map_err(|source| {
+            not_a_source_archive(
+                archive_tar_zst,
+                format!(
+                    "create symlink {} -> {}: {source}",
+                    relative.display(),
+                    link_name.display()
+                ),
+            )
+        })?;
+    }
+    validate_source_tree(dest).map_err(|error| {
+        not_a_source_archive(
+            archive_tar_zst,
+            format!("extracted tree failed source validation: {error}"),
+        )
+    })?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_archive_symlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn create_archive_symlink(_target: &Path, _link: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this platform cannot preserve source symlink semantics",
+    ))
 }
 
 /// Normalize an extracted file's permissions to the two states the archive
@@ -911,11 +1011,13 @@ impl CapsuleControlFiles {
 /// from the digest wholesale.
 ///
 /// In the derivation flow this runs against the staging copy, after the A1v2
-/// pass (step 1) has already rejected symlinks and special nodes in the
-/// original tree. That is also why every rejection here is relativized against
-/// `selected_root`: in the derivation flow the root is the process-private
-/// staging copy, and a caller shown `<staging>/capsule.toml` would be shown a
-/// path it can write to and cannot act on.
+/// pass (step 1) has admitted only closed repository-internal symlinks and
+/// rejected special nodes. A control file itself must still be a regular file;
+/// a symlink under that reserved name is never dereferenced. Every rejection
+/// here is relativized against `selected_root`: in the derivation flow the root
+/// is the process-private staging copy, and a caller shown
+/// `<staging>/capsule.toml` would be shown a path it can write to and cannot act
+/// on.
 pub fn resolve_capsule_control_files(
     selected_root: &Path,
 ) -> Result<CapsuleControlFiles, CapsuleProgramError> {
@@ -1191,10 +1293,9 @@ impl ProjectedCapsuleSource {
     /// vectors pin *together*. Names are the projection's own bytes, so there is
     /// no path back to the tree.
     ///
-    /// A non-UTF-8 name, a symlink, or a special node here is not transliterated
-    /// or skipped: A1v2 admissibility and `copy_tree` already rejected all three
-    /// before staging, so encountering one means the tree changed afterwards and
-    /// this fails closed.
+    /// A non-UTF-8 name or special node here is not transliterated or skipped.
+    /// Validated symlinks are intentionally absent because this method returns
+    /// regular-file paths; their structure remains committed by the digest.
     pub fn projected_file_paths(&self) -> Result<Vec<String>, CapsuleProgramError> {
         let mut paths = Vec::new();
         collect_projected_files(self.staging.path(), "", &mut paths)
@@ -1298,15 +1399,25 @@ fn require_empty_directory(destination: &Path) -> Result<(), CapsuleProgramError
 
 /// Copies `source_dir` into `dest_dir` recursively. `fs::copy` preserves unix
 /// permission bits, so the A1 executable-bit identity survives staging. The
-/// A1v2 pass has already rejected symlinks and special nodes; any encountered
-/// here means the tree changed after the gate, and staging fails closed.
+/// source-profile pass has already validated symlinks and rejected special
+/// nodes. Links are copied without dereferencing and are created after ordinary
+/// entries, so they cannot redirect a later copy.
 ///
 /// `common::fs::copy_dir_recursive` is deliberately not reused: its policies
 /// *skip* symlinks and special nodes, which would silently drop a post-gate
 /// mutation out of the digest instead of rejecting it.
 fn copy_tree(source_dir: &Path, dest_dir: &Path) -> Result<(), CapsuleProgramError> {
+    copy_tree_inner(source_dir, source_dir, dest_dir)
+}
+
+fn copy_tree_inner(
+    source_root: &Path,
+    source_dir: &Path,
+    dest_dir: &Path,
+) -> Result<(), CapsuleProgramError> {
     let entries = fs::read_dir(source_dir)
         .map_err(|source| projection_io("read directory", source_dir, source))?;
+    let mut symlinks = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|source| projection_io("read directory", source_dir, source))?;
         let path = entry.path();
@@ -1317,10 +1428,27 @@ fn copy_tree(source_dir: &Path, dest_dir: &Path) -> Result<(), CapsuleProgramErr
         if file_type.is_dir() {
             fs::create_dir(&destination)
                 .map_err(|source| projection_io("create directory", &destination, source))?;
-            copy_tree(&path, &destination)?;
+            copy_tree_inner(source_root, &path, &destination)?;
         } else if file_type.is_file() {
             fs::copy(&path, &destination)
                 .map_err(|source| projection_io("copy file", &path, source))?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&path)
+                .map_err(|source| projection_io("read symlink", &path, source))?;
+            let raw_target = target.to_str().ok_or_else(|| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "non-UTF-8 symlink target at {} during staging",
+                    path.display()
+                ))
+            })?;
+            let relative = path.strip_prefix(source_root).unwrap_or(&path);
+            validate_symlink_target(relative, raw_target).map_err(|error| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "invalid symlink at {} during staging: {error}",
+                    path.display()
+                ))
+            })?;
+            symlinks.push((target, destination));
         } else {
             return Err(CapsuleProgramError::SourceProjection(format!(
                 "unexpected {} at {} during staging (tree changed after the \
@@ -1329,6 +1457,10 @@ fn copy_tree(source_dir: &Path, dest_dir: &Path) -> Result<(), CapsuleProgramErr
                 path.display(),
             )));
         }
+    }
+    for (target, destination) in symlinks {
+        create_archive_symlink(&target, &destination)
+            .map_err(|source| projection_io("copy symlink", &destination, source))?;
     }
     Ok(())
 }
@@ -1367,6 +1499,9 @@ fn collect_projected_files(
             collect_projected_files(&path, &relative, out)?;
         } else if file_type.is_file() {
             out.push(relative);
+        } else if file_type.is_symlink() {
+            // The source digest commits the link. This method enumerates
+            // regular files only, so it deliberately does not dereference it.
         } else {
             return Err(CapsuleProgramError::SourceProjection(format!(
                 "unexpected {} at {} in the projected tree (tree changed after the \
@@ -1720,7 +1855,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_named_capsule_lock_rejected_by_admissibility_pass() {
+    fn symlink_named_capsule_lock_is_not_excluded_as_a_control_file() {
         use std::os::unix::fs::symlink;
 
         let tmp = TempDir::new().unwrap();
@@ -1732,8 +1867,8 @@ mod tests {
             panic!("expected SourceProjection, got {err:?}");
         };
         assert!(
-            message.contains("A1v2 admissibility") && message.contains("symlink"),
-            "a control-file symlink must fail the step-1 gate, not be excluded: {message}"
+            message.contains("capsule.lock") && message.contains("regular file"),
+            "a control-file symlink must not be excluded as though it were the lock: {message}"
         );
     }
 
@@ -2053,10 +2188,8 @@ mod tests {
         ));
     }
 
-    /// A symlink entry is rejected by the extractor. A1v2 would reject an
-    /// in-tree symlink later anyway, but the extractor must not create the
-    /// link in the first place — a symlink on disk is a redirect a *subsequent*
-    /// entry in the same archive could be written through.
+    /// An absolute symlink entry is rejected before creation. Safe links are
+    /// delayed until after content extraction and validated as one source tree.
     #[test]
     fn symlink_entry_is_rejected_before_any_link_is_created() {
         let sandbox = TempDir::new().unwrap();
@@ -2076,7 +2209,7 @@ mod tests {
         let CapsuleProgramError::NotPinnedMaterialization(message) = &err else {
             panic!("expected NotPinnedMaterialization, got {err:?}");
         };
-        assert!(message.contains("Symlink"), "{message}");
+        assert!(message.contains("relative portable path"), "{message}");
         assert!(
             fs::symlink_metadata(dest.join("link.txt")).is_err(),
             "no symlink may be created before the archive is rejected"
@@ -2664,21 +2797,30 @@ mod tests {
         );
     }
 
-    /// A symlink anywhere in the tree is refused, not followed and not skipped
-    /// — so there is no projection whose digest disagrees with what a producer
-    /// would copy. The refusal happens before the destination is touched.
+    /// A validated symlink is preserved in the projected source and remains a
+    /// symlink; it is never flattened into the target file.
     #[cfg(unix)]
     #[test]
-    fn a_symlink_is_refused_before_anything_is_materialized() {
+    fn a_safe_symlink_is_materialized_without_dereferencing() {
         let root = TempDir::new().unwrap();
         write_base_tree(root.path());
         std::os::unix::fs::symlink("src/main.py", root.path().join("link.py")).unwrap();
 
         let destination = TempDir::new().unwrap();
-        let error = materialize_program_source_projection(&pinned(root.path()), destination.path())
-            .expect_err("a symlink is inadmissible");
-        assert!(format!("{error}").contains("symlink"), "{error}");
-        assert_eq!(fs::read_dir(destination.path()).unwrap().count(), 0);
+        let materialized =
+            materialize_program_source_projection(&pinned(root.path()), destination.path())
+                .expect("a repository-internal link is admissible");
+        assert!(
+            materialized
+                .contract
+                .digest
+                .to_string()
+                .starts_with("sha256:")
+        );
+        assert_eq!(
+            fs::read_link(destination.path().join("link.py")).unwrap(),
+            Path::new("src/main.py")
+        );
     }
 
     /// A non-empty destination is refused: its leftovers would be copied into
