@@ -4,11 +4,11 @@
 //! [`materialize_source_archive`] turns a materialized checkout into a frozen,
 //! content-addressed `.tar.zst` plus its A1v2 identity, in this order:
 //!
-//! 1. Run the A1v2 admissibility profile + hash
+//! 1. Run the source-tree admissibility profile + hash
 //!    ([`super::source_tree::materialized_source_tree_hash`]). A tree that
-//!    violates any admissibility rule (symlink, submodule, LFS pointer, per-file
-//!    or file-count cap, …) has **no** archive: the function returns before a
-//!    single byte is written.
+//!    violates any admissibility rule (unsafe symlink, submodule, LFS pointer,
+//!    per-file or file-count cap, …) has **no** archive: the function returns
+//!    before a single byte is written.
 //! 2. Build a **deterministic** `tar` of the admissible tree — entries in A1's
 //!    per-directory raw-byte-sorted depth-first order, headers normalized
 //!    (mode `0o755` if the A1 executable bit is set else `0o644`; `mtime`/`uid`/
@@ -30,14 +30,18 @@
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tar::{Builder, EntryType, Header};
 use thiserror::Error;
 
 use super::source_tree::{
-    SourceAdmissibilityError, materialized_source_tree_hash, source_archive_hash,
+    SourceAdmissibilityError, ValidatedEntryKind, ValidatedSourceEntry, source_archive_hash,
+    validate_source_tree,
 };
+
+#[cfg(test)]
+use super::source_tree::materialized_source_tree_hash;
 
 /// Production cap on the compressed `.tar.zst` (100 MiB); exceeding it blocks the
 /// repo (SOURCE_MATERIALIZATION_SPEC §3.4).
@@ -169,21 +173,24 @@ fn materialize_source_archive_with_caps(
     // `Inadmissible` (which forwards its pipeline_state), so an inadmissible tree
     // stops here — before the tree is walked for archiving or `out_tar_zst` is
     // touched.
-    let tree_hash = materialized_source_tree_hash(checkout_root)?;
+    let validated = validate_source_tree(checkout_root)?;
+    let tree_hash = validated.tree_hash;
 
-    // (b) Collect entries in A1's per-directory raw-byte-sorted DFS order and sum
-    // regular-file content so a hostile tree cannot force an unbounded in-memory
-    // `tar` buffer before the cap check (per-file / file-count caps already ran).
-    let mut entries: Vec<ArchiveEntry> = Vec::new();
-    let mut content_bytes: u64 = 0;
-    let mut file_count: u64 = 0;
-    collect_entries(
-        checkout_root,
-        checkout_root,
-        &mut entries,
-        &mut content_bytes,
-        &mut file_count,
-    )?;
+    // (b) The same validated entry plan drives identity and archiving. A second
+    // independent walker would be a policy fork: a link admitted by one walk
+    // but serialized differently by another is exactly the skew this boundary
+    // must prevent.
+    let content_bytes = validated.entries.iter().fold(0u64, |sum, entry| {
+        sum.saturating_add(match entry.kind {
+            ValidatedEntryKind::File { size, .. } => size,
+            _ => 0,
+        })
+    });
+    let file_count = validated
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry.kind, ValidatedEntryKind::File { .. }))
+        .count() as u64;
     if content_bytes > caps.max_uncompressed {
         return Err(SourceMaterializeError::UncompressedTooLarge {
             bytes: content_bytes,
@@ -193,7 +200,7 @@ fn materialize_source_archive_with_caps(
 
     // Build the deterministic tar in memory. Bounded above by content_bytes (<=
     // cap) plus per-entry header/padding overhead.
-    let tar_bytes = build_deterministic_tar(&entries)?;
+    let tar_bytes = build_deterministic_tar(&validated.entries)?;
     let uncompressed_bytes = tar_bytes.len() as u64;
     if uncompressed_bytes > caps.max_uncompressed {
         return Err(SourceMaterializeError::UncompressedTooLarge {
@@ -244,109 +251,12 @@ fn materialize_source_archive_with_caps(
     })
 }
 
-/// One entry to archive: a regular file or a directory, with its path relative to
-/// the checkout root. Symlinks / devices / etc. never appear — admissibility ran
-/// first and rejected them.
-struct ArchiveEntry {
-    /// Path relative to the checkout root (POSIX separators on the Linux builder).
-    rel: PathBuf,
-    /// Absolute path used to read the file contents.
-    abs: PathBuf,
-    kind: EntryKind,
-}
-
-enum EntryKind {
-    Dir,
-    File { size: u64, executable: bool },
-}
-
-/// Walk `dir` recursively in A1's order (each directory's children sorted by raw
-/// name bytes, depth-first), pushing a directory entry before recursing into it.
-/// Mirrors [`super::tree_hash`]'s `read_dir_sorted` so the archive order tracks
-/// the fold order the identity is computed in.
-fn collect_entries(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<ArchiveEntry>,
-    content_bytes: &mut u64,
-    file_count: &mut u64,
-) -> Result<(), SourceMaterializeError> {
-    let read = fs::read_dir(dir).map_err(|source| SourceMaterializeError::Io {
-        context: format!("read dir {}", dir.display()),
-        source,
-    })?;
-    let mut children: Vec<(Vec<u8>, PathBuf)> = Vec::new();
-    for entry in read {
-        let entry = entry.map_err(|source| SourceMaterializeError::Io {
-            context: format!("read dir entry under {}", dir.display()),
-            source,
-        })?;
-        let path = entry.path();
-        children.push((raw_name_bytes(&entry.file_name()), path));
-    }
-    children.sort_by(|a, b| a.0.cmp(&b.0));
-
-    for (_, path) in children {
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| SourceMaterializeError::Io {
-                context: format!("stat {}", path.display()),
-                source,
-            })?;
-        let file_type = metadata.file_type();
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|_| SourceMaterializeError::Io {
-                context: format!(
-                    "path {} is not under root {}",
-                    path.display(),
-                    root.display()
-                ),
-                source: io::Error::new(io::ErrorKind::InvalidInput, "path escapes root"),
-            })?
-            .to_path_buf();
-
-        if file_type.is_dir() {
-            out.push(ArchiveEntry {
-                rel,
-                abs: path.clone(),
-                kind: EntryKind::Dir,
-            });
-            collect_entries(root, &path, out, content_bytes, file_count)?;
-        } else if file_type.is_file() {
-            let size = metadata.len();
-            *content_bytes = content_bytes.saturating_add(size);
-            *file_count += 1;
-            out.push(ArchiveEntry {
-                rel,
-                abs: path,
-                kind: EntryKind::File {
-                    size,
-                    executable: is_executable(&metadata),
-                },
-            });
-        } else {
-            // Admissibility already ran and rejected symlinks / devices / sockets /
-            // FIFOs; a non-file, non-dir entry here is a TOCTOU race (the tree
-            // changed between the two walks) — a transient internal failure.
-            return Err(SourceMaterializeError::Io {
-                context: format!(
-                    "unexpected node type at {} after admissibility",
-                    path.display()
-                ),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "non-file/non-dir entry after admissibility passed",
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Serialize `entries` into a deterministic `tar` byte buffer. Every header field
 /// is set explicitly (never copied from filesystem metadata) so the bytes depend
-/// only on the entry's path, kind, size, and A1 executable bit.
-fn build_deterministic_tar(entries: &[ArchiveEntry]) -> Result<Vec<u8>, SourceMaterializeError> {
+/// only on the validated entry plan.
+fn build_deterministic_tar(
+    entries: &[ValidatedSourceEntry],
+) -> Result<Vec<u8>, SourceMaterializeError> {
     let mut builder = Builder::new(Vec::new());
     for entry in entries {
         let mut header = Header::new_gnu();
@@ -355,8 +265,8 @@ fn build_deterministic_tar(entries: &[ArchiveEntry]) -> Result<Vec<u8>, SourceMa
         header.set_mtime(0);
         // new_gnu() leaves uname/gname empty and device fields zero; we never copy
         // fs metadata, so those stay normalized.
-        match entry.kind {
-            EntryKind::Dir => {
+        match &entry.kind {
+            ValidatedEntryKind::Directory => {
                 header.set_entry_type(EntryType::Directory);
                 header.set_mode(0o755);
                 header.set_size(0);
@@ -369,19 +279,32 @@ fn build_deterministic_tar(entries: &[ArchiveEntry]) -> Result<Vec<u8>, SourceMa
                         source,
                     })?;
             }
-            EntryKind::File { size, executable } => {
+            ValidatedEntryKind::File { size, executable } => {
                 header.set_entry_type(EntryType::Regular);
-                header.set_mode(if executable { 0o755 } else { 0o644 });
-                header.set_size(size);
-                let file =
-                    fs::File::open(&entry.abs).map_err(|source| SourceMaterializeError::Io {
-                        context: format!("open {} for archiving", entry.abs.display()),
-                        source,
-                    })?;
+                header.set_mode(if *executable { 0o755 } else { 0o644 });
+                header.set_size(*size);
+                let file = open_validated_regular_file(entry, *size, *executable)?;
                 builder
                     .append_data(&mut header, &entry.rel, file)
                     .map_err(|source| SourceMaterializeError::Io {
                         context: format!("append file {} to tar", entry.rel.display()),
+                        source,
+                    })?;
+            }
+            ValidatedEntryKind::Symlink { raw_target, .. } => {
+                header.set_entry_type(EntryType::Symlink);
+                header.set_mode(0o777);
+                header.set_size(0);
+                header
+                    .set_link_name(raw_target)
+                    .map_err(|source| SourceMaterializeError::Io {
+                        context: format!("set link target for {}", entry.rel.display()),
+                        source,
+                    })?;
+                builder
+                    .append_data(&mut header, &entry.rel, io::empty())
+                    .map_err(|source| SourceMaterializeError::Io {
+                        context: format!("append symlink {} to tar", entry.rel.display()),
                         source,
                     })?;
             }
@@ -395,16 +318,42 @@ fn build_deterministic_tar(entries: &[ArchiveEntry]) -> Result<Vec<u8>, SourceMa
         })
 }
 
-#[cfg(unix)]
-fn raw_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    name.as_bytes().to_vec()
-}
+fn open_validated_regular_file(
+    entry: &ValidatedSourceEntry,
+    expected_size: u64,
+    expected_executable: bool,
+) -> Result<fs::File, SourceMaterializeError> {
+    let metadata =
+        fs::symlink_metadata(&entry.abs).map_err(|source| SourceMaterializeError::Io {
+            context: format!("stat {} before archiving", entry.rel.display()),
+            source,
+        })?;
+    if !metadata.file_type().is_file()
+        || metadata.len() != expected_size
+        || is_executable(&metadata) != expected_executable
+    {
+        return Err(SourceMaterializeError::Io {
+            context: format!("validate {} before archiving", entry.rel.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "entry changed after source-tree validation",
+            ),
+        });
+    }
 
-#[cfg(not(unix))]
-fn raw_name_bytes(name: &std::ffi::OsStr) -> Vec<u8> {
-    // Admissibility already required UTF-8 names, so this is lossless in practice.
-    name.to_string_lossy().into_owned().into_bytes()
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options
+        .open(&entry.abs)
+        .map_err(|source| SourceMaterializeError::Io {
+            context: format!("open {} for archiving", entry.rel.display()),
+            source,
+        })
 }
 
 #[cfg(unix)]
@@ -483,12 +432,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn inadmissible_symlink_blocks_before_any_archive_is_written() {
+    fn unsafe_absolute_symlink_blocks_before_any_archive_is_written() {
         use std::os::unix::fs::symlink;
 
         let tree = tempfile::tempdir().unwrap();
-        write_file(tree.path(), "real.txt", b"target");
-        symlink("real.txt", tree.path().join("link")).unwrap();
+        symlink("/etc/passwd", tree.path().join("link")).unwrap();
 
         let out = tempfile::tempdir().unwrap().path().join("blocked.tar.zst");
         let err = materialize_source_archive(tree.path(), &out).unwrap_err();
@@ -496,7 +444,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SourceMaterializeError::Inadmissible(SourceAdmissibilityError::Symlink { .. })
+                SourceMaterializeError::Inadmissible(
+                    SourceAdmissibilityError::AbsoluteOrPlatformSymlinkTarget { .. }
+                )
             ),
             "got {err:?}"
         );
@@ -505,6 +455,37 @@ mod tests {
         assert!(
             !out.exists(),
             "no archive may be written for an inadmissible tree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_file_and_directory_symlinks_round_trip_with_identity() {
+        use std::os::unix::fs::symlink;
+
+        let tree = tempfile::tempdir().unwrap();
+        write_file(tree.path(), "assets/logo.txt", b"logo");
+        write_file(tree.path(), "src/main.js", b"console.log('ok')\n");
+        fs::create_dir_all(tree.path().join("site")).unwrap();
+        symlink("../assets", tree.path().join("site/assets")).unwrap();
+        symlink("../src/main.js", tree.path().join("site/main.js")).unwrap();
+
+        let out = tempfile::tempdir().unwrap().path().join("links.tar.zst");
+        let produced = materialize_source_archive(tree.path(), &out).unwrap();
+        let unpacked = tempfile::tempdir().unwrap();
+        crate::program_source_projection::extract_source_archive(&out, unpacked.path()).unwrap();
+
+        assert_eq!(
+            materialized_source_tree_hash(unpacked.path()).unwrap(),
+            produced.materialized_source_tree_hash
+        );
+        assert_eq!(
+            fs::read_link(unpacked.path().join("site/assets")).unwrap(),
+            Path::new("../assets")
+        );
+        assert_eq!(
+            fs::read_link(unpacked.path().join("site/main.js")).unwrap(),
+            Path::new("../src/main.js")
         );
     }
 
