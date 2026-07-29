@@ -3259,7 +3259,10 @@ readiness_probe = { http_get = "/health" }
     fn source_without_a_detectable_language_fails_closed() {
         let m = parse(&base_toml());
         let err = derive_build_spec(&m, &SourceProbe::default()).unwrap_err();
-        assert!(err.contains("no node") && err.contains("python"), "{err}");
+        assert!(
+            err.contains("deno") && err.contains("node") && err.contains("python"),
+            "{err}"
+        );
     }
 
     #[test]
