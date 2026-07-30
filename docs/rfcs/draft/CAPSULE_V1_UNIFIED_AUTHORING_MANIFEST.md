@@ -82,4 +82,3 @@ binds the revision to the fetched content digest.
 
 Existing v1 manifests without `source` or `metadata` retain their prior source
 selection and execution behavior. Unknown fields remain fail-closed.
-

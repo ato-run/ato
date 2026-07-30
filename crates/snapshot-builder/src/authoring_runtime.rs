@@ -15,7 +15,7 @@ use capsule::authoring_intent::{
     ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
     normalize_program_intent, to_capsule_manifest_v1,
 };
-use capsule::types::manifest_v1::SealAtV1;
+use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::authoring_evidence::{
@@ -83,6 +83,24 @@ pub struct AuthoringSourceOverlay {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuthoringStoreMetadata {
+    pub name: String,
+    pub short_description: String,
+    pub full_description: String,
+    #[serde(default)]
+    pub primary_category: Option<String>,
+    #[serde(default)]
+    pub primary_subcategory: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub assets: Option<MetadataAssetsV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthoringWork {
     pub kind: String,
     pub work_id: String,
@@ -97,6 +115,12 @@ pub struct AuthoringWork {
     pub pinned_source: PinnedAuthoringSource,
     #[serde(default)]
     pub source_overlay: Option<AuthoringSourceOverlay>,
+    /// Store-facing authored intent projected by the API before this claim is
+    /// handed to a builder. The builder merges it into the declaration before
+    /// deriving Program Intent or invoking the v1 build lane, so there is one
+    /// Effective Manifest for build, lock, revision, and Clean Replay.
+    #[serde(default)]
+    pub store_metadata: Option<AuthoringStoreMetadata>,
     #[serde(default)]
     pub previous_receipt_digest: Option<String>,
     #[serde(default)]
@@ -189,6 +213,13 @@ impl ScreenshotCompletionError {
 pub struct ScreenshotCompletionAck {
     pub accepted: bool,
     pub already_completed: bool,
+}
+
+pub struct SetupCommandCompletion {
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 pub struct AuthoringApiClient<'a> {
@@ -334,8 +365,7 @@ impl AuthoringApiClient<'_> {
         work: &AuthoringWork,
         builder_slot_id: &str,
         command: &SetupCommandClaim,
-        exit_code: i32,
-        duration_ms: u64,
+        completion: &SetupCommandCompletion,
     ) -> Result<(), String> {
         let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
         ureq::post(&format!(
@@ -351,8 +381,10 @@ impl AuthoringApiClient<'_> {
             "builder_slot_id": builder_slot_id,
             "worker_claim_id": worker_claim_id,
             "lease_generation": command.lease_generation,
-            "exit_code": exit_code.clamp(0, 255),
-            "duration_ms": duration_ms,
+            "exit_code": completion.exit_code.clamp(0, 255),
+            "duration_ms": completion.duration_ms,
+            "stdout_truncated": completion.stdout_truncated,
+            "stderr_truncated": completion.stderr_truncated,
         }))
         .map_err(|error| http_error("complete setup command", error))?;
         Ok(())
@@ -609,6 +641,16 @@ pub struct SetupReady<'a> {
     pub resolution_lock_digest: &'a str,
     pub source_closure_id: &'a str,
     pub generated_capsule_toml: &'a str,
+    pub materialized_assets: &'a [MaterializedSetupAsset],
+}
+
+#[derive(Debug, Serialize)]
+pub struct MaterializedSetupAsset {
+    pub kind: &'static str,
+    pub origin_path: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub bytes_base64: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -1001,93 +1043,116 @@ pub fn resolve_authoring_recipe(
     source_root: &Path,
     work: &AuthoringWork,
 ) -> Result<(NormalizedProgramIntentEnvelopeV1, String), String> {
-    let Some(overlay) = &work.source_overlay else {
+    let (origin_manifest, preserve_exact_bytes, merge_store_draft) = if let Some(overlay) =
+        &work.source_overlay
+    {
+        if overlay.source_revision_id != work.source_revision_id {
+            return Err("Source Overlay targets a different immutable Source Revision".to_string());
+        }
+        let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
+            .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
+        match manifest {
+            SourceOverlayManifestV1::CapsuleToml {
+                schema,
+                capsule_toml,
+                ..
+            } => {
+                require_overlay_schema(&schema)?;
+                // A capsule_toml overlay is already the complete author-edited
+                // Manifest. It is applied after the pre-setup Store draft and
+                // therefore wins byte-for-byte.
+                (capsule_toml, true, false)
+            }
+            SourceOverlayManifestV1::ManualCommand {
+                schema,
+                launch_argv,
+                port,
+                readiness_path,
+            } => {
+                require_overlay_schema(&schema)?;
+                if launch_argv.is_empty() {
+                    return Err("manual launch argv is empty".to_string());
+                }
+                if readiness_path != "/" {
+                    return Err(
+                        "manual Authoring v1 currently supports only the synthesized root readiness path"
+                            .to_string(),
+                    );
+                }
+                let required_tools = vec![launch_argv[0].clone()];
+                let normalized = normalize_program_intent(ProgramIntentDraftV1 {
+                    schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+                    origin: ProgramIntentOrigin::ManualSetup,
+                    toolchains: Vec::new(),
+                    build_steps: Vec::new(),
+                    launch: ProgramCommandDraftV1::Argv {
+                        argv: launch_argv,
+                        cwd: WorkspacePathV1::root(),
+                        requested_environment: Vec::new(),
+                        required_tools,
+                    },
+                    readiness: ReadinessIntentV1::Http {
+                        port,
+                        path: readiness_path,
+                        timeout_seconds: 60,
+                    },
+                    build_output_roots: Vec::new(),
+                    bindings: Vec::new(),
+                    unresolved: Vec::new(),
+                })
+                .map_err(|error| format!("normalize manual Program Intent: {error}"))?;
+                (render_inferred_capsule_toml(&normalized)?, false, true)
+            }
+        }
+    } else {
         let source_manifest = source_root.join("capsule.toml");
         if source_manifest.is_file() {
             let capsule_toml = std::fs::read_to_string(&source_manifest)
                 .map_err(|error| format!("read source capsule.toml: {error}"))?;
-            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
-                .map_err(|error| format!("validate source capsule.toml: {error}"))?;
-            parsed
-                .validate_for_interactive_capture()
-                .map_err(|error| format!("source capsule.toml is outside Authoring v1: {error}"))?;
-            let normalized =
-                normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(
-                    |error| format!("derive Program Intent from source capsule.toml: {error}"),
-                )?)
-                .map_err(|error| format!("normalize source Program Intent: {error}"))?;
-            return Ok((normalized, capsule_toml));
+            (capsule_toml, true, true)
+        } else {
+            let normalized = infer_authoring_intent(source_root)?;
+            (render_inferred_capsule_toml(&normalized)?, false, true)
         }
-        let normalized = infer_authoring_intent(source_root)?;
-        let manifest = render_inferred_capsule_toml(&normalized)?;
-        return Ok((normalized, manifest));
     };
-    if overlay.source_revision_id != work.source_revision_id {
-        return Err("Source Overlay targets a different immutable Source Revision".to_string());
-    }
-    let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
-        .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
-    match manifest {
-        SourceOverlayManifestV1::CapsuleToml {
-            schema,
-            capsule_toml,
-            ..
-        } => {
-            require_overlay_schema(&schema)?;
-            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
-                .map_err(|error| format!("validate edited capsule.toml: {error}"))?;
-            parsed
-                .validate_for_interactive_capture()
-                .map_err(|error| format!("edited capsule.toml is outside Authoring v1: {error}"))?;
-            let normalized =
-                normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(
-                    |error| format!("derive Program Intent from edited capsule.toml: {error}"),
-                )?)
-                .map_err(|error| format!("normalize edited Program Intent: {error}"))?;
-            Ok((normalized, capsule_toml))
-        }
-        SourceOverlayManifestV1::ManualCommand {
-            schema,
-            launch_argv,
-            port,
-            readiness_path,
-        } => {
-            require_overlay_schema(&schema)?;
-            if launch_argv.is_empty() {
-                return Err("manual launch argv is empty".to_string());
+
+    let mut parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&origin_manifest)
+        .map_err(|error| format!("validate Effective capsule.toml: {error}"))?;
+    let effective_manifest =
+        if let Some(metadata) = work.store_metadata.as_ref().filter(|_| merge_store_draft) {
+            parsed.name = metadata.name.clone();
+            parsed.metadata.short_description = Some(metadata.short_description.clone());
+            parsed.metadata.description = Some(metadata.full_description.clone());
+            parsed.metadata.license = metadata.license.clone();
+            parsed.metadata.tags = metadata.tags.clone();
+            parsed.metadata.store =
+                metadata
+                    .primary_category
+                    .as_ref()
+                    .map(|category| StoreMetadataV1 {
+                        category: category.clone(),
+                        subcategory: metadata.primary_subcategory.clone(),
+                    });
+            if metadata.assets.is_some() {
+                parsed.metadata.assets = metadata.assets.clone();
             }
-            if readiness_path != "/" {
-                return Err(
-                    "manual Authoring v1 currently supports only the synthesized root readiness path"
-                        .to_string(),
-                );
-            }
-            let required_tools = vec![launch_argv[0].clone()];
-            let normalized = normalize_program_intent(ProgramIntentDraftV1 {
-                schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
-                origin: ProgramIntentOrigin::ManualSetup,
-                toolchains: Vec::new(),
-                build_steps: Vec::new(),
-                launch: ProgramCommandDraftV1::Argv {
-                    argv: launch_argv,
-                    cwd: WorkspacePathV1::root(),
-                    requested_environment: Vec::new(),
-                    required_tools,
-                },
-                readiness: ReadinessIntentV1::Http {
-                    port,
-                    path: readiness_path,
-                    timeout_seconds: 60,
-                },
-                build_output_roots: Vec::new(),
-                bindings: Vec::new(),
-                unresolved: Vec::new(),
-            })
-            .map_err(|error| format!("normalize manual Program Intent: {error}"))?;
-            let capsule_toml = render_inferred_capsule_toml(&normalized)?;
-            Ok((normalized, capsule_toml))
-        }
-    }
+            toml::to_string(&parsed)
+                .map_err(|error| format!("serialize Effective capsule.toml: {error}"))?
+        } else if preserve_exact_bytes {
+            origin_manifest
+        } else {
+            toml::to_string(&parsed)
+                .map_err(|error| format!("serialize Effective capsule.toml: {error}"))?
+        };
+    parsed
+        .validate_for_interactive_capture()
+        .map_err(|error| format!("Effective capsule.toml is outside Authoring v1: {error}"))?;
+    let normalized =
+        normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(|error| {
+            format!("derive Program Intent from Effective capsule.toml: {error}")
+        })?)
+        .map_err(|error| format!("normalize Effective Program Intent: {error}"))?;
+    Ok((normalized, effective_manifest))
 }
 
 pub fn authoring_recipe_origin(
@@ -1761,6 +1826,12 @@ timeout_seconds = 30
                     "kind": "capsule_toml",
                     "capsule_toml": capsule_toml
                 }
+            },
+            "store_metadata": {
+                "name": "stale-listing-name",
+                "short_description": "stale listing draft",
+                "full_description": "must not replace the later Manifest overlay",
+                "tags": []
             },
             "setup_mode": "manual",
             "setup_journal_sequence": 2,

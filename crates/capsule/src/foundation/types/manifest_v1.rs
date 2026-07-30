@@ -283,6 +283,11 @@ pub struct AssetPathLocatorV1 {
 #[serde(deny_unknown_fields)]
 pub struct AssetUrlLocatorV1 {
     pub url: String,
+    pub content_digest: String,
+    pub artifact_ref: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 
 /// One launch-supplied variable. BOTH fields are explicit.
@@ -499,6 +504,15 @@ fn build_ignore_matcher(
     })
 }
 
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 impl CapsuleManifestV1 {
     /// Parse and validate. There is no lenient mode: a manifest that does not
     /// validate is not a v1 manifest.
@@ -647,6 +661,50 @@ impl CapsuleManifestV1 {
                                 reason: "must be a credential-free HTTPS URL with a host"
                                     .to_string(),
                             });
+                        }
+                        if !is_sha256_digest(&url.content_digest) {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "content_digest must be sha256:<64 lowercase hex>"
+                                    .to_string(),
+                            });
+                        }
+                        let digest_hex = &url.content_digest["sha256:".len()..];
+                        if url.artifact_ref != format!("ato-asset://sha256/{digest_hex}") {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "artifact_ref must match content_digest exactly"
+                                    .to_string(),
+                            });
+                        }
+                        if !matches!(
+                            url.media_type.as_str(),
+                            "image/png" | "image/jpeg" | "image/webp"
+                        ) {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "media_type must be image/png, image/jpeg, or image/webp"
+                                    .to_string(),
+                            });
+                        }
+                        if let Some(origin_url) = &url.origin_url {
+                            let origin = Url::parse(origin_url).map_err(|error| {
+                                ManifestV1Error::Invalid {
+                                    field,
+                                    reason: format!("origin_url must be HTTPS: {error}"),
+                                }
+                            })?;
+                            if origin.scheme() != "https"
+                                || origin.host_str().is_none()
+                                || !origin.username().is_empty()
+                                || origin.password().is_some()
+                            {
+                                return Err(ManifestV1Error::Invalid {
+                                    field,
+                                    reason: "origin_url must be a credential-free HTTPS URL"
+                                        .to_string(),
+                                });
+                            }
                         }
                     }
                     None => {}
@@ -872,6 +930,99 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/health"]
         manifest
             .validate_for_interactive_capture()
             .expect("qualifies for the Step-4 subset");
+    }
+
+    #[test]
+    fn identity_matches_the_api_cross_language_golden_vector() {
+        use sha2::{Digest as _, Sha256};
+
+        use crate::capsule_lock::{
+            CapsuleLock, LockManifestSection, LockSourceSelectionSection, compute_lock_id,
+        };
+
+        const CROSS_LANGUAGE_MANIFEST: &str = r#"
+schema_version = "1"
+name = "café-界"
+version = "1.2.3"
+
+[source]
+root = "app"
+ignore = ["dist/**", "é/**"]
+
+[metadata]
+short_description = "Unicode ✓"
+tags = ["zeta", "日本語"]
+
+[tools]
+zeta = "2"
+alpha = "1"
+
+[[build.steps]]
+command = ["npm", "run", "build"]
+
+[run]
+command = ["node", "server.js", "--message", "界"]
+
+[env]
+ZETA = "last"
+ALPHA = "first"
+"#;
+        fn sha256_jcs<T: serde::Serialize>(value: &T) -> String {
+            let bytes = serde_jcs::to_vec(value).expect("JCS");
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        }
+
+        let manifest = CapsuleManifestV1::from_toml(CROSS_LANGUAGE_MANIFEST).expect("manifest");
+        let normalized_manifest_digest = manifest.normalized_digest().expect("digest");
+        let system_ignore = SYSTEM_SOURCE_IGNORE_V1
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let mut effective_ignore = system_ignore.clone();
+        effective_ignore.extend(manifest.source.ignore.clone());
+        let source_selection = LockSourceSelectionSection {
+            root: manifest.source.root.clone(),
+            policy_version: SOURCE_FILTER_POLICY_VERSION_V1.to_string(),
+            effective_ignore_digest: sha256_jcs(&effective_ignore),
+            system_ignore_digest: sha256_jcs(&system_ignore),
+            manifest_ignore_digest: sha256_jcs(&manifest.source.ignore),
+            effective_ignore,
+        };
+        let source_closure_id = format!("sha256:{}", "1".repeat(64));
+        let capsule_revision_id = format!(
+            "caprev_{}",
+            sha256_jcs(&serde_json::json!({
+                "source_closure_id": source_closure_id,
+                "normalized_manifest_digest": normalized_manifest_digest.clone(),
+            }))
+            .trim_start_matches("sha256:")
+        );
+        let lock = CapsuleLock {
+            manifest: Some(LockManifestSection {
+                schema_version: "1".to_string(),
+                normalized_digest: normalized_manifest_digest.clone(),
+            }),
+            source_selection: Some(source_selection.clone()),
+            ..CapsuleLock::default()
+        };
+        let lock_id = compute_lock_id(&lock).expect("lock id");
+
+        assert_eq!(
+            normalized_manifest_digest,
+            "sha256:3aafdd92e46a4b185a63b1401e8b0fc2617f550b190d6f6f6a7da6f1df45be6b"
+        );
+        assert_eq!(
+            source_selection.effective_ignore_digest,
+            "sha256:b479692e904ce5b55ab62192a9d42db7451b2021da32c03739b0e6e6d8e82f23"
+        );
+        assert_eq!(
+            capsule_revision_id,
+            "caprev_5c96be2977a5e2d27d1bf01abddde011a609ad100bcd711468862d3c25298d12"
+        );
+        assert_eq!(
+            lock_id.as_str(),
+            "blake3:b93954b0ba65db20b880f72b118bf3a64f4b4172d132e612e283cfc76f1a2b19"
+        );
     }
 
     /// The command is an argv, and argument boundaries survive verbatim —
@@ -1524,6 +1675,10 @@ path = "assets/icon.png"
 
 [metadata.assets.banner]
 url = "https://assets.example/banner.webp"
+content_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+artifact_ref = "ato-asset://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+media_type = "image/webp"
+origin_url = "https://origin.example/banner.webp"
 
 [run]
 command = ["python"]
