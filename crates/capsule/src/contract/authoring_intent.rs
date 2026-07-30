@@ -410,6 +410,7 @@ pub fn to_capsule_manifest_v1(
         name,
         version,
         source: Default::default(),
+        metadata: Default::default(),
         tools: normalized
             .toolchains
             .iter()
