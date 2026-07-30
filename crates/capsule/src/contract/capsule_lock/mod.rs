@@ -43,8 +43,9 @@ pub use schema::{
     AttestationsSection, BindingSection, CAPSULE_LOCK_SCHEMA_VERSION, CapsuleLock, ContractSection,
     DeliveryBootstrap, DeliveryEnvironment, DeliveryHealthcheck, DeliveryRepair, DeliveryService,
     FeatureName, KnownFeature, LockEnvironmentValue, LockFeatures, LockId, LockLaunchSection,
-    LockSignature, PolicySection, ResolutionSection, UnresolvedReason, UnresolvedValue,
-    delivery_environment, parse_delivery_environment_value,
+    LockManifestSection, LockMetadataAsset, LockMetadataAssetOrigin, LockMetadataAssetsSection,
+    LockSignature, LockSourceSelectionSection, PolicySection, ResolutionSection, UnresolvedReason,
+    UnresolvedValue, delivery_environment, parse_delivery_environment_value,
 };
 pub use validate::{
     CapsuleLockValidationError, ValidationMode, validate_persisted, validate_structural,

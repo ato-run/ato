@@ -34,10 +34,14 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
@@ -296,10 +300,17 @@ struct ClaimedPinnedSource {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ClaimedSource {
     source_kind: Option<String>,
+    #[serde(default)]
     github_owner: String,
+    #[serde(default)]
     github_repo: String,
     commit_sha: String,
+    #[serde(default)]
     subdirectory: Option<String>,
+    #[serde(default)]
+    upload_id: Option<String>,
+    #[serde(default)]
+    archive_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1100,6 +1111,8 @@ struct ProducedBuild {
     boot_timeout_s: Option<u32>,
     /// Resolver-owned lock identity. Present only for the strict v1 producer.
     resolution_lock_digest: Option<String>,
+    /// Filtered Program Source Closure committed by the v1 execution contract.
+    source_closure_id: Option<String>,
     /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
     /// validated at produce time.
     ///
@@ -1354,6 +1367,7 @@ fn produce_recipe_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // The authored acceptance program, validated above. Only the interactive
         // HOLD reads it.
         seal_at,
@@ -1723,6 +1737,7 @@ fn produce_import_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
@@ -1845,6 +1860,7 @@ fn produce_oci_image_import(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         warmup_paths: warmup.warmup_paths,
@@ -1948,6 +1964,7 @@ fn produce_compose_import(
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
@@ -2753,6 +2770,138 @@ fn process_source_materialize_job(
                 format!("source_materialize params are invalid: {e}"),
             )
         })?;
+    if source.source_kind.as_deref() == Some("local_archive") {
+        if params.schema != "ato.source-materialize-job/v1"
+            || params.source != *source
+            || params.provider != "local_archive"
+            || params.commit_algorithm != "sha256"
+            || params.resolved_commit_sha != source.commit_sha
+            || params.resolver_contract_version != "ato.capsule-program-source-projection/v1"
+        {
+            return Err(SourceMaterializeFail::internal(
+                "source_plan_mismatch",
+                "the claimed local source and exact-source params disagree".to_string(),
+            ));
+        }
+        let upload_id = source.upload_id.as_deref().ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                "local source omitted upload_id".to_string(),
+            )
+        })?;
+        let expected_digest = source.archive_digest.as_deref().ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                "local source omitted archive_digest".to_string(),
+            )
+        })?;
+        let url = format!(
+            "{}/v1/capsule-snapshots/jobs/{}/local-source-archive",
+            cfg.api_url.trim_end_matches('/'),
+            job.id
+        );
+        let response = ureq::get(&url)
+            .set("authorization", &format!("Bearer {}", cfg.token))
+            .set("x-ato-builder-id", &cfg.agent_id)
+            .call()
+            .map_err(|error| {
+                SourceMaterializeFail::internal(
+                    "local_archive_download",
+                    format!("download local source archive: {error}"),
+                )
+            })?;
+        let mut bytes = Vec::new();
+        std::io::Read::take(response.into_reader(), 100 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                SourceMaterializeFail::internal(
+                    "local_archive_download",
+                    format!("read local source archive: {error}"),
+                )
+            })?;
+        if bytes.len() > 100 * 1024 * 1024 {
+            return Err(SourceMaterializeFail::internal(
+                "compressed_cap_exceeded",
+                "local source archive exceeds 100 MiB".to_string(),
+            ));
+        }
+        let actual_digest = capsule::blob::source_archive_hash(&bytes);
+        if actual_digest != expected_digest {
+            return Err(SourceMaterializeFail::internal(
+                "local_archive_digest_mismatch",
+                "local source archive bytes do not match the selected digest".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(&jobdir).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_workspace",
+                format!("create local source workspace: {error}"),
+            )
+        })?;
+        let archive_path = jobdir.join("source.tar.zst");
+        std::fs::write(&archive_path, &bytes).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_workspace",
+                format!("write local source archive: {error}"),
+            )
+        })?;
+        let extracted = jobdir.join("source");
+        capsule::contract::program_source_projection::extract_source_archive(
+            &archive_path,
+            &extracted,
+        )
+        .map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_invalid",
+                format!("validate local source archive: {error}"),
+            )
+        })?;
+        let source_tree_digest = materialized_source_tree_hash(&extracted).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_tree",
+                format!("digest local source tree: {error}"),
+            )
+        })?;
+        let archive = source_archive_upload::LocalArchive::new(
+            archive_path,
+            actual_digest.clone(),
+            bytes.len() as u64,
+        );
+        let transport = source_archive_upload::HttpArchiveUploadTransport {
+            api_url: &cfg.api_url,
+            token: &cfg.token,
+            agent_id: &cfg.agent_id,
+        };
+        let object_key = source_archive_upload::upload_source_archive(
+            &transport, &job.id, &archive,
+        )
+        .map_err(|error| SourceMaterializeFail::internal(error.code(), error.to_string()))?;
+        let source_receipt = snapshot::source_receipt::SourceReceiptV1 {
+            canonical_repository: format!("ato-local://{upload_id}"),
+            commit_algorithm: "sha256".to_string(),
+            provider: "local_archive".to_string(),
+            resolved_commit_sha: source.commit_sha.clone(),
+            resolver_contract_version: params.resolver_contract_version,
+            schema: snapshot::source_receipt::SOURCE_RECEIPT_V1_SCHEMA.to_string(),
+            source_tree_digest: source_tree_digest.clone(),
+        };
+        let materialization_receipt = snapshot::source_receipt::SourceMaterializationReceiptV1 {
+            archive_format_version: snapshot::source_materialization::SOURCE_ARCHIVE_FORMAT_V1
+                .to_string(),
+            object_key,
+            schema: snapshot::source_receipt::SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA.to_string(),
+            size_bytes: bytes.len() as u64,
+            source_archive_digest: actual_digest,
+            source_tree_digest,
+        };
+        return Ok(SourceMaterializeOk {
+            source_receipt_digest: source_receipt.digest(),
+            materialization_receipt_digest: materialization_receipt.digest(),
+            source_receipt,
+            materialization_receipt,
+            archive,
+        });
+    }
     if params.schema != "ato.source-materialize-job/v1"
         || params.source != *source
         || params.source.source_kind.as_deref() != Some("github")
@@ -3128,14 +3277,6 @@ fn produce_pinned_v1_build(
         acquired.materialized().contract.digest.bytes(),
     )
     .to_string();
-    if generated_manifest.is_some() {
-        refuse_source_revision_mismatch(
-            input.source_revision_id(),
-            input.expected_source_tree_digest(),
-            &expected_source_digest,
-        )?;
-    }
-
     // The manifest, read from that workspace. Parsed here as well as inside the
     // lane because the ack carries values the lane has no reason to report —
     // the manifest hash the registry keys on, and the authored acceptance
@@ -3284,6 +3425,7 @@ fn produce_pinned_v1_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: Some(resolution_lock_digest),
+        source_closure_id: Some(outcome.source_digest),
         seal_at,
         // A v1 manifest has no `[snapshot]` table, so the backend applies its
         // own warmup fallback — the same as a v0.3 capsule that authored none.
@@ -4120,6 +4262,240 @@ fn authoring_readiness_terminal_line(port: u16, path: &str) -> String {
     format!("Readiness: HTTP {path} on port {port} succeeded")
 }
 
+struct SetupCommandResult {
+    exit_code: i32,
+    duration_ms: u64,
+    stdout: String,
+    stderr: String,
+}
+
+fn drain_command_stream(mut stream: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut kept = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let available = limit.saturating_sub(kept.len());
+        kept.extend_from_slice(&buffer[..count.min(available)]);
+    }
+    Ok(kept)
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_setup_command_sandbox(
+    source_root: &Path,
+    cwd: &Path,
+) -> Result<std::process::Child, String> {
+    let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .ok_or_else(|| "setup commands require Bubblewrap".to_string())?;
+    let mut process = Command::new(bwrap);
+    process
+        .args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ])
+        .arg("--bind")
+        .arg(source_root)
+        .arg("/workspace");
+    for system_path in [
+        "/bin",
+        "/usr",
+        "/usr/local",
+        "/lib",
+        "/lib64",
+        "/etc/ssl/certs",
+        "/etc/resolv.conf",
+        "/etc/hosts",
+        "/etc/passwd",
+        "/etc/group",
+    ] {
+        if Path::new(system_path).exists() {
+            process.args(["--ro-bind", system_path, system_path]);
+        }
+    }
+    for control_file in ["capsule.toml", "capsule.lock"] {
+        let host = source_root.join(control_file);
+        if host.is_file() {
+            process
+                .arg("--ro-bind")
+                .arg(&host)
+                .arg(Path::new("/workspace").join(control_file));
+        }
+    }
+    let sandbox_cwd = Path::new("/workspace").join(
+        cwd.strip_prefix(source_root)
+            .map_err(|_| "setup command cwd escaped the workspace".to_string())?,
+    );
+    process
+        .arg("--chdir")
+        .arg(sandbox_cwd)
+        .args(["--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin"])
+        .args(["--setenv", "HOME", "/workspace/.ato-command-home"])
+        .args(["--setenv", "LANG", "C.UTF-8"])
+        .args(["/bin/sh", "-s"])
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn setup command: {error}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_setup_command_sandbox(
+    _source_root: &Path,
+    _cwd: &Path,
+) -> Result<std::process::Child, String> {
+    Err("setup commands require the Linux Bubblewrap sandbox".to_string())
+}
+
+fn execute_authoring_setup_command(
+    source_root: &Path,
+    work: &authoring_runtime::AuthoringWork,
+    command: &authoring_runtime::SetupCommandClaim,
+) -> Result<SetupCommandResult, String> {
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        return Err("setup commands must never run as root".to_string());
+    }
+    if command.shell != ["/bin/sh", "-s"] {
+        return Err("setup command shell contract is unsupported".to_string());
+    }
+    let cwd_path = Path::new(&command.cwd);
+    if cwd_path.is_absolute()
+        || command.cwd.contains('\\')
+        || cwd_path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("setup command cwd is outside the source workspace".to_string());
+    }
+    let source_root = source_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize setup source root: {error}"))?;
+    let cwd = source_root
+        .join(cwd_path)
+        .canonicalize()
+        .map_err(|error| format!("canonicalize setup command cwd: {error}"))?;
+    if !cwd.starts_with(&source_root) || !cwd.is_dir() {
+        return Err("setup command cwd is outside the source workspace".to_string());
+    }
+    let command_home = source_root.join(".ato-command-home");
+    std::fs::create_dir_all(&command_home)
+        .map_err(|error| format!("create setup command HOME: {error}"))?;
+    let mut child = spawn_setup_command_sandbox(&source_root, &cwd)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "setup command stdin unavailable".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "setup command stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "setup command stderr unavailable".to_string())?;
+    let max_output = command.max_output_bytes_per_stream;
+    let started = Instant::now();
+    let deadline = chrono::DateTime::parse_from_rfc3339(&work.lease_expires_at)
+        .ok()
+        .and_then(|lease| {
+            lease
+                .signed_duration_since(chrono::Utc::now().fixed_offset())
+                .to_std()
+                .ok()
+        })
+        .unwrap_or_else(|| Duration::from_secs(command.max_runtime_seconds))
+        .min(Duration::from_secs(command.max_runtime_seconds));
+    let (status, stdout_bytes, stderr_bytes) = std::thread::scope(|scope| {
+        let input = command.stdin.as_bytes();
+        let writer = scope.spawn(move || -> std::io::Result<()> {
+            stdin.write_all(input)?;
+            stdin.flush()
+        });
+        let stdout_reader = scope.spawn(move || drain_command_stream(stdout, max_output));
+        let stderr_reader = scope.spawn(move || drain_command_stream(stderr, max_output));
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if started.elapsed() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let waited = child.wait();
+                    break waited;
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        let writer = writer
+            .join()
+            .map_err(|_| "setup command stdin writer panicked".to_string())?;
+        writer.map_err(|error| format!("write setup command stdin: {error}"))?;
+        let stdout_bytes = stdout_reader
+            .join()
+            .map_err(|_| "setup command stdout reader panicked".to_string())?
+            .map_err(|error| format!("read setup command stdout: {error}"))?;
+        let stderr_bytes = stderr_reader
+            .join()
+            .map_err(|_| "setup command stderr reader panicked".to_string())?
+            .map_err(|error| format!("read setup command stderr: {error}"))?;
+        Ok::<_, String>((status, stdout_bytes, stderr_bytes))
+    })?;
+    let status = status.map_err(|error| format!("wait for setup command: {error}"))?;
+    let timed_out = started.elapsed() >= deadline && !status.success();
+    Ok(SetupCommandResult {
+        exit_code: if timed_out {
+            124
+        } else {
+            status.code().unwrap_or(1)
+        },
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+    })
+}
+
+fn report_setup_command_stream(
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+    slot_id: &str,
+    command: &authoring_runtime::SetupCommandClaim,
+    stream: &str,
+    sequence: &mut u64,
+    output: &str,
+) -> Result<(), String> {
+    const CHUNK_BYTES: usize = 256 * 1024;
+    let mut remaining = output;
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(CHUNK_BYTES);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &remaining[..end];
+        client.append_setup_command_output(work, slot_id, command, stream, *sequence, chunk)?;
+        *sequence += 1;
+        remaining = &remaining[end..];
+    }
+    Ok(())
+}
+
 fn process_authoring_setup(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -4161,8 +4537,6 @@ fn process_authoring_setup(
             ));
         }
     }
-    let setup_origin =
-        authoring_runtime::authoring_recipe_origin(work).map_err(|error| fail("detect", error))?;
     let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
         .map_err(|error| fail("setup", error))?;
     if jobdir.exists() {
@@ -4189,6 +4563,9 @@ fn process_authoring_setup(
         &inference_root,
     )
     .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
+    let setup_origin = authoring_runtime::authoring_recipe_origin(&inference_root, work)
+        .map_err(|error| fail("detect", error))?;
+    let source_has_manifest = inference_root.join("capsule.toml").is_file();
     let (normalized, generated_manifest) =
         authoring_runtime::resolve_authoring_recipe(&inference_root, work)
             .map_err(|error| fail("detect", error))?;
@@ -4198,12 +4575,16 @@ fn process_authoring_setup(
         &jobdir,
         &input,
         verified,
-        Some(&generated_manifest),
+        (!source_has_manifest).then_some(generated_manifest.as_str()),
     )?;
     let resolution_lock_digest = produced
         .resolution_lock_digest
         .clone()
         .ok_or_else(|| fail("build", "v1 resolver emitted no lock identity".to_string()))?;
+    let source_closure_id = produced
+        .source_closure_id
+        .clone()
+        .ok_or_else(|| fail("build", "v1 resolver emitted no source closure".to_string()))?;
     let store =
         CasStore::open(jobdir.join("cas")).map_err(|error| fail("launch", error.to_string()))?;
     let guest = backend
@@ -4243,7 +4624,7 @@ fn process_authoring_setup(
         &work.work_id,
         &cfg.token,
         vec![
-            format!("Source closure: {}", work.source_closure_id),
+            format!("Source closure: {source_closure_id}"),
             format!("Program Intent: {}", normalized.digest),
             format!("Resolution lock: {resolution_lock_digest}"),
             format!(
@@ -4309,6 +4690,7 @@ fn process_authoring_setup(
                 origin: setup_origin,
                 normalized_program_intent: &normalized,
                 resolution_lock_digest: &resolution_lock_digest,
+                source_closure_id: &source_closure_id,
                 generated_capsule_toml: &generated_manifest,
             },
         )
@@ -4321,7 +4703,56 @@ fn process_authoring_setup(
     loop {
         match client.setup_control(work) {
             Ok(control) if control.action == "continue" => {
-                std::thread::sleep(Duration::from_secs(2));
+                match client.claim_setup_command(work, &slot.slot_id) {
+                    Ok(Some(command)) => {
+                        let result =
+                            execute_authoring_setup_command(&inference_root, work, &command)
+                                .unwrap_or_else(|error| SetupCommandResult {
+                                    exit_code: 1,
+                                    duration_ms: 0,
+                                    stdout: String::new(),
+                                    stderr: error,
+                                });
+                        let mut sequence = 0;
+                        report_setup_command_stream(
+                            client,
+                            work,
+                            &slot.slot_id,
+                            &command,
+                            "stdout",
+                            &mut sequence,
+                            &result.stdout,
+                        )
+                        .map_err(|error| fail("setup_command_output", error))?;
+                        report_setup_command_stream(
+                            client,
+                            work,
+                            &slot.slot_id,
+                            &command,
+                            "stderr",
+                            &mut sequence,
+                            &result.stderr,
+                        )
+                        .map_err(|error| fail("setup_command_output", error))?;
+                        client
+                            .complete_setup_command(
+                                work,
+                                &slot.slot_id,
+                                &command,
+                                result.exit_code,
+                                result.duration_ms,
+                            )
+                            .map_err(|error| fail("setup_command_complete", error))?;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_secs(2)),
+                    Err(error) => {
+                        eprintln!(
+                            "[builder] Authoring Session {} command claim failed: {error}",
+                            work.authoring_session_id
+                        );
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
             }
             Ok(_) => break,
             Err(error) => {
@@ -4488,8 +4919,22 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             &jobdir.join("source-download"),
         )
         .map_err(|error| error.to_string())?;
-        let generated_manifest =
-            authoring_runtime::replay_capsule_toml(self.work, &request.normalized_program_intent)?;
+        let replay_source = jobdir.join("replay-source");
+        std::fs::create_dir_all(&replay_source)
+            .map_err(|error| format!("create Clean Replay source workspace: {error}"))?;
+        capsule::contract::program_source_projection::extract_source_archive(
+            verified.path(),
+            &replay_source,
+        )
+        .map_err(|error| format!("extract Clean Replay source: {error}"))?;
+        let (replayed_intent, generated_manifest) =
+            authoring_runtime::resolve_authoring_recipe(&replay_source, self.work)?;
+        if replayed_intent.digest != request.normalized_program_intent.digest {
+            return Err(
+                "fresh recipe resolution does not match the Authoring Session Program Intent"
+                    .to_string(),
+            );
+        }
         let produced = produce_pinned_v1_build(
             self.cfg,
             &self.work.work_id,
@@ -6350,6 +6795,8 @@ targets = ["web"]
                 github_repo: "app".into(),
                 commit_sha: "a".repeat(40),
                 subdirectory: None,
+                upload_id: None,
+                archive_digest: None,
             }),
             recipe_toml: None,
             kind: kind.into(),
@@ -6732,6 +7179,8 @@ targets = ["web"]
             github_repo: repo.into(),
             commit_sha: commit.into(),
             subdirectory: sub.map(String::from),
+            upload_id: None,
+            archive_digest: None,
         };
         let dest =
             std::env::temp_dir().join(format!("never-created-clone-dest-{}", std::process::id()));
