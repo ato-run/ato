@@ -922,71 +922,40 @@ fn lock_metadata_asset(
             }
             let bytes = std::fs::read(&resolved)
                 .map_err(|error| format!("read metadata asset '{}': {error}", path.path))?;
+            let digest_hex = hex::encode(Sha256::digest(&bytes));
             Ok(LockMetadataAsset {
                 origin: LockMetadataAssetOrigin {
                     kind: "path".to_string(),
                     value: path.path.clone(),
                 },
-                content_digest: format!("sha256:{}", hex::encode(Sha256::digest(&bytes))),
-                artifact_ref: None,
-                media_type: image_media_type(&bytes, &path.path)?,
+                content_digest: format!("sha256:{digest_hex}"),
+                artifact_ref: Some(format!("ato-asset://sha256/{digest_hex}")),
+                media_type: image_media_type(&bytes)?,
             })
         }
-        AssetLocatorV1::Url(url) => {
-            let file_name = url.url.rsplit('/').next().unwrap_or_default();
-            let digest_hex = file_name.split('.').next().unwrap_or_default();
-            if digest_hex.len() != 64
-                || !digest_hex
-                    .chars()
-                    .all(|character| character.is_ascii_hexdigit())
-            {
-                return Err(format!(
-                    "metadata asset URL must be materialized to a content-addressed authoring-assets URL: {}",
-                    url.url
-                ));
-            }
-            let extension = file_name.rsplit('.').next().unwrap_or_default();
-            let media_type = image_media_type(&[], extension)?;
-            Ok(LockMetadataAsset {
-                origin: LockMetadataAssetOrigin {
-                    kind: "url".to_string(),
-                    value: url.url.clone(),
-                },
-                content_digest: format!("sha256:{}", digest_hex.to_ascii_lowercase()),
-                artifact_ref: Some(format!(
-                    "ato-asset://sha256/{}",
-                    digest_hex.to_ascii_lowercase()
-                )),
-                media_type,
-            })
-        }
+        AssetLocatorV1::Url(url) => Ok(LockMetadataAsset {
+            origin: LockMetadataAssetOrigin {
+                kind: "url".to_string(),
+                value: url.origin_url.clone().unwrap_or_else(|| url.url.clone()),
+            },
+            content_digest: url.content_digest.clone(),
+            artifact_ref: Some(url.artifact_ref.clone()),
+            media_type: url.media_type.clone(),
+        }),
     }
 }
 
-fn image_media_type(bytes: &[u8], path_or_extension: &str) -> Result<String, String> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-        || path_or_extension.to_ascii_lowercase().ends_with(".png")
-        || path_or_extension.eq_ignore_ascii_case("png")
-    {
+fn image_media_type(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok("image/png".to_string());
     }
-    if bytes.starts_with(b"\xff\xd8\xff")
-        || path_or_extension.to_ascii_lowercase().ends_with(".jpg")
-        || path_or_extension.to_ascii_lowercase().ends_with(".jpeg")
-        || path_or_extension.eq_ignore_ascii_case("jpg")
-        || path_or_extension.eq_ignore_ascii_case("jpeg")
-    {
+    if bytes.starts_with(b"\xff\xd8\xff") {
         return Ok("image/jpeg".to_string());
     }
-    if (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP")
-        || path_or_extension.to_ascii_lowercase().ends_with(".webp")
-        || path_or_extension.eq_ignore_ascii_case("webp")
-    {
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
         return Ok("image/webp".to_string());
     }
-    Err(format!(
-        "metadata asset has an unsupported image type: {path_or_extension}"
-    ))
+    Err("metadata asset bytes have an unsupported image type".to_string())
 }
 
 /// Refuse a build path that lives inside the source tree.
