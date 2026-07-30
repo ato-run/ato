@@ -32,6 +32,7 @@ chrono = { version = "0.4", default-features = true }
 blake3 = "1"
 sha2 = "0.10"
 base64 = "0.22"
+libc = "0.2"
 ed25519-dalek = "2.0"
 serde_jcs = "0.1"
 # v1 intake refusals (`v1_intake::V1IntakeRefusal`) are a typed enum rather than

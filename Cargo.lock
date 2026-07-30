@@ -6563,6 +6563,7 @@ dependencies = [
  "capsulefs",
  "chrono",
  "ed25519-dalek",
+ "libc",
  "protocol",
  "serde",
  "serde_jcs",
