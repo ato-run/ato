@@ -273,6 +273,91 @@ impl AuthoringApiClient<'_> {
             .map_err(|error| format!("decode setup control: {error}"))
     }
 
+    pub fn claim_setup_command(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+    ) -> Result<Option<SetupCommandClaim>, String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        let response = ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/claim",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+        }))
+        .map_err(|error| http_error("claim setup command", error))?;
+        let body = response
+            .into_json::<SetupCommandClaimResponse>()
+            .map_err(|error| format!("decode setup command claim: {error}"))?;
+        Ok(body.command)
+    }
+
+    pub fn append_setup_command_output(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+        command: &SetupCommandClaim,
+        stream: &str,
+        sequence: u64,
+        data: &str,
+    ) -> Result<(), String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/{}/output",
+            self.api_url.trim_end_matches('/'),
+            work.work_id,
+            command.command_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+            "lease_generation": command.lease_generation,
+            "stream": stream,
+            "sequence": sequence,
+            "data": data,
+        }))
+        .map_err(|error| http_error("append setup command output", error))?;
+        Ok(())
+    }
+
+    pub fn complete_setup_command(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+        command: &SetupCommandClaim,
+        exit_code: i32,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/{}/complete",
+            self.api_url.trim_end_matches('/'),
+            work.work_id,
+            command.command_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+            "lease_generation": command.lease_generation,
+            "exit_code": exit_code.clamp(0, 255),
+            "duration_ms": duration_ms,
+        }))
+        .map_err(|error| http_error("complete setup command", error))?;
+        Ok(())
+    }
+
     pub fn mark_setup_stopped(&self, work: &AuthoringWork) -> Result<(), String> {
         ureq::post(&format!(
             "{}{AUTHORING_BASE_PATH}/setup/{}/stopped",
@@ -522,6 +607,7 @@ pub struct SetupReady<'a> {
     pub origin: &'a str,
     pub normalized_program_intent: &'a NormalizedProgramIntentEnvelopeV1,
     pub resolution_lock_digest: &'a str,
+    pub source_closure_id: &'a str,
     pub generated_capsule_toml: &'a str,
 }
 
@@ -529,6 +615,26 @@ pub struct SetupReady<'a> {
 #[serde(deny_unknown_fields)]
 pub struct SetupControl {
     pub action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupCommandClaimResponse {
+    command: Option<SetupCommandClaim>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCommandClaim {
+    pub command_id: String,
+    pub shell: Vec<String>,
+    pub stdin: String,
+    pub cwd: String,
+    pub max_runtime_seconds: u64,
+    pub max_output_bytes_per_stream: usize,
+    #[serde(rename = "policy_digest")]
+    pub _policy_digest: String,
+    pub lease_generation: u64,
 }
 
 pub struct AuthoringArchiveTransport<'a> {
@@ -574,9 +680,7 @@ impl crate::source_archive_download::ArchiveDownloadTransport for AuthoringArchi
 
 pub fn archive_input(work: &AuthoringWork) -> Result<ArchiveOnlyBuildInput, String> {
     let source = &work.pinned_source;
-    if source.source_revision_id != work.source_revision_id
-        || source.source_tree_digest != work.source_closure_id
-    {
+    if source.source_revision_id != work.source_revision_id {
         return Err("pinned source identity does not match its Authoring Session".to_string());
     }
     ArchiveOnlyBuildInput::new(
@@ -878,6 +982,12 @@ enum SourceOverlayManifestV1 {
     CapsuleToml {
         schema: String,
         capsule_toml: String,
+        #[serde(default)]
+        #[serde(rename = "normalized_manifest_digest")]
+        _normalized_manifest_digest: Option<String>,
+        #[serde(default)]
+        #[serde(rename = "base_manifest_digest")]
+        _base_manifest_digest: Option<String>,
     },
     ManualCommand {
         schema: String,
@@ -892,6 +1002,22 @@ pub fn resolve_authoring_recipe(
     work: &AuthoringWork,
 ) -> Result<(NormalizedProgramIntentEnvelopeV1, String), String> {
     let Some(overlay) = &work.source_overlay else {
+        let source_manifest = source_root.join("capsule.toml");
+        if source_manifest.is_file() {
+            let capsule_toml = std::fs::read_to_string(&source_manifest)
+                .map_err(|error| format!("read source capsule.toml: {error}"))?;
+            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
+                .map_err(|error| format!("validate source capsule.toml: {error}"))?;
+            parsed
+                .validate_for_interactive_capture()
+                .map_err(|error| format!("source capsule.toml is outside Authoring v1: {error}"))?;
+            let normalized =
+                normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(
+                    |error| format!("derive Program Intent from source capsule.toml: {error}"),
+                )?)
+                .map_err(|error| format!("normalize source Program Intent: {error}"))?;
+            return Ok((normalized, capsule_toml));
+        }
         let normalized = infer_authoring_intent(source_root)?;
         let manifest = render_inferred_capsule_toml(&normalized)?;
         return Ok((normalized, manifest));
@@ -905,6 +1031,7 @@ pub fn resolve_authoring_recipe(
         SourceOverlayManifestV1::CapsuleToml {
             schema,
             capsule_toml,
+            ..
         } => {
             require_overlay_schema(&schema)?;
             let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
@@ -963,9 +1090,16 @@ pub fn resolve_authoring_recipe(
     }
 }
 
-pub fn authoring_recipe_origin(work: &AuthoringWork) -> Result<&'static str, String> {
+pub fn authoring_recipe_origin(
+    source_root: &Path,
+    work: &AuthoringWork,
+) -> Result<&'static str, String> {
     let Some(overlay) = &work.source_overlay else {
-        return Ok("inferred");
+        return Ok(if source_root.join("capsule.toml").is_file() {
+            "existing_config"
+        } else {
+            "inferred"
+        });
     };
     match overlay
         .manifest
@@ -978,6 +1112,7 @@ pub fn authoring_recipe_origin(work: &AuthoringWork) -> Result<&'static str, Str
     }
 }
 
+#[cfg(test)]
 pub fn replay_capsule_toml(
     work: &AuthoringWork,
     normalized: &NormalizedProgramIntentEnvelopeV1,
@@ -994,6 +1129,7 @@ pub fn replay_capsule_toml(
         SourceOverlayManifestV1::CapsuleToml {
             schema,
             capsule_toml,
+            ..
         } => {
             require_overlay_schema(&schema)?;
             Ok(capsule_toml)
@@ -1429,6 +1565,61 @@ mod tests {
     }
 
     #[test]
+    fn source_capsule_toml_wins_over_inference_and_is_not_overwritten() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "fixture").expect("source");
+        let capsule_toml = r#"schema_version = "1"
+name = "source-owned"
+version = "2.0.0"
+
+[metadata]
+short_description = "kept byte-for-byte"
+
+[run]
+command = ["python3", "-m", "http.server", "4310", "--bind", "0.0.0.0"]
+
+[web]
+port = 4310
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["python3", "-c", "print('ready')"]
+timeout_seconds = 30
+"#;
+        std::fs::write(root.path().join("capsule.toml"), capsule_toml).expect("manifest");
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_source_manifest",
+            "authoring_session_id": "auth_source_manifest",
+            "capsule_revision_id": "caprev_source_manifest",
+            "source_revision_id": "srev_source_manifest",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_source_manifest",
+                "source_materialization_id": "smat_source_manifest",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_source_manifest.tar.zst",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "setup_mode": "suggested",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_source_manifest"
+        }))
+        .expect("claim");
+
+        let (normalized, exact_toml) =
+            resolve_authoring_recipe(root.path(), &work).expect("source recipe");
+
+        assert_eq!(exact_toml, capsule_toml);
+        assert_eq!(normalized.intent.launch.argv[3], "4310");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("capsule.toml")).expect("unchanged manifest"),
+            capsule_toml
+        );
+    }
+
+    #[test]
     fn manual_command_overlay_generates_a_replayable_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("deno.json"), r#"{"tasks":{}}"#).expect("config");
@@ -1472,7 +1663,7 @@ mod tests {
             resolve_authoring_recipe(root.path(), &work).expect("manual recipe");
 
         assert_eq!(
-            authoring_recipe_origin(&work).expect("origin"),
+            authoring_recipe_origin(root.path(), &work).expect("origin"),
             "manual_setup"
         );
         assert_eq!(
@@ -1583,7 +1774,7 @@ timeout_seconds = 30
             resolve_authoring_recipe(root.path(), &work).expect("edited recipe");
 
         assert_eq!(
-            authoring_recipe_origin(&work).expect("origin"),
+            authoring_recipe_origin(root.path(), &work).expect("origin"),
             "existing_config"
         );
         assert_eq!(
