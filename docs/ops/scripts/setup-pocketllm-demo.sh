@@ -4,7 +4,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Brings a fresh Ubuntu 22.04/24.04 + NVIDIA host to the point where the
 #
-#     Store → Open → chat
+#     Store → Run → chat
 #
 # demo for the GPU local-LLM "PocketLLM" (Qwen3-30B-A3B via SGLang) works:
 #
@@ -19,8 +19,9 @@
 #   6. open-webui (systemd) chat UI → localhost:30000/v1  + a 2nd cloudflared tunnel
 #
 # The capsule (ato/pocketllm, repo Koh0920/qwen3-sglang) is ALREADY published —
-# this script does not publish anything. The demo entrypoint stays
-#     https://app.ato.run/open/ato/pocketllm
+# this script does not publish anything. The demo entrypoint is the App Page's
+# autostart URL (/open is retired with no redirect — ato-pwa#241):
+#     https://app.ato.run/a/pocketllm?autostart=1&ref=ato%2Fpocketllm
 # and the open-webui tunnel URL is the chat surface.
 #
 # Every validated command below ran on a real RTX A6000 on 2026-06-25.
@@ -33,7 +34,7 @@
 # (driver-reboot resume, device-flow approval). At the end it prints:
 #   • the runner tunnel URL (runner --public-base-url)
 #   • the open-webui chat tunnel URL (the chat surface)
-#   • the /open demo URL
+#   • the demo entrypoint URL (App Page, autostart)
 #
 # ── pkill GOTCHA (cost hours, read this) ─────────────────────────────────────
 # NEVER run `pkill -f cloudflared` (or any `pkill -f <pattern>` where the pattern
@@ -78,7 +79,9 @@ SGLANG_PORT=30000          # SGLang OpenAI-compatible API (loopback)
 PROXY_PORT=8080            # ato runner proxy (cloudflared → here) → <slug>.app.ato.run
 WEBUI_PORT=8888            # open-webui chat UI (cloudflared → here)
 CAPSULE_REF="ato/pocketllm"
-OPEN_URL="https://app.ato.run/open/${CAPSULE_REF}"
+# /open is retired with no redirect (ato-pwa#241) — the demo entrypoint is the
+# App Page's autostart URL instead: /a/<slug>?autostart=1&ref=<publisher/slug>.
+DEMO_APP_URL="https://app.ato.run/a/${CAPSULE_REF##*/}?autostart=1&ref=${CAPSULE_REF//\//%2F}"
 
 # systemd unit names (idempotent: same names every run).
 UNIT_CF_RUNNER="ato-cf-tunnel"      # cloudflared → runner proxy (PROXY_PORT)
@@ -446,11 +449,11 @@ ${GREEN}${BOLD}PocketLLM demo is set up on ${HOST}.${NC}
       ${WEBUI_TUNNEL_URL}
 
   ${BOLD}Demo entrypoint${NC} (open as the DEMO ACCOUNT in a browser):
-      ${OPEN_URL}
+      ${DEMO_APP_URL}
 
-The demo is TWO surfaces today: the model app_url reached via /open, and the
-direct open-webui chat tunnel above. (Single-capsule "app_url IS the chat UI" is
-blocked on ato-api#152.)
+The demo is TWO surfaces today: the model app_url reached via the App Page's
+autostart, and the direct open-webui chat tunnel above. (Single-capsule
+"app_url IS the chat UI" is blocked on ato-api#152.)
 
 ${YELLOW}Ephemeral-URL reminder:${NC} cloudflared quick-tunnel URLs change whenever the
 cloudflared process restarts. The tunnels are systemd units (survive SSH/reboot),
