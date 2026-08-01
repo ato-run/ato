@@ -47,8 +47,15 @@ exactly this broke every staging preview.
     builder and the runner agent need it (see below).
   - `/etc/ato/runner-builder-override.env` — root-owned `0600`; holds
     `SNAPSHOT_BUILDER_AGENT_TOKEN`, `ATO_API_URL=https://staging.api.ato.run`,
-    `ATO_BUILDER_SUPERVISOR=1`, `ATO_FC_VSOCK=1`, and
+    `ATO_BUILDER_SUPERVISOR=1`, `ATO_FC_VSOCK=1`, `ATO_FC_MEM_MIB=4096`, and
     `ATO_GUEST_AGENT_BIN=/usr/local/lib/ato/guest-agent-musl`.
+
+Authoring builders need a 4 GiB guest. Large Vite dependency optimizers can
+temporarily retain substantially more memory outside V8's bounded old space
+while the first page is warmed for capture. A 2 GiB guest can therefore pass
+HTTP readiness and then be OOM-killed immediately after Ready-State restore.
+The in-guest Node limit remains 512 MiB; the remaining memory is reserved for
+optimizer-native allocations, the kernel, and restore-time page faults.
 
 ## /tmp capacity: why ATO_FC_WORK is set
 
