@@ -899,7 +899,12 @@ pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str
 rm -rf "$ATO_ROOTFS/app/node_modules/.vite" "$ATO_ROOTFS/app/node_modules/.vite-temp"
 ln -s /tmp/ato-node-cache/vite "$ATO_ROOTFS/app/node_modules/.vite"
 ln -s /tmp/ato-node-cache/vite-temp "$ATO_ROOTFS/app/node_modules/.vite-temp""#,
-            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0",
+            // Keep Node's V8 heap within the 2 GiB authoring guest envelope.
+            // Tooling such as Vite can otherwise consume almost the entire
+            // guest during dependency optimization and be killed only after
+            // readiness has succeeded. The init script is identity-bearing,
+            // so this resource policy is deterministic and auditable.
+            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NODE_OPTIONS=--max-old-space-size=1024",
             "mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp",
         ),
         _ => ("", "", ""),
@@ -3719,6 +3724,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             "{export}"
         );
         assert!(
+            export.contains("NODE_OPTIONS=--max-old-space-size=1024"),
+            "{export}"
+        );
+        assert!(
             export.find("mount -t tmpfs tmpfs /tmp").unwrap()
                 < export.find("mkdir -p /tmp/ato-node-cache/vite").unwrap(),
             "the cache targets must be created after /tmp becomes tmpfs: {export}"
@@ -3732,6 +3741,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
 
         assert!(!export.contains("ato-node-cache"), "{export}");
         assert!(!export.contains("node_modules/.vite"), "{export}");
+        assert!(!export.contains("NODE_OPTIONS"), "{export}");
     }
 
     const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";

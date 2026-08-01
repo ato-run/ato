@@ -74,6 +74,14 @@ Seal, and cannot widen a source or dependency path to writable access. The
 initial Node authoring policy applies this to Vite's `.vite` and `.vite-temp`
 caches, which Vite must create before its HTTP listener becomes ready.
 
+The builder also applies a deterministic runtime resource policy inside the
+identity-bearing guest init. For the 2 GiB authoring guest, Node receives a
+1 GiB V8 old-space limit. This leaves headroom for the kernel and non-heap
+runtime memory and prevents dependency optimizers from passing readiness and
+then being killed by the guest OOM policy. The limit is builder policy, not an
+author-controlled environment value, and changing it changes the measured
+filesystem view.
+
 `CleanReplayReceiptV1` is emitted by an authenticated builder and binds the
 Authoring Session, all materialization inputs, execution contract, readiness,
 effective isolation posture, and replay diff. The API verifies this receipt;
