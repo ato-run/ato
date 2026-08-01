@@ -1480,6 +1480,52 @@ pub(crate) fn base_image_and_install(
     })
 }
 
+/// The image-build-time production build for a vite `preview` launch, derived
+/// from filesystem evidence (same doctrine as [`base_image_and_install`]).
+///
+/// A `[run] command` of `<pm> run preview …` serves `dist/`, and `dist/` must
+/// exist BEFORE the guest boots: the guest rootfs is read-only (see
+/// `export_guest_rootfs_script_v1` — only tool-owned cache paths are redirected
+/// to tmpfs), so running `vite build` at boot fails on EROFS. The build
+/// therefore belongs in the image assembly, chained after dependency install,
+/// where its output is baked into the identity-bearing guest tree.
+///
+/// Fail-closed: only a plain `… vite build` script (no shell syntax) from a
+/// recognized package manager qualifies; anything else returns `None` and the
+/// image is assembled exactly as before.
+pub fn vite_production_prebuild_cmd(authored: &[String], source_root: &Path) -> Option<String> {
+    let pm = authored.first().map(String::as_str)?;
+    if !matches!(pm, "npm" | "pnpm" | "yarn" | "bun") {
+        return None;
+    }
+    if authored.get(1).map(String::as_str) != Some("run")
+        || authored.get(2).map(String::as_str) != Some("preview")
+    {
+        return None;
+    }
+    let raw = std::fs::read_to_string(source_root.join("package.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let build = value
+        .get("scripts")
+        .and_then(|scripts| scripts.get("build"))
+        .and_then(|script| script.as_str())?;
+    if build.trim().is_empty()
+        || build.chars().any(|character| {
+            matches!(
+                character,
+                '\'' | '"' | '\\' | ';' | '|' | '&' | '$' | '<' | '>' | '(' | ')'
+            ) || character.is_control()
+        })
+    {
+        return None;
+    }
+    let tokens = build.split_ascii_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 || tokens[tokens.len() - 2..] != ["vite", "build"] {
+        return None;
+    }
+    Some(format!("{pm} run build"))
+}
+
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
 /// interpolated into the generated `supervisor.json` + the guest spawn script, so a
 /// malformed name is **rejected at emission** (fail-closed), never emitted — mirroring
@@ -3178,6 +3224,49 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             has_py_files: true,
             ..SourceProbe::default()
         }
+    }
+
+    fn preview_argv() -> Vec<String> {
+        ["npm", "run", "preview", "--", "--host", "0.0.0.0"]
+            .map(str::to_string)
+            .to_vec()
+    }
+
+    #[test]
+    fn vite_preview_launch_gets_an_image_time_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("fixture");
+        assert_eq!(
+            vite_production_prebuild_cmd(&preview_argv(), dir.path()),
+            Some("npm run build".to_string())
+        );
+    }
+
+    #[test]
+    fn compound_or_non_vite_build_scripts_get_no_image_time_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"npm run a && npm run b","preview":"vite preview"}}"#,
+        )
+        .expect("fixture");
+        assert_eq!(
+            vite_production_prebuild_cmd(&preview_argv(), dir.path()),
+            None
+        );
+
+        // A non-preview launch never gets one either, whatever the scripts say.
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .expect("fixture");
+        let dev = ["npm", "run", "dev"].map(str::to_string).to_vec();
+        assert_eq!(vite_production_prebuild_cmd(&dev, dir.path()), None);
     }
 
     #[test]
