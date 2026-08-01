@@ -92,6 +92,10 @@ pub(crate) struct RestoreSnapshotCommand {
     /// Legacy Web leases omit this field and `surface_contract_version` together.
     pub session_surface: Option<SessionSurfaceDescriptor>,
     pub surface_contract_version: Option<String>,
+    /// Additive public-surface activation contract. `Some("2")` means local
+    /// readiness is not user-visible readiness: the runner must keep retrying
+    /// `/ready` until the control plane validates and activates the public path.
+    pub surface_activation_version: Option<String>,
     /// Control-plane session binding for the surface gateway assertion scope.
     /// Required only for an explicit canonical surface lease.
     pub session_id: Option<String>,
@@ -220,6 +224,28 @@ pub(crate) fn parse_restore_snapshot_command(
             (Some(version.to_string()), Some(descriptor))
         }
     };
+    let surface_activation_version =
+        if fields.is_some_and(|fields| fields.contains_key("surface_activation_version")) {
+            let version = command
+                .get("surface_activation_version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| err("surface_activation_version must be a non-empty string"))?;
+            if version != "2" {
+                return Err(err(&format!(
+                    "unsupported surface_activation_version {version:?}"
+                )));
+            }
+            if session_surface.is_none() {
+                return Err(err(
+                    "surface_activation_version requires an explicit session_surface",
+                ));
+            }
+            Some(version.to_string())
+        } else {
+            None
+        };
     let accepted_present =
         fields.is_some_and(|fields| fields.contains_key("accepted_session_surfaces"));
     let accepted_session_surfaces = if accepted_present {
@@ -330,6 +356,7 @@ pub(crate) fn parse_restore_snapshot_command(
             .filter(|s| !s.trim().is_empty()),
         session_surface,
         surface_contract_version,
+        surface_activation_version,
         session_id,
         accepted_session_surfaces,
         with_bindings,
@@ -1216,6 +1243,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_surface_activation_v2_only_with_an_explicit_surface() {
+        let command = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "surface_activation_version": "2",
+            "session_id": "session-web-1",
+            "accepted_session_surfaces": [{
+                "kind": "web",
+                "profiles": ["ato.web-surface.v1"]
+            }],
+            "session_surface": {
+                "kind": "web",
+                "profile": "ato.web-surface.v1",
+                "surface_id": "surface-web-1",
+                "embed_policy": "sandboxed"
+            }
+        })))
+        .expect("valid activation v2 Web surface");
+        assert_eq!(command.surface_activation_version.as_deref(), Some("2"));
+
+        let unsupported = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "surface_activation_version": "3",
+            "session_id": "session-web-1",
+            "accepted_session_surfaces": [{
+                "kind": "web",
+                "profiles": ["ato.web-surface.v1"]
+            }],
+            "session_surface": {
+                "kind": "web",
+                "profile": "ato.web-surface.v1",
+                "surface_id": "surface-web-1",
+                "embed_policy": "sandboxed"
+            }
+        })))
+        .expect_err("unknown activation versions fail closed");
+        assert!(unsupported.1.contains("surface_activation_version"));
+
+        let without_surface = parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_activation_version": "2"
+        })))
+        .expect_err("activation v2 cannot be detached from a surface");
+        assert!(without_surface.1.contains("explicit session_surface"));
+    }
+
+    #[test]
     fn legacy_artifact_accepts_an_explicit_canonical_web_surface() {
         let manifest = manifest_with(None, false);
         let command = explicit_web_surface_command();
@@ -1722,6 +1794,7 @@ mod tests {
             healthcheck_url_path: Some("/health".into()),
             session_surface: None,
             surface_contract_version: None,
+            surface_activation_version: None,
             session_id: None,
             accepted_session_surfaces: None,
             with_bindings: false,
