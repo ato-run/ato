@@ -31,3 +31,6 @@ thiserror = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

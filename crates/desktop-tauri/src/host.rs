@@ -745,4 +745,53 @@ mod tests {
             Err(HostControlError::UnrecognizedIntent(_))
         ));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_cancel_terminates_the_owned_process_group_without_an_orphan() {
+        let host = DesktopHost::new();
+        let sleep = runner::resolve_on_path("sleep").expect("sleep on PATH");
+        let child_id = host
+            .operation_agent
+            .lock()
+            .expect("operation supervisor")
+            .spawn(&SpawnSpec {
+                program: sleep,
+                args: vec!["30".into()],
+                env: Vec::new(),
+                output: OutputSink::Null,
+            })
+            .expect("spawn cancellable operation");
+        host.operations.lock().expect("operation records").insert(
+            "op-cancel-test".into(),
+            OperationRecord {
+                child_id,
+                kind: DesktopOperationKind::Install,
+                target: None,
+                log_path: PathBuf::from(".tmp/op-cancel-test.log"),
+                cancelled: false,
+                exit_code: None,
+            },
+        );
+
+        let cancelled = host
+            .cancel_operation("op-cancel-test")
+            .expect("cancel operation");
+        assert_eq!(cancelled.status, DesktopOperationStatus::Cancelled);
+        assert_eq!(
+            host.operation_status("op-cancel-test")
+                .expect("read cancelled status")
+                .status,
+            DesktopOperationStatus::Cancelled
+        );
+
+        // terminate_group waits for the direct child after signalling the
+        // whole process group, so ESRCH is observable synchronously here.
+        let rc = unsafe { libc::kill(child_id.0 as libc::pid_t, 0) };
+        assert_eq!(rc, -1, "cancelled install process must be gone");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
 }
