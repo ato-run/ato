@@ -50,7 +50,7 @@ neither crate depends on Tauri, GPUI, Wry, React, or WebView types.
 |---|---|---|---|
 | `main` | bundled Launcher assets | yes | local asset origin only |
 | `home` | `https://app.ato.run` | no | exact trusted HTTPS origin only |
-| `app:*` | capsule session surface | no | future session-specific policy |
+| `app:*` | capsule session surface | no | the launched loopback HTTP(S) origin only |
 
 The `main` capability is defense in depth, not the sole authorization check.
 Every custom command verifies the caller label. Remote Home communicates using
@@ -113,6 +113,20 @@ session record directory directly. The CLI exposes:
 - `ato app installed remove <install-profile-key> --json`
 - `ato app installed remove <install-profile-key> --purge-state --json`
 
+Install sources are likewise explicit CLI lanes owned by `ato`, never by the
+shell:
+
+- Store: `ato install <publisher/slug> ...`
+- GitHub: `ato install --from-gh-repo <owner/repository> ...`
+- local source tree: `ato install --from-local <directory> ...`
+- local artifact: `ato install --from-capsule <file.capsule> ...`
+
+The local-artifact lane derives capsule name and version from the capsule
+artifact, assigns the non-registry `local` publisher namespace, and enters the
+same install finalization path as Store and GitHub. This preserves the shared
+installed-app/profile/revision identity derivation instead of creating Desktop
+records directly.
+
 Their shared wire types live in `protocol::desktop_library`. Card identity is
 always `install_profile_key`; handle, revision, and session identities are
 metadata only. Reads fail closed on corrupt revision metadata. Remove refuses a
@@ -135,8 +149,10 @@ directories are never deleted by this command.
 
 - The Desktop build currently requires sibling `ato` and `ato-pwa` checkouts or
   an explicit `ATO_DESKTOP_PWA_DIR`.
-- Tauri command registration, app windows, mutation UI, and release bundling
-  remain follow-up phases.
+- Native dialogs are required for install approval and destructive removal, so
+  a compromised bundled document cannot silently approve a mutation.
+- Linux bundle validation requires a native Linux CI runner because WebKitGTK
+  and DBus cannot be meaningfully cross-linked from macOS.
 
 ## Phase 0/1 acceptance
 
@@ -150,7 +166,28 @@ directories are never deleted by this command.
 - [x] Revalidate `atoview://` redirects.
 - [x] Add the host-agnostic one-shot command and typed client boundary.
 - [x] Add Installed Apps read/remove model through CLI JSON contracts.
-- [ ] Register Installed Apps/session commands in the Tauri adapter and emit
+- [x] Register Installed Apps/session commands in the Tauri adapter and emit
   lifecycle events.
-- [ ] Add `app:*` windows and lifecycle parity.
-- [ ] Add multi-platform bundle/release CI.
+- [x] Add `app:*` windows and lifecycle parity.
+- [x] Add multi-platform bundle/release CI.
+
+## Phase 2–6 acceptance
+
+- [x] Install from Store, GitHub, local source trees, and local `.capsule`
+  artifacts through typed CLI lanes.
+- [x] Persist the Launcher library through CLI-owned installed state.
+- [x] Keep Launch, Focus, Close (hidden warm retention), and Stop as distinct
+  operations.
+- [x] Limit remote Home handoff to a validated
+  `ato://desktop/install?kind=store|github&source=...` intent.
+- [x] Keep all Tauri commands unavailable to remote Home and guest windows;
+  commands also reject every caller label other than `main`.
+- [x] Serialize Desktop inspect/launch to enforce single-instance focus and
+  stop a newly launched session if its window cannot be presented.
+- [x] Supervise runner and install children as process groups; cancellation,
+  readiness failure, shell shutdown, and retained-session expiry reap owned
+  processes.
+- [x] Add Launcher app detail, revision update/rollback, repair, and native
+  confirmed remove/remove-with-data flows.
+- [x] Bundle `ato` and `ato-netd`; define native macOS, Windows, and Linux
+  bundle jobs.
