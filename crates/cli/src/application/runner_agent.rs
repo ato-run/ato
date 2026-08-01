@@ -2352,18 +2352,72 @@ fn serve_root_proxy(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Ok((mut inbound, _)) = listener.accept().await else {
+            let Ok((inbound, _)) = listener.accept().await else {
                 break;
             };
             let upstream_addr = upstream_addr.clone();
             tokio::spawn(async move {
-                let Ok(mut upstream) = tokio::net::TcpStream::connect(&upstream_addr).await else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await;
+                if let Err(error) = relay_root_http(inbound, &upstream_addr).await {
+                    tracing::debug!(%error, %upstream_addr, "runner ingress connection ended");
+                }
             });
         }
     })
+}
+
+/// Relay one public HTTP connection after replacing Ato's ingress hostname
+/// with the capsule-facing authority. Normal requests are forced closed by the
+/// shared policy, while WebSocket upgrades remain full-duplex after the first
+/// normalized handshake.
+async fn relay_root_http(
+    mut inbound: tokio::net::TcpStream,
+    upstream_addr: &str,
+) -> std::io::Result<()> {
+    use protocol::net::ingress_http::{MAX_REQUEST_HEAD_BYTES, normalize_request_head};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let request = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut request = Vec::with_capacity(4096);
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = inbound.read(&mut chunk).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "runner ingress request ended before its HTTP headers",
+                ));
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                if end + 4 > MAX_REQUEST_HEAD_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "runner ingress request headers exceed 64 KiB",
+                    ));
+                }
+                return Ok(request);
+            }
+            if request.len() >= MAX_REQUEST_HEAD_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "runner ingress request headers exceed 64 KiB",
+                ));
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "runner ingress request headers timed out",
+        )
+    })??;
+    let normalized = normalize_request_head(request, upstream_addr)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut upstream = tokio::net::TcpStream::connect(upstream_addr).await?;
+    upstream.write_all(&normalized).await?;
+    tokio::io::copy_bidirectional(&mut inbound, &mut upstream).await?;
+    Ok(())
 }
 
 // ── Proxy readiness probe (v1.2 PR 3e-4) ──
@@ -7359,13 +7413,20 @@ mod tests {
         // bring-up probe consumes one connection before the real request.
         let upstream_listener = TcpListener::bind("127.0.0.1:0").expect("bind upstream");
         let upstream_port = upstream_listener.local_addr().expect("addr").port();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
         let upstream = std::thread::spawn(move || {
+            let mut request_tx = Some(request_tx);
             for _ in 0..3 {
                 let Ok((mut stream, _)) = upstream_listener.accept() else {
                     break;
                 };
                 let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
+                let read = stream.read(&mut buf).unwrap_or(0);
+                if read > 0
+                    && let Some(sender) = request_tx.take()
+                {
+                    let _ = sender.send(String::from_utf8_lossy(&buf[..read]).into_owned());
+                }
                 let body = "{\"hello\":\"from-upstream\"}";
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -7388,6 +7449,11 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let body = response.text().await.expect("body");
         assert!(body.contains("from-upstream"));
+        let request = request_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("upstream request");
+        assert!(request.contains(&format!("Host: 127.0.0.1:{upstream_port}\r\n")));
+        assert!(request.contains("Connection: close\r\n"));
         drop(upstream); // serving thread parks on accept; process teardown reaps it
         handle.abort();
 
