@@ -13,6 +13,7 @@
 //! pieces moved into `ato-netd` and per-caller `net_client` modules.
 
 pub mod control;
+pub mod ingress_http;
 pub mod receipt;
 pub mod resolver;
 pub mod stable_origin;

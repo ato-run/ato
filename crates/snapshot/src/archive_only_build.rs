@@ -48,8 +48,9 @@ use std::path::{Path, PathBuf};
 
 use capsule::contract::program_source_projection::{
     MaterializedProgramSource, VerifiedPinnedSourceMaterialization,
-    materialize_program_source_projection,
+    materialize_program_source_projection_with_manifest,
 };
+use capsule::foundation::types::manifest_v1::CapsuleManifestV1;
 
 use crate::source_materialization::{
     SourceMaterializationError, object_key_for_archive, verify_fetched_archive,
@@ -327,11 +328,21 @@ pub fn acquire_pinned_source(
         }
     })?;
 
-    let materialized =
-        materialize_program_source_projection(&pinned, &projection_root).map_err(|e| {
-            ArchiveOnlyBuildRefusal::ProjectionFailed {
+    let manifest_text =
+        pinned
+            .root_manifest_text()
+            .map_err(|e| ArchiveOnlyBuildRefusal::ProjectionFailed {
                 reason: e.to_string(),
-            }
+            })?;
+    let manifest = CapsuleManifestV1::from_toml(&manifest_text).map_err(|e| {
+        ArchiveOnlyBuildRefusal::ProjectionFailed {
+            reason: format!("invalid root capsule.toml: {e}"),
+        }
+    })?;
+    let materialized =
+        materialize_program_source_projection_with_manifest(&pinned, &projection_root, &manifest)
+            .map_err(|e| ArchiveOnlyBuildRefusal::ProjectionFailed {
+            reason: e.to_string(),
         })?;
 
     Ok(AcquiredPinnedSource {
@@ -504,7 +515,8 @@ mod tests {
         fs::create_dir_all(checkout.join("app")).expect("mkdir");
         fs::write(
             checkout.join("capsule.toml"),
-            "[capsule]\nname = \"menuflow\"\n",
+            "schema_version = \"1\"\nname = \"menuflow\"\nversion = \"1.0.0\"\n\
+             [run]\ncommand = [\"python3\", \"app/main.py\"]\n",
         )
         .expect("write manifest");
         fs::write(checkout.join("app").join("main.py"), "print('hello')\n").expect("write source");

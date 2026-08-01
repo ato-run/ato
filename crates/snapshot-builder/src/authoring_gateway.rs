@@ -1,10 +1,12 @@
 //! One registered builder slot serving both Authoring Preview and Terminal.
 //!
-//! Preview traffic is an opaque TCP relay to the held guest. Only the
-//! session-bound Terminal path is terminated here as a WebSocket, and only
-//! after the API-injected builder bearer is verified.
+//! Preview traffic normalizes the public ingress `Host` into the held guest's
+//! authority, then relays bytes. Normal HTTP is one request per upstream
+//! connection; a WebSocket becomes opaque after its normalized handshake.
+//! Only the session-bound Terminal path is terminated here as a WebSocket, and
+//! only after the API-injected builder bearer is verified.
 
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +15,8 @@ use std::time::Duration;
 use tungstenite::Message;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::StatusCode;
+
+use protocol::net::ingress_http::{MAX_REQUEST_HEAD_BYTES, normalize_request_head};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -199,6 +203,10 @@ fn authorize_terminal_handshake(
 
 fn relay_preview(mut client: TcpStream, upstream: SocketAddr) -> io::Result<()> {
     let mut server = TcpStream::connect_timeout(&upstream, CONNECT_TIMEOUT)?;
+    let request = read_preview_request_head(&mut client)?;
+    let normalized = normalize_preview_request(request, upstream)?;
+    server.write_all(&normalized)?;
+    client.set_read_timeout(None)?;
     let mut client_read = client.try_clone()?;
     let mut server_write = server.try_clone()?;
     let upstream_half = std::thread::spawn(move || {
@@ -213,13 +221,58 @@ fn relay_preview(mut client: TcpStream, upstream: SocketAddr) -> io::Result<()> 
     downstream.map(|_| ())
 }
 
+fn read_preview_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
+    client.set_read_timeout(Some(CONNECT_TIMEOUT))?;
+    let mut request = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = client.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Authoring Preview request ended before its HTTP headers",
+            ));
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            if end + 4 > MAX_REQUEST_HEAD_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Authoring Preview request headers exceed 64 KiB",
+                ));
+            }
+            return Ok(request);
+        }
+        if request.len() >= MAX_REQUEST_HEAD_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Authoring Preview request headers exceed 64 KiB",
+            ));
+        }
+    }
+}
+
+/// Normalize the public builder origin into the guest-facing authority.
+///
+/// Source servers such as Vite reject an arbitrary public `Host` by default.
+/// The Authoring Preview boundary owns that public origin, so forwarding it
+/// unchanged leaks ingress topology into the capsule and makes an otherwise
+/// healthy app return 403. Normal HTTP requests are also made one-per-upstream
+/// connection: that keeps every request on a reused browser connection going
+/// through this normalization. WebSocket upgrades retain their connection
+/// headers and become an opaque byte stream after this first handshake.
+fn normalize_preview_request(request: Vec<u8>, upstream: SocketAddr) -> io::Result<Vec<u8>> {
+    normalize_request_head(request, &upstream.to_string())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
 
     #[test]
-    fn preview_requests_are_relayed_without_http_rewriting() {
+    fn preview_requests_use_the_guest_authority_and_close_normal_http() {
         let upstream = TcpListener::bind("127.0.0.1:0").expect("upstream");
         let upstream_address = upstream.local_addr().expect("address");
         let echo = std::thread::spawn(move || {
@@ -240,12 +293,30 @@ mod tests {
         .expect("gateway");
         let mut client = TcpStream::connect(gateway.listen_addr()).expect("connect");
         client
-            .write_all(b"GET / HTTP/1.1\r\nHost: preview.example\r\n\r\n")
+            .write_all(b"GET / HTTP/1.1\r\nHost: preview.example\r\nConnection: keep-alive\r\n\r\n")
             .expect("write");
         let mut echoed = [0_u8; 128];
         let read = client.read(&mut echoed).expect("read");
-        assert!(String::from_utf8_lossy(&echoed[..read]).starts_with("GET / HTTP/1.1"));
+        let request = String::from_utf8_lossy(&echoed[..read]);
+        assert!(request.starts_with("GET / HTTP/1.1"));
+        assert!(request.contains(&format!("Host: {upstream_address}\r\n")));
+        assert!(request.contains("Connection: close\r\n"));
+        assert!(!request.contains("preview.example"));
         drop(gateway);
         echo.join().expect("echo thread");
+    }
+
+    #[test]
+    fn preview_websocket_upgrade_keeps_upgrade_headers() {
+        let upstream: SocketAddr = "127.0.0.1:8000".parse().expect("upstream");
+        let request = b"GET /socket HTTP/1.1\r\nHost: preview.example\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\n\r\n".to_vec();
+
+        let normalized = normalize_preview_request(request, upstream).expect("normalize");
+        let normalized = String::from_utf8(normalized).expect("utf8");
+
+        assert!(normalized.contains("Host: 127.0.0.1:8000\r\n"));
+        assert!(normalized.contains("Connection: keep-alive, Upgrade\r\n"));
+        assert!(normalized.contains("Upgrade: websocket\r\n"));
+        assert!(!normalized.contains("Connection: close"));
     }
 }

@@ -58,6 +58,17 @@ pub struct SourceProbe {
     /// Any top-level `*.py` file — a python signal for stdlib-only apps that ship no
     /// requirements.txt / pyproject.toml and declare no driver.
     pub has_py_files: bool,
+    /// Trimmed raw contents of `.nvmrc`, if present and non-empty. Node
+    /// toolchain evidence (ato-api#443) — see [`resolve_node_toolchain`].
+    pub nvmrc: Option<String>,
+    /// Trimmed raw contents of `.node-version`, if present and non-empty.
+    pub node_version_file: Option<String>,
+    /// `package.json`'s `volta.node` field, if present (Volta pins an EXACT
+    /// version here, never a range).
+    pub package_json_volta_node: Option<String>,
+    /// `package.json`'s `engines.node` field, if present (a semver RANGE,
+    /// e.g. `">=22"` or `"^18.0.0"` — never assumed exact).
+    pub package_json_engines_node: Option<String>,
 }
 
 impl SourceProbe {
@@ -69,6 +80,17 @@ impl SourceProbe {
                     .any(|e| e.path().extension().is_some_and(|x| x == "py"))
             })
             .unwrap_or(false);
+        let read_trimmed_nonempty = |f: &str| {
+            std::fs::read_to_string(dir.join(f))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let (package_json_volta_node, package_json_engines_node) = if has("package.json") {
+            read_package_json_node_fields(&dir.join("package.json"))
+        } else {
+            Default::default()
+        };
         SourceProbe {
             has_deno_json: has("deno.json") || has("deno.jsonc"),
             has_deno_lock: has("deno.lock"),
@@ -81,8 +103,214 @@ impl SourceProbe {
             has_pyproject: has("pyproject.toml"),
             has_index_html: has("index.html") || dir.join("public").join("index.html").exists(),
             has_py_files,
+            nvmrc: read_trimmed_nonempty(".nvmrc"),
+            node_version_file: read_trimmed_nonempty(".node-version"),
+            package_json_volta_node,
+            package_json_engines_node,
         }
     }
+}
+
+/// Read `package.json`'s `volta.node` and `engines.node` fields, if present
+/// and shaped as strings. Malformed JSON or a non-string field is treated as
+/// absent (not an error) — [`resolve_node_toolchain`] then falls through to
+/// the next-priority evidence source, same as if the file simply had no such
+/// field. This function itself never fails closed; only the resolver does.
+fn read_package_json_node_fields(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (None, None);
+    };
+    let volta_node = value
+        .get("volta")
+        .and_then(|v| v.get("node"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let engines_node = value
+        .get("engines")
+        .and_then(|v| v.get("node"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    (volta_node, engines_node)
+}
+
+/// Where a resolved Node runtime version came from — recorded so the choice
+/// is diagnosable/auditable instead of silently baked into `base_image`.
+/// Ordered by priority (highest first); NOT derived `Ord` — this order is
+/// documentation, [`resolve_node_toolchain`] is the actual precedence logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeVersionSource {
+    NvmrcFile,
+    NodeVersionFile,
+    PackageJsonVolta,
+    PackageJsonEngines,
+    AtoDefault,
+}
+
+/// The resolved Node toolchain evidence for a `RuntimeKind::Node` build:
+/// which source won, what it declared verbatim, and the exact version the
+/// resolver committed to. `resolved_version` is NEVER a range or a mutable
+/// tag — seeing one here (e.g. `"22.x"` or `"lts/*"`) is a resolver bug, not
+/// a legitimate value; every code path that produces this struct MUST have
+/// already fully resolved to `major.minor.patch`.
+///
+/// This is diagnostic/evidence metadata, not itself an identity input — the
+/// identity-bearing value is the base image DIGEST that
+/// `resolve_runtime_artifact` pins from the tag `base_image_and_install`
+/// derives from this struct's major version (see that function's doc
+/// comment for why only the major component feeds the tag).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeToolchainEvidence {
+    pub source: NodeVersionSource,
+    /// The raw declared value as found in source (e.g. `.nvmrc`'s exact
+    /// contents, or the literal `engines.node` range string) — kept even
+    /// when it is a range, not itself the resolved version, so a human can
+    /// see what the author actually wrote.
+    pub declared: String,
+    /// The exact version the resolver committed to, `major.minor.patch`.
+    pub resolved_version: String,
+}
+
+/// The Node version used when no toolchain evidence is present anywhere in
+/// the source tree — matches the version this resolver replaces the
+/// previously-hardcoded `"node:20-slim"` with, so a capsule with NO opinion
+/// on its Node version keeps building exactly as it did before this
+/// resolver existed.
+const ATO_DEFAULT_NODE_VERSION: &str = "20.20.2";
+
+/// A short ascending ladder of Node releases used to resolve an
+/// `engines.node` RANGE (the only evidence source that is ever a range, not
+/// an exact pin) to one concrete version. Deliberately not exhaustive — an
+/// author who needs a version outside this ladder should pin `.nvmrc`
+/// instead, which resolves exactly with no ladder involved.
+const NODE_VERSION_LADDER: &[&str] = &["18.20.4", "20.20.2", "22.14.0", "24.18.0"];
+
+/// The oldest Node major this resolver will ever emit a base image for.
+/// Below this, `node:{major}-slim` reliably does not exist on Docker Hub —
+/// fail closed rather than let `docker build` turn a resolver mistake into
+/// an opaque "manifest unknown" pull failure.
+const MIN_SUPPORTED_NODE_MAJOR: u64 = 4;
+
+fn parse_exact_node_version(
+    raw: &str,
+    source: NodeVersionSource,
+) -> Result<semver::Version, String> {
+    // `.nvmrc` / `.node-version` conventionally allow a leading `v` and a
+    // bare major or major.minor — pad the missing components with `.0`
+    // rather than reject them; `volta.node` never has the `v` prefix.
+    let stripped = raw.trim().trim_start_matches('v').trim_start_matches('V');
+    if stripped.is_empty() || !stripped.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "{source:?} declares {raw:?}, which is not a version this resolver understands \
+             (aliases like \"lts/*\" or \"stable\" are not supported — pin an exact version)"
+        ));
+    }
+    let padded = match stripped.matches('.').count() {
+        0 => format!("{stripped}.0.0"),
+        1 => format!("{stripped}.0"),
+        _ => stripped.to_string(),
+    };
+    semver::Version::parse(&padded)
+        .map_err(|error| format!("{source:?} declares {raw:?}, not a parseable version: {error}"))
+}
+
+/// Resolve which exact Node version to build a `RuntimeKind::Node` capsule
+/// on, from SOURCE-TREE evidence only (ato-api#443/#1221). A `capsule.toml`
+/// manifest-level override (`[runtime] node = "..."`, highest priority in
+/// the original design) is deliberately OUT OF SCOPE here — that needs its
+/// own manifest-schema PR; see ato-api#443's discussion for why `[[tools]]`
+/// (execution tools — pnpm/yarn/bun) is the wrong place for it.
+///
+/// Priority, highest first — the FIRST source present wins outright, never
+/// merged with a lower-priority source:
+///   1. `.nvmrc` (exact pin, `v` prefix tolerated, major/major.minor padded)
+///   2. `.node-version` (same format as `.nvmrc`)
+///   3. `package.json` `volta.node` (Volta always pins exact)
+///   4. `package.json` `engines.node` (a semver RANGE — resolved to a
+///      concrete version via [`NODE_VERSION_LADDER`]: the lowest ladder
+///      entry the range accepts, or [`ATO_DEFAULT_NODE_VERSION`] if it
+///      itself already satisfies the range)
+///   5. [`ATO_DEFAULT_NODE_VERSION`] — no evidence anywhere.
+///
+/// Fails closed (`node_toolchain_unavailable`-shaped message) rather than
+/// silently falling through to the Ato default when evidence IS present but
+/// unparseable, or resolves to a major below [`MIN_SUPPORTED_NODE_MAJOR`] —
+/// an author who declared a version gets an honest error, never a silently
+/// different runtime than what they asked for.
+pub(crate) fn resolve_node_toolchain(probe: &SourceProbe) -> Result<NodeToolchainEvidence, String> {
+    let exact = |raw: &str, source: NodeVersionSource| -> Result<NodeToolchainEvidence, String> {
+        let version = parse_exact_node_version(raw, source)?;
+        Ok(NodeToolchainEvidence {
+            source,
+            declared: raw.to_string(),
+            resolved_version: version.to_string(),
+        })
+    };
+
+    let evidence = if let Some(raw) = &probe.nvmrc {
+        exact(raw, NodeVersionSource::NvmrcFile)?
+    } else if let Some(raw) = &probe.node_version_file {
+        exact(raw, NodeVersionSource::NodeVersionFile)?
+    } else if let Some(raw) = &probe.package_json_volta_node {
+        exact(raw, NodeVersionSource::PackageJsonVolta)?
+    } else if let Some(raw) = &probe.package_json_engines_node {
+        let req = semver::VersionReq::parse(raw).map_err(|error| {
+            format!(
+                "package.json engines.node declares {raw:?}, not a parseable semver range: {error}"
+            )
+        })?;
+        let default_version = semver::Version::parse(ATO_DEFAULT_NODE_VERSION)
+            .expect("ATO_DEFAULT_NODE_VERSION is a valid exact version");
+        let resolved = if req.matches(&default_version) {
+            default_version
+        } else {
+            NODE_VERSION_LADDER
+                .iter()
+                .filter_map(|v| semver::Version::parse(v).ok())
+                .find(|v| req.matches(v))
+                .ok_or_else(|| {
+                    format!(
+                        "package.json engines.node range {raw:?} is not satisfied by any \
+                         version this resolver knows about — pin .nvmrc to an exact version instead"
+                    )
+                })?
+        };
+        NodeToolchainEvidence {
+            source: NodeVersionSource::PackageJsonEngines,
+            declared: raw.to_string(),
+            resolved_version: resolved.to_string(),
+        }
+    } else {
+        NodeToolchainEvidence {
+            source: NodeVersionSource::AtoDefault,
+            declared: ATO_DEFAULT_NODE_VERSION.to_string(),
+            resolved_version: ATO_DEFAULT_NODE_VERSION.to_string(),
+        }
+    };
+
+    let major: u64 = evidence
+        .resolved_version
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| {
+            format!(
+                "resolved Node version {:?} has no major component",
+                evidence.resolved_version
+            )
+        })?;
+    if major < MIN_SUPPORTED_NODE_MAJOR {
+        return Err(format!(
+            "node_toolchain_unavailable: resolved Node major {major} (from {:?} = {:?}) is below \
+             the oldest version this builder supports ({MIN_SUPPORTED_NODE_MAJOR})",
+            evidence.source, evidence.declared
+        ));
+    }
+
+    Ok(evidence)
 }
 
 /// v1.2 (#912): the supervisor build config emitted into the rootfs
@@ -346,7 +574,11 @@ pub fn derive_build_spec(
         }
     };
 
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    // Legacy v0.3 lane: benefits from the same corrected Node base-image
+    // resolution, but does not carry `NodeToolchainEvidence` in its receipt
+    // shape (scoped to the v1 lane below — see ato-api#443/#1221).
+    let (base_image, install_cmd, _node_toolchain_evidence) =
+        base_image_and_install(runtime, probe)?;
 
     Ok(RootfsBuildSpec {
         runtime,
@@ -457,6 +689,11 @@ pub struct RootfsBuildSpecV1 {
     /// authored `[run] command`.
     pub resolved_argv: Vec<String>,
     pub port: u16,
+    /// Node toolchain resolution evidence (ato-api#443) — `Some` only for
+    /// `RuntimeKind::Node`. Diagnostic metadata: WHY `base_image`'s major
+    /// version is what it is, not itself an identity input (the digest
+    /// `resolve_runtime_artifact` pins from `base_image` is).
+    pub node_toolchain: Option<NodeToolchainEvidence>,
 }
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
@@ -478,11 +715,28 @@ pub fn derive_build_spec_v1(
 
     // v1 has no driver/language hints — the tree is the whole declaration.
     let runtime = detect_runtime_kind("", "", probe)?;
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    let (base_image, install_cmd, node_toolchain) = base_image_and_install(runtime, probe)?;
 
     let authored = &m.run.command;
     if authored.is_empty() {
         return Err("[run] command is empty; there is no argv to launch".into());
+    }
+    // The runtime (and therefore the base image and what got installed) comes
+    // from the PROBE — a fact about the resolved source root — while `[run]
+    // command` is author-declared and could name a toolchain the probe never
+    // saw, e.g. a manually authored `["npm", "start"]` over a source.root that
+    // does not actually carry a package.json (excluded by a subdir pick, or
+    // authored against the wrong tree). Left unchecked, the image builds
+    // successfully on a base with no npm installed and the mismatch only
+    // surfaces as a "command not found" at guest boot — refuse it here,
+    // before the Docker build spends anything on it (ato-api#443 §6).
+    if !launch_program_is_compatible_with_runtime(&authored[0], runtime) {
+        return Err(format!(
+            "[run] command launches `{}`, which is not available in the {runtime:?} runtime \
+             image resolved for this source root (its expected manifest — e.g. package.json \
+             for a Node launch — was not found there); refusing before the image is built",
+            authored[0]
+        ));
     }
     // Each word is emitted single-quoted into the generated init, so a control
     // character could break out of the quoting or the heredoc delimiter. Reject
@@ -519,6 +773,7 @@ pub fn derive_build_spec_v1(
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
+        node_toolchain,
     })
 }
 
@@ -634,12 +889,25 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 ///
 /// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
-    let runtime_environment = match spec.runtime {
-        RuntimeKind::Deno => "export DENO_DIR=/deno-dir",
-        RuntimeKind::Node => {
-            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
-        }
-        _ => "",
+    let (runtime_rootfs_setup, runtime_environment, runtime_tmpfs_setup) = match spec.runtime {
+        RuntimeKind::Deno => ("", "export DENO_DIR=/deno-dir", ""),
+        RuntimeKind::Node => (
+            r#"# Vite bundles its config and dependency optimizer cache at runtime. The guest
+# rootfs stays read-only; only these tool-owned, disposable cache paths are
+# redirected into the already-declared /tmp tmpfs. Keeping the links in the
+# immutable rootfs also makes the effective filesystem view identity-bearing.
+rm -rf "$ATO_ROOTFS/app/node_modules/.vite" "$ATO_ROOTFS/app/node_modules/.vite-temp"
+ln -s /tmp/ato-node-cache/vite "$ATO_ROOTFS/app/node_modules/.vite"
+ln -s /tmp/ato-node-cache/vite-temp "$ATO_ROOTFS/app/node_modules/.vite-temp""#,
+            // Keep Node's V8 heap within the 2 GiB authoring guest envelope.
+            // Tooling such as Vite can otherwise consume almost the entire
+            // guest during dependency optimization and be killed only after
+            // readiness has succeeded. The init script is identity-bearing,
+            // so this resource policy is deterministic and auditable.
+            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NODE_OPTIONS=--max-old-space-size=512",
+            "mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp",
+        ),
+        _ => ("", "", ""),
     };
     format!(
         r#"set -euo pipefail
@@ -653,6 +921,7 @@ trap cleanup EXIT
 CID=$({tool} create "$TAG")
 {tool} export "$CID" | tar -x -C "$ATO_ROOTFS"
 {tool} rm -f "$CID" >/dev/null; CID=""
+{runtime_rootfs_setup}
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
@@ -669,6 +938,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
+{runtime_tmpfs_setup}
 cd {init_cwd}
 {launch}
 while true; do sleep 1000; done
@@ -682,7 +952,9 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         tool = tool,
         launch = launch_argv_line(&spec.resolved_argv),
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        runtime_rootfs_setup = runtime_rootfs_setup,
         runtime_environment = runtime_environment,
+        runtime_tmpfs_setup = runtime_tmpfs_setup,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
     )
@@ -917,8 +1189,23 @@ fn is_uuid(value: &str) -> bool {
             })
 }
 
-/// Run one generated builder script under `bash -c`, reporting the stderr tail
-/// on failure. The shared spawn half of [`build_rootfs`] and the two v1 halves.
+/// Upper bound, in bytes, on the stderr tail captured into a failed builder
+/// script's error message (ato-api#443 §5). Large enough to hold a full `npm
+/// ci` failure — the EBADENGINE warnings plus the EUSAGE lockfile-sync detail
+/// observed reproducing that issue — while staying bounded so a runaway
+/// script can never balloon an error into an unbounded log.
+const BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
+
+/// Run one generated builder script under `bash -c`, reporting a bounded,
+/// secret-redacted stderr tail on failure. The shared spawn half of
+/// [`build_rootfs`] and the two v1 halves — including `assemble_app_image_v1`,
+/// which is where a manifest-derived `RUN /bin/sh -lc '<install_cmd>'` (e.g.
+/// `npm ci`) actually runs inside `docker build`.
+///
+/// Redaction happens before truncation, and both happen before this ever
+/// returns: nothing downstream (logs, the ato-api ack, an issue comment) can
+/// leak a credential this function already scrubbed, and nothing downstream
+/// has to re-bound an unbounded stream itself.
 fn run_builder_script(
     stage: &str,
     script: &str,
@@ -935,16 +1222,121 @@ fn run_builder_script(
     if out.status.success() {
         return Ok(());
     }
-    let tail: String = String::from_utf8_lossy(&out.stderr)
-        .lines()
-        .rev()
-        .take(12)
+    let redacted = redact_secrets(&String::from_utf8_lossy(&out.stderr));
+    let (tail, truncated) = bounded_diagnostic_tail(&redacted);
+    let error_code = classify_builder_script_error_code(stage, &tail);
+    let exit_code = out.status.code().unwrap_or(1);
+    let truncated_note = if truncated { " (stderr truncated)" } else { "" };
+    Err(format!(
+        "{stage} failed: {error_code}, exit {exit_code}{truncated_note}\n{tail}"
+    ))
+}
+
+/// Redact substrings of a builder script's stderr that look like credentials
+/// before anything captures or returns them (ato-api#443 §5): a failing `npm
+/// ci` can echo a registry URL with embedded basic-auth, an
+/// `Authorization`/`Cookie` header, or an `.npmrc`-sourced `_authToken`, and
+/// none of that may leave the builder host as plain text. Whole-line
+/// redaction is deliberate — a line-level false positive costs a little
+/// diagnosability; a substring-level false negative leaks a secret.
+fn redact_secrets(text: &str) -> String {
+    const LINE_MARKERS: &[&str] = &[
+        "authorization:",
+        "cookie:",
+        "set-cookie:",
+        "_authtoken",
+        "bearer ",
+        "token=",
+        "token:",
+        "password=",
+        "password:",
+        "secret=",
+        "secret:",
+        "apikey",
+        "api_key",
+    ];
+    text.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if LINE_MARKERS.iter().any(|marker| lower.contains(marker))
+                || line_has_credentialed_url(&lower)
+            {
+                "[REDACTED LINE: possible credential]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(format!("{stage} failed: {tail}"))
+        .join("\n")
+}
+
+/// True if `line` (already lowercased) contains a `scheme://user:pass@host`
+/// URL — the shape `npm error request to https://…@registry...` takes when a
+/// registry URL carries embedded basic-auth.
+fn line_has_credentialed_url(lower_line: &str) -> bool {
+    let Some(scheme_at) = lower_line.find("://") else {
+        return false;
+    };
+    let after_scheme = &lower_line[scheme_at + 3..];
+    let Some(at) = after_scheme.find('@') else {
+        return false;
+    };
+    let credential_candidate = &after_scheme[..at];
+    !credential_candidate.is_empty()
+        && !credential_candidate.contains('/')
+        && !credential_candidate.contains(char::is_whitespace)
+}
+
+/// Keep only the last [`BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES`] of `text`,
+/// cutting on a line boundary, and report whether anything was cut. The
+/// returned bool is the `stderr_truncated` signal a caller surfaces alongside
+/// the diagnostic — silently shortening the text without saying so would look
+/// like a complete log.
+fn bounded_diagnostic_tail(text: &str) -> (String, bool) {
+    if text.len() <= BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES {
+        return (text.to_string(), false);
+    }
+    let mut start = text.len() - BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = match text[start..].find('\n') {
+        Some(newline) => &text[start + newline + 1..],
+        None => &text[start..],
+    };
+    (tail.to_string(), true)
+}
+
+/// Classify a builder script failure's stderr into a stable, machine-readable
+/// error code. Scoped to the `assemble app image` stage — the only stage that
+/// runs an author-declared dependency-install command — so an unrelated
+/// docker/export/mkfs failure never gets an npm-flavored code.
+fn classify_builder_script_error_code(stage: &str, redacted_tail: &str) -> &'static str {
+    if stage == "assemble app image" {
+        let lower = redacted_tail.to_ascii_lowercase();
+        if lower.contains("npm error") || lower.contains("npm err!") {
+            if lower.contains("eusage") {
+                return "npm_ci_lockfile_mismatch";
+            }
+            if lower.contains("enoent") {
+                return "npm_ci_not_found";
+            }
+            if lower.contains("ebadengine") {
+                return "npm_ci_engine_mismatch";
+            }
+            return "npm_ci_failed";
+        }
+        if lower.contains("ebadengine") {
+            return "npm_ci_engine_mismatch";
+        }
+        if lower.contains("yarn error") {
+            return "yarn_install_failed";
+        }
+        if lower.contains(" err_pnpm_") {
+            return "pnpm_install_failed";
+        }
+    }
+    "builder_script_failed"
 }
 
 /// Which runtime family a source tree belongs to.
@@ -988,12 +1380,32 @@ pub(crate) fn detect_runtime_kind(
 /// dependency manifest implies. Both are RESOLVED values — the builder's
 /// choice, not the author's — which is why the Execution Contract records the
 /// base image by resolved digest rather than by the tag chosen here.
+/// Whether a launch program name is available in the base image a
+/// [`RuntimeKind`] resolves to. Used to catch a `[run] command` that names a
+/// toolchain the resolved source root's runtime classification does not
+/// provide — see the call site in `derive_build_spec_v1`. Programs with no
+/// runtime implication (a static binary, a shell script, `sh` itself, ...)
+/// are always compatible: there is nothing to cross-check.
+fn launch_program_is_compatible_with_runtime(program: &str, runtime: RuntimeKind) -> bool {
+    match program {
+        "node" | "npm" | "npx" | "yarn" | "pnpm" => runtime == RuntimeKind::Node,
+        "deno" => runtime == RuntimeKind::Deno,
+        // StaticWeb's base image is `python:3.11-slim` too (its dependency-free
+        // fallback launches via `python3 -m http.server`), so python is valid
+        // under either classification.
+        "python" | "python3" | "pip" | "pip3" => {
+            matches!(runtime, RuntimeKind::Python | RuntimeKind::StaticWeb)
+        }
+        _ => true,
+    }
+}
+
 pub(crate) fn base_image_and_install(
     runtime: RuntimeKind,
     probe: &SourceProbe,
-) -> (String, Option<String>) {
-    match runtime {
-        RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
+) -> Result<(String, Option<String>, Option<NodeToolchainEvidence>), String> {
+    Ok(match runtime {
+        RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None, None),
         RuntimeKind::Deno => (
             "denoland/deno:alpine-1.38.2".to_string(),
             Some(if probe.has_deno_fresh_entrypoints {
@@ -1005,33 +1417,54 @@ pub(crate) fn base_image_and_install(
             } else {
                 "true".to_string()
             }),
+            None,
         ),
-        RuntimeKind::Node => (
-            "node:20-slim".to_string(),
-            Some(if probe.has_package_json {
-                if probe.has_yarn_lock {
-                    format!(
-                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
-                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
-                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-                         yarn install --frozen-lockfile"
-                    )
-                } else if probe.has_pnpm_lock {
-                    format!(
-                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
-                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
-                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-                         pnpm install --frozen-lockfile"
-                    )
-                } else if probe.has_package_lock {
-                    "npm ci".to_string()
+        RuntimeKind::Node => {
+            // The base image tag carries only the MAJOR version component —
+            // matching the pre-resolver hardcoded `"node:20-slim"` tag
+            // granularity — because Docker Hub's official Node images are
+            // reliably published at that granularity, while an exact
+            // `node:{major.minor.patch}-slim` tag is not guaranteed to
+            // exist for every patch a source tree might declare. This does
+            // NOT weaken reproducibility: `resolve_runtime_artifact` pins
+            // whatever this tag resolves to at build time down to an
+            // immutable `repo@sha256:…` digest before the image is ever
+            // built FROM it (see that function's doc comment) — the digest,
+            // not this tag, is what the Execution Contract commits.
+            let evidence = resolve_node_toolchain(probe)?;
+            let major = evidence
+                .resolved_version
+                .split('.')
+                .next()
+                .expect("resolve_node_toolchain always returns major.minor.patch");
+            (
+                format!("node:{major}-slim"),
+                Some(if probe.has_package_json {
+                    if probe.has_yarn_lock {
+                        format!(
+                            "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                             COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                             COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                             yarn install --frozen-lockfile"
+                        )
+                    } else if probe.has_pnpm_lock {
+                        format!(
+                            "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                             COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                             COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                             pnpm install --frozen-lockfile"
+                        )
+                    } else if probe.has_package_lock {
+                        "npm ci".to_string()
+                    } else {
+                        "npm install".to_string()
+                    }
                 } else {
-                    "npm install".to_string()
-                }
-            } else {
-                "true".to_string()
-            }),
-        ),
+                    "true".to_string()
+                }),
+                Some(evidence),
+            )
+        }
         RuntimeKind::Python => (
             "python:3.11-slim".to_string(),
             Some(if probe.has_requirements_txt {
@@ -1042,8 +1475,9 @@ pub(crate) fn base_image_and_install(
                 // stdlib-only app — nothing to install.
                 "true".to_string()
             }),
+            None,
         ),
-    }
+    })
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -2854,6 +3288,271 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert_eq!(npm.install_cmd.as_deref(), Some("npm ci"));
     }
 
+    /// ato-api#443 §6: a `[run] command` that launches `npm` over a source
+    /// root the probe did NOT classify as Node (e.g. `source.root` excluded
+    /// the package.json, or the manifest was authored against a different
+    /// tree) must be refused before the Docker build runs, not left to fail
+    /// as a "command not found" at guest boot.
+    #[test]
+    fn v1_refuses_an_npm_launch_command_when_the_source_root_has_no_package_json() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+
+        let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
+            .expect_err("must refuse before building");
+
+        assert!(error.contains("npm"), "{error}");
+        assert!(error.contains("Python"), "{error}");
+        assert!(
+            error.contains("refusing before the image is built"),
+            "{error}"
+        );
+    }
+
+    /// The mirror case: `[run] command` correctly matches what the probe
+    /// found, so the same manifest shape as above must still succeed once a
+    /// package.json is actually present.
+    #[test]
+    fn v1_accepts_an_npm_launch_command_when_the_source_root_has_a_package_json() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Node);
+    }
+
+    /// The dependency-free static fallback launches via `python3` even though
+    /// it is classified `StaticWeb`, not `Python` — both share the
+    /// `python:3.11-slim` base image, so this must NOT be refused by the
+    /// cross-check above.
+    #[test]
+    fn v1_accepts_a_python3_launch_command_under_the_static_web_runtime() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_index_html: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::StaticWeb);
+    }
+
+    /// ato-api#443/#1221: `swagger-api/swagger-editor` pinned at
+    /// `0409380aaa654604f8f681eee04e748f55b80b85` — `.nvmrc` declares `24.18`
+    /// (no `engines` field). Reproduced live: this exact source, this exact
+    /// generated Dockerfile shape, built under the OLD hardcoded
+    /// `node:20-slim` fails `npm ci` (EBADENGINE warnings + EUSAGE lockfile
+    /// mismatch); the identical build under `node:24-slim` succeeds cleanly.
+    /// This fixture is the regression guard for that fix — NOT a synthetic
+    /// approximation, the exact `.nvmrc` content from the pinned commit.
+    #[test]
+    fn swagger_editor_pinned_commit_resolves_to_its_nvmrc_major() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                nvmrc: Some("24.18".to_string()),
+                ..SourceProbe::default()
+            },
+        )
+        .expect("swagger-editor-shaped source derives");
+        assert_eq!(spec.base_image, "node:24-slim");
+        assert_eq!(spec.install_cmd.as_deref(), Some("npm ci"));
+        let evidence = spec.node_toolchain.expect("Node runtime carries evidence");
+        assert_eq!(evidence.source, NodeVersionSource::NvmrcFile);
+        assert_eq!(evidence.declared, "24.18");
+        assert_eq!(evidence.resolved_version, "24.18.0");
+    }
+
+    /// Priority order (ato-api#443): the FIRST source present wins outright,
+    /// never merged with a lower-priority one — a repo with both `.nvmrc`
+    /// and a stale `engines.node` range must not average the two.
+    #[test]
+    fn node_toolchain_priority_order_is_nvmrc_then_node_version_file_then_volta_then_engines() {
+        let all_four = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("v22.5.0".to_string()),
+            node_version_file: Some("18.19.0".to_string()),
+            package_json_volta_node: Some("16.20.2".to_string()),
+            package_json_engines_node: Some(">=14".to_string()),
+            ..SourceProbe::default()
+        };
+        assert_eq!(
+            resolve_node_toolchain(&all_four).unwrap().resolved_version,
+            "22.5.0",
+            ".nvmrc wins over everything else"
+        );
+
+        let three = SourceProbe {
+            nvmrc: None,
+            ..all_four.clone()
+        };
+        assert_eq!(
+            resolve_node_toolchain(&three).unwrap().resolved_version,
+            "18.19.0",
+            ".node-version wins once .nvmrc is absent"
+        );
+
+        let two = SourceProbe {
+            node_version_file: None,
+            ..three
+        };
+        assert_eq!(
+            resolve_node_toolchain(&two).unwrap().resolved_version,
+            "16.20.2",
+            "volta.node wins once both file-based sources are absent"
+        );
+
+        let one = SourceProbe {
+            package_json_volta_node: None,
+            ..two
+        };
+        let evidence = resolve_node_toolchain(&one).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::PackageJsonEngines);
+        // ">=14" is satisfied by the Ato default (20.20.2) — the resolver
+        // prefers the default over inventing a version off the ladder when
+        // the default itself already satisfies the declared range.
+        assert_eq!(evidence.resolved_version, ATO_DEFAULT_NODE_VERSION);
+
+        let none = SourceProbe {
+            package_json_engines_node: None,
+            ..one
+        };
+        let evidence = resolve_node_toolchain(&none).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::AtoDefault);
+        assert_eq!(evidence.resolved_version, ATO_DEFAULT_NODE_VERSION);
+    }
+
+    /// A range the Ato default does NOT satisfy walks the ladder to the
+    /// first entry that does, rather than picking the default anyway.
+    #[test]
+    fn node_toolchain_engines_range_above_the_default_walks_the_ladder() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            package_json_engines_node: Some(">=22".to_string()),
+            ..SourceProbe::default()
+        };
+        let evidence = resolve_node_toolchain(&probe).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::PackageJsonEngines);
+        assert_eq!(evidence.resolved_version, "22.14.0");
+    }
+
+    /// A range no ladder entry satisfies is a typed, honest failure — the
+    /// resolver never silently substitutes an out-of-range version.
+    #[test]
+    fn node_toolchain_impossible_engines_range_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            package_json_engines_node: Some(">=99".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(
+            error.contains(">=99"),
+            "error names the impossible range: {error}"
+        );
+    }
+
+    /// An `.nvmrc` alias this resolver does not understand (`"lts/*"` and
+    /// similar) is refused, not guessed at.
+    #[test]
+    fn node_toolchain_unparseable_nvmrc_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("lts/*".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(
+            error.contains("lts/*"),
+            "error names the unparseable value: {error}"
+        );
+    }
+
+    /// A resolved major below the oldest version this builder supports is a
+    /// `node_toolchain_unavailable` failure, not a silent clamp.
+    #[test]
+    fn node_toolchain_ancient_version_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("0.10.48".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(
+            error.contains("node_toolchain_unavailable"),
+            "error is typed as unavailable, not a generic parse failure: {error}"
+        );
+    }
+
+    /// Deterministic: the same source evidence resolves to the identical
+    /// version and source across repeated calls — no clock/registry/network
+    /// input anywhere in this pure function.
+    #[test]
+    fn node_toolchain_resolution_is_stable_across_repeated_calls() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("24.18".to_string()),
+            ..SourceProbe::default()
+        };
+        let first = resolve_node_toolchain(&probe).unwrap();
+        let second = resolve_node_toolchain(&probe).unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// A `package.json`-carrying web project (Vite/CRA-shaped: it ALSO ships
+    /// `index.html`) must resolve as `RuntimeKind::Node`, not
+    /// `RuntimeKind::StaticWeb` — a package-managed app whose deps are never
+    /// installed is a silent broken build, not a working static site.
+    #[test]
+    fn a_package_managed_web_app_with_index_html_is_not_misclassified_as_static() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                has_index_html: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Node);
+        assert_eq!(spec.install_cmd.as_deref(), Some("npm ci"));
+    }
+
+    /// Non-Node runtimes never carry Node toolchain evidence.
+    #[test]
+    fn non_node_runtimes_carry_no_node_toolchain_evidence() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Python);
+        assert_eq!(spec.node_toolchain, None);
+    }
+
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
     /// is a shell string that has to exec somehow. v1 argv is exact, so the same
     /// input must survive untouched — an author who wants an interpreter names
@@ -2986,6 +3685,65 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert!(export.contains("'yarn' 'start'"), "{export}");
     }
 
+    /// Package-managed Authoring currently infers only Vite launch scripts.
+    /// Vite writes its bundled config and optimizer cache below `node_modules`
+    /// before opening the HTTP listener. A read-only Ready-State rootfs would
+    /// otherwise make both swagger-editor and drawdb exit with EROFS/ENOENT.
+    /// The immutable guest redirects only those disposable tool caches into the
+    /// existing `/tmp` tmpfs; source and installed dependencies stay read-only.
+    #[test]
+    fn a_node_guest_redirects_vite_runtime_caches_into_tmpfs() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8000"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("node spec");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(
+            export
+                .contains("ln -s /tmp/ato-node-cache/vite \"$ATO_ROOTFS/app/node_modules/.vite\""),
+            "{export}"
+        );
+        assert!(
+            export.contains(
+                "ln -s /tmp/ato-node-cache/vite-temp \"$ATO_ROOTFS/app/node_modules/.vite-temp\""
+            ),
+            "{export}"
+        );
+        assert!(
+            export.contains("mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp"),
+            "{export}"
+        );
+        assert!(
+            export.contains("NODE_OPTIONS=--max-old-space-size=512"),
+            "{export}"
+        );
+        assert!(
+            export.find("mount -t tmpfs tmpfs /tmp").unwrap()
+                < export.find("mkdir -p /tmp/ato-node-cache/vite").unwrap(),
+            "the cache targets must be created after /tmp becomes tmpfs: {export}"
+        );
+    }
+
+    #[test]
+    fn a_non_node_guest_does_not_gain_node_runtime_cache_paths() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("python spec");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(!export.contains("ato-node-cache"), "{export}");
+        assert!(!export.contains("node_modules/.vite"), "{export}");
+        assert!(!export.contains("NODE_OPTIONS"), "{export}");
+    }
+
     const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     /// The image is built FROM the digest-pinned reference the lane resolved,
@@ -3037,6 +3795,51 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert!(
             !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
             "COPY . would ship the generated Dockerfile to the guest: {script}"
+        );
+    }
+
+    /// ato-api#443 §6: the ENTIRE projected source must land under the guest
+    /// `/app`, including when the repository's OWN top-level directory
+    /// happens to be named `src` — the same name the build context stages the
+    /// projection under (`$BUILD/src`). Runs the real `mkdir`/`cp -a` half of
+    /// `assemble_app_image_script_v1` (everything up to, but not including,
+    /// `docker build`) against an actual filesystem fixture, so this proves
+    /// the real copy behavior rather than re-asserting the script's text.
+    #[test]
+    fn a_repo_owned_src_subdirectory_survives_nested_under_the_staging_src_dir() {
+        let source_root = tempfile::tempdir().expect("source root");
+        std::fs::write(
+            source_root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"vite"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(source_root.path().join("package-lock.json"), "{}").expect("lockfile");
+        std::fs::write(source_root.path().join("index.html"), "<div></div>").expect("index");
+        std::fs::create_dir(source_root.path().join("src")).expect("repo src dir");
+        std::fs::write(source_root.path().join("src").join("index.js"), "// entry")
+            .expect("repo src file");
+
+        let build_dir = tempfile::tempdir().expect("build dir");
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(r#"set -euo pipefail; mkdir -p "$BUILD/src"; cp -a "$ATO_SRC/." "$BUILD/src/""#)
+            .env("ATO_SRC", source_root.path())
+            .env("BUILD", build_dir.path())
+            .status()
+            .expect("run the staging half of the generated script");
+        assert!(status.success());
+
+        // The root of the projection (package.json, index.html, ...) lands
+        // directly under the staging `src/`, exactly what `COPY src/. {workdir}/`
+        // then ships to the guest.
+        assert!(build_dir.path().join("src/package.json").is_file());
+        assert!(build_dir.path().join("src/package-lock.json").is_file());
+        assert!(build_dir.path().join("src/index.html").is_file());
+        // The repo's OWN `src/` survives NESTED, un-clobbered by the staging
+        // directory that happens to share its name.
+        assert!(
+            build_dir.path().join("src/src/index.js").is_file(),
+            "the repo's own src/ subdirectory must survive nested under the staging src/"
         );
     }
 
@@ -5490,5 +6293,129 @@ readiness_probe = { http_get = "/health" }
         );
         assert_eq!(json["base_env"]["PORT"], spec.port.to_string());
         assert_eq!(json["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
+    }
+
+    // --- builder script failure diagnostics (ato-api#443 §5) -------------------
+
+    #[test]
+    fn builder_script_failure_classifies_npm_ci_lockfile_mismatch() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error code EUSAGE' >&2; echo 'npm error EUSAGE lockfile not in sync' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("assemble app image failed: npm_ci_lockfile_mismatch, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_classifies_generic_npm_ci_failure() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error could not resolve dependency' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("assemble app image failed: npm_ci_failed, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_does_not_npm_classify_unrelated_stages() {
+        // Only the stage that actually runs a manifest-derived install
+        // command gets an npm-flavored code; a docker/export failure that
+        // happens to mention "npm" in passing must not be mislabeled.
+        let error = run_builder_script("export guest rootfs", "echo 'npm error' >&2; exit 1", &[])
+            .unwrap_err();
+        assert!(
+            error.starts_with("export guest rootfs failed: builder_script_failed, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_an_authorization_header() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error request failed' >&2; echo 'Authorization: Bearer sk-live-secret-value' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(!error.contains("sk-live-secret-value"), "leaked: {error}");
+        assert!(
+            error.contains("[REDACTED LINE"),
+            "missing redaction: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_a_credentialed_registry_url() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error request to https://npm_token:s3cr3t-value@registry.npmjs.org/pkg failed' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(!error.contains("s3cr3t-value"), "leaked: {error}");
+        assert!(
+            error.contains("[REDACTED LINE"),
+            "missing redaction: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_an_npmrc_auth_token_line() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error' >&2; echo '_authToken=deadbeefdeadbeefdeadbeef' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            !error.contains("deadbeefdeadbeefdeadbeef"),
+            "leaked: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_truncates_long_stderr_with_an_explicit_marker() {
+        // A single stderr line well past the diagnostic bound: the tail must
+        // be cut and the message must SAY it was truncated rather than
+        // silently shortening the output.
+        let error = run_builder_script(
+            "assemble app image",
+            "echo -n 'npm error ' >&2; head -c 20000 /dev/zero | tr '\\0' 'x' >&2; echo >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("(stderr truncated)"),
+            "missing truncation marker: {error}"
+        );
+        assert!(
+            error.len() < 20000,
+            "diagnostic was not bounded: {} bytes",
+            error.len()
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_does_not_truncate_short_stderr() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error short' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            !error.contains("(stderr truncated)"),
+            "false positive: {error}"
+        );
+        assert!(error.contains("npm error short"));
     }
 }

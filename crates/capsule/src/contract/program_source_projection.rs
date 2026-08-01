@@ -101,6 +101,7 @@ use crate::foundation::blob::source_tree::{
     MAX_FILE_COUNT, MAX_FILE_SIZE_BYTES, MAX_TREE_ENTRY_COUNT, materialized_source_tree_hash,
     validate_source_tree, validate_symlink_target,
 };
+use crate::foundation::types::manifest_v1::CapsuleManifestV1;
 
 /// The Capsule manifest file name at the selected root.
 const CAPSULE_MANIFEST_FILE_NAME: &str = "capsule.toml";
@@ -323,6 +324,19 @@ impl PartialEq for VerifiedPinnedSourceMaterialization {
 impl Eq for VerifiedPinnedSourceMaterialization {}
 
 impl VerifiedPinnedSourceMaterialization {
+    /// Read the root manifest bytes without exposing the private pinned root.
+    ///
+    /// Source selection is declared by this file, so callers must be able to
+    /// parse it before projecting while the proof-carrying root itself remains
+    /// inaccessible.
+    pub fn root_manifest_text(&self) -> Result<String, CapsuleProgramError> {
+        fs::read_to_string(self.root.join(CAPSULE_MANIFEST_FILE_NAME)).map_err(|source| {
+            CapsuleProgramError::SourceProjection(format!(
+                "failed to read root {CAPSULE_MANIFEST_FILE_NAME} from pinned source: {source}"
+            ))
+        })
+    }
+
     /// Mint the proof **by construction**, by extracting a content-addressed
     /// source archive (`materialize_source_archive`'s `.tar.zst`) into a
     /// process-private directory this value owns.
@@ -1366,6 +1380,137 @@ pub fn materialize_program_source_projection(
         contract,
         excluded_control_files: projected.excluded_control_files().to_vec(),
     })
+}
+
+/// Materialize the program source selected by a normalized v1 manifest.
+///
+/// The legacy projection remains the first phase so the root control files are
+/// withheld exactly as before. Selection is then applied relative to
+/// `[source].root`; the resulting filtered tree, rather than the unfiltered
+/// archive, is what the returned contract commits.
+pub fn materialize_program_source_projection_with_manifest(
+    pinned: &VerifiedPinnedSourceMaterialization,
+    destination: &Path,
+    manifest: &CapsuleManifestV1,
+) -> Result<MaterializedProgramSource, CapsuleProgramError> {
+    manifest.validate().map_err(|error| {
+        CapsuleProgramError::SourceProjection(format!(
+            "the source-selection manifest is invalid: {error}"
+        ))
+    })?;
+    if manifest.source.root == "." && manifest.source.ignore.is_empty() {
+        return materialize_program_source_projection(pinned, destination);
+    }
+
+    require_empty_directory(destination)?;
+    let private_parent = destination.parent().unwrap_or(destination);
+    let unfiltered = tempfile::Builder::new()
+        .prefix(".ato-unfiltered-source-")
+        .tempdir_in(private_parent)
+        .map_err(|source| {
+            CapsuleProgramError::SourceProjection(format!(
+                "failed to create the private unfiltered projection: {source}"
+            ))
+        })?;
+    let projected = materialize_program_source_projection(pinned, unfiltered.path())?;
+    let selected_root = unfiltered.path().join(&manifest.source.root);
+    let metadata = fs::symlink_metadata(&selected_root).map_err(|source| {
+        CapsuleProgramError::SourceProjection(format!(
+            "source.root '{}' is not a readable directory in the pinned source: {source}",
+            manifest.source.root
+        ))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(CapsuleProgramError::SourceProjection(format!(
+            "source.root '{}' is not a directory",
+            manifest.source.root
+        )));
+    }
+
+    copy_selected_tree(manifest, &selected_root, &selected_root, destination)?;
+    let materialized_hash = materialized_source_tree_hash(destination).map_err(|source| {
+        CapsuleProgramError::SourceProjection(format!(
+            "failed to hash the selected program source: {source}"
+        ))
+    })?;
+    let contract = ProgramSourceContract {
+        digest: ProgramSourceDigest::parse(&materialized_hash)?,
+        projection_schema: ProgramSourceProjectionSchemaV1,
+    };
+    Ok(MaterializedProgramSource {
+        contract,
+        excluded_control_files: projected.excluded_control_files,
+    })
+}
+
+fn copy_selected_tree(
+    manifest: &CapsuleManifestV1,
+    selected_root: &Path,
+    source_dir: &Path,
+    destination_dir: &Path,
+) -> Result<(), CapsuleProgramError> {
+    let mut entries = fs::read_dir(source_dir)
+        .map_err(|source| projection_io("read selected source directory", source_dir, source))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| projection_io("read selected source directory", source_dir, source))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(selected_root).map_err(|_| {
+            CapsuleProgramError::SourceProjection(
+                "selected source entry escaped source.root".to_string(),
+            )
+        })?;
+        let relative_text = relative.to_str().ok_or_else(|| {
+            CapsuleProgramError::SourceProjection(format!(
+                "non-UTF-8 path in selected source: {}",
+                relative.display()
+            ))
+        })?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|source| projection_io("inspect selected source entry", &path, source))?;
+        let is_dir = metadata.file_type().is_dir();
+        let included = manifest
+            .source_path_is_included(relative_text, is_dir)
+            .map_err(|error| {
+                CapsuleProgramError::SourceProjection(format!(
+                    "evaluate source selection for {relative_text}: {error}"
+                ))
+            })?;
+        if !included {
+            continue;
+        }
+
+        let destination = destination_dir.join(entry.file_name());
+        if is_dir {
+            fs::create_dir(&destination).map_err(|source| {
+                projection_io("create selected directory", &destination, source)
+            })?;
+            copy_selected_tree(manifest, selected_root, &path, &destination)?;
+        } else if metadata.file_type().is_file() {
+            fs::copy(&path, &destination)
+                .map_err(|source| projection_io("copy selected file", &path, source))?;
+        } else if metadata.file_type().is_symlink() {
+            let resolved = path.canonicalize().map_err(|source| {
+                projection_io("resolve selected source symlink", &path, source)
+            })?;
+            let selected_root = selected_root.canonicalize().map_err(|source| {
+                projection_io("resolve selected source root", selected_root, source)
+            })?;
+            if !resolved.starts_with(&selected_root) {
+                return Err(CapsuleProgramError::SourceProjection(format!(
+                    "selected source symlink '{}' escapes source.root",
+                    relative.display()
+                )));
+            }
+            let target = fs::read_link(&path)
+                .map_err(|source| projection_io("read selected source symlink", &path, source))?;
+            create_archive_symlink(&target, &destination)
+                .map_err(|source| projection_io("copy selected source symlink", &path, source))?;
+        }
+    }
+    Ok(())
 }
 
 /// `destination` exists, is a directory, and holds nothing. Fail-closed: a
@@ -2661,6 +2806,51 @@ mod tests {
         let materialized = materialize_program_source_projection(&pinned(root), destination.path())
             .expect("the projection materializes");
         (destination, materialized)
+    }
+
+    #[test]
+    fn manifest_source_root_and_ignore_define_the_materialized_closure() {
+        let root = TempDir::new().unwrap();
+        fs::write(
+            root.path().join("capsule.toml"),
+            r#"
+schema_version = "1"
+name = "selected"
+version = "1.0.0"
+[source]
+root = "app"
+ignore = ["ignored.txt"]
+[run]
+command = ["node", "main.js"]
+"#,
+        )
+        .unwrap();
+        fs::create_dir(root.path().join("app")).unwrap();
+        fs::create_dir(root.path().join("other")).unwrap();
+        fs::write(root.path().join("app/main.js"), "selected").unwrap();
+        fs::write(root.path().join("app/ignored.txt"), "ignored").unwrap();
+        fs::write(root.path().join("app/.env"), "secret").unwrap();
+        fs::write(root.path().join("other/not-selected.txt"), "other").unwrap();
+        let manifest = CapsuleManifestV1::from_toml(
+            &fs::read_to_string(root.path().join("capsule.toml")).unwrap(),
+        )
+        .unwrap();
+        let destination = TempDir::new().unwrap();
+
+        materialize_program_source_projection_with_manifest(
+            &pinned(root.path()),
+            destination.path(),
+            &manifest,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(destination.path().join("main.js")).unwrap(),
+            "selected"
+        );
+        assert!(!destination.path().join("ignored.txt").exists());
+        assert!(!destination.path().join(".env").exists());
+        assert!(!destination.path().join("other").exists());
     }
 
     /// What lands in the destination is the PROJECTION, not the checkout: the

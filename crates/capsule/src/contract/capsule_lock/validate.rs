@@ -1,6 +1,7 @@
 use crate::capsule_lock::closure::{normalize_closure_value, validate_closure_value};
 use chrono::DateTime;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::capsule_lock::hash::compute_lock_id;
@@ -47,6 +48,8 @@ pub enum CapsuleLockValidationError {
     InvalidClosure(String),
     #[error("invalid contract.delivery: {0}")]
     InvalidDelivery(String),
+    #[error("invalid authoring identity: {0}")]
+    InvalidAuthoringIdentity(String),
 }
 
 /// Structural validation accepts draft locks without requiring lock_id.
@@ -80,6 +83,7 @@ pub fn validate_structural(
     validate_required_features(&lock.features.required_for_execution, mode, &mut errors);
     validate_resolution_closure(lock, &mut errors);
     validate_contract_delivery(lock, &mut errors);
+    validate_authoring_identity(lock, &mut errors);
 
     for unresolved in lock
         .resolution
@@ -102,6 +106,145 @@ pub fn validate_structural(
     } else {
         Err(errors)
     }
+}
+
+fn sha256_jcs<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    let bytes = serde_jcs::to_vec(value).map_err(|error| error.to_string())?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
+fn validate_authoring_identity(lock: &CapsuleLock, errors: &mut Vec<CapsuleLockValidationError>) {
+    let mut invalid = Vec::new();
+    if let Some(manifest) = &lock.manifest {
+        if manifest.schema_version != crate::types::manifest_v1::MANIFEST_SCHEMA_V1 {
+            invalid.push("manifest.schema_version must be '1'".to_string());
+        }
+        if !valid_sha256(&manifest.normalized_digest) {
+            invalid.push("manifest.normalized_digest is malformed".to_string());
+        }
+    }
+    if let Some(selection) = &lock.source_selection {
+        if selection.policy_version != crate::types::manifest_v1::SOURCE_FILTER_POLICY_VERSION_V1 {
+            invalid.push("source_selection.policy_version is unsupported".to_string());
+        }
+        for (field, digest) in [
+            ("system_ignore_digest", &selection.system_ignore_digest),
+            ("manifest_ignore_digest", &selection.manifest_ignore_digest),
+            (
+                "effective_ignore_digest",
+                &selection.effective_ignore_digest,
+            ),
+        ] {
+            if !valid_sha256(digest) {
+                invalid.push(format!("source_selection.{field} is malformed"));
+            }
+        }
+        let system = crate::types::manifest_v1::SYSTEM_SOURCE_IGNORE_V1
+            .iter()
+            .map(|pattern| (*pattern).to_string())
+            .collect::<Vec<_>>();
+        match sha256_jcs(&system) {
+            Ok(expected) if expected != selection.system_ignore_digest => {
+                invalid.push("source_selection.system_ignore_digest mismatch".to_string());
+            }
+            Err(error) => invalid.push(format!("canonicalize system ignore policy: {error}")),
+            _ => {}
+        }
+        if !selection.effective_ignore.starts_with(&system) {
+            invalid.push(
+                "source_selection.effective_ignore must begin with the system policy".to_string(),
+            );
+        }
+        let authored = selection
+            .effective_ignore
+            .strip_prefix(system.as_slice())
+            .unwrap_or_default();
+        match sha256_jcs(&authored) {
+            Ok(expected) if expected != selection.manifest_ignore_digest => {
+                invalid.push("source_selection.manifest_ignore_digest mismatch".to_string());
+            }
+            Err(error) => invalid.push(format!("canonicalize manifest ignore policy: {error}")),
+            _ => {}
+        }
+        match sha256_jcs(&selection.effective_ignore) {
+            Ok(expected) if expected != selection.effective_ignore_digest => {
+                invalid.push("source_selection.effective_ignore_digest mismatch".to_string());
+            }
+            Err(error) => invalid.push(format!("canonicalize effective ignore policy: {error}")),
+            _ => {}
+        }
+    }
+    if let Some(assets) = &lock.metadata_assets {
+        for (field, asset) in [
+            ("icon", assets.icon.as_ref()),
+            ("banner", assets.banner.as_ref()),
+        ] {
+            let Some(asset) = asset else { continue };
+            if !matches!(asset.origin.kind.as_str(), "path" | "url")
+                || asset.origin.value.trim().is_empty()
+            {
+                invalid.push(format!("metadata_assets.{field}.origin is invalid"));
+            } else if asset.origin.kind == "path"
+                && (asset.origin.value.starts_with('/')
+                    || asset.origin.value.contains('\\')
+                    || asset
+                        .origin
+                        .value
+                        .split('/')
+                        .any(|segment| segment.is_empty() || matches!(segment, "." | "..")))
+            {
+                invalid.push(format!(
+                    "metadata_assets.{field}.origin path is not normalized"
+                ));
+            } else if asset.origin.kind == "url"
+                && url::Url::parse(&asset.origin.value).map_or(true, |url| {
+                    url.scheme() != "https"
+                        || !url.username().is_empty()
+                        || url.password().is_some()
+                        || url.fragment().is_some()
+                        || url.host_str().is_none()
+                })
+            {
+                invalid.push(format!(
+                    "metadata_assets.{field}.origin URL is not a credential-free HTTPS URL"
+                ));
+            }
+            if !valid_sha256(&asset.content_digest) {
+                invalid.push(format!(
+                    "metadata_assets.{field}.content_digest is malformed"
+                ));
+            }
+            let expected_ref = asset
+                .content_digest
+                .strip_prefix("sha256:")
+                .map(|digest| format!("ato-asset://sha256/{digest}"));
+            if asset.artifact_ref.as_ref() != expected_ref.as_ref() {
+                invalid.push(format!(
+                    "metadata_assets.{field}.artifact_ref does not match content_digest"
+                ));
+            }
+            if !matches!(
+                asset.media_type.as_str(),
+                "image/png" | "image/jpeg" | "image/webp"
+            ) {
+                invalid.push(format!("metadata_assets.{field}.media_type is unsupported"));
+            }
+        }
+    }
+    errors.extend(
+        invalid
+            .into_iter()
+            .map(CapsuleLockValidationError::InvalidAuthoringIdentity),
+    );
 }
 
 /// Persisted validation applies structural validation and then enforces lock_id.
@@ -511,6 +654,10 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{CapsuleLock, ValidationMode, validate_structural};
+    use crate::capsule_lock::{
+        LockManifestSection, LockMetadataAsset, LockMetadataAssetOrigin, LockMetadataAssetsSection,
+        LockSourceSelectionSection,
+    };
 
     fn lock_with_delivery(delivery: Value, closure: Option<Value>) -> CapsuleLock {
         let mut lock = CapsuleLock::default();
@@ -647,5 +794,62 @@ mod tests {
                 .to_string()
                 .contains("contract.delivery.install.environment.services[].name must be non-empty")
         }));
+    }
+
+    fn validation_messages(lock: &CapsuleLock) -> String {
+        validate_structural(lock, ValidationMode::Strict)
+            .expect_err("invalid authoring identity")
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn malformed_manifest_and_source_policy_are_rejected() {
+        let lock = CapsuleLock {
+            manifest: Some(LockManifestSection {
+                schema_version: "0.3".to_string(),
+                normalized_digest: "sha256:ABC".to_string(),
+            }),
+            source_selection: Some(LockSourceSelectionSection {
+                root: ".".to_string(),
+                policy_version: "future-policy".to_string(),
+                effective_ignore: vec!["not-the-system-policy".to_string()],
+                system_ignore_digest: format!("sha256:{}", "0".repeat(64)),
+                manifest_ignore_digest: format!("sha256:{}", "0".repeat(64)),
+                effective_ignore_digest: format!("sha256:{}", "0".repeat(64)),
+            }),
+            ..CapsuleLock::default()
+        };
+        let errors = validation_messages(&lock);
+        assert!(errors.contains("manifest.schema_version"));
+        assert!(errors.contains("manifest.normalized_digest"));
+        assert!(errors.contains("policy_version"));
+        assert!(errors.contains("system_ignore_digest mismatch"));
+        assert!(errors.contains("must begin with the system policy"));
+    }
+
+    #[test]
+    fn asset_origin_ref_and_media_type_are_rejected_fail_closed() {
+        let lock = CapsuleLock {
+            metadata_assets: Some(LockMetadataAssetsSection {
+                icon: Some(LockMetadataAsset {
+                    origin: LockMetadataAssetOrigin {
+                        kind: "url".to_string(),
+                        value: "http://user:secret@127.0.0.1/icon.png#fragment".to_string(),
+                    },
+                    content_digest: format!("sha256:{}", "a".repeat(64)),
+                    artifact_ref: Some(format!("ato-asset://sha256/{}", "b".repeat(64))),
+                    media_type: "application/octet-stream".to_string(),
+                }),
+                banner: None,
+            }),
+            ..CapsuleLock::default()
+        };
+        let errors = validation_messages(&lock);
+        assert!(errors.contains("credential-free HTTPS"));
+        assert!(errors.contains("artifact_ref does not match"));
+        assert!(errors.contains("media_type is unsupported"));
     }
 }
