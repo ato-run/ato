@@ -65,6 +65,15 @@ Replay accepts only:
 It must not receive the authoring workspace, authoring processes, host
 environment, host credentials, or unrecorded host tools.
 
+The materialized runtime remains read-only. When a resolved runtime tool owns
+a known disposable cache below that immutable tree, the builder may replace
+that cache path with a deterministic symlink into the guest's existing `/tmp`
+tmpfs. The symlink is part of the measured immutable filesystem view; the cache
+contents are `temporary`, are never included in a Source Overlay or Ready-State
+Seal, and cannot widen a source or dependency path to writable access. The
+initial Node authoring policy applies this to Vite's `.vite` and `.vite-temp`
+caches, which Vite must create before its HTTP listener becomes ready.
+
 `CleanReplayReceiptV1` is emitted by an authenticated builder and binds the
 Authoring Session, all materialization inputs, execution contract, readiness,
 effective isolation posture, and replay diff. The API verifies this receipt;

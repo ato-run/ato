@@ -86,9 +86,11 @@ impl SourceProbe {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
         };
-        let (package_json_volta_node, package_json_engines_node) = has("package.json")
-            .then(|| read_package_json_node_fields(&dir.join("package.json")))
-            .unwrap_or_default();
+        let (package_json_volta_node, package_json_engines_node) = if has("package.json") {
+            read_package_json_node_fields(&dir.join("package.json"))
+        } else {
+            Default::default()
+        };
         SourceProbe {
             has_deno_json: has("deno.json") || has("deno.jsonc"),
             has_deno_lock: has("deno.lock"),
@@ -192,7 +194,10 @@ const NODE_VERSION_LADDER: &[&str] = &["18.20.4", "20.20.2", "22.14.0", "24.18.0
 /// an opaque "manifest unknown" pull failure.
 const MIN_SUPPORTED_NODE_MAJOR: u64 = 4;
 
-fn parse_exact_node_version(raw: &str, source: NodeVersionSource) -> Result<semver::Version, String> {
+fn parse_exact_node_version(
+    raw: &str,
+    source: NodeVersionSource,
+) -> Result<semver::Version, String> {
     // `.nvmrc` / `.node-version` conventionally allow a leading `v` and a
     // bare major or major.minor — pad the missing components with `.0`
     // rather than reject them; `volta.node` never has the `v` prefix.
@@ -291,7 +296,12 @@ pub(crate) fn resolve_node_toolchain(probe: &SourceProbe) -> Result<NodeToolchai
         .split('.')
         .next()
         .and_then(|s| s.parse().ok())
-        .ok_or_else(|| format!("resolved Node version {:?} has no major component", evidence.resolved_version))?;
+        .ok_or_else(|| {
+            format!(
+                "resolved Node version {:?} has no major component",
+                evidence.resolved_version
+            )
+        })?;
     if major < MIN_SUPPORTED_NODE_MAJOR {
         return Err(format!(
             "node_toolchain_unavailable: resolved Node major {major} (from {:?} = {:?}) is below \
@@ -567,7 +577,8 @@ pub fn derive_build_spec(
     // Legacy v0.3 lane: benefits from the same corrected Node base-image
     // resolution, but does not carry `NodeToolchainEvidence` in its receipt
     // shape (scoped to the v1 lane below — see ato-api#443/#1221).
-    let (base_image, install_cmd, _node_toolchain_evidence) = base_image_and_install(runtime, probe)?;
+    let (base_image, install_cmd, _node_toolchain_evidence) =
+        base_image_and_install(runtime, probe)?;
 
     Ok(RootfsBuildSpec {
         runtime,
@@ -878,12 +889,20 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 ///
 /// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
-    let runtime_environment = match spec.runtime {
-        RuntimeKind::Deno => "export DENO_DIR=/deno-dir",
-        RuntimeKind::Node => {
-            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0"
-        }
-        _ => "",
+    let (runtime_rootfs_setup, runtime_environment, runtime_tmpfs_setup) = match spec.runtime {
+        RuntimeKind::Deno => ("", "export DENO_DIR=/deno-dir", ""),
+        RuntimeKind::Node => (
+            r#"# Vite bundles its config and dependency optimizer cache at runtime. The guest
+# rootfs stays read-only; only these tool-owned, disposable cache paths are
+# redirected into the already-declared /tmp tmpfs. Keeping the links in the
+# immutable rootfs also makes the effective filesystem view identity-bearing.
+rm -rf "$ATO_ROOTFS/app/node_modules/.vite" "$ATO_ROOTFS/app/node_modules/.vite-temp"
+ln -s /tmp/ato-node-cache/vite "$ATO_ROOTFS/app/node_modules/.vite"
+ln -s /tmp/ato-node-cache/vite-temp "$ATO_ROOTFS/app/node_modules/.vite-temp""#,
+            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0",
+            "mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp",
+        ),
+        _ => ("", "", ""),
     };
     format!(
         r#"set -euo pipefail
@@ -897,6 +916,7 @@ trap cleanup EXIT
 CID=$({tool} create "$TAG")
 {tool} export "$CID" | tar -x -C "$ATO_ROOTFS"
 {tool} rm -f "$CID" >/dev/null; CID=""
+{runtime_rootfs_setup}
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
@@ -913,6 +933,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
+{runtime_tmpfs_setup}
 cd {init_cwd}
 {launch}
 while true; do sleep 1000; done
@@ -926,7 +947,9 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         tool = tool,
         launch = launch_argv_line(&spec.resolved_argv),
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        runtime_rootfs_setup = runtime_rootfs_setup,
         runtime_environment = runtime_environment,
+        runtime_tmpfs_setup = runtime_tmpfs_setup,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
     )
@@ -1198,11 +1221,7 @@ fn run_builder_script(
     let (tail, truncated) = bounded_diagnostic_tail(&redacted);
     let error_code = classify_builder_script_error_code(stage, &tail);
     let exit_code = out.status.code().unwrap_or(1);
-    let truncated_note = if truncated {
-        " (stderr truncated)"
-    } else {
-        ""
-    };
+    let truncated_note = if truncated { " (stderr truncated)" } else { "" };
     Err(format!(
         "{stage} failed: {error_code}, exit {exit_code}{truncated_note}\n{tail}"
     ))
@@ -3281,7 +3300,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
 
         assert!(error.contains("npm"), "{error}");
         assert!(error.contains("Python"), "{error}");
-        assert!(error.contains("refusing before the image is built"), "{error}");
+        assert!(
+            error.contains("refusing before the image is built"),
+            "{error}"
+        );
     }
 
     /// The mirror case: `[run] command` correctly matches what the probe
@@ -3441,7 +3463,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             ..SourceProbe::default()
         };
         let error = resolve_node_toolchain(&probe).unwrap_err();
-        assert!(error.contains(">=99"), "error names the impossible range: {error}");
+        assert!(
+            error.contains(">=99"),
+            "error names the impossible range: {error}"
+        );
     }
 
     /// An `.nvmrc` alias this resolver does not understand (`"lts/*"` and
@@ -3454,7 +3479,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             ..SourceProbe::default()
         };
         let error = resolve_node_toolchain(&probe).unwrap_err();
-        assert!(error.contains("lts/*"), "error names the unparseable value: {error}");
+        assert!(
+            error.contains("lts/*"),
+            "error names the unparseable value: {error}"
+        );
     }
 
     /// A resolved major below the oldest version this builder supports is a
@@ -3650,6 +3678,60 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             "{export}"
         );
         assert!(export.contains("'yarn' 'start'"), "{export}");
+    }
+
+    /// Package-managed Authoring currently infers only Vite launch scripts.
+    /// Vite writes its bundled config and optimizer cache below `node_modules`
+    /// before opening the HTTP listener. A read-only Ready-State rootfs would
+    /// otherwise make both swagger-editor and drawdb exit with EROFS/ENOENT.
+    /// The immutable guest redirects only those disposable tool caches into the
+    /// existing `/tmp` tmpfs; source and installed dependencies stay read-only.
+    #[test]
+    fn a_node_guest_redirects_vite_runtime_caches_into_tmpfs() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "8000"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("node spec");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(
+            export
+                .contains("ln -s /tmp/ato-node-cache/vite \"$ATO_ROOTFS/app/node_modules/.vite\""),
+            "{export}"
+        );
+        assert!(
+            export.contains(
+                "ln -s /tmp/ato-node-cache/vite-temp \"$ATO_ROOTFS/app/node_modules/.vite-temp\""
+            ),
+            "{export}"
+        );
+        assert!(
+            export.contains("mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp"),
+            "{export}"
+        );
+        assert!(
+            export.find("mount -t tmpfs tmpfs /tmp").unwrap()
+                < export.find("mkdir -p /tmp/ato-node-cache/vite").unwrap(),
+            "the cache targets must be created after /tmp becomes tmpfs: {export}"
+        );
+    }
+
+    #[test]
+    fn a_non_node_guest_does_not_gain_node_runtime_cache_paths() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("python spec");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(!export.contains("ato-node-cache"), "{export}");
+        assert!(!export.contains("node_modules/.vite"), "{export}");
     }
 
     const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
@@ -6238,9 +6320,8 @@ readiness_probe = { http_get = "/health" }
         // Only the stage that actually runs a manifest-derived install
         // command gets an npm-flavored code; a docker/export failure that
         // happens to mention "npm" in passing must not be mislabeled.
-        let error =
-            run_builder_script("export guest rootfs", "echo 'npm error' >&2; exit 1", &[])
-                .unwrap_err();
+        let error = run_builder_script("export guest rootfs", "echo 'npm error' >&2; exit 1", &[])
+            .unwrap_err();
         assert!(
             error.starts_with("export guest rootfs failed: builder_script_failed, exit 1"),
             "unexpected message: {error}"
@@ -6256,7 +6337,10 @@ readiness_probe = { http_get = "/health" }
         )
         .unwrap_err();
         assert!(!error.contains("sk-live-secret-value"), "leaked: {error}");
-        assert!(error.contains("[REDACTED LINE"), "missing redaction: {error}");
+        assert!(
+            error.contains("[REDACTED LINE"),
+            "missing redaction: {error}"
+        );
     }
 
     #[test]
@@ -6268,7 +6352,10 @@ readiness_probe = { http_get = "/health" }
         )
         .unwrap_err();
         assert!(!error.contains("s3cr3t-value"), "leaked: {error}");
-        assert!(error.contains("[REDACTED LINE"), "missing redaction: {error}");
+        assert!(
+            error.contains("[REDACTED LINE"),
+            "missing redaction: {error}"
+        );
     }
 
     #[test]
@@ -6279,7 +6366,10 @@ readiness_probe = { http_get = "/health" }
             &[],
         )
         .unwrap_err();
-        assert!(!error.contains("deadbeefdeadbeefdeadbeef"), "leaked: {error}");
+        assert!(
+            !error.contains("deadbeefdeadbeefdeadbeef"),
+            "leaked: {error}"
+        );
     }
 
     #[test]
@@ -6306,10 +6396,16 @@ readiness_probe = { http_get = "/health" }
 
     #[test]
     fn builder_script_failure_does_not_truncate_short_stderr() {
-        let error =
-            run_builder_script("assemble app image", "echo 'npm error short' >&2; exit 1", &[])
-                .unwrap_err();
-        assert!(!error.contains("(stderr truncated)"), "false positive: {error}");
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error short' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            !error.contains("(stderr truncated)"),
+            "false positive: {error}"
+        );
         assert!(error.contains("npm error short"));
     }
 }
