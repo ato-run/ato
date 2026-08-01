@@ -65,6 +65,24 @@ Replay accepts only:
 It must not receive the authoring workspace, authoring processes, host
 environment, host credentials, or unrecorded host tools.
 
+The materialized runtime remains read-only. When a resolved runtime tool owns
+a known disposable cache below that immutable tree, the builder may replace
+that cache path with a deterministic symlink into the guest's existing `/tmp`
+tmpfs. The symlink is part of the measured immutable filesystem view; the cache
+contents are `temporary`, are never included in a Source Overlay or Ready-State
+Seal, and cannot widen a source or dependency path to writable access. The
+initial Node authoring policy applies this to Vite's `.vite` and `.vite-temp`
+caches, which Vite must create before its HTTP listener becomes ready.
+
+The builder also applies a deterministic runtime resource policy inside the
+identity-bearing guest init. Authoring builders provision a 3 GiB guest while
+Node receives a 512 MiB V8 old-space limit. This leaves headroom for the kernel,
+restore-time page faults, and dependency-optimizer allocations that V8 does not
+account to old space. A 2 GiB guest is insufficient for large Vite graphs: it
+can pass readiness and then be killed immediately after Ready-State restore.
+The limit is builder policy, not an author-controlled environment value, and
+changing it changes the measured filesystem view.
+
 `CleanReplayReceiptV1` is emitted by an authenticated builder and binds the
 Authoring Session, all materialization inputs, execution contract, readiness,
 effective isolation posture, and replay diff. The API verifies this receipt;
@@ -118,6 +136,21 @@ readiness
 The Seal identity is distinct from a Capsule revision and from Execution
 Identity. A Seal always references its clean-replay and restore-verification
 receipts and remains reconstructible from source, normalized intent, and lock.
+
+The post-restore browser brings the app target to the foreground, stays alive
+for a bounded 20-second wall-clock render window, and then captures through
+Chromium's inherited local DevTools pipe. If that first frame does not pass the
+screenshot quality gate, the same browser receives one bounded 10-second paint
+retry before the final frame is evaluated. The pipe adds no host TCP listener
+and does not widen the guest-only egress cage. The capture must not use
+Chromium's virtual-time budget: applications with continuously scheduled timers
+or workers can keep virtual time from completing even after a valid first frame
+is paintable, which would reject an otherwise healthy Seal.
+
+The Firecracker control client gives `PUT /snapshot/create` a separate
+120-second read budget because that request does not reply until the complete
+multi-GiB guest-memory image is written. Other control requests retain the
+15-second fail-fast budget.
 
 ### Published media repair completion
 

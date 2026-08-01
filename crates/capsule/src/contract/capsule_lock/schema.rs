@@ -61,6 +61,15 @@ pub struct CapsuleLock {
     /// envelope's parent claim fail-closed on every read/write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_identity: Option<CapsuleProgramEnvelopeV1>,
+    /// Normalized authoring manifest committed by this lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<LockManifestSection>,
+    /// Effective source-selection policy, including the immutable system rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_selection: Option<LockSourceSelectionSection>,
+    /// Resolved content identities for Store-facing metadata assets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_assets: Option<LockMetadataAssetsSection>,
 }
 
 impl Default for CapsuleLock {
@@ -79,8 +88,51 @@ impl Default for CapsuleLock {
             launch: None,
             execution_contract: None,
             program_identity: None,
+            manifest: None,
+            source_selection: None,
+            metadata_assets: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockManifestSection {
+    pub schema_version: String,
+    pub normalized_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockSourceSelectionSection {
+    pub root: String,
+    pub policy_version: String,
+    #[serde(default)]
+    pub effective_ignore: Vec<String>,
+    pub system_ignore_digest: String,
+    pub manifest_ignore_digest: String,
+    pub effective_ignore_digest: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockMetadataAssetsSection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<LockMetadataAsset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<LockMetadataAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockMetadataAsset {
+    pub origin: LockMetadataAssetOrigin,
+    pub content_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<String>,
+    pub media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockMetadataAssetOrigin {
+    pub kind: String,
+    pub value: String,
 }
 
 /// D5 — the optional `launch` lock section carrying persisted non-secret

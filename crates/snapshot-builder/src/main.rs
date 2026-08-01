@@ -34,10 +34,14 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::io::Read as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine as _;
@@ -61,6 +65,7 @@ use protocol::session_surface::{
     PIXEL_STREAM_PROFILE, SessionSurfaceKind,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::docker_import::build::SystemImportCommandRunner;
 use snapshot::docker_import::{
@@ -296,10 +301,25 @@ struct ClaimedPinnedSource {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 struct ClaimedSource {
     source_kind: Option<String>,
+    #[serde(default)]
     github_owner: String,
+    #[serde(default)]
     github_repo: String,
     commit_sha: String,
+    #[serde(default)]
     subdirectory: Option<String>,
+    #[serde(default)]
+    upload_id: Option<String>,
+    #[serde(default)]
+    archive_digest: Option<String>,
+    #[serde(default)]
+    manifest_digest: Option<String>,
+    #[serde(default)]
+    source_root: Option<String>,
+    #[serde(default)]
+    measured_file_count_hint: Option<u64>,
+    #[serde(default)]
+    measured_uncompressed_bytes_hint: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -414,6 +434,8 @@ struct ClaimedJob {
     lease_token: Option<wizard_wire::LeaseToken>,
     #[serde(default)]
     lease_expires_at: Option<String>,
+    #[serde(default)]
+    claim_generation: Option<u32>,
 }
 
 fn default_job_kind() -> String {
@@ -1100,6 +1122,8 @@ struct ProducedBuild {
     boot_timeout_s: Option<u32>,
     /// Resolver-owned lock identity. Present only for the strict v1 producer.
     resolution_lock_digest: Option<String>,
+    /// Filtered Program Source Closure committed by the v1 execution contract.
+    source_closure_id: Option<String>,
     /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
     /// validated at produce time.
     ///
@@ -1354,6 +1378,7 @@ fn produce_recipe_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // The authored acceptance program, validated above. Only the interactive
         // HOLD reads it.
         seal_at,
@@ -1723,6 +1748,7 @@ fn produce_import_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
@@ -1845,6 +1871,7 @@ fn produce_oci_image_import(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         warmup_paths: warmup.warmup_paths,
@@ -1948,6 +1975,7 @@ fn produce_compose_import(
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
         resolution_lock_digest: None,
+        source_closure_id: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
@@ -2753,6 +2781,152 @@ fn process_source_materialize_job(
                 format!("source_materialize params are invalid: {e}"),
             )
         })?;
+    if source.source_kind.as_deref() == Some("local_archive") {
+        if params.schema != "ato.source-materialize-job/v1"
+            || params.source != *source
+            || params.provider != "local_archive"
+            || params.commit_algorithm != "sha256"
+            || params.resolved_commit_sha != source.commit_sha
+            || params.resolver_contract_version != "ato.capsule-program-source-projection/v1"
+        {
+            return Err(SourceMaterializeFail::internal(
+                "source_plan_mismatch",
+                "the claimed local source and exact-source params disagree".to_string(),
+            ));
+        }
+        let upload_id = source.upload_id.as_deref().ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                "local source omitted upload_id".to_string(),
+            )
+        })?;
+        let expected_digest = source.archive_digest.as_deref().ok_or_else(|| {
+            SourceMaterializeFail::internal(
+                "source_plan_invalid",
+                "local source omitted archive_digest".to_string(),
+            )
+        })?;
+        let url = format!(
+            "{}/v1/capsule-snapshots/jobs/{}/local-source-archive",
+            cfg.api_url.trim_end_matches('/'),
+            job.id
+        );
+        let response = ureq::get(&url)
+            .set("authorization", &format!("Bearer {}", cfg.token))
+            .set("x-ato-builder-id", &cfg.agent_id)
+            .set(
+                "x-ato-claim-generation",
+                &job.claim_generation
+                    .ok_or_else(|| {
+                        SourceMaterializeFail::internal(
+                            "source_claim_invalid",
+                            "local source claim omitted its generation fence".to_string(),
+                        )
+                    })?
+                    .to_string(),
+            )
+            .call()
+            .map_err(|error| {
+                SourceMaterializeFail::internal(
+                    "local_archive_download",
+                    format!("download local source archive: {error}"),
+                )
+            })?;
+        let mut bytes = Vec::new();
+        std::io::Read::take(response.into_reader(), 100 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| {
+                SourceMaterializeFail::internal(
+                    "local_archive_download",
+                    format!("read local source archive: {error}"),
+                )
+            })?;
+        if bytes.len() > 100 * 1024 * 1024 {
+            return Err(SourceMaterializeFail::internal(
+                "compressed_cap_exceeded",
+                "local source archive exceeds 100 MiB".to_string(),
+            ));
+        }
+        let actual_digest = capsule::blob::source_archive_hash(&bytes);
+        if actual_digest != expected_digest {
+            return Err(SourceMaterializeFail::internal(
+                "local_archive_digest_mismatch",
+                "local source archive bytes do not match the selected digest".to_string(),
+            ));
+        }
+        std::fs::create_dir_all(&jobdir).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_workspace",
+                format!("create local source workspace: {error}"),
+            )
+        })?;
+        let archive_path = jobdir.join("source.tar.zst");
+        std::fs::write(&archive_path, &bytes).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_workspace",
+                format!("write local source archive: {error}"),
+            )
+        })?;
+        let extracted = jobdir.join("source");
+        capsule::contract::program_source_projection::extract_source_archive(
+            &archive_path,
+            &extracted,
+        )
+        .map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_invalid",
+                format!("validate local source archive: {error}"),
+            )
+        })?;
+        verify_local_authoring_archive(&extracted, source).map_err(|reason| {
+            SourceMaterializeFail::internal("local_archive_evidence_mismatch", reason)
+        })?;
+        let source_tree_digest = materialized_source_tree_hash(&extracted).map_err(|error| {
+            SourceMaterializeFail::internal(
+                "local_archive_tree",
+                format!("digest local source tree: {error}"),
+            )
+        })?;
+        let archive = source_archive_upload::LocalArchive::new(
+            archive_path,
+            actual_digest.clone(),
+            bytes.len() as u64,
+        );
+        let transport = source_archive_upload::HttpArchiveUploadTransport {
+            api_url: &cfg.api_url,
+            token: &cfg.token,
+            agent_id: &cfg.agent_id,
+        };
+        let object_key = source_archive_upload::upload_source_archive(
+            &transport, &job.id, &archive,
+        )
+        .map_err(|error| SourceMaterializeFail::internal(error.code(), error.to_string()))?;
+        let source_receipt = snapshot::source_receipt::SourceReceiptV1 {
+            canonical_repository: format!("ato-local://{upload_id}"),
+            commit_algorithm: "sha256".to_string(),
+            provider: "local_archive".to_string(),
+            resolved_commit_sha: source.commit_sha.clone(),
+            resolver_contract_version: params.resolver_contract_version,
+            schema: snapshot::source_receipt::SOURCE_RECEIPT_V1_SCHEMA.to_string(),
+            source_tree_digest: source_tree_digest.clone(),
+        };
+        let materialization_receipt = snapshot::source_receipt::SourceMaterializationReceiptV1 {
+            archive_format_version: snapshot::source_materialization::SOURCE_ARCHIVE_FORMAT_V1
+                .to_string(),
+            object_key,
+            schema: snapshot::source_receipt::SOURCE_MATERIALIZATION_RECEIPT_V1_SCHEMA.to_string(),
+            size_bytes: bytes.len() as u64,
+            source_archive_digest: actual_digest,
+            source_tree_digest,
+        };
+        return Ok(SourceMaterializeOk {
+            source_receipt_digest: source_receipt.digest(),
+            materialization_receipt_digest: materialization_receipt.digest(),
+            source_receipt,
+            materialization_receipt,
+            archive,
+        });
+    }
     if params.schema != "ato.source-materialize-job/v1"
         || params.source != *source
         || params.source.source_kind.as_deref() != Some("github")
@@ -2843,6 +3017,141 @@ fn process_source_materialize_job(
         materialization_receipt: outcome.materialization,
         archive,
     })
+}
+
+fn verify_local_authoring_archive(root: &Path, source: &ClaimedSource) -> Result<(), String> {
+    let expected_root = source.source_root.as_deref().unwrap_or(".");
+    let manifest_path = root.join("capsule.toml");
+    let parsed_manifest = if let Some(expected_digest) = source.manifest_digest.as_deref() {
+        let raw = std::fs::read_to_string(&manifest_path)
+            .map_err(|error| format!("archive omitted declared capsule.toml: {error}"))?;
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&raw)
+            .map_err(|error| format!("archive capsule.toml is invalid: {error}"))?;
+        let measured = manifest
+            .normalized_digest()
+            .map_err(|error| format!("normalize archive capsule.toml: {error}"))?;
+        if measured != expected_digest {
+            return Err(
+                "archive capsule.toml digest differs from the manifest declared in the upload plan"
+                    .to_string(),
+            );
+        }
+        if manifest.source.root != expected_root {
+            return Err(
+                "archive capsule.toml source.root differs from the upload plan".to_string(),
+            );
+        }
+        Some(manifest)
+    } else {
+        if manifest_path.is_file() {
+            return Err(
+                "archive contains capsule.toml although the upload plan declared no manifest"
+                    .to_string(),
+            );
+        }
+        if expected_root != "." {
+            return Err("a manifest-less local source must use source.root='.'".to_string());
+        }
+        None
+    };
+
+    let mut files = Vec::new();
+    collect_local_archive_files(root, root, &mut files)?;
+    let measured_count = u64::try_from(files.len()).map_err(|_| "file count overflow")?;
+    let measured_bytes = files.iter().try_fold(0_u64, |sum, (_, size)| {
+        sum.checked_add(*size).ok_or("uncompressed size overflow")
+    })?;
+    if source.measured_file_count_hint != Some(measured_count)
+        || source.measured_uncompressed_bytes_hint != Some(measured_bytes)
+    {
+        return Err(
+            "builder file count or uncompressed size differs from the client completion hint"
+                .to_string(),
+        );
+    }
+
+    let selected_prefix = if expected_root == "." {
+        None
+    } else {
+        Some(format!("{expected_root}/"))
+    };
+    for (path, _) in files {
+        if matches!(
+            path.as_str(),
+            "capsule.toml" | "capsule.lock" | "ato.lock.json"
+        ) {
+            continue;
+        }
+        let selected_path = match &selected_prefix {
+            Some(prefix) => path
+                .strip_prefix(prefix)
+                .ok_or_else(|| format!("archive entry '{path}' is outside declared source.root"))?,
+            None => path.as_str(),
+        };
+        if local_path_is_system_excluded(selected_path) {
+            return Err(format!(
+                "archive entry '{path}' violates the system source exclusion policy"
+            ));
+        }
+        if let Some(manifest) = &parsed_manifest
+            && !manifest
+                .source_path_is_included(selected_path, false)
+                .map_err(|error| format!("apply source selection to '{path}': {error}"))?
+        {
+            return Err(format!(
+                "archive entry '{path}' is excluded by the Effective Manifest"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_local_archive_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, u64)>,
+) -> Result<(), String> {
+    let mut entries = std::fs::read_dir(current)
+        .map_err(|error| format!("read extracted local archive: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read extracted local archive entry: {error}"))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("inspect extracted local archive entry: {error}"))?;
+        if metadata.file_type().is_symlink() {
+            return Err("local archive must not contain symbolic links".to_string());
+        }
+        if metadata.is_dir() {
+            collect_local_archive_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "local archive entry escaped extraction root")?
+                .to_str()
+                .ok_or("local archive path is not UTF-8")?
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            files.push((relative, metadata.len()));
+        } else {
+            return Err("local archive contains an unsupported entry type".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn local_path_is_system_excluded(path: &str) -> bool {
+    let segments = path.split('/').collect::<Vec<_>>();
+    let file_name = segments.last().copied().unwrap_or_default();
+    path.starts_with(".git/")
+        || file_name == ".env"
+        || file_name.starts_with(".env.")
+        || file_name.ends_with(".pem")
+        || file_name.ends_with(".key")
+        || matches!(file_name, "id_rsa" | "id_ed25519")
+        || segments
+            .iter()
+            .any(|segment| matches!(*segment, ".aws" | ".ssh"))
 }
 
 /// Obtain the pinned source for a v1 build, or fail the job.
@@ -2989,15 +3298,14 @@ fn v1_image_ref(job_id: &str) -> String {
     format!("ato-v1-build-{slug}-{}", std::process::id())
 }
 
-/// Add a generated declaration as a source overlay without changing the
-/// immutable source closure it describes.
+/// Materialize the Effective Manifest into a derived build-view archive.
 ///
 /// The API-provided archive is verified and extracted before this function is
-/// called. Re-materializing that workspace after creating `capsule.toml`
-/// produces the exact archive the shared v1 producer expects: its program
-/// source projection excludes the generated control file, so the resulting
-/// source digest must still equal the original config-less source closure.
-fn materialize_generated_manifest_overlay(
+/// called. This archive is not persisted as a new Source Revision: it is a
+/// deterministic build view derived from the already-verified extraction plus
+/// declaration control data. Program source projection withholds capsule.toml,
+/// so declaration-only edits do not change the Source Closure.
+fn materialize_effective_manifest(
     workspace: &Path,
     input: &ArchiveOnlyBuildInput,
     generated_manifest: &str,
@@ -3005,25 +3313,13 @@ fn materialize_generated_manifest_overlay(
 ) -> std::result::Result<ArchiveOnlyBuildInput, (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
     let manifest_path = workspace.join("capsule.toml");
-    let mut manifest = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&manifest_path)
-        .map_err(|error| {
-            fail(
-                "manifest",
-                format!("generated setup refuses to replace an existing capsule.toml: {error}"),
-            )
-        })?;
-    std::io::Write::write_all(&mut manifest, generated_manifest.as_bytes())
-        .map_err(|error| fail("manifest", format!("write generated capsule.toml: {error}")))?;
-    drop(manifest);
-
+    std::fs::write(&manifest_path, generated_manifest)
+        .map_err(|error| fail("manifest", format!("write effective capsule.toml: {error}")))?;
     let materialized =
         capsule::blob::materialize_source_archive(workspace, archive_path).map_err(|error| {
             fail(
                 "source_overlay",
-                format!("materialize generated source overlay: {error}"),
+                format!("materialize Effective Manifest build view: {error}"),
             )
         })?;
     let object_key =
@@ -3031,7 +3327,7 @@ fn materialize_generated_manifest_overlay(
             .map_err(|error| {
                 fail(
                     "source_overlay",
-                    format!("derive generated source overlay identity: {error}"),
+                    format!("derive Effective Manifest build-view identity: {error}"),
                 )
             })?;
     ArchiveOnlyBuildInput::new(
@@ -3094,14 +3390,13 @@ fn produce_pinned_v1_build(
     )
     .map_err(|e| fail("build", format!("extract the pinned source archive: {e}")))?;
 
-    // 2. A config-less authoring source gets a typed Source Overlay containing
-    //    only the generated declaration. The shared v1 producer always sees an
-    //    archive with capsule.toml, while its projected source identity remains
-    //    the immutable closure from the API receipt.
-    let generated_archive_path = jobdir.join("generated-source-overlay.tar.zst");
+    // 2. Materialize the one Effective Manifest in the workspace and a
+    //    deterministic derived build view. The server-pinned archive was
+    //    already verified before this control-file overlay is applied.
+    let generated_archive_path = jobdir.join("effective-manifest-build-view.tar.zst");
     let (build_input, build_archive_path) = match generated_manifest {
         Some(generated_manifest) => (
-            materialize_generated_manifest_overlay(
+            materialize_effective_manifest(
                 &workspace,
                 input,
                 generated_manifest,
@@ -3112,8 +3407,19 @@ fn produce_pinned_v1_build(
         None => (input.clone(), verified.path().to_path_buf()),
     };
 
-    // 3. The program-source identity this revision COMMITS, derived from the
-    //    exact archive the v1 producer will consume.
+    // 3. Derive the program-source identity from the verified archive selected
+    //    by that exact Effective Manifest.
+    let manifest_path = workspace.join("capsule.toml");
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
+        fail(
+            "manifest",
+            format!("the pinned source carries no capsule.toml: {e}"),
+        )
+    })?;
+    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+        &String::from_utf8_lossy(&manifest_bytes),
+    )
+    .map_err(|e| fail("manifest", e.to_string()))?;
     let acquired = snapshot::archive_only_build::acquire_pinned_source(
         &build_input,
         &DownloadedArchiveFetch {
@@ -3128,29 +3434,6 @@ fn produce_pinned_v1_build(
         acquired.materialized().contract.digest.bytes(),
     )
     .to_string();
-    if generated_manifest.is_some() {
-        refuse_source_revision_mismatch(
-            input.source_revision_id(),
-            input.expected_source_tree_digest(),
-            &expected_source_digest,
-        )?;
-    }
-
-    // The manifest, read from that workspace. Parsed here as well as inside the
-    // lane because the ack carries values the lane has no reason to report —
-    // the manifest hash the registry keys on, and the authored acceptance
-    // program the interactive HOLD needs.
-    let manifest_path = workspace.join("capsule.toml");
-    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
-        fail(
-            "manifest",
-            format!("the pinned source carries no capsule.toml: {e}"),
-        )
-    })?;
-    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
-        &String::from_utf8_lossy(&manifest_bytes),
-    )
-    .map_err(|e| fail("manifest", e.to_string()))?;
     // The authored `[seal_at]`, validated by the SAME function the v0.3 lane
     // uses so both refuse the same argv — and validated BEFORE a rootfs is
     // built, so an authoring typo does not cost a full build.
@@ -3284,6 +3567,7 @@ fn produce_pinned_v1_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: Some(resolution_lock_digest),
+        source_closure_id: Some(outcome.source_digest),
         seal_at,
         // A v1 manifest has no `[snapshot]` table, so the backend applies its
         // own warmup fallback — the same as a v0.3 capsule that authored none.
@@ -4120,6 +4404,256 @@ fn authoring_readiness_terminal_line(port: u16, path: &str) -> String {
     format!("Readiness: HTTP {path} on port {port} succeeded")
 }
 
+struct SetupCommandResult {
+    exit_code: i32,
+    duration_ms: u64,
+    stdout: String,
+    stderr: String,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+fn drain_command_stream(
+    mut stream: impl std::io::Read,
+    limit: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut truncated = false;
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let available = limit.saturating_sub(kept.len());
+        kept.extend_from_slice(&buffer[..count.min(available)]);
+        truncated |= count > available;
+    }
+    Ok((kept, truncated))
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_setup_command_sandbox(
+    source_root: &Path,
+    cwd: &Path,
+) -> Result<std::process::Child, String> {
+    let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .ok_or_else(|| "setup commands require Bubblewrap".to_string())?;
+    let mut process = Command::new(bwrap);
+    process
+        .args([
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-cgroup",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ])
+        .arg("--bind")
+        .arg(source_root)
+        .arg("/workspace");
+    for system_path in [
+        "/bin",
+        "/usr",
+        "/usr/local",
+        "/lib",
+        "/lib64",
+        "/etc/ssl/certs",
+        "/etc/resolv.conf",
+        "/etc/hosts",
+        "/etc/passwd",
+        "/etc/group",
+    ] {
+        if Path::new(system_path).exists() {
+            process.args(["--ro-bind", system_path, system_path]);
+        }
+    }
+    for control_file in ["capsule.toml", "capsule.lock"] {
+        let host = source_root.join(control_file);
+        if host.is_file() {
+            process
+                .arg("--ro-bind")
+                .arg(&host)
+                .arg(Path::new("/workspace").join(control_file));
+        }
+    }
+    let sandbox_cwd = Path::new("/workspace").join(
+        cwd.strip_prefix(source_root)
+            .map_err(|_| "setup command cwd escaped the workspace".to_string())?,
+    );
+    process
+        .arg("--chdir")
+        .arg(sandbox_cwd)
+        .args(["--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin"])
+        .args(["--setenv", "HOME", "/workspace/.ato-command-home"])
+        .args(["--setenv", "LANG", "C.UTF-8"])
+        .args(["/bin/sh", "-s"])
+        .env_clear()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn setup command: {error}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_setup_command_sandbox(
+    _source_root: &Path,
+    _cwd: &Path,
+) -> Result<std::process::Child, String> {
+    Err("setup commands require the Linux Bubblewrap sandbox".to_string())
+}
+
+fn execute_authoring_setup_command(
+    source_root: &Path,
+    work: &authoring_runtime::AuthoringWork,
+    command: &authoring_runtime::SetupCommandClaim,
+) -> Result<SetupCommandResult, String> {
+    #[cfg(unix)]
+    if unsafe { libc::geteuid() } == 0 {
+        return Err("setup commands must never run as root".to_string());
+    }
+    if command.shell != ["/bin/sh", "-s"] {
+        return Err("setup command shell contract is unsupported".to_string());
+    }
+    let cwd_path = Path::new(&command.cwd);
+    if cwd_path.is_absolute()
+        || command.cwd.contains('\\')
+        || cwd_path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return Err("setup command cwd is outside the source workspace".to_string());
+    }
+    let source_root = source_root
+        .canonicalize()
+        .map_err(|error| format!("canonicalize setup source root: {error}"))?;
+    let cwd = source_root
+        .join(cwd_path)
+        .canonicalize()
+        .map_err(|error| format!("canonicalize setup command cwd: {error}"))?;
+    if !cwd.starts_with(&source_root) || !cwd.is_dir() {
+        return Err("setup command cwd is outside the source workspace".to_string());
+    }
+    let command_home = source_root.join(".ato-command-home");
+    std::fs::create_dir_all(&command_home)
+        .map_err(|error| format!("create setup command HOME: {error}"))?;
+    let mut child = spawn_setup_command_sandbox(&source_root, &cwd)?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "setup command stdin unavailable".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "setup command stdout unavailable".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "setup command stderr unavailable".to_string())?;
+    let max_output = command.max_output_bytes_per_stream;
+    let started = Instant::now();
+    let deadline = chrono::DateTime::parse_from_rfc3339(&work.lease_expires_at)
+        .ok()
+        .and_then(|lease| {
+            lease
+                .signed_duration_since(chrono::Utc::now().fixed_offset())
+                .to_std()
+                .ok()
+        })
+        .unwrap_or_else(|| Duration::from_secs(command.max_runtime_seconds))
+        .min(Duration::from_secs(command.max_runtime_seconds));
+    let (status, stdout_bytes, stderr_bytes, stdout_truncated, stderr_truncated) =
+        std::thread::scope(|scope| {
+            let input = command.stdin.as_bytes();
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                stdin.write_all(input)?;
+                stdin.flush()
+            });
+            let stdout_reader = scope.spawn(move || drain_command_stream(stdout, max_output));
+            let stderr_reader = scope.spawn(move || drain_command_stream(stderr, max_output));
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Ok(status),
+                    Ok(None) if started.elapsed() < deadline => {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Ok(None) => {
+                        let _ = child.kill();
+                        let waited = child.wait();
+                        break waited;
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            let writer = writer
+                .join()
+                .map_err(|_| "setup command stdin writer panicked".to_string())?;
+            writer.map_err(|error| format!("write setup command stdin: {error}"))?;
+            let (stdout_bytes, stdout_truncated) = stdout_reader
+                .join()
+                .map_err(|_| "setup command stdout reader panicked".to_string())?
+                .map_err(|error| format!("read setup command stdout: {error}"))?;
+            let (stderr_bytes, stderr_truncated) = stderr_reader
+                .join()
+                .map_err(|_| "setup command stderr reader panicked".to_string())?
+                .map_err(|error| format!("read setup command stderr: {error}"))?;
+            Ok::<_, String>((
+                status,
+                stdout_bytes,
+                stderr_bytes,
+                stdout_truncated,
+                stderr_truncated,
+            ))
+        })?;
+    let status = status.map_err(|error| format!("wait for setup command: {error}"))?;
+    let timed_out = started.elapsed() >= deadline && !status.success();
+    Ok(SetupCommandResult {
+        exit_code: if timed_out {
+            124
+        } else {
+            status.code().unwrap_or(1)
+        },
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        stdout_truncated,
+        stderr_truncated,
+    })
+}
+
+fn report_setup_command_stream(
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+    slot_id: &str,
+    command: &authoring_runtime::SetupCommandClaim,
+    stream: &str,
+    sequence: &mut u64,
+    output: &str,
+) -> Result<(), String> {
+    const CHUNK_BYTES: usize = 256 * 1024;
+    let mut remaining = output;
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(CHUNK_BYTES);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        let chunk = &remaining[..end];
+        client.append_setup_command_output(work, slot_id, command, stream, *sequence, chunk)?;
+        *sequence += 1;
+        remaining = &remaining[end..];
+    }
+    Ok(())
+}
+
 fn process_authoring_setup(
     cfg: &Config,
     backend: &FirecrackerBackend,
@@ -4161,8 +4695,6 @@ fn process_authoring_setup(
             ));
         }
     }
-    let setup_origin =
-        authoring_runtime::authoring_recipe_origin(work).map_err(|error| fail("detect", error))?;
     let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
         .map_err(|error| fail("setup", error))?;
     if jobdir.exists() {
@@ -4189,21 +4721,29 @@ fn process_authoring_setup(
         &inference_root,
     )
     .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
+    let setup_origin = authoring_runtime::authoring_recipe_origin(&inference_root, work)
+        .map_err(|error| fail("detect", error))?;
     let (normalized, generated_manifest) =
         authoring_runtime::resolve_authoring_recipe(&inference_root, work)
             .map_err(|error| fail("detect", error))?;
+    let materialized_assets = materialize_setup_path_assets(&inference_root, &generated_manifest)
+        .map_err(|error| fail("metadata_assets", error))?;
     let produced = produce_pinned_v1_build(
         cfg,
         &work.work_id,
         &jobdir,
         &input,
         verified,
-        Some(&generated_manifest),
+        Some(generated_manifest.as_str()),
     )?;
     let resolution_lock_digest = produced
         .resolution_lock_digest
         .clone()
         .ok_or_else(|| fail("build", "v1 resolver emitted no lock identity".to_string()))?;
+    let source_closure_id = produced
+        .source_closure_id
+        .clone()
+        .ok_or_else(|| fail("build", "v1 resolver emitted no source closure".to_string()))?;
     let store =
         CasStore::open(jobdir.join("cas")).map_err(|error| fail("launch", error.to_string()))?;
     let guest = backend
@@ -4243,7 +4783,7 @@ fn process_authoring_setup(
         &work.work_id,
         &cfg.token,
         vec![
-            format!("Source closure: {}", work.source_closure_id),
+            format!("Source closure: {source_closure_id}"),
             format!("Program Intent: {}", normalized.digest),
             format!("Resolution lock: {resolution_lock_digest}"),
             format!(
@@ -4309,7 +4849,9 @@ fn process_authoring_setup(
                 origin: setup_origin,
                 normalized_program_intent: &normalized,
                 resolution_lock_digest: &resolution_lock_digest,
+                source_closure_id: &source_closure_id,
                 generated_capsule_toml: &generated_manifest,
+                materialized_assets: &materialized_assets,
             },
         )
         .map_err(|error| fail("setup_ready", error))?;
@@ -4321,7 +4863,62 @@ fn process_authoring_setup(
     loop {
         match client.setup_control(work) {
             Ok(control) if control.action == "continue" => {
-                std::thread::sleep(Duration::from_secs(2));
+                match client.claim_setup_command(work, &slot.slot_id) {
+                    Ok(Some(command)) => {
+                        let result =
+                            execute_authoring_setup_command(&inference_root, work, &command)
+                                .unwrap_or_else(|error| SetupCommandResult {
+                                    exit_code: 1,
+                                    duration_ms: 0,
+                                    stdout: String::new(),
+                                    stderr: error,
+                                    stdout_truncated: false,
+                                    stderr_truncated: false,
+                                });
+                        let mut sequence = 0;
+                        report_setup_command_stream(
+                            client,
+                            work,
+                            &slot.slot_id,
+                            &command,
+                            "stdout",
+                            &mut sequence,
+                            &result.stdout,
+                        )
+                        .map_err(|error| fail("setup_command_output", error))?;
+                        report_setup_command_stream(
+                            client,
+                            work,
+                            &slot.slot_id,
+                            &command,
+                            "stderr",
+                            &mut sequence,
+                            &result.stderr,
+                        )
+                        .map_err(|error| fail("setup_command_output", error))?;
+                        client
+                            .complete_setup_command(
+                                work,
+                                &slot.slot_id,
+                                &command,
+                                &authoring_runtime::SetupCommandCompletion {
+                                    exit_code: result.exit_code,
+                                    duration_ms: result.duration_ms,
+                                    stdout_truncated: result.stdout_truncated,
+                                    stderr_truncated: result.stderr_truncated,
+                                },
+                            )
+                            .map_err(|error| fail("setup_command_complete", error))?;
+                    }
+                    Ok(None) => std::thread::sleep(Duration::from_secs(2)),
+                    Err(error) => {
+                        eprintln!(
+                            "[builder] Authoring Session {} command claim failed: {error}",
+                            work.authoring_session_id
+                        );
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
             }
             Ok(_) => break,
             Err(error) => {
@@ -4339,6 +4936,79 @@ fn process_authoring_setup(
         .mark_setup_stopped(work)
         .map_err(|error| fail("setup_stop", error))?;
     Ok(())
+}
+
+fn materialize_setup_path_assets(
+    workspace_root: &Path,
+    capsule_toml: &str,
+) -> Result<Vec<authoring_runtime::MaterializedSetupAsset>, String> {
+    use capsule::types::manifest_v1::AssetLocatorV1;
+
+    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(capsule_toml)
+        .map_err(|error| format!("parse Effective Manifest assets: {error}"))?;
+    let Some(assets) = manifest.metadata.assets.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let selected_root = workspace_root
+        .join(&manifest.source.root)
+        .canonicalize()
+        .map_err(|error| format!("resolve source.root for assets: {error}"))?;
+    let mut materialized = Vec::new();
+    for (kind, locator) in [
+        ("icon", assets.icon.as_ref()),
+        ("banner", assets.banner.as_ref()),
+    ] {
+        let Some(AssetLocatorV1::Path(locator)) = locator else {
+            continue;
+        };
+        let path = selected_root
+            .join(&locator.path)
+            .canonicalize()
+            .map_err(|error| format!("resolve {kind} asset path: {error}"))?;
+        if !path.starts_with(&selected_root) || !path.is_file() {
+            return Err(format!("{kind} asset path escaped source.root"));
+        }
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("read {kind} asset bytes: {error}"))?;
+        if bytes.is_empty() || bytes.len() > 5 * 1024 * 1024 {
+            return Err(format!("{kind} asset must be within 1 byte..5 MiB"));
+        }
+        let media_type = setup_asset_media_type(&bytes, &locator.path)?;
+        let digest = hex::encode(Sha256::digest(&bytes));
+        materialized.push(authoring_runtime::MaterializedSetupAsset {
+            kind,
+            origin_path: locator.path.clone(),
+            content_digest: format!("sha256:{digest}"),
+            media_type: media_type.to_string(),
+            bytes_base64: BASE64.encode(bytes),
+        });
+    }
+    Ok(materialized)
+}
+
+fn setup_asset_media_type(bytes: &[u8], path: &str) -> Result<&'static str, String> {
+    let detected = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        return Err(format!("{path} has unsupported image magic bytes"));
+    };
+    let lower = path.to_ascii_lowercase();
+    let extension_matches = match detected {
+        "image/png" => lower.ends_with(".png"),
+        "image/jpeg" => lower.ends_with(".jpg") || lower.ends_with(".jpeg"),
+        "image/webp" => lower.ends_with(".webp"),
+        _ => false,
+    };
+    if !extension_matches {
+        return Err(format!(
+            "{path} extension does not match detected {detected} bytes"
+        ));
+    }
+    Ok(detected)
 }
 
 struct BuilderCleanReplayAdapter<'a> {
@@ -4488,8 +5158,22 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             &jobdir.join("source-download"),
         )
         .map_err(|error| error.to_string())?;
-        let generated_manifest =
-            authoring_runtime::replay_capsule_toml(self.work, &request.normalized_program_intent)?;
+        let replay_source = jobdir.join("replay-source");
+        std::fs::create_dir_all(&replay_source)
+            .map_err(|error| format!("create Clean Replay source workspace: {error}"))?;
+        capsule::contract::program_source_projection::extract_source_archive(
+            verified.path(),
+            &replay_source,
+        )
+        .map_err(|error| format!("extract Clean Replay source: {error}"))?;
+        let (replayed_intent, generated_manifest) =
+            authoring_runtime::resolve_authoring_recipe(&replay_source, self.work)?;
+        if replayed_intent.digest != request.normalized_program_intent.digest {
+            return Err(
+                "fresh recipe resolution does not match the Authoring Session Program Intent"
+                    .to_string(),
+            );
+        }
         let produced = produce_pinned_v1_build(
             self.cfg,
             &self.work.work_id,
@@ -6337,6 +7021,110 @@ targets = ["web"]
         );
     }
 
+    #[test]
+    fn command_stream_reports_bytes_discarded_after_the_limit() {
+        let (kept, truncated) =
+            drain_command_stream(std::io::Cursor::new(b"abcdef"), 4).expect("drain");
+        assert_eq!(kept, b"abcd");
+        assert!(truncated);
+
+        let (kept, truncated) =
+            drain_command_stream(std::io::Cursor::new(b"abcd"), 4).expect("drain exact");
+        assert_eq!(kept, b"abcd");
+        assert!(!truncated);
+    }
+
+    fn local_claim(
+        manifest_digest: String,
+        source_root: &str,
+        file_count: u64,
+        byte_count: u64,
+    ) -> ClaimedSource {
+        ClaimedSource {
+            source_kind: Some("local".into()),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            commit_sha: String::new(),
+            subdirectory: None,
+            upload_id: Some("local_upload".into()),
+            archive_digest: Some(format!("sha256:{}", "a".repeat(64))),
+            manifest_digest: Some(manifest_digest),
+            source_root: Some(source_root.into()),
+            measured_file_count_hint: Some(file_count),
+            measured_uncompressed_bytes_hint: Some(byte_count),
+        }
+    }
+
+    const LOCAL_MANIFEST: &str = r#"schema_version = "1"
+name = "local"
+version = "1.0.0"
+
+[source]
+root = "app"
+
+[run]
+command = ["python", "main.py"]
+"#;
+
+    #[test]
+    fn local_archive_refuses_a_manifest_different_from_the_upload_plan() {
+        let root = tempfile::tempdir().expect("archive");
+        std::fs::create_dir(root.path().join("app")).expect("source root");
+        std::fs::write(root.path().join("app/main.py"), b"print('ok')\n").expect("source");
+        let declared = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(LOCAL_MANIFEST)
+            .expect("declared manifest");
+        let declared_digest = declared.normalized_digest().expect("digest");
+        let archive_manifest = LOCAL_MANIFEST.replace("name = \"local\"", "name = \"swapped\"");
+        std::fs::write(
+            root.path().join("capsule.toml"),
+            archive_manifest.as_bytes(),
+        )
+        .expect("archive manifest");
+        let byte_count = archive_manifest.len() as u64
+            + std::fs::metadata(root.path().join("app/main.py"))
+                .expect("source metadata")
+                .len();
+        let claim = local_claim(declared_digest, "app", 2, byte_count);
+
+        let error = verify_local_authoring_archive(root.path(), &claim)
+            .expect_err("manifest substitution must fail closed");
+        assert!(error.contains("digest differs"), "{error}");
+    }
+
+    #[test]
+    fn local_archive_refuses_files_outside_source_root() {
+        let root = tempfile::tempdir().expect("archive");
+        std::fs::create_dir(root.path().join("app")).expect("source root");
+        std::fs::create_dir(root.path().join("notes")).expect("outside root");
+        std::fs::write(root.path().join("app/main.py"), b"print('ok')\n").expect("source");
+        std::fs::write(
+            root.path().join("notes/private-sentinel.txt"),
+            b"must not upload",
+        )
+        .expect("sentinel");
+        std::fs::write(root.path().join("capsule.toml"), LOCAL_MANIFEST).expect("manifest");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(LOCAL_MANIFEST)
+            .expect("manifest");
+        let byte_count = [
+            root.path().join("capsule.toml"),
+            root.path().join("app/main.py"),
+            root.path().join("notes/private-sentinel.txt"),
+        ]
+        .into_iter()
+        .map(|path| std::fs::metadata(path).expect("metadata").len())
+        .sum();
+        let claim = local_claim(
+            manifest.normalized_digest().expect("digest"),
+            "app",
+            3,
+            byte_count,
+        );
+
+        let error = verify_local_authoring_archive(root.path(), &claim)
+            .expect_err("out-of-root data must fail closed");
+        assert!(error.contains("outside declared source.root"), "{error}");
+    }
+
     fn import_job(kind: &str, params: Option<serde_json::Value>) -> ClaimedJob {
         ClaimedJob {
             pinned_source: None,
@@ -6350,6 +7138,12 @@ targets = ["web"]
                 github_repo: "app".into(),
                 commit_sha: "a".repeat(40),
                 subdirectory: None,
+                upload_id: None,
+                archive_digest: None,
+                manifest_digest: None,
+                source_root: None,
+                measured_file_count_hint: None,
+                measured_uncompressed_bytes_hint: None,
             }),
             recipe_toml: None,
             kind: kind.into(),
@@ -6364,6 +7158,7 @@ targets = ["web"]
             worker_claim_id: None,
             lease_token: None,
             lease_expires_at: None,
+            claim_generation: None,
         }
     }
 
@@ -6732,6 +7527,12 @@ targets = ["web"]
             github_repo: repo.into(),
             commit_sha: commit.into(),
             subdirectory: sub.map(String::from),
+            upload_id: None,
+            archive_digest: None,
+            manifest_digest: None,
+            source_root: None,
+            measured_file_count_hint: None,
+            measured_uncompressed_bytes_hint: None,
         };
         let dest =
             std::env::temp_dir().join(format!("never-created-clone-dest-{}", std::process::id()));
@@ -7834,13 +8635,13 @@ targets = ["web"]
         let generated_manifest = authoring_runtime::render_inferred_capsule_toml(&normalized)
             .expect("render generated manifest");
         let overlay_archive = workspace.path().join("overlay.tar.zst");
-        let overlay_input = materialize_generated_manifest_overlay(
+        let overlay_input = materialize_effective_manifest(
             workspace.path(),
             &input,
             &generated_manifest,
             &overlay_archive,
         )
-        .expect("materialize generated overlay");
+        .expect("materialize generated manifest");
 
         let acquired = snapshot::archive_only_build::acquire_pinned_source(
             &overlay_input,
@@ -7864,28 +8665,84 @@ targets = ["web"]
     }
 
     #[test]
-    fn generated_manifest_overlay_refuses_to_replace_source_declaration() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        std::fs::write(workspace.path().join("capsule.toml"), b"source declaration")
-            .expect("write source declaration");
+    fn effective_manifest_overlay_replaces_source_declaration_without_changing_source_identity() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("main.py"), b"print('effective')\n")
+            .expect("write source");
+        std::fs::write(
+            source.path().join("capsule.toml"),
+            r#"
+schema_version = "1"
+name = "original"
+version = "1.0.0"
+
+[run]
+command = ["python", "main.py", "--original"]
+"#,
+        )
+        .expect("write original declaration");
+        let raw_archive = source.path().join("raw-source.tar.zst");
+        let raw = capsule::blob::materialize_source_archive(source.path(), &raw_archive)
+            .expect("materialize raw source");
+        let program_only = tempfile::tempdir().expect("program-only source");
+        std::fs::write(program_only.path().join("main.py"), b"print('effective')\n")
+            .expect("program-only file");
+        let program_archive = program_only.path().join("program-only.tar.zst");
+        let program =
+            capsule::blob::materialize_source_archive(program_only.path(), &program_archive)
+                .expect("materialize program-only source");
         let input = pinned_input(
-            &format!("sha256:{}", "1".repeat(64)),
-            &format!("sha256:{}", "2".repeat(64)),
+            &raw.source_archive_hash,
+            &program.materialized_source_tree_hash,
         );
 
-        let (stage, reason) = materialize_generated_manifest_overlay(
+        let workspace = tempfile::tempdir().expect("workspace");
+        capsule::contract::program_source_projection::extract_source_archive(
+            &raw_archive,
+            workspace.path(),
+        )
+        .expect("extract verified raw source");
+        let effective_manifest = r#"
+schema_version = "1"
+name = "edited"
+version = "1.0.0"
+
+[run]
+command = ["python", "main.py", "--edited"]
+"#;
+        let overlay_archive = workspace.path().join("overlay.tar.zst");
+        let overlay_input = materialize_effective_manifest(
             workspace.path(),
             &input,
-            "generated declaration",
-            &workspace.path().join("overlay.tar.zst"),
+            effective_manifest,
+            &overlay_archive,
         )
-        .expect_err("a generated overlay must not overwrite source");
-        assert_eq!(stage, "manifest");
-        assert!(reason.contains("refuses to replace"), "{reason}");
+        .expect("materialize effective manifest");
+
+        let acquired = snapshot::archive_only_build::acquire_pinned_source(
+            &overlay_input,
+            &DownloadedArchiveFetch {
+                object_key: overlay_input.source_archive_object_key(),
+                archive: &overlay_archive,
+            },
+            &workspace.path().join("acquired"),
+        )
+        .expect("project effective overlay");
+        let projected = ContentDigest::new(
+            DigestAlgorithm::Sha256,
+            acquired.materialized().contract.digest.bytes(),
+        )
+        .to_string();
+        assert_eq!(projected, program.materialized_source_tree_hash);
         assert_eq!(
-            std::fs::read(workspace.path().join("capsule.toml")).expect("read source declaration"),
-            b"source declaration"
+            std::fs::read_to_string(workspace.path().join("capsule.toml"))
+                .expect("read effective declaration"),
+            effective_manifest
         );
+        let effective: capsule::types::manifest_v1::CapsuleManifestV1 =
+            toml::from_str(effective_manifest).expect("parse effective manifest");
+        assert_eq!(effective.name, "edited");
+        assert_eq!(effective.run.command, vec!["python", "main.py", "--edited"]);
     }
 
     /// The adapter serves ONE object, and says so rather than answering with

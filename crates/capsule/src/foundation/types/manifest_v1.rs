@@ -62,9 +62,13 @@
 //! saying so is more useful than minting an identity that omits them.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
 
 /// The only schema version that may mint an Execution Identity.
 pub const MANIFEST_SCHEMA_V1: &str = "1";
@@ -131,6 +135,17 @@ pub struct CapsuleManifestV1 {
     pub name: String,
     pub version: String,
 
+    /// `[source]` — the deterministic source-selection policy used before the
+    /// source closure is computed. The default preserves the pre-unified-v1
+    /// behavior for already-authored manifests.
+    #[serde(default, skip_serializing_if = "SourceSelectionV1::is_default")]
+    pub source: SourceSelectionV1,
+
+    /// `[metadata]` — Store-facing authored intent. It is part of the
+    /// normalized manifest digest even though it does not alter launch.
+    #[serde(default, skip_serializing_if = "MetadataV1::is_empty")]
+    pub metadata: MetadataV1,
+
     /// `[tools]` — pinned tool versions, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, String>,
@@ -162,6 +177,117 @@ pub struct CapsuleManifestV1 {
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+}
+
+pub const SOURCE_FILTER_POLICY_VERSION_V1: &str = "ato-source-filter/v1";
+pub const MAX_SOURCE_IGNORE_PATTERNS_V1: usize = 256;
+pub const MAX_SOURCE_IGNORE_PATTERN_BYTES_V1: usize = 1024;
+pub const MAX_SOURCE_IGNORE_TOTAL_BYTES_V1: usize = 64 * 1024;
+
+/// Safety exclusions are policy, not author intent. A later manifest negation
+/// can never re-include one of these paths.
+pub const SYSTEM_SOURCE_IGNORE_V1: &[&str] = &[
+    ".git/**",
+    ".env",
+    ".env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/.aws/**",
+    "**/.ssh/**",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSelectionV1 {
+    #[serde(default = "default_source_root")]
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+}
+
+impl Default for SourceSelectionV1 {
+    fn default() -> Self {
+        Self {
+            root: default_source_root(),
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl SourceSelectionV1 {
+    fn is_default(&self) -> bool {
+        self.root == "." && self.ignore.is_empty()
+    }
+}
+
+fn default_source_root() -> String {
+    ".".to_string()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<StoreMetadataV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<MetadataAssetsV1>,
+}
+
+impl MetadataV1 {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMetadataV1 {
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataAssetsV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<AssetLocatorV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<AssetLocatorV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AssetLocatorV1 {
+    Path(AssetPathLocatorV1),
+    Url(AssetUrlLocatorV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetPathLocatorV1 {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetUrlLocatorV1 {
+    pub url: String,
+    pub content_digest: String,
+    pub artifact_ref: String,
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 
 /// One launch-supplied variable. BOTH fields are explicit.
@@ -308,6 +434,85 @@ fn looks_secret(name: &str) -> bool {
     crate::execution_contract_finalize::is_sensitive_env_key(name)
 }
 
+fn validate_source_relative_path(
+    field: &'static str,
+    value: &str,
+    allow_root: bool,
+) -> Result<(), ManifestV1Error> {
+    if value == "." {
+        return if allow_root {
+            Ok(())
+        } else {
+            Err(ManifestV1Error::Invalid {
+                field,
+                reason: "must name a file below the source root".to_string(),
+            })
+        };
+    }
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains('\\')
+        || value.contains('\0')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field,
+            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, or a leading slash".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ignore_pattern(pattern: &str) -> Result<(), ManifestV1Error> {
+    let body = pattern.strip_prefix('!').unwrap_or(pattern);
+    let body = body.strip_prefix('/').unwrap_or(body);
+    if body.is_empty()
+        || pattern.contains('\\')
+        || pattern.contains('\0')
+        || pattern.starts_with("//")
+        || body.split('/').any(|segment| segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field: "source.ignore[]",
+            reason: format!(
+                "{pattern:?} is not a supported source-root-relative gitignore pattern"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn build_ignore_matcher(
+    patterns: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<Gitignore, ManifestV1Error> {
+    let mut builder = GitignoreBuilder::new(".");
+    for pattern in patterns {
+        let pattern = pattern.as_ref();
+        builder
+            .add_line(None, pattern)
+            .map_err(|error| ManifestV1Error::Invalid {
+                field: "source.ignore[]",
+                reason: format!("{pattern:?}: {error}"),
+            })?;
+    }
+    builder.build().map_err(|error| ManifestV1Error::Invalid {
+        field: "source.ignore[]",
+        reason: error.to_string(),
+    })
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 impl CapsuleManifestV1 {
     /// Parse and validate. There is no lenient mode: a manifest that does not
     /// validate is not a v1 manifest.
@@ -321,11 +526,189 @@ impl CapsuleManifestV1 {
         Ok(manifest)
     }
 
+    /// SHA-256 over the canonical JSON form of the normalized v1 manifest.
+    /// Defaults are expanded by deserialization before this is computed, so
+    /// omitted and explicitly-defaulted source/metadata sections agree.
+    pub fn normalized_digest(&self) -> Result<String, ManifestV1Error> {
+        self.validate()?;
+        let bytes = serde_jcs::to_vec(self).map_err(|error| ManifestV1Error::Invalid {
+            field: "capsule.toml",
+            reason: format!("failed to canonicalize the normalized manifest: {error}"),
+        })?;
+        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    }
+
+    /// Whether a source-relative path survives both the immutable system
+    /// safety policy and the manifest's last-match-wins ignore rules.
+    pub fn source_path_is_included(
+        &self,
+        relative_path: &str,
+        is_dir: bool,
+    ) -> Result<bool, ManifestV1Error> {
+        validate_source_relative_path("source path", relative_path, false)?;
+        let path = Path::new(relative_path);
+        let system = build_ignore_matcher(SYSTEM_SOURCE_IGNORE_V1)?;
+        if system.matched_path_or_any_parents(path, is_dir).is_ignore() {
+            return Ok(false);
+        }
+        let authored = build_ignore_matcher(&self.source.ignore)?;
+        Ok(!authored
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore())
+    }
+
     pub fn validate(&self) -> Result<(), ManifestV1Error> {
         require_manifest_v1(&self.schema_version)?;
         for (field, value) in [("name", &self.name), ("version", &self.version)] {
             if value.trim().is_empty() {
                 return Err(ManifestV1Error::Missing { field });
+            }
+        }
+
+        validate_source_relative_path("source.root", &self.source.root, true)?;
+        if self.source.ignore.len() > MAX_SOURCE_IGNORE_PATTERNS_V1 {
+            return Err(ManifestV1Error::Invalid {
+                field: "source.ignore",
+                reason: format!(
+                    "contains {} patterns; the limit is {MAX_SOURCE_IGNORE_PATTERNS_V1}",
+                    self.source.ignore.len()
+                ),
+            });
+        }
+        let total_ignore_bytes = self
+            .source
+            .ignore
+            .iter()
+            .try_fold(0usize, |total, pattern| {
+                if pattern.len() > MAX_SOURCE_IGNORE_PATTERN_BYTES_V1 {
+                    return Err(ManifestV1Error::Invalid {
+                        field: "source.ignore[]",
+                        reason: format!(
+                            "pattern is {} bytes; the limit is {MAX_SOURCE_IGNORE_PATTERN_BYTES_V1}",
+                            pattern.len()
+                        ),
+                    });
+                }
+                validate_ignore_pattern(pattern)?;
+                Ok(total + pattern.len())
+            })?;
+        if total_ignore_bytes > MAX_SOURCE_IGNORE_TOTAL_BYTES_V1 {
+            return Err(ManifestV1Error::Invalid {
+                field: "source.ignore",
+                reason: format!(
+                    "contains {total_ignore_bytes} bytes; the limit is {MAX_SOURCE_IGNORE_TOTAL_BYTES_V1}"
+                ),
+            });
+        }
+        // Compile once during validation so malformed glob syntax is refused
+        // before any source walk starts.
+        build_ignore_matcher(&self.source.ignore)?;
+
+        if let Some(store) = &self.metadata.store {
+            if store.category.trim().is_empty() {
+                return Err(ManifestV1Error::Missing {
+                    field: "metadata.store.category",
+                });
+            }
+            if store
+                .subcategory
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(ManifestV1Error::Invalid {
+                    field: "metadata.store.subcategory",
+                    reason: "must not be empty when present".to_string(),
+                });
+            }
+        }
+        if self.metadata.tags.iter().any(|tag| tag.trim().is_empty()) {
+            return Err(ManifestV1Error::Invalid {
+                field: "metadata.tags[]",
+                reason: "must not contain empty tags".to_string(),
+            });
+        }
+        if let Some(assets) = &self.metadata.assets {
+            for (field, locator) in [
+                ("metadata.assets.icon", assets.icon.as_ref()),
+                ("metadata.assets.banner", assets.banner.as_ref()),
+            ] {
+                match locator {
+                    Some(AssetLocatorV1::Path(path)) => {
+                        validate_source_relative_path(field, &path.path, false)?;
+                        if !self.source_path_is_included(&path.path, false)? {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: format!(
+                                    "referenced path {:?} is excluded by the effective source policy",
+                                    path.path
+                                ),
+                            });
+                        }
+                    }
+                    Some(AssetLocatorV1::Url(url)) => {
+                        let parsed =
+                            Url::parse(&url.url).map_err(|error| ManifestV1Error::Invalid {
+                                field,
+                                reason: format!("must be an HTTPS URL: {error}"),
+                            })?;
+                        if parsed.scheme() != "https"
+                            || parsed.host_str().is_none()
+                            || !parsed.username().is_empty()
+                            || parsed.password().is_some()
+                        {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "must be a credential-free HTTPS URL with a host"
+                                    .to_string(),
+                            });
+                        }
+                        if !is_sha256_digest(&url.content_digest) {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "content_digest must be sha256:<64 lowercase hex>"
+                                    .to_string(),
+                            });
+                        }
+                        let digest_hex = &url.content_digest["sha256:".len()..];
+                        if url.artifact_ref != format!("ato-asset://sha256/{digest_hex}") {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "artifact_ref must match content_digest exactly"
+                                    .to_string(),
+                            });
+                        }
+                        if !matches!(
+                            url.media_type.as_str(),
+                            "image/png" | "image/jpeg" | "image/webp"
+                        ) {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "media_type must be image/png, image/jpeg, or image/webp"
+                                    .to_string(),
+                            });
+                        }
+                        if let Some(origin_url) = &url.origin_url {
+                            let origin = Url::parse(origin_url).map_err(|error| {
+                                ManifestV1Error::Invalid {
+                                    field,
+                                    reason: format!("origin_url must be HTTPS: {error}"),
+                                }
+                            })?;
+                            if origin.scheme() != "https"
+                                || origin.host_str().is_none()
+                                || !origin.username().is_empty()
+                                || origin.password().is_some()
+                            {
+                                return Err(ManifestV1Error::Invalid {
+                                    field,
+                                    reason: "origin_url must be a credential-free HTTPS URL"
+                                        .to_string(),
+                                });
+                            }
+                        }
+                    }
+                    None => {}
+                }
             }
         }
 
@@ -547,6 +930,99 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/health"]
         manifest
             .validate_for_interactive_capture()
             .expect("qualifies for the Step-4 subset");
+    }
+
+    #[test]
+    fn identity_matches_the_api_cross_language_golden_vector() {
+        use sha2::{Digest as _, Sha256};
+
+        use crate::capsule_lock::{
+            CapsuleLock, LockManifestSection, LockSourceSelectionSection, compute_lock_id,
+        };
+
+        const CROSS_LANGUAGE_MANIFEST: &str = r#"
+schema_version = "1"
+name = "café-界"
+version = "1.2.3"
+
+[source]
+root = "app"
+ignore = ["dist/**", "é/**"]
+
+[metadata]
+short_description = "Unicode ✓"
+tags = ["zeta", "日本語"]
+
+[tools]
+zeta = "2"
+alpha = "1"
+
+[[build.steps]]
+command = ["npm", "run", "build"]
+
+[run]
+command = ["node", "server.js", "--message", "界"]
+
+[env]
+ZETA = "last"
+ALPHA = "first"
+"#;
+        fn sha256_jcs<T: serde::Serialize>(value: &T) -> String {
+            let bytes = serde_jcs::to_vec(value).expect("JCS");
+            format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+        }
+
+        let manifest = CapsuleManifestV1::from_toml(CROSS_LANGUAGE_MANIFEST).expect("manifest");
+        let normalized_manifest_digest = manifest.normalized_digest().expect("digest");
+        let system_ignore = SYSTEM_SOURCE_IGNORE_V1
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect::<Vec<_>>();
+        let mut effective_ignore = system_ignore.clone();
+        effective_ignore.extend(manifest.source.ignore.clone());
+        let source_selection = LockSourceSelectionSection {
+            root: manifest.source.root.clone(),
+            policy_version: SOURCE_FILTER_POLICY_VERSION_V1.to_string(),
+            effective_ignore_digest: sha256_jcs(&effective_ignore),
+            system_ignore_digest: sha256_jcs(&system_ignore),
+            manifest_ignore_digest: sha256_jcs(&manifest.source.ignore),
+            effective_ignore,
+        };
+        let source_closure_id = format!("sha256:{}", "1".repeat(64));
+        let capsule_revision_id = format!(
+            "caprev_{}",
+            sha256_jcs(&serde_json::json!({
+                "source_closure_id": source_closure_id,
+                "normalized_manifest_digest": normalized_manifest_digest.clone(),
+            }))
+            .trim_start_matches("sha256:")
+        );
+        let lock = CapsuleLock {
+            manifest: Some(LockManifestSection {
+                schema_version: "1".to_string(),
+                normalized_digest: normalized_manifest_digest.clone(),
+            }),
+            source_selection: Some(source_selection.clone()),
+            ..CapsuleLock::default()
+        };
+        let lock_id = compute_lock_id(&lock).expect("lock id");
+
+        assert_eq!(
+            normalized_manifest_digest,
+            "sha256:3aafdd92e46a4b185a63b1401e8b0fc2617f550b190d6f6f6a7da6f1df45be6b"
+        );
+        assert_eq!(
+            source_selection.effective_ignore_digest,
+            "sha256:b479692e904ce5b55ab62192a9d42db7451b2021da32c03739b0e6e6d8e82f23"
+        );
+        assert_eq!(
+            capsule_revision_id,
+            "caprev_5c96be2977a5e2d27d1bf01abddde011a609ad100bcd711468862d3c25298d12"
+        );
+        assert_eq!(
+            lock_id.as_str(),
+            "blake3:b93954b0ba65db20b880f72b118bf3a64f4b4172d132e612e283cfc76f1a2b19"
+        );
     }
 
     /// The command is an argv, and argument boundaries survive verbatim —
@@ -1172,5 +1648,159 @@ timeout_seconds = {seconds}
             CapsuleManifestV1::from_toml(&text).expect("reparse"),
             manifest
         );
+    }
+
+    #[test]
+    fn unified_source_and_metadata_are_strict_and_identity_bearing() {
+        let base = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[source]
+root = "."
+ignore = ["dist/**", "!dist/store-card.png"]
+
+[metadata]
+short_description = "First description"
+tags = ["developer-tool"]
+
+[metadata.store]
+category = "developer_tools"
+subcategory = "utilities"
+
+[metadata.assets.icon]
+path = "assets/icon.png"
+
+[metadata.assets.banner]
+url = "https://assets.example/banner.webp"
+content_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+artifact_ref = "ato-asset://sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+media_type = "image/webp"
+origin_url = "https://origin.example/banner.webp"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("unified manifest parses");
+        let mut changed = base.clone();
+        changed.metadata.short_description = Some("Second description".to_string());
+        assert_ne!(
+            base.normalized_digest().expect("base digest"),
+            changed.normalized_digest().expect("metadata digest"),
+            "Store metadata is part of the normalized manifest identity"
+        );
+        assert!(
+            base.source_path_is_included("dist/store-card.png", false)
+                .unwrap()
+        );
+        assert!(!base.source_path_is_included("dist/app.js", false).unwrap());
+    }
+
+    #[test]
+    fn safety_ignore_cannot_be_reincluded() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[source]
+ignore = ["!.env", "!keys/id_rsa"]
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("patterns are valid author intent");
+        assert!(!manifest.source_path_is_included(".env", false).unwrap());
+        assert!(
+            !manifest
+                .source_path_is_included("keys/id_rsa", false)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn ignored_or_traversing_asset_paths_are_refused() {
+        for asset in ["../icon.png", "dist/icon.png"] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[source]
+ignore = ["dist/**"]
+
+[metadata.assets.icon]
+path = "{asset}"
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("unsafe asset path");
+            assert!(
+                matches!(
+                    error,
+                    ManifestV1Error::Invalid {
+                        field: "metadata.assets.icon",
+                        ..
+                    }
+                ),
+                "{asset}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_asset_locator_requires_exactly_one_known_locator() {
+        for locator in [
+            r#"path = "assets/icon.png"
+url = "https://assets.example/icon.png""#,
+            r#"digest = "sha256:abc""#,
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+{locator}
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("ambiguous or unknown asset locator");
+            assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn source_and_metadata_unknown_fields_are_refused() {
+        for extra in [
+            "[source]\nroot = \".\"\ninclude = [\"src/**\"]",
+            "[metadata]\nshort_description = \"demo\"\nfeatured = true",
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+{extra}
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("unknown unified manifest field");
+            assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
     }
 }

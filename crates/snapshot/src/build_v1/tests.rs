@@ -386,6 +386,53 @@ fn a_pinned_archive_is_what_the_identity_is_minted_over() {
 }
 
 #[test]
+fn effective_manifest_run_command_drives_the_guest_and_lock() {
+    let original = minimal_manifest("").replace(
+        r#"command = ["python3", "app.py"]"#,
+        r#"command = ["python3", "app.py", "--original"]"#,
+    );
+    let edited = original.replace("--original", "--edited");
+    let workspace = Workspace::new(&original);
+    let frozen = TempDir::new().expect("archive dir");
+    let archive = frozen.path().join("pinned.tar.zst");
+    capsule::blob::materialize_source_archive(workspace.dir.path(), &archive)
+        .expect("freeze original source");
+    workspace.write("capsule.toml", &edited);
+
+    let work = workspace.work.path().join("effective-manifest");
+    std::fs::create_dir_all(&work).expect("work root");
+    let outcome = run(
+        V1BuildRequest {
+            workspace_root: workspace.dir.path(),
+            pinned_source_archive: Some(&archive),
+            work_root: &work,
+            guest_image_path: &workspace.out.path().join("effective.img"),
+            rootfs_size_mib: 512,
+            image_ref: "ato-v1-effective-manifest",
+        },
+        &FakeProducer::healthy(),
+    )
+    .expect("effective manifest build");
+
+    assert_eq!(
+        outcome.authored_argv,
+        ["python3", "app.py", "--edited"],
+        "the guest recipe must use the edited Effective Manifest"
+    );
+    let manifest = CapsuleManifestV1::from_toml(&edited).expect("edited manifest remains valid");
+    assert_eq!(
+        workspace
+            .lock()
+            .manifest
+            .expect("manifest lock section")
+            .normalized_digest,
+        manifest
+            .normalized_digest()
+            .expect("edited manifest digest")
+    );
+}
+
+#[test]
 fn a_v1_build_mints_publishes_and_reads_back() {
     let workspace = Workspace::new(&minimal_manifest(""));
     let producer = FakeProducer::healthy();
