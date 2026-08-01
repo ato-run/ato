@@ -904,7 +904,7 @@ ln -s /tmp/ato-node-cache/vite-temp "$ATO_ROOTFS/app/node_modules/.vite-temp""#,
             // guest during dependency optimization and be killed only after
             // readiness has succeeded. The init script is identity-bearing,
             // so this resource policy is deterministic and auditable.
-            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NODE_OPTIONS=--max-old-space-size=1024",
+            "export COREPACK_HOME=/opt/ato/corepack COREPACK_ENABLE_DOWNLOAD_PROMPT=0 NODE_OPTIONS=--max-old-space-size=512",
             "mkdir -p /tmp/ato-node-cache/vite /tmp/ato-node-cache/vite-temp",
         ),
         _ => ("", "", ""),
@@ -3724,7 +3724,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             "{export}"
         );
         assert!(
-            export.contains("NODE_OPTIONS=--max-old-space-size=1024"),
+            export.contains("NODE_OPTIONS=--max-old-space-size=512"),
             "{export}"
         );
         assert!(
