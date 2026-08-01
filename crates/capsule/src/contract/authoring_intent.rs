@@ -410,6 +410,8 @@ pub fn to_capsule_manifest_v1(
         schema_version: "1".to_string(),
         name,
         version,
+        source: Default::default(),
+        metadata: Default::default(),
         tools: normalized
             .toolchains
             .iter()

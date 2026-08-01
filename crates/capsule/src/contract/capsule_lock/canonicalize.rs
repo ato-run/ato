@@ -2,7 +2,8 @@ use serde::Serialize;
 
 use crate::capsule_lock::closure::normalize_resolution_closure_entries;
 use crate::capsule_lock::schema::{
-    CapsuleLock, ContractSection, LockLaunchSection, ResolutionSection,
+    CapsuleLock, ContractSection, LockLaunchSection, LockManifestSection,
+    LockMetadataAssetsSection, LockSourceSelectionSection, ResolutionSection,
 };
 use crate::capsule_program_contract::CapsuleProgramEnvelopeV1;
 use crate::error::Result;
@@ -13,6 +14,12 @@ use crate::execution_contract::ExecutionContractEnvelopeV1;
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CanonicalLockProjection {
     pub schema_version: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<LockManifestSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_selection: Option<LockSourceSelectionSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_assets: Option<LockMetadataAssetsSection>,
     pub resolution: ResolutionSection,
     pub contract: ContractSection,
 }
@@ -39,6 +46,12 @@ pub struct CanonicalLockProjection {
 pub struct CanonicalSignatureProjection {
     pub schema_version: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<LockManifestSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_selection: Option<LockSourceSelectionSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_assets: Option<LockMetadataAssetsSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_contract: Option<ExecutionContractEnvelopeV1>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch: Option<LockLaunchSection>,
@@ -48,8 +61,14 @@ pub struct CanonicalSignatureProjection {
     pub contract: ContractSection,
 }
 
-pub const CANONICAL_IDENTITY_INCLUDED_SECTIONS: &[&str] =
-    &["schema_version", "resolution", "contract"];
+pub const CANONICAL_IDENTITY_INCLUDED_SECTIONS: &[&str] = &[
+    "schema_version",
+    "manifest",
+    "source_selection",
+    "metadata_assets",
+    "resolution",
+    "contract",
+];
 pub const CANONICAL_IDENTITY_EXCLUDED_SECTIONS: &[&str] = &[
     "generated_at",
     "features",
@@ -72,6 +91,9 @@ pub fn canonical_projection(lock: &CapsuleLock) -> Result<CanonicalLockProjectio
 
     Ok(CanonicalLockProjection {
         schema_version: lock.schema_version,
+        manifest: lock.manifest.clone(),
+        source_selection: lock.source_selection.clone(),
+        metadata_assets: lock.metadata_assets.clone(),
         resolution,
         contract: lock.contract.clone(),
     })
@@ -90,6 +112,9 @@ pub fn canonical_signature_projection(lock: &CapsuleLock) -> Result<CanonicalSig
     let identity = canonical_projection(lock)?;
     Ok(CanonicalSignatureProjection {
         schema_version: identity.schema_version,
+        manifest: identity.manifest,
+        source_selection: identity.source_selection,
+        metadata_assets: identity.metadata_assets,
         execution_contract: lock.execution_contract.clone(),
         launch: lock.launch.clone(),
         program_identity: lock.program_identity.clone(),

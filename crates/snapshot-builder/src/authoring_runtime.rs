@@ -15,7 +15,7 @@ use capsule::authoring_intent::{
     ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
     normalize_program_intent, to_capsule_manifest_v1,
 };
-use capsule::types::manifest_v1::SealAtV1;
+use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::authoring_evidence::{
@@ -83,6 +83,24 @@ pub struct AuthoringSourceOverlay {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuthoringStoreMetadata {
+    pub name: String,
+    pub short_description: String,
+    pub full_description: String,
+    #[serde(default)]
+    pub primary_category: Option<String>,
+    #[serde(default)]
+    pub primary_subcategory: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub assets: Option<MetadataAssetsV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthoringWork {
     pub kind: String,
     pub work_id: String,
@@ -97,6 +115,12 @@ pub struct AuthoringWork {
     pub pinned_source: PinnedAuthoringSource,
     #[serde(default)]
     pub source_overlay: Option<AuthoringSourceOverlay>,
+    /// Store-facing authored intent projected by the API before this claim is
+    /// handed to a builder. The builder merges it into the declaration before
+    /// deriving Program Intent or invoking the v1 build lane, so there is one
+    /// Effective Manifest for build, lock, revision, and Clean Replay.
+    #[serde(default)]
+    pub store_metadata: Option<AuthoringStoreMetadata>,
     #[serde(default)]
     pub previous_receipt_digest: Option<String>,
     #[serde(default)]
@@ -191,6 +215,13 @@ pub struct ScreenshotCompletionAck {
     pub already_completed: bool,
 }
 
+pub struct SetupCommandCompletion {
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
 pub struct AuthoringApiClient<'a> {
     pub api_url: &'a str,
     pub builder_token: &'a str,
@@ -271,6 +302,92 @@ impl AuthoringApiClient<'_> {
         response
             .into_json()
             .map_err(|error| format!("decode setup control: {error}"))
+    }
+
+    pub fn claim_setup_command(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+    ) -> Result<Option<SetupCommandClaim>, String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        let response = ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/claim",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+        }))
+        .map_err(|error| http_error("claim setup command", error))?;
+        let body = response
+            .into_json::<SetupCommandClaimResponse>()
+            .map_err(|error| format!("decode setup command claim: {error}"))?;
+        Ok(body.command)
+    }
+
+    pub fn append_setup_command_output(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+        command: &SetupCommandClaim,
+        stream: &str,
+        sequence: u64,
+        data: &str,
+    ) -> Result<(), String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/{}/output",
+            self.api_url.trim_end_matches('/'),
+            work.work_id,
+            command.command_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+            "lease_generation": command.lease_generation,
+            "stream": stream,
+            "sequence": sequence,
+            "data": data,
+        }))
+        .map_err(|error| http_error("append setup command output", error))?;
+        Ok(())
+    }
+
+    pub fn complete_setup_command(
+        &self,
+        work: &AuthoringWork,
+        builder_slot_id: &str,
+        command: &SetupCommandClaim,
+        completion: &SetupCommandCompletion,
+    ) -> Result<(), String> {
+        let worker_claim_id = work.worker_claim_id.as_deref().unwrap_or(&work.work_id);
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/commands/{}/complete",
+            self.api_url.trim_end_matches('/'),
+            work.work_id,
+            command.command_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "builder_slot_id": builder_slot_id,
+            "worker_claim_id": worker_claim_id,
+            "lease_generation": command.lease_generation,
+            "exit_code": completion.exit_code.clamp(0, 255),
+            "duration_ms": completion.duration_ms,
+            "stdout_truncated": completion.stdout_truncated,
+            "stderr_truncated": completion.stderr_truncated,
+        }))
+        .map_err(|error| http_error("complete setup command", error))?;
+        Ok(())
     }
 
     pub fn mark_setup_stopped(&self, work: &AuthoringWork) -> Result<(), String> {
@@ -522,13 +639,44 @@ pub struct SetupReady<'a> {
     pub origin: &'a str,
     pub normalized_program_intent: &'a NormalizedProgramIntentEnvelopeV1,
     pub resolution_lock_digest: &'a str,
+    pub source_closure_id: &'a str,
     pub generated_capsule_toml: &'a str,
+    pub materialized_assets: &'a [MaterializedSetupAsset],
+}
+
+#[derive(Debug, Serialize)]
+pub struct MaterializedSetupAsset {
+    pub kind: &'static str,
+    pub origin_path: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub bytes_base64: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SetupControl {
     pub action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetupCommandClaimResponse {
+    command: Option<SetupCommandClaim>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetupCommandClaim {
+    pub command_id: String,
+    pub shell: Vec<String>,
+    pub stdin: String,
+    pub cwd: String,
+    pub max_runtime_seconds: u64,
+    pub max_output_bytes_per_stream: usize,
+    #[serde(rename = "policy_digest")]
+    pub _policy_digest: String,
+    pub lease_generation: u64,
 }
 
 pub struct AuthoringArchiveTransport<'a> {
@@ -574,9 +722,7 @@ impl crate::source_archive_download::ArchiveDownloadTransport for AuthoringArchi
 
 pub fn archive_input(work: &AuthoringWork) -> Result<ArchiveOnlyBuildInput, String> {
     let source = &work.pinned_source;
-    if source.source_revision_id != work.source_revision_id
-        || source.source_tree_digest != work.source_closure_id
-    {
+    if source.source_revision_id != work.source_revision_id {
         return Err("pinned source identity does not match its Authoring Session".to_string());
     }
     ArchiveOnlyBuildInput::new(
@@ -815,25 +961,28 @@ pub fn infer_authoring_intent(
     if source_root.join("deno.json").is_file() {
         return infer_deno_fresh_intent(source_root);
     }
+    // A `package.json` marks a package-managed application regardless of
+    // whether a root `index.html` also exists (many bundler-served apps,
+    // including swagger-editor, ship one as their dev-server template). It
+    // must never be routed into the dependency-free static-file path below —
+    // that would silently skip dependency install and the app's own start
+    // script (ato-api#443).
+    if source_root.join("package.json").is_file() {
+        return infer_package_managed_intent(source_root);
+    }
     if !source_root.join("index.html").is_file() {
         return Err(
-            "source inference requires either deno.json with a plain Fresh start task or a root index.html"
+            "source inference requires deno.json with a plain Fresh start task, package.json for a package-managed application, or a root index.html for a dependency-free static application"
                 .to_string(),
         );
     }
-    let (argv, required_tool) = if source_root.join("package.json").is_file() {
-        (
-            vec![
-                "node".to_string(),
-                "--input-type=module".to_string(),
-                "-e".to_string(),
-                NODE_STATIC_SERVER.to_string(),
-            ],
-            "node",
-        )
-    } else {
-        (
-            vec![
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
                 "python3".to_string(),
                 "-m".to_string(),
                 "http.server".to_string(),
@@ -841,19 +990,9 @@ pub fn infer_authoring_intent(
                 "--bind".to_string(),
                 "0.0.0.0".to_string(),
             ],
-            "python3",
-        )
-    };
-    normalize_program_intent(ProgramIntentDraftV1 {
-        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
-        origin: ProgramIntentOrigin::Inference,
-        toolchains: Vec::new(),
-        build_steps: Vec::new(),
-        launch: ProgramCommandDraftV1::Argv {
-            argv,
             cwd: WorkspacePathV1::root(),
             requested_environment: Vec::new(),
-            required_tools: vec![required_tool.to_string()],
+            required_tools: vec!["python3".to_string()],
         },
         readiness: ReadinessIntentV1::Http {
             port: 8000,
@@ -867,10 +1006,136 @@ pub fn infer_authoring_intent(
     .map_err(|error| error.to_string())
 }
 
-/// Dependency-free static server for repositories already identified as Node
-/// projects. The path checks keep request resolution inside the materialized
-/// source root, including after following repository-internal symlinks.
-const NODE_STATIC_SERVER: &str = r#"import{createServer}from"node:http";import{readFile,realpath,stat}from"node:fs/promises";import{extname,relative,resolve,sep}from"node:path";const root=await realpath(".");const inside=p=>{const r=relative(root,p);return r===""||r!==".."&&!r.startsWith(".."+sep)};const types={".css":"text/css; charset=utf-8",".gif":"image/gif",".html":"text/html; charset=utf-8",".ico":"image/x-icon",".jpeg":"image/jpeg",".jpg":"image/jpeg",".js":"text/javascript; charset=utf-8",".json":"application/json; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".png":"image/png",".svg":"image/svg+xml",".wasm":"application/wasm",".webmanifest":"application/manifest+json; charset=utf-8",".webp":"image/webp",".wav":"audio/wav"};createServer(async(req,res)=>{try{if(req.method!=="GET"&&req.method!=="HEAD"){res.writeHead(405,{Allow:"GET, HEAD"}).end();return}if(!req.url||req.url.length>4096){res.writeHead(414).end();return}const url=new URL(req.url,"http://localhost");const pathname=decodeURIComponent(url.pathname);if(pathname.includes("\0")||pathname.includes("\\")){res.writeHead(400).end();return}let file=resolve(root,"."+pathname);if(!inside(file)){res.writeHead(403).end();return}if((await stat(file)).isDirectory())file=resolve(file,"index.html");file=await realpath(file);if(!inside(file)||(await stat(file)).isFile()===false){res.writeHead(403).end();return}const body=await readFile(file);res.writeHead(200,{"Content-Type":types[extname(file).toLowerCase()]??"application/octet-stream","Content-Length":body.length,"X-Content-Type-Options":"nosniff"});res.end(req.method==="HEAD"?undefined:body)}catch{res.writeHead(404).end()}}).listen(8000,"0.0.0.0");"#;
+/// Infer a launch command for a package-managed (`package.json`-carrying)
+/// application.
+///
+/// Dependency install itself is decided independently, from filesystem
+/// evidence, by the v1 build lane (`rootfs_builder::base_image_and_install`)
+/// — this function only has to choose how the app is *started* once installed.
+/// It only auto-infers a launch command when it can be confident the app will
+/// actually bind where Ato expects: today that means `scripts.start` or
+/// `scripts.dev` resolves, with no shell syntax, to a plain invocation whose
+/// last token is `vite` — a CLI with well-known `--host`/`--port` flags that
+/// can be appended safely as trailing argv (via the package manager's `--`
+/// argument-forwarding convention) without guessing whether the underlying
+/// framework even reads a port argument. Any other shape (missing script,
+/// shell operators, an unrecognized dev-server binary, an ambiguous set of
+/// lockfiles) fails closed to manual setup rather than assume.
+fn infer_package_managed_intent(
+    source_root: &Path,
+) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    let package_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(source_root.join("package.json"))
+            .map_err(|error| format!("read package.json: {error}"))?,
+    )
+    .map_err(|error| format!("parse package.json: {error}"))?;
+
+    let package_manager = resolve_launch_package_manager(source_root, &package_json)?;
+
+    let (script_name, script_command) = package_json
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|scripts| {
+            ["start", "dev"].iter().find_map(|name| {
+                scripts
+                    .get(*name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|command| (*name, command))
+            })
+        })
+        .ok_or_else(|| {
+            "package-managed inference requires scripts.start or scripts.dev in package.json"
+                .to_string()
+        })?;
+
+    let script_argv = parse_plain_task_argv(script_command)?;
+    if script_argv.last().map(String::as_str) != Some("vite") {
+        return Err(format!(
+            "package-managed inference cannot guarantee `{package_manager} run {script_name}` ({script_command:?}) binds to Ato's assigned host/port — manual setup required"
+        ));
+    }
+
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
+                package_manager.to_string(),
+                "run".to_string(),
+                script_name.to_string(),
+                "--".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "8000".to_string(),
+            ],
+            cwd: WorkspacePathV1::root(),
+            requested_environment: Vec::new(),
+            required_tools: vec![package_manager.to_string()],
+        },
+        readiness: ReadinessIntentV1::Http {
+            port: 8000,
+            path: "/".to_string(),
+            timeout_seconds: 60,
+        },
+        build_output_roots: Vec::new(),
+        bindings: Vec::new(),
+        unresolved: Vec::new(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Decide which package manager launches the app, preferring the explicit
+/// Corepack `packageManager` declaration and otherwise inferring from
+/// whichever single lockfile is present. No lockfile defaults to `npm`
+/// (always available wherever `package.json` is honored); more than one
+/// *distinct* package manager's lockfile is ambiguous and fails closed rather
+/// than guessing which one is authoritative.
+fn resolve_launch_package_manager(
+    source_root: &Path,
+    package_json: &serde_json::Value,
+) -> Result<&'static str, String> {
+    if let Some(declared) = package_json
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+    {
+        let name = declared.split('@').next().unwrap_or_default();
+        return match name {
+            "npm" => Ok("npm"),
+            "yarn" => Ok("yarn"),
+            "pnpm" => Ok("pnpm"),
+            "bun" => Ok("bun"),
+            other => Err(format!(
+                "unsupported packageManager `{other}` declared in package.json"
+            )),
+        };
+    }
+    const LOCKFILES: &[(&str, &str)] = &[
+        ("package-lock.json", "npm"),
+        ("npm-shrinkwrap.json", "npm"),
+        ("yarn.lock", "yarn"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("bun.lock", "bun"),
+        ("bun.lockb", "bun"),
+    ];
+    let mut found: Vec<&str> = LOCKFILES
+        .iter()
+        .filter(|(file, _)| source_root.join(file).is_file())
+        .map(|(_, manager)| *manager)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    match found.as_slice() {
+        [] => Ok("npm"),
+        [single] => Ok(single),
+        multiple => Err(format!(
+            "ambiguous package manager: multiple lockfiles disagree ({})",
+            multiple.join(", ")
+        )),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -878,6 +1143,12 @@ enum SourceOverlayManifestV1 {
     CapsuleToml {
         schema: String,
         capsule_toml: String,
+        #[serde(default)]
+        #[serde(rename = "normalized_manifest_digest")]
+        _normalized_manifest_digest: Option<String>,
+        #[serde(default)]
+        #[serde(rename = "base_manifest_digest")]
+        _base_manifest_digest: Option<String>,
     },
     ManualCommand {
         schema: String,
@@ -891,81 +1162,128 @@ pub fn resolve_authoring_recipe(
     source_root: &Path,
     work: &AuthoringWork,
 ) -> Result<(NormalizedProgramIntentEnvelopeV1, String), String> {
-    let Some(overlay) = &work.source_overlay else {
-        let normalized = infer_authoring_intent(source_root)?;
-        let manifest = render_inferred_capsule_toml(&normalized)?;
-        return Ok((normalized, manifest));
+    let (origin_manifest, preserve_exact_bytes, merge_store_draft) = if let Some(overlay) =
+        &work.source_overlay
+    {
+        if overlay.source_revision_id != work.source_revision_id {
+            return Err("Source Overlay targets a different immutable Source Revision".to_string());
+        }
+        let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
+            .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
+        match manifest {
+            SourceOverlayManifestV1::CapsuleToml {
+                schema,
+                capsule_toml,
+                ..
+            } => {
+                require_overlay_schema(&schema)?;
+                // A capsule_toml overlay is already the complete author-edited
+                // Manifest. It is applied after the pre-setup Store draft and
+                // therefore wins byte-for-byte.
+                (capsule_toml, true, false)
+            }
+            SourceOverlayManifestV1::ManualCommand {
+                schema,
+                launch_argv,
+                port,
+                readiness_path,
+            } => {
+                require_overlay_schema(&schema)?;
+                if launch_argv.is_empty() {
+                    return Err("manual launch argv is empty".to_string());
+                }
+                if readiness_path != "/" {
+                    return Err(
+                        "manual Authoring v1 currently supports only the synthesized root readiness path"
+                            .to_string(),
+                    );
+                }
+                let required_tools = vec![launch_argv[0].clone()];
+                let normalized = normalize_program_intent(ProgramIntentDraftV1 {
+                    schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+                    origin: ProgramIntentOrigin::ManualSetup,
+                    toolchains: Vec::new(),
+                    build_steps: Vec::new(),
+                    launch: ProgramCommandDraftV1::Argv {
+                        argv: launch_argv,
+                        cwd: WorkspacePathV1::root(),
+                        requested_environment: Vec::new(),
+                        required_tools,
+                    },
+                    readiness: ReadinessIntentV1::Http {
+                        port,
+                        path: readiness_path,
+                        timeout_seconds: 60,
+                    },
+                    build_output_roots: Vec::new(),
+                    bindings: Vec::new(),
+                    unresolved: Vec::new(),
+                })
+                .map_err(|error| format!("normalize manual Program Intent: {error}"))?;
+                (render_inferred_capsule_toml(&normalized)?, false, true)
+            }
+        }
+    } else {
+        let source_manifest = source_root.join("capsule.toml");
+        if source_manifest.is_file() {
+            let capsule_toml = std::fs::read_to_string(&source_manifest)
+                .map_err(|error| format!("read source capsule.toml: {error}"))?;
+            (capsule_toml, true, true)
+        } else {
+            let normalized = infer_authoring_intent(source_root)?;
+            (render_inferred_capsule_toml(&normalized)?, false, true)
+        }
     };
-    if overlay.source_revision_id != work.source_revision_id {
-        return Err("Source Overlay targets a different immutable Source Revision".to_string());
-    }
-    let manifest: SourceOverlayManifestV1 = serde_json::from_value(overlay.manifest.clone())
-        .map_err(|error| format!("decode Source Overlay manifest: {error}"))?;
-    match manifest {
-        SourceOverlayManifestV1::CapsuleToml {
-            schema,
-            capsule_toml,
-        } => {
-            require_overlay_schema(&schema)?;
-            let parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&capsule_toml)
-                .map_err(|error| format!("validate edited capsule.toml: {error}"))?;
-            parsed
-                .validate_for_interactive_capture()
-                .map_err(|error| format!("edited capsule.toml is outside Authoring v1: {error}"))?;
-            let normalized =
-                normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(
-                    |error| format!("derive Program Intent from edited capsule.toml: {error}"),
-                )?)
-                .map_err(|error| format!("normalize edited Program Intent: {error}"))?;
-            Ok((normalized, capsule_toml))
-        }
-        SourceOverlayManifestV1::ManualCommand {
-            schema,
-            launch_argv,
-            port,
-            readiness_path,
-        } => {
-            require_overlay_schema(&schema)?;
-            if launch_argv.is_empty() {
-                return Err("manual launch argv is empty".to_string());
+
+    let mut parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&origin_manifest)
+        .map_err(|error| format!("validate Effective capsule.toml: {error}"))?;
+    let effective_manifest =
+        if let Some(metadata) = work.store_metadata.as_ref().filter(|_| merge_store_draft) {
+            parsed.name = metadata.name.clone();
+            parsed.metadata.short_description = Some(metadata.short_description.clone());
+            parsed.metadata.description = Some(metadata.full_description.clone());
+            parsed.metadata.license = metadata.license.clone();
+            parsed.metadata.tags = metadata.tags.clone();
+            parsed.metadata.store =
+                metadata
+                    .primary_category
+                    .as_ref()
+                    .map(|category| StoreMetadataV1 {
+                        category: category.clone(),
+                        subcategory: metadata.primary_subcategory.clone(),
+                    });
+            if metadata.assets.is_some() {
+                parsed.metadata.assets = metadata.assets.clone();
             }
-            if readiness_path != "/" {
-                return Err(
-                    "manual Authoring v1 currently supports only the synthesized root readiness path"
-                        .to_string(),
-                );
-            }
-            let required_tools = vec![launch_argv[0].clone()];
-            let normalized = normalize_program_intent(ProgramIntentDraftV1 {
-                schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
-                origin: ProgramIntentOrigin::ManualSetup,
-                toolchains: Vec::new(),
-                build_steps: Vec::new(),
-                launch: ProgramCommandDraftV1::Argv {
-                    argv: launch_argv,
-                    cwd: WorkspacePathV1::root(),
-                    requested_environment: Vec::new(),
-                    required_tools,
-                },
-                readiness: ReadinessIntentV1::Http {
-                    port,
-                    path: readiness_path,
-                    timeout_seconds: 60,
-                },
-                build_output_roots: Vec::new(),
-                bindings: Vec::new(),
-                unresolved: Vec::new(),
-            })
-            .map_err(|error| format!("normalize manual Program Intent: {error}"))?;
-            let capsule_toml = render_inferred_capsule_toml(&normalized)?;
-            Ok((normalized, capsule_toml))
-        }
-    }
+            toml::to_string(&parsed)
+                .map_err(|error| format!("serialize Effective capsule.toml: {error}"))?
+        } else if preserve_exact_bytes {
+            origin_manifest
+        } else {
+            toml::to_string(&parsed)
+                .map_err(|error| format!("serialize Effective capsule.toml: {error}"))?
+        };
+    parsed
+        .validate_for_interactive_capture()
+        .map_err(|error| format!("Effective capsule.toml is outside Authoring v1: {error}"))?;
+    let normalized =
+        normalize_program_intent(draft_from_capsule_manifest_v1(&parsed).map_err(|error| {
+            format!("derive Program Intent from Effective capsule.toml: {error}")
+        })?)
+        .map_err(|error| format!("normalize Effective Program Intent: {error}"))?;
+    Ok((normalized, effective_manifest))
 }
 
-pub fn authoring_recipe_origin(work: &AuthoringWork) -> Result<&'static str, String> {
+pub fn authoring_recipe_origin(
+    source_root: &Path,
+    work: &AuthoringWork,
+) -> Result<&'static str, String> {
     let Some(overlay) = &work.source_overlay else {
-        return Ok("inferred");
+        return Ok(if source_root.join("capsule.toml").is_file() {
+            "existing_config"
+        } else {
+            "inferred"
+        });
     };
     match overlay
         .manifest
@@ -978,6 +1296,7 @@ pub fn authoring_recipe_origin(work: &AuthoringWork) -> Result<&'static str, Str
     }
 }
 
+#[cfg(test)]
 pub fn replay_capsule_toml(
     work: &AuthoringWork,
     normalized: &NormalizedProgramIntentEnvelopeV1,
@@ -994,6 +1313,7 @@ pub fn replay_capsule_toml(
         SourceOverlayManifestV1::CapsuleToml {
             schema,
             capsule_toml,
+            ..
         } => {
             require_overlay_schema(&schema)?;
             Ok(capsule_toml)
@@ -1353,28 +1673,102 @@ mod tests {
     }
 
     #[test]
-    fn node_static_repository_uses_the_materialized_node_runtime() {
+    fn package_managed_app_with_index_html_is_not_misclassified_as_static() {
+        // Regression for ato-api#443: a package.json-carrying repository must
+        // never fall into the dependency-free static-file path just because
+        // it also has a root index.html (swagger-editor ships one as its
+        // Vite dev-server template).
         let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
-        std::fs::write(root.path().join("package.json"), r#"{"name":"static-app"}"#)
-            .expect("package");
+        std::fs::write(root.path().join("index.html"), "<div id=\"root\"></div>").expect("fixture");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"swagger-editor","scripts":{"start":"cross-env DISABLE_ESLINT_PLUGIN=false vite"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
 
         let normalized = infer_authoring_intent(root.path()).expect("intent");
 
         assert_eq!(
-            normalized.intent.launch.argv[..3],
-            ["node", "--input-type=module", "-e"]
+            normalized.intent.launch.argv,
+            [
+                "npm", "run", "start", "--", "--host", "0.0.0.0", "--port", "8000",
+            ]
         );
-        assert_eq!(normalized.intent.launch.required_tools, ["node"]);
-        assert!(
-            normalized.intent.launch.argv[3].contains("createServer"),
-            "the inferred command embeds a dependency-free static server"
-        );
+        assert_eq!(normalized.intent.launch.required_tools, ["npm"]);
         let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
         let parsed =
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
+        assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn package_managed_inference_prefers_declared_package_manager() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","packageManager":"pnpm@9.1.0","scripts":{"dev":"vite"}}"#,
+        )
+        .expect("package");
+        // A stray npm lockfile must not win over the explicit declaration.
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+
+        assert_eq!(normalized.intent.launch.argv[0], "pnpm");
+        assert_eq!(normalized.intent.launch.argv[2], "dev");
+        assert_eq!(normalized.intent.launch.required_tools, ["pnpm"]);
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_without_a_start_or_dev_script() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("package.json"), r#"{"name":"static-app"}"#)
+            .expect("package");
+
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_for_an_unrecognized_dev_server() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"node server.js"}}"#,
+        )
+        .expect("package");
+
+        let error = infer_authoring_intent(root.path()).expect_err("must fail closed");
+        assert!(error.contains("manual setup required"));
+    }
+
+    #[test]
+    fn package_managed_inference_refuses_shell_task_syntax() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"PORT=8000 && vite"}}"#,
+        )
+        .expect("package");
+
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_on_ambiguous_lockfiles() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"vite"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("npm lockfile");
+        std::fs::write(root.path().join("yarn.lock"), "").expect("yarn lockfile");
+
+        let error = infer_authoring_intent(root.path()).expect_err("must fail closed");
+        assert!(error.contains("ambiguous package manager"));
     }
 
     #[test]
@@ -1429,6 +1823,61 @@ mod tests {
     }
 
     #[test]
+    fn source_capsule_toml_wins_over_inference_and_is_not_overwritten() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "fixture").expect("source");
+        let capsule_toml = r#"schema_version = "1"
+name = "source-owned"
+version = "2.0.0"
+
+[metadata]
+short_description = "kept byte-for-byte"
+
+[run]
+command = ["python3", "-m", "http.server", "4310", "--bind", "0.0.0.0"]
+
+[web]
+port = 4310
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["python3", "-c", "print('ready')"]
+timeout_seconds = 30
+"#;
+        std::fs::write(root.path().join("capsule.toml"), capsule_toml).expect("manifest");
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_source_manifest",
+            "authoring_session_id": "auth_source_manifest",
+            "capsule_revision_id": "caprev_source_manifest",
+            "source_revision_id": "srev_source_manifest",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_source_manifest",
+                "source_materialization_id": "smat_source_manifest",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_source_manifest.tar.zst",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "setup_mode": "suggested",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_source_manifest"
+        }))
+        .expect("claim");
+
+        let (normalized, exact_toml) =
+            resolve_authoring_recipe(root.path(), &work).expect("source recipe");
+
+        assert_eq!(exact_toml, capsule_toml);
+        assert_eq!(normalized.intent.launch.argv[3], "4310");
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("capsule.toml")).expect("unchanged manifest"),
+            capsule_toml
+        );
+    }
+
+    #[test]
     fn manual_command_overlay_generates_a_replayable_manifest() {
         let root = tempfile::tempdir().expect("tempdir");
         std::fs::write(root.path().join("deno.json"), r#"{"tasks":{}}"#).expect("config");
@@ -1472,7 +1921,7 @@ mod tests {
             resolve_authoring_recipe(root.path(), &work).expect("manual recipe");
 
         assert_eq!(
-            authoring_recipe_origin(&work).expect("origin"),
+            authoring_recipe_origin(root.path(), &work).expect("origin"),
             "manual_setup"
         );
         assert_eq!(
@@ -1571,6 +2020,12 @@ timeout_seconds = 30
                     "capsule_toml": capsule_toml
                 }
             },
+            "store_metadata": {
+                "name": "stale-listing-name",
+                "short_description": "stale listing draft",
+                "full_description": "must not replace the later Manifest overlay",
+                "tags": []
+            },
             "setup_mode": "manual",
             "setup_journal_sequence": 2,
             "lease_token": "lease-token-with-at-least-thirty-two-bytes",
@@ -1583,7 +2038,7 @@ timeout_seconds = 30
             resolve_authoring_recipe(root.path(), &work).expect("edited recipe");
 
         assert_eq!(
-            authoring_recipe_origin(&work).expect("origin"),
+            authoring_recipe_origin(root.path(), &work).expect("origin"),
             "existing_config"
         );
         assert_eq!(

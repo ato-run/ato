@@ -58,6 +58,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::docker_import::{
     BuildTool, ResolvedRuntimeArtifact, measure_guest_target, resolve_runtime_artifact,
 };
@@ -68,7 +70,11 @@ use crate::rootfs_builder::{
     mkfs_guest_rootfs_v1, v1_filesystem_uuid,
 };
 use crate::v1_materialization::{V1MaterializationReceipt, measure_guest_artifact, target_triple};
-use capsule::capsule_lock::{self, CapsuleLock, LockEnvironmentValue, LockLaunchSection};
+use capsule::capsule_lock::{
+    self, CapsuleLock, LockEnvironmentValue, LockLaunchSection, LockManifestSection,
+    LockMetadataAsset, LockMetadataAssetOrigin, LockMetadataAssetsSection,
+    LockSourceSelectionSection,
+};
 use capsule::common::lock_presence::CAPSULE_LOCK_FILE_NAME;
 use capsule::execution_contract::{
     ContentDigest, DigestAlgorithm, EnvironmentValuePayloadV1, ExecutionContractEnvelopeV1,
@@ -77,10 +83,12 @@ use capsule::execution_contract::{
 use capsule::execution_contract_finalize::{FinalizationError, environment_value_digest};
 use capsule::program_source_projection::{
     MaterializedProgramSource, VerifiedPinnedSourceMaterialization,
-    materialize_program_source_projection,
+    materialize_program_source_projection_with_manifest,
 };
 use capsule::routing::input_resolver::resolve_canonical_lock_path;
-use capsule::types::manifest_v1::CapsuleManifestV1;
+use capsule::types::manifest_v1::{
+    AssetLocatorV1, CapsuleManifestV1, SOURCE_FILTER_POLICY_VERSION_V1, SYSTEM_SOURCE_IGNORE_V1,
+};
 
 use crate::observe_v1::{V1BuildObservation, observe_v1};
 
@@ -436,6 +444,11 @@ pub fn run(
     // must stop the build before it spends a registry round trip on it.
     let lock_path = resolve_lock_path(request.workspace_root)?;
 
+    // Read and normalize the root manifest before source selection. The
+    // projected tree — not the checkout — is what the guest gets and what
+    // `source.digest` names.
+    let manifest = read_v1_manifest(request.workspace_root)?;
+
     // 1–3. Freeze the workspace, then project it. The projected tree — not the
     // checkout — is what the guest gets and what `source.digest` names.
     let projection_root = request.work_root.join("projected-source");
@@ -449,11 +462,8 @@ pub fn run(
         request.pinned_source_archive,
         request.work_root,
         &projection_root,
+        &manifest,
     )?;
-
-    // The manifest is read from the WORKSPACE, not from the projection: the
-    // projection is precisely the tree with the manifest removed.
-    let manifest = read_v1_manifest(request.workspace_root)?;
 
     // 4. Derive the recipe from the projected tree. Probing the projection
     // rather than the checkout matters: the probe decides the runtime family
@@ -588,7 +598,7 @@ pub fn run(
     // deleting the merged file on failure would take the caller's other
     // sections with it — worse than the stale lock the removal exists to avoid.
     let previous_lock_bytes = std::fs::read(&lock_path).ok();
-    persist_execution_contract(&lock_path, &manifest, &minted)?;
+    persist_execution_contract(&lock_path, request.workspace_root, &manifest, &minted)?;
 
     // 11. Read it back from disk through the trusted path — not from the value
     // still in memory, which would prove nothing about what was written.
@@ -647,6 +657,7 @@ fn project_pinned_source(
     pinned_source_archive: Option<&Path>,
     work_root: &Path,
     destination: &Path,
+    manifest: &CapsuleManifestV1,
 ) -> Result<MaterializedProgramSource, V1BuildError> {
     // One projection, two ways of getting the archive it reads — and only the
     // archive step differs. A caller that already holds a PROVED archive hands
@@ -670,11 +681,11 @@ fn project_pinned_source(
                 reason: source.to_string(),
             }
         })?;
-    materialize_program_source_projection(&pinned, destination).map_err(|source| {
-        V1BuildError::ProgramSourceProjectionFailed {
+    materialize_program_source_projection_with_manifest(&pinned, destination, manifest).map_err(
+        |source| V1BuildError::ProgramSourceProjectionFailed {
             reason: source.to_string(),
-        }
-    })
+        },
+    )
 }
 
 fn read_v1_manifest(workspace_root: &Path) -> Result<CapsuleManifestV1, V1BuildError> {
@@ -790,6 +801,7 @@ fn mint_error_from_finalization(error: FinalizationError) -> V1BuildError {
 /// wrong with it into the new one.
 fn persist_execution_contract(
     lock_path: &Path,
+    workspace_root: &Path,
     manifest: &CapsuleManifestV1,
     minted: &ExecutionContractEnvelopeV1,
 ) -> Result<(), V1BuildError> {
@@ -808,6 +820,27 @@ fn persist_execution_contract(
 
     lock.execution_contract = Some(minted.clone());
     lock.launch = d5_launch_section(manifest, minted)?;
+    lock.manifest = Some(LockManifestSection {
+        schema_version: manifest.schema_version.clone(),
+        normalized_digest: manifest.normalized_digest().map_err(|source| {
+            V1BuildError::LockPersistFailed {
+                path: lock_path.to_path_buf(),
+                reason: format!("normalize capsule.toml: {source}"),
+            }
+        })?,
+    });
+    lock.source_selection = Some(lock_source_selection(manifest).map_err(|reason| {
+        V1BuildError::LockPersistFailed {
+            path: lock_path.to_path_buf(),
+            reason,
+        }
+    })?);
+    lock.metadata_assets = lock_metadata_assets(workspace_root, manifest).map_err(|reason| {
+        V1BuildError::LockPersistFailed {
+            path: lock_path.to_path_buf(),
+            reason,
+        }
+    })?;
 
     capsule_lock::write_pretty_to_path(&lock, lock_path).map_err(|source| {
         V1BuildError::LockPersistFailed {
@@ -815,6 +848,114 @@ fn persist_execution_contract(
             reason: source.to_string(),
         }
     })
+}
+
+fn lock_source_selection(
+    manifest: &CapsuleManifestV1,
+) -> Result<LockSourceSelectionSection, String> {
+    let system_ignore = SYSTEM_SOURCE_IGNORE_V1
+        .iter()
+        .map(|pattern| (*pattern).to_string())
+        .collect::<Vec<_>>();
+    let mut effective_ignore = system_ignore.clone();
+    effective_ignore.extend(manifest.source.ignore.iter().cloned());
+    Ok(LockSourceSelectionSection {
+        root: manifest.source.root.clone(),
+        policy_version: SOURCE_FILTER_POLICY_VERSION_V1.to_string(),
+        system_ignore_digest: sha256_jcs(&system_ignore)?,
+        manifest_ignore_digest: sha256_jcs(&manifest.source.ignore)?,
+        effective_ignore_digest: sha256_jcs(&effective_ignore)?,
+        effective_ignore,
+    })
+}
+
+fn sha256_jcs<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    let bytes = serde_jcs::to_vec(value)
+        .map_err(|error| format!("canonicalize source selection: {error}"))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+}
+
+fn lock_metadata_assets(
+    workspace_root: &Path,
+    manifest: &CapsuleManifestV1,
+) -> Result<Option<LockMetadataAssetsSection>, String> {
+    let Some(assets) = &manifest.metadata.assets else {
+        return Ok(None);
+    };
+    let icon = assets
+        .icon
+        .as_ref()
+        .map(|asset| lock_metadata_asset(workspace_root, manifest, asset))
+        .transpose()?;
+    let banner = assets
+        .banner
+        .as_ref()
+        .map(|asset| lock_metadata_asset(workspace_root, manifest, asset))
+        .transpose()?;
+    if icon.is_none() && banner.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(LockMetadataAssetsSection { icon, banner }))
+    }
+}
+
+fn lock_metadata_asset(
+    workspace_root: &Path,
+    manifest: &CapsuleManifestV1,
+    locator: &AssetLocatorV1,
+) -> Result<LockMetadataAsset, String> {
+    match locator {
+        AssetLocatorV1::Path(path) => {
+            let selected_root = workspace_root
+                .join(&manifest.source.root)
+                .canonicalize()
+                .map_err(|error| format!("resolve source.root for metadata asset: {error}"))?;
+            let resolved = selected_root
+                .join(&path.path)
+                .canonicalize()
+                .map_err(|error| format!("resolve metadata asset '{}': {error}", path.path))?;
+            if !resolved.starts_with(&selected_root) {
+                return Err(format!(
+                    "metadata asset '{}' resolves outside source.root",
+                    path.path
+                ));
+            }
+            let bytes = std::fs::read(&resolved)
+                .map_err(|error| format!("read metadata asset '{}': {error}", path.path))?;
+            let digest_hex = hex::encode(Sha256::digest(&bytes));
+            Ok(LockMetadataAsset {
+                origin: LockMetadataAssetOrigin {
+                    kind: "path".to_string(),
+                    value: path.path.clone(),
+                },
+                content_digest: format!("sha256:{digest_hex}"),
+                artifact_ref: Some(format!("ato-asset://sha256/{digest_hex}")),
+                media_type: image_media_type(&bytes)?,
+            })
+        }
+        AssetLocatorV1::Url(url) => Ok(LockMetadataAsset {
+            origin: LockMetadataAssetOrigin {
+                kind: "url".to_string(),
+                value: url.origin_url.clone().unwrap_or_else(|| url.url.clone()),
+            },
+            content_digest: url.content_digest.clone(),
+            artifact_ref: Some(url.artifact_ref.clone()),
+            media_type: url.media_type.clone(),
+        }),
+    }
+}
+
+fn image_media_type(bytes: &[u8]) -> Result<String, String> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Ok("image/png".to_string());
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Ok("image/jpeg".to_string());
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Ok("image/webp".to_string());
+    }
+    Err("metadata asset bytes have an unsupported image type".to_string())
 }
 
 /// Refuse a build path that lives inside the source tree.
