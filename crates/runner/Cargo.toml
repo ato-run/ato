@@ -1,0 +1,32 @@
+[package]
+name = "runner"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Host-agnostic execution supervision — drives the ato CLI to run/stop/observe capsule sessions. Desktop is one host; future hosts: IoT / mobile / EV."
+homepage = "https://ato.run"
+repository = "https://github.com/ato-run/ato"
+
+# The ato CLI remains the SOLE owner of capsule execution / isolation / runner
+# control. This crate does not execute — it *supervises* (spawns/observes/kills
+# the CLI as a child) behind the `RunnerHost` abstraction so any host can drive
+# it. It stays dependency-light: wire types come from `protocol`, nothing here
+# reaches for GUI / webview / platform-UI deps.
+
+[package.metadata.dist]
+dist = false
+
+[lib]
+name = "runner"
+path = "src/lib.rs"
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tracing = "0.1"
+
+# Unix process-group teardown (kill(2) with a negative pid). Windows uses
+# `taskkill /T /F` via std::process, so no platform crate is needed there.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

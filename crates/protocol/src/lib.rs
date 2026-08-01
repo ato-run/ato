@@ -58,9 +58,14 @@ pub mod config;
 pub mod consent;
 pub mod error;
 pub mod handle;
+pub mod intent;
+pub mod nacelle_ipc;
 pub mod net;
+pub mod oci_session;
 pub mod placement;
+pub mod runtime_control;
 pub mod runtime_control_events;
+pub mod secret_bridge;
 pub mod session_surface;
 
 pub use error::{Result, WireError};

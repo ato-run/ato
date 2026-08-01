@@ -11,6 +11,7 @@ members = [
     "crates/cli/lock-draft-engine",
     "crates/nacelle",
     "crates/netd",
+    "crates/runner",
 ]
 
 # `desktop` (and its xtask) are kept OUT of the workspace because their
@@ -25,6 +26,8 @@ exclude = [
     "crates/desktop/xtask",
     "crates/desktop/.tmp",
     "crates/desktop/vendor",
+    # Tauri migration shell — heavy platform deps, own Cargo.lock (like `desktop`).
+    "crates/desktop-tauri",
     "sidecars/ato-tsnetd",
 ]
 
