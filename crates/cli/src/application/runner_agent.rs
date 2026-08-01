@@ -226,6 +226,7 @@ pub fn load_runner_credentials() -> Result<RunnerCredentials> {
 // ─────────────────────────────────────────────
 
 const SESSION_HORIZON_EXTENSION_CAPABILITY: &str = "session-horizon-extension-v1";
+const SURFACE_ACTIVATION_V2_CAPABILITY: &str = "surface-activation-v2";
 
 pub(crate) fn binary_on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
@@ -250,6 +251,7 @@ pub fn collect_capabilities() -> Vec<String> {
     }
     caps.push("source-sandbox".to_string());
     caps.push(SESSION_HORIZON_EXTENSION_CAPABILITY.to_string());
+    caps.push(SURFACE_ACTIVATION_V2_CAPABILITY.to_string());
     caps
 }
 
@@ -2279,11 +2281,35 @@ async fn report_lease_ready(
     lease_id: &str,
     payload: &ReadyPayload,
 ) -> Result<()> {
-    let url = format!(
-        "{}/v1/runner-leases/{}/ready",
-        api_base.trim_end_matches('/'),
-        lease_id
-    );
+    match report_lease_ready_attempt(client, api_base, runner_token, lease_id, payload).await {
+        ReadyReportAttempt::Accepted => Ok(()),
+        ReadyReportAttempt::Retryable(error) | ReadyReportAttempt::Terminal(error) => {
+            bail!("{error}")
+        }
+    }
+}
+
+const READY_REPORT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const SURFACE_ACTIVATION_RETRY_DELAY: Duration = Duration::from_secs(1);
+const DEFAULT_SURFACE_ACTIVATION_HORIZON: Duration = Duration::from_secs(120);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ReadyReportAttempt {
+    Accepted,
+    Retryable(String),
+    Terminal(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SurfaceActivationOutcome {
+    Accepted { attempts: u32 },
+    StopRequested,
+    LeaseDone,
+    HorizonExpired,
+    Rejected(String),
+}
+
+fn ready_report_body(payload: &ReadyPayload) -> serde_json::Value {
     let mut body = serde_json::json!({ "execution_id": payload.execution_id });
     if let Some(ready_url) = payload.ready_url.as_deref() {
         body["ready_url"] = serde_json::Value::String(ready_url.to_string());
@@ -2291,19 +2317,118 @@ async fn report_lease_ready(
     if let Some(port) = payload.local_port {
         body["local_port"] = serde_json::Value::Number(port.into());
     }
-    let response = client
+    body
+}
+
+fn bounded_response_detail(body: String) -> String {
+    serde_json::from_str::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|value| value.get("error")?.as_str().map(str::to_string))
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 128
+                && code
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+        .unwrap_or_else(|| "response body omitted".to_string())
+}
+
+async fn report_lease_ready_attempt(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    payload: &ReadyPayload,
+) -> ReadyReportAttempt {
+    let url = format!(
+        "{}/v1/runner-leases/{}/ready",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let response = match client
         .post(&url)
         .bearer_auth(runner_token)
-        .json(&body)
+        .json(&ready_report_body(payload))
+        .timeout(READY_REPORT_REQUEST_TIMEOUT)
         .send()
         .await
-        .context("ready report request failed")?;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return ReadyReportAttempt::Retryable(format!(
+                "ready report request failed: {}",
+                scrub_secrets(&error.to_string())
+            ));
+        }
+    };
     let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("ready report rejected (HTTP {status}): {body}");
+    if status.is_success() {
+        return ReadyReportAttempt::Accepted;
     }
-    Ok(())
+    let detail = bounded_response_detail(response.text().await.unwrap_or_default());
+    let message = format!("ready report rejected (HTTP {status}): {detail}");
+    if status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_EARLY
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        ReadyReportAttempt::Retryable(message)
+    } else {
+        ReadyReportAttempt::Terminal(message)
+    }
+}
+
+/// Activation v2 never falls back to `/status ready`. A transient `/ready`
+/// failure is retried with bounded delay while the runner also observes Stop.
+async fn report_lease_ready_v2(
+    client: &reqwest::Client,
+    api_base: &str,
+    runner_token: &str,
+    lease_id: &str,
+    payload: &ReadyPayload,
+    horizon: Duration,
+    retry_delay: Duration,
+) -> SurfaceActivationOutcome {
+    let deadline = std::time::Instant::now()
+        .checked_add(horizon)
+        .unwrap_or_else(std::time::Instant::now);
+    let control_url = format!(
+        "{}/v1/runner-leases/{}/control",
+        api_base.trim_end_matches('/'),
+        lease_id
+    );
+    let mut attempts = 0u32;
+    loop {
+        if attempts > 0 && std::time::Instant::now() >= deadline {
+            return SurfaceActivationOutcome::HorizonExpired;
+        }
+        attempts = attempts.saturating_add(1);
+        match report_lease_ready_attempt(client, api_base, runner_token, lease_id, payload).await {
+            ReadyReportAttempt::Accepted => {
+                return SurfaceActivationOutcome::Accepted { attempts };
+            }
+            ReadyReportAttempt::Terminal(error) => {
+                return SurfaceActivationOutcome::Rejected(error);
+            }
+            ReadyReportAttempt::Retryable(error) => {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: activation attempt {attempts} is retryable: {}",
+                    scrub_secrets(&error)
+                );
+            }
+        }
+        match poll_control_once(client, &control_url, runner_token).await {
+            ControlOutcome::Stop => return SurfaceActivationOutcome::StopRequested,
+            ControlOutcome::Done => return SurfaceActivationOutcome::LeaseDone,
+            ControlOutcome::Continue { .. } => {}
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return SurfaceActivationOutcome::HorizonExpired;
+        }
+        tokio::time::sleep(retry_delay.min(remaining)).await;
+    }
 }
 
 /// Single-slot root L4 proxy: every accepted connection is piped to the ONE
@@ -5082,13 +5207,50 @@ async fn handle_restore_snapshot_lease(
         payload.execution_id,
         payload.ready_url.as_deref().unwrap_or("none")
     );
-    if let Err(err) = report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await
-    {
-        eprintln!(
-            "⚠️  restore lease {lease_id}: ready report failed: {}",
-            scrub_secrets(&format!("{err:#}"))
-        );
-    }
+    let activation_failure_reason = if cmd.surface_activation_version.as_deref() == Some("2") {
+        let activation_horizon = cmd
+            .max_duration_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_SURFACE_ACTIVATION_HORIZON);
+        match report_lease_ready_v2(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            &payload,
+            activation_horizon,
+            SURFACE_ACTIVATION_RETRY_DELAY,
+        )
+        .await
+        {
+            SurfaceActivationOutcome::Accepted { attempts } => {
+                println!(
+                    "✅ restore lease {lease_id}: public surface activated after {attempts} ready attempt(s)"
+                );
+                None
+            }
+            SurfaceActivationOutcome::StopRequested => Some("user_requested"),
+            SurfaceActivationOutcome::LeaseDone => Some("lease_control_done"),
+            SurfaceActivationOutcome::HorizonExpired => Some("surface_activation_timeout"),
+            SurfaceActivationOutcome::Rejected(error) => {
+                eprintln!(
+                    "⚠️  restore lease {lease_id}: public surface activation rejected: {}",
+                    scrub_secrets(&error)
+                );
+                Some("surface_activation_rejected")
+            }
+        }
+    } else {
+        if let Err(err) =
+            report_lease_ready(client, api_base, runner_token, &lease_id, &payload).await
+        {
+            eprintln!(
+                "⚠️  restore lease {lease_id}: ready report failed: {}",
+                scrub_secrets(&format!("{err:#}"))
+            );
+        }
+        None
+    };
     prof_mark!("ready_ack_ms");
     // Track R1 summary — one stable line per successful restore (grep: RESTORE_PROF).
     // P3 adds `content_ready_ms`: the restore's own measurement of how long
@@ -5157,76 +5319,86 @@ async fn handle_restore_snapshot_lease(
     let mut pending_horizon_ack = None;
     let mut pixel_idle_horizon_reset_unix_millis = None;
     let mut pixel_idle_suppressed_until = None;
-    let reason = loop {
-        tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
-        let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
-        // Preserve the original short-circuit: only poll /control while the VM is up.
-        let control = if vmm_exited {
-            ControlOutcome::Continue {
-                session_horizon: None,
-            }
-        } else {
-            poll_control_once(client, &control_url, runner_token).await
-        };
+    let reason = if let Some(reason) = activation_failure_reason {
+        reason
+    } else {
+        loop {
+            tokio::time::sleep(Duration::from_secs(RESTORE_HOLD_POLL_SECS)).await;
+            let vmm_exited = session.vmm_pid.is_some_and(|pid| !vmm_alive(pid));
+            // Preserve the original short-circuit: only poll /control while the VM is up.
+            let control = if vmm_exited {
+                ControlOutcome::Continue {
+                    session_horizon: None,
+                }
+            } else {
+                poll_control_once(client, &control_url, runner_token).await
+            };
 
-        // Stop/Done never carries an update, so terminal control wins. A valid
-        // continuation is applied before evaluating the old hard deadline, allowing
-        // an update observed on the boundary to keep this same VMM alive.
-        if !vmm_exited
-            && let ControlOutcome::Continue {
-                session_horizon: Some(update),
-            } = control
-        {
-            let applied_at = std::time::Instant::now();
-            if let Some(horizon) = preview_horizon.as_mut()
-                && horizon.try_apply(update, applied_at)
+            // Stop/Done never carries an update, so terminal control wins. A valid
+            // continuation is applied before evaluating the old hard deadline, allowing
+            // an update observed on the boundary to keep this same VMM alive.
+            if !vmm_exited
+                && let ControlOutcome::Continue {
+                    session_horizon: Some(update),
+                } = control
             {
-                // Any applied generation restarts normal Pixel idle accounting.
-                // A begin-generation may additionally suppress idle expiry while
-                // the user is in an external auth/checkout tab.
-                pixel_idle_horizon_reset_unix_millis = Some(unix_time_millis());
-                let idle_grace_secs = update
-                    .idle_grace_secs
-                    .min(MAX_SESSION_HORIZON_IDLE_GRACE_SECS);
-                pixel_idle_suppressed_until =
-                    applied_at.checked_add(Duration::from_secs(idle_grace_secs));
-                pending_horizon_ack = Some(update);
+                let applied_at = std::time::Instant::now();
+                if let Some(horizon) = preview_horizon.as_mut()
+                    && horizon.try_apply(update, applied_at)
+                {
+                    // Any applied generation restarts normal Pixel idle accounting.
+                    // A begin-generation may additionally suppress idle expiry while
+                    // the user is in an external auth/checkout tab.
+                    pixel_idle_horizon_reset_unix_millis = Some(unix_time_millis());
+                    let idle_grace_secs = update
+                        .idle_grace_secs
+                        .min(MAX_SESSION_HORIZON_IDLE_GRACE_SECS);
+                    pixel_idle_suppressed_until =
+                        applied_at.checked_add(Duration::from_secs(idle_grace_secs));
+                    pending_horizon_ack = Some(update);
+                }
             }
-        }
-        if let Some(reason) = restore_hold_break_reason(
-            std::time::Instant::now(),
-            preview_horizon.map(|horizon| horizon.deadline()),
-            vmm_exited,
-            control,
-        ) {
-            break reason;
-        }
-        let pixel_idle_is_suppressed =
-            pixel_idle_suppressed_until.is_some_and(|until| std::time::Instant::now() < until);
-        let observed_pixel_activity = gateway_handle
-            .as_ref()
-            .and_then(RestoreGatewayHandle::last_input_activity_unix_millis);
-        if !pixel_idle_is_suppressed
-            && pixel_surface_idle_expired(
-                unix_time_millis(),
-                latest_pixel_activity(
-                    observed_pixel_activity,
-                    pixel_idle_horizon_reset_unix_millis,
-                ),
-                pixel_idle_timeout_secs,
-            )
-        {
-            break "preview_idle_expired";
-        }
-        if let Some(applied) = pending_horizon_ack
-            && report_session_horizon_applied(client, api_base, runner_token, &lease_id, applied)
+            if let Some(reason) = restore_hold_break_reason(
+                std::time::Instant::now(),
+                preview_horizon.map(|horizon| horizon.deadline()),
+                vmm_exited,
+                control,
+            ) {
+                break reason;
+            }
+            let pixel_idle_is_suppressed =
+                pixel_idle_suppressed_until.is_some_and(|until| std::time::Instant::now() < until);
+            let observed_pixel_activity = gateway_handle
+                .as_ref()
+                .and_then(RestoreGatewayHandle::last_input_activity_unix_millis);
+            if !pixel_idle_is_suppressed
+                && pixel_surface_idle_expired(
+                    unix_time_millis(),
+                    latest_pixel_activity(
+                        observed_pixel_activity,
+                        pixel_idle_horizon_reset_unix_millis,
+                    ),
+                    pixel_idle_timeout_secs,
+                )
+            {
+                break "preview_idle_expired";
+            }
+            if let Some(applied) = pending_horizon_ack
+                && report_session_horizon_applied(
+                    client,
+                    api_base,
+                    runner_token,
+                    &lease_id,
+                    applied,
+                )
                 .await
-        {
-            println!(
-                "↗ restore lease {lease_id}: session horizon generation {} applied (max_duration_secs={}, idle_grace_secs={})",
-                applied.generation, applied.max_duration_secs, applied.idle_grace_secs
-            );
-            pending_horizon_ack = None;
+            {
+                println!(
+                    "↗ restore lease {lease_id}: session horizon generation {} applied (max_duration_secs={}, idle_grace_secs={})",
+                    applied.generation, applied.max_duration_secs, applied.idle_grace_secs
+                );
+                pending_horizon_ack = None;
+            }
         }
     };
     println!("🛑 restore lease {lease_id}: {reason}; tearing down");
@@ -5950,6 +6122,7 @@ mod tests {
         )));
         assert!(caps.contains(&"source-sandbox".to_string()));
         assert!(caps.contains(&SESSION_HORIZON_EXTENSION_CAPABILITY.to_string()));
+        assert!(caps.contains(&SURFACE_ACTIVATION_V2_CAPABILITY.to_string()));
     }
 
     #[test]
@@ -7915,6 +8088,31 @@ mod tests {
         (format!("http://{}", addr), handle)
     }
 
+    /// Ordered HTTP script for retry/control tests. Each response closes the
+    /// connection so one accepted request consumes exactly one script entry.
+    fn scripted_http(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let mut requests = Vec::with_capacity(responses.len());
+            for (status_line, json_body) in responses {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 8192];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                requests.push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "{status_line}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{json_body}",
+                    json_body.len()
+                );
+                stream.write_all(response.as_bytes()).expect("write");
+            }
+            requests
+        });
+        (format!("http://{}", addr), handle)
+    }
+
     #[tokio::test]
     async fn serve_sends_runner_token_bearer_heartbeat() {
         let (base, server) = one_shot_http(
@@ -8097,6 +8295,105 @@ mod tests {
                 session_horizon: None
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn activation_v2_retries_transient_ready_without_status_fallback() {
+        let (base, server) = scripted_http(vec![
+            (
+                "HTTP/1.1 503 Service Unavailable",
+                "{\"error\":\"surface_probe_failed\"}",
+            ),
+            ("HTTP/1.1 200 OK", "{\"stop_requested\":false}"),
+            ("HTTP/1.1 200 OK", "{\"ok\":true}"),
+        ]);
+        let client = reqwest::Client::new();
+        let payload = ReadyPayload {
+            execution_id: "blake3:execution".to_string(),
+            ready_url: Some("https://s0.runner.example/".to_string()),
+            local_port: Some(8_000),
+        };
+
+        let outcome = report_lease_ready_v2(
+            &client,
+            &base,
+            "ato_rnr_t",
+            "01L",
+            &payload,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await;
+        let requests = server.join().expect("server");
+
+        assert_eq!(outcome, SurfaceActivationOutcome::Accepted { attempts: 2 });
+        assert!(requests[0].contains("POST /v1/runner-leases/01L/ready"));
+        assert!(requests[1].contains("GET /v1/runner-leases/01L/control"));
+        assert!(requests[2].contains("POST /v1/runner-leases/01L/ready"));
+        assert!(requests.iter().all(|request| !request.contains("/status")));
+    }
+
+    #[tokio::test]
+    async fn activation_v2_does_not_retry_terminal_ready_rejection() {
+        let (base, server) = scripted_http(vec![(
+            "HTTP/1.1 409 Conflict",
+            "{\"error\":\"surface_binding_not_pending\"}",
+        )]);
+        let client = reqwest::Client::new();
+        let payload = ReadyPayload {
+            execution_id: "blake3:execution".to_string(),
+            ready_url: Some("https://s0.runner.example/".to_string()),
+            local_port: Some(8_000),
+        };
+
+        let outcome = report_lease_ready_v2(
+            &client,
+            &base,
+            "ato_rnr_t",
+            "01L",
+            &payload,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await;
+        let requests = server.join().expect("server");
+
+        assert!(matches!(outcome, SurfaceActivationOutcome::Rejected(_)));
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("POST /v1/runner-leases/01L/ready"));
+    }
+
+    #[tokio::test]
+    async fn activation_v2_stop_wins_before_a_retry() {
+        let (base, server) = scripted_http(vec![
+            (
+                "HTTP/1.1 503 Service Unavailable",
+                "{\"error\":\"surface_probe_failed\"}",
+            ),
+            ("HTTP/1.1 200 OK", "{\"stop_requested\":true}"),
+        ]);
+        let client = reqwest::Client::new();
+        let payload = ReadyPayload {
+            execution_id: "blake3:execution".to_string(),
+            ready_url: Some("https://s0.runner.example/".to_string()),
+            local_port: Some(8_000),
+        };
+
+        let outcome = report_lease_ready_v2(
+            &client,
+            &base,
+            "ato_rnr_t",
+            "01L",
+            &payload,
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        )
+        .await;
+        let requests = server.join().expect("server");
+
+        assert_eq!(outcome, SurfaceActivationOutcome::StopRequested);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("GET /v1/runner-leases/01L/control"));
     }
 
     #[tokio::test]

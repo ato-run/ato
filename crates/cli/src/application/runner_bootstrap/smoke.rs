@@ -416,6 +416,7 @@ async fn smoke_pipeline(
             healthcheck_url_path: None,
             session_surface: None,
             surface_contract_version: None,
+            surface_activation_version: None,
             session_id: None,
             accepted_session_surfaces: None,
             with_bindings: false,
