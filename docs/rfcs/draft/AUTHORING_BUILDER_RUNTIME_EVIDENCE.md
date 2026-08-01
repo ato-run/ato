@@ -75,7 +75,7 @@ initial Node authoring policy applies this to Vite's `.vite` and `.vite-temp`
 caches, which Vite must create before its HTTP listener becomes ready.
 
 The builder also applies a deterministic runtime resource policy inside the
-identity-bearing guest init. Authoring builders provision a 4 GiB guest while
+identity-bearing guest init. Authoring builders provision a 3 GiB guest while
 Node receives a 512 MiB V8 old-space limit. This leaves headroom for the kernel,
 restore-time page faults, and dependency-optimizer allocations that V8 does not
 account to old space. A 2 GiB guest is insufficient for large Vite graphs: it
@@ -136,6 +136,11 @@ readiness
 The Seal identity is distinct from a Capsule revision and from Execution
 Identity. A Seal always references its clean-replay and restore-verification
 receipts and remains reconstructible from source, normalized intent, and lock.
+
+The post-restore browser waits with a bounded wall-clock timeout. It must not
+use Chromium's virtual-time budget: applications with continuously scheduled
+timers or workers can keep virtual time from completing even after a valid
+first frame is paintable, which would reject an otherwise healthy Seal.
 
 ### Published media repair completion
 
