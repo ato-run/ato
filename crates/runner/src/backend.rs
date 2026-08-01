@@ -22,6 +22,9 @@ pub enum HostError {
     /// The host failed to spawn the requested process.
     #[error("spawn failed: {0}")]
     Spawn(String),
+    /// The host failed to run a short-lived command to completion.
+    #[error("command failed to run: {0}")]
+    Run(String),
     /// The host failed to tear down a process group.
     #[error("process-group teardown failed: {0}")]
     Teardown(String),
@@ -72,6 +75,40 @@ pub struct SpawnSpec {
     pub output: OutputSink,
 }
 
+/// A short-lived command whose output is collected by the caller.
+///
+/// Unlike [`SpawnSpec`], this has no output routing policy: stdout and stderr
+/// are always captured so the client can decode the CLI's JSON response and
+/// surface a bounded diagnostic when the command exits unsuccessfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSpec {
+    /// The program to run (typically resolved via [`RunnerHost::resolve_binary`]).
+    pub program: PathBuf,
+    /// Arguments passed to the program.
+    pub args: Vec<String>,
+    /// Extra environment variables for the child.
+    pub env: Vec<(String, String)>,
+}
+
+/// Captured result of a short-lived command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedCommand {
+    /// Process exit code. `-1` means the platform did not expose one (for
+    /// example, termination by a signal on Unix).
+    pub exit_code: i32,
+    /// Bytes written to stdout.
+    pub stdout: Vec<u8>,
+    /// Bytes written to stderr.
+    pub stderr: Vec<u8>,
+}
+
+impl CompletedCommand {
+    /// Whether the command completed with exit code zero.
+    pub fn success(&self) -> bool {
+        self.exit_code == 0
+    }
+}
+
 /// The host-specific execution surface. One implementation per host kind
 /// (desktop today; IoT / mobile / EV later). Must be `Send + Sync` so a
 /// supervisor can be shared across the host's tasks.
@@ -85,4 +122,10 @@ pub trait RunnerHost: Send + Sync {
 
     /// Spawn a supervised child from `spec`.
     fn spawn(&self, spec: &SpawnSpec) -> Result<Self::Child, HostError>;
+
+    /// Run a short-lived command and capture all of its output.
+    ///
+    /// This is deliberately separate from [`Self::spawn`]: callers must not
+    /// use it for a long-running session whose output could grow without bound.
+    fn run_to_completion(&self, spec: &CommandSpec) -> Result<CompletedCommand, HostError>;
 }

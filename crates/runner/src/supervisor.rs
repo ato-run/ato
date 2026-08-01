@@ -69,7 +69,10 @@ impl<H: RunnerHost> ProcessSupervisor<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::{ChildId, HostError, ManagedChild, OutputSink, RunnerHost, SpawnSpec};
+    use crate::backend::{
+        ChildId, CommandSpec, CompletedCommand, HostError, ManagedChild, OutputSink, RunnerHost,
+        SpawnSpec,
+    };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -104,6 +107,13 @@ mod tests {
             Ok(FakeChild {
                 id: ChildId(self.next.fetch_add(1, Ordering::Relaxed)),
                 alive: true,
+            })
+        }
+        fn run_to_completion(&self, _spec: &CommandSpec) -> Result<CompletedCommand, HostError> {
+            Ok(CompletedCommand {
+                exit_code: 0,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             })
         }
     }

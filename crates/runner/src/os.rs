@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
-use crate::backend::{ChildId, HostError, ManagedChild, OutputSink, RunnerHost, SpawnSpec};
+use crate::backend::{
+    ChildId, CommandSpec, CompletedCommand, HostError, ManagedChild, OutputSink, RunnerHost,
+    SpawnSpec,
+};
 
 /// Extension trait suppressing the console window a GUI-subsystem process would
 /// otherwise pop when it spawns a *console* child on Windows. No-op elsewhere.
@@ -287,6 +290,23 @@ impl RunnerHost for NativeHost {
             handle: Mutex::new(Some(child)),
         })
     }
+
+    fn run_to_completion(&self, spec: &CommandSpec) -> Result<CompletedCommand, HostError> {
+        let mut cmd = Command::new(&spec.program);
+        cmd.args(&spec.args).stdin(Stdio::null());
+        for (key, value) in &spec.env {
+            cmd.env(key, value);
+        }
+        cmd.no_console_window();
+        let output = cmd.output().map_err(|e| {
+            HostError::Run(format!("run {} to completion: {e}", spec.program.display()))
+        })?;
+        Ok(CompletedCommand {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -314,6 +334,43 @@ mod tests {
             host.resolve_binary("nacelle").unwrap(),
             PathBuf::from("/opt/ato/nacelle")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runs_short_command_and_captures_stdout_stderr_and_exit_code() {
+        let host = NativeHost::with_path_lookup();
+        let shell = host.resolve_binary("sh").expect("sh on PATH for the test");
+        let completed = host
+            .run_to_completion(&CommandSpec {
+                program: shell,
+                args: vec!["-c".into(), "printf 'out'; printf 'err' >&2; exit 7".into()],
+                env: vec![],
+            })
+            .expect("command completes");
+
+        assert_eq!(completed.exit_code, 7);
+        assert_eq!(completed.stdout, b"out");
+        assert_eq!(completed.stderr, b"err");
+        assert!(!completed.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn short_command_receives_extra_environment() {
+        let host = NativeHost::with_path_lookup();
+        let shell = host.resolve_binary("sh").expect("sh on PATH for the test");
+        let completed = host
+            .run_to_completion(&CommandSpec {
+                program: shell,
+                args: vec!["-c".into(), "printf '%s' \"$ATO_RUNNER_TEST_VALUE\"".into()],
+                env: vec![("ATO_RUNNER_TEST_VALUE".into(), "present".into())],
+            })
+            .expect("command completes");
+
+        assert!(completed.success());
+        assert_eq!(completed.stdout, b"present");
+        assert!(completed.stderr.is_empty());
     }
 
     #[cfg(unix)]
