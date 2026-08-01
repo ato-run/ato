@@ -142,6 +142,11 @@ use Chromium's virtual-time budget: applications with continuously scheduled
 timers or workers can keep virtual time from completing even after a valid
 first frame is paintable, which would reject an otherwise healthy Seal.
 
+The Firecracker control client gives `PUT /snapshot/create` a separate
+120-second read budget because that request does not reply until the complete
+multi-GiB guest-memory image is written. Other control requests retain the
+15-second fail-fast budget.
+
 ### Published media repair completion
 
 A screenshot repair for an already-published Seal reuses that exact Seal and
