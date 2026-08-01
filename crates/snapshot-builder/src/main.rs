@@ -3565,19 +3565,7 @@ fn produce_pinned_v1_build(
         docker_import_receipt: None,
         oci_import_receipt: None,
         compose_import_receipt: None,
-        // A run.command that BUILDS before it serves (the inferred vite
-        // production lane emits `sh -lc "<pm> run build && <pm> run preview …"`)
-        // legitimately spends minutes before first readiness at capture time.
-        // Grant exactly those commands the capped maximum instead of the env
-        // default that assumes an instantly-serving process; restores resume a
-        // serving snapshot and never pay this budget.
-        boot_timeout_s: if manifest.run.command.first().map(String::as_str) == Some("sh")
-            && manifest.run.command.iter().any(|word| word.contains("&&"))
-        {
-            Some(MAX_BOOT_TIMEOUT_S)
-        } else {
-            None
-        },
+        boot_timeout_s: None,
         resolution_lock_digest: Some(resolution_lock_digest),
         source_closure_id: Some(outcome.source_digest),
         seal_at,
