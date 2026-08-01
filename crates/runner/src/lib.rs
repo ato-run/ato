@@ -28,7 +28,9 @@
 //! introduces no new wire types of its own.
 
 pub mod backend;
+pub mod client;
 pub mod control;
+pub mod events;
 pub mod os;
 pub mod session;
 pub mod supervisor;
@@ -38,6 +40,7 @@ pub use backend::{
     ChildId, CommandSpec, CompletedCommand, HostError, ManagedChild, OutputSink, RunnerHost,
     SpawnSpec,
 };
+pub use client::{ClientError, InstallSource, InstalledAppsClient, SessionClient};
 pub use os::{
     CommandNoWindowExt, NativeChild, NativeHost, mark_process_group_leader, resolve_on_path,
     terminate_process_group,
