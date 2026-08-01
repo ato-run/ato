@@ -60,6 +60,10 @@ libc = "0.2"
 # extracted back and re-digested before anything is stored. Already a
 # dev-dependency; promoted because this now runs in a shipped path.
 tempfile = "3"
+# Node toolchain resolution (ato-api#443): parses `.nvmrc`/`.node-version`
+# exact pins and `package.json` `engines.node` RANGES. Already resolved in
+# the workspace lockfile (cli/desktop depend on it) at a compatible version.
+semver = "1.0"
 
 [dev-dependencies]
 serde_json = "1.0"
