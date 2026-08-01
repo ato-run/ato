@@ -1055,6 +1055,19 @@ fn infer_package_managed_intent(
         ));
     }
 
+    // Production lane: when the package also declares plain `vite build` +
+    // `vite preview` scripts, build once and serve the BUILT app instead of
+    // leaving the published capsule on the dev server. Dev serving ships the
+    // unbundled module graph (measured for drawdb: 448 requests / 115 MB
+    // before first paint through the app proxy — the "ready but blank for
+    // 30s" preview); `vite preview` serves the minified dist/. The build runs
+    // during snapshot capture only — a restore resumes the already-serving
+    // process — so launches never pay for it. Scripts with shell syntax or a
+    // non-vite tail keep today's dev-server lane rather than guessing.
+    if let Some(production) = infer_vite_production_launch(&package_json, package_manager) {
+        return normalize_program_intent(production).map_err(|error| error.to_string());
+    }
+
     normalize_program_intent(ProgramIntentDraftV1 {
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
         origin: ProgramIntentOrigin::Inference,
@@ -1085,6 +1098,69 @@ fn infer_package_managed_intent(
         unresolved: Vec::new(),
     })
     .map_err(|error| error.to_string())
+}
+
+/// The vite production launch, when the package declares it unambiguously:
+/// `scripts.build` is plainly `… vite build` and `scripts.preview` is plainly
+/// `… vite preview`. Anything else (a compound build like swagger-editor's
+/// `npm run build:app && …`, a missing preview script) returns `None` and the
+/// caller keeps the dev-server lane.
+///
+/// The launch is a shell compound (`build && preview`) because manifest v1 has
+/// exactly one `run.command` and its `[[build.steps]]` are refused at build
+/// time — the shell escape hatch is the one sanctioned way to sequence the
+/// two. `--strictPort` makes a port collision fail readiness instead of
+/// silently serving on a port Ato never probes.
+fn infer_vite_production_launch(
+    package_json: &serde_json::Value,
+    package_manager: &'static str,
+) -> Option<ProgramIntentDraftV1> {
+    let script = |name: &str| -> Option<Vec<String>> {
+        package_json
+            .get("scripts")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|scripts| scripts.get(name))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|command| parse_plain_task_argv(command).ok())
+    };
+    let tail_is = |argv: &[String], tail: [&str; 2]| {
+        argv.len() >= 2 && argv[argv.len() - 2..] == tail.map(str::to_string)
+    };
+    let build = script("build")?;
+    let preview = script("preview")?;
+    if !tail_is(&build, ["vite", "build"]) || !tail_is(&preview, ["vite", "preview"]) {
+        return None;
+    }
+    Some(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::ShellEscapeHatch {
+            interpreter_argv: vec!["sh".to_string(), "-lc".to_string()],
+            script: format!(
+                "{package_manager} run build && {package_manager} run preview -- --host 0.0.0.0 --port 8000 --strictPort"
+            ),
+            justification: "manifest v1 has a single run.command; the production \
+                lane must sequence `vite build` before `vite preview`, and the \
+                build cost is paid once at snapshot capture, never at restore"
+                .to_string(),
+            cwd: WorkspacePathV1::root(),
+            requested_environment: Vec::new(),
+            required_tools: vec![package_manager.to_string(), "sh".to_string()],
+        },
+        // The capture-side boot budget for this compound is granted by the
+        // builder (see the pinned v1 lane's `boot_timeout_s`); this timeout is
+        // the intent's own declaration of the same fact.
+        readiness: ReadinessIntentV1::Http {
+            port: 8000,
+            path: "/".to_string(),
+            timeout_seconds: 600,
+        },
+        build_output_roots: Vec::new(),
+        bindings: Vec::new(),
+        unresolved: Vec::new(),
+    })
 }
 
 /// Decide which package manager launches the app, preferring the explicit
@@ -1426,7 +1502,10 @@ pub fn render_inferred_capsule_toml(
             ],
             timeout_seconds: Some(30),
         },
-        "node" | "npm" | "npx" | "yarn" | "pnpm" => SealAtV1 {
+        // `sh` is emitted only by the package-managed production lane
+        // (`sh -lc "<pm> run build && <pm> run preview …"`), whose guest is
+        // always a Node image — the node-based seal probe holds there.
+        "node" | "npm" | "npx" | "yarn" | "pnpm" | "sh" => SealAtV1 {
             command: vec![
                 "node".to_string(),
                 "--input-type=module".to_string(),
@@ -1702,6 +1781,85 @@ mod tests {
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
         assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn vite_app_with_plain_build_and_preview_gets_the_production_lane() {
+        // drawdb-shaped package.json: `dev: vite` plus plain `vite build` /
+        // `vite preview` scripts. The published capsule must serve the BUILT
+        // app — dev serving ships the unbundled module graph (measured 448
+        // requests / 115 MB before first paint through the app proxy).
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"drawdb","scripts":{"dev":"vite","build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+
+        assert_eq!(
+            normalized.intent.launch.argv,
+            [
+                "sh",
+                "-lc",
+                "npm run build && npm run preview -- --host 0.0.0.0 --port 8000 --strictPort",
+            ]
+        );
+        assert!(normalized.intent.launch.explicit_shell_escape);
+        assert_eq!(normalized.intent.launch.required_tools, ["npm", "sh"]);
+        match &normalized.intent.readiness {
+            ReadinessIntentV1::Http {
+                port,
+                path,
+                timeout_seconds,
+            } => {
+                assert_eq!((*port, path.as_str()), (8000, "/"));
+                // The capture-side budget for `npm run build` before the
+                // preview server first answers.
+                assert_eq!(*timeout_seconds, 600);
+            }
+            other => panic!("expected HTTP readiness, got {other:?}"),
+        }
+        let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
+        let parsed =
+            capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
+        assert_eq!(parsed.run.command, normalized.intent.launch.argv);
+        assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
+        assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn vite_app_with_compound_build_keeps_the_dev_lane() {
+        // swagger-editor-shaped: the build script chains sub-builds with `&&`,
+        // so the production lane cannot claim it plainly — fail closed to the
+        // dev-server lane rather than guess which sub-build serves.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"swagger-editor","scripts":{"start":"cross-env A=1 vite","build":"npm run build:app && npm run build:bundle","preview":"vite preview"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+        assert_eq!(normalized.intent.launch.argv[0], "npm");
+        assert_eq!(normalized.intent.launch.argv[2], "start");
+    }
+
+    #[test]
+    fn vite_app_without_a_preview_script_keeps_the_dev_lane() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"dev":"vite","build":"vite build"}}"#,
+        )
+        .expect("package");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+        assert_eq!(normalized.intent.launch.argv[0], "npm");
+        assert_eq!(normalized.intent.launch.argv[2], "dev");
     }
 
     #[test]
