@@ -6,7 +6,12 @@
 
 use std::path::PathBuf;
 
+use serde::de::DeserializeOwned;
 use serde_json::Value;
+
+use protocol::desktop_library::{
+    DesktopLibrarySnapshot, DesktopOperation, InstalledAppSummary, InstalledRemoveResult,
+};
 
 use crate::{CommandSpec, HostError, RunnerHost};
 
@@ -48,11 +53,11 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         Self { host }
     }
 
-    pub fn list(&self) -> Result<Value, ClientError> {
+    pub fn list(&self) -> Result<DesktopLibrarySnapshot, ClientError> {
         self.run_json(["app", "installed", "list", "--json"])
     }
 
-    pub fn inspect(&self, install_profile_key: &str) -> Result<Value, ClientError> {
+    pub fn inspect(&self, install_profile_key: &str) -> Result<InstalledAppSummary, ClientError> {
         self.run_json(["app", "installed", "inspect", install_profile_key, "--json"])
     }
 
@@ -79,7 +84,7 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         &self,
         install_profile_key: &str,
         revision: Option<&str>,
-    ) -> Result<Value, ClientError> {
+    ) -> Result<DesktopOperation, ClientError> {
         let mut args = vec!["rollback".to_string(), install_profile_key.to_string()];
         if let Some(revision) = revision {
             args.push(revision.to_string());
@@ -88,7 +93,7 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         self.run_json(args)
     }
 
-    pub fn remove(&self, install_profile_key: &str) -> Result<Value, ClientError> {
+    pub fn remove(&self, install_profile_key: &str) -> Result<InstalledRemoveResult, ClientError> {
         self.remove_with_state_policy(install_profile_key, false)
     }
 
@@ -96,7 +101,7 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         &self,
         install_profile_key: &str,
         purge_state: bool,
-    ) -> Result<Value, ClientError> {
+    ) -> Result<InstalledRemoveResult, ClientError> {
         let mut args = vec![
             "app".to_string(),
             "installed".to_string(),
@@ -110,8 +115,9 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         self.run_json(args)
     }
 
-    fn run_json<I, S>(&self, args: I) -> Result<Value, ClientError>
+    fn run_json<T, I, S>(&self, args: I) -> Result<T, ClientError>
     where
+        T: DeserializeOwned,
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
@@ -161,8 +167,9 @@ where
     }
 }
 
-fn run_ato_json<H, I, S>(host: &H, args: I) -> Result<Value, ClientError>
+fn run_ato_json<T, H, I, S>(host: &H, args: I) -> Result<T, ClientError>
 where
+    T: DeserializeOwned,
     H: RunnerHost,
     I: IntoIterator<Item = S>,
     S: Into<String>,
@@ -272,10 +279,10 @@ mod tests {
 
     #[test]
     fn installed_list_uses_future_cli_read_contract() {
-        let host = FakeHost::successful_json(r#"{"apps":[]}"#);
+        let host = FakeHost::successful_json(r#"{"schema_version":"1","apps":[]}"#);
         let response = InstalledAppsClient::new(&host).list().unwrap();
 
-        assert_eq!(response["apps"], serde_json::json!([]));
+        assert!(response.apps.is_empty());
         assert_eq!(
             host.args(),
             vec![vec!["app", "installed", "list", "--json"]]
