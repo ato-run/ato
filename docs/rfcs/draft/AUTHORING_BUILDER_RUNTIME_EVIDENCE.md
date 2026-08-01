@@ -75,12 +75,13 @@ initial Node authoring policy applies this to Vite's `.vite` and `.vite-temp`
 caches, which Vite must create before its HTTP listener becomes ready.
 
 The builder also applies a deterministic runtime resource policy inside the
-identity-bearing guest init. For the 2 GiB authoring guest, Node receives a
-512 MiB V8 old-space limit. This leaves headroom for the kernel and non-heap
-runtime memory and prevents dependency optimizers from passing readiness and
-then being killed by the guest OOM policy. The limit is builder policy, not an
-author-controlled environment value, and changing it changes the measured
-filesystem view.
+identity-bearing guest init. Authoring builders provision a 4 GiB guest while
+Node receives a 512 MiB V8 old-space limit. This leaves headroom for the kernel,
+restore-time page faults, and dependency-optimizer allocations that V8 does not
+account to old space. A 2 GiB guest is insufficient for large Vite graphs: it
+can pass readiness and then be killed immediately after Ready-State restore.
+The limit is builder policy, not an author-controlled environment value, and
+changing it changes the measured filesystem view.
 
 `CleanReplayReceiptV1` is emitted by an authenticated builder and binds the
 Authoring Session, all materialization inputs, execution contract, readiness,
