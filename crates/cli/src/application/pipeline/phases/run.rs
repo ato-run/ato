@@ -1706,7 +1706,7 @@ fn run_validation_mode(preview_mode: bool) -> capsule::types::ValidationMode {
 ///
 /// Other `Literal` values (non-numeric, out-of-range) are dropped: parsing
 /// already rejects them, so they should never reach here.
-fn collect_port_preferences(
+pub(crate) fn collect_port_preferences(
     inputs: &[capsule::installed_state::LaunchConditionInput],
 ) -> HashMap<String, crate::executors::launch_context::PortPreference> {
     use crate::executors::launch_context::PortPreference;

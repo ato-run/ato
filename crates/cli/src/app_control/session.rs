@@ -57,6 +57,16 @@ use crate::runtime::{overrides as runtime_overrides, port_manager::PortManager};
 use super::guest_contract::GuestContract;
 use super::resolve::resolve_local_plan_with_state_overrides;
 
+/// Explicit installed-launch inputs carried into the detached session path.
+/// Values are supplied by `ato launch`; ordinary `ato app session start`
+/// callers use the empty default.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InstalledSessionLaunchOptions {
+    pub command_args: Vec<String>,
+    pub launch_inputs: Vec<capsule::installed_state::LaunchConditionInput>,
+    pub nacelle: Option<PathBuf>,
+}
+
 // Thread-local install lifecycle context set by `ato launch` before calling
 // `execute_run_command`. Using a thread-local (rather than a process-global
 // slot or process env vars) means:
@@ -135,6 +145,15 @@ where
 /// itself does not reliably survive the async executor boundary.
 pub(crate) fn current_install_profile_key() -> Option<String> {
     with_install_lifecycle_context(|ctx| ctx.map(|c| c.install_profile_key.clone()))
+}
+
+/// Clone the active install lifecycle identity while still on the synchronous
+/// launch thread. Detached session preparation uses the complete identity to
+/// resolve revision-scoped secret grants and state bindings without consulting
+/// ambient process state from an async executor.
+pub(crate) fn active_install_lifecycle()
+-> Option<crate::cli::commands::run::InstallLifecycleContext> {
+    with_install_lifecycle_context(|ctx| ctx.cloned())
 }
 
 /// Stamp install lifecycle IDs onto `record` if a lifecycle context was set
@@ -513,6 +532,50 @@ pub fn start_session(
     run_config_hash: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    start_session_with_options(
+        handle,
+        target_label,
+        community_toml_id,
+        attach_state,
+        from_materialized_record,
+        local_manifest_path,
+        run_config_hash,
+        json,
+        InstalledSessionLaunchOptions::default(),
+    )
+}
+
+pub(crate) fn start_installed_session(
+    handle: &str,
+    manifest_path: PathBuf,
+    options: InstalledSessionLaunchOptions,
+    json: bool,
+) -> Result<()> {
+    start_session_with_options(
+        handle,
+        None,
+        None,
+        &[],
+        None,
+        Some(manifest_path),
+        None,
+        json,
+        options,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_session_with_options(
+    handle: &str,
+    target_label: Option<&str>,
+    community_toml_id: Option<&str>,
+    attach_state: &[String],
+    from_materialized_record: Option<&str>,
+    local_manifest_path: Option<std::path::PathBuf>,
+    run_config_hash: Option<&str>,
+    json: bool,
+    installed_options: InstalledSessionLaunchOptions,
+) -> Result<()> {
     // Reserve stdout for the SessionStartEnvelope when the caller
     // asked for JSON. Without this, the orchestrator's stream pumper
     // (`adapters/runtime/executors/orchestrator.rs::spawn_prefixed_stream`)
@@ -646,6 +709,7 @@ pub fn start_session(
             json,
         )
     };
+    runner.set_installed_launch_options(installed_options);
     let pipeline = ConsumerRunPipeline::standard();
     // Boundary-level receipt emission (refs #74, #99). On the happy
     // path the pipeline emits its own full v2 receipt before spawn
@@ -903,6 +967,7 @@ pub(super) fn start_guest_session(
     Ok(session_info_from_stored(session))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn start_runtime_session(
     handle: &str,
     resolution: &super::resolve::HandleResolution,
@@ -911,6 +976,7 @@ pub(super) fn start_runtime_session(
     raw_manifest: &str,
     launch: &capsule::launch_spec::LaunchSpec,
     mut notes: Vec<String>,
+    installed_options: &InstalledSessionLaunchOptions,
 ) -> Result<SessionInfo> {
     let display_strategy = display_strategy_for_runtime(plan);
     if matches!(display_strategy, CapsuleDisplayStrategy::Unsupported) {
@@ -934,7 +1000,9 @@ pub(super) fn start_runtime_session(
     let PreparedSessionExecution {
         mut prepared,
         dep_contracts,
-    } = prepare_session_execution(plan, raw_manifest)?;
+        authoritative_lock,
+        effective_state,
+    } = prepare_session_execution(plan, raw_manifest, installed_options)?;
     timer.finish_ok();
 
     #[cfg(unix)]
@@ -1018,6 +1086,11 @@ pub(super) fn start_runtime_session(
         &display_strategy,
         &temp_log_path,
         session_web_port.as_ref().map(|web_port| web_port.port),
+        SessionSourceContext {
+            nacelle: installed_options.nacelle.as_deref(),
+            authoritative_lock: authoritative_lock.as_ref(),
+            effective_state: effective_state.as_ref(),
+        },
     )
     .with_context(|| {
         format!(
@@ -1312,6 +1385,7 @@ pub(super) fn start_orchestration_session_in_process(
     plan: &capsule::router::ManifestData,
     raw_manifest: &str,
     mut notes: Vec<String>,
+    installed_options: &InstalledSessionLaunchOptions,
 ) -> Result<SessionInfo> {
     use crate::application::pipeline::executor::PhaseStageTimer;
     use crate::application::pipeline::hourglass::HourglassPhase;
@@ -1390,6 +1464,11 @@ pub(super) fn start_orchestration_session_in_process(
 
     let mut launch_ctx =
         runtime_handle.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
+    apply_installed_launch_options(
+        &mut launch_ctx,
+        installed_options,
+        active_install_lifecycle().as_ref(),
+    )?;
 
     // Step 1: dependency contracts (= top-level [dependencies.<alias>]).
     // Distinct from the [services] graph below; same setup as single-target
@@ -1438,7 +1517,7 @@ pub(super) fn start_orchestration_session_in_process(
         // session path.
         dangerously_skip_permissions: allow_unsafe,
         assume_yes: true,
-        nacelle: None,
+        nacelle: installed_options.nacelle.clone(),
         // Desktop sessions consume the leaf via their own WebView only, so
         // they want podman to pick a free host port instead of grabbing the
         // recipe's declared port. Without this, two recipes that both declare
@@ -2406,11 +2485,89 @@ fn try_load_authoritative_lock(
 pub(super) struct PreparedSessionExecution {
     pub(super) prepared: crate::executors::target_runner::PreparedTargetExecution,
     pub(super) dep_contracts: Option<DependencyContractGuard>,
+    authoritative_lock: Option<capsule::capsule_lock::CapsuleLock>,
+    effective_state: Option<crate::application::workspace::state::EffectiveLockState>,
+}
+
+fn apply_installed_launch_options(
+    launch_ctx: &mut crate::executors::launch_context::RuntimeLaunchContext,
+    options: &InstalledSessionLaunchOptions,
+    lifecycle: Option<&crate::cli::commands::run::InstallLifecycleContext>,
+) -> Result<()> {
+    if !options.command_args.is_empty() {
+        *launch_ctx = launch_ctx
+            .clone()
+            .with_command_args(options.command_args.clone());
+    }
+
+    if options.launch_inputs.is_empty() {
+        return Ok(());
+    }
+
+    let lifecycle = lifecycle.ok_or_else(|| {
+        anyhow::anyhow!(
+            "installed launch-condition inputs require an active install lifecycle identity"
+        )
+    })?;
+    let has_secret_grant = options.launch_inputs.iter().any(|input| {
+        matches!(
+            input.kind,
+            capsule::installed_state::LaunchConditionInputKind::Secret
+                | capsule::installed_state::LaunchConditionInputKind::Env
+        ) && matches!(
+            input.value,
+            capsule::installed_state::LaunchConditionInputValue::Grant(_)
+        )
+    });
+    let has_state_binding = options.launch_inputs.iter().any(|input| {
+        input.kind == capsule::installed_state::LaunchConditionInputKind::State
+            && matches!(
+                input.value,
+                capsule::installed_state::LaunchConditionInputValue::Binding(_)
+            )
+    });
+
+    if has_secret_grant || has_state_binding {
+        let db = capsule::installed_state::InstalledStateDb::open_default()
+            .context("open installed-state DB for detached launch input injection")?;
+        if has_secret_grant {
+            let secret_env = crate::adapters::runtime::secret_injection::resolve_secret_injection(
+                &db,
+                &lifecycle.install_profile_key,
+                Some(&lifecycle.install_revision_id),
+                &options.launch_inputs,
+                &crate::adapters::runtime::secret_injection::SecretStoreValueStore,
+            )?;
+            if !secret_env.is_empty() {
+                *launch_ctx = launch_ctx.clone().with_secret_env(secret_env);
+            }
+        }
+        if has_state_binding {
+            let state_mounts = crate::adapters::runtime::state_binding_injection::resolve_state_binding_materialization(
+            &db,
+            &lifecycle.install_profile_key,
+            Some(&lifecycle.install_revision_id),
+            &options.launch_inputs,
+        )?;
+            if !state_mounts.is_empty() {
+                *launch_ctx = launch_ctx.clone().with_state_mounts(state_mounts);
+            }
+        }
+    }
+
+    let port_preferences =
+        crate::application::pipeline::phases::run::collect_port_preferences(&options.launch_inputs);
+    if !port_preferences.is_empty() {
+        *launch_ctx = launch_ctx.clone().with_port_preferences(port_preferences);
+    }
+
+    Ok(())
 }
 
 fn prepare_session_execution(
     plan: &capsule::router::ManifestData,
     raw_manifest: &str,
+    installed_options: &InstalledSessionLaunchOptions,
 ) -> Result<PreparedSessionExecution> {
     let reporter = Arc::new(make_orchestration_reporter());
     let (authoritative_lock, lock_path) = try_load_authoritative_lock(&plan.workspace_root)?;
@@ -2437,6 +2594,11 @@ fn prepare_session_execution(
         .context("failed to create runtime for session execution preparation")?;
 
     let mut launch_ctx = runtime.block_on(resolve_launch_context(plan, &prepared, &reporter))?;
+    apply_installed_launch_options(
+        &mut launch_ctx,
+        installed_options,
+        active_install_lifecycle().as_ref(),
+    )?;
 
     // session-start used to skip dependency contracts entirely — the
     // run.rs pipeline is the only path that wires `[dependencies.*]`
@@ -2477,7 +2639,16 @@ fn prepare_session_execution(
     Ok(PreparedSessionExecution {
         prepared: prepared_target,
         dep_contracts,
+        authoritative_lock: prepared.authoritative_lock,
+        effective_state: prepared.effective_state,
     })
+}
+
+#[derive(Clone, Copy)]
+struct SessionSourceContext<'a> {
+    nacelle: Option<&'a Path>,
+    authoritative_lock: Option<&'a capsule::capsule_lock::CapsuleLock>,
+    effective_state: Option<&'a crate::application::workspace::state::EffectiveLockState>,
 }
 
 fn spawn_runtime_process(
@@ -2486,6 +2657,7 @@ fn spawn_runtime_process(
     display_strategy: &CapsuleDisplayStrategy,
     log_path: &Path,
     selected_web_port: Option<u16>,
+    source_context: SessionSourceContext<'_>,
 ) -> Result<CapsuleProcess> {
     let logged = || ExecuteMode::Logged(log_path.to_path_buf());
     if matches!(display_strategy, CapsuleDisplayStrategy::WebUrl) {
@@ -2532,13 +2704,7 @@ fn spawn_runtime_process(
                 log_path: None,
                 execution_cwd: None,
             }),
-            "python" => crate::executors::source::execute_host(
-                plan,
-                None,
-                Arc::new(CliReporter::new(false)),
-                logged(),
-                &prepared.launch_ctx,
-            ),
+            "python" => execute_session_source(plan, prepared, logged(), source_context),
             _ => anyhow::bail!("unsupported runtime=web driver '{driver}' for session start"),
         };
     }
@@ -2596,24 +2762,40 @@ fn spawn_runtime_process(
         // `No module named uvicorn` for ato Desktop's session-start
         // flow.
         capsule::execution_plan::guard::ExecutorKind::Native => {
-            crate::executors::source::execute_host(
-                plan,
-                None,
-                Arc::new(CliReporter::new(false)),
-                logged(),
-                &prepared.launch_ctx,
-            )
+            execute_session_source(plan, prepared, logged(), source_context)
         }
         _ if plan.execution_run_command().is_some() => {
             crate::executors::shell::execute(plan, logged(), &prepared.launch_ctx)
         }
-        _ => crate::executors::source::execute_host(
+        _ => execute_session_source(plan, prepared, logged(), source_context),
+    }
+}
+
+fn execute_session_source(
+    plan: &capsule::router::ManifestData,
+    prepared: &crate::executors::target_runner::PreparedTargetExecution,
+    mode: ExecuteMode,
+    source_context: SessionSourceContext<'_>,
+) -> Result<CapsuleProcess> {
+    if let Some(nacelle) = source_context.nacelle {
+        crate::executors::source::execute(
             plan,
-            None,
+            source_context.authoritative_lock,
+            source_context.effective_state,
+            Some(nacelle.to_path_buf()),
             Arc::new(CliReporter::new(false)),
-            logged(),
+            "strict",
+            mode,
             &prepared.launch_ctx,
-        ),
+        )
+    } else {
+        crate::executors::source::execute_host(
+            plan,
+            source_context.authoritative_lock,
+            Arc::new(CliReporter::new(false)),
+            mode,
+            &prepared.launch_ctx,
+        )
     }
 }
 
@@ -3830,6 +4012,66 @@ mod tests {
                 None => unsafe { std::env::remove_var("ATO_DESKTOP_SESSION_ROOT") },
             }
         }
+    }
+
+    #[test]
+    fn installed_launch_options_apply_args_and_port_without_opening_state_db() {
+        use crate::executors::launch_context::PortPreference;
+        use capsule::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+
+        let lifecycle = crate::cli::commands::run::InstallLifecycleContext {
+            installed_app_id: "app_test".to_string(),
+            install_profile_id: "default".to_string(),
+            install_profile_key: "ipk_test".to_string(),
+            install_revision_id: "rev_test".to_string(),
+        };
+        let options = InstalledSessionLaunchOptions {
+            command_args: vec!["--theme".to_string(), "dark".to_string()],
+            launch_inputs: vec![LaunchConditionInput {
+                kind: LaunchConditionInputKind::Port,
+                key: "main".to_string(),
+                value: LaunchConditionInputValue::Literal("4317".to_string()),
+            }],
+            nacelle: None,
+        };
+        let mut launch_ctx = crate::executors::launch_context::RuntimeLaunchContext::empty();
+
+        apply_installed_launch_options(&mut launch_ctx, &options, Some(&lifecycle))
+            .expect("apply detached launch options");
+
+        assert_eq!(launch_ctx.command_args(), &["--theme", "dark"]);
+        assert_eq!(
+            launch_ctx.port_preference("main"),
+            Some(PortPreference::Concrete(4317))
+        );
+    }
+
+    #[test]
+    fn installed_launch_inputs_require_lifecycle_identity() {
+        use capsule::installed_state::{
+            LaunchConditionInput, LaunchConditionInputKind, LaunchConditionInputValue,
+        };
+
+        let options = InstalledSessionLaunchOptions {
+            command_args: Vec::new(),
+            launch_inputs: vec![LaunchConditionInput {
+                kind: LaunchConditionInputKind::Port,
+                key: "main".to_string(),
+                value: LaunchConditionInputValue::Literal("auto".to_string()),
+            }],
+            nacelle: None,
+        };
+        let mut launch_ctx = crate::executors::launch_context::RuntimeLaunchContext::empty();
+
+        let error = apply_installed_launch_options(&mut launch_ctx, &options, None)
+            .expect_err("missing lifecycle must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("active install lifecycle identity")
+        );
     }
 
     /// A persisted-valid canonical lock written under `file_name` — the

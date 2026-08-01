@@ -21,7 +21,9 @@ use crate::adapters::runtime::launch_condition_prompt::{
     CliLaunchConditionPromptProvider, DbStateBindingTargetStore, LaunchConditionSeams,
     SecretStoreGrantStore, resolve_prompt_launch_inputs,
 };
-use crate::app_control::session::ScopedInstallLifecycleGuard;
+use crate::app_control::session::{
+    InstalledSessionLaunchOptions, ScopedInstallLifecycleGuard, start_installed_session,
+};
 use crate::cli::commands::run::InstallLifecycleContext;
 use crate::install::support::execute_run_command;
 use crate::reporters;
@@ -273,10 +275,6 @@ pub(crate) fn execute_launch_command(
 /// reserve/remap, ready probe, kill-process-group on readiness failure → no
 /// orphan).
 ///
-/// Not yet wired on this detached path (logged, never silently dropped): launch
-/// profile `args`, `capsule://…?secret/state/env` inputs, and `--nacelle`. The
-/// foreground path applies all of those; the Desktop relaunch currently targets
-/// condition-less installed apps.
 #[allow(clippy::too_many_arguments)]
 fn relaunch_installed_detached(
     capsule_handle: &str,
@@ -288,23 +286,6 @@ fn relaunch_installed_detached(
     lifecycle_ctx: InstallLifecycleContext,
     json: bool,
 ) -> Result<()> {
-    if !profile_args.is_empty() {
-        tracing::warn!(
-            "ato launch (detached): launch profile args {profile_args:?} are not yet applied on \
-             the installed relaunch path"
-        );
-    }
-    if !capsule_launch_inputs.is_empty() {
-        tracing::warn!(
-            "ato launch (detached): {} launch-condition input(s) resolved but injection on the \
-             installed relaunch path is not yet wired",
-            capsule_launch_inputs.len()
-        );
-    }
-    if nacelle.is_some() {
-        tracing::warn!("ato launch (detached): --nacelle is not applied; ignoring");
-    }
-
     // Resolve the frozen revision: find the pinned `.capsule` and extract its
     // `capsule.toml`. The run executes directly from this immutable revision
     // artifact, so the pinned current_revision is honoured even after a rollback.
@@ -333,14 +314,14 @@ fn relaunch_installed_detached(
     // On readiness failure it kills the whole process group, so a timed-out
     // relaunch leaves no orphan. Installed capsules are pre-consented; the
     // session-start pipeline does not re-show the run consent gate.
-    crate::app_control::start_session(
+    start_installed_session(
         capsule_handle,
-        /* target_label */ None,
-        /* community_toml_id */ None,
-        /* attach_state */ &[],
-        /* from_materialized_record */ None,
-        /* local_manifest_path */ Some(pinned_manifest_path),
-        /* run_config_hash */ None,
+        pinned_manifest_path,
+        InstalledSessionLaunchOptions {
+            command_args: profile_args,
+            launch_inputs: capsule_launch_inputs,
+            nacelle: nacelle.map(Path::to_path_buf),
+        },
         json,
     )
 }

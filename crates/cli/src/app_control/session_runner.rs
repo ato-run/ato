@@ -45,10 +45,10 @@ use crate::reporters::CliReporter;
 use super::guest_contract::parse_guest_contract;
 use super::resolve::HandleResolution;
 use super::session::{
-    SessionInfo, redirect_stdout_to_stderr, resolve_local_plan_for_session_start,
-    resolve_session_launch_plan, restore_stdout, start_guest_session,
-    start_orchestration_session_in_process, start_orchestration_session_supervisor,
-    start_runtime_session,
+    InstalledSessionLaunchOptions, SessionInfo, redirect_stdout_to_stderr,
+    resolve_local_plan_for_session_start, resolve_session_launch_plan, restore_stdout,
+    start_guest_session, start_orchestration_session_in_process,
+    start_orchestration_session_supervisor, start_runtime_session,
 };
 
 /// Env var fence for the legacy opaque orchestration supervisor (#73 PR-C).
@@ -123,6 +123,7 @@ pub(super) struct SessionStartPhaseRunner {
     start_source: SessionStartSource,
     expected_run_config_hash: Option<String>,
     attach_state: Vec<String>,
+    installed_options: InstalledSessionLaunchOptions,
 
     // Set by Install phase
     resolution: Option<HandleResolution>,
@@ -203,6 +204,7 @@ impl SessionStartPhaseRunner {
             start_source: SessionStartSource::Handle,
             expected_run_config_hash,
             attach_state,
+            installed_options: InstalledSessionLaunchOptions::default(),
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -236,6 +238,7 @@ impl SessionStartPhaseRunner {
             start_source: SessionStartSource::MaterializedRecord(record),
             expected_run_config_hash,
             attach_state,
+            installed_options: InstalledSessionLaunchOptions::default(),
             resolution: None,
             manifest_path: None,
             plan: None,
@@ -254,6 +257,14 @@ impl SessionStartPhaseRunner {
             session_info: None,
             receipt_graph_id_sink: None,
         }
+    }
+
+    pub(super) fn set_installed_launch_options(&mut self, options: InstalledSessionLaunchOptions) {
+        self.launch_ctx = self
+            .launch_ctx
+            .clone()
+            .with_command_args(options.command_args.clone());
+        self.installed_options = options;
     }
 
     /// Construct a runner that starts a session from an explicit capsule.toml
@@ -392,12 +403,15 @@ impl SessionStartPhaseRunner {
             );
         }
 
-        let launch = capsule::launch_spec::derive_launch_spec(&plan).with_context(|| {
+        let mut launch = capsule::launch_spec::derive_launch_spec(&plan).with_context(|| {
             format!(
                 "failed to derive launch spec for materialized manifest {}",
                 manifest_path.display()
             )
         })?;
+        launch
+            .args
+            .extend(self.installed_options.command_args.clone());
         let raw_manifest = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("failed to read {}", manifest_path.display()))?;
         let manifest_value: toml::Value = toml::from_str(&raw_manifest)
@@ -1302,6 +1316,7 @@ impl SessionStartPhaseRunner {
                 plan,
                 raw_manifest,
                 self.notes.clone(),
+                &self.installed_options,
             );
         }
 
@@ -1313,6 +1328,14 @@ impl SessionStartPhaseRunner {
         );
 
         if let Some(guest) = guest {
+            if !self.installed_options.command_args.is_empty()
+                || !self.installed_options.launch_inputs.is_empty()
+                || self.installed_options.nacelle.is_some()
+            {
+                anyhow::bail!(
+                    "installed guest sessions do not support launch profile args, launch-condition inputs, or --nacelle"
+                );
+            }
             start_guest_session(
                 &self.handle,
                 resolution,
@@ -1330,6 +1353,7 @@ impl SessionStartPhaseRunner {
                 raw_manifest,
                 launch,
                 self.notes.clone(),
+                &self.installed_options,
             )
         }
     }
