@@ -51,6 +51,16 @@ fn build_desktop_frontend(pwa_dir: &Path) {
     }
 
     let npm = std::env::var_os(NPM_ENV).unwrap_or_else(|| "npm".into());
+    if !pwa_dir.join("node_modules").is_dir() {
+        let status = Command::new(&npm)
+            .args(["ci", "--ignore-scripts"])
+            .current_dir(pwa_dir)
+            .status()
+            .unwrap_or_else(|error| panic!("failed to execute {:?} ci: {error}", npm));
+        if !status.success() {
+            panic!("ato-pwa dependency install failed with {status}");
+        }
+    }
     let status = Command::new(&npm)
         .args(["run", "build:desktop"])
         .current_dir(pwa_dir)

@@ -13,7 +13,7 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": ["app", "dmg"]
+    "active": true,
+    "targets": "all"
   }
 }
