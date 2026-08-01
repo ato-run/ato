@@ -839,6 +839,7 @@ mod tests {
         assert_eq!(decoded, bytes);
     }
 
+    #[cfg(unix)]
     #[test]
     fn client_render_budget_remains_below_the_capture_timeout() {
         assert!(RENDER_SETTLE_BUDGET + RENDER_RETRY_BUDGET < CAPTURE_TIMEOUT);
