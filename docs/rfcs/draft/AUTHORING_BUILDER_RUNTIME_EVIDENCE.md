@@ -137,13 +137,15 @@ The Seal identity is distinct from a Capsule revision and from Execution
 Identity. A Seal always references its clean-replay and restore-verification
 receipts and remains reconstructible from source, normalized intent, and lock.
 
-The post-restore browser stays alive for a bounded 20-second wall-clock render
-window and then captures through Chromium's inherited local DevTools pipe. The
-pipe adds no host TCP listener and does not widen the guest-only egress cage.
-The capture must not use Chromium's virtual-time budget: applications with
-continuously scheduled timers or workers can keep virtual time from completing
-even after a valid first frame is paintable, which would reject an otherwise
-healthy Seal.
+The post-restore browser brings the app target to the foreground, stays alive
+for a bounded 20-second wall-clock render window, and then captures through
+Chromium's inherited local DevTools pipe. If that first frame does not pass the
+screenshot quality gate, the same browser receives one bounded 10-second paint
+retry before the final frame is evaluated. The pipe adds no host TCP listener
+and does not widen the guest-only egress cage. The capture must not use
+Chromium's virtual-time budget: applications with continuously scheduled timers
+or workers can keep virtual time from completing even after a valid first frame
+is paintable, which would reject an otherwise healthy Seal.
 
 The Firecracker control client gives `PUT /snapshot/create` a separate
 120-second read budget because that request does not reply until the complete
