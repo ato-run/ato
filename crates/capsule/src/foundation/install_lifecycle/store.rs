@@ -318,6 +318,7 @@ impl InstallInstanceStore {
             let entry = entry?;
             if entry.file_type()?.is_dir()
                 && let Some(name) = entry.file_name().to_str()
+                && entry.path().join("app.json").is_file()
             {
                 apps.push(InstalledAppId::new(name));
             }
@@ -1156,6 +1157,59 @@ impl InstallInstanceStore {
         Ok(profiles)
     }
 
+    /// Remove one installed profile registration while preserving immutable
+    /// revisions and app state. Returns `true` when this was the app's final
+    /// profile and the app record was archived, making the app disappear from
+    /// [`Self::list_installed_apps`].
+    pub fn remove_profile_registration(
+        &self,
+        app: &InstalledAppId,
+        profile: &ProfileId,
+    ) -> Result<bool> {
+        let profile_dir = self.profile_dir(app, profile);
+        if !profile_dir.is_dir() {
+            anyhow::bail!(
+                "installed profile {}/{} does not exist",
+                app.as_str(),
+                profile.as_str()
+            );
+        }
+        fs::remove_dir_all(&profile_dir)
+            .with_context(|| format!("remove profile dir {}", profile_dir.display()))?;
+
+        if !self.list_profiles(app)?.is_empty() {
+            return Ok(false);
+        }
+
+        let app_record = self.app_record_path(app);
+        let archived = self
+            .instance_dir(app)
+            .join("archived_metadata")
+            .join("removed_app.json");
+        if let Some(parent) = archived.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(&app_record, &archived).with_context(|| {
+            format!(
+                "archive removed app record {} to {}",
+                app_record.display(),
+                archived.display()
+            )
+        })?;
+        Ok(true)
+    }
+
+    /// Delete the app-owned persistent state directory. This does not touch
+    /// external state-binding targets recorded elsewhere.
+    pub fn purge_app_state(&self, app: &InstalledAppId) -> Result<()> {
+        let state_dir = self.state_dir(app);
+        if state_dir.exists() {
+            fs::remove_dir_all(&state_dir)
+                .with_context(|| format!("purge app state {}", state_dir.display()))?;
+        }
+        Ok(())
+    }
+
     /// Resolve a capsule handle (a `publisher/slug` scoped id, tolerant of a
     /// `capsule://` prefix and ASCII case) to the **single** installed profile
     /// that owns it. Enumerates installed apps and matches each [`AppRecord`]'s
@@ -1778,5 +1832,81 @@ mod tests {
         apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let ids: Vec<&str> = apps.iter().map(|a| a.as_str()).collect();
         assert_eq!(ids, vec!["app_a", "app_b", "app_c"]);
+    }
+
+    #[test]
+    fn removing_final_profile_hides_app_but_preserves_state() {
+        let (_dir, store) = temp_store();
+        let app = InstalledAppId::new("app_remove");
+        let profile = ProfileId::default();
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: "p".into(),
+                slug: "remove".into(),
+                capsule_handle: "p/remove".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        store
+            .write_profile(
+                &app,
+                &LaunchProfile {
+                    profile_id: profile.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        fs::write(store.state_dir(&app).join("data"), b"keep").unwrap();
+
+        assert!(store.remove_profile_registration(&app, &profile).unwrap());
+        assert!(store.list_installed_apps().unwrap().is_empty());
+        assert_eq!(
+            fs::read(store.state_dir(&app).join("data")).unwrap(),
+            b"keep"
+        );
+        assert!(
+            store
+                .instance_dir(&app)
+                .join("archived_metadata/removed_app.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn removing_one_of_multiple_profiles_keeps_app_registered() {
+        let (_dir, store) = temp_store();
+        let app = InstalledAppId::new("app_multi_remove");
+        store
+            .write_app_record(&AppRecord {
+                installed_app_id: app.clone(),
+                publisher: "p".into(),
+                slug: "multi".into(),
+                capsule_handle: "p/multi".into(),
+                version: "1.0.0".into(),
+                installed_at: "2025-01-01T00:00:00Z".into(),
+                updated_at: "2025-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+        for profile in [ProfileId::default(), ProfileId::new("staging")] {
+            store
+                .write_profile(
+                    &app,
+                    &LaunchProfile {
+                        profile_id: profile,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        assert!(
+            !store
+                .remove_profile_registration(&app, &ProfileId::new("staging"))
+                .unwrap()
+        );
+        assert_eq!(store.list_installed_apps().unwrap(), vec![app]);
     }
 }

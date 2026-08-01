@@ -11,6 +11,7 @@ pub(crate) struct RollbackArgs {
     /// If provided, rollback to this specific revision.
     /// If omitted, rollback to the previous revision in the log.
     pub(crate) revision_id: Option<String>,
+    pub(crate) json: bool,
 }
 
 pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
@@ -68,10 +69,7 @@ pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
     };
 
     if target_rev.as_str() == current.as_str() {
-        eprintln!(
-            "Already at revision {}. Nothing to rollback.",
-            target_rev.as_str()
-        );
+        output_rollback_result(&args, current.as_str(), target_rev.as_str(), true)?;
         return Ok(());
     }
 
@@ -79,11 +77,38 @@ pub(crate) fn execute_rollback_command(args: RollbackArgs) -> Result<()> {
         .set_current_revision(&app_id, &profile_id, &target_rev)
         .with_context(|| format!("set current revision to {}", target_rev.as_str()))?;
 
-    println!(
-        "Rolled back from {} → {}",
-        current.as_str(),
-        target_rev.as_str()
-    );
+    output_rollback_result(&args, current.as_str(), target_rev.as_str(), false)?;
+    Ok(())
+}
+
+fn output_rollback_result(
+    args: &RollbackArgs,
+    from_revision: &str,
+    to_revision: &str,
+    unchanged: bool,
+) -> Result<()> {
+    if args.json {
+        let message = if unchanged {
+            format!("Already at revision {to_revision}")
+        } else {
+            format!("Rolled back from {from_revision} to {to_revision}")
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&protocol::desktop_library::DesktopOperation {
+                operation_id: format!("rollback:{}", args.install_profile_key),
+                kind: protocol::desktop_library::DesktopOperationKind::Rollback,
+                status: protocol::desktop_library::DesktopOperationStatus::Succeeded,
+                install_profile_key: Some(args.install_profile_key.clone()),
+                session_id: None,
+                message: Some(message),
+            })?
+        );
+    } else if unchanged {
+        eprintln!("Already at revision {to_revision}. Nothing to rollback.");
+    } else {
+        println!("Rolled back from {from_revision} → {to_revision}");
+    }
     Ok(())
 }
 
@@ -215,6 +240,7 @@ mod tests {
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: None,
+            json: false,
         });
         unsafe {
             std::env::remove_var("ATO_HOME");
@@ -241,6 +267,7 @@ mod tests {
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: Some("rev_ffff0000000000000000000000000000".to_owned()),
+            json: false,
         });
         unsafe {
             std::env::remove_var("ATO_HOME");
@@ -268,6 +295,7 @@ mod tests {
         let result = execute_rollback_command(RollbackArgs {
             install_profile_key: ipk.as_str().to_owned(),
             revision_id: Some(rev1.as_str().to_owned()),
+            json: false,
         });
         unsafe {
             std::env::remove_var("ATO_HOME");

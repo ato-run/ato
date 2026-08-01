@@ -551,6 +551,10 @@ pub(crate) enum Commands {
 
         /// Specific revision ID to rollback to. If omitted, rolls back to the previous revision.
         revision_id: Option<String>,
+
+        /// Emit machine-readable JSON
+        #[arg(long, default_value_t = false)]
+        json: bool,
     },
 
     #[command(

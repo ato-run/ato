@@ -2,6 +2,9 @@ use anyhow::Result;
 
 pub(super) fn execute_app_command(command: crate::AppCommands, json_mode: bool) -> Result<()> {
     match command {
+        crate::AppCommands::Installed { command } => {
+            super::installed_apps::execute_installed_command(command, json_mode)
+        }
         crate::AppCommands::Resolve {
             handle,
             target,

@@ -56,6 +56,7 @@ pub mod binding_lease;
 pub mod ccp;
 pub mod config;
 pub mod consent;
+pub mod desktop_library;
 pub mod error;
 pub mod handle;
 pub mod intent;

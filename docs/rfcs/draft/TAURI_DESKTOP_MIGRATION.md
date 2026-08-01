@@ -84,6 +84,44 @@ for release jobs that already staged a verified frontend.
 - Integration: build with no pre-existing `desktop-tauri/frontend` directory.
 - Parity gate: existing GPUI Desktop test result must remain unchanged.
 
+## Runner command boundary
+
+`RunnerHost::spawn` is reserved for supervised, long-lived children.
+Short-lived CLI operations use `RunnerHost::run_to_completion(CommandSpec)` and
+return exit code, stdout, and stderr as `CompletedCommand`. This separation
+prevents a session from filling an undrained capture buffer while still giving
+JSON commands a deterministic response boundary.
+
+`InstalledAppsClient` owns the `ato app installed ...` command vocabulary.
+`SessionClient` owns `ps`, detached launch, and stop. Window focus is injected
+as host presentation policy and never implemented by the CLI or runner crate.
+
+The Tauri adapter emits these stable event names after operations:
+
+- `desktop://library-changed`
+- `desktop://session-changed`
+- `desktop://operation-progress`
+- `desktop://operation-failed`
+
+## Installed library CLI contract
+
+Desktop shells do not read the instance store, installed-state SQLite DB, or
+session record directory directly. The CLI exposes:
+
+- `ato app installed list --json`
+- `ato app installed inspect <install-profile-key> --json`
+- `ato app installed remove <install-profile-key> --json`
+- `ato app installed remove <install-profile-key> --purge-state --json`
+
+Their shared wire types live in `protocol::desktop_library`. Card identity is
+always `install_profile_key`; handle, revision, and session identities are
+metadata only. Reads fail closed on corrupt revision metadata. Remove refuses a
+live profile. Normal remove archives the final app registration but preserves
+app-owned state and immutable revisions. `--purge-state` additionally removes
+app-owned state and the profile's installed-state ledger rows; it is refused
+while another profile of the same app remains. External state-binding target
+directories are never deleted by this command.
+
 ## Consequences
 
 ### Positive
@@ -97,7 +135,7 @@ for release jobs that already staged a verified frontend.
 
 - The Desktop build currently requires sibling `ato` and `ato-pwa` checkouts or
   an explicit `ATO_DESKTOP_PWA_DIR`.
-- Installed Apps commands, session control, app windows, and release bundling
+- Tauri command registration, app windows, mutation UI, and release bundling
   remain follow-up phases.
 
 ## Phase 0/1 acceptance
@@ -110,6 +148,9 @@ for release jobs that already staged a verified frontend.
 - [x] Deny native commands from non-`main` callers.
 - [x] Pin Launcher and Home top-level navigation origins.
 - [x] Revalidate `atoview://` redirects.
-- [ ] Add Installed Apps read model and session control through CLI contracts.
+- [x] Add the host-agnostic one-shot command and typed client boundary.
+- [x] Add Installed Apps read/remove model through CLI JSON contracts.
+- [ ] Register Installed Apps/session commands in the Tauri adapter and emit
+  lifecycle events.
 - [ ] Add `app:*` windows and lifecycle parity.
 - [ ] Add multi-platform bundle/release CI.

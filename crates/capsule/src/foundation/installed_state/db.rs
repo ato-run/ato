@@ -175,6 +175,35 @@ impl InstalledStateDb {
         &self.db_path
     }
 
+    /// Remove every device-local ledger row owned by an install profile.
+    /// External state-binding target directories and secret values are not
+    /// deleted here; this database stores only their local references.
+    pub fn purge_install_profile(&self, install_profile_key: &str) -> Result<()> {
+        let mut conn = self.connect()?;
+        let transaction = conn
+            .transaction()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        for table in [
+            "state_binding_targets",
+            "state_binding_refs",
+            "secret_grant_refs",
+            "launch_condition_claims",
+            "port_claims",
+            "resource_claims",
+        ] {
+            transaction
+                .execute(
+                    &format!("DELETE FROM {table} WHERE install_profile_key = ?1"),
+                    params![install_profile_key],
+                )
+                .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        }
+        transaction
+            .commit()
+            .map_err(|e| CapsuleError::Runtime(e.to_string()))?;
+        Ok(())
+    }
+
     fn connect(&self) -> Result<Connection> {
         let conn = Connection::open(&self.db_path).map_err(|e| {
             CapsuleError::Runtime(format!("failed to open {}: {e}", self.db_path.display()))

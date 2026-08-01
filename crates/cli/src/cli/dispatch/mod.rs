@@ -12,6 +12,7 @@ mod gc;
 mod import_cmd;
 mod inspect;
 mod install;
+mod installed_apps;
 mod internal;
 mod ipc;
 mod key;
@@ -541,9 +542,11 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Rollback {
             install_profile_key,
             revision_id,
+            json: command_json,
         } => rollback::execute_rollback_command(rollback::RollbackArgs {
             install_profile_key,
             revision_id,
+            json: json || command_json,
         }),
 
         Commands::AppUpdate {

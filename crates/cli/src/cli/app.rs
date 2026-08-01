@@ -2,6 +2,12 @@ use clap::{Subcommand, ValueEnum};
 
 #[derive(Subcommand)]
 pub(crate) enum AppCommands {
+    #[command(about = "Inspect or remove installed app profiles")]
+    Installed {
+        #[command(subcommand)]
+        command: InstalledCommands,
+    },
+
     #[command(about = "Resolve a capsule-aware ato-desktop handle into a launch preview")]
     Resolve {
         handle: String,
@@ -58,6 +64,29 @@ pub(crate) enum AppCommands {
         package_id: String,
         #[arg(long, value_enum)]
         action: RepairActionArg,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum InstalledCommands {
+    #[command(about = "List installed app profiles")]
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Inspect an installed app profile")]
+    Inspect {
+        install_profile_key: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Remove an installed app profile registration")]
+    Remove {
+        install_profile_key: String,
+        #[arg(long, default_value_t = false)]
+        purge_state: bool,
         #[arg(long)]
         json: bool,
     },
