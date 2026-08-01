@@ -116,6 +116,11 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(60);
 /// browser alive over its local DevTools pipe and capture after this bounded
 /// wall-clock delay instead. This remains strictly below [`CAPTURE_TIMEOUT`].
 const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(20);
+/// Some applications defer their first meaningful paint until the target is
+/// visible and an animation/intersection-observer frame has run. If the first
+/// capture is still blank, keep the same caged browser alive for one bounded
+/// retry instead of relaunching it into the same cold state.
+const RENDER_RETRY_BUDGET: Duration = Duration::from_secs(10);
 
 #[cfg(unix)]
 const MAX_CDP_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -545,29 +550,48 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
             Some(&session_id),
         )?;
         cdp.request(4, "Page.enable", serde_json::json!({}), Some(&session_id))?;
-        std::thread::sleep(RENDER_SETTLE_BUDGET);
-        let captured = cdp.request(
+        // `Target.createTarget` may leave the app in a background target.
+        // Background throttling can prevent requestAnimationFrame and
+        // IntersectionObserver-driven landing pages from painting even though
+        // their HTTP readiness check has passed.
+        cdp.request(
             5,
-            "Page.captureScreenshot",
-            serde_json::json!({
-                "format": "png",
-                "fromSurface": true,
-                "captureBeyondViewport": false
-            }),
+            "Page.bringToFront",
+            serde_json::json!({}),
             Some(&session_id),
         )?;
-        let encoded = captured
-            .get("data")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "DevTools captureScreenshot omitted PNG data".to_string())?;
-        let png = BASE64
-            .decode(encoded)
-            .map_err(|e| format!("decode DevTools PNG: {e}"))?;
+        std::thread::sleep(RENDER_SETTLE_BUDGET);
+        let mut png = capture_png(&mut cdp, 6, &session_id)?;
+        if crate::authoring_evidence::analyze_screenshot_png(&png).is_err() {
+            std::thread::sleep(RENDER_RETRY_BUDGET);
+            png = capture_png(&mut cdp, 7, &session_id)?;
+        }
         std::fs::write(out_path, png).map_err(|e| format!("write screenshot: {e}"))
     })();
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+#[cfg(unix)]
+fn capture_png(cdp: &mut CdpPipe<'_>, id: u64, session_id: &str) -> Result<Vec<u8>, String> {
+    let captured = cdp.request(
+        id,
+        "Page.captureScreenshot",
+        serde_json::json!({
+            "format": "png",
+            "fromSurface": true,
+            "captureBeyondViewport": false
+        }),
+        Some(session_id),
+    )?;
+    let encoded = captured
+        .get("data")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "DevTools captureScreenshot omitted PNG data".to_string())?;
+    BASE64
+        .decode(encoded)
+        .map_err(|e| format!("decode DevTools PNG: {e}"))
 }
 
 #[cfg(unix)]
@@ -815,8 +839,9 @@ mod tests {
 
     #[test]
     fn client_render_budget_remains_below_the_capture_timeout() {
-        assert!(RENDER_SETTLE_BUDGET < CAPTURE_TIMEOUT);
+        assert!(RENDER_SETTLE_BUDGET + RENDER_RETRY_BUDGET < CAPTURE_TIMEOUT);
         assert_eq!(RENDER_SETTLE_BUDGET.as_millis(), 20_000);
+        assert_eq!(RENDER_RETRY_BUDGET.as_millis(), 10_000);
         assert_eq!(CAPTURE_TIMEOUT.as_millis(), 60_000);
     }
 
