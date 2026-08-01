@@ -16,8 +16,9 @@ use tungstenite::Message;
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::http::StatusCode;
 
+use protocol::net::ingress_http::{MAX_REQUEST_HEAD_BYTES, normalize_request_head};
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_PREVIEW_REQUEST_HEAD_BYTES: usize = 64 * 1024;
 
 pub struct AuthoringGateway {
     listen: SocketAddr,
@@ -234,7 +235,7 @@ fn read_preview_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
         }
         request.extend_from_slice(&chunk[..read]);
         if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-            if end + 4 > MAX_PREVIEW_REQUEST_HEAD_BYTES {
+            if end + 4 > MAX_REQUEST_HEAD_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Authoring Preview request headers exceed 64 KiB",
@@ -242,7 +243,7 @@ fn read_preview_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
             }
             return Ok(request);
         }
-        if request.len() >= MAX_PREVIEW_REQUEST_HEAD_BYTES {
+        if request.len() >= MAX_REQUEST_HEAD_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Authoring Preview request headers exceed 64 KiB",
@@ -261,94 +262,8 @@ fn read_preview_request_head(client: &mut TcpStream) -> io::Result<Vec<u8>> {
 /// through this normalization. WebSocket upgrades retain their connection
 /// headers and become an opaque byte stream after this first handshake.
 fn normalize_preview_request(request: Vec<u8>, upstream: SocketAddr) -> io::Result<Vec<u8>> {
-    let head_end = request
-        .windows(4)
-        .position(|bytes| bytes == b"\r\n\r\n")
-        .map(|position| position + 4)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Authoring Preview request has no complete HTTP header block",
-            )
-        })?;
-    let mut lines = request[..head_end - 4]
-        .split(|byte| *byte == b'\n')
-        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
-    let request_line = lines
-        .next()
-        .filter(|line| !line.is_empty())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Authoring Preview request has no request line",
-            )
-        })?;
-    let headers: Vec<&[u8]> = lines.collect();
-    let has_upgrade_header = headers.iter().any(|line| {
-        header_parts(line).is_some_and(|(name, _)| name.eq_ignore_ascii_case(b"upgrade"))
-    });
-    let connection_requests_upgrade = headers.iter().any(|line| {
-        header_parts(line).is_some_and(|(name, value)| {
-            name.eq_ignore_ascii_case(b"connection")
-                && value
-                    .split(|byte| *byte == b',')
-                    .any(|token| trim_ascii(token).eq_ignore_ascii_case(b"upgrade"))
-        })
-    });
-    let is_upgrade = has_upgrade_header && connection_requests_upgrade;
-
-    let mut normalized = Vec::with_capacity(request.len() + 32);
-    normalized.extend_from_slice(request_line);
-    normalized.extend_from_slice(b"\r\n");
-    let mut wrote_host = false;
-    let mut wrote_connection = false;
-    for line in headers {
-        let Some((name, _)) = header_parts(line) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Authoring Preview request contains a malformed header",
-            ));
-        };
-        if name.eq_ignore_ascii_case(b"host") {
-            if !wrote_host {
-                write!(&mut normalized, "Host: {upstream}\r\n")?;
-                wrote_host = true;
-            }
-        } else if name.eq_ignore_ascii_case(b"connection") && !is_upgrade {
-            if !wrote_connection {
-                normalized.extend_from_slice(b"Connection: close\r\n");
-                wrote_connection = true;
-            }
-        } else {
-            normalized.extend_from_slice(line);
-            normalized.extend_from_slice(b"\r\n");
-        }
-    }
-    if !wrote_host {
-        write!(&mut normalized, "Host: {upstream}\r\n")?;
-    }
-    if !is_upgrade && !wrote_connection {
-        normalized.extend_from_slice(b"Connection: close\r\n");
-    }
-    normalized.extend_from_slice(b"\r\n");
-    normalized.extend_from_slice(&request[head_end..]);
-    Ok(normalized)
-}
-
-fn header_parts(line: &[u8]) -> Option<(&[u8], &[u8])> {
-    let separator = line.iter().position(|byte| *byte == b':')?;
-    let name = trim_ascii(&line[..separator]);
-    (!name.is_empty()).then(|| (name, trim_ascii(&line[separator + 1..])))
-}
-
-fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
-    while bytes.first().is_some_and(u8::is_ascii_whitespace) {
-        bytes = &bytes[1..];
-    }
-    while bytes.last().is_some_and(u8::is_ascii_whitespace) {
-        bytes = &bytes[..bytes.len() - 1];
-    }
-    bytes
+    normalize_request_head(request, &upstream.to_string())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 #[cfg(test)]
