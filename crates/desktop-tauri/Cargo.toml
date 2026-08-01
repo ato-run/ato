@@ -1,0 +1,31 @@
+# Ato Desktop — Tauri shell (migration from the GPUI + Wry reference shell).
+# Kept out of the parent workspace because Tauri's platform graph and release
+# lifecycle are independent, exactly like crates/desktop.
+[workspace]
+
+[package]
+name = "ato-desktop-tauri"
+version = "0.1.0"
+edition = "2024"
+description = "Ato Desktop — secure Tauri shell for the offline launcher"
+publish = false
+
+[lib]
+name = "ato_desktop_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+protocol = { path = "../protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["cookies", "rustls-tls"] }
+runner = { path = "../runner" }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+thiserror = "2"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
