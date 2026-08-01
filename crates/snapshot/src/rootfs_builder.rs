@@ -58,6 +58,17 @@ pub struct SourceProbe {
     /// Any top-level `*.py` file — a python signal for stdlib-only apps that ship no
     /// requirements.txt / pyproject.toml and declare no driver.
     pub has_py_files: bool,
+    /// Trimmed raw contents of `.nvmrc`, if present and non-empty. Node
+    /// toolchain evidence (ato-api#443) — see [`resolve_node_toolchain`].
+    pub nvmrc: Option<String>,
+    /// Trimmed raw contents of `.node-version`, if present and non-empty.
+    pub node_version_file: Option<String>,
+    /// `package.json`'s `volta.node` field, if present (Volta pins an EXACT
+    /// version here, never a range).
+    pub package_json_volta_node: Option<String>,
+    /// `package.json`'s `engines.node` field, if present (a semver RANGE,
+    /// e.g. `">=22"` or `"^18.0.0"` — never assumed exact).
+    pub package_json_engines_node: Option<String>,
 }
 
 impl SourceProbe {
@@ -69,6 +80,15 @@ impl SourceProbe {
                     .any(|e| e.path().extension().is_some_and(|x| x == "py"))
             })
             .unwrap_or(false);
+        let read_trimmed_nonempty = |f: &str| {
+            std::fs::read_to_string(dir.join(f))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        let (package_json_volta_node, package_json_engines_node) = has("package.json")
+            .then(|| read_package_json_node_fields(&dir.join("package.json")))
+            .unwrap_or_default();
         SourceProbe {
             has_deno_json: has("deno.json") || has("deno.jsonc"),
             has_deno_lock: has("deno.lock"),
@@ -81,8 +101,206 @@ impl SourceProbe {
             has_pyproject: has("pyproject.toml"),
             has_index_html: has("index.html") || dir.join("public").join("index.html").exists(),
             has_py_files,
+            nvmrc: read_trimmed_nonempty(".nvmrc"),
+            node_version_file: read_trimmed_nonempty(".node-version"),
+            package_json_volta_node,
+            package_json_engines_node,
         }
     }
+}
+
+/// Read `package.json`'s `volta.node` and `engines.node` fields, if present
+/// and shaped as strings. Malformed JSON or a non-string field is treated as
+/// absent (not an error) — [`resolve_node_toolchain`] then falls through to
+/// the next-priority evidence source, same as if the file simply had no such
+/// field. This function itself never fails closed; only the resolver does.
+fn read_package_json_node_fields(path: &Path) -> (Option<String>, Option<String>) {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (None, None);
+    };
+    let volta_node = value
+        .get("volta")
+        .and_then(|v| v.get("node"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let engines_node = value
+        .get("engines")
+        .and_then(|v| v.get("node"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    (volta_node, engines_node)
+}
+
+/// Where a resolved Node runtime version came from — recorded so the choice
+/// is diagnosable/auditable instead of silently baked into `base_image`.
+/// Ordered by priority (highest first); NOT derived `Ord` — this order is
+/// documentation, [`resolve_node_toolchain`] is the actual precedence logic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeVersionSource {
+    NvmrcFile,
+    NodeVersionFile,
+    PackageJsonVolta,
+    PackageJsonEngines,
+    AtoDefault,
+}
+
+/// The resolved Node toolchain evidence for a `RuntimeKind::Node` build:
+/// which source won, what it declared verbatim, and the exact version the
+/// resolver committed to. `resolved_version` is NEVER a range or a mutable
+/// tag — seeing one here (e.g. `"22.x"` or `"lts/*"`) is a resolver bug, not
+/// a legitimate value; every code path that produces this struct MUST have
+/// already fully resolved to `major.minor.patch`.
+///
+/// This is diagnostic/evidence metadata, not itself an identity input — the
+/// identity-bearing value is the base image DIGEST that
+/// `resolve_runtime_artifact` pins from the tag `base_image_and_install`
+/// derives from this struct's major version (see that function's doc
+/// comment for why only the major component feeds the tag).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeToolchainEvidence {
+    pub source: NodeVersionSource,
+    /// The raw declared value as found in source (e.g. `.nvmrc`'s exact
+    /// contents, or the literal `engines.node` range string) — kept even
+    /// when it is a range, not itself the resolved version, so a human can
+    /// see what the author actually wrote.
+    pub declared: String,
+    /// The exact version the resolver committed to, `major.minor.patch`.
+    pub resolved_version: String,
+}
+
+/// The Node version used when no toolchain evidence is present anywhere in
+/// the source tree — matches the version this resolver replaces the
+/// previously-hardcoded `"node:20-slim"` with, so a capsule with NO opinion
+/// on its Node version keeps building exactly as it did before this
+/// resolver existed.
+const ATO_DEFAULT_NODE_VERSION: &str = "20.20.2";
+
+/// A short ascending ladder of Node releases used to resolve an
+/// `engines.node` RANGE (the only evidence source that is ever a range, not
+/// an exact pin) to one concrete version. Deliberately not exhaustive — an
+/// author who needs a version outside this ladder should pin `.nvmrc`
+/// instead, which resolves exactly with no ladder involved.
+const NODE_VERSION_LADDER: &[&str] = &["18.20.4", "20.20.2", "22.14.0", "24.18.0"];
+
+/// The oldest Node major this resolver will ever emit a base image for.
+/// Below this, `node:{major}-slim` reliably does not exist on Docker Hub —
+/// fail closed rather than let `docker build` turn a resolver mistake into
+/// an opaque "manifest unknown" pull failure.
+const MIN_SUPPORTED_NODE_MAJOR: u64 = 4;
+
+fn parse_exact_node_version(raw: &str, source: NodeVersionSource) -> Result<semver::Version, String> {
+    // `.nvmrc` / `.node-version` conventionally allow a leading `v` and a
+    // bare major or major.minor — pad the missing components with `.0`
+    // rather than reject them; `volta.node` never has the `v` prefix.
+    let stripped = raw.trim().trim_start_matches('v').trim_start_matches('V');
+    if stripped.is_empty() || !stripped.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return Err(format!(
+            "{source:?} declares {raw:?}, which is not a version this resolver understands \
+             (aliases like \"lts/*\" or \"stable\" are not supported — pin an exact version)"
+        ));
+    }
+    let padded = match stripped.matches('.').count() {
+        0 => format!("{stripped}.0.0"),
+        1 => format!("{stripped}.0"),
+        _ => stripped.to_string(),
+    };
+    semver::Version::parse(&padded)
+        .map_err(|error| format!("{source:?} declares {raw:?}, not a parseable version: {error}"))
+}
+
+/// Resolve which exact Node version to build a `RuntimeKind::Node` capsule
+/// on, from SOURCE-TREE evidence only (ato-api#443/#1221). A `capsule.toml`
+/// manifest-level override (`[runtime] node = "..."`, highest priority in
+/// the original design) is deliberately OUT OF SCOPE here — that needs its
+/// own manifest-schema PR; see ato-api#443's discussion for why `[[tools]]`
+/// (execution tools — pnpm/yarn/bun) is the wrong place for it.
+///
+/// Priority, highest first — the FIRST source present wins outright, never
+/// merged with a lower-priority source:
+///   1. `.nvmrc` (exact pin, `v` prefix tolerated, major/major.minor padded)
+///   2. `.node-version` (same format as `.nvmrc`)
+///   3. `package.json` `volta.node` (Volta always pins exact)
+///   4. `package.json` `engines.node` (a semver RANGE — resolved to a
+///      concrete version via [`NODE_VERSION_LADDER`]: the lowest ladder
+///      entry the range accepts, or [`ATO_DEFAULT_NODE_VERSION`] if it
+///      itself already satisfies the range)
+///   5. [`ATO_DEFAULT_NODE_VERSION`] — no evidence anywhere.
+///
+/// Fails closed (`node_toolchain_unavailable`-shaped message) rather than
+/// silently falling through to the Ato default when evidence IS present but
+/// unparseable, or resolves to a major below [`MIN_SUPPORTED_NODE_MAJOR`] —
+/// an author who declared a version gets an honest error, never a silently
+/// different runtime than what they asked for.
+pub(crate) fn resolve_node_toolchain(probe: &SourceProbe) -> Result<NodeToolchainEvidence, String> {
+    let exact = |raw: &str, source: NodeVersionSource| -> Result<NodeToolchainEvidence, String> {
+        let version = parse_exact_node_version(raw, source)?;
+        Ok(NodeToolchainEvidence {
+            source,
+            declared: raw.to_string(),
+            resolved_version: version.to_string(),
+        })
+    };
+
+    let evidence = if let Some(raw) = &probe.nvmrc {
+        exact(raw, NodeVersionSource::NvmrcFile)?
+    } else if let Some(raw) = &probe.node_version_file {
+        exact(raw, NodeVersionSource::NodeVersionFile)?
+    } else if let Some(raw) = &probe.package_json_volta_node {
+        exact(raw, NodeVersionSource::PackageJsonVolta)?
+    } else if let Some(raw) = &probe.package_json_engines_node {
+        let req = semver::VersionReq::parse(raw).map_err(|error| {
+            format!(
+                "package.json engines.node declares {raw:?}, not a parseable semver range: {error}"
+            )
+        })?;
+        let default_version = semver::Version::parse(ATO_DEFAULT_NODE_VERSION)
+            .expect("ATO_DEFAULT_NODE_VERSION is a valid exact version");
+        let resolved = if req.matches(&default_version) {
+            default_version
+        } else {
+            NODE_VERSION_LADDER
+                .iter()
+                .filter_map(|v| semver::Version::parse(v).ok())
+                .find(|v| req.matches(v))
+                .ok_or_else(|| {
+                    format!(
+                        "package.json engines.node range {raw:?} is not satisfied by any \
+                         version this resolver knows about — pin .nvmrc to an exact version instead"
+                    )
+                })?
+        };
+        NodeToolchainEvidence {
+            source: NodeVersionSource::PackageJsonEngines,
+            declared: raw.to_string(),
+            resolved_version: resolved.to_string(),
+        }
+    } else {
+        NodeToolchainEvidence {
+            source: NodeVersionSource::AtoDefault,
+            declared: ATO_DEFAULT_NODE_VERSION.to_string(),
+            resolved_version: ATO_DEFAULT_NODE_VERSION.to_string(),
+        }
+    };
+
+    let major: u64 = evidence
+        .resolved_version
+        .split('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("resolved Node version {:?} has no major component", evidence.resolved_version))?;
+    if major < MIN_SUPPORTED_NODE_MAJOR {
+        return Err(format!(
+            "node_toolchain_unavailable: resolved Node major {major} (from {:?} = {:?}) is below \
+             the oldest version this builder supports ({MIN_SUPPORTED_NODE_MAJOR})",
+            evidence.source, evidence.declared
+        ));
+    }
+
+    Ok(evidence)
 }
 
 /// v1.2 (#912): the supervisor build config emitted into the rootfs
@@ -346,7 +564,10 @@ pub fn derive_build_spec(
         }
     };
 
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    // Legacy v0.3 lane: benefits from the same corrected Node base-image
+    // resolution, but does not carry `NodeToolchainEvidence` in its receipt
+    // shape (scoped to the v1 lane below — see ato-api#443/#1221).
+    let (base_image, install_cmd, _node_toolchain_evidence) = base_image_and_install(runtime, probe)?;
 
     Ok(RootfsBuildSpec {
         runtime,
@@ -457,6 +678,11 @@ pub struct RootfsBuildSpecV1 {
     /// authored `[run] command`.
     pub resolved_argv: Vec<String>,
     pub port: u16,
+    /// Node toolchain resolution evidence (ato-api#443) — `Some` only for
+    /// `RuntimeKind::Node`. Diagnostic metadata: WHY `base_image`'s major
+    /// version is what it is, not itself an identity input (the digest
+    /// `resolve_runtime_artifact` pins from `base_image` is).
+    pub node_toolchain: Option<NodeToolchainEvidence>,
 }
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
@@ -478,7 +704,7 @@ pub fn derive_build_spec_v1(
 
     // v1 has no driver/language hints — the tree is the whole declaration.
     let runtime = detect_runtime_kind("", "", probe)?;
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    let (base_image, install_cmd, node_toolchain) = base_image_and_install(runtime, probe)?;
 
     let authored = &m.run.command;
     if authored.is_empty() {
@@ -519,6 +745,7 @@ pub fn derive_build_spec_v1(
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
+        node_toolchain,
     })
 }
 
@@ -991,9 +1218,9 @@ pub(crate) fn detect_runtime_kind(
 pub(crate) fn base_image_and_install(
     runtime: RuntimeKind,
     probe: &SourceProbe,
-) -> (String, Option<String>) {
-    match runtime {
-        RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
+) -> Result<(String, Option<String>, Option<NodeToolchainEvidence>), String> {
+    Ok(match runtime {
+        RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None, None),
         RuntimeKind::Deno => (
             "denoland/deno:alpine-1.38.2".to_string(),
             Some(if probe.has_deno_fresh_entrypoints {
@@ -1005,33 +1232,54 @@ pub(crate) fn base_image_and_install(
             } else {
                 "true".to_string()
             }),
+            None,
         ),
-        RuntimeKind::Node => (
-            "node:20-slim".to_string(),
-            Some(if probe.has_package_json {
-                if probe.has_yarn_lock {
-                    format!(
-                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
-                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
-                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-                         yarn install --frozen-lockfile"
-                    )
-                } else if probe.has_pnpm_lock {
-                    format!(
-                        "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
-                         COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
-                         COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-                         pnpm install --frozen-lockfile"
-                    )
-                } else if probe.has_package_lock {
-                    "npm ci".to_string()
+        RuntimeKind::Node => {
+            // The base image tag carries only the MAJOR version component —
+            // matching the pre-resolver hardcoded `"node:20-slim"` tag
+            // granularity — because Docker Hub's official Node images are
+            // reliably published at that granularity, while an exact
+            // `node:{major.minor.patch}-slim` tag is not guaranteed to
+            // exist for every patch a source tree might declare. This does
+            // NOT weaken reproducibility: `resolve_runtime_artifact` pins
+            // whatever this tag resolves to at build time down to an
+            // immutable `repo@sha256:…` digest before the image is ever
+            // built FROM it (see that function's doc comment) — the digest,
+            // not this tag, is what the Execution Contract commits.
+            let evidence = resolve_node_toolchain(probe)?;
+            let major = evidence
+                .resolved_version
+                .split('.')
+                .next()
+                .expect("resolve_node_toolchain always returns major.minor.patch");
+            (
+                format!("node:{major}-slim"),
+                Some(if probe.has_package_json {
+                    if probe.has_yarn_lock {
+                        format!(
+                            "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                             COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                             COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                             yarn install --frozen-lockfile"
+                        )
+                    } else if probe.has_pnpm_lock {
+                        format!(
+                            "corepack enable && COREPACK_HOME={V1_COREPACK_HOME} \
+                             COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack install && \
+                             COREPACK_HOME={V1_COREPACK_HOME} COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+                             pnpm install --frozen-lockfile"
+                        )
+                    } else if probe.has_package_lock {
+                        "npm ci".to_string()
+                    } else {
+                        "npm install".to_string()
+                    }
                 } else {
-                    "npm install".to_string()
-                }
-            } else {
-                "true".to_string()
-            }),
-        ),
+                    "true".to_string()
+                }),
+                Some(evidence),
+            )
+        }
         RuntimeKind::Python => (
             "python:3.11-slim".to_string(),
             Some(if probe.has_requirements_txt {
@@ -1042,8 +1290,9 @@ pub(crate) fn base_image_and_install(
                 // stdlib-only app — nothing to install.
                 "true".to_string()
             }),
+            None,
         ),
-    }
+    })
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -2852,6 +3101,200 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         )
         .expect("npm derives");
         assert_eq!(npm.install_cmd.as_deref(), Some("npm ci"));
+    }
+
+    /// ato-api#443/#1221: `swagger-api/swagger-editor` pinned at
+    /// `0409380aaa654604f8f681eee04e748f55b80b85` — `.nvmrc` declares `24.18`
+    /// (no `engines` field). Reproduced live: this exact source, this exact
+    /// generated Dockerfile shape, built under the OLD hardcoded
+    /// `node:20-slim` fails `npm ci` (EBADENGINE warnings + EUSAGE lockfile
+    /// mismatch); the identical build under `node:24-slim` succeeds cleanly.
+    /// This fixture is the regression guard for that fix — NOT a synthetic
+    /// approximation, the exact `.nvmrc` content from the pinned commit.
+    #[test]
+    fn swagger_editor_pinned_commit_resolves_to_its_nvmrc_major() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                nvmrc: Some("24.18".to_string()),
+                ..SourceProbe::default()
+            },
+        )
+        .expect("swagger-editor-shaped source derives");
+        assert_eq!(spec.base_image, "node:24-slim");
+        assert_eq!(spec.install_cmd.as_deref(), Some("npm ci"));
+        let evidence = spec.node_toolchain.expect("Node runtime carries evidence");
+        assert_eq!(evidence.source, NodeVersionSource::NvmrcFile);
+        assert_eq!(evidence.declared, "24.18");
+        assert_eq!(evidence.resolved_version, "24.18.0");
+    }
+
+    /// Priority order (ato-api#443): the FIRST source present wins outright,
+    /// never merged with a lower-priority one — a repo with both `.nvmrc`
+    /// and a stale `engines.node` range must not average the two.
+    #[test]
+    fn node_toolchain_priority_order_is_nvmrc_then_node_version_file_then_volta_then_engines() {
+        let all_four = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("v22.5.0".to_string()),
+            node_version_file: Some("18.19.0".to_string()),
+            package_json_volta_node: Some("16.20.2".to_string()),
+            package_json_engines_node: Some(">=14".to_string()),
+            ..SourceProbe::default()
+        };
+        assert_eq!(
+            resolve_node_toolchain(&all_four).unwrap().resolved_version,
+            "22.5.0",
+            ".nvmrc wins over everything else"
+        );
+
+        let three = SourceProbe {
+            nvmrc: None,
+            ..all_four.clone()
+        };
+        assert_eq!(
+            resolve_node_toolchain(&three).unwrap().resolved_version,
+            "18.19.0",
+            ".node-version wins once .nvmrc is absent"
+        );
+
+        let two = SourceProbe {
+            node_version_file: None,
+            ..three
+        };
+        assert_eq!(
+            resolve_node_toolchain(&two).unwrap().resolved_version,
+            "16.20.2",
+            "volta.node wins once both file-based sources are absent"
+        );
+
+        let one = SourceProbe {
+            package_json_volta_node: None,
+            ..two
+        };
+        let evidence = resolve_node_toolchain(&one).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::PackageJsonEngines);
+        // ">=14" is satisfied by the Ato default (20.20.2) — the resolver
+        // prefers the default over inventing a version off the ladder when
+        // the default itself already satisfies the declared range.
+        assert_eq!(evidence.resolved_version, ATO_DEFAULT_NODE_VERSION);
+
+        let none = SourceProbe {
+            package_json_engines_node: None,
+            ..one
+        };
+        let evidence = resolve_node_toolchain(&none).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::AtoDefault);
+        assert_eq!(evidence.resolved_version, ATO_DEFAULT_NODE_VERSION);
+    }
+
+    /// A range the Ato default does NOT satisfy walks the ladder to the
+    /// first entry that does, rather than picking the default anyway.
+    #[test]
+    fn node_toolchain_engines_range_above_the_default_walks_the_ladder() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            package_json_engines_node: Some(">=22".to_string()),
+            ..SourceProbe::default()
+        };
+        let evidence = resolve_node_toolchain(&probe).unwrap();
+        assert_eq!(evidence.source, NodeVersionSource::PackageJsonEngines);
+        assert_eq!(evidence.resolved_version, "22.14.0");
+    }
+
+    /// A range no ladder entry satisfies is a typed, honest failure — the
+    /// resolver never silently substitutes an out-of-range version.
+    #[test]
+    fn node_toolchain_impossible_engines_range_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            package_json_engines_node: Some(">=99".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(error.contains(">=99"), "error names the impossible range: {error}");
+    }
+
+    /// An `.nvmrc` alias this resolver does not understand (`"lts/*"` and
+    /// similar) is refused, not guessed at.
+    #[test]
+    fn node_toolchain_unparseable_nvmrc_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("lts/*".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(error.contains("lts/*"), "error names the unparseable value: {error}");
+    }
+
+    /// A resolved major below the oldest version this builder supports is a
+    /// `node_toolchain_unavailable` failure, not a silent clamp.
+    #[test]
+    fn node_toolchain_ancient_version_fails_closed() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("0.10.48".to_string()),
+            ..SourceProbe::default()
+        };
+        let error = resolve_node_toolchain(&probe).unwrap_err();
+        assert!(
+            error.contains("node_toolchain_unavailable"),
+            "error is typed as unavailable, not a generic parse failure: {error}"
+        );
+    }
+
+    /// Deterministic: the same source evidence resolves to the identical
+    /// version and source across repeated calls — no clock/registry/network
+    /// input anywhere in this pure function.
+    #[test]
+    fn node_toolchain_resolution_is_stable_across_repeated_calls() {
+        let probe = SourceProbe {
+            has_package_json: true,
+            nvmrc: Some("24.18".to_string()),
+            ..SourceProbe::default()
+        };
+        let first = resolve_node_toolchain(&probe).unwrap();
+        let second = resolve_node_toolchain(&probe).unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// A `package.json`-carrying web project (Vite/CRA-shaped: it ALSO ships
+    /// `index.html`) must resolve as `RuntimeKind::Node`, not
+    /// `RuntimeKind::StaticWeb` — a package-managed app whose deps are never
+    /// installed is a silent broken build, not a working static site.
+    #[test]
+    fn a_package_managed_web_app_with_index_html_is_not_misclassified_as_static() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                has_index_html: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Node);
+        assert_eq!(spec.install_cmd.as_deref(), Some("npm ci"));
+    }
+
+    /// Non-Node runtimes never carry Node toolchain evidence.
+    #[test]
+    fn non_node_runtimes_carry_no_node_toolchain_evidence() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Python);
+        assert_eq!(spec.node_toolchain, None);
     }
 
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
