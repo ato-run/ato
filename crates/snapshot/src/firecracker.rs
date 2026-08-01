@@ -1612,6 +1612,17 @@ fn hotset_enabled() -> bool {
 // Firecracker's micro-http server keeps the connection alive, so we must NOT
 // read to EOF (that blocks until the read timeout). Read exactly the status line
 // + headers (until CRLFCRLF), then `Content-Length` body bytes, then stop.
+const FC_API_READ_TIMEOUT: Duration = Duration::from_secs(15);
+const FC_SNAPSHOT_CREATE_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn fc_api_read_timeout(path: &str) -> Duration {
+    if path == "/snapshot/create" {
+        FC_SNAPSHOT_CREATE_TIMEOUT
+    } else {
+        FC_API_READ_TIMEOUT
+    }
+}
+
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -1639,7 +1650,12 @@ fn fc_request(
     body: Option<&str>,
 ) -> std::io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(sock)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    // A Full snapshot writes the entire guest memory image before Firecracker
+    // replies. Multi-GiB authoring guests can legitimately take longer than the
+    // ordinary control-plane timeout; treating that delayed success as EAGAIN
+    // leaves an otherwise healthy held guest unable to seal. Keep every other
+    // API request on the short fail-fast budget.
+    stream.set_read_timeout(Some(fc_api_read_timeout(path)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let body = body.unwrap_or("");
     let req = format!(
@@ -3463,6 +3479,19 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_snapshot_creation_gets_a_multi_gib_write_budget() {
+        assert_eq!(
+            fc_api_read_timeout("/snapshot/create"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            fc_api_read_timeout("/snapshot/load"),
+            Duration::from_secs(15)
+        );
+        assert_eq!(fc_api_read_timeout("/vm"), Duration::from_secs(15));
+    }
 
     // ── readiness status classification: 2xx/3xx = the app answered ──
 
