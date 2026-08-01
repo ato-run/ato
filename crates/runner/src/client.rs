@@ -43,6 +43,25 @@ pub enum InstallSource {
     Local(PathBuf),
 }
 
+impl InstallSource {
+    /// Canonical `ato install` argv shared by synchronous clients and
+    /// cancellable Desktop operation supervisors.
+    pub fn ato_args(&self) -> Vec<String> {
+        let mut args = vec!["install".to_string()];
+        match self {
+            Self::Store(capsule_ref) => args.push(capsule_ref.clone()),
+            Self::GitHub(repository) => {
+                args.extend(["--from-gh-repo".into(), repository.clone()]);
+            }
+            Self::Local(path) => {
+                args.extend(["--from-local".into(), path.display().to_string()]);
+            }
+        }
+        args.extend(["-y".into(), "--no-project".into(), "--json".into()]);
+        args
+    }
+}
+
 /// Client for installed-app lifecycle commands.
 pub struct InstalledAppsClient<'a, H: RunnerHost> {
     host: &'a H,
@@ -62,18 +81,7 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
     }
 
     pub fn install(&self, source: &InstallSource) -> Result<Value, ClientError> {
-        let mut args = vec!["install".to_string()];
-        match source {
-            InstallSource::Store(capsule_ref) => args.push(capsule_ref.clone()),
-            InstallSource::GitHub(repository) => {
-                args.extend(["--from-gh-repo".into(), repository.clone()]);
-            }
-            InstallSource::Local(path) => {
-                args.extend(["--from-local".into(), path.display().to_string()]);
-            }
-        }
-        args.extend(["-y".into(), "--no-project".into(), "--json".into()]);
-        self.run_json(args)
+        self.run_json(source.ato_args())
     }
 
     pub fn update(&self, install_profile_key: &str) -> Result<Value, ClientError> {
@@ -113,6 +121,10 @@ impl<'a, H: RunnerHost> InstalledAppsClient<'a, H> {
         }
         args.push("--json".to_string());
         self.run_json(args)
+    }
+
+    pub fn repair(&self, package_id: &str, action: &str) -> Result<Value, ClientError> {
+        self.run_json(["app", "repair", package_id, "--action", action, "--json"])
     }
 
     fn run_json<T, I, S>(&self, args: I) -> Result<T, ClientError>

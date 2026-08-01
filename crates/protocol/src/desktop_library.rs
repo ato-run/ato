@@ -75,9 +75,11 @@ pub enum DesktopOperationKind {
     Update,
     Rollback,
     Remove,
+    Repair,
     Launch,
     Stop,
     Focus,
+    Close,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +89,7 @@ pub enum DesktopOperationStatus {
     Running,
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

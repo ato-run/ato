@@ -8,6 +8,10 @@ pub const SESSION_CHANGED: &str = "desktop://session-changed";
 pub const OPERATION_PROGRESS: &str = "desktop://operation-progress";
 /// An operation failed and the launcher should surface its diagnostic.
 pub const OPERATION_FAILED: &str = "desktop://operation-failed";
+/// Trusted remote Home requested that the local Launcher present an install.
+/// The event is advisory: only the bundled Launcher can invoke the install
+/// command, so the handoff never grants remote content a native capability.
+pub const INSTALL_REQUESTED: &str = "desktop://install-requested";
 
 #[cfg(test)]
 mod tests {
@@ -19,5 +23,6 @@ mod tests {
         assert_eq!(SESSION_CHANGED, "desktop://session-changed");
         assert_eq!(OPERATION_PROGRESS, "desktop://operation-progress");
         assert_eq!(OPERATION_FAILED, "desktop://operation-failed");
+        assert_eq!(INSTALL_REQUESTED, "desktop://install-requested");
     }
 }

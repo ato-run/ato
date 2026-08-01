@@ -43,6 +43,11 @@ pub trait ManagedChild: Send {
     fn id(&self) -> ChildId;
     /// Whether the process is still alive (host-specific liveness check).
     fn is_alive(&self) -> bool;
+    /// Exit code captured after liveness observes completion. `None` means the
+    /// child is still running or the host cannot expose a code.
+    fn exit_code(&self) -> Option<i32> {
+        None
+    }
     /// Terminate the whole process group. Idempotent — safe to call on an
     /// already-dead child.
     fn terminate_group(&mut self) -> Result<(), HostError>;

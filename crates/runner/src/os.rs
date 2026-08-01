@@ -172,6 +172,7 @@ pub struct NativeChild {
     /// The wrapper handle, behind a mutex so liveness can be polled through a
     /// shared reference. `None` once the process has been reaped.
     handle: Mutex<Option<std::process::Child>>,
+    exit_code: Mutex<Option<i32>>,
 }
 
 impl ManagedChild for NativeChild {
@@ -187,7 +188,12 @@ impl ManagedChild for NativeChild {
         match guard.as_mut() {
             Some(child) => match child.try_wait() {
                 // Exited — drop the reaped handle so we do not wait on it twice.
-                Ok(Some(_status)) => {
+                Ok(Some(status)) => {
+                    *self
+                        .exit_code
+                        .lock()
+                        .expect("native child exit-code mutex poisoned") =
+                        Some(status.code().unwrap_or(-1));
                     *guard = None;
                     false
                 }
@@ -197,6 +203,13 @@ impl ManagedChild for NativeChild {
             },
             None => false,
         }
+    }
+
+    fn exit_code(&self) -> Option<i32> {
+        *self
+            .exit_code
+            .lock()
+            .expect("native child exit-code mutex poisoned")
     }
 
     fn terminate_group(&mut self) -> Result<(), HostError> {
@@ -288,6 +301,7 @@ impl RunnerHost for NativeHost {
         Ok(NativeChild {
             pid,
             handle: Mutex::new(Some(child)),
+            exit_code: Mutex::new(None),
         })
     }
 

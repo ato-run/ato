@@ -33,14 +33,47 @@ impl<H: RunnerHost> ProcessSupervisor<H> {
 
     /// Drop any children that have exited. Returns how many were reaped.
     pub fn reap(&mut self) -> usize {
-        let before = self.children.len();
-        self.children.retain(|c| c.is_alive());
-        before - self.children.len()
+        self.reap_with_status().len()
+    }
+
+    /// Reap exited children and return their ids plus captured exit codes.
+    /// Hosts use this to distinguish successful completion from a failed
+    /// cancellable operation without surrendering process-group ownership.
+    pub fn reap_with_status(&mut self) -> Vec<(ChildId, Option<i32>)> {
+        let mut running = Vec::with_capacity(self.children.len());
+        let mut completed = Vec::new();
+        for child in self.children.drain(..) {
+            if child.is_alive() {
+                running.push(child);
+            } else {
+                completed.push((child.id(), child.exit_code()));
+            }
+        }
+        self.children = running;
+        completed
     }
 
     /// Number of children currently supervised.
     pub fn supervised_count(&self) -> usize {
         self.children.len()
+    }
+
+    /// Whether a child is still owned by this supervisor. Call [`Self::reap`]
+    /// first when the caller needs a current liveness snapshot.
+    pub fn contains(&self, id: ChildId) -> bool {
+        self.children.iter().any(|child| child.id() == id)
+    }
+
+    /// Terminate one supervised process group and remove it from ownership.
+    /// Returns `Ok(false)` when the id is already absent, making cancellation
+    /// idempotent across UI retries and completion races.
+    pub fn terminate(&mut self, id: ChildId) -> Result<bool, HostError> {
+        let Some(index) = self.children.iter().position(|child| child.id() == id) else {
+            return Ok(false);
+        };
+        let mut child = self.children.remove(index);
+        child.terminate_group()?;
+        Ok(true)
     }
 
     /// Terminate every supervised child's process group and forget them.
@@ -156,5 +189,21 @@ mod tests {
         assert_eq!(sup.supervised_count(), 0);
         sup.shutdown().unwrap();
         assert_eq!(sup.supervised_count(), 0);
+    }
+
+    #[test]
+    fn terminates_only_the_requested_child_and_is_idempotent() {
+        let host = FakeHost {
+            next: AtomicU64::new(10),
+        };
+        let mut sup = ProcessSupervisor::new(host);
+        let first = sup.spawn(&spec()).unwrap();
+        let second = sup.spawn(&spec()).unwrap();
+
+        assert!(sup.terminate(first).unwrap());
+        assert!(!sup.contains(first));
+        assert!(sup.contains(second));
+        assert!(!sup.terminate(first).unwrap());
+        assert_eq!(sup.supervised_count(), 1);
     }
 }
