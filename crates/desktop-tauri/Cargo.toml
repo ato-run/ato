@@ -12,7 +12,9 @@ publish = false
 
 [lib]
 name = "ato_desktop_tauri_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# This package is desktop-only. Mobile-oriented staticlib/cdylib outputs make
+# the MinGW linker export the entire Tauri graph and can exceed PE ordinals.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
