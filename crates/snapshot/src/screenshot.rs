@@ -115,11 +115,13 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(60);
 /// scheduled timers/workers (Swagger Editor, Monaco, etc.). Keep the same
 /// browser alive over its local DevTools pipe and capture after this bounded
 /// wall-clock delay instead. This remains strictly below [`CAPTURE_TIMEOUT`].
+#[cfg(unix)]
 const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(20);
 /// Some applications defer their first meaningful paint until the target is
 /// visible and an animation/intersection-observer frame has run. If the first
 /// capture is still blank, keep the same caged browser alive for one bounded
 /// retry instead of relaunching it into the same cold state.
+#[cfg(unix)]
 const RENDER_RETRY_BUDGET: Duration = Duration::from_secs(10);
 
 #[cfg(unix)]
