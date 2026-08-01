@@ -408,7 +408,7 @@ pub(crate) enum Commands {
     #[command(hide = true, about = "Register a durable local app from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
-        #[arg(required_unless_present_any = ["from_gh_repo", "from_local"])]
+        #[arg(required_unless_present_any = ["from_gh_repo", "from_local", "from_capsule"])]
         slug: Option<String>,
 
         /// Build and install directly from a public GitHub repository
@@ -428,6 +428,15 @@ pub(crate) enum Commands {
             conflicts_with_all = ["slug", "from_gh_repo"]
         )]
         from_local: Option<PathBuf>,
+
+        /// Install an existing local `.capsule` artifact without contacting a
+        /// registry. Desktop exposes this only through a native file picker.
+        #[arg(
+            long = "from-capsule",
+            value_name = "FILE",
+            conflicts_with_all = ["slug", "from_gh_repo", "from_local"]
+        )]
+        from_capsule: Option<PathBuf>,
 
         /// Registry URL (default: api.ato.run)
         #[arg(long)]

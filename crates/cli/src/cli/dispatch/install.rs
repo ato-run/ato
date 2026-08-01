@@ -20,6 +20,7 @@ pub(crate) struct InstallCommandArgs {
     pub(crate) slug: Option<String>,
     pub(crate) from_gh_repo: Option<String>,
     pub(crate) from_local: Option<PathBuf>,
+    pub(crate) from_capsule: Option<PathBuf>,
     pub(crate) registry: Option<String>,
     pub(crate) version: Option<String>,
     pub(crate) default: bool,
@@ -48,6 +49,39 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
             std::io::stderr().is_terminal(),
         );
     let rt = tokio::runtime::Runtime::new()?;
+
+    if let Some(artifact_path) = args.from_capsule.as_deref() {
+        if args.registry.is_some() {
+            anyhow::bail!("--registry cannot be used with --from-capsule");
+        }
+        if args.version.is_some() {
+            anyhow::bail!("--version cannot be used with --from-capsule");
+        }
+        if artifact_path.extension().and_then(|value| value.to_str()) != Some("capsule") {
+            anyhow::bail!("--from-capsule requires a .capsule file");
+        }
+        if !artifact_path.is_file() {
+            anyhow::bail!(
+                "local capsule artifact does not exist: {}",
+                artifact_path.display()
+            );
+        }
+
+        let result = rt.block_on(install::install_built_local_artifact(
+            artifact_path,
+            install::InstallExecutionOptions {
+                output_dir: args.output,
+                yes: args.yes,
+                projection_preference,
+                json_output: args.json,
+                can_prompt_interactively: can_prompt,
+                promotion_source: None,
+                keep_progressive_flow_open: false,
+            },
+        ))?;
+        render_install_result(&result, args.json, args.no_project)?;
+        return Ok(());
+    }
 
     if let Some(local_dir) = args.from_local.as_deref() {
         if args.registry.is_some() {
@@ -94,7 +128,9 @@ pub(crate) fn execute_install_command(args: InstallCommandArgs) -> Result<()> {
 
     rt.block_on(async {
         let slug = args.slug.ok_or_else(|| {
-            anyhow::anyhow!("capsule slug is required when not using --from-gh-repo")
+            anyhow::anyhow!(
+                "capsule slug is required when not using --from-gh-repo, --from-local, or --from-capsule"
+            )
         })?;
         if let Some(message) = install::provider_target::provider_install_error(&slug)? {
             anyhow::bail!(message);

@@ -41,6 +41,7 @@ pub enum InstallSource {
     Store(String),
     GitHub(String),
     Local(PathBuf),
+    Capsule(PathBuf),
 }
 
 impl InstallSource {
@@ -55,6 +56,9 @@ impl InstallSource {
             }
             Self::Local(path) => {
                 args.extend(["--from-local".into(), path.display().to_string()]);
+            }
+            Self::Capsule(path) => {
+                args.extend(["--from-capsule".into(), path.display().to_string()]);
             }
         }
         args.extend(["-y".into(), "--no-project".into(), "--json".into()]);
@@ -314,6 +318,28 @@ mod tests {
                 "install",
                 "--from-local",
                 "/chosen/app",
+                "-y",
+                "--no-project",
+                "--json",
+            ]]
+        );
+    }
+
+    #[test]
+    fn install_source_selects_the_explicit_capsule_file_lane() {
+        let host = FakeHost::successful_json(r#"{"ok":true}"#);
+        InstalledAppsClient::new(&host)
+            .install(&InstallSource::Capsule(PathBuf::from(
+                "/chosen/demo.capsule",
+            )))
+            .unwrap();
+
+        assert_eq!(
+            host.args(),
+            vec![vec![
+                "install",
+                "--from-capsule",
+                "/chosen/demo.capsule",
                 "-y",
                 "--no-project",
                 "--json",

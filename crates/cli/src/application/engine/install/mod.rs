@@ -1191,6 +1191,37 @@ pub async fn install_built_github_artifact(
     repository: &str,
     options: InstallExecutionOptions,
 ) -> Result<InstallResult> {
+    install_built_artifact(
+        artifact_path,
+        publisher,
+        format!("github:{repository}"),
+        options,
+    )
+    .await
+}
+
+/// Register an already-built local capsule using the same lifecycle and
+/// revision materialization path as Store and GitHub installs. The artifact's
+/// manifest owns slug/version; `local` is the explicit publisher namespace so
+/// importing a file can never impersonate a registry publisher.
+pub async fn install_built_local_artifact(
+    artifact_path: &Path,
+    options: InstallExecutionOptions,
+) -> Result<InstallResult> {
+    let artifact_name = artifact_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported.capsule");
+    let source_label = format!("local-artifact:{artifact_name}");
+    install_built_artifact(artifact_path, "local", source_label, options).await
+}
+
+async fn install_built_artifact(
+    artifact_path: &Path,
+    publisher: &str,
+    source_label: String,
+    options: InstallExecutionOptions,
+) -> Result<InstallResult> {
     let artifact_bytes = std::fs::read(artifact_path)
         .with_context(|| format!("Failed to read built artifact: {}", artifact_path.display()))?;
     let manifest_toml = extract_manifest_toml_from_capsule(&artifact_bytes)
@@ -1206,14 +1237,14 @@ pub async fn install_built_github_artifact(
     let display_slug = scoped_ref.slug.clone();
     let normalized_file_name = format!("{}-{}.capsule", scoped_ref.slug, version);
     complete_install_from_bytes(
-        format!("github:{repository}"),
+        source_label.clone(),
         scoped_ref,
         display_slug,
         version.to_string(),
         artifact_bytes,
         normalized_file_name,
         options,
-        InstallSource::Local(format!("github:{repository}")),
+        InstallSource::Local(source_label),
     )
     .await
 }
