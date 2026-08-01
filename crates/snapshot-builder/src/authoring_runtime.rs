@@ -1061,9 +1061,10 @@ fn infer_package_managed_intent(
     // unbundled module graph (measured for drawdb: 448 requests / 115 MB
     // before first paint through the app proxy — the "ready but blank for
     // 30s" preview); `vite preview` serves the minified dist/. The build runs
-    // during snapshot capture only — a restore resumes the already-serving
-    // process — so launches never pay for it. Scripts with shell syntax or a
-    // non-vite tail keep today's dev-server lane rather than guessing.
+    // at IMAGE BUILD time (the guest rootfs is read-only at boot) and a
+    // restore resumes the already-serving process — launches never pay for
+    // it. Scripts with shell syntax or a non-vite tail keep today's
+    // dev-server lane rather than guessing.
     if let Some(production) = infer_vite_production_launch(&package_json, package_manager) {
         return normalize_program_intent(production).map_err(|error| error.to_string());
     }
@@ -1106,11 +1107,13 @@ fn infer_package_managed_intent(
 /// `npm run build:app && …`, a missing preview script) returns `None` and the
 /// caller keeps the dev-server lane.
 ///
-/// The launch is a shell compound (`build && preview`) because manifest v1 has
-/// exactly one `run.command` and its `[[build.steps]]` are refused at build
-/// time — the shell escape hatch is the one sanctioned way to sequence the
-/// two. `--strictPort` makes a port collision fail readiness instead of
-/// silently serving on a port Ato never probes.
+/// The launch itself is ONLY `<pm> run preview`: the production build cannot
+/// run at guest boot — the v1 guest rootfs is read-only, so `vite build`
+/// writing `dist/` would fail on EROFS — and instead runs at IMAGE BUILD time,
+/// chained after dependency install by the v1 build lane
+/// (`rootfs_builder::vite_production_prebuild_cmd`, keyed on this exact
+/// launch shape). `--strictPort` makes a port collision fail readiness instead
+/// of silently serving on a port Ato never probes.
 fn infer_vite_production_launch(
     package_json: &serde_json::Value,
     package_manager: &'static str,
@@ -1136,26 +1139,26 @@ fn infer_vite_production_launch(
         origin: ProgramIntentOrigin::Inference,
         toolchains: Vec::new(),
         build_steps: Vec::new(),
-        launch: ProgramCommandDraftV1::ShellEscapeHatch {
-            interpreter_argv: vec!["sh".to_string(), "-lc".to_string()],
-            script: format!(
-                "{package_manager} run build && {package_manager} run preview -- --host 0.0.0.0 --port 8000 --strictPort"
-            ),
-            justification: "manifest v1 has a single run.command; the production \
-                lane must sequence `vite build` before `vite preview`, and the \
-                build cost is paid once at snapshot capture, never at restore"
-                .to_string(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
+                package_manager.to_string(),
+                "run".to_string(),
+                "preview".to_string(),
+                "--".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "8000".to_string(),
+                "--strictPort".to_string(),
+            ],
             cwd: WorkspacePathV1::root(),
             requested_environment: Vec::new(),
-            required_tools: vec![package_manager.to_string(), "sh".to_string()],
+            required_tools: vec![package_manager.to_string()],
         },
-        // The capture-side boot budget for this compound is granted by the
-        // builder (see the pinned v1 lane's `boot_timeout_s`); this timeout is
-        // the intent's own declaration of the same fact.
         readiness: ReadinessIntentV1::Http {
             port: 8000,
             path: "/".to_string(),
-            timeout_seconds: 600,
+            timeout_seconds: 60,
         },
         build_output_roots: Vec::new(),
         bindings: Vec::new(),
@@ -1502,10 +1505,7 @@ pub fn render_inferred_capsule_toml(
             ],
             timeout_seconds: Some(30),
         },
-        // `sh` is emitted only by the package-managed production lane
-        // (`sh -lc "<pm> run build && <pm> run preview …"`), whose guest is
-        // always a Node image — the node-based seal probe holds there.
-        "node" | "npm" | "npx" | "yarn" | "pnpm" | "sh" => SealAtV1 {
+        "node" | "npm" | "npx" | "yarn" | "pnpm" => SealAtV1 {
             command: vec![
                 "node".to_string(),
                 "--input-type=module".to_string(),
@@ -1802,23 +1802,22 @@ mod tests {
         assert_eq!(
             normalized.intent.launch.argv,
             [
-                "sh",
-                "-lc",
-                "npm run build && npm run preview -- --host 0.0.0.0 --port 8000 --strictPort",
+                "npm",
+                "run",
+                "preview",
+                "--",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8000",
+                "--strictPort",
             ]
         );
-        assert!(normalized.intent.launch.explicit_shell_escape);
-        assert_eq!(normalized.intent.launch.required_tools, ["npm", "sh"]);
+        assert!(!normalized.intent.launch.explicit_shell_escape);
+        assert_eq!(normalized.intent.launch.required_tools, ["npm"]);
         match &normalized.intent.readiness {
-            ReadinessIntentV1::Http {
-                port,
-                path,
-                timeout_seconds,
-            } => {
+            ReadinessIntentV1::Http { port, path, .. } => {
                 assert_eq!((*port, path.as_str()), (8000, "/"));
-                // The capture-side budget for `npm run build` before the
-                // preview server first answers.
-                assert_eq!(*timeout_seconds, 600);
             }
             other => panic!("expected HTTP readiness, got {other:?}"),
         }
