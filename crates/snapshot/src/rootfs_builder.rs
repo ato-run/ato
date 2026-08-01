@@ -1144,8 +1144,23 @@ fn is_uuid(value: &str) -> bool {
             })
 }
 
-/// Run one generated builder script under `bash -c`, reporting the stderr tail
-/// on failure. The shared spawn half of [`build_rootfs`] and the two v1 halves.
+/// Upper bound, in bytes, on the stderr tail captured into a failed builder
+/// script's error message (ato-api#443 §5). Large enough to hold a full `npm
+/// ci` failure — the EBADENGINE warnings plus the EUSAGE lockfile-sync detail
+/// observed reproducing that issue — while staying bounded so a runaway
+/// script can never balloon an error into an unbounded log.
+const BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
+
+/// Run one generated builder script under `bash -c`, reporting a bounded,
+/// secret-redacted stderr tail on failure. The shared spawn half of
+/// [`build_rootfs`] and the two v1 halves — including `assemble_app_image_v1`,
+/// which is where a manifest-derived `RUN /bin/sh -lc '<install_cmd>'` (e.g.
+/// `npm ci`) actually runs inside `docker build`.
+///
+/// Redaction happens before truncation, and both happen before this ever
+/// returns: nothing downstream (logs, the ato-api ack, an issue comment) can
+/// leak a credential this function already scrubbed, and nothing downstream
+/// has to re-bound an unbounded stream itself.
 fn run_builder_script(
     stage: &str,
     script: &str,
@@ -1162,16 +1177,125 @@ fn run_builder_script(
     if out.status.success() {
         return Ok(());
     }
-    let tail: String = String::from_utf8_lossy(&out.stderr)
-        .lines()
-        .rev()
-        .take(12)
+    let redacted = redact_secrets(&String::from_utf8_lossy(&out.stderr));
+    let (tail, truncated) = bounded_diagnostic_tail(&redacted);
+    let error_code = classify_builder_script_error_code(stage, &tail);
+    let exit_code = out.status.code().unwrap_or(1);
+    let truncated_note = if truncated {
+        " (stderr truncated)"
+    } else {
+        ""
+    };
+    Err(format!(
+        "{stage} failed: {error_code}, exit {exit_code}{truncated_note}\n{tail}"
+    ))
+}
+
+/// Redact substrings of a builder script's stderr that look like credentials
+/// before anything captures or returns them (ato-api#443 §5): a failing `npm
+/// ci` can echo a registry URL with embedded basic-auth, an
+/// `Authorization`/`Cookie` header, or an `.npmrc`-sourced `_authToken`, and
+/// none of that may leave the builder host as plain text. Whole-line
+/// redaction is deliberate — a line-level false positive costs a little
+/// diagnosability; a substring-level false negative leaks a secret.
+fn redact_secrets(text: &str) -> String {
+    const LINE_MARKERS: &[&str] = &[
+        "authorization:",
+        "cookie:",
+        "set-cookie:",
+        "_authtoken",
+        "bearer ",
+        "token=",
+        "token:",
+        "password=",
+        "password:",
+        "secret=",
+        "secret:",
+        "apikey",
+        "api_key",
+    ];
+    text.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if LINE_MARKERS.iter().any(|marker| lower.contains(marker))
+                || line_has_credentialed_url(&lower)
+            {
+                "[REDACTED LINE: possible credential]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("\n");
-    Err(format!("{stage} failed: {tail}"))
+        .join("\n")
+}
+
+/// True if `line` (already lowercased) contains a `scheme://user:pass@host`
+/// URL — the shape `npm error request to https://…@registry...` takes when a
+/// registry URL carries embedded basic-auth.
+fn line_has_credentialed_url(lower_line: &str) -> bool {
+    let Some(scheme_at) = lower_line.find("://") else {
+        return false;
+    };
+    let after_scheme = &lower_line[scheme_at + 3..];
+    let Some(at) = after_scheme.find('@') else {
+        return false;
+    };
+    let credential_candidate = &after_scheme[..at];
+    !credential_candidate.is_empty()
+        && !credential_candidate.contains('/')
+        && !credential_candidate.contains(char::is_whitespace)
+}
+
+/// Keep only the last [`BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES`] of `text`,
+/// cutting on a line boundary, and report whether anything was cut. The
+/// returned bool is the `stderr_truncated` signal a caller surfaces alongside
+/// the diagnostic — silently shortening the text without saying so would look
+/// like a complete log.
+fn bounded_diagnostic_tail(text: &str) -> (String, bool) {
+    if text.len() <= BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES {
+        return (text.to_string(), false);
+    }
+    let mut start = text.len() - BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let tail = match text[start..].find('\n') {
+        Some(newline) => &text[start + newline + 1..],
+        None => &text[start..],
+    };
+    (tail.to_string(), true)
+}
+
+/// Classify a builder script failure's stderr into a stable, machine-readable
+/// error code. Scoped to the `assemble app image` stage — the only stage that
+/// runs an author-declared dependency-install command — so an unrelated
+/// docker/export/mkfs failure never gets an npm-flavored code.
+fn classify_builder_script_error_code(stage: &str, redacted_tail: &str) -> &'static str {
+    if stage == "assemble app image" {
+        let lower = redacted_tail.to_ascii_lowercase();
+        if lower.contains("npm error") || lower.contains("npm err!") {
+            if lower.contains("eusage") {
+                return "npm_ci_lockfile_mismatch";
+            }
+            if lower.contains("enoent") {
+                return "npm_ci_not_found";
+            }
+            if lower.contains("ebadengine") {
+                return "npm_ci_engine_mismatch";
+            }
+            return "npm_ci_failed";
+        }
+        if lower.contains("ebadengine") {
+            return "npm_ci_engine_mismatch";
+        }
+        if lower.contains("yarn error") {
+            return "yarn_install_failed";
+        }
+        if lower.contains(" err_pnpm_") {
+            return "pnpm_install_failed";
+        }
+    }
+    "builder_script_failed"
 }
 
 /// Which runtime family a source tree belongs to.
@@ -5933,5 +6057,115 @@ readiness_probe = { http_get = "/health" }
         );
         assert_eq!(json["base_env"]["PORT"], spec.port.to_string());
         assert_eq!(json["bindings_env"]["OPENAI_API_KEY"], "openai_api_key");
+    }
+
+    // --- builder script failure diagnostics (ato-api#443 §5) -------------------
+
+    #[test]
+    fn builder_script_failure_classifies_npm_ci_lockfile_mismatch() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error code EUSAGE' >&2; echo 'npm error EUSAGE lockfile not in sync' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("assemble app image failed: npm_ci_lockfile_mismatch, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_classifies_generic_npm_ci_failure() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error could not resolve dependency' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.starts_with("assemble app image failed: npm_ci_failed, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_does_not_npm_classify_unrelated_stages() {
+        // Only the stage that actually runs a manifest-derived install
+        // command gets an npm-flavored code; a docker/export failure that
+        // happens to mention "npm" in passing must not be mislabeled.
+        let error =
+            run_builder_script("export guest rootfs", "echo 'npm error' >&2; exit 1", &[])
+                .unwrap_err();
+        assert!(
+            error.starts_with("export guest rootfs failed: builder_script_failed, exit 1"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_an_authorization_header() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error request failed' >&2; echo 'Authorization: Bearer sk-live-secret-value' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(!error.contains("sk-live-secret-value"), "leaked: {error}");
+        assert!(error.contains("[REDACTED LINE"), "missing redaction: {error}");
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_a_credentialed_registry_url() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error request to https://npm_token:s3cr3t-value@registry.npmjs.org/pkg failed' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(!error.contains("s3cr3t-value"), "leaked: {error}");
+        assert!(error.contains("[REDACTED LINE"), "missing redaction: {error}");
+    }
+
+    #[test]
+    fn builder_script_failure_redacts_an_npmrc_auth_token_line() {
+        let error = run_builder_script(
+            "assemble app image",
+            "echo 'npm error' >&2; echo '_authToken=deadbeefdeadbeefdeadbeef' >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(!error.contains("deadbeefdeadbeefdeadbeef"), "leaked: {error}");
+    }
+
+    #[test]
+    fn builder_script_failure_truncates_long_stderr_with_an_explicit_marker() {
+        // A single stderr line well past the diagnostic bound: the tail must
+        // be cut and the message must SAY it was truncated rather than
+        // silently shortening the output.
+        let error = run_builder_script(
+            "assemble app image",
+            "echo -n 'npm error ' >&2; head -c 20000 /dev/zero | tr '\\0' 'x' >&2; echo >&2; exit 1",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("(stderr truncated)"),
+            "missing truncation marker: {error}"
+        );
+        assert!(
+            error.len() < 20000,
+            "diagnostic was not bounded: {} bytes",
+            error.len()
+        );
+    }
+
+    #[test]
+    fn builder_script_failure_does_not_truncate_short_stderr() {
+        let error =
+            run_builder_script("assemble app image", "echo 'npm error short' >&2; exit 1", &[])
+                .unwrap_err();
+        assert!(!error.contains("(stderr truncated)"), "false positive: {error}");
+        assert!(error.contains("npm error short"));
     }
 }
