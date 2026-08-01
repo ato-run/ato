@@ -961,25 +961,28 @@ pub fn infer_authoring_intent(
     if source_root.join("deno.json").is_file() {
         return infer_deno_fresh_intent(source_root);
     }
+    // A `package.json` marks a package-managed application regardless of
+    // whether a root `index.html` also exists (many bundler-served apps,
+    // including swagger-editor, ship one as their dev-server template). It
+    // must never be routed into the dependency-free static-file path below —
+    // that would silently skip dependency install and the app's own start
+    // script (ato-api#443).
+    if source_root.join("package.json").is_file() {
+        return infer_package_managed_intent(source_root);
+    }
     if !source_root.join("index.html").is_file() {
         return Err(
-            "source inference requires either deno.json with a plain Fresh start task or a root index.html"
+            "source inference requires deno.json with a plain Fresh start task, package.json for a package-managed application, or a root index.html for a dependency-free static application"
                 .to_string(),
         );
     }
-    let (argv, required_tool) = if source_root.join("package.json").is_file() {
-        (
-            vec![
-                "node".to_string(),
-                "--input-type=module".to_string(),
-                "-e".to_string(),
-                NODE_STATIC_SERVER.to_string(),
-            ],
-            "node",
-        )
-    } else {
-        (
-            vec![
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
                 "python3".to_string(),
                 "-m".to_string(),
                 "http.server".to_string(),
@@ -987,19 +990,9 @@ pub fn infer_authoring_intent(
                 "--bind".to_string(),
                 "0.0.0.0".to_string(),
             ],
-            "python3",
-        )
-    };
-    normalize_program_intent(ProgramIntentDraftV1 {
-        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
-        origin: ProgramIntentOrigin::Inference,
-        toolchains: Vec::new(),
-        build_steps: Vec::new(),
-        launch: ProgramCommandDraftV1::Argv {
-            argv,
             cwd: WorkspacePathV1::root(),
             requested_environment: Vec::new(),
-            required_tools: vec![required_tool.to_string()],
+            required_tools: vec!["python3".to_string()],
         },
         readiness: ReadinessIntentV1::Http {
             port: 8000,
@@ -1013,10 +1006,136 @@ pub fn infer_authoring_intent(
     .map_err(|error| error.to_string())
 }
 
-/// Dependency-free static server for repositories already identified as Node
-/// projects. The path checks keep request resolution inside the materialized
-/// source root, including after following repository-internal symlinks.
-const NODE_STATIC_SERVER: &str = r#"import{createServer}from"node:http";import{readFile,realpath,stat}from"node:fs/promises";import{extname,relative,resolve,sep}from"node:path";const root=await realpath(".");const inside=p=>{const r=relative(root,p);return r===""||r!==".."&&!r.startsWith(".."+sep)};const types={".css":"text/css; charset=utf-8",".gif":"image/gif",".html":"text/html; charset=utf-8",".ico":"image/x-icon",".jpeg":"image/jpeg",".jpg":"image/jpeg",".js":"text/javascript; charset=utf-8",".json":"application/json; charset=utf-8",".mjs":"text/javascript; charset=utf-8",".png":"image/png",".svg":"image/svg+xml",".wasm":"application/wasm",".webmanifest":"application/manifest+json; charset=utf-8",".webp":"image/webp",".wav":"audio/wav"};createServer(async(req,res)=>{try{if(req.method!=="GET"&&req.method!=="HEAD"){res.writeHead(405,{Allow:"GET, HEAD"}).end();return}if(!req.url||req.url.length>4096){res.writeHead(414).end();return}const url=new URL(req.url,"http://localhost");const pathname=decodeURIComponent(url.pathname);if(pathname.includes("\0")||pathname.includes("\\")){res.writeHead(400).end();return}let file=resolve(root,"."+pathname);if(!inside(file)){res.writeHead(403).end();return}if((await stat(file)).isDirectory())file=resolve(file,"index.html");file=await realpath(file);if(!inside(file)||(await stat(file)).isFile()===false){res.writeHead(403).end();return}const body=await readFile(file);res.writeHead(200,{"Content-Type":types[extname(file).toLowerCase()]??"application/octet-stream","Content-Length":body.length,"X-Content-Type-Options":"nosniff"});res.end(req.method==="HEAD"?undefined:body)}catch{res.writeHead(404).end()}}).listen(8000,"0.0.0.0");"#;
+/// Infer a launch command for a package-managed (`package.json`-carrying)
+/// application.
+///
+/// Dependency install itself is decided independently, from filesystem
+/// evidence, by the v1 build lane (`rootfs_builder::base_image_and_install`)
+/// — this function only has to choose how the app is *started* once installed.
+/// It only auto-infers a launch command when it can be confident the app will
+/// actually bind where Ato expects: today that means `scripts.start` or
+/// `scripts.dev` resolves, with no shell syntax, to a plain invocation whose
+/// last token is `vite` — a CLI with well-known `--host`/`--port` flags that
+/// can be appended safely as trailing argv (via the package manager's `--`
+/// argument-forwarding convention) without guessing whether the underlying
+/// framework even reads a port argument. Any other shape (missing script,
+/// shell operators, an unrecognized dev-server binary, an ambiguous set of
+/// lockfiles) fails closed to manual setup rather than assume.
+fn infer_package_managed_intent(
+    source_root: &Path,
+) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    let package_json: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(source_root.join("package.json"))
+            .map_err(|error| format!("read package.json: {error}"))?,
+    )
+    .map_err(|error| format!("parse package.json: {error}"))?;
+
+    let package_manager = resolve_launch_package_manager(source_root, &package_json)?;
+
+    let (script_name, script_command) = package_json
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|scripts| {
+            ["start", "dev"].iter().find_map(|name| {
+                scripts
+                    .get(*name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|command| (*name, command))
+            })
+        })
+        .ok_or_else(|| {
+            "package-managed inference requires scripts.start or scripts.dev in package.json"
+                .to_string()
+        })?;
+
+    let script_argv = parse_plain_task_argv(script_command)?;
+    if script_argv.last().map(String::as_str) != Some("vite") {
+        return Err(format!(
+            "package-managed inference cannot guarantee `{package_manager} run {script_name}` ({script_command:?}) binds to Ato's assigned host/port — manual setup required"
+        ));
+    }
+
+    normalize_program_intent(ProgramIntentDraftV1 {
+        schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
+        origin: ProgramIntentOrigin::Inference,
+        toolchains: Vec::new(),
+        build_steps: Vec::new(),
+        launch: ProgramCommandDraftV1::Argv {
+            argv: vec![
+                package_manager.to_string(),
+                "run".to_string(),
+                script_name.to_string(),
+                "--".to_string(),
+                "--host".to_string(),
+                "0.0.0.0".to_string(),
+                "--port".to_string(),
+                "8000".to_string(),
+            ],
+            cwd: WorkspacePathV1::root(),
+            requested_environment: Vec::new(),
+            required_tools: vec![package_manager.to_string()],
+        },
+        readiness: ReadinessIntentV1::Http {
+            port: 8000,
+            path: "/".to_string(),
+            timeout_seconds: 60,
+        },
+        build_output_roots: Vec::new(),
+        bindings: Vec::new(),
+        unresolved: Vec::new(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Decide which package manager launches the app, preferring the explicit
+/// Corepack `packageManager` declaration and otherwise inferring from
+/// whichever single lockfile is present. No lockfile defaults to `npm`
+/// (always available wherever `package.json` is honored); more than one
+/// *distinct* package manager's lockfile is ambiguous and fails closed rather
+/// than guessing which one is authoritative.
+fn resolve_launch_package_manager(
+    source_root: &Path,
+    package_json: &serde_json::Value,
+) -> Result<&'static str, String> {
+    if let Some(declared) = package_json
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+    {
+        let name = declared.split('@').next().unwrap_or_default();
+        return match name {
+            "npm" => Ok("npm"),
+            "yarn" => Ok("yarn"),
+            "pnpm" => Ok("pnpm"),
+            "bun" => Ok("bun"),
+            other => Err(format!(
+                "unsupported packageManager `{other}` declared in package.json"
+            )),
+        };
+    }
+    const LOCKFILES: &[(&str, &str)] = &[
+        ("package-lock.json", "npm"),
+        ("npm-shrinkwrap.json", "npm"),
+        ("yarn.lock", "yarn"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("bun.lock", "bun"),
+        ("bun.lockb", "bun"),
+    ];
+    let mut found: Vec<&str> = LOCKFILES
+        .iter()
+        .filter(|(file, _)| source_root.join(file).is_file())
+        .map(|(_, manager)| *manager)
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    match found.as_slice() {
+        [] => Ok("npm"),
+        [single] => Ok(single),
+        multiple => Err(format!(
+            "ambiguous package manager: multiple lockfiles disagree ({})",
+            multiple.join(", ")
+        )),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1554,28 +1673,103 @@ mod tests {
     }
 
     #[test]
-    fn node_static_repository_uses_the_materialized_node_runtime() {
+    fn package_managed_app_with_index_html_is_not_misclassified_as_static() {
+        // Regression for ato-api#443: a package.json-carrying repository must
+        // never fall into the dependency-free static-file path just because
+        // it also has a root index.html (swagger-editor ships one as its
+        // Vite dev-server template).
         let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
-        std::fs::write(root.path().join("package.json"), r#"{"name":"static-app"}"#)
-            .expect("package");
+        std::fs::write(root.path().join("index.html"), "<div id=\"root\"></div>")
+            .expect("fixture");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"swagger-editor","scripts":{"start":"cross-env DISABLE_ESLINT_PLUGIN=false vite"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
 
         let normalized = infer_authoring_intent(root.path()).expect("intent");
 
         assert_eq!(
-            normalized.intent.launch.argv[..3],
-            ["node", "--input-type=module", "-e"]
+            normalized.intent.launch.argv,
+            [
+                "npm", "run", "start", "--", "--host", "0.0.0.0", "--port", "8000",
+            ]
         );
-        assert_eq!(normalized.intent.launch.required_tools, ["node"]);
-        assert!(
-            normalized.intent.launch.argv[3].contains("createServer"),
-            "the inferred command embeds a dependency-free static server"
-        );
+        assert_eq!(normalized.intent.launch.required_tools, ["npm"]);
         let manifest = render_inferred_capsule_toml(&normalized).expect("manifest");
         let parsed =
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.seal_at.expect("seal_at").command[0], "node");
+        assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn package_managed_inference_prefers_declared_package_manager() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","packageManager":"pnpm@9.1.0","scripts":{"dev":"vite"}}"#,
+        )
+        .expect("package");
+        // A stray npm lockfile must not win over the explicit declaration.
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
+
+        let normalized = infer_authoring_intent(root.path()).expect("intent");
+
+        assert_eq!(normalized.intent.launch.argv[0], "pnpm");
+        assert_eq!(normalized.intent.launch.argv[2], "dev");
+        assert_eq!(normalized.intent.launch.required_tools, ["pnpm"]);
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_without_a_start_or_dev_script() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("package.json"), r#"{"name":"static-app"}"#)
+            .expect("package");
+
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_for_an_unrecognized_dev_server() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"node server.js"}}"#,
+        )
+        .expect("package");
+
+        let error = infer_authoring_intent(root.path()).expect_err("must fail closed");
+        assert!(error.contains("manual setup required"));
+    }
+
+    #[test]
+    fn package_managed_inference_refuses_shell_task_syntax() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"PORT=8000 && vite"}}"#,
+        )
+        .expect("package");
+
+        assert!(infer_authoring_intent(root.path()).is_err());
+    }
+
+    #[test]
+    fn package_managed_inference_fails_closed_on_ambiguous_lockfiles() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"vite"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("npm lockfile");
+        std::fs::write(root.path().join("yarn.lock"), "").expect("yarn lockfile");
+
+        let error = infer_authoring_intent(root.path()).expect_err("must fail closed");
+        assert!(error.contains("ambiguous package manager"));
     }
 
     #[test]
