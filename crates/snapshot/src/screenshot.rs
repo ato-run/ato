@@ -104,8 +104,12 @@ const DEFAULT_SANDBOX_UID: u32 = 61234;
 #[cfg(unix)]
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Let client-rendered applications hydrate and paint after the initial
-/// document load. This remains strictly below [`CAPTURE_TIMEOUT`], so a page
-/// that never settles is still killed by the outer wall-clock bound.
+/// document load. This is a wall-clock upper bound passed to Chrome's
+/// `--timeout`; `--virtual-time-budget` must not be used here because apps with
+/// continuously scheduled timers/workers (Swagger Editor, Monaco, etc.) may
+/// never exhaust virtual time and leave Chrome running until the outer bound.
+/// This remains strictly below [`CAPTURE_TIMEOUT`], so a page that never
+/// settles is still killed by the outer wall-clock bound.
 const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(15);
 
 /// Reject a captured PNG bigger than this many raw bytes. The ato-api ack
@@ -437,10 +441,7 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
     cmd.arg("--headless=new")
         .arg(format!("--screenshot={}", out_path.display()))
         .arg("--window-size=1280,800")
-        .arg(format!(
-            "--virtual-time-budget={}",
-            RENDER_SETTLE_BUDGET.as_millis()
-        ))
+        .arg(render_settle_arg())
         .arg("--run-all-compositor-stages-before-draw")
         // `--no-sandbox` is RETAINED deliberately (see module docs). Dropping it
         // needs Chromium's in-process sandbox to initialize as a NON-root uid,
@@ -506,6 +507,11 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
             Err(e) => return Err(format!("wait {bin}: {e}")),
         }
     }
+}
+
+#[cfg(unix)]
+fn render_settle_arg() -> String {
+    format!("--timeout={}", RENDER_SETTLE_BUDGET.as_millis())
 }
 
 /// Load `path`, enforce the size cap + PNG-magic sanity check, and base64
@@ -668,5 +674,6 @@ mod tests {
     fn client_render_budget_remains_below_the_capture_timeout() {
         assert!(RENDER_SETTLE_BUDGET < CAPTURE_TIMEOUT);
         assert_eq!(RENDER_SETTLE_BUDGET.as_millis(), 15_000);
+        assert_eq!(render_settle_arg(), "--timeout=15000");
     }
 }
