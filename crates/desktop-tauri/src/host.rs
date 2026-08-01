@@ -21,6 +21,7 @@ use runner::{
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::{
     MAIN_WINDOW_LABEL, build_home_window, close_app_window, focus_app_window, open_app_window,
@@ -112,6 +113,7 @@ impl DesktopHost {
     }
 
     fn library_list(&self) -> Result<DesktopLibrarySnapshot, HostControlError> {
+        self.sweep_retained()?;
         let host = self.installed_apps();
         Ok(InstalledAppsClient::new(&host).list()?)
     }
@@ -189,14 +191,47 @@ impl DesktopHost {
         Ok(())
     }
 
+    fn activate_session(&self, session_id: &str) -> Result<(), HostControlError> {
+        self.retained_sessions
+            .lock()
+            .map_err(|_| HostControlError::Poisoned)?
+            .take_by_session_id(session_id);
+        Ok(())
+    }
+
+    pub(crate) fn sweep_retained(&self) -> Result<Vec<String>, HostControlError> {
+        let expired = self
+            .retained_sessions
+            .lock()
+            .map_err(|_| HostControlError::Poisoned)?
+            .evict_expired(Instant::now());
+        let mut stopped = Vec::with_capacity(expired.len());
+        for (session, _) in expired {
+            let session_id = session.session_id;
+            self.session_stop(&session_id)?;
+            stopped.push(session_id);
+        }
+        Ok(stopped)
+    }
+
     fn start_install(&self, source: InstallSource) -> Result<DesktopOperation, HostControlError> {
-        if let InstallSource::Local(path) = &source
-            && !path.exists()
-        {
-            return Err(HostControlError::InvalidInstallSource(format!(
-                "local path does not exist: {}",
-                path.display()
-            )));
+        match &source {
+            InstallSource::Local(path) if !path.is_dir() => {
+                return Err(HostControlError::InvalidInstallSource(format!(
+                    "local folder does not exist: {}",
+                    path.display()
+                )));
+            }
+            InstallSource::Capsule(path)
+                if !path.is_file()
+                    || path.extension().and_then(|value| value.to_str()) != Some("capsule") =>
+            {
+                return Err(HostControlError::InvalidInstallSource(format!(
+                    "local capsule file is missing or has the wrong extension: {}",
+                    path.display()
+                )));
+            }
+            _ => {}
         }
         let operation_id = format!(
             "op-{}-{}",
@@ -353,6 +388,8 @@ pub enum HostControlError {
     InvalidInstallSource(String),
     #[error("invalid repair action: {0}")]
     InvalidRepairAction(String),
+    #[error("native confirmation was declined")]
+    ConfirmationDeclined,
     #[error("unknown operation: {0}")]
     UnknownOperation(String),
     #[error("intent verb '{0}' is not yet supported by the Tauri shell")]
@@ -434,8 +471,26 @@ pub fn library_install(
         "store" if !source.trim().is_empty() => InstallSource::Store(source),
         "github" if !source.trim().is_empty() => InstallSource::GitHub(source),
         "local" if !source.trim().is_empty() => InstallSource::Local(PathBuf::from(source)),
+        "capsule" if !source.trim().is_empty() => InstallSource::Capsule(PathBuf::from(source)),
         _ => return Err("invalid install source kind or empty source".to_string()),
     };
+    let approved = app
+        .dialog()
+        .message(format!(
+            "Install this capsule on this device?\n\n{}",
+            install_source_label(&source)
+        ))
+        .title("Confirm capsule install")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Review and install".into(),
+            "Cancel".into(),
+        ))
+        .parent(&window)
+        .blocking_show();
+    if !approved {
+        return Err(HostControlError::ConfirmationDeclined.to_string());
+    }
     let operation = host
         .start_install(source)
         .map_err(|error| error.to_string())?;
@@ -457,6 +512,8 @@ pub fn operation_status(
     emit(&app, runner::events::OPERATION_PROGRESS, &operation)?;
     if operation.status == DesktopOperationStatus::Succeeded {
         emit(&app, runner::events::LIBRARY_CHANGED, &operation)?;
+    } else if operation.status == DesktopOperationStatus::Failed {
+        emit(&app, runner::events::OPERATION_FAILED, &operation)?;
     }
     Ok(operation)
 }
@@ -516,6 +573,29 @@ pub fn library_remove(
     purge_state: bool,
 ) -> Result<InstalledRemoveResult, String> {
     require_main_window(&window)?;
+    let action = if purge_state {
+        "Remove the app and permanently delete its persistent data?"
+    } else {
+        "Remove the app from this device? Persistent data will be preserved."
+    };
+    let approved = app
+        .dialog()
+        .message(action)
+        .title("Confirm app removal")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            if purge_state {
+                "Remove and delete data".into()
+            } else {
+                "Remove".into()
+            },
+            "Cancel".into(),
+        ))
+        .parent(&window)
+        .blocking_show();
+    if !approved {
+        return Err(HostControlError::ConfirmationDeclined.to_string());
+    }
     let value = host
         .library_remove(&install_profile_key, purge_state)
         .map_err(|error| error.to_string())?;
@@ -572,6 +652,8 @@ pub fn session_launch(
                 session.session_id
             )
         })?;
+        host.activate_session(&session.session_id)
+            .map_err(|error| error.to_string())?;
         let value = serde_json::json!({
             "schema_version": "ccp/v1",
             "package_id": "ato/ato-desktop",
@@ -614,10 +696,13 @@ pub fn session_launch(
 pub fn session_focus(
     window: WebviewWindow,
     app: AppHandle,
+    host: State<'_, DesktopHost>,
     session_id: String,
 ) -> Result<(), String> {
     require_main_window(&window)?;
     focus_app_window(&app, &session_id)?;
+    host.activate_session(&session_id)
+        .map_err(|error| error.to_string())?;
     emit(&app, runner::events::SESSION_CHANGED, &session_id)
 }
 
@@ -664,6 +749,15 @@ pub fn open_home(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
 
 fn emit<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: &T) -> Result<(), String> {
     app.emit(event, payload).map_err(|error| error.to_string())
+}
+
+fn install_source_label(source: &InstallSource) -> String {
+    match source {
+        InstallSource::Store(value) => format!("Store: {value}"),
+        InstallSource::GitHub(value) => format!("GitHub: {value}"),
+        InstallSource::Local(path) => format!("Local folder: {}", path.display()),
+        InstallSource::Capsule(path) => format!("Capsule file: {}", path.display()),
+    }
 }
 
 fn native_host() -> NativeHost {

@@ -7,6 +7,7 @@ mod host;
 mod proxy;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::webview::NewWindowResponse;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
@@ -55,10 +56,37 @@ pub fn run() {
         )
         .setup(|app| {
             build_main_window(app.handle())?;
+            spawn_retention_maintenance(app.handle());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("error while running the Ato desktop shell");
+}
+
+fn spawn_retention_maintenance(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::Builder::new()
+        .name("ato-retained-session-maintenance".to_owned())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(30));
+            let host = app.state::<host::DesktopHost>();
+            match host.sweep_retained() {
+                Ok(stopped) if !stopped.is_empty() => {
+                    let _ = app.emit(runner::events::SESSION_CHANGED, stopped);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ = app.emit(
+                        runner::events::OPERATION_FAILED,
+                        serde_json::json!({
+                            "kind": "retained_session_cleanup",
+                            "message": error.to_string(),
+                        }),
+                    );
+                }
+            }
+        })
+        .expect("retained-session maintenance thread starts");
 }
 
 fn build_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
