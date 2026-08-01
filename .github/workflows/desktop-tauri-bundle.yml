@@ -1,0 +1,76 @@
+name: Desktop Tauri Bundle
+
+on:
+  pull_request:
+    paths:
+      - "crates/desktop-tauri/**"
+      - "crates/runner/**"
+      - "crates/protocol/**"
+      - ".github/workflows/desktop-tauri-bundle.yml"
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    name: ${{ matrix.os }} bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            ato: ato
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            ato: ato.exe
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            ato: ato
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ato
+      - uses: actions/checkout@v4
+        with:
+          repository: ato-run/ato-pwa
+          ref: ${{ github.head_ref || github.ref_name }}
+          path: ato-pwa
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ato-pwa/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux bundle dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file pkg-config wget \
+            libayatana-appindicator3-dev libdbus-1-dev librsvg2-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev patchelf
+      - name: Install frontend dependencies
+        working-directory: ato-pwa
+        run: npm ci --ignore-scripts
+      - name: Build bundled runtime sidecars
+        working-directory: ato
+        run: cargo build --release -p cli -p netd --target ${{ matrix.target }}
+      - name: Stage Tauri sidecars
+        shell: bash
+        run: |
+          mkdir -p ato/crates/desktop-tauri/binaries
+          cp "ato/target/${{ matrix.target }}/release/${{ matrix.ato }}" "ato/crates/desktop-tauri/binaries/ato-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
+          cp "ato/target/${{ matrix.target }}/release/ato-netd${{ runner.os == 'Windows' && '.exe' || '' }}" "ato/crates/desktop-tauri/binaries/ato-netd-${{ matrix.target }}${{ runner.os == 'Windows' && '.exe' || '' }}"
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build native bundle
+        working-directory: ato/crates/desktop-tauri
+        env:
+          ATO_DESKTOP_PWA_DIR: ${{ github.workspace }}/ato-pwa
+        run: cargo tauri build --target ${{ matrix.target }} --config '{"bundle":{"externalBin":["binaries/ato","binaries/ato-netd"]}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ato-desktop-tauri-${{ matrix.target }}
+          path: ato/crates/desktop-tauri/target/${{ matrix.target }}/release/bundle/**
+          if-no-files-found: error
