@@ -515,7 +515,7 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
         let target = cdp.request(
             1,
             "Target.createTarget",
-            serde_json::json!({"url": url, "width": 1280, "height": 800}),
+            serde_json::json!({"url": url}),
             None,
         )?;
         let target_id = target
