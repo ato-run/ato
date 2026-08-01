@@ -1679,8 +1679,7 @@ mod tests {
         // it also has a root index.html (swagger-editor ships one as its
         // Vite dev-server template).
         let root = tempfile::tempdir().expect("tempdir");
-        std::fs::write(root.path().join("index.html"), "<div id=\"root\"></div>")
-            .expect("fixture");
+        std::fs::write(root.path().join("index.html"), "<div id=\"root\"></div>").expect("fixture");
         std::fs::write(
             root.path().join("package.json"),
             r#"{"name":"swagger-editor","scripts":{"start":"cross-env DISABLE_ESLINT_PLUGIN=false vite"}}"#,
