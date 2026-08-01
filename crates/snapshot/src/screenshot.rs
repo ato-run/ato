@@ -60,7 +60,13 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 #[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
 use std::net::IpAddr;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
@@ -99,18 +105,20 @@ const DEFAULT_SANDBOX_UID: u32 = 61234;
 /// navigate + screenshot). A restore-time capture runs while the builder is
 /// still under heavy rootfs/CAS I/O, and large JavaScript apps can take longer
 /// than eight seconds merely to start Chromium and paint their first frame.
-/// Thirty seconds remains well inside the authoring lease while allowing that
+/// Sixty seconds remains well inside the authoring lease while allowing that
 /// required post-restore evidence to be produced reliably.
 #[cfg(unix)]
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Let client-rendered applications hydrate and paint after the initial
-/// document load. This is a wall-clock upper bound passed to Chrome's
-/// `--timeout`; `--virtual-time-budget` must not be used here because apps with
-/// continuously scheduled timers/workers (Swagger Editor, Monaco, etc.) may
-/// never exhaust virtual time and leave Chrome running until the outer bound.
-/// This remains strictly below [`CAPTURE_TIMEOUT`], so a page that never
-/// settles is still killed by the outer wall-clock bound.
-const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(15);
+/// document load. Chrome's screenshot CLI does not wait for client rendering,
+/// while `--virtual-time-budget` may never finish for apps with continuously
+/// scheduled timers/workers (Swagger Editor, Monaco, etc.). Keep the same
+/// browser alive over its local DevTools pipe and capture after this bounded
+/// wall-clock delay instead. This remains strictly below [`CAPTURE_TIMEOUT`].
+const RENDER_SETTLE_BUDGET: Duration = Duration::from_secs(20);
+
+#[cfg(unix)]
+const MAX_CDP_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Reject a captured PNG bigger than this many raw bytes. The ato-api ack
 /// endpoint caps the base64 payload at 700_000 chars (~525_000 raw bytes) and
@@ -422,14 +430,10 @@ fn env_bin(var: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Run `<bin> --headless=new --screenshot=<out_path> ... <url>` as unprivileged
-/// `uid`, bounded by `CAPTURE_TIMEOUT`. Privilege is dropped to `uid` in a
-/// `pre_exec` hook BEFORE the browser image runs; if the drop fails the browser
-/// is never exec'd (so it can never run as root). No existing "command with a
-/// timeout" helper was found in the workspace (checked
-/// `docker_import`/`snapshot-builder`), so this polls `Child::try_wait` — the
-/// same bounded-wait shape already used for the guest health probe
-/// (`wait_health_until`) — rather than pulling in a new dependency.
+/// Run Chrome as unprivileged `uid`, keep it alive over the local DevTools pipe,
+/// and capture only after the client-render budget. The pipe is inherited as
+/// Chrome's fixed fd 3 (commands) and fd 4 (responses); it does not widen the
+/// browser's egress cage or expose a builder-host TCP listener.
 #[cfg(unix)]
 fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), String> {
     let dir = out_path.parent().unwrap_or_else(|| Path::new("."));
@@ -437,11 +441,17 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
     // access to any real profile.
     let profile = dir.join("profile");
 
+    let (mut command_parent, command_child) =
+        UnixStream::pair().map_err(|e| format!("create DevTools command pipe: {e}"))?;
+    let (response_parent, response_child) =
+        UnixStream::pair().map_err(|e| format!("create DevTools response pipe: {e}"))?;
+    let command_child_fd = command_child.as_raw_fd();
+    let response_child_fd = response_child.as_raw_fd();
+
     let mut cmd = Command::new(bin);
     cmd.arg("--headless=new")
-        .arg(format!("--screenshot={}", out_path.display()))
+        .arg("--remote-debugging-pipe")
         .arg("--window-size=1280,800")
-        .arg(render_settle_arg())
         .arg("--run-all-compositor-stages-before-draw")
         // `--no-sandbox` is RETAINED deliberately (see module docs). Dropping it
         // needs Chromium's in-process sandbox to initialize as a NON-root uid,
@@ -461,7 +471,7 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
         .arg("--no-first-run") // skip first-run setup/network
         .arg("--no-default-browser-check")
         .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(url)
+        .arg("about:blank")
         // Keep the browser out of root's HOME (which `uid` cannot read anyway).
         .env("HOME", dir)
         .stdin(Stdio::null())
@@ -476,6 +486,12 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
     // non-root you can no longer setgid).
     unsafe {
         cmd.pre_exec(move || {
+            if libc::dup2(command_child_fd, 3) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::dup2(response_child_fd, 4) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             if libc::setgroups(0, std::ptr::null()) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -490,28 +506,155 @@ fn run_capture(bin: &str, out_path: &Path, url: &str, uid: u32) -> Result<(), St
     }
 
     let mut child = cmd.spawn().map_err(|e| format!("spawn {bin}: {e}"))?;
+    drop(command_child);
+    drop(response_child);
 
-    let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => return Err(format!("{bin} exited with {status}")),
-            Ok(None) => {
-                if start.elapsed() >= CAPTURE_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("{bin} timed out after {CAPTURE_TIMEOUT:?}"));
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(format!("wait {bin}: {e}")),
-        }
-    }
+    let deadline = Instant::now() + CAPTURE_TIMEOUT;
+    let result = (|| {
+        let mut cdp = CdpPipe::new(&mut command_parent, response_parent, deadline);
+        let target = cdp.request(
+            1,
+            "Target.createTarget",
+            serde_json::json!({"url": url, "width": 1280, "height": 800}),
+            None,
+        )?;
+        let target_id = target
+            .get("targetId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "DevTools createTarget omitted targetId".to_string())?;
+        let attached = cdp.request(
+            2,
+            "Target.attachToTarget",
+            serde_json::json!({"targetId": target_id, "flatten": true}),
+            None,
+        )?;
+        let session_id = attached
+            .get("sessionId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "DevTools attachToTarget omitted sessionId".to_string())?
+            .to_string();
+        cdp.request(
+            3,
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({
+                "width": 1280,
+                "height": 800,
+                "deviceScaleFactor": 1,
+                "mobile": false
+            }),
+            Some(&session_id),
+        )?;
+        cdp.request(4, "Page.enable", serde_json::json!({}), Some(&session_id))?;
+        std::thread::sleep(RENDER_SETTLE_BUDGET);
+        let captured = cdp.request(
+            5,
+            "Page.captureScreenshot",
+            serde_json::json!({
+                "format": "png",
+                "fromSurface": true,
+                "captureBeyondViewport": false
+            }),
+            Some(&session_id),
+        )?;
+        let encoded = captured
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "DevTools captureScreenshot omitted PNG data".to_string())?;
+        let png = BASE64
+            .decode(encoded)
+            .map_err(|e| format!("decode DevTools PNG: {e}"))?;
+        std::fs::write(out_path, png).map_err(|e| format!("write screenshot: {e}"))
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 #[cfg(unix)]
-fn render_settle_arg() -> String {
-    format!("--timeout={}", RENDER_SETTLE_BUDGET.as_millis())
+struct CdpPipe<'a> {
+    writer: &'a mut UnixStream,
+    reader: UnixStream,
+    pending: Vec<u8>,
+    deadline: Instant,
+}
+
+#[cfg(unix)]
+impl<'a> CdpPipe<'a> {
+    fn new(writer: &'a mut UnixStream, reader: UnixStream, deadline: Instant) -> Self {
+        Self {
+            writer,
+            reader,
+            pending: Vec::new(),
+            deadline,
+        }
+    }
+
+    fn request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+        session_id: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        let mut message = serde_json::json!({"id": id, "method": method, "params": params});
+        if let Some(session_id) = session_id {
+            message["sessionId"] = serde_json::Value::String(session_id.to_string());
+        }
+        let bytes = serde_json::to_vec(&message)
+            .map_err(|e| format!("encode DevTools command {method}: {e}"))?;
+        self.writer
+            .write_all(&bytes)
+            .and_then(|_| self.writer.write_all(&[0]))
+            .and_then(|_| self.writer.flush())
+            .map_err(|e| format!("write DevTools command {method}: {e}"))?;
+        loop {
+            let response = self.read_message()?;
+            if response.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = response.get("error") {
+                return Err(format!("DevTools command {method} failed: {error}"));
+            }
+            return Ok(response
+                .get("result")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    fn read_message(&mut self) -> Result<serde_json::Value, String> {
+        loop {
+            if let Some(end) = self.pending.iter().position(|byte| *byte == 0) {
+                let message: Vec<u8> = self.pending.drain(..end).collect();
+                self.pending.drain(..1);
+                return serde_json::from_slice(&message)
+                    .map_err(|e| format!("decode DevTools response: {e}"));
+            }
+            let remaining = self
+                .deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| format!("DevTools capture timed out after {CAPTURE_TIMEOUT:?}"))?;
+            self.reader
+                .set_read_timeout(Some(remaining.min(Duration::from_secs(1))))
+                .map_err(|e| format!("set DevTools read timeout: {e}"))?;
+            let mut buf = [0u8; 8192];
+            match self.reader.read(&mut buf) {
+                Ok(0) => return Err("Chrome closed the DevTools response pipe".to_string()),
+                Ok(read) => {
+                    self.pending.extend_from_slice(&buf[..read]);
+                    if self.pending.len() > MAX_CDP_MESSAGE_BYTES {
+                        return Err("DevTools response exceeded size limit".to_string());
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(format!("read DevTools response: {error}")),
+            }
+        }
+    }
 }
 
 /// Load `path`, enforce the size cap + PNG-magic sanity check, and base64
@@ -673,7 +816,43 @@ mod tests {
     #[test]
     fn client_render_budget_remains_below_the_capture_timeout() {
         assert!(RENDER_SETTLE_BUDGET < CAPTURE_TIMEOUT);
-        assert_eq!(RENDER_SETTLE_BUDGET.as_millis(), 15_000);
-        assert_eq!(render_settle_arg(), "--timeout=15000");
+        assert_eq!(RENDER_SETTLE_BUDGET.as_millis(), 20_000);
+        assert_eq!(CAPTURE_TIMEOUT.as_millis(), 60_000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn devtools_pipe_ignores_events_and_matches_the_command_id() {
+        let (mut command_parent, mut command_child) = UnixStream::pair().unwrap();
+        let (response_parent, mut response_child) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut request = Vec::new();
+            loop {
+                let mut byte = [0u8; 1];
+                command_child.read_exact(&mut byte).unwrap();
+                if byte[0] == 0 {
+                    break;
+                }
+                request.push(byte[0]);
+            }
+            let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+            assert_eq!(request["id"], 7);
+            response_child
+                .write_all(b"{\"method\":\"Page.loadEventFired\"}\0")
+                .unwrap();
+            response_child
+                .write_all(b"{\"id\":7,\"result\":{\"data\":\"png\"}}\0")
+                .unwrap();
+        });
+        let mut pipe = CdpPipe::new(
+            &mut command_parent,
+            response_parent,
+            Instant::now() + Duration::from_secs(1),
+        );
+        let result = pipe
+            .request(7, "Page.captureScreenshot", serde_json::json!({}), None)
+            .unwrap();
+        assert_eq!(result["data"], "png");
+        server.join().unwrap();
     }
 }
