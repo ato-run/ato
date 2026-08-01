@@ -710,6 +710,23 @@ pub fn derive_build_spec_v1(
     if authored.is_empty() {
         return Err("[run] command is empty; there is no argv to launch".into());
     }
+    // The runtime (and therefore the base image and what got installed) comes
+    // from the PROBE — a fact about the resolved source root — while `[run]
+    // command` is author-declared and could name a toolchain the probe never
+    // saw, e.g. a manually authored `["npm", "start"]` over a source.root that
+    // does not actually carry a package.json (excluded by a subdir pick, or
+    // authored against the wrong tree). Left unchecked, the image builds
+    // successfully on a base with no npm installed and the mismatch only
+    // surfaces as a "command not found" at guest boot — refuse it here,
+    // before the Docker build spends anything on it (ato-api#443 §6).
+    if !launch_program_is_compatible_with_runtime(&authored[0], runtime) {
+        return Err(format!(
+            "[run] command launches `{}`, which is not available in the {runtime:?} runtime \
+             image resolved for this source root (its expected manifest — e.g. package.json \
+             for a Node launch — was not found there); refusing before the image is built",
+            authored[0]
+        ));
+    }
     // Each word is emitted single-quoted into the generated init, so a control
     // character could break out of the quoting or the heredoc delimiter. Reject
     // at derivation rather than escaping at emission (fail-closed).
@@ -1339,6 +1356,26 @@ pub(crate) fn detect_runtime_kind(
 /// dependency manifest implies. Both are RESOLVED values — the builder's
 /// choice, not the author's — which is why the Execution Contract records the
 /// base image by resolved digest rather than by the tag chosen here.
+/// Whether a launch program name is available in the base image a
+/// [`RuntimeKind`] resolves to. Used to catch a `[run] command` that names a
+/// toolchain the resolved source root's runtime classification does not
+/// provide — see the call site in `derive_build_spec_v1`. Programs with no
+/// runtime implication (a static binary, a shell script, `sh` itself, ...)
+/// are always compatible: there is nothing to cross-check.
+fn launch_program_is_compatible_with_runtime(program: &str, runtime: RuntimeKind) -> bool {
+    match program {
+        "node" | "npm" | "npx" | "yarn" | "pnpm" => runtime == RuntimeKind::Node,
+        "deno" => runtime == RuntimeKind::Deno,
+        // StaticWeb's base image is `python:3.11-slim` too (its dependency-free
+        // fallback launches via `python3 -m http.server`), so python is valid
+        // under either classification.
+        "python" | "python3" | "pip" | "pip3" => {
+            matches!(runtime, RuntimeKind::Python | RuntimeKind::StaticWeb)
+        }
+        _ => true,
+    }
+}
+
 pub(crate) fn base_image_and_install(
     runtime: RuntimeKind,
     probe: &SourceProbe,
@@ -3227,6 +3264,68 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert_eq!(npm.install_cmd.as_deref(), Some("npm ci"));
     }
 
+    /// ato-api#443 §6: a `[run] command` that launches `npm` over a source
+    /// root the probe did NOT classify as Node (e.g. `source.root` excluded
+    /// the package.json, or the manifest was authored against a different
+    /// tree) must be refused before the Docker build runs, not left to fail
+    /// as a "command not found" at guest boot.
+    #[test]
+    fn v1_refuses_an_npm_launch_command_when_the_source_root_has_no_package_json() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+
+        let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
+            .expect_err("must refuse before building");
+
+        assert!(error.contains("npm"), "{error}");
+        assert!(error.contains("Python"), "{error}");
+        assert!(error.contains("refusing before the image is built"), "{error}");
+    }
+
+    /// The mirror case: `[run] command` correctly matches what the probe
+    /// found, so the same manifest shape as above must still succeed once a
+    /// package.json is actually present.
+    #[test]
+    fn v1_accepts_an_npm_launch_command_when_the_source_root_has_a_package_json() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["npm", "start"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_package_json: true,
+                has_package_lock: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::Node);
+    }
+
+    /// The dependency-free static fallback launches via `python3` even though
+    /// it is classified `StaticWeb`, not `Python` — both share the
+    /// `python:3.11-slim` base image, so this must NOT be refused by the
+    /// cross-check above.
+    #[test]
+    fn v1_accepts_a_python3_launch_command_under_the_static_web_runtime() {
+        let manifest = V1_MINIMAL.replace(
+            r#"command = ["python3", "app.py"]"#,
+            r#"command = ["python3", "-m", "http.server", "8080", "--bind", "0.0.0.0"]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_index_html: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("derives");
+        assert_eq!(spec.runtime, RuntimeKind::StaticWeb);
+    }
+
     /// ato-api#443/#1221: `swagger-api/swagger-editor` pinned at
     /// `0409380aaa654604f8f681eee04e748f55b80b85` — `.nvmrc` declares `24.18`
     /// (no `engines` field). Reproduced live: this exact source, this exact
@@ -3604,6 +3703,51 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert!(
             !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
             "COPY . would ship the generated Dockerfile to the guest: {script}"
+        );
+    }
+
+    /// ato-api#443 §6: the ENTIRE projected source must land under the guest
+    /// `/app`, including when the repository's OWN top-level directory
+    /// happens to be named `src` — the same name the build context stages the
+    /// projection under (`$BUILD/src`). Runs the real `mkdir`/`cp -a` half of
+    /// `assemble_app_image_script_v1` (everything up to, but not including,
+    /// `docker build`) against an actual filesystem fixture, so this proves
+    /// the real copy behavior rather than re-asserting the script's text.
+    #[test]
+    fn a_repo_owned_src_subdirectory_survives_nested_under_the_staging_src_dir() {
+        let source_root = tempfile::tempdir().expect("source root");
+        std::fs::write(
+            source_root.path().join("package.json"),
+            r#"{"name":"app","scripts":{"start":"vite"}}"#,
+        )
+        .expect("package.json");
+        std::fs::write(source_root.path().join("package-lock.json"), "{}").expect("lockfile");
+        std::fs::write(source_root.path().join("index.html"), "<div></div>").expect("index");
+        std::fs::create_dir(source_root.path().join("src")).expect("repo src dir");
+        std::fs::write(source_root.path().join("src").join("index.js"), "// entry")
+            .expect("repo src file");
+
+        let build_dir = tempfile::tempdir().expect("build dir");
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(r#"set -euo pipefail; mkdir -p "$BUILD/src"; cp -a "$ATO_SRC/." "$BUILD/src/""#)
+            .env("ATO_SRC", source_root.path())
+            .env("BUILD", build_dir.path())
+            .status()
+            .expect("run the staging half of the generated script");
+        assert!(status.success());
+
+        // The root of the projection (package.json, index.html, ...) lands
+        // directly under the staging `src/`, exactly what `COPY src/. {workdir}/`
+        // then ships to the guest.
+        assert!(build_dir.path().join("src/package.json").is_file());
+        assert!(build_dir.path().join("src/package-lock.json").is_file());
+        assert!(build_dir.path().join("src/index.html").is_file());
+        // The repo's OWN `src/` survives NESTED, un-clobbered by the staging
+        // directory that happens to share its name.
+        assert!(
+            build_dir.path().join("src/src/index.js").is_file(),
+            "the repo's own src/ subdirectory must survive nested under the staging src/"
         );
     }
 
