@@ -120,12 +120,47 @@ impl CpuEntitlementRuntime {
             _ => false,
         }
     }
+
+    /// May the runner poll for (and thus claim) NEW workload leases right now?
+    /// `Off` → yes (legacy behavior). `Active` → only while Healthy: an
+    /// Unhealthy manager stops new admissions, so claiming a lease we would
+    /// then refuse at pre-resume would just burn a dispatch. `Faulted` → no.
+    /// Existing VMs are untouched in every case.
+    pub fn polling_allowed(&self) -> bool {
+        match self {
+            CpuEntitlementRuntime::Off => true,
+            CpuEntitlementRuntime::Active(e) => matches!(
+                e.manager.health(),
+                super::runner_cpu_manager::CpuManagerHealth::Healthy
+            ),
+            CpuEntitlementRuntime::Faulted { .. } => false,
+        }
+    }
 }
 
 /// Manager queue capacity for a runner with `max_slots` execution slots: room
 /// for one admit + one release per slot in flight, plus diagnostics headroom.
 pub fn queue_capacity_for(max_slots: usize) -> usize {
     (max_slots * 2 + 4).max(8)
+}
+
+/// Process-wide entitlement runtime, initialized ONCE at `ato runner serve`
+/// startup. Other entry points (builder, one-shot CLI runs) never initialize
+/// it, so [`cpu_entitlement`] returns `None` there and every consumer treats
+/// that as Off — the feature exists only inside the serving runner.
+static CPU_ENTITLEMENT: std::sync::OnceLock<CpuEntitlementRuntime> = std::sync::OnceLock::new();
+
+/// Initialize the global runtime from the environment. Hard-errors only on an
+/// unintelligible config; a host that cannot deliver `enforce` yields
+/// `Faulted` (observable via heartbeat, claims stopped) rather than an exit.
+pub fn init_cpu_entitlement(max_slots: usize) -> Result<&'static CpuEntitlementRuntime, String> {
+    let config = CpuEntitlementConfig::from_env(|k| std::env::var(k).ok())?;
+    Ok(CPU_ENTITLEMENT.get_or_init(|| build(&config, max_slots)))
+}
+
+/// The runtime, if [`init_cpu_entitlement`] ran in this process.
+pub fn cpu_entitlement() -> Option<&'static CpuEntitlementRuntime> {
+    CPU_ENTITLEMENT.get()
 }
 
 /// Build the entitlement runtime from config.

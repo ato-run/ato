@@ -947,8 +947,40 @@ pub async fn run_serve(
         cleanup_orphan_slot_netns(pool.capacity());
     }
 
+    // ADR-016: initialize the CPU entitlement runtime ONCE for this serve
+    // process. Off (default) is a complete no-op; enforce on a host that
+    // cannot deliver it FAULTS — the runner keeps heartbeating so the fault is
+    // observable, but workload claims stop (no silent unthrottled fallback).
+    let cpu_rt = crate::application::runner_cpu_config::init_cpu_entitlement(pool.capacity())
+        .map_err(|e| anyhow::anyhow!("cpu entitlement config: {e}"))?;
+    match cpu_rt {
+        crate::application::runner_cpu_config::CpuEntitlementRuntime::Off => {}
+        crate::application::runner_cpu_config::CpuEntitlementRuntime::Active(e) => {
+            println!(
+                "   CPU entitlement: ENFORCE (budget {}m, {} slots)",
+                e.budget_millis,
+                pool.capacity()
+            );
+        }
+        crate::application::runner_cpu_config::CpuEntitlementRuntime::Faulted { reason } => {
+            eprintln!(
+                "🚨 CPU entitlement: enforce requested but FAULTED ({reason}); workload claims \
+                 are STOPPED until the host is fixed (heartbeat continues)"
+            );
+        }
+    }
+
     loop {
-        let capabilities = collect_capabilities();
+        let mut capabilities = collect_capabilities();
+        // ADR-016: advertised only while Active AND Healthy — re-evaluated
+        // every heartbeat, so an Unhealthy manager drops the capability at the
+        // next beat without touching running VMs.
+        if cpu_rt.capability_advertised() {
+            capabilities.push(
+                crate::application::runner_cpu_config::RUNTIME_CPU_ENTITLEMENT_CAPABILITY
+                    .to_string(),
+            );
+        }
         let body = build_heartbeat_body(
             &capabilities,
             public_base_url.as_deref(),
@@ -1039,7 +1071,11 @@ pub async fn run_serve(
         let mut remaining = interval;
         while remaining > 0 {
             let iter_start = std::time::Instant::now();
-            let can_poll = pool.has_free();
+            // ADR-016: an entitlement runtime that cannot admit (Faulted, or
+            // Active gone Unhealthy) stops NEW lease polling — claiming a lease
+            // only to refuse it at pre-resume would burn the dispatch. Existing
+            // VMs continue; Off is always pollable.
+            let can_poll = pool.has_free() && cpu_rt.polling_allowed();
 
             // Pre-sleep only when we are NOT about to long-poll a free slot:
             // the short idle cadence (non-long-poll), or backpressure when at
@@ -4368,6 +4404,55 @@ fn restore_hold_break_reason(
 /// bound-ready BEFORE any traffic is exposed (`bind_before_expose`). Values live
 /// only in guest tmpfs; renewal runs for the session lifetime and is scrubbed at
 /// teardown.
+/// ADR-016: release a session's CPU entitlement AFTER its VM teardown is
+/// confirmed (the backend `stop` kill-and-reaped the VMM, or the launch's
+/// failed restore already reaped it via `FcProcess::Drop`). No-op when
+/// entitlement is Off/uninitialized or the lease was never admitted.
+///
+/// `vmm_pid` is the session's recorded pid when the caller has one; a launch
+/// that failed before a session existed passes `None` and the pid is looked up
+/// from the manager's own record (the admission it may have committed for this
+/// lease). Per `CpuReleaseOutcome`, the slot is released on ANY Ok — a survivor
+/// rebalance hiccup never holds the freed slot.
+fn release_cpu_entitlement_after_teardown(lease_id: &str, slot_index: usize, vmm_pid: Option<u32>) {
+    use crate::application::runner_cpu_config::{CpuEntitlementRuntime, cpu_entitlement};
+    use crate::application::runner_cpu_manager::{CpuManagerError, RebalanceOutcome};
+    use crate::application::runner_cpu_teardown::{ProcessExitEvidence, confirm_vm_teardown};
+    let Some(CpuEntitlementRuntime::Active(e)) = cpu_entitlement() else {
+        return;
+    };
+    let recorded_pid = vmm_pid.or_else(|| {
+        e.manager.snapshot().ok().and_then(|snap| {
+            snap.applied
+                .iter()
+                .find(|a| a.request.lease_id == lease_id)
+                .map(|a| a.vmm_pid)
+        })
+    });
+    let Some(pid) = recorded_pid else {
+        // Never admitted (hook refused / restore failed pre-spawn) — nothing to
+        // release.
+        return;
+    };
+    let proof = confirm_vm_teardown(lease_id, slot_index, pid, ProcessExitEvidence::Killed);
+    match e.manager.release_after_teardown(proof) {
+        Ok(outcome) => match outcome.rebalance {
+            RebalanceOutcome::Applied | RebalanceOutcome::NoSurvivors => {}
+            RebalanceOutcome::RolledBack { error } => eprintln!(
+                "⚠️  cpu-entitlement: lease {lease_id} released; survivor rebalance rolled back ({error})"
+            ),
+            RebalanceOutcome::Unhealthy { reason }
+            | RebalanceOutcome::SkippedUnhealthy { reason } => eprintln!(
+                "🚨 cpu-entitlement: lease {lease_id} released; survivors not raised (manager unhealthy: {reason})"
+            ),
+        },
+        Err(CpuManagerError::UnknownLease { .. }) => {} // never admitted
+        Err(err) => eprintln!(
+            "🚨 cpu-entitlement: lease {lease_id}: release failed ({err}); CPU reservation retained fail-closed"
+        ),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 // The final prof_mark! call's reassignment of prof_last is a dead store
 // (nothing times an interval after it) — inherent to the macro applying
@@ -4384,7 +4469,6 @@ async fn handle_restore_snapshot_lease(
     netns_enabled: bool,
     surface_gateway: Option<SurfaceGatewayRuntime>,
 ) {
-    use crate::application::ready_state::backend::select_backend_for_slot;
     use crate::application::ready_state::binding_grants::{
         binding_namespace, preflight_resolve_names,
     };
@@ -4656,7 +4740,30 @@ async fn handle_restore_snapshot_lease(
     // #948 N-slot: build the backend for THIS slot. Under netns mode the
     // Firecracker config is namespaced (ato-slot-{index}) so concurrent restores
     // don't collide on tap/IP/lock; legacy single-slot keeps the root-ns config.
-    let backend = match select_backend_for_slot(slot.index, netns_enabled) {
+    // ADR-016: when CPU entitlement is Active, install a per-launch pre-resume
+    // hook on THIS backend clone — the VMM pid is admitted + attached to its
+    // slot cgroup (with membership read-back) before /snapshot/load resumes the
+    // guest; a refused admission aborts the launch. Off → None → byte-identical
+    // legacy path.
+    let cpu_hook: Option<std::sync::Arc<dyn snapshot::PreResumeHook>> =
+        match crate::application::runner_cpu_config::cpu_entitlement() {
+            Some(crate::application::runner_cpu_config::CpuEntitlementRuntime::Active(e)) => {
+                Some(std::sync::Arc::new(
+                    crate::application::runner_cpu_hook::RunnerCpuPreResumeHook::new(
+                        e.manager.clone(),
+                        crate::application::runner_cpu_hook::standard_request(
+                            &lease_id, slot.index,
+                        ),
+                    ),
+                ))
+            }
+            _ => None,
+        };
+    let backend = match crate::application::ready_state::backend::select_backend_for_slot_with_hook(
+        slot.index,
+        netns_enabled,
+        cpu_hook,
+    ) {
         Ok(b) => b,
         Err(e) => {
             fail(
@@ -4822,6 +4929,12 @@ async fn handle_restore_snapshot_lease(
     ) {
         Ok(r) => r,
         Err(e) => {
+            // ADR-016: an admission may have committed before the restore step
+            // that failed (e.g. /snapshot/load); restore_and_expose has already
+            // reaped the spawned VMM on this path (FcProcess::Drop), so the
+            // entitlement — if any — is released against the manager's own
+            // recorded pid. Never-admitted launches are a no-op here.
+            release_cpu_entitlement_after_teardown(&lease_id, slot.index, None);
             fail(
                 client,
                 api_base,
@@ -4856,7 +4969,10 @@ async fn handle_restore_snapshot_lease(
     let Some(guest_port) = session.guest_port else {
         // Nothing to expose (e.g. a Fake/KVM-free backend) — a public run needs a served
         // port. Tear the session down and fail rather than report a portless ready.
-        let _ = teardown(backend.as_ref(), session);
+        let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+        if teardown(backend.as_ref(), session).is_ok() {
+            release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+        }
         fail(
             client,
             api_base,
@@ -4896,7 +5012,10 @@ async fn handle_restore_snapshot_lease(
         }
         .await;
         if let Err(e) = mount_result {
-            let _ = teardown(backend.as_ref(), session);
+            let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+            if teardown(backend.as_ref(), session).is_ok() {
+                release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+            }
             fail(
                 client,
                 api_base,
@@ -4950,7 +5069,10 @@ async fn handle_restore_snapshot_lease(
                     Some(ctx)
                 }
                 Err(e) => {
-                    let _ = teardown(backend.as_ref(), session);
+                    let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+                    if teardown(backend.as_ref(), session).is_ok() {
+                        release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+                    }
                     fail(
                         client,
                         api_base,
@@ -5102,7 +5224,10 @@ async fn handle_restore_snapshot_lease(
                         ),
                     }
                 }
-                let _ = teardown(backend.as_ref(), session);
+                let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+                if teardown(backend.as_ref(), session).is_ok() {
+                    release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+                }
                 fail(
                     client,
                     api_base,
@@ -5171,7 +5296,14 @@ async fn handle_restore_snapshot_lease(
                                 ),
                             }
                         }
-                        let _ = teardown(backend.as_ref(), session);
+                        let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+                        if teardown(backend.as_ref(), session).is_ok() {
+                            release_cpu_entitlement_after_teardown(
+                                &lease_id,
+                                slot.index,
+                                cpu_vmm_pid,
+                            );
+                        }
                         fail(
                             client,
                             api_base,
@@ -5430,6 +5562,7 @@ async fn handle_restore_snapshot_lease(
             Err(e) => eprintln!("⚠️  restore lease {lease_id}: binding scrub task join error: {e}"),
         }
     }
+    let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
     let vm_stopped = match teardown(backend.as_ref(), session) {
         Ok(_) => true,
         Err(e) => {
@@ -5440,6 +5573,12 @@ async fn handle_restore_snapshot_lease(
             false
         }
     };
+    // ADR-016: release the CPU entitlement ONLY on a confirmed VM stop — a VM
+    // that may still be running must keep its quota reservation (fail closed,
+    // mirroring the slot-release rule below).
+    if vm_stopped {
+        release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+    }
     let cleanup = StopCleanup::from_teardown(vm_stopped, gateway_stopped);
     if let Err(err) = report_lease_stopped_with_reason(
         client,
