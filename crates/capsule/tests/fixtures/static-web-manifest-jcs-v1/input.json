@@ -13,10 +13,20 @@
       "blob": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "size": 7,
       "media_type": "text/plain; charset=utf-8"
+    },
+    "assets/😀.txt": {
+      "blob": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 9,
+      "media_type": "text/plain; charset=utf-8"
+    },
+    "assets/.txt": {
+      "blob": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "size": 11,
+      "media_type": "text/plain; charset=utf-8"
     }
   },
   "security": {
     "connect_src": ["https://api.example.com:8443", "wss://socket.example.net"],
-    "frame_ancestors": ["https://ato.run", "https://app.ato.run"]
+    "frame_ancestors": ["https://ato.run", "https://app.ato.run", "https://staging.ato.run"]
   }
 }

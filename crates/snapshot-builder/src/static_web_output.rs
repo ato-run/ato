@@ -50,8 +50,8 @@ impl StaticWebOutputPlan {
         Ok(())
     }
 
-    pub fn security(&self) -> StaticWebSecurityV1 {
-        StaticWebSecurityV1::producer_policy(self.connect_src.clone())
+    pub fn security(&self) -> Result<StaticWebSecurityV1> {
+        StaticWebSecurityV1::producer_policy(self.connect_src.clone()).map_err(anyhow::Error::from)
     }
 }
 
