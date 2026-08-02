@@ -35,6 +35,11 @@ neither output replaces or weakens the other.
 ## Safety
 
 The closure rejects links, special files, unsafe/non-NFC paths, source maps,
-oversized trees, unsupported MIME types, and no-secret-scan hits. The schema,
+oversized trees, unsupported MIME types, and runtime secret canary hits. This
+is a scan for known runtime-secret bytes supplied by a future builder caller;
+an empty canary list does not assert that generic secret detection succeeded.
+Actual builder integration must require typed evidence that distinguishes
+`no_runtime_secrets` from `runtime_secret_canaries_scanned`; that evidence is
+deferred from this pure producer. The schema,
 canonical bytes, SHA-256, lower-case base32 host labels, R2 keys, and blob
 metadata are aligned to the merged `ato-contents` Worker contract fixture.
