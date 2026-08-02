@@ -45,6 +45,7 @@ pub(crate) mod runner_agent;
 pub(crate) mod runner_bootstrap;
 pub(crate) mod runner_cgroup;
 pub(crate) mod runner_cpu_allocator;
+pub(crate) mod runner_cpu_config;
 pub(crate) mod runner_cpu_manager;
 pub(crate) mod runner_enroll;
 pub(crate) mod runtime_observation;
