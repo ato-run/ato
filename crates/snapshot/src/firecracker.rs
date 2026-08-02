@@ -1747,6 +1747,20 @@ impl FcProcess {
     fn detach(mut self) -> Option<Child> {
         self.child.take()
     }
+    /// Host OS process id of the running VMM, for resource-controller attachment
+    /// (writing into a slot cgroup's `cgroup.procs`) BEFORE the guest executes —
+    /// i.e. in the window after `spawn` and before `InstanceStart` / `PUT
+    /// /snapshot/load`. `None` once the child has been detached or killed.
+    ///
+    /// This is a host runtime handle only — NOT a stable execution identity. It
+    /// must never be persisted, returned in an API response, or written to a
+    /// receipt.
+    // Consumed by the restore-path CPU-cgroup attach hook (same PR, wired next);
+    // exposed now so the accessor and its safety contract review together.
+    #[allow(dead_code)]
+    pub(crate) fn host_pid(&self) -> Option<u32> {
+        self.child.as_ref().map(std::process::Child::id)
+    }
 }
 impl Drop for FcProcess {
     fn drop(&mut self) {
