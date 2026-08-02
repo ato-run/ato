@@ -280,6 +280,9 @@ pub enum FakeFailPoint {
     /// both the apply and its rollback cannot write, forcing the unhealthy path.
     WriteQuotaAny,
     AttachPid,
+    /// attach_pid RETURNS Ok but silently drops the pid — models a write that
+    /// "succeeded" without taking, which only the membership read-back catches.
+    AttachPidSilentlyLost,
     SlotPidsRead,
     RemoveSlot,
 }
@@ -434,6 +437,9 @@ impl CpuCgroupBackend for FakeCgroupBackend {
     fn attach_pid(&self, slot_index: usize, pid: u32) -> Result<(), CgroupError> {
         if self.armed(FakeFailPoint::AttachPid) {
             return Err(CgroupError::new("attach_pid", Some(slot_index), "injected"));
+        }
+        if self.armed(FakeFailPoint::AttachPidSilentlyLost) {
+            return Ok(()); // "success" that never took
         }
         self.state
             .lock()

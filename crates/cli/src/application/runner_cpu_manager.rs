@@ -588,6 +588,24 @@ impl ManagerActor {
         if let Err(e) = self.backend.attach_pid(slot_index, vmm_pid) {
             return Err(self.rollback(e, Some(slot_index)));
         }
+        // Membership read-back: an admission is complete only when the pid is
+        // PROVEN present in the slot cgroup (a write that "succeeded" but did
+        // not take — races, kernel edge cases — must not resume a guest
+        // unthrottled). Not-present or unreadable → roll back and refuse.
+        match self.backend.slot_pids(slot_index) {
+            Ok(pids) if pids.contains(&vmm_pid) => {}
+            Ok(_) => {
+                return Err(self.rollback(
+                    CgroupError::new(
+                        "attach_readback",
+                        Some(slot_index),
+                        format!("pid {vmm_pid} not present after attach"),
+                    ),
+                    Some(slot_index),
+                ));
+            }
+            Err(e) => return Err(self.rollback(e, Some(slot_index))),
+        }
 
         // Commit: record every lease at its new quota, including the pid.
         self.commit(&target, request, vmm_pid);
@@ -1137,6 +1155,23 @@ mod tests {
         let res = mgr.release_after_teardown(proof("b", 1, 200));
         assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
+    }
+
+    #[test]
+    fn admit_attach_that_silently_did_not_take_is_refused() {
+        // attach_pid returns Ok but the pid never lands in the cgroup: the
+        // membership read-back must catch it and refuse the admission (rolled
+        // back — candidate is empty, so this stays a clean refusal).
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        be.fail_at(FakeFailPoint::AttachPidSilentlyLost);
+        let res = mgr.admit_and_attach(std_req("a", 0), 100);
+        assert!(matches!(res, Err(CpuManagerError::CgroupRolledBack(_))));
+        be.clear_fail();
+        assert!(matches!(mgr.health(), CpuManagerHealth::Healthy));
+        assert_eq!(mgr.snapshot().unwrap().applied.len(), 0);
+        // The same launch admits fine once attach really works.
+        admit(&mgr, std_req("a", 0), 100);
     }
 
     /// Drive the manager Unhealthy while keeping live sessions, by failing a
