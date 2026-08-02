@@ -397,6 +397,14 @@ try {
  pnpm test
 ```
 
+### ADR-016 CI scope
+
+For the Runtime CPU Entitlement / teardown-safety milestone, Windows and macOS
+regression-test results are informational and do not block completion. Keep
+their GitHub Actions workflows enabled and report their status, but use Linux
+coverage, required static checks, and the isolated Sugamo cgroup-v2 acceptance
+as the completion gate for this Linux host-enforcement work.
+
 ## Key Paths
 
 - `~/.ato/config.toml`: CLI configuration
