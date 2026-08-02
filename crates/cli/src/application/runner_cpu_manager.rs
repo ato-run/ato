@@ -1096,6 +1096,53 @@ mod tests {
     }
 
     #[test]
+    fn failed_release_can_retry_and_reclaim_the_same_reservation() {
+        // A transient cgroup removal failure must hold accounting on the first
+        // attempt, then allow the exact same verified teardown proof to reclaim
+        // the slot once the backend recovers. The manager remains Unhealthy for
+        // admissions, but release is intentionally still accepted there.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("survivor", 0), 100);
+        admit(&mgr, std_req("retry", 1), 200);
+        be.simulate_process_exit(1, 200);
+        be.fail_at(FakeFailPoint::RemoveSlot);
+
+        let first = mgr.release_after_teardown(proof("retry", 1, 200));
+        assert!(matches!(
+            first,
+            Err(CpuManagerError::SlotNotReclaimed { .. })
+        ));
+        assert_eq!(mgr.snapshot().unwrap().applied.len(), 2, "reservation held");
+        assert_eq!(
+            be.quota_of(1),
+            Some(2000),
+            "cgroup not treated as reclaimed"
+        );
+        assert!(matches!(mgr.health(), CpuManagerHealth::Unhealthy { .. }));
+        assert!(matches!(
+            mgr.admit_and_attach(std_req("new", 2), 300),
+            Err(CpuManagerError::Unhealthy { .. })
+        ));
+
+        be.clear_fail();
+        let second = mgr
+            .release_after_teardown(proof("retry", 1, 200))
+            .expect("same proof retries reclamation");
+        assert!(matches!(
+            second.rebalance,
+            RebalanceOutcome::SkippedUnhealthy { .. }
+        ));
+        assert_eq!(be.quota_of(1), None, "slot cgroup removed on retry");
+        let snapshot = mgr.snapshot().unwrap();
+        assert_eq!(snapshot.applied.len(), 1, "CPU reservation finally freed");
+        assert!(matches!(
+            snapshot.health,
+            CpuManagerHealth::Unhealthy { .. }
+        ));
+    }
+
+    #[test]
     fn release_slot_pid_read_failure_keeps_reservation() {
         let be = Arc::new(FakeCgroupBackend::new());
         let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
