@@ -1206,12 +1206,22 @@ const BUILDER_SCRIPT_DIAGNOSTIC_MAX_BYTES: usize = 16 * 1024;
 /// returns: nothing downstream (logs, the ato-api ack, an issue comment) can
 /// leak a credential this function already scrubbed, and nothing downstream
 /// has to re-bound an unbounded stream itself.
+// Windows provides `bash.exe` as a WSL launcher before Git for Windows' Bash
+// on PATH. The generated builder scripts need a POSIX shell in production but
+// are only exercised as host-side unit-test fixtures on Windows; `sh.exe` is
+// Git for Windows' POSIX shell and avoids accidentally starting WSL.
+#[cfg(windows)]
+const BUILDER_SCRIPT_SHELL: &str = "sh";
+
+#[cfg(not(windows))]
+const BUILDER_SCRIPT_SHELL: &str = "bash";
+
 fn run_builder_script(
     stage: &str,
     script: &str,
     env: &[(&str, std::ffi::OsString)],
 ) -> Result<(), String> {
-    let mut command = Command::new("bash");
+    let mut command = Command::new(BUILDER_SCRIPT_SHELL);
     command.arg("-c").arg(script);
     for (key, value) in env {
         command.env(key, value);
@@ -3150,6 +3160,15 @@ sync; umount "$MNT"
 mod tests {
     use super::*;
     use capsule::foundation::types::manifest::CapsuleManifest;
+
+    #[test]
+    fn builder_script_shell_avoids_the_windows_wsl_launcher() {
+        #[cfg(windows)]
+        assert_eq!(BUILDER_SCRIPT_SHELL, "sh");
+
+        #[cfg(not(windows))]
+        assert_eq!(BUILDER_SCRIPT_SHELL, "bash");
+    }
 
     // --- v1 authoring surface ---------------------------------------------------
 
