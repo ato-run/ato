@@ -321,6 +321,23 @@ pub(crate) fn derive_plan(
         });
     }
 
+    // ADR-016: enforce-only CPU delegation drop-in. The check is Ok/Warn (never
+    // Missing) unless the env file explicitly selects enforce, so a feature-off
+    // setup plans NOTHING here.
+    if failed("cpu_delegation_dropin") {
+        plan.push(FixAction {
+            id: "cpu_delegation_dropin",
+            title: format!(
+                "Write {} (Delegate=yes + DelegateSubgroup=main), then daemon-reload",
+                cpu_delegation_dropin_path()
+            ),
+            commands: vec![
+                format!("<write> {}", cpu_delegation_dropin_path()),
+                "systemctl daemon-reload".to_string(),
+            ],
+        });
+    }
+
     // ── Official-preview extras (ato#1006 ingress PR C) ──
     if let Some(cfg) = &opts.official {
         if failed("caddy") {
@@ -409,6 +426,29 @@ pub(crate) fn env_file_missing_lines(
         .filter(|(k, _)| !existing.contains_key(*k))
         .map(|(k, v)| format!("{k}={v}"))
         .collect()
+}
+
+/// ADR-016: drop-in path granting the runner service a delegated cgroup
+/// subtree. Written ONLY when the env file explicitly selects
+/// `ATO_RUNNER_CPU_ENTITLEMENT=enforce`; with the feature off, setup neither
+/// writes nor touches it — zero unit diff.
+pub(crate) fn cpu_delegation_dropin_path() -> String {
+    format!("{SYSTEMD_DIR}/{RUNNER_UNIT}.d/50-cpu-delegation.conf")
+}
+
+/// Render the CPU-delegation drop-in. Pure. `Delegate=yes` hands the service's
+/// cgroup subtree to the runner; `DelegateSubgroup=main` (systemd ≥ 254;
+/// older systemd logs-and-ignores it) moves the service's own processes into a
+/// child group so the delegated parent has no interior processes — the cgroup
+/// v2 constraint that would otherwise block enabling `+cpu` for slot children.
+pub(crate) fn render_cpu_delegation_dropin() -> String {
+    "# Written by `ato runner setup` — ADR-016 runtime CPU entitlement (enforce only).\n\
+     # Delete this file and daemon-reload to revert; it is only ever written when\n\
+     # /etc/ato/runner.env sets ATO_RUNNER_CPU_ENTITLEMENT=enforce.\n\
+     [Service]\n\
+     Delegate=yes\n\
+     DelegateSubgroup=main\n"
+        .to_string()
 }
 
 /// Render a systemd unit. Pure. Both services run as root in v0 (Firecracker tap
@@ -660,6 +700,23 @@ pub(crate) fn run(opts: SetupOptions) -> Result<()> {
                     }
                 }
             }
+            "cpu_delegation_dropin" => {
+                for cmd in &a.commands {
+                    if let Some(rest) = cmd.strip_prefix("<write> ") {
+                        let path = Path::new(rest);
+                        if let Some(dir) = path.parent() {
+                            std::fs::create_dir_all(dir)
+                                .with_context(|| format!("create {}", dir.display()))?;
+                        }
+                        let bak = backup_then_write(path, &render_cpu_delegation_dropin())?;
+                        if let Some(b) = bak {
+                            println!("   (previous drop-in backed up to {})", b.display());
+                        }
+                    } else {
+                        run_shell(cmd)?;
+                    }
+                }
+            }
             "caddyfile" => {
                 let cfg = opts
                     .official
@@ -814,6 +871,47 @@ mod tests {
             .map(|id| check(id, CheckStatus::Ok))
             .collect();
         assert!(derive_plan(&all_ok, &opts(), &bins()).is_empty());
+    }
+
+    #[test]
+    fn cpu_delegation_dropin_planned_only_when_check_missing() {
+        // Missing (enforce requested, drop-in absent/stale) → planned, with a
+        // write + daemon-reload.
+        let plan = derive_plan(
+            &[check("cpu_delegation_dropin", CheckStatus::Missing)],
+            &opts(),
+            &bins(),
+        );
+        let action = plan
+            .iter()
+            .find(|a| a.id == "cpu_delegation_dropin")
+            .expect("planned");
+        assert!(action.commands[0].starts_with("<write> "));
+        assert!(action.commands[0].contains("50-cpu-delegation.conf"));
+        assert_eq!(action.commands[1], "systemctl daemon-reload");
+        // Ok (off, or already current) → feature-off setups plan NOTHING here.
+        let plan = derive_plan(
+            &[check("cpu_delegation_dropin", CheckStatus::Ok)],
+            &opts(),
+            &bins(),
+        );
+        assert!(plan.iter().all(|a| a.id != "cpu_delegation_dropin"));
+        // Warn (stale drop-in while off) is advisory only — never auto-fixed.
+        let plan = derive_plan(
+            &[check("cpu_delegation_dropin", CheckStatus::Warn)],
+            &opts(),
+            &bins(),
+        );
+        assert!(plan.iter().all(|a| a.id != "cpu_delegation_dropin"));
+    }
+
+    #[test]
+    fn cpu_delegation_dropin_renders_delegation() {
+        let text = render_cpu_delegation_dropin();
+        assert!(text.contains("[Service]"));
+        assert!(text.contains("Delegate=yes"));
+        assert!(text.contains("DelegateSubgroup=main"));
+        assert!(cpu_delegation_dropin_path().ends_with(".service.d/50-cpu-delegation.conf"));
     }
 
     #[test]
