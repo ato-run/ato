@@ -343,6 +343,27 @@ impl CapsuleManifestV1 {
                 )?;
             }
         }
+        for (name, version) in &self.tools {
+            if name.trim().is_empty() || version.trim().is_empty() {
+                return Err(ManifestV1Error::Invalid {
+                    field: "tools.<NAME>",
+                    reason: "tool names and version constraints must be non-empty".to_string(),
+                });
+            }
+            if name
+                .chars()
+                .any(|character| matches!(character, '\0' | '\n' | '\r'))
+                || version
+                    .chars()
+                    .any(|character| matches!(character, '\0' | '\n' | '\r'))
+            {
+                return Err(ManifestV1Error::Invalid {
+                    field: "tools.<NAME>",
+                    reason: "tool names and version constraints must not contain control lines"
+                        .to_string(),
+                });
+            }
+        }
 
         if let Some(web) = &self.web {
             if web.port == 0 {
@@ -453,24 +474,10 @@ impl CapsuleManifestV1 {
     pub fn validate_for_interactive_capture(&self) -> Result<(), ManifestV1Error> {
         self.validate()?;
 
-        if !self.tools.is_empty() {
-            return Err(ManifestV1Error::Unsupported {
-                feature: "[tools]",
-                why: "a pinned tool is a dependency, and per-dependency derivation and output \
-                      digests have no producer yet, so its identity could not be measured",
-            });
-        }
-        if self
-            .build
-            .as_ref()
-            .is_some_and(|build| !build.steps.is_empty())
-        {
-            return Err(ManifestV1Error::Unsupported {
-                feature: "[[build.steps]]",
-                why: "a build output has no name and no guest placement in this build, so its \
-                      projection could not be committed",
-            });
-        }
+        // Runtime/tool compatibility is checked by the producer after it has
+        // inspected the pinned source. Build steps are exact argv and mutate
+        // the single exported guest tree whose filesystem.view_digest is
+        // measured below; they do not create an unmeasured side artifact.
         if !self.state.is_empty() {
             return Err(ManifestV1Error::Unsupported {
                 feature: "[state.<name>]",
@@ -841,36 +848,20 @@ snapshot = "exclude"
         }
     }
 
-    /// Outside the Step-4 subset is a REFUSAL BY NAME, not an approximation —
-    /// and not a parse error either, because these are perfectly good capsules.
+    /// External state still requires an idle lifecycle and is refused by name,
+    /// while tool pins and exact build argv are eligible for measured capture.
     #[test]
-    fn features_outside_the_step_four_subset_are_refused_by_name() {
-        let cases: [(&str, &str); 3] = [
-            (
-                r#"
-[tools]
-python = "3.12""#,
-                "[tools]",
-            ),
-            (
-                r#"
-[[build.steps]]
-command = ["make"]"#,
-                "[[build.steps]]",
-            ),
-            (
-                r#"
-[state.data]
-mount = "/data"
-access = "read-write"
-schema = "s"
-snapshot = "exclude""#,
-                "[state.<name>]",
-            ),
-        ];
-        for (extra, feature) in cases {
-            let manifest = parse(&format!(
-                r#"
+    fn measured_build_inputs_are_allowed_but_external_state_is_refused() {
+        let build_manifest = parse(&format!(
+            "{MINIMAL}\n[tools]\npython = \"3.12\"\n\n[[build.steps]]\ncommand = [\"python\", \"build.py\"]\n"
+        ))
+        .expect("build manifest parses");
+        build_manifest
+            .validate_for_interactive_capture()
+            .expect("tool pin and build result are measured by the producer");
+
+        let manifest = parse(
+            r#"
 schema_version = "1"
 name = "demo"
 version = "0.1.0"
@@ -884,19 +875,23 @@ bind = "0.0.0.0"
 
 [seal_at]
 command = ["true"]
-{extra}
-"#
-            ))
-            .expect("it PARSES — it is a valid v1 manifest");
-            let error = manifest
-                .validate_for_interactive_capture()
-                .expect_err("outside the subset");
-            match error {
-                ManifestV1Error::Unsupported { feature: named, .. } => {
-                    assert_eq!(named, feature)
-                }
-                other => panic!("expected Unsupported({feature}), got {other}"),
+
+[state.data]
+mount = "/data"
+access = "read-write"
+schema = "s"
+snapshot = "exclude"
+"#,
+        )
+        .expect("state manifest parses");
+        let error = manifest
+            .validate_for_interactive_capture()
+            .expect_err("external state stays outside the subset");
+        match error {
+            ManifestV1Error::Unsupported { feature, .. } => {
+                assert_eq!(feature, "[state.<name>]")
             }
+            other => panic!("expected Unsupported([state.<name>]), got {other}"),
         }
     }
 

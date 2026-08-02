@@ -422,6 +422,9 @@ pub struct RootfsBuildSpecV1 {
     pub runtime: RuntimeKind,
     pub base_image: String,
     pub install_cmd: Option<String>,
+    /// Authored build commands, in declaration order. Every entry remains an
+    /// exact argv and is emitted with Dockerfile exec-form `RUN`.
+    pub build_steps: Vec<Vec<String>>,
     /// argv the runtime prepends to the authored command.
     ///
     /// Nothing for every family in the Step-4 subset, and that is a measurement
@@ -439,9 +442,9 @@ pub struct RootfsBuildSpecV1 {
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
 ///
-/// Fail-closed on everything the Step-4 subset does not cover — the subset gate
-/// runs first, so a manifest with `[tools]`, `[[build.steps]]` or `[state.*]`
-/// never reaches the runtime detection below.
+/// Fail-closed on everything the interactive capture subset does not cover.
+/// Runtime selection can only pin the primary detected runtime; the exported
+/// rootfs digest commits the effects of every exact-argv build step.
 pub fn derive_build_spec_v1(
     m: &capsule::types::manifest_v1::CapsuleManifestV1,
     probe: &SourceProbe,
@@ -456,7 +459,7 @@ pub fn derive_build_spec_v1(
 
     // v1 has no driver/language hints — the tree is the whole declaration.
     let runtime = detect_runtime_kind("", "", probe)?;
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    let (base_image, install_cmd) = v1_base_image_and_install(runtime, probe, &m.tools)?;
 
     let authored = &m.run.command;
     if authored.is_empty() {
@@ -494,6 +497,17 @@ pub fn derive_build_spec_v1(
         runtime,
         base_image,
         install_cmd,
+        build_steps: m
+            .build
+            .as_ref()
+            .map(|build| {
+                build
+                    .steps
+                    .iter()
+                    .map(|step| step.command.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
@@ -543,6 +557,17 @@ pub(crate) fn assemble_app_image_script_v1(
     tool: &str,
 ) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    let build_steps = spec
+        .build_steps
+        .iter()
+        .map(|argv| {
+            format!(
+                "RUN {}",
+                serde_json::to_string(argv).expect("an argv always serializes as JSON")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     // The projection goes in a SUBDIRECTORY of the build context, and the
     // generated Dockerfile sits beside it rather than inside it.
     //
@@ -571,6 +596,7 @@ FROM {base}
 WORKDIR {workdir}
 COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
+{build_steps}
 DOCKER
 {tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
 "#,
@@ -578,6 +604,7 @@ DOCKER
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
         install_q = install_q,
+        build_steps = build_steps,
     )
 }
 
@@ -978,6 +1005,36 @@ pub(crate) fn base_image_and_install(
             }),
         ),
     }
+}
+
+fn v1_base_image_and_install(
+    runtime: RuntimeKind,
+    probe: &SourceProbe,
+    tools: &BTreeMap<String, String>,
+) -> Result<(String, Option<String>), String> {
+    let primary = match runtime {
+        RuntimeKind::Node => "node",
+        RuntimeKind::Python | RuntimeKind::StaticWeb => "python",
+    };
+    if let Some(unsupported) = tools.keys().find(|name| name.as_str() != primary) {
+        return Err(format!(
+            "[tools].{unsupported} is not the detected primary runtime {primary}; \
+             interactive capture currently pins only the primary runtime"
+        ));
+    }
+    let (mut base_image, install) = base_image_and_install(runtime, probe);
+    if let Some(version) = tools.get(primary) {
+        if !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+        {
+            return Err(format!(
+                "[tools].{primary} version {version:?} contains unsupported characters"
+            ));
+        }
+        base_image = format!("{primary}:{version}-slim");
+    }
+    Ok((base_image, install))
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -2694,6 +2751,37 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         );
         assert!(spec.runtime_invocation_prefix.words().is_empty());
         assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
+    }
+
+    #[test]
+    fn v1_tool_pin_and_build_steps_drive_the_measured_guest() {
+        let manifest = V1_MINIMAL.replace(
+            "[run]",
+            "[tools]\npython = \"3.12\"\n\n[[build.steps]]\ncommand = [\"python3\", \"build.py\", \"arg with space\"]\n\n[run]",
+        );
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.base_image, "python:3.12-slim");
+        assert_eq!(
+            spec.build_steps,
+            [vec![
+                "python3".to_string(),
+                "build.py".to_string(),
+                "arg with space".to_string(),
+            ]]
+        );
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        assert!(
+            script.contains(r#"RUN ["python3","build.py","arg with space"]"#),
+            "build argv must use Dockerfile exec form: {script}"
+        );
+    }
+
+    #[test]
+    fn v1_refuses_a_secondary_tool_it_cannot_provision() {
+        let manifest = V1_MINIMAL.replace("[run]", "[tools]\nnode = \"22\"\n\n[run]");
+        let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
+            .expect_err("python source cannot claim an unprovisioned node tool");
+        assert!(error.contains("detected primary runtime python"), "{error}");
     }
 
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command

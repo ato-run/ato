@@ -968,11 +968,13 @@ fn a_secret_named_env_value_is_refused_before_anything_is_built() {
 /// A capsule outside the Step-4 subset never reaches a measurement.
 #[test]
 fn a_capsule_outside_the_subset_is_refused_before_measuring() {
-    let workspace = Workspace::new(&minimal_manifest("\n[tools]\npython = \"3.12\"\n"));
+    let workspace = Workspace::new(&minimal_manifest(
+        "\n[state.data]\nmount = \"/data\"\naccess = \"read-write\"\nschema = \"v1\"\nsnapshot = \"exclude\"\n",
+    ));
     let producer = FakeProducer::healthy();
 
     let error = workspace.build(&producer).expect_err("refused");
-    assert!(format!("{error}").contains("[tools]"), "{error}");
+    assert!(format!("{error}").contains("[state.<name>]"), "{error}");
     assert!(producer.log().resolved_images.is_empty());
 }
 
