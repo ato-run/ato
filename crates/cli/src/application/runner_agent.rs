@@ -4425,30 +4425,54 @@ fn restore_hold_break_reason(
 /// launch, no admission was ever recorded, or the manager has confirmed the
 /// release. Callers MUST hold the execution slot on `false`: CPU accounting and
 /// slot ownership are released as one transaction boundary.
+const CPU_RELEASE_ATTEMPTS: usize = 2;
+
+/// Release a confirmed VMM's CPU reservation. A reclaim failure is retried
+/// once synchronously before the lease task gives up and holds its execution
+/// slot. This is deliberately a transaction retry, not a timeout: the manager
+/// reply still defines whether the request committed.
 fn release_cpu_entitlement_after_teardown(
     lease_id: &str,
     slot_index: usize,
     vmm_pid: Option<u32>,
-) -> bool {
+) -> Result<(), crate::application::runner_cpu_manager::CpuManagerError> {
+    debug_assert_eq!(CPU_RELEASE_ATTEMPTS, 2);
+    match release_cpu_entitlement_after_teardown_once(lease_id, slot_index, vmm_pid) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            eprintln!(
+                "⚠️  cpu-entitlement: lease {lease_id}: release attempt 1 failed ({first_error}); retrying once before holding the execution slot"
+            );
+            release_cpu_entitlement_after_teardown_once(lease_id, slot_index, vmm_pid)
+        }
+    }
+}
+
+/// One fail-closed CPU release transaction. This function never substitutes a
+/// missing manager reply for a successful release: a communication failure is
+/// returned to the caller so the runner keeps the execution slot held.
+fn release_cpu_entitlement_after_teardown_once(
+    lease_id: &str,
+    slot_index: usize,
+    vmm_pid: Option<u32>,
+) -> Result<(), crate::application::runner_cpu_manager::CpuManagerError> {
     use crate::application::runner_cpu_config::{CpuEntitlementRuntime, cpu_entitlement};
-    use crate::application::runner_cpu_manager::{CpuManagerError, RebalanceOutcome};
+    use crate::application::runner_cpu_manager::RebalanceOutcome;
     use crate::application::runner_cpu_teardown::{ProcessExitEvidence, confirm_vm_teardown};
     let Some(CpuEntitlementRuntime::Active(e)) = cpu_entitlement() else {
-        return true;
+        return Ok(());
     };
-    let recorded_pid = vmm_pid.or_else(|| {
-        e.manager.snapshot().ok().and_then(|snap| {
-            snap.applied
-                .iter()
-                .find(|a| a.request.lease_id == lease_id)
-                .map(|a| a.vmm_pid)
-        })
-    });
-    let Some(pid) = recorded_pid else {
+    let snapshot = e.manager.snapshot()?;
+    let Some(applied) = snapshot
+        .applied
+        .iter()
+        .find(|entitlement| entitlement.request.lease_id == lease_id)
+    else {
         // Never admitted (hook refused / restore failed pre-spawn) — nothing to
-        // release.
-        return true;
+        // release. A duplicate teardown also reaches this idempotent outcome.
+        return Ok(());
     };
+    let pid = vmm_pid.unwrap_or(applied.vmm_pid);
     let proof = confirm_vm_teardown(lease_id, slot_index, pid, ProcessExitEvidence::Killed);
     match e.manager.release_after_teardown(proof) {
         Ok(outcome) => {
@@ -4462,16 +4486,23 @@ fn release_cpu_entitlement_after_teardown(
                     "🚨 cpu-entitlement: lease {lease_id} released; survivors not raised (manager unhealthy: {reason})"
                 ),
             }
-            true
+            Ok(())
         }
-        Err(CpuManagerError::UnknownLease { .. }) => true, // never admitted
-        Err(err) => {
-            eprintln!(
-                "🚨 cpu-entitlement: lease {lease_id}: release failed ({err}); CPU reservation retained fail-closed"
-            );
-            false
-        }
+        Err(err) => Err(err),
     }
+}
+
+/// The execution slot is downstream of CPU reclamation. Keeping this small
+/// barrier separate makes the ordering explicit at every teardown path: a
+/// failed CPU transaction is returned unchanged and the slot callback is never
+/// invoked.
+fn release_slot_after_cpu_reclaim(
+    cpu_release: Result<(), crate::application::runner_cpu_manager::CpuManagerError>,
+    release_slot: impl FnOnce(),
+) -> Result<(), crate::application::runner_cpu_manager::CpuManagerError> {
+    cpu_release?;
+    release_slot();
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4573,7 +4604,7 @@ async fn handle_restore_snapshot_lease(
         slot: SlotLease,
         code: &str,
         message: String,
-        cpu_released: bool,
+        cpu_release: Option<Result<(), crate::application::runner_cpu_manager::CpuManagerError>>,
     ) {
         eprintln!(
             "⚠️  restore lease {lease_id} rejected: {}",
@@ -4591,12 +4622,14 @@ async fn handle_restore_snapshot_lease(
                 scrub_secrets(&format!("{err:#}"))
             );
         }
-        if cpu_released {
-            slot.release();
-        } else {
-            eprintln!(
-                "⚠️  restore lease {lease_id}: execution slot held because CPU entitlement release was unconfirmed"
-            );
+        match cpu_release.map(|result| release_slot_after_cpu_reclaim(result, || slot.release())) {
+            Some(Ok(())) => {}
+            Some(Err(error)) => eprintln!(
+                "🚨 cpu-entitlement: lease {lease_id}: release failed ({error}); CPU reservation and execution slot retained fail-closed"
+            ),
+            None => eprintln!(
+                "⚠️  restore lease {lease_id}: execution slot held because VM teardown was unconfirmed"
+            ),
         }
     }
 
@@ -4994,7 +5027,9 @@ async fn handle_restore_snapshot_lease(
             // reaped the spawned VMM on this path (FcProcess::Drop), so the
             // entitlement — if any — is released against the manager's own
             // recorded pid. Never-admitted launches are a no-op here.
-            let cpu_released = release_cpu_entitlement_after_teardown(&lease_id, slot.index, None);
+            let cpu_release = Some(release_cpu_entitlement_after_teardown(
+                &lease_id, slot.index, None,
+            ));
             fail_after_teardown(
                 client,
                 api_base,
@@ -5003,7 +5038,7 @@ async fn handle_restore_snapshot_lease(
                 slot,
                 "restore_failed",
                 format!("{e:#}"),
-                cpu_released,
+                cpu_release,
             )
             .await;
             return;
@@ -5031,8 +5066,9 @@ async fn handle_restore_snapshot_lease(
         // Nothing to expose (e.g. a Fake/KVM-free backend) — a public run needs a served
         // port. Tear the session down and fail rather than report a portless ready.
         let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
-        let cpu_released = teardown(backend.as_ref(), session).is_ok()
-            && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+        let cpu_release = teardown(backend.as_ref(), session)
+            .ok()
+            .map(|_| release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid));
         fail_after_teardown(
             client,
             api_base,
@@ -5041,7 +5077,7 @@ async fn handle_restore_snapshot_lease(
             slot,
             "restore_no_port",
             "restored session exposed no guest port; this runner cannot serve it".to_string(),
-            cpu_released,
+            cpu_release,
         )
         .await;
         return;
@@ -5074,8 +5110,9 @@ async fn handle_restore_snapshot_lease(
         .await;
         if let Err(e) = mount_result {
             let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
-            let cpu_released = teardown(backend.as_ref(), session).is_ok()
-                && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+            let cpu_release = teardown(backend.as_ref(), session).ok().map(|_| {
+                release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid)
+            });
             fail_after_teardown(
                 client,
                 api_base,
@@ -5084,7 +5121,7 @@ async fn handle_restore_snapshot_lease(
                 slot,
                 "mount_failed",
                 format!("{e:#}"),
-                cpu_released,
+                cpu_release,
             )
             .await;
             return;
@@ -5096,61 +5133,61 @@ async fn handle_restore_snapshot_lease(
     // gate returns Ok only at bound-ready (the guest-agent then restarts the
     // workload with the real env). ANY failure = teardown + typed fail — an
     // unbound supervisor session must never reach the proxy/ready steps below.
-    let supervisor_bind: Option<(std::path::PathBuf, String)> = if let Some(names) =
-        &supervisor_names
-    {
-        let step = async {
-            let uds = session.vsock_uds.clone().ok_or_else(|| {
-                anyhow::anyhow!("restored supervisor session exposes no vsock uds")
-            })?;
-            let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            let leases = issue_leases(
-                resolved_bindings.clone().unwrap_or_default(),
-                now_ms,
-                binding_ttl_ms(),
-            )?;
-            let bind_uds = uds.clone();
-            // Blocking vsock connect + delivery — keep it off the async reactor.
-            tokio::task::spawn_blocking(move || {
-                bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
-            Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+    let supervisor_bind: Option<(std::path::PathBuf, String)> =
+        if let Some(names) = &supervisor_names {
+            let step = async {
+                let uds = session.vsock_uds.clone().ok_or_else(|| {
+                    anyhow::anyhow!("restored supervisor session exposes no vsock uds")
+                })?;
+                let namespace = binding_namespace(&cmd.capsule_manifest_hash)?;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let leases = issue_leases(
+                    resolved_bindings.clone().unwrap_or_default(),
+                    now_ms,
+                    binding_ttl_ms(),
+                )?;
+                let bind_uds = uds.clone();
+                // Blocking vsock connect + delivery — keep it off the async reactor.
+                tokio::task::spawn_blocking(move || {
+                    bind_before_expose(&bind_uds, &leases, Duration::from_secs(10))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("bind task join: {e}"))??;
+                Ok::<(std::path::PathBuf, String), anyhow::Error>((uds, namespace))
+            };
+            match step.await {
+                Ok(ctx) => {
+                    println!(
+                        "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
+                        names.len()
+                    );
+                    Some(ctx)
+                }
+                Err(e) => {
+                    let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
+                    let cpu_release = teardown(backend.as_ref(), session).ok().map(|_| {
+                        release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid)
+                    });
+                    fail_after_teardown(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "bind_failed",
+                        format!("{e:#}"),
+                        cpu_release,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            None
         };
-        match step.await {
-            Ok(ctx) => {
-                println!(
-                    "🔐 restore lease {lease_id}: {} binding(s) delivered, session bound-ready",
-                    names.len()
-                );
-                Some(ctx)
-            }
-            Err(e) => {
-                let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
-                let cpu_released = teardown(backend.as_ref(), session).is_ok()
-                    && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
-                fail_after_teardown(
-                    client,
-                    api_base,
-                    runner_token,
-                    &lease_id,
-                    slot,
-                    "bind_failed",
-                    format!("{e:#}"),
-                    cpu_released,
-                )
-                .await;
-                return;
-            }
-        }
-    } else {
-        None
-    };
     prof_mark!("bind_before_expose_ms");
 
     // 6. Materialize the selected surface gateway and prove its protocol-level
@@ -5287,8 +5324,9 @@ async fn handle_restore_snapshot_lease(
                     }
                 }
                 let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
-                let cpu_released = teardown(backend.as_ref(), session).is_ok()
-                    && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+                let cpu_release = teardown(backend.as_ref(), session).ok().map(|_| {
+                    release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid)
+                });
                 fail_after_teardown(
                     client,
                     api_base,
@@ -5297,7 +5335,7 @@ async fn handle_restore_snapshot_lease(
                     slot,
                     "surface_not_ready",
                     format!("{err:#}"),
-                    cpu_released,
+                    cpu_release,
                 )
                 .await;
                 return;
@@ -5359,12 +5397,13 @@ async fn handle_restore_snapshot_lease(
                             }
                         }
                         let cpu_vmm_pid = session.vmm_pid.and_then(|p| u32::try_from(p).ok());
-                        let cpu_released = teardown(backend.as_ref(), session).is_ok()
-                            && release_cpu_entitlement_after_teardown(
+                        let cpu_release = teardown(backend.as_ref(), session).ok().map(|_| {
+                            release_cpu_entitlement_after_teardown(
                                 &lease_id,
                                 slot.index,
                                 cpu_vmm_pid,
-                            );
+                            )
+                        });
                         fail_after_teardown(
                             client,
                             api_base,
@@ -5373,7 +5412,7 @@ async fn handle_restore_snapshot_lease(
                             slot,
                             "proxy_ready_timeout",
                             format!("{err:#}"),
-                            cpu_released,
+                            cpu_release,
                         )
                         .await;
                         return;
@@ -5638,8 +5677,18 @@ async fn handle_restore_snapshot_lease(
     // ADR-016: release the CPU entitlement ONLY on a confirmed VM stop — a VM
     // that may still be running must keep its quota reservation (fail closed,
     // mirroring the slot-release rule below).
-    let cpu_released =
-        vm_stopped && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
+    let cpu_release = vm_stopped
+        .then(|| release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid));
+    let cpu_released = match cpu_release {
+        Some(Ok(())) => true,
+        Some(Err(error)) => {
+            eprintln!(
+                "🚨 cpu-entitlement: lease {lease_id}: release failed ({error}); CPU reservation and execution slot retained fail-closed"
+            );
+            false
+        }
+        None => false,
+    };
     let cleanup = StopCleanup::from_teardown(vm_stopped, gateway_stopped);
     let cleanup = if cpu_released {
         cleanup
@@ -8397,6 +8446,62 @@ mod tests {
         assert!(cpu_held.process_terminated);
         assert!(cpu_held.proxy_stopped);
         assert!(!cpu_held.slot_released);
+    }
+
+    #[test]
+    fn cpu_reclaim_orders_slot_release_and_allows_a_later_retry() {
+        use std::cell::RefCell;
+
+        let pool = SlotPool::new(1, "127.0.0.1".to_string(), 8420);
+        let slot = pool.acquire().expect("slot claimed");
+        let order = RefCell::new(Vec::new());
+
+        // Controlled reclaim failure: its cause reaches the caller, the slot
+        // stays occupied, and the release callback is never invoked.
+        order.borrow_mut().push("cpu-release-failed");
+        let error = release_slot_after_cpu_reclaim(
+            Err(
+                crate::application::runner_cpu_manager::CpuManagerError::ManagerStopped {
+                    reason: "injected cgroup remove failure".to_string(),
+                },
+            ),
+            || order.borrow_mut().push("slot-release"),
+        )
+        .expect_err("failed CPU reclaim must hold the slot");
+        assert!(error.to_string().contains("injected cgroup remove failure"));
+        assert_eq!(order.into_inner(), vec!["cpu-release-failed"]);
+        assert_eq!(pool.active(), 1);
+        assert!(pool.acquire().is_none(), "held slot cannot be re-admitted");
+
+        // A later successful retry reclaims CPU first and only then releases
+        // the same execution slot. Repeating the completion is idempotent.
+        let order = RefCell::new(Vec::new());
+        order.borrow_mut().push("cpu-release-succeeded");
+        release_slot_after_cpu_reclaim(Ok(()), || {
+            order.borrow_mut().push("slot-release");
+            slot.release();
+        })
+        .expect("successful retry releases the slot");
+        assert_eq!(
+            order.into_inner(),
+            vec!["cpu-release-succeeded", "slot-release"]
+        );
+        assert_eq!(pool.active(), 0);
+        release_slot_after_cpu_reclaim(Ok(()), || slot.release())
+            .expect("duplicate teardown release is idempotent");
+        assert_eq!(pool.active(), 0, "duplicate teardown cannot double-release");
+    }
+
+    #[test]
+    fn feature_off_keeps_legacy_slot_teardown() {
+        let runtime = crate::application::runner_cpu_config::CpuEntitlementRuntime::Off;
+        assert!(runtime.polling_allowed());
+        assert!(!runtime.capability_advertised());
+
+        let pool = SlotPool::new(1, "127.0.0.1".to_string(), 8420);
+        let slot = pool.acquire().expect("slot claimed");
+        slot.release();
+        assert_eq!(pool.active(), 0, "feature-off does not add a CPU barrier");
     }
 
     #[test]
