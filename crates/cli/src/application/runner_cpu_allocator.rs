@@ -106,7 +106,8 @@ pub enum CpuAllocationError {
 pub type CpuAllocation = BTreeMap<String, u32>;
 
 /// Allocate `budget_millis` across `requests` by deterministic integer
-/// max-min fairness. See the module docs for the policy.
+/// floor-first capped equal-share (= max-min fairness under the v1 shared-floor
+/// invariant). See the module docs for the policy.
 ///
 /// `requests` may be given in any order; the outcome depends only on each
 /// request's `slot_index`. An empty request set yields an empty allocation.
