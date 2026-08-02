@@ -213,8 +213,13 @@ pub fn build(config: &CpuEntitlementConfig, max_slots: usize) -> CpuEntitlementR
 
 /// Resolve this process's delegated cgroup v2 directory under the unified mount.
 ///
-/// cgroup v2 lists exactly one `0::<path>` line in `/proc/self/cgroup`; the
-/// delegated root is `/sys/fs/cgroup<path>`.
+/// cgroup v2 lists exactly one `0::<path>` line in `/proc/self/cgroup`. Under
+/// `DelegateSubgroup=` (systemd ≥ 254 — which enforce effectively requires,
+/// see the setup drop-in) the process lives in a CHILD of the delegation
+/// boundary (`<unit>.service/main`), whose own `cgroup.controllers` is empty
+/// until the delegatee enables controllers in the unit's `subtree_control` —
+/// so the raw self path would flunk preflight with "cpu controller absent".
+/// [`adjust_for_delegate_subgroup`] steps up to the unit cgroup in that case.
 fn resolve_delegated_root() -> Result<PathBuf, String> {
     let content = std::fs::read_to_string("/proc/self/cgroup")
         .map_err(|e| format!("read /proc/self/cgroup: {e}"))?;
@@ -224,10 +229,38 @@ fn resolve_delegated_root() -> Result<PathBuf, String> {
             let mount = std::env::var("ATO_RUNNER_CGROUP_MOUNT")
                 .unwrap_or_else(|_| "/sys/fs/cgroup".to_string());
             let path = rest.trim_start_matches('/');
-            return Ok(PathBuf::from(mount).join(path));
+            return Ok(adjust_for_delegate_subgroup(
+                PathBuf::from(mount).join(path),
+            ));
         }
     }
     Err("no cgroup v2 (0::) line in /proc/self/cgroup".to_string())
+}
+
+/// If `own` lacks the `cpu` controller but its PARENT is a systemd unit cgroup
+/// (`*.service` / `*.scope`) that has it, the parent is the real delegation
+/// boundary (`DelegateSubgroup=` placed us one level below it) — return the
+/// parent. Anything else returns `own` unchanged: we never walk past a unit
+/// boundary into the slice above it.
+fn adjust_for_delegate_subgroup(own: PathBuf) -> PathBuf {
+    let has_cpu = |dir: &std::path::Path| {
+        std::fs::read_to_string(dir.join("cgroup.controllers"))
+            .map(|t| t.split_whitespace().any(|c| c == "cpu"))
+            .unwrap_or(false)
+    };
+    if has_cpu(&own) {
+        return own;
+    }
+    if let Some(parent) = own.parent() {
+        let unit_like = parent
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".service") || n.ends_with(".scope"));
+        if unit_like && has_cpu(parent) {
+            return parent.to_path_buf();
+        }
+    }
+    own
 }
 
 #[cfg(test)]
@@ -316,6 +349,35 @@ mod tests {
         assert!(matches!(rt, CpuEntitlementRuntime::Faulted { .. }));
         assert!(!rt.claims_allowed());
         assert!(!rt.capability_advertised());
+    }
+
+    #[test]
+    fn delegate_subgroup_adjustment_steps_up_to_the_unit_cgroup() {
+        let dir = tempfile::tempdir().unwrap();
+        // Layout: <root>/acc.service (has cpu) / main (empty controllers).
+        let unit = dir.path().join("acc.service");
+        let main = unit.join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(unit.join("cgroup.controllers"), "cpuset cpu io memory").unwrap();
+        std::fs::write(main.join("cgroup.controllers"), "").unwrap();
+        // In the subgroup, cpu absent → adjusted to the unit parent.
+        assert_eq!(adjust_for_delegate_subgroup(main.clone()), unit);
+        // The unit itself has cpu → unchanged.
+        assert_eq!(adjust_for_delegate_subgroup(unit.clone()), unit);
+        // A subgroup whose parent is NOT unit-like stays put (never walk into a
+        // slice).
+        let slice_child = dir.path().join("sys.slice").join("inner");
+        std::fs::create_dir_all(&slice_child).unwrap();
+        std::fs::write(slice_child.join("cgroup.controllers"), "").unwrap();
+        std::fs::write(
+            dir.path().join("sys.slice").join("cgroup.controllers"),
+            "cpu",
+        )
+        .unwrap();
+        assert_eq!(
+            adjust_for_delegate_subgroup(slice_child.clone()),
+            slice_child
+        );
     }
 
     #[test]
