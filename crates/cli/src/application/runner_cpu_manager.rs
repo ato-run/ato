@@ -1,5 +1,17 @@
 //! Single-owner CPU entitlement manager (ADR-016 PR2).
 //!
+//! The manager is a dedicated **std::thread** actor (`ato-cpu-entitlement`),
+//! deliberately NOT a tokio task: its work is exclusively synchronous local
+//! kernel-filesystem I/O (cgroup read/write) plus pure allocator math, and its
+//! one caller that matters is the synchronous pre-resume hook seam invoked
+//! inline on an async lease task — a plain blocking request/reply to an OS
+//! thread is safe from ANY runtime context (no `block_in_place`, no
+//! `Handle::block_on`, no `blocking_send`), independent of Tokio flavor.
+//! Requests wait for transaction completion (no caller-side timeout — a timeout
+//! without commit fencing could abandon a request the actor later commits); a
+//! FULL queue is refused up-front as [`CpuManagerError::ManagerBusy`] so a
+//! guest is never resumed on an unconfirmed quota.
+//!
 //! Detached lease tasks never touch the shared allocation directly; they send
 //! commands to this one actor, which owns the [`CpuCgroupBackend`] and the
 //! current per-slot allocation. It computes a new allocation with
@@ -25,8 +37,8 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-use tokio::sync::{mpsc, oneshot};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use super::runner_cgroup::{CgroupError, CpuCgroupBackend};
 use super::runner_cpu_allocator::{CpuAllocationError, CpuRequest, allocate_cpu};
@@ -76,6 +88,15 @@ pub enum CpuManagerError {
         slot_index: usize,
         detail: String,
     },
+    /// The manager's request queue is full. Fail-closed for admissions: the
+    /// guest is NOT resumed. The caller may retry or fail the launch.
+    #[error("CPU manager request queue is full")]
+    ManagerBusy,
+    /// The manager thread is gone (channel disconnected) — process shutdown or
+    /// a panic in the actor. No entitlement transaction was or will be applied
+    /// for this request.
+    #[error("CPU manager stopped: {reason}")]
+    ManagerStopped { reason: String },
 }
 
 /// Outcome of a successful admission.
@@ -111,6 +132,12 @@ pub enum RebalanceOutcome {
     /// The survivor raise AND its rollback failed; the manager is now Unhealthy.
     /// The freed slot is STILL released (it was reclaimed before this step).
     Unhealthy { reason: String },
+    /// The manager was already Unhealthy when this release was processed: the
+    /// slot was reclaimed and the reservation freed (refusing releases while
+    /// Unhealthy would leak slots and cgroups forever), but survivors were NOT
+    /// raised — the recorded allocation may not match the cgroup tree, so
+    /// growing into it is not provably safe.
+    SkippedUnhealthy { reason: String },
 }
 
 /// A read-only view of manager state for diagnostics / tests.
@@ -180,62 +207,121 @@ enum Command {
     AdmitAndAttach {
         request: CpuRequest,
         vmm_pid: u32,
-        reply: oneshot::Sender<Result<CpuAdmission, CpuManagerError>>,
+        reply: SyncSender<Result<CpuAdmission, CpuManagerError>>,
     },
     ReleaseAfterTeardown {
         proof: TeardownObservation,
-        reply: oneshot::Sender<Result<CpuReleaseOutcome, CpuManagerError>>,
+        reply: SyncSender<Result<CpuReleaseOutcome, CpuManagerError>>,
     },
     Snapshot {
-        reply: oneshot::Sender<CpuManagerSnapshot>,
+        reply: SyncSender<CpuManagerSnapshot>,
+    },
+    Shutdown {
+        reply: SyncSender<()>,
     },
 }
 
-/// Handle to the manager actor. Cloneable; every clone talks to the one owner.
+/// Health mirror encoding for the lock-free [`CpuEntitlementManager::health`]
+/// read (the reason string travels via `snapshot()`).
+const HEALTH_HEALTHY: u8 = 0;
+const HEALTH_UNHEALTHY: u8 = 1;
+
+/// State shared between the handle(s) and the actor thread: the command queue
+/// plus lock-free mirrors the actor updates after every state change, so hot
+/// callers (heartbeat capability checks) never queue a round-trip just to ask
+/// "are you healthy".
+struct ManagerShared {
+    tx: SyncSender<Command>,
+    health: AtomicU8,
+    allocation_generation: AtomicU64,
+}
+
+/// Handle to the manager actor. Cloneable; every clone talks to the one owner
+/// thread. All methods are synchronous and safe to call from any thread,
+/// including tokio runtime workers: the actor does only local kernel-filesystem
+/// I/O and allocator math, so a request/reply round-trip is bounded fs-write
+/// time, not network time.
 #[derive(Clone)]
 pub struct CpuEntitlementManager {
-    tx: mpsc::Sender<Command>,
+    inner: Arc<ManagerShared>,
 }
 
 impl CpuEntitlementManager {
-    /// Spawn the owner actor over `backend` with `budget_millis`. The returned
-    /// handle is cheap to clone across detached lease tasks.
-    pub fn spawn(backend: Arc<dyn CpuCgroupBackend>, budget_millis: u32) -> Self {
-        let (tx, rx) = mpsc::channel(64);
+    /// Start the owner thread (`ato-cpu-entitlement`) over `backend` with
+    /// `budget_millis`. `queue_capacity` bounds in-flight commands (derive it
+    /// from max_slots, e.g. `max(8, max_slots * 2 + 4)`); a full queue refuses
+    /// new work as [`CpuManagerError::ManagerBusy`] instead of blocking
+    /// admissions behind an unbounded backlog.
+    pub fn start(
+        backend: Arc<dyn CpuCgroupBackend>,
+        budget_millis: u32,
+        queue_capacity: usize,
+    ) -> Result<Self, CpuManagerError> {
+        let (tx, rx) = sync_channel(queue_capacity.max(1));
+        let inner = Arc::new(ManagerShared {
+            tx,
+            health: AtomicU8::new(HEALTH_HEALTHY),
+            allocation_generation: AtomicU64::new(0),
+        });
         let actor = ManagerActor {
             backend,
             budget_millis,
             health: CpuManagerHealth::Healthy,
             applied: BTreeMap::new(),
             allocation_generation: 0,
+            shared: Arc::clone(&inner),
         };
-        tokio::spawn(actor.run(rx));
-        Self { tx }
+        std::thread::Builder::new()
+            .name("ato-cpu-entitlement".to_string())
+            .spawn(move || actor.run(rx))
+            .map_err(|e| CpuManagerError::ManagerStopped {
+                reason: format!("spawn manager thread: {e}"),
+            })?;
+        Ok(Self { inner })
+    }
+
+    /// Send a command whose slot in the queue was made by `make`, then wait for
+    /// the reply. Waits for TRANSACTION COMPLETION — no caller-side timeout, by
+    /// design: a timeout that abandons the wait while the actor later commits
+    /// would desynchronize caller and manager state (needs cancel tokens +
+    /// commit fencing to add safely; deferred).
+    fn request<T>(
+        &self,
+        make: impl FnOnce(SyncSender<T>) -> Command,
+    ) -> Result<T, CpuManagerError> {
+        let (reply_tx, reply_rx) = sync_channel::<T>(1);
+        match self.inner.tx.try_send(make(reply_tx)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(CpuManagerError::ManagerBusy),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(CpuManagerError::ManagerStopped {
+                    reason: "manager thread exited".to_string(),
+                });
+            }
+        }
+        reply_rx
+            .recv()
+            .map_err(|_| CpuManagerError::ManagerStopped {
+                reason: "manager thread dropped reply".to_string(),
+            })
     }
 
     /// Admit a new session: compute the new allocation including it, apply the
     /// quotas (decrease-before-increase), attach `vmm_pid` to the slot cgroup,
     /// and commit. On any failure the previous allocation is restored and this
     /// returns an error WITHOUT the pid attached — the caller must not resume
-    /// the guest.
-    pub async fn admit_and_attach(
+    /// the guest. Synchronous: blocks the calling thread for the fs-write
+    /// round-trip; called from the pre-resume hook where the launch is already
+    /// serialized on this result.
+    pub fn admit_and_attach(
         &self,
         request: CpuRequest,
         vmm_pid: u32,
     ) -> Result<CpuAdmission, CpuManagerError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Command::AdmitAndAttach {
-                request,
-                vmm_pid,
-                reply,
-            })
-            .await
-            .map_err(|_| CpuManagerError::Unhealthy {
-                reason: "manager actor stopped".to_string(),
-            })?;
-        rx.await.map_err(|_| CpuManagerError::Unhealthy {
-            reason: "manager actor dropped reply".to_string(),
+        self.request(|reply| Command::AdmitAndAttach {
+            request,
+            vmm_pid,
+            reply,
         })?
     }
 
@@ -243,27 +329,71 @@ impl CpuEntitlementManager {
     /// survivors upward into the freed budget. The `proof` carries the session
     /// identity the manager verifies against its record. On `Ok`, the slot IS
     /// reclaimed and the caller must free the runner slot; `outcome.rebalance`
-    /// reports what happened to survivors.
-    pub async fn release_after_teardown(
+    /// reports what happened to survivors. Processed even when the manager is
+    /// Unhealthy (refusing releases would leak slots); only admissions are
+    /// refused there.
+    pub fn release_after_teardown(
         &self,
         proof: TeardownObservation,
     ) -> Result<CpuReleaseOutcome, CpuManagerError> {
-        let (reply, rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReleaseAfterTeardown { proof, reply })
-            .await
-            .map_err(|_| CpuManagerError::Unhealthy {
-                reason: "manager actor stopped".to_string(),
+        // A full queue must not lose a release: unlike an admission (where
+        // refusing is the safe direction), a refused release leaks the slot. So
+        // this uses a BLOCKING send — bounded, because every queued command is
+        // local fs I/O, and the actor never blocks on a caller (replies go into
+        // a capacity-1 channel whose receiver is already waiting).
+        let (reply_tx, reply_rx) = sync_channel(1);
+        self.inner
+            .tx
+            .send(Command::ReleaseAfterTeardown {
+                proof,
+                reply: reply_tx,
+            })
+            .map_err(|_| CpuManagerError::ManagerStopped {
+                reason: "manager thread exited".to_string(),
             })?;
-        rx.await.map_err(|_| CpuManagerError::Unhealthy {
-            reason: "manager actor dropped reply".to_string(),
-        })?
+        reply_rx
+            .recv()
+            .map_err(|_| CpuManagerError::ManagerStopped {
+                reason: "manager thread dropped reply".to_string(),
+            })?
     }
 
-    pub async fn snapshot(&self) -> Option<CpuManagerSnapshot> {
-        let (reply, rx) = oneshot::channel();
-        self.tx.send(Command::Snapshot { reply }).await.ok()?;
-        rx.await.ok()
+    /// Lock-free health read from the atomic mirror (reason via `snapshot()`).
+    pub fn health(&self) -> CpuManagerHealth {
+        match self.inner.health.load(Ordering::Acquire) {
+            HEALTH_HEALTHY => CpuManagerHealth::Healthy,
+            _ => CpuManagerHealth::Unhealthy {
+                reason: "see snapshot() for detail".to_string(),
+            },
+        }
+    }
+
+    /// Lock-free read of the allocation generation mirror.
+    pub fn allocation_generation(&self) -> u64 {
+        self.inner.allocation_generation.load(Ordering::Acquire)
+    }
+
+    pub fn snapshot(&self) -> Result<CpuManagerSnapshot, CpuManagerError> {
+        self.request(|reply| Command::Snapshot { reply })
+    }
+
+    /// Ask the actor to stop after draining commands ahead of this one, and
+    /// wait until it acknowledges. Further requests return `ManagerStopped`.
+    pub fn shutdown(&self) -> Result<(), CpuManagerError> {
+        // Blocking send: shutdown must not be refused for a momentarily-full
+        // queue.
+        let (reply_tx, reply_rx) = sync_channel(1);
+        self.inner
+            .tx
+            .send(Command::Shutdown { reply: reply_tx })
+            .map_err(|_| CpuManagerError::ManagerStopped {
+                reason: "manager thread already exited".to_string(),
+            })?;
+        reply_rx
+            .recv()
+            .map_err(|_| CpuManagerError::ManagerStopped {
+                reason: "manager thread dropped shutdown ack".to_string(),
+            })
     }
 }
 
@@ -274,27 +404,52 @@ struct ManagerActor {
     /// lease_id → applied entitlement.
     applied: BTreeMap<String, AppliedEntitlement>,
     allocation_generation: u64,
+    /// Mirrors for lock-free reads from handles.
+    shared: Arc<ManagerShared>,
 }
 
 impl ManagerActor {
-    async fn run(mut self, mut rx: mpsc::Receiver<Command>) {
-        while let Some(cmd) = rx.recv().await {
+    fn run(mut self, rx: Receiver<Command>) {
+        // Exits when every handle is dropped (recv disconnect) or on Shutdown.
+        while let Ok(cmd) = rx.recv() {
             match cmd {
                 Command::AdmitAndAttach {
                     request,
                     vmm_pid,
                     reply,
                 } => {
-                    let _ = reply.send(self.admit(request, vmm_pid));
+                    let result = self.admit(request, vmm_pid);
+                    self.mirror();
+                    let _ = reply.send(result);
                 }
                 Command::ReleaseAfterTeardown { proof, reply } => {
-                    let _ = reply.send(self.release(proof));
+                    let result = self.release(proof);
+                    self.mirror();
+                    let _ = reply.send(result);
                 }
                 Command::Snapshot { reply } => {
                     let _ = reply.send(self.snapshot());
                 }
+                Command::Shutdown { reply } => {
+                    let _ = reply.send(());
+                    break;
+                }
             }
         }
+    }
+
+    /// Publish health + generation to the lock-free mirrors AFTER a state
+    /// change and BEFORE the reply is sent, so a caller that observes a reply
+    /// can never read a mirror older than that reply.
+    fn mirror(&self) {
+        let health = match self.health {
+            CpuManagerHealth::Healthy => HEALTH_HEALTHY,
+            CpuManagerHealth::Unhealthy { .. } => HEALTH_UNHEALTHY,
+        };
+        self.shared.health.store(health, Ordering::Release);
+        self.shared
+            .allocation_generation
+            .store(self.allocation_generation, Ordering::Release);
     }
 
     fn snapshot(&self) -> CpuManagerSnapshot {
@@ -520,11 +675,10 @@ impl ManagerActor {
         &mut self,
         proof: TeardownObservation,
     ) -> Result<CpuReleaseOutcome, CpuManagerError> {
-        if let CpuManagerHealth::Unhealthy { reason } = &self.health {
-            return Err(CpuManagerError::Unhealthy {
-                reason: reason.clone(),
-            });
-        }
+        // NOTE: releases are processed even when Unhealthy — refusing them would
+        // leak slots and cgroups forever. Only NEW admissions are refused there.
+        // The reclaim below runs fully verified regardless of health; what an
+        // Unhealthy manager skips is the survivor raise (see the tail).
         let lease_id = proof.lease_id.clone();
         // Verify ALL THREE identity fields against the record BEFORE mutating any
         // state — a proof for one session, or a stale proof for a slot since
@@ -608,6 +762,17 @@ impl ManagerActor {
                 rebalance: RebalanceOutcome::NoSurvivors,
             });
         }
+        if let CpuManagerHealth::Unhealthy { reason } = &self.health {
+            // Slot reclaimed and reservation freed, but the recorded allocation
+            // may not match the cgroup tree — raising survivors into the freed
+            // budget is not provably safe, so leave their quotas as-is.
+            return Ok(CpuReleaseOutcome {
+                allocation_generation: self.allocation_generation,
+                rebalance: RebalanceOutcome::SkippedUnhealthy {
+                    reason: reason.clone(),
+                },
+            });
+        }
         let requests: Vec<CpuRequest> = self.applied.values().map(|a| a.request.clone()).collect();
         // Removing a request only shrank the floor sum, so this recompute cannot
         // exceed the budget; a failure here is defensive-only.
@@ -671,11 +836,8 @@ mod tests {
         }
     }
 
-    async fn admit(mgr: &CpuEntitlementManager, req: CpuRequest, pid: u32) -> u32 {
-        mgr.admit_and_attach(req, pid)
-            .await
-            .expect("admit")
-            .quota_millis
+    fn admit(mgr: &CpuEntitlementManager, req: CpuRequest, pid: u32) -> u32 {
+        mgr.admit_and_attach(req, pid).expect("admit").quota_millis
     }
 
     fn proof(lease: &str, slot: usize, pid: u32) -> TeardownObservation {
@@ -684,7 +846,7 @@ mod tests {
 
     /// Model a real teardown then release: the VMM leaves the slot cgroup, then
     /// the teardown proof is presented.
-    async fn teardown_and_release(
+    fn teardown_and_release(
         mgr: &CpuEntitlementManager,
         be: &FakeCgroupBackend,
         lease: &str,
@@ -692,26 +854,26 @@ mod tests {
         pid: u32,
     ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         be.simulate_process_exit(slot, pid);
-        mgr.release_after_teardown(proof(lease, slot, pid)).await
+        mgr.release_after_teardown(proof(lease, slot, pid))
     }
 
-    #[tokio::test]
-    async fn single_standard_gets_max() {
+    #[test]
+    fn single_standard_gets_max() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        assert_eq!(admit(&mgr, std_req("a", 0), 100).await, 2000);
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        assert_eq!(admit(&mgr, std_req("a", 0), 100), 2000);
         assert_eq!(be.quota_of(0), Some(2000));
         assert_eq!(be.pids_of(0), vec![100]);
     }
 
-    #[tokio::test]
-    async fn four_standard_constrained_share_evenly() {
+    #[test]
+    fn four_standard_constrained_share_evenly() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
         for i in 0..4 {
-            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32).await;
+            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32);
         }
-        let snap = mgr.snapshot().await.unwrap();
+        let snap = mgr.snapshot().unwrap();
         for a in &snap.applied {
             assert_eq!(a.quota_millis, 1500, "slot {}", a.slot_index);
         }
@@ -720,33 +882,31 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn three_standard_plus_economy() {
+    #[test]
+    fn three_standard_plus_economy() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 1).await;
-        admit(&mgr, std_req("b", 1), 2).await;
-        admit(&mgr, std_req("c", 2), 3).await;
-        admit(&mgr, eco_req("eco", 3), 4).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 1);
+        admit(&mgr, std_req("b", 1), 2);
+        admit(&mgr, std_req("c", 2), 3);
+        admit(&mgr, eco_req("eco", 3), 4);
         assert_eq!(be.quota_of(0), Some(1667));
         assert_eq!(be.quota_of(1), Some(1667));
         assert_eq!(be.quota_of(2), Some(1666));
         assert_eq!(be.quota_of(3), Some(1000));
     }
 
-    #[tokio::test]
-    async fn release_rebalances_survivors_upward() {
+    #[test]
+    fn release_rebalances_survivors_upward() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
         for i in 0..4 {
-            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32).await;
+            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32);
         }
         for i in 0..4 {
             assert_eq!(be.quota_of(i), Some(1500));
         }
-        teardown_and_release(&mgr, &be, "s3", 3, 103)
-            .await
-            .expect("release");
+        teardown_and_release(&mgr, &be, "s3", 3, 103).expect("release");
         // Survivors rise to their 2000m ceiling; freed slot cgroup removed.
         for i in 0..3 {
             assert_eq!(be.quota_of(i), Some(2000), "survivor slot {i}");
@@ -754,13 +914,13 @@ mod tests {
         assert_eq!(be.quota_of(3), None, "freed slot removed");
     }
 
-    #[tokio::test]
-    async fn admit_over_floor_sum_is_rejected_and_rolls_back() {
+    #[test]
+    fn admit_over_floor_sum_is_rejected_and_rolls_back() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 2000);
-        admit(&mgr, std_req("a", 0), 1).await;
-        admit(&mgr, std_req("b", 1), 2).await; // 2×1000 floor = budget, ok
-        let third = mgr.admit_and_attach(std_req("c", 2), 3).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 2000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 1);
+        admit(&mgr, std_req("b", 1), 2); // 2×1000 floor = budget, ok
+        let third = mgr.admit_and_attach(std_req("c", 2), 3);
         assert!(matches!(
             third,
             Err(CpuManagerError::Allocation(
@@ -773,13 +933,13 @@ mod tests {
         assert_eq!(be.pids_of(2), Vec::<u32>::new());
     }
 
-    #[tokio::test]
-    async fn attach_failure_rolls_back_without_starting_guest() {
+    #[test]
+    fn attach_failure_rolls_back_without_starting_guest() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
         be.fail_at(FakeFailPoint::AttachPid);
-        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        let res = mgr.admit_and_attach(std_req("b", 1), 200);
         assert!(matches!(res, Err(CpuManagerError::CgroupRolledBack(_))));
         // The survivor 'a' is restored to its committed quota; the empty
         // candidate cgroup for 'b' is torn down (Blocker 5).
@@ -787,141 +947,138 @@ mod tests {
         assert_eq!(be.quota_of(1), None, "empty candidate slot removed");
         assert_eq!(be.pids_of(1), Vec::<u32>::new());
         // Manager still healthy — a clean rollback keeps it serving.
-        let snap = mgr.snapshot().await.unwrap();
+        let snap = mgr.snapshot().unwrap();
         assert_eq!(snap.health, CpuManagerHealth::Healthy);
         assert_eq!(snap.applied.len(), 1);
     }
 
-    #[tokio::test]
-    async fn admit_candidate_cleanup_remove_failure_goes_unhealthy() {
+    #[test]
+    fn admit_candidate_cleanup_remove_failure_goes_unhealthy() {
         // attach fails → rollback inspects the empty candidate and tries to
         // remove it → the remove ALSO fails → Unhealthy. Both points armed at
         // once (the fake now supports a failure set).
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
         be.fail_at(FakeFailPoint::AttachPid);
         be.fail_at(FakeFailPoint::RemoveSlot);
-        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        let res = mgr.admit_and_attach(std_req("b", 1), 200);
         assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
-        let snap = mgr.snapshot().await.unwrap();
+        let snap = mgr.snapshot().unwrap();
         assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
     }
 
-    #[tokio::test]
-    async fn rollback_failure_marks_unhealthy_and_stops_admissions() {
+    #[test]
+    fn rollback_failure_marks_unhealthy_and_stops_admissions() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
         // Three standard over 6000 → 2000m each. Admitting a fourth forces every
         // existing slot to DECREASE 2000→1500. Arm WriteQuotaAny so both that
         // decrease AND the rollback restore fail → the manager must go unhealthy.
-        admit(&mgr, std_req("a", 0), 100).await;
-        admit(&mgr, std_req("b", 1), 200).await;
-        admit(&mgr, std_req("c", 2), 300).await;
+        admit(&mgr, std_req("a", 0), 100);
+        admit(&mgr, std_req("b", 1), 200);
+        admit(&mgr, std_req("c", 2), 300);
         be.fail_at(FakeFailPoint::WriteQuotaAny);
-        let res = mgr.admit_and_attach(std_req("d", 3), 400).await;
+        let res = mgr.admit_and_attach(std_req("d", 3), 400);
         assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
-        let snap = mgr.snapshot().await.unwrap();
+        let snap = mgr.snapshot().unwrap();
         assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
         // Further admissions are refused while unhealthy.
         be.clear_fail();
-        let after = mgr.admit_and_attach(std_req("e", 4), 500).await;
+        let after = mgr.admit_and_attach(std_req("e", 4), 500);
         assert!(matches!(after, Err(CpuManagerError::Unhealthy { .. })));
     }
 
-    #[tokio::test]
-    async fn releasing_unknown_lease_errs() {
+    #[test]
+    fn releasing_unknown_lease_errs() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be, 8000);
-        let res = mgr.release_after_teardown(proof("ghost", 9, 999)).await;
+        let mgr = CpuEntitlementManager::start(be, 8000, 16).unwrap();
+        let res = mgr.release_after_teardown(proof("ghost", 9, 999));
         assert!(matches!(res, Err(CpuManagerError::UnknownLease { .. })));
     }
 
-    #[tokio::test]
-    async fn release_proof_with_wrong_slot_is_rejected() {
+    #[test]
+    fn release_proof_with_wrong_slot_is_rejected() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
         be.simulate_process_exit(0, 100);
         // Proof claims slot 3, but 'a' is recorded on slot 0.
-        let res = mgr.release_after_teardown(proof("a", 3, 100)).await;
+        let res = mgr.release_after_teardown(proof("a", 3, 100));
         assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
         // Nothing released: 'a' still holds its slot.
         assert_eq!(be.quota_of(0), Some(2000));
-        assert_eq!(mgr.snapshot().await.unwrap().applied.len(), 1);
+        assert_eq!(mgr.snapshot().unwrap().applied.len(), 1);
     }
 
-    #[tokio::test]
-    async fn release_proof_with_wrong_pid_is_rejected() {
+    #[test]
+    fn release_proof_with_wrong_pid_is_rejected() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
         be.simulate_process_exit(0, 100);
         // Correct lease + slot, WRONG pid.
-        let res = mgr.release_after_teardown(proof("a", 0, 999)).await;
+        let res = mgr.release_after_teardown(proof("a", 0, 999));
         assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "not released");
     }
 
-    #[tokio::test]
-    async fn stale_proof_cannot_release_reused_slot() {
+    #[test]
+    fn stale_proof_cannot_release_reused_slot() {
         // A slot is used by pid 100, released, then reused by pid 200. A stale
         // proof carrying pid 100 must not release the new occupant.
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
-        teardown_and_release(&mgr, &be, "a", 0, 100)
-            .await
-            .expect("first release");
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
+        teardown_and_release(&mgr, &be, "a", 0, 100).expect("first release");
         // Reuse slot 0 for a new session 'b' with pid 200.
-        admit(&mgr, std_req("b", 0), 200).await;
+        admit(&mgr, std_req("b", 0), 200);
         // Stale proof: lease 'b' is on slot 0, but with pid 100 (the old one).
-        let res = mgr.release_after_teardown(proof("b", 0, 100)).await;
+        let res = mgr.release_after_teardown(proof("b", 0, 100));
         assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "new occupant not released");
     }
 
-    #[tokio::test]
-    async fn admit_rejects_preexisting_pid_before_quota_changes() {
+    #[test]
+    fn admit_rejects_preexisting_pid_before_quota_changes() {
         // A candidate slot that already holds a process (ensure_slot reused a
         // non-empty cgroup) must be refused BEFORE any existing session's quota
         // is touched.
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 100).await; // slot 0 → 2000m
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100); // slot 0 → 2000m
         be.seed_slot_pids(1, vec![7777]); // slot 1 already occupied
-        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        let res = mgr.admit_and_attach(std_req("b", 1), 200);
         assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
         // Existing session 'a' quota UNCHANGED (2000, not lowered toward 1500).
         assert_eq!(be.quota_of(0), Some(2000), "existing quota untouched");
     }
 
-    #[tokio::test]
-    async fn admit_pid_read_failure_does_not_rebalance_existing_sessions() {
+    #[test]
+    fn admit_pid_read_failure_does_not_rebalance_existing_sessions() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 100).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
         be.fail_at(FakeFailPoint::SlotPidsRead);
-        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        let res = mgr.admit_and_attach(std_req("b", 1), 200);
         assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "existing quota untouched");
     }
 
-    #[tokio::test]
-    async fn survivor_rebalance_failure_still_releases_slot() {
+    #[test]
+    fn survivor_rebalance_failure_still_releases_slot() {
         // Post-reclaim, the survivor raise fails but rolls back cleanly: the
         // release SUCCEEDS (slot reclaimed) with a RolledBack rebalance, and the
         // manager stays Healthy.
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
         for i in 0..4 {
-            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32).await;
+            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32);
         }
         be.simulate_process_exit(3, 103);
         be.fail_at(FakeFailPoint::WriteQuotaIncrease); // survivor raise fails
         let outcome = mgr
             .release_after_teardown(proof("s3", 3, 103))
-            .await
             .expect("release still succeeds");
         assert!(matches!(
             outcome.rebalance,
@@ -934,51 +1091,192 @@ mod tests {
             "slot reclaimed despite rebalance fail"
         );
         assert!(matches!(
-            mgr.snapshot().await.unwrap().health,
+            mgr.snapshot().unwrap().health,
             CpuManagerHealth::Healthy
         ));
     }
 
-    #[tokio::test]
-    async fn release_with_lingering_pid_keeps_reservation_and_goes_unhealthy() {
+    #[test]
+    fn release_with_lingering_pid_keeps_reservation_and_goes_unhealthy() {
         // The VM did NOT actually exit — a pid lingers in the slot cgroup. That
         // budget must not flow to survivors, so release fails closed.
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 100).await;
-        admit(&mgr, std_req("b", 1), 200).await; // both 2000m (budget 6000)
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
+        admit(&mgr, std_req("b", 1), 200); // both 2000m (budget 6000)
         // Do NOT simulate exit for 'b': its pid 200 still occupies slot 1.
-        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        let res = mgr.release_after_teardown(proof("b", 1, 200));
         assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
         // Survivor 'a' was NOT raised; 'b' still recorded; manager unhealthy.
         assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
-        let snap = mgr.snapshot().await.unwrap();
+        let snap = mgr.snapshot().unwrap();
         assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
     }
 
-    #[tokio::test]
-    async fn release_slot_remove_failure_keeps_reservation() {
+    #[test]
+    fn release_slot_remove_failure_keeps_reservation() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 100).await;
-        admit(&mgr, std_req("b", 1), 200).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
+        admit(&mgr, std_req("b", 1), 200);
         be.simulate_process_exit(1, 200); // process is gone…
         be.fail_at(FakeFailPoint::RemoveSlot); // …but the cgroup won't remove.
-        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        let res = mgr.release_after_teardown(proof("b", 1, 200));
         assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
     }
 
-    #[tokio::test]
-    async fn release_slot_pid_read_failure_keeps_reservation() {
+    #[test]
+    fn release_slot_pid_read_failure_keeps_reservation() {
         let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
-        admit(&mgr, std_req("a", 0), 100).await;
-        admit(&mgr, std_req("b", 1), 200).await;
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
+        admit(&mgr, std_req("b", 1), 200);
         be.simulate_process_exit(1, 200);
         be.fail_at(FakeFailPoint::SlotPidsRead);
-        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        let res = mgr.release_after_teardown(proof("b", 1, 200));
         assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
         assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
+    }
+
+    /// Drive the manager Unhealthy while keeping live sessions, by failing a
+    /// later admission's rollback (WriteQuotaAny fails both apply and restore).
+    fn force_unhealthy_with_live_sessions(
+        mgr: &CpuEntitlementManager,
+        be: &Arc<FakeCgroupBackend>,
+    ) {
+        be.fail_at(FakeFailPoint::WriteQuotaAny);
+        let res = mgr.admit_and_attach(std_req("poison", 5), 999);
+        assert!(res.is_err());
+        be.clear_fail();
+        assert!(matches!(mgr.health(), CpuManagerHealth::Unhealthy { .. }));
+    }
+
+    #[test]
+    fn unhealthy_release_still_reclaims_but_skips_survivor_raise() {
+        // Unhealthy must NOT refuse releases (that would leak slots/cgroups
+        // forever). It reclaims + frees the reservation, and skips the survivor
+        // raise.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 16).unwrap();
+        for i in 0..3 {
+            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32);
+        }
+        force_unhealthy_with_live_sessions(&mgr, &be);
+        be.simulate_process_exit(2, 102);
+        let outcome = mgr
+            .release_after_teardown(proof("s2", 2, 102))
+            .expect("release processed while unhealthy");
+        assert!(matches!(
+            outcome.rebalance,
+            RebalanceOutcome::SkippedUnhealthy { .. }
+        ));
+        assert_eq!(be.quota_of(2), None, "slot reclaimed");
+        // Survivors keep their prior quotas — no raise attempted.
+        assert_eq!(be.quota_of(0), Some(2000));
+        assert_eq!(be.quota_of(1), Some(2000));
+        // A NEW admission is still refused…
+        assert!(matches!(
+            mgr.admit_and_attach(std_req("new", 3), 300),
+            Err(CpuManagerError::Unhealthy { .. })
+        ));
+        // …and snapshot still answers.
+        let snap = mgr.snapshot().unwrap();
+        assert_eq!(snap.applied.len(), 2);
+    }
+
+    #[test]
+    fn shutdown_acks_and_later_requests_fail() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        admit(&mgr, std_req("a", 0), 100);
+        mgr.shutdown().expect("shutdown acked");
+        assert!(matches!(
+            mgr.admit_and_attach(std_req("b", 1), 200),
+            Err(CpuManagerError::ManagerStopped { .. })
+        ));
+    }
+
+    #[test]
+    fn health_and_generation_mirrors_track_actor_state() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 16).unwrap();
+        assert!(matches!(mgr.health(), CpuManagerHealth::Healthy));
+        assert_eq!(mgr.allocation_generation(), 0);
+        admit(&mgr, std_req("a", 0), 100);
+        // Mirror is published before the admit reply → visible right after.
+        assert_eq!(mgr.allocation_generation(), 1);
+        force_unhealthy_with_live_sessions(&mgr, &be);
+        assert!(matches!(mgr.health(), CpuManagerHealth::Unhealthy { .. }));
+    }
+
+    /// A backend whose ensure_slot parks until released, letting a test hold
+    /// the actor busy while the command queue fills behind it.
+    #[derive(Debug)]
+    struct GatedBackend {
+        inner: FakeCgroupBackend,
+        entered: SyncSender<()>,
+        gate: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl CpuCgroupBackend for GatedBackend {
+        fn preflight(
+            &self,
+        ) -> Result<super::super::runner_cgroup::CgroupCapabilities, CgroupError> {
+            self.inner.preflight()
+        }
+        fn ensure_slot(&self, slot_index: usize) -> Result<(), CgroupError> {
+            let _ = self.entered.send(());
+            let _ = self.gate.lock().unwrap().recv(); // park until the gate opens
+            self.inner.ensure_slot(slot_index)
+        }
+        fn read_quota_millis(&self, slot_index: usize) -> Result<Option<u32>, CgroupError> {
+            self.inner.read_quota_millis(slot_index)
+        }
+        fn write_quota_millis(&self, slot_index: usize, q: u32) -> Result<(), CgroupError> {
+            self.inner.write_quota_millis(slot_index, q)
+        }
+        fn attach_pid(&self, slot_index: usize, pid: u32) -> Result<(), CgroupError> {
+            self.inner.attach_pid(slot_index, pid)
+        }
+        fn slot_pids(&self, slot_index: usize) -> Result<Vec<u32>, CgroupError> {
+            self.inner.slot_pids(slot_index)
+        }
+        fn remove_slot(&self, slot_index: usize) -> Result<(), CgroupError> {
+            self.inner.remove_slot(slot_index)
+        }
+    }
+
+    #[test]
+    fn full_queue_refuses_admission_as_manager_busy() {
+        let (entered_tx, entered_rx) = sync_channel(4);
+        let (gate_tx, gate_rx) = sync_channel::<()>(4);
+        let be = Arc::new(GatedBackend {
+            inner: FakeCgroupBackend::new(),
+            entered: entered_tx,
+            gate: std::sync::Mutex::new(gate_rx),
+        });
+        // Capacity 1. Deterministic, sleep-free sequence:
+        //   1. t1's admit is DEQUEUED and parks the actor in ensure_slot
+        //      (confirmed via `entered`), leaving the queue empty;
+        //   2. main fills the one queue slot with a probe command whose reply
+        //      receiver is dropped (the actor's later reply send is ignored);
+        //   3. the next admission must be refused up-front as ManagerBusy.
+        let mgr = CpuEntitlementManager::start(be.clone(), 8000, 1).unwrap();
+        let m1 = mgr.clone();
+        let t1 = std::thread::spawn(move || m1.admit_and_attach(std_req("a", 0), 100));
+        entered_rx.recv().expect("actor entered ensure_slot"); // actor busy now
+        mgr.inner
+            .tx
+            .try_send(Command::Snapshot {
+                reply: sync_channel(1).0,
+            })
+            .expect("probe fills the single queue slot");
+        assert!(matches!(
+            mgr.admit_and_attach(std_req("c", 2), 300),
+            Err(CpuManagerError::ManagerBusy)
+        ));
+        // Open the gate; t1 completes; the probe is drained harmlessly.
+        gate_tx.send(()).unwrap();
+        t1.join().unwrap().expect("first admit");
     }
 }

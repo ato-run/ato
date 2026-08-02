@@ -284,7 +284,7 @@ pub enum FakeFailPoint {
     RemoveSlot,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct FakeState {
     /// slot_index → quota millis (absent = slot not created).
     quotas: BTreeMap<usize, u32>,
@@ -295,6 +295,7 @@ struct FakeState {
 /// In-memory backend that records every mutation and can fail any subset of
 /// operations on demand. `Send + Sync` via an internal mutex so it can back the
 /// manager actor in tests.
+#[derive(Debug)]
 pub struct FakeCgroupBackend {
     state: Mutex<FakeState>,
     fail: Mutex<std::collections::BTreeSet<FakeFailPoint>>,
