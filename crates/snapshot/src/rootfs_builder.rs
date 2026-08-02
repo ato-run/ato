@@ -40,6 +40,19 @@ pub enum RuntimeKind {
     Python,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Receives bounded chunks from the container build as they are produced.
+/// Implementations must not retain `bytes`; returning an error makes the build
+/// fail closed because an immutable attempt may not silently lose its log.
+pub trait BuildOutputSink {
+    fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String>;
+}
+
 /// A cheap probe of the source tree, so [`derive_build_spec`] stays pure + testable
 /// without a real checkout. Populated by [`SourceProbe::scan`] over the materialized dir.
 #[derive(Debug, Clone, Default)]
@@ -556,11 +569,42 @@ pub(crate) fn assemble_app_image_script_v1(
     pinned_base_ref: &str,
     tool: &str,
 ) -> String {
+    assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, false)
+}
+
+fn assemble_app_image_script_v1_mode(
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    tool: &str,
+    live_output: bool,
+) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
     let build_steps = spec
         .build_steps
         .iter()
-        .map(|argv| {
+        .enumerate()
+        .map(|(index, argv)| {
+            if live_output {
+                let step_id = format!("build.user.{}", index + 1);
+                let wrapper = format!(
+                    "printf '\\036ATO_STEP_START:{step_id}\\037\\n'; \
+                     \"$@\"; ato_status=$?; \
+                     printf '\\036ATO_STEP_END:{step_id}:%s\\037\\n' \"$ato_status\"; \
+                     exit \"$ato_status\""
+                );
+                let mut wrapped = vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    wrapper,
+                    "ato-step".to_string(),
+                ];
+                wrapped.extend(argv.iter().cloned());
+                return format!(
+                    "RUN {}",
+                    serde_json::to_string(&wrapped)
+                        .expect("a wrapped argv always serializes as JSON")
+                );
+            }
             format!(
                 "RUN {}",
                 serde_json::to_string(argv).expect("an argv always serializes as JSON")
@@ -581,6 +625,11 @@ pub(crate) fn assemble_app_image_script_v1(
     // a repository with no Dockerfile would still get one at `/app` that is not
     // in the projection. Copying `src/.` makes the guest's `{workdir}` exactly
     // the projection, byte for byte.
+    let build_invocation = if live_output {
+        format!(r#"{tool} build --no-cache -t "$ATO_IMAGE" "$BUILD""#)
+    } else {
+        format!(r#"{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null"#)
+    };
     format!(
         r#"set -euo pipefail
 BUILD=$(mktemp -d)
@@ -598,13 +647,13 @@ COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
 {build_steps}
 DOCKER
-{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
+{build_invocation}
 "#,
-        tool = tool,
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
         install_q = install_q,
         build_steps = build_steps,
+        build_invocation = build_invocation,
     )
 }
 
@@ -794,6 +843,31 @@ pub fn assemble_app_image_v1(
     })
 }
 
+pub fn assemble_app_image_v1_with_output(
+    projected_source: &Path,
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    image_ref: &str,
+    tool: &str,
+    output: &mut dyn BuildOutputSink,
+) -> Result<AssembledGuestImage, String> {
+    reject_control_chars("pinned base image reference", pinned_base_ref)?;
+    reject_control_chars("assembled image reference", image_ref)?;
+    let script = assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, true);
+    run_builder_script_with_output(
+        "assemble app image",
+        &script,
+        &[
+            ("ATO_SRC", projected_source.as_os_str().to_os_string()),
+            ("ATO_IMAGE", image_ref.into()),
+        ],
+        output,
+    )?;
+    Ok(AssembledGuestImage {
+        image_ref: image_ref.to_string(),
+    })
+}
+
 /// Export an assembled image's filesystem into `rootfs_dir` and install the
 /// guest init.
 ///
@@ -932,6 +1006,110 @@ fn run_builder_script(
         return Ok(());
     }
     let tail: String = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("{stage} failed: {tail}"))
+}
+
+fn run_builder_script_with_output(
+    stage: &str,
+    script: &str,
+    env: &[(&str, std::ffi::OsString)],
+    output: &mut dyn BuildOutputSink,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn {stage}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("capture {stage} stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("capture {stage} stderr"))?;
+    fn spawn_reader<R: Read + Send + 'static>(
+        stream: BuildOutputStream,
+        mut pipe: R,
+        sender: std::sync::mpsc::SyncSender<(BuildOutputStream, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 8 * 1024];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.send((stream, buffer[..count].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send((
+                            stream,
+                            format!("Ato could not read build output: {error}\n").into_bytes(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(256);
+    let readers = vec![
+        spawn_reader(BuildOutputStream::Stdout, stdout, sender.clone()),
+        spawn_reader(BuildOutputStream::Stderr, stderr, sender.clone()),
+    ];
+    drop(sender);
+
+    let mut telemetry_error = None;
+    let mut stderr_tail = Vec::new();
+    for (stream, bytes) in receiver {
+        if stream == BuildOutputStream::Stderr {
+            stderr_tail.extend_from_slice(&bytes);
+            if stderr_tail.len() > 32 * 1024 {
+                stderr_tail.drain(..stderr_tail.len() - 32 * 1024);
+            }
+        }
+        if telemetry_error.is_none()
+            && let Err(error) = output.write(stream, &bytes)
+        {
+            telemetry_error = Some(error);
+        }
+    }
+    for reader in readers {
+        if reader.join().is_err() && telemetry_error.is_none() {
+            telemetry_error = Some("a build output reader panicked".to_string());
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for {stage}: {error}"))?;
+    if let Some(error) = telemetry_error {
+        return Err(format!("stream {stage} output: {error}"));
+    }
+    if status.success() {
+        return Ok(());
+    }
+    let tail = String::from_utf8_lossy(&stderr_tail)
         .lines()
         .rev()
         .take(12)
@@ -2774,6 +2952,43 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             script.contains(r#"RUN ["python3","build.py","arg with space"]"#),
             "build argv must use Dockerfile exec form: {script}"
         );
+        let live = assemble_app_image_script_v1_mode(&spec, PINNED_BASE, "docker", true);
+        assert!(live.contains("ATO_STEP_START:build.user.1"), "{live}");
+        assert!(live.contains("ATO_STEP_END:build.user.1"), "{live}");
+        assert!(
+            live.contains(r#","ato-step","python3","build.py","arg with space"]"#),
+            "the wrapper must pass the exact authored argv through \"$@\": {live}"
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingOutput {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    impl BuildOutputSink for CapturingOutput {
+        fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String> {
+            match stream {
+                BuildOutputStream::Stdout => self.stdout.extend_from_slice(bytes),
+                BuildOutputStream::Stderr => self.stderr.extend_from_slice(bytes),
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn builder_script_streams_stdout_and_stderr_before_returning() {
+        let mut output = CapturingOutput::default();
+        run_builder_script_with_output(
+            "stream test",
+            "printf 'one\\ntwo\\n'; printf 'warning\\n' >&2",
+            &[],
+            &mut output,
+        )
+        .expect("script succeeds");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "one\ntwo\n");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "warning\n");
     }
 
     #[test]
