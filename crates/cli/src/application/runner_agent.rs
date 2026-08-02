@@ -3084,6 +3084,15 @@ impl StopCleanup {
             slot_released: process_terminated && proxy_stopped,
         }
     }
+
+    /// Keep the execution slot held even though the workload/proxy teardown
+    /// itself completed. Used when the CPU entitlement manager has not yet
+    /// confirmed cgroup reclamation, so the runner never reuses a slot whose
+    /// host-side reservation is still live or uncertain.
+    fn hold_slot(mut self) -> Self {
+        self.slot_released = false;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -5631,7 +5640,12 @@ async fn handle_restore_snapshot_lease(
     // mirroring the slot-release rule below).
     let cpu_released =
         vm_stopped && release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid);
-    let cleanup = StopCleanup::from_teardown(cpu_released, gateway_stopped);
+    let cleanup = StopCleanup::from_teardown(vm_stopped, gateway_stopped);
+    let cleanup = if cpu_released {
+        cleanup
+    } else {
+        cleanup.hold_slot()
+    };
     if let Err(err) = report_lease_stopped_with_reason(
         client,
         api_base,
@@ -8376,6 +8390,13 @@ mod tests {
         assert!(!StopCleanup::from_teardown(false, true).slot_released);
         assert!(!StopCleanup::from_teardown(true, false).slot_released);
         assert!(!StopCleanup::from_teardown(false, false).slot_released);
+
+        // The VM/proxy facts stay honest when CPU accounting cannot yet be
+        // released, but the execution slot remains unavailable.
+        let cpu_held = StopCleanup::from_teardown(true, true).hold_slot();
+        assert!(cpu_held.process_terminated);
+        assert!(cpu_held.proxy_stopped);
+        assert!(!cpu_held.slot_released);
     }
 
     #[test]
