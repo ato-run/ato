@@ -164,14 +164,20 @@ impl CpuCgroupBackend for LinuxCgroupV2Backend {
                 .map_err(|e| fail(format!("probe cpu.max write: {e}")))?;
             let read = std::fs::read_to_string(&cpu_max)
                 .map_err(|e| fail(format!("probe cpu.max read: {e}")))?;
-            if read.split_whitespace().next() != Some("100000") {
+            // Validate BOTH fields — quota AND period — round-tripped.
+            let mut tokens = read.split_whitespace();
+            let (quota, period) = (tokens.next(), tokens.next());
+            if quota != Some("100000") || period != Some("100000") {
                 return Err(fail(format!("probe cpu.max round-trip mismatch: {read:?}")));
             }
             Ok(())
         })();
-        // Always attempt to clean the probe, regardless of the result.
-        let _ = std::fs::remove_dir(&probe);
-        probe_result?;
+        // Removing the probe cgroup is part of the contract: a probe that cannot
+        // be cleaned up is a delegated-tree we don't fully control, so a remove
+        // failure fails preflight (surfaced alongside any probe error).
+        let remove_result = std::fs::remove_dir(&probe)
+            .map_err(|e| fail(format!("remove probe {}: {e}", probe.display())));
+        probe_result.and(remove_result)?;
 
         Ok(CgroupCapabilities {
             delegated_root: self.root.clone(),
@@ -219,10 +225,21 @@ impl CpuCgroupBackend for LinuxCgroupV2Backend {
     fn slot_pids(&self, slot_index: usize) -> Result<Vec<u32>, CgroupError> {
         let path = self.slot_dir(slot_index).join("cgroup.procs");
         match std::fs::read_to_string(&path) {
-            Ok(text) => Ok(text
+            // STRICT parse: this read is load-bearing for release/admit safety,
+            // so a token we cannot parse is an error, not a silently-dropped pid
+            // that could make an occupied cgroup look empty (fail-closed).
+            Ok(text) => text
                 .split_whitespace()
-                .filter_map(|t| t.parse().ok())
-                .collect()),
+                .map(|token| {
+                    token.parse::<u32>().map_err(|e| {
+                        CgroupError::new(
+                            "slot_pids",
+                            Some(slot_index),
+                            format!("invalid pid token {token:?}: {e}"),
+                        )
+                    })
+                })
+                .collect(),
             // A not-yet-created slot has no procs file; treat as empty.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(CgroupError::new(
@@ -521,5 +538,34 @@ mod tests {
         std::fs::write(dir.path().join("cgroup.controllers"), "cpuset io memory").unwrap();
         let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
         assert!(be.preflight().is_err());
+    }
+
+    #[test]
+    fn linux_slot_pids_valid_tokens_parse() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
+        let slot = be.slot_dir(0);
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("cgroup.procs"), "101\n202\n303\n").unwrap();
+        assert_eq!(be.slot_pids(0).unwrap(), vec![101, 202, 303]);
+    }
+
+    #[test]
+    fn linux_slot_pids_malformed_is_error_not_empty() {
+        // A garbage cgroup.procs must NOT read as an empty (releasable) slot.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
+        let slot = be.slot_dir(0);
+        std::fs::create_dir_all(&slot).unwrap();
+        std::fs::write(slot.join("cgroup.procs"), "101\nnot-a-pid\n303").unwrap();
+        assert!(be.slot_pids(0).is_err(), "malformed token must be an error");
+    }
+
+    #[test]
+    fn linux_slot_pids_absent_file_is_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
+        // Slot dir never created → no procs file → empty, not error.
+        assert_eq!(be.slot_pids(5).unwrap(), Vec::<u32>::new());
     }
 }
