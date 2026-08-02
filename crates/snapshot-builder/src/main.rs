@@ -1115,7 +1115,7 @@ fn produce_build(
     if let Some(pinned) = job.pinned_source.as_ref() {
         let (input, verified) =
             obtain_pinned_source(cfg, job, pinned, &jobdir.join("pinned-source"))?;
-        return produce_pinned_v1_build(cfg, &job.id, jobdir, &input, verified, None);
+        return produce_pinned_v1_build(cfg, &job.id, jobdir, &input, verified, None, None);
     }
 
     match job.kind.as_str() {
@@ -3052,6 +3052,7 @@ fn produce_pinned_v1_build(
     input: &ArchiveOnlyBuildInput,
     verified: source_archive_download::TreeVerifiedArchive,
     generated_manifest: Option<&str>,
+    output: Option<&mut dyn snapshot::rootfs_builder::BuildOutputSink>,
 ) -> std::result::Result<ProducedBuild, (String, String)> {
     let fail = |stage: &str, e: String| (stage.to_string(), e);
 
@@ -3145,12 +3146,13 @@ fn produce_pinned_v1_build(
     // 4. The v1 producer lane — the same code `ato build` runs, over the same
     //    verified archive. `pinned_source_archive` is what keeps the projection
     //    on the proved bytes instead of a re-freeze of the extraction.
-    let producer = snapshot::build_v1::HostV1GuestProducer::probe().map_err(|reason| {
-        fail(
-            "build",
-            format!("a v1 build needs a container tool: {reason}"),
-        )
-    })?;
+    let producer = snapshot::build_v1::HostV1GuestProducer::probe_with_optional_output(output)
+        .map_err(|reason| {
+            fail(
+                "build",
+                format!("a v1 build needs a container tool: {reason}"),
+            )
+        })?;
     let work_root = jobdir.join("v1-work");
     std::fs::create_dir_all(&work_root)
         .map_err(|e| fail("build", format!("create the v1 work directory: {e}")))?;
@@ -4233,11 +4235,30 @@ impl BuildEventEmitter<'_> {
     }
 
     fn attempt_started(&mut self) -> Result<(), String> {
-        self.emit(
-            "attempt_started",
-            None,
-            serde_json::json!({ "builder_image": "ato/snapshot-builder" }),
-        )
+        let configured_digest = std::env::var("ATO_BUILDER_IMAGE_DIGEST")
+            .ok()
+            .filter(|value| {
+                value.len() == "sha256:".len() + 64
+                    && value.starts_with("sha256:")
+                    && value["sha256:".len()..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            });
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "builder_image".to_string(),
+            serde_json::Value::String(format!(
+                "ato/snapshot-builder:{}",
+                env!("CARGO_PKG_VERSION")
+            )),
+        );
+        if let Some(digest) = configured_digest {
+            fields.insert(
+                "builder_image_digest".to_string(),
+                serde_json::Value::String(digest),
+            );
+        }
+        self.emit("attempt_started", None, serde_json::Value::Object(fields))
     }
 
     fn attempt_finished(
@@ -4301,6 +4322,14 @@ impl BuildEventEmitter<'_> {
         )
     }
 
+    fn output(&mut self, step_id: &str, stream: &str, data: &str) -> Result<(), String> {
+        self.emit(
+            "output",
+            Some(step_id),
+            serde_json::json!({ "stream": stream, "data": data }),
+        )
+    }
+
     fn planned_command_steps(&self) -> Vec<(String, Vec<String>, String, Vec<String>)> {
         self.work
             .effective_build_plan
@@ -4336,6 +4365,256 @@ impl BuildEventEmitter<'_> {
                 Some((step_id.to_string(), argv, cwd, environment_names))
             })
             .collect()
+    }
+}
+
+struct AuthoringBuildOutputSink<'events, 'client> {
+    events: &'events mut BuildEventEmitter<'client>,
+    planned: std::collections::BTreeMap<String, (Vec<String>, String, Vec<String>)>,
+    completed: std::collections::BTreeSet<String>,
+    active: Option<(String, std::time::Instant)>,
+    current_step: Option<String>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl<'events, 'client> AuthoringBuildOutputSink<'events, 'client> {
+    fn new(
+        events: &'events mut BuildEventEmitter<'client>,
+        planned: &[(String, Vec<String>, String, Vec<String>)],
+    ) -> Self {
+        Self {
+            events,
+            planned: planned
+                .iter()
+                .map(|(step_id, argv, cwd, environment)| {
+                    (
+                        step_id.clone(),
+                        (argv.clone(), cwd.clone(), environment.clone()),
+                    )
+                })
+                .collect(),
+            completed: std::collections::BTreeSet::new(),
+            active: None,
+            current_step: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn marker(line: &str, prefix: &str) -> Option<String> {
+        let start = line.find(prefix)? + prefix.len();
+        let value = &line[start..];
+        let end = value
+            .find(|character: char| character == '\u{1f}' || character.is_whitespace())
+            .unwrap_or(value.len());
+        let value = &value[..end];
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
+    fn start_command(&mut self, step_id: String) -> Result<(), String> {
+        if self.active.is_some() {
+            return Err("a build step started before the previous step finished".to_string());
+        }
+        let (argv, cwd, environment_names) = self
+            .planned
+            .get(&step_id)
+            .cloned()
+            .ok_or_else(|| format!("container output named an unknown step {step_id}"))?;
+        let started = self.events.step_started(&step_id)?;
+        self.events.emit(
+            "command_started",
+            Some(&step_id),
+            serde_json::json!({
+                "command_argv": argv,
+                "cwd": cwd,
+                "environment_names": environment_names,
+            }),
+        )?;
+        self.current_step = Some(step_id.clone());
+        self.active = Some((step_id, started));
+        Ok(())
+    }
+
+    fn finish_command(&mut self, marker: String) -> Result<(), String> {
+        let (step_id, code) = marker
+            .rsplit_once(':')
+            .ok_or_else(|| format!("invalid build step end marker {marker:?}"))?;
+        let exit_code = code
+            .parse::<i32>()
+            .map_err(|_| format!("invalid build step exit code {code:?}"))?;
+        let (active_step, started) = self
+            .active
+            .take()
+            .ok_or_else(|| format!("build step {step_id} ended before it started"))?;
+        if active_step != step_id {
+            return Err(format!(
+                "build step {step_id} ended while {active_step} was running"
+            ));
+        }
+        let (argv, cwd, environment_names) = self
+            .planned
+            .get(step_id)
+            .cloned()
+            .ok_or_else(|| format!("container output named an unknown step {step_id}"))?;
+        self.events.emit(
+            "command_finished",
+            Some(step_id),
+            serde_json::json!({
+                "command_argv": argv,
+                "cwd": cwd,
+                "environment_names": environment_names,
+                "exit_code": exit_code,
+                "duration_ms": started.elapsed().as_millis() as u64,
+            }),
+        )?;
+        self.events.step_finished(
+            step_id,
+            if exit_code == 0 {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            started,
+            Some(exit_code),
+            (exit_code != 0).then_some("command_failed"),
+        )?;
+        self.completed.insert(step_id.to_string());
+        self.current_step = None;
+        Ok(())
+    }
+
+    fn emit_line(
+        &mut self,
+        stream: snapshot::rootfs_builder::BuildOutputStream,
+        line: &[u8],
+    ) -> Result<(), String> {
+        let text = String::from_utf8_lossy(line);
+        if let Some(step_id) = Self::marker(&text, "ATO_STEP_START:") {
+            return self.start_command(step_id);
+        }
+        if let Some(marker) = Self::marker(&text, "ATO_STEP_END:") {
+            return self.finish_command(marker);
+        }
+        let step_id = self
+            .current_step
+            .as_deref()
+            .unwrap_or("runtime.provisioning")
+            .to_string();
+        let stream = match stream {
+            snapshot::rootfs_builder::BuildOutputStream::Stdout => "stdout",
+            snapshot::rootfs_builder::BuildOutputStream::Stderr => "stderr",
+        };
+        self.events.output(&step_id, stream, &text)
+    }
+
+    fn consume(
+        &mut self,
+        stream: snapshot::rootfs_builder::BuildOutputStream,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        let buffer = match stream {
+            snapshot::rootfs_builder::BuildOutputStream::Stdout => &mut self.stdout,
+            snapshot::rootfs_builder::BuildOutputStream::Stderr => &mut self.stderr,
+        };
+        buffer.extend_from_slice(bytes);
+        let mut consumed = 0;
+        let mut lines = Vec::new();
+        for (index, byte) in buffer.iter().enumerate() {
+            if *byte == b'\n' {
+                lines.push(buffer[consumed..=index].to_vec());
+                consumed = index + 1;
+            }
+        }
+        if consumed > 0 {
+            buffer.drain(..consumed);
+        }
+        for line in lines {
+            self.emit_line(stream, &line)?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self, require_complete: bool) -> Result<(), String> {
+        for stream in [
+            snapshot::rootfs_builder::BuildOutputStream::Stdout,
+            snapshot::rootfs_builder::BuildOutputStream::Stderr,
+        ] {
+            let remaining = match stream {
+                snapshot::rootfs_builder::BuildOutputStream::Stdout => {
+                    std::mem::take(&mut self.stdout)
+                }
+                snapshot::rootfs_builder::BuildOutputStream::Stderr => {
+                    std::mem::take(&mut self.stderr)
+                }
+            };
+            if !remaining.is_empty() {
+                self.emit_line(stream, &remaining)?;
+            }
+        }
+        if let Some((step_id, started)) = self.active.take() {
+            if require_complete {
+                return Err("container output ended while a build command was running".to_string());
+            }
+            let (argv, cwd, environment_names) = self
+                .planned
+                .get(&step_id)
+                .cloned()
+                .ok_or_else(|| format!("container output named an unknown step {step_id}"))?;
+            self.events.emit(
+                "command_finished",
+                Some(&step_id),
+                serde_json::json!({
+                    "command_argv": argv,
+                    "cwd": cwd,
+                    "environment_names": environment_names,
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                }),
+            )?;
+            self.events
+                .step_finished(&step_id, "failed", started, None, Some("command_failed"))?;
+            self.completed.insert(step_id);
+        }
+        if require_complete && self.completed.len() != self.planned.len() {
+            let missing = self
+                .planned
+                .keys()
+                .filter(|step_id| !self.completed.contains(*step_id))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "container output omitted build step markers for {missing}"
+            ));
+        }
+        if !require_complete {
+            for step_id in self
+                .planned
+                .keys()
+                .filter(|step_id| !self.completed.contains(*step_id))
+                .cloned()
+                .collect::<Vec<_>>()
+            {
+                self.events.step_finished(
+                    &step_id,
+                    "skipped",
+                    std::time::Instant::now(),
+                    None,
+                    None,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl snapshot::rootfs_builder::BuildOutputSink for AuthoringBuildOutputSink<'_, '_> {
+    fn write(
+        &mut self,
+        stream: snapshot::rootfs_builder::BuildOutputStream,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        self.consume(stream, bytes)
     }
 }
 
@@ -4495,52 +4774,26 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
 
         let runtime_started = self.events.step_started("runtime.provisioning")?;
         let planned_commands = self.events.planned_command_steps();
-        let mut command_steps = Vec::new();
-        for (step_id, argv, cwd, environment_names) in &planned_commands {
-            let step_started = self.events.step_started(step_id)?;
-            self.events.emit(
-                "command_started",
-                Some(step_id),
-                serde_json::json!({
-                    "command_argv": argv,
-                    "cwd": cwd,
-                    "environment_names": environment_names,
-                }),
-            )?;
-            command_steps.push((step_id.clone(), step_started));
-        }
-        let produced = produce_pinned_v1_build(
-            self.cfg,
-            &self.work.work_id,
-            &jobdir,
-            &input,
-            verified,
-            Some(generated_manifest),
-        );
+        let produced = {
+            let mut output = AuthoringBuildOutputSink::new(self.events, &planned_commands);
+            let result = produce_pinned_v1_build(
+                self.cfg,
+                &self.work.work_id,
+                &jobdir,
+                &input,
+                verified,
+                Some(generated_manifest),
+                Some(&mut output),
+            );
+            let require_complete = result.is_ok();
+            match (result, output.finish(require_complete)) {
+                (Ok(produced), Ok(())) => Ok(produced),
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(("build_output".to_string(), error)),
+            }
+        };
         let produced = match produced {
             Ok(produced) => {
-                for ((step_id, argv, cwd, environment_names), (_, step_started)) in
-                    planned_commands.iter().zip(command_steps.iter())
-                {
-                    self.events.emit(
-                        "command_finished",
-                        Some(step_id),
-                        serde_json::json!({
-                            "command_argv": argv,
-                            "cwd": cwd,
-                            "environment_names": environment_names,
-                            "exit_code": 0,
-                            "duration_ms": step_started.elapsed().as_millis() as u64,
-                        }),
-                    )?;
-                    self.events.step_finished(
-                        step_id,
-                        "succeeded",
-                        *step_started,
-                        Some(0),
-                        None,
-                    )?;
-                }
                 self.events.step_finished(
                     "runtime.provisioning",
                     "succeeded",
@@ -4552,15 +4805,6 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             }
             Err((stage, reason)) => {
                 let category = build_failure_category(&stage, &reason);
-                for (step_id, step_started) in command_steps {
-                    let _ = self.events.step_finished(
-                        &step_id,
-                        "failed",
-                        step_started,
-                        None,
-                        Some(category),
-                    );
-                }
                 let _ = self.events.step_finished(
                     "runtime.provisioning",
                     "failed",
@@ -7843,6 +8087,20 @@ targets = ["web"]
                 .expect("safe")
                 .to_string_lossy(),
             "/builder/work/authoring-clean-as_01ABC",
+        );
+    }
+
+    #[test]
+    fn buildkit_prefix_does_not_hide_the_authored_step_marker() {
+        let line = "#8 0.241 \u{1e}ATO_STEP_START:build.user.2\u{1f}\n";
+        assert_eq!(
+            AuthoringBuildOutputSink::marker(line, "ATO_STEP_START:").as_deref(),
+            Some("build.user.2")
+        );
+        let end = "#8 0.300 \u{1e}ATO_STEP_END:build.user.2:1\u{1f}\n";
+        assert_eq!(
+            AuthoringBuildOutputSink::marker(end, "ATO_STEP_END:").as_deref(),
+            Some("build.user.2:1")
         );
     }
 }
