@@ -4154,7 +4154,7 @@ fn process_authoring_setup(
     });
     let (origin, normalized, generated_manifest) = match authored_toml {
         Some(capsule_toml) => (
-            "existing_config",
+            "manual_setup",
             authoring_runtime::normalize_capsule_toml(capsule_toml)
                 .map_err(|error| fail("detect", error))?,
             capsule_toml.to_string(),
