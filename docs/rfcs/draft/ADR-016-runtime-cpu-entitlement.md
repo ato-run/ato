@@ -43,14 +43,17 @@ change.
    | economy  | 1000m  | 1000m  |
    | standard | 1000m  | 2000m  |
 
-3. **Allocation is deterministic integer max-min fairness** over a per-runner
-   millicore budget (production 8000m, staging 6000m). Every active session is
-   guaranteed its minimum; spare budget fills evenly up to each session's
-   maximum; a session that saturates below the even share returns the remainder
-   to the others; integer residue is distributed in `slot_index` order. No
-   floats (host-to-host determinism), no priority weights in v1. If the sum of
-   minimums would exceed the budget, the NEW claim is rejected rather than
-   shrinking a running session below its floor.
+3. **Allocation is deterministic integer floor-first capped equal-share** over a
+   per-runner millicore budget (production 8000m, staging 6000m). Every active
+   session is guaranteed its minimum; spare budget fills evenly up to each
+   session's maximum; a session that saturates below the even share returns the
+   remainder to the others; integer residue is distributed in `slot_index`
+   order. No floats (host-to-host determinism), no priority weights in v1. v1
+   further requires every request to share ONE floor (both classes use 1000m),
+   and under a shared floor this policy is exactly max-min fairness; a mixed
+   floor is rejected rather than silently mis-shared. If the sum of minimums
+   would exceed the budget, the NEW claim is rejected rather than shrinking a
+   running session below its floor.
 
    With `min = 1000m`, `max_slots = 4` and `budget >= 4000m`, every admissible
    slot count keeps its floor, so **the API stays CPU-unaware in v1**: capacity
@@ -61,10 +64,15 @@ change.
    cgroup per slot and writes `cpu.max` = `<quota> <period=100000>`. On
    reallocation, quotas are lowered before they are raised so the sum never
    transiently exceeds the budget. The Firecracker PID is attached to its slot
-   cgroup BEFORE `InstanceStart`, so no boot window runs unthrottled. Failure to
-   apply a quota rolls back to the previous allocation and refuses the new
-   launch; a failed rollback marks the allocator unhealthy and stops new lease
-   polling while existing VMs continue on their last-applied quota.
+   cgroup **before the first guest instruction executes** — which is NOT
+   `InstanceStart` on the restore path: a restore spawns Firecracker, then
+   resumes the guest with `PUT /snapshot/load {resume_vm:true}`, so the attach
+   must land in the spawn→load window. Concretely: cold boot attaches before
+   `InstanceStart`; restore attaches before `/snapshot/load`. Either way no
+   guest instruction runs unthrottled. Failure to apply a quota rolls back to
+   the previous allocation and refuses the new launch; a failed rollback marks
+   the allocator unhealthy and stops new lease polling while existing VMs
+   continue on their last-applied quota.
 
 ## Invariants
 
@@ -93,7 +101,8 @@ ingress allowlist rows.
 - **PR 1 (this):** the pure `runner_cpu_allocator` module + this ADR. Integer
   max-min fairness with exhaustive unit tests. No production behavior.
 - **PR 2:** `runner_cgroup` + `CpuEntitlementManager` single-owner actor,
-  systemd `Delegate=yes`, pre-`InstanceStart` PID attach, capability
+  systemd `Delegate=yes`, PID attach before first guest instruction (before
+  `InstanceStart` on cold boot, before `/snapshot/load` on restore), capability
   advertisement, `ATO_RUNNER_CPU_ENTITLEMENT` flag (default off).
 - **PR 3 (ato-api):** `performance_preference` → server-resolved request, shared
   lease-command composer, `runner_leases` columns, capability gate, admin read
