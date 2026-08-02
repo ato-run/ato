@@ -104,40 +104,78 @@ impl LinuxCgroupV2Backend {
 
 impl CpuCgroupBackend for LinuxCgroupV2Backend {
     fn preflight(&self) -> Result<CgroupCapabilities, CgroupError> {
-        // cgroup v2 exposes cgroup.controllers at the root of the (single)
-        // hierarchy; its presence distinguishes v2 from v1.
+        let fail = |reason: String| CgroupError::new("preflight", None, reason);
+
+        // 1. cgroup v2: the unified hierarchy exposes cgroup.controllers at the
+        //    delegated root; its presence distinguishes v2 from v1.
         let controllers_path = self.root.join("cgroup.controllers");
         let controllers = std::fs::read_to_string(&controllers_path).map_err(|e| {
-            CgroupError::new(
-                "preflight",
-                None,
-                format!("read {}: {e}", controllers_path.display()),
-            )
+            fail(format!(
+                "not cgroup v2 (read {}: {e})",
+                controllers_path.display()
+            ))
         })?;
-        let cpu_controller = controllers.split_whitespace().any(|c| c == "cpu");
-        if !cpu_controller {
-            return Err(CgroupError::new(
-                "preflight",
-                None,
-                "cpu controller absent from delegated cgroup.controllers",
+        if !controllers.split_whitespace().any(|c| c == "cpu") {
+            return Err(fail(
+                "cpu controller absent from delegated cgroup.controllers".to_string(),
             ));
         }
-        // Ensure the cpu controller is delegated to our subtree, and that we can
-        // create the slots parent (proves write access).
+
+        // 2. Delegate the cpu controller into our subtree. In cgroup v2 a cgroup
+        //    that holds processes cannot enable a controller for its children
+        //    (the "no internal process" constraint), so `+cpu` failing here is a
+        //    real, fail-closed error — NOT something to ignore. The runner main
+        //    process is expected to sit in a leaf subgroup (systemd
+        //    DelegateSubgroup=, or an explicit move), leaving this root
+        //    process-free and able to delegate.
         let subtree = self.root.join("cgroup.subtree_control");
-        // Best-effort enable; ignore EBUSY-style errors, the ensure below is the
-        // real writability check.
-        let _ = std::fs::write(&subtree, "+cpu");
-        std::fs::create_dir_all(self.slots_parent()).map_err(|e| {
-            CgroupError::new(
-                "preflight",
-                None,
-                format!("create slots parent {}: {e}", self.slots_parent().display()),
-            )
+        std::fs::write(&subtree, "+cpu").map_err(|e| {
+            fail(format!(
+                "enable cpu in {} (is the delegated root process-free?): {e}",
+                subtree.display()
+            ))
         })?;
+        // Read back: the write can succeed yet not stick on some setups.
+        let subtree_now = std::fs::read_to_string(&subtree)
+            .map_err(|e| fail(format!("read back {}: {e}", subtree.display())))?;
+        if !subtree_now.split_whitespace().any(|c| c == "cpu") {
+            return Err(fail(
+                "cpu did not appear in cgroup.subtree_control after +cpu".to_string(),
+            ));
+        }
+
+        // 3. Create the slots parent and delegate cpu one level further, so slot
+        //    children can carry cpu.max.
+        std::fs::create_dir_all(self.slots_parent())
+            .map_err(|e| fail(format!("create {}: {e}", self.slots_parent().display())))?;
+        let slots_subtree = self.slots_parent().join("cgroup.subtree_control");
+        std::fs::write(&slots_subtree, "+cpu")
+            .map_err(|e| fail(format!("enable cpu in {}: {e}", slots_subtree.display())))?;
+
+        // 4. Prove a slot child can actually carry a cpu.max: create a probe,
+        //    round-trip a quota, and remove it. This is the difference between
+        //    "the directory exists" and "the cpu controller really works here".
+        let probe = self.slots_parent().join("ato-preflight-probe");
+        std::fs::create_dir_all(&probe)
+            .map_err(|e| fail(format!("create probe {}: {e}", probe.display())))?;
+        let probe_result = (|| {
+            let cpu_max = probe.join("cpu.max");
+            std::fs::write(&cpu_max, cpu_max_line(1000))
+                .map_err(|e| fail(format!("probe cpu.max write: {e}")))?;
+            let read = std::fs::read_to_string(&cpu_max)
+                .map_err(|e| fail(format!("probe cpu.max read: {e}")))?;
+            if read.split_whitespace().next() != Some("100000") {
+                return Err(fail(format!("probe cpu.max round-trip mismatch: {read:?}")));
+            }
+            Ok(())
+        })();
+        // Always attempt to clean the probe, regardless of the result.
+        let _ = std::fs::remove_dir(&probe);
+        probe_result?;
+
         Ok(CgroupCapabilities {
             delegated_root: self.root.clone(),
-            cpu_controller,
+            cpu_controller: true,
         })
     }
 
@@ -211,7 +249,7 @@ impl CpuCgroupBackend for LinuxCgroupV2Backend {
 // ─── Fake backend for tests ─────────────────────────────────────────────────
 
 /// Which operation a [`FakeCgroupBackend`] should fail, for injection tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FakeFailPoint {
     Preflight,
     EnsureSlot,
@@ -225,6 +263,7 @@ pub enum FakeFailPoint {
     /// both the apply and its rollback cannot write, forcing the unhealthy path.
     WriteQuotaAny,
     AttachPid,
+    SlotPidsRead,
     RemoveSlot,
 }
 
@@ -236,20 +275,21 @@ struct FakeState {
     pids: BTreeMap<usize, Vec<u32>>,
 }
 
-/// In-memory backend that records every mutation and can fail any single
-/// operation on demand. `Send + Sync` via an internal mutex so it can back the
+/// In-memory backend that records every mutation and can fail any subset of
+/// operations on demand. `Send + Sync` via an internal mutex so it can back the
 /// manager actor in tests.
 pub struct FakeCgroupBackend {
     state: Mutex<FakeState>,
-    fail: Mutex<Option<FakeFailPoint>>,
+    fail: Mutex<std::collections::BTreeSet<FakeFailPoint>>,
     cpu_controller: bool,
 }
 
+// FakeFailPoint needs Ord for the armed-set.
 impl Default for FakeCgroupBackend {
     fn default() -> Self {
         Self {
             state: Mutex::new(FakeState::default()),
-            fail: Mutex::new(None),
+            fail: Mutex::new(std::collections::BTreeSet::new()),
             cpu_controller: true,
         }
     }
@@ -268,17 +308,18 @@ impl FakeCgroupBackend {
         }
     }
 
-    /// Arm a single failure point; cleared with `clear_fail`.
+    /// Arm a failure point. Multiple may be armed at once (e.g. attach + remove
+    /// to model a rollback whose cleanup also fails).
     pub fn fail_at(&self, point: FakeFailPoint) {
-        *self.fail.lock().unwrap() = Some(point);
+        self.fail.lock().unwrap().insert(point);
     }
 
     pub fn clear_fail(&self) {
-        *self.fail.lock().unwrap() = None;
+        self.fail.lock().unwrap().clear();
     }
 
     fn armed(&self, point: FakeFailPoint) -> bool {
-        *self.fail.lock().unwrap() == Some(point)
+        self.fail.lock().unwrap().contains(&point)
     }
 
     /// Pre-seed a slot with pids (stale-cgroup startup tests).
@@ -286,6 +327,16 @@ impl FakeCgroupBackend {
         let mut st = self.state.lock().unwrap();
         st.quotas.entry(slot_index).or_insert(1000);
         st.pids.insert(slot_index, pids);
+    }
+
+    /// Model a VMM process exiting: it leaves the slot cgroup's `cgroup.procs`,
+    /// as the kernel reflects once the process is reaped. Tests call this just
+    /// before `release_after_teardown` to reproduce the real post-teardown
+    /// state (an empty slot cgroup).
+    pub fn simulate_process_exit(&self, slot_index: usize, pid: u32) {
+        if let Some(pids) = self.state.lock().unwrap().pids.get_mut(&slot_index) {
+            pids.retain(|&p| p != pid);
+        }
     }
 
     /// Current recorded quota for assertions.
@@ -377,6 +428,9 @@ impl CpuCgroupBackend for FakeCgroupBackend {
     }
 
     fn slot_pids(&self, slot_index: usize) -> Result<Vec<u32>, CgroupError> {
+        if self.armed(FakeFailPoint::SlotPidsRead) {
+            return Err(CgroupError::new("slot_pids", Some(slot_index), "injected"));
+        }
         Ok(self.pids_of(slot_index))
     }
 
@@ -446,5 +500,26 @@ mod tests {
         let be = FakeCgroupBackend::new();
         be.seed_slot_pids(1, vec![9001, 9002]);
         assert_eq!(be.slot_pids(1).unwrap(), vec![9001, 9002]);
+    }
+
+    // The Linux backend's preflight NEGATIVE paths are robust over a tempdir
+    // (they short-circuit before any kernel-specific write semantics). The
+    // POSITIVE path depends on the kernel reporting an enabled controller in
+    // cgroup.subtree_control after a `+cpu` write — a plain file can't simulate
+    // that — so it is covered by the KVM acceptance test in PR 2b.
+    #[test]
+    fn linux_preflight_rejects_non_v2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No cgroup.controllers file → not cgroup v2.
+        let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
+        assert!(be.preflight().is_err());
+    }
+
+    #[test]
+    fn linux_preflight_rejects_missing_cpu_controller() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("cgroup.controllers"), "cpuset io memory").unwrap();
+        let be = LinuxCgroupV2Backend::new(dir.path().to_path_buf());
+        assert!(be.preflight().is_err());
     }
 }

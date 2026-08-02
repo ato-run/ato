@@ -59,6 +59,19 @@ pub enum CpuManagerError {
     Unhealthy { reason: String },
     #[error("no entitlement registered for lease {lease_id}")]
     UnknownLease { lease_id: String },
+    /// The teardown proof's identity does not match the recorded entitlement
+    /// (wrong slot or pid for that lease). Fail-closed: nothing is released.
+    #[error("teardown proof mismatch for lease {lease_id}: {detail}")]
+    ProofMismatch { lease_id: String, detail: String },
+    /// The freed slot's cgroup could not be confirmed empty-and-removed, so its
+    /// CPU budget must NOT be handed to survivors (a lingering process would
+    /// keep consuming it). Fail-closed to Unhealthy.
+    #[error("slot {slot_index} could not be reclaimed for lease {lease_id}: {detail}")]
+    SlotNotReclaimed {
+        lease_id: String,
+        slot_index: usize,
+        detail: String,
+    },
 }
 
 /// Outcome of a successful admission.
@@ -79,20 +92,52 @@ pub struct CpuManagerSnapshot {
     pub budget_millis: u32,
 }
 
-/// Proof that a VM teardown was confirmed. Constructable only inside this crate
-/// (its single field is private), so `ReleaseAfterTeardown` cannot be issued
-/// from an arbitrary call site that has not actually observed teardown — the
-/// type is the permission.
-#[derive(Debug, Clone, Copy)]
+/// Observed evidence that a VMM process has exited — the only thing that mints a
+/// [`TeardownConfirmed`]. Held by value so the proof cannot be forged from a
+/// bare marker; the runner constructs it from a real `wait`/`kill` result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessExitEvidence {
+    /// The VMM child was `wait`ed and is gone.
+    Reaped,
+    /// The VMM was signalled and confirmed no longer present (`kill -0` ENOENT).
+    Killed,
+}
+
+/// Identity-bound proof that a specific session's VM has been torn down.
+///
+/// This is a capability type: `release_after_teardown` cannot be called without
+/// one, and one cannot be minted except by the runner's confirmed-teardown seam
+/// (which alone observes the [`ProcessExitEvidence`]). The manager additionally
+/// checks the proof's `lease_id` / `slot_index` / `vmm_pid` against the recorded
+/// entitlement, so a proof for one session can never release another.
+#[derive(Debug, Clone)]
 pub struct TeardownConfirmed {
-    _private: (),
+    lease_id: String,
+    slot_index: usize,
+    vmm_pid: u32,
+    observed_exit: ProcessExitEvidence,
 }
 
 impl TeardownConfirmed {
-    /// Mint the proof. Call ONLY at the runner's confirmed-teardown seam
-    /// (`StopCleanup` with `slot_released`), never speculatively.
-    pub(crate) fn assert() -> Self {
-        Self { _private: () }
+    /// Mint the proof at the runner's confirmed-teardown seam. `evidence` must
+    /// come from a real process-exit observation (reap or confirmed kill), never
+    /// speculatively.
+    pub(crate) fn observed(
+        lease_id: impl Into<String>,
+        slot_index: usize,
+        vmm_pid: u32,
+        evidence: ProcessExitEvidence,
+    ) -> Self {
+        Self {
+            lease_id: lease_id.into(),
+            slot_index,
+            vmm_pid,
+            observed_exit: evidence,
+        }
+    }
+
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
     }
 }
 
@@ -103,8 +148,7 @@ enum Command {
         reply: oneshot::Sender<Result<CpuAdmission, CpuManagerError>>,
     },
     ReleaseAfterTeardown {
-        lease_id: String,
-        _proof: TeardownConfirmed,
+        proof: TeardownConfirmed,
         reply: oneshot::Sender<Result<(), CpuManagerError>>,
     },
     Snapshot {
@@ -161,19 +205,15 @@ impl CpuEntitlementManager {
     }
 
     /// Release a session AFTER its VM teardown is confirmed, then rebalance the
-    /// survivors upward into the freed budget.
+    /// survivors upward into the freed budget. The `proof` carries the session
+    /// identity the manager verifies against its record.
     pub async fn release_after_teardown(
         &self,
-        lease_id: impl Into<String>,
         proof: TeardownConfirmed,
     ) -> Result<(), CpuManagerError> {
         let (reply, rx) = oneshot::channel();
         self.tx
-            .send(Command::ReleaseAfterTeardown {
-                lease_id: lease_id.into(),
-                _proof: proof,
-                reply,
-            })
+            .send(Command::ReleaseAfterTeardown { proof, reply })
             .await
             .map_err(|_| CpuManagerError::Unhealthy {
                 reason: "manager actor stopped".to_string(),
@@ -210,10 +250,8 @@ impl ManagerActor {
                 } => {
                     let _ = reply.send(self.admit(request, vmm_pid));
                 }
-                Command::ReleaseAfterTeardown {
-                    lease_id, reply, ..
-                } => {
-                    let _ = reply.send(self.release(&lease_id));
+                Command::ReleaseAfterTeardown { proof, reply } => {
+                    let _ = reply.send(self.release(proof));
                 }
                 Command::Snapshot { reply } => {
                     let _ = reply.send(self.snapshot());
@@ -305,24 +343,28 @@ impl ManagerActor {
         requests.push(request.clone());
         let target = self.compute(&requests)?;
 
-        // Create the new slot's cgroup before writing its quota / attaching.
+        // Create the new slot's cgroup before writing its quota / attaching. A
+        // failure here created no candidate cgroup, so only existing slots need
+        // restoring.
         if let Err(e) = self.backend.ensure_slot(slot_index) {
-            return Err(self.rollback(e));
+            return Err(self.rollback(e, None));
         }
+        // From here the candidate cgroup exists; every rollback must also clean
+        // it up (Blocker 5).
         // Set the new slot's quota to its target FIRST at floor via write (it
         // holds no live budget). Order among existing slots is decrease-first.
         if let Err(e) = self.apply_quotas(&target) {
-            return Err(self.rollback(e));
+            return Err(self.rollback(e, Some(slot_index)));
         }
         // The new slot itself is an "increase from nothing"; write it explicitly
         // (apply_quotas skips leases not yet in `applied`).
         let new_quota = target[&lease_id];
         if let Err(e) = self.backend.write_quota_millis(slot_index, new_quota) {
-            return Err(self.rollback(e));
+            return Err(self.rollback(e, Some(slot_index)));
         }
         // Attach the VMM pid BEFORE the guest resumes.
         if let Err(e) = self.backend.attach_pid(slot_index, vmm_pid) {
-            return Err(self.rollback(e));
+            return Err(self.rollback(e, Some(slot_index)));
         }
 
         // Commit: record every lease at its new quota.
@@ -336,10 +378,48 @@ impl ManagerActor {
         })
     }
 
-    /// Roll the cgroup tree back to the last committed allocation. If the
-    /// rollback writes succeed the manager stays healthy and returns the
-    /// original error; if a rollback write fails, go unhealthy.
-    fn rollback(&mut self, cause: CgroupError) -> CpuManagerError {
+    /// Roll the cgroup tree back to the last committed allocation after a failed
+    /// admission. If `candidate_slot` is set, its just-created cgroup is torn
+    /// down too — but ONLY after confirming it holds no pid: a candidate that
+    /// already has a process (attach partially took, or an unexpected occupant),
+    /// or whose pid list can't be read, or that won't remove, means the host
+    /// state is uncertain, so the manager goes Unhealthy rather than pretend it
+    /// cleaned up. A clean rollback keeps it Healthy and returns the cause.
+    fn rollback(&mut self, cause: CgroupError, candidate_slot: Option<usize>) -> CpuManagerError {
+        if let Some(slot) = candidate_slot {
+            match self.backend.slot_pids(slot) {
+                Ok(pids) if pids.is_empty() => {
+                    if let Err(remove_err) = self.backend.remove_slot(slot) {
+                        self.go_unhealthy(format!(
+                            "admission rollback after {cause}: candidate slot {slot} \
+                             remove failed: {remove_err}"
+                        ));
+                        return CpuManagerError::Unhealthy {
+                            reason: format!("candidate slot {slot} remove failed: {remove_err}"),
+                        };
+                    }
+                }
+                Ok(pids) => {
+                    self.go_unhealthy(format!(
+                        "admission rollback after {cause}: candidate slot {slot} holds \
+                         {} pid(s); refusing to reuse",
+                        pids.len()
+                    ));
+                    return CpuManagerError::Unhealthy {
+                        reason: format!("candidate slot {slot} not empty"),
+                    };
+                }
+                Err(read_err) => {
+                    self.go_unhealthy(format!(
+                        "admission rollback after {cause}: candidate slot {slot} pid \
+                         read failed: {read_err}"
+                    ));
+                    return CpuManagerError::Unhealthy {
+                        reason: format!("candidate slot {slot} pid read failed: {read_err}"),
+                    };
+                }
+            }
+        }
         if let Err(rollback_err) = self.restore_applied() {
             self.go_unhealthy(format!("rollback after {cause} failed: {rollback_err}"));
             return CpuManagerError::Unhealthy {
@@ -368,21 +448,75 @@ impl ManagerActor {
         );
     }
 
-    fn release(&mut self, lease_id: &str) -> Result<(), CpuManagerError> {
+    fn release(&mut self, proof: TeardownConfirmed) -> Result<(), CpuManagerError> {
         if let CpuManagerHealth::Unhealthy { reason } = &self.health {
             return Err(CpuManagerError::Unhealthy {
                 reason: reason.clone(),
             });
         }
-        let Some(removed) = self.applied.remove(lease_id) else {
+        let lease_id = proof.lease_id.clone();
+        // Verify the proof matches the recorded entitlement BEFORE mutating any
+        // state — a proof for one session can never release another.
+        let Some(entitlement) = self.applied.get(&lease_id) else {
             return Err(CpuManagerError::UnknownLease {
-                lease_id: lease_id.to_string(),
+                lease_id: lease_id.clone(),
             });
         };
-        // Remove the freed slot's cgroup (best-effort — it must be empty; VM is
-        // gone). A remove failure is not fatal: the slot budget is already
-        // reclaimed in accounting, and the survivors' rebalance is what matters.
-        let _ = self.backend.remove_slot(removed.slot_index);
+        if entitlement.slot_index != proof.slot_index {
+            return Err(CpuManagerError::ProofMismatch {
+                lease_id,
+                detail: format!(
+                    "proof slot {} != recorded slot {}",
+                    proof.slot_index, entitlement.slot_index
+                ),
+            });
+        }
+        let slot_index = entitlement.slot_index;
+
+        // Reclaim BEFORE releasing accounting (Blocker 1): the freed slot's CPU
+        // budget may only flow to survivors once we have proven the slot cgroup
+        // is empty and removed. Any doubt — a lingering pid, an unreadable proc
+        // list, or a remove failure — means a process could still be consuming
+        // that budget, so we keep the reservation and go Unhealthy rather than
+        // double-allocate it.
+        match self.backend.slot_pids(slot_index) {
+            Ok(pids) if pids.is_empty() => {}
+            Ok(pids) => {
+                self.go_unhealthy(format!(
+                    "release {lease_id}: slot {slot_index} still holds {} pid(s)",
+                    pids.len()
+                ));
+                return Err(CpuManagerError::SlotNotReclaimed {
+                    lease_id,
+                    slot_index,
+                    detail: "slot cgroup not empty".to_string(),
+                });
+            }
+            Err(read_err) => {
+                self.go_unhealthy(format!(
+                    "release {lease_id}: slot {slot_index} pid read failed: {read_err}"
+                ));
+                return Err(CpuManagerError::SlotNotReclaimed {
+                    lease_id,
+                    slot_index,
+                    detail: format!("pid read failed: {read_err}"),
+                });
+            }
+        }
+        if let Err(remove_err) = self.backend.remove_slot(slot_index) {
+            self.go_unhealthy(format!(
+                "release {lease_id}: slot {slot_index} remove failed: {remove_err}"
+            ));
+            return Err(CpuManagerError::SlotNotReclaimed {
+                lease_id,
+                slot_index,
+                detail: format!("remove failed: {remove_err}"),
+            });
+        }
+
+        // Slot proven reclaimed — now it is safe to drop the accounting and hand
+        // its budget to survivors.
+        self.applied.remove(&lease_id);
 
         if self.applied.is_empty() {
             self.allocation_generation += 1;
@@ -404,9 +538,9 @@ impl ManagerActor {
             }
         };
         // Survivors only ever RISE after a release (freed budget), so this is
-        // all increases — still safe to apply directly.
+        // all increases — still safe to apply directly. No candidate slot here.
         if let Err(e) = self.apply_quotas(&target) {
-            return Err(self.rollback(e));
+            return Err(self.rollback(e, None));
         }
         for entitlement in self.applied.values_mut() {
             if let Some(&q) = target.get(&entitlement.request.lease_id) {
@@ -445,6 +579,23 @@ mod tests {
             .await
             .expect("admit")
             .quota_millis
+    }
+
+    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownConfirmed {
+        TeardownConfirmed::observed(lease, slot, pid, ProcessExitEvidence::Reaped)
+    }
+
+    /// Model a real teardown then release: the VMM leaves the slot cgroup, then
+    /// the confirmed-teardown proof is presented.
+    async fn teardown_and_release(
+        mgr: &CpuEntitlementManager,
+        be: &FakeCgroupBackend,
+        lease: &str,
+        slot: usize,
+        pid: u32,
+    ) -> Result<(), CpuManagerError> {
+        be.simulate_process_exit(slot, pid);
+        mgr.release_after_teardown(proof(lease, slot, pid)).await
     }
 
     #[tokio::test]
@@ -496,7 +647,7 @@ mod tests {
         for i in 0..4 {
             assert_eq!(be.quota_of(i), Some(1500));
         }
-        mgr.release_after_teardown("s3", TeardownConfirmed::assert())
+        teardown_and_release(&mgr, &be, "s3", 3, 103)
             .await
             .expect("release");
         // Survivors rise to their 2000m ceiling; freed slot cgroup removed.
@@ -533,13 +684,49 @@ mod tests {
         be.fail_at(FakeFailPoint::AttachPid);
         let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
         assert!(matches!(res, Err(CpuManagerError::CgroupRolledBack(_))));
-        // The survivor 'a' is restored to its committed quota; 'b' not attached.
+        // The survivor 'a' is restored to its committed quota; the empty
+        // candidate cgroup for 'b' is torn down (Blocker 5).
         assert_eq!(be.quota_of(0), Some(2000));
+        assert_eq!(be.quota_of(1), None, "empty candidate slot removed");
         assert_eq!(be.pids_of(1), Vec::<u32>::new());
         // Manager still healthy — a clean rollback keeps it serving.
         let snap = mgr.snapshot().await.unwrap();
         assert_eq!(snap.health, CpuManagerHealth::Healthy);
         assert_eq!(snap.applied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn admit_candidate_with_lingering_pid_goes_unhealthy() {
+        // A candidate slot that already holds a pid when a later admit step
+        // fails must NOT be silently reused: the host state is uncertain, so the
+        // manager goes Unhealthy.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        // Pre-seed slot 1 with a stray pid, then fail the attach so rollback
+        // inspects the candidate and finds it non-empty.
+        be.seed_slot_pids(1, vec![7777]);
+        be.fail_at(FakeFailPoint::AttachPid);
+        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
+        let snap = mgr.snapshot().await.unwrap();
+        assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
+    }
+
+    #[tokio::test]
+    async fn admit_candidate_cleanup_remove_failure_goes_unhealthy() {
+        // attach fails → rollback inspects the empty candidate and tries to
+        // remove it → the remove ALSO fails → Unhealthy. Both points armed at
+        // once (the fake now supports a failure set).
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        be.fail_at(FakeFailPoint::AttachPid);
+        be.fail_at(FakeFailPoint::RemoveSlot);
+        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
+        let snap = mgr.snapshot().await.unwrap();
+        assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
     }
 
     #[tokio::test]
@@ -567,9 +754,64 @@ mod tests {
     async fn releasing_unknown_lease_errs() {
         let be = Arc::new(FakeCgroupBackend::new());
         let mgr = CpuEntitlementManager::spawn(be, 8000);
-        let res = mgr
-            .release_after_teardown("ghost", TeardownConfirmed::assert())
-            .await;
+        let res = mgr.release_after_teardown(proof("ghost", 9, 999)).await;
         assert!(matches!(res, Err(CpuManagerError::UnknownLease { .. })));
+    }
+
+    #[tokio::test]
+    async fn release_proof_with_wrong_slot_is_rejected() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        be.simulate_process_exit(0, 100);
+        // Proof claims slot 3, but 'a' is recorded on slot 0.
+        let res = mgr.release_after_teardown(proof("a", 3, 100)).await;
+        assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
+        // Nothing released: 'a' still holds its slot.
+        assert_eq!(be.quota_of(0), Some(2000));
+        assert_eq!(mgr.snapshot().await.unwrap().applied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn release_with_lingering_pid_keeps_reservation_and_goes_unhealthy() {
+        // The VM did NOT actually exit — a pid lingers in the slot cgroup. That
+        // budget must not flow to survivors, so release fails closed.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        admit(&mgr, std_req("b", 1), 200).await; // both 2000m (budget 6000)
+        // Do NOT simulate exit for 'b': its pid 200 still occupies slot 1.
+        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
+        // Survivor 'a' was NOT raised; 'b' still recorded; manager unhealthy.
+        assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
+        let snap = mgr.snapshot().await.unwrap();
+        assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
+    }
+
+    #[tokio::test]
+    async fn release_slot_remove_failure_keeps_reservation() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        admit(&mgr, std_req("b", 1), 200).await;
+        be.simulate_process_exit(1, 200); // process is gone…
+        be.fail_at(FakeFailPoint::RemoveSlot); // …but the cgroup won't remove.
+        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
+        assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
+    }
+
+    #[tokio::test]
+    async fn release_slot_pid_read_failure_keeps_reservation() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        admit(&mgr, std_req("b", 1), 200).await;
+        be.simulate_process_exit(1, 200);
+        be.fail_at(FakeFailPoint::SlotPidsRead);
+        let res = mgr.release_after_teardown(proof("b", 1, 200)).await;
+        assert!(matches!(res, Err(CpuManagerError::SlotNotReclaimed { .. })));
+        assert_eq!(be.quota_of(0), Some(2000), "survivor not raised");
     }
 }
