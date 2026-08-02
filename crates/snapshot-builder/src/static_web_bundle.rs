@@ -123,7 +123,7 @@ pub fn produce_static_web_bundle(
         receipts
             .entry(hex_digest.clone())
             .or_insert(StaticWebBlobReceiptV1 {
-                sha256: digest.clone(),
+                digest: digest.clone(),
                 size,
                 r2_key: blob_r2_key(&digest).map_err(anyhow::Error::from)?,
                 custom_metadata: StaticWebBlobMetadataV1 {
@@ -167,7 +167,7 @@ pub fn produce_static_web_bundle(
     let receipt_digest = receipt.digest().map_err(anyhow::Error::from)?;
     fs::write(staging.path().join("manifest.json"), &manifest_bytes)
         .context("write canonical static web manifest")?;
-    fs::write(staging.path().join("receipt.json"), receipt_bytes)
+    fs::write(staging.path().join("receipt.json"), &receipt_bytes)
         .context("write static web receipt")?;
 
     let bundle_root = destination_parent.join("static-web-bundle-v1");

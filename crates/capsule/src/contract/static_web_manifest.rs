@@ -238,7 +238,7 @@ pub fn validate_connect_source(value: &str) -> Result<(), StaticWebManifestError
 
 /// Validates a policy set and converts it to its sole v1 representation.
 pub fn canonicalize_connect_sources(
-    connect_src: &mut Vec<String>,
+    connect_src: &mut [String],
 ) -> Result<(), StaticWebManifestError> {
     for value in connect_src.iter() {
         validate_connect_source(value)?;
