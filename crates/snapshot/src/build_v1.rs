@@ -67,7 +67,7 @@ use crate::guest_filesystem_digest::guest_filesystem_digest;
 use crate::rootfs_builder::{
     AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
     assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
-    mkfs_guest_rootfs_v1, v1_filesystem_uuid,
+    mkfs_guest_rootfs_v1, v1_filesystem_uuid, vite_production_prebuild_cmd,
 };
 use crate::v1_materialization::{V1MaterializationReceipt, measure_guest_artifact, target_triple};
 use capsule::capsule_lock::{
@@ -469,8 +469,17 @@ pub fn run(
     // rather than the checkout matters: the probe decides the runtime family
     // from the files present, and those are the files the guest will have.
     let probe = SourceProbe::scan(&projection_root);
-    let spec = derive_build_spec_v1(&manifest, &probe)
+    let mut spec = derive_build_spec_v1(&manifest, &probe)
         .map_err(|reason| V1BuildError::RecipeDerivationFailed { reason })?;
+    // A `<pm> run preview` launch serves a production `dist/` that must exist
+    // before the read-only guest boots — bake the build into the image, chained
+    // after install (see `vite_production_prebuild_cmd` for the evidence gate).
+    if let Some(prebuild) = vite_production_prebuild_cmd(&manifest.run.command, &projection_root) {
+        spec.install_cmd = Some(match spec.install_cmd.take() {
+            Some(install) => format!("{install} && {prebuild}"),
+            None => prebuild,
+        });
+    }
 
     // 5. Resolve the base image to an immutable digest BEFORE building, so the
     // image is built `FROM` the same bytes the contract records. Resolving
