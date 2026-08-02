@@ -1,6 +1,6 @@
 //! Teardown proof minting for CPU entitlement release (ADR-016 PR2b).
 //!
-//! This module is the ONLY place a [`TeardownObservation`] can be constructed:
+//! This module is the ONLY place a [`TeardownConfirmed`] can be constructed:
 //! its fields are private and the sole constructor lives here, next to the
 //! runner's confirmed-teardown seam. The manager (`runner_cpu_manager`) merely
 //! CONSUMES the proof and re-verifies its identity fields against the recorded
@@ -31,14 +31,14 @@ pub enum ProcessExitEvidence {
 /// not be duplicable. Constructible only via [`confirm_vm_teardown`] in this
 /// module.
 #[derive(Debug)]
-pub struct TeardownObservation {
+pub struct TeardownConfirmed {
     lease_id: String,
     slot_index: usize,
     vmm_pid: u32,
     observed_exit: ProcessExitEvidence,
 }
 
-impl TeardownObservation {
+impl TeardownConfirmed {
     pub(crate) fn lease_id(&self) -> &str {
         &self.lease_id
     }
@@ -61,8 +61,8 @@ pub(crate) fn confirm_vm_teardown(
     slot_index: usize,
     vmm_pid: u32,
     evidence: ProcessExitEvidence,
-) -> TeardownObservation {
-    TeardownObservation {
+) -> TeardownConfirmed {
+    TeardownConfirmed {
         lease_id: lease_id.into(),
         slot_index,
         vmm_pid,

@@ -51,26 +51,14 @@ pub(crate) fn select_backend() -> anyhow::Result<Box<dyn SnapshotBackend>> {
     }
 }
 
-/// Select the backend for a specific run SLOT (#948 N-slot). Identical to
-/// [`select_backend`] except that, for the Firecracker backend under
-/// `netns_enabled`, it derives a per-slot network-namespaced config
-/// ([`FirecrackerConfig::for_slot`]) so N restores can run concurrently in
-/// isolated namespaces. `netns_enabled == false` yields the exact legacy config
-/// (single-slot, root namespace). Non-Firecracker backends ignore the slot.
-#[cfg(test)]
-pub(crate) fn select_backend_for_slot(
-    slot_index: usize,
-    netns_enabled: bool,
-) -> anyhow::Result<Box<dyn SnapshotBackend>> {
-    select_backend_for_slot_with_hook(slot_index, netns_enabled, None)
-}
-
-/// [`select_backend_for_slot`] plus an optional ADR-016 pre-resume hook,
-/// installed on the per-launch Firecracker backend (so it cannot leak across
-/// launches) and invoked with the VMM host pid before the guest resumes. Only
-/// the Firecracker backend honors the hook — it is the only backend the CPU
-/// entitlement targets (the capability is never advertised for the others, so
-/// an entitled lease cannot land on them).
+/// Select the backend for a specific run SLOT (#948 N-slot), optionally with
+/// an ADR-016 pre-resume hook. For Firecracker under `netns_enabled`, this
+/// derives a per-slot network-namespaced config ([`FirecrackerConfig::for_slot`])
+/// so N restores can run concurrently in isolated namespaces. The hook belongs
+/// to this per-launch backend instance and is invoked with the VMM host pid
+/// before the guest resumes. Only Firecracker honors the hook — it is the only
+/// backend the CPU entitlement targets (the capability is never advertised for
+/// the others, so an entitled lease cannot land on them).
 pub(crate) fn select_backend_for_slot_with_hook(
     slot_index: usize,
     netns_enabled: bool,

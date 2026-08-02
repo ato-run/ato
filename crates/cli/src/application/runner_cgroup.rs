@@ -626,7 +626,7 @@ mod tests {
             println!("admitted acc-{i} pid {pid} at {}m", adm.quota_millis);
         }
         // 3 x standard over 6000m -> 2000m each; verify the REAL cpu.max files.
-        for i in 0..3 {
+        for (i, pid) in pids.iter().copied().enumerate() {
             let raw = std::fs::read_to_string(
                 root.join("ato-slots")
                     .join(format!("ato-slot-{i}"))
@@ -638,7 +638,7 @@ mod tests {
                 ["200000", "100000"]
             );
             let procs = be.slot_pids(i).unwrap();
-            assert_eq!(procs, vec![pids[i]], "slot {i} holds exactly its pid");
+            assert_eq!(procs, vec![pid], "slot {i} holds exactly its pid");
         }
 
         // Real teardown of slot 2: kill + REAP, wait for cgroup.procs to empty,
