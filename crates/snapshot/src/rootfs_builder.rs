@@ -438,6 +438,8 @@ pub struct RootfsBuildSpecV1 {
     /// Authored build commands, in declaration order. Every entry remains an
     /// exact argv and is emitted with Dockerfile exec-form `RUN`.
     pub build_steps: Vec<Vec<String>>,
+    /// Authored non-secret environment values baked into the guest launch.
+    pub environment: BTreeMap<String, String>,
     /// argv the runtime prepends to the authored command.
     ///
     /// Nothing for every family in the Step-4 subset, and that is a measurement
@@ -521,6 +523,7 @@ pub fn derive_build_spec_v1(
                     .collect()
             })
             .unwrap_or_default(),
+        environment: m.env.clone(),
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
@@ -688,6 +691,11 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 ///
 /// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
+    let authored_environment = spec
+        .environment
+        .iter()
+        .map(|(name, value)| format!("export {name}={}\n", shell_single_quote(value)))
+        .collect::<String>();
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
@@ -709,7 +717,7 @@ cat > "$ATO_ROOTFS/sbin/init" <<'INIT'
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
-mount -t proc proc /proc 2>/dev/null
+{authored_environment}mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
@@ -730,6 +738,7 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
+        authored_environment = authored_environment,
     )
 }
 
@@ -2997,6 +3006,17 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
             .expect_err("python source cannot claim an unprovisioned node tool");
         assert!(error.contains("detected primary runtime python"), "{error}");
+    }
+
+    #[test]
+    fn v1_authored_environment_is_exported_without_shell_reparsing() {
+        let manifest = V1_MINIMAL.replace("[run]", "[env]\nGREETING = \"hello 'world'\"\n\n[run]");
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        let script = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(
+            script.contains(r#"export GREETING='hello '\''world'\'''"#),
+            "{script}"
+        );
     }
 
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
