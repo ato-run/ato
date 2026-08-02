@@ -42,6 +42,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use super::runner_cgroup::{CgroupError, CpuCgroupBackend};
 use super::runner_cpu_allocator::{CpuAllocationError, CpuRequest, allocate_cpu};
+use super::runner_cpu_teardown::TeardownConfirmed;
 
 /// An entitlement currently applied to a slot cgroup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,60 +150,6 @@ pub struct CpuManagerSnapshot {
     pub budget_millis: u32,
 }
 
-/// Observed evidence that a VMM process has exited — the only thing that mints a
-/// [`TeardownObservation`]. Held by value so the proof cannot be forged from a
-/// bare marker; the runner constructs it from a real `wait`/`kill` result.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProcessExitEvidence {
-    /// The VMM child was `wait`ed and is gone.
-    Reaped,
-    /// The VMM was signalled and confirmed no longer present (`kill -0` ENOENT).
-    Killed,
-}
-
-/// An observation that a specific session's VM has been torn down, carrying the
-/// session identity (`lease_id` / `slot_index` / `vmm_pid`) and the evidence.
-///
-/// `release()` requires one and verifies ALL THREE identity fields against the
-/// recorded entitlement, so a proof for one session — or a stale proof for a
-/// slot that has since been reused by a different pid — can never release the
-/// current occupant. Not `Clone`: a capability to release should not be
-/// duplicable.
-///
-/// Named "observation" rather than "confirmed" deliberately: `observed()` is
-/// `pub(crate)`, which does not by itself prove the caller watched the exit.
-/// PR 2b moves the constructor into the real teardown module so the type
-/// becomes a genuine capability; until then it is an identity-checked argument.
-#[derive(Debug)]
-pub struct TeardownObservation {
-    lease_id: String,
-    slot_index: usize,
-    vmm_pid: u32,
-    observed_exit: ProcessExitEvidence,
-}
-
-impl TeardownObservation {
-    /// Build from a real process-exit observation (reap or confirmed kill),
-    /// never speculatively.
-    pub(crate) fn observed(
-        lease_id: impl Into<String>,
-        slot_index: usize,
-        vmm_pid: u32,
-        evidence: ProcessExitEvidence,
-    ) -> Self {
-        Self {
-            lease_id: lease_id.into(),
-            slot_index,
-            vmm_pid,
-            observed_exit: evidence,
-        }
-    }
-
-    pub fn lease_id(&self) -> &str {
-        &self.lease_id
-    }
-}
-
 enum Command {
     AdmitAndAttach {
         request: CpuRequest,
@@ -210,7 +157,7 @@ enum Command {
         reply: SyncSender<Result<CpuAdmission, CpuManagerError>>,
     },
     ReleaseAfterTeardown {
-        proof: TeardownObservation,
+        proof: TeardownConfirmed,
         reply: SyncSender<Result<CpuReleaseOutcome, CpuManagerError>>,
     },
     Snapshot {
@@ -334,7 +281,7 @@ impl CpuEntitlementManager {
     /// refused there.
     pub fn release_after_teardown(
         &self,
-        proof: TeardownObservation,
+        proof: TeardownConfirmed,
     ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         // A full queue must not lose a release: unlike an admission (where
         // refusing is the safe direction), a refused release leaks the slot. So
@@ -689,15 +636,12 @@ impl ManagerActor {
         );
     }
 
-    fn release(
-        &mut self,
-        proof: TeardownObservation,
-    ) -> Result<CpuReleaseOutcome, CpuManagerError> {
+    fn release(&mut self, proof: TeardownConfirmed) -> Result<CpuReleaseOutcome, CpuManagerError> {
         // NOTE: releases are processed even when Unhealthy — refusing them would
         // leak slots and cgroups forever. Only NEW admissions are refused there.
         // The reclaim below runs fully verified regardless of health; what an
         // Unhealthy manager skips is the survivor raise (see the tail).
-        let lease_id = proof.lease_id.clone();
+        let lease_id = proof.lease_id().to_string();
         // Verify ALL THREE identity fields against the record BEFORE mutating any
         // state — a proof for one session, or a stale proof for a slot since
         // reused by a different pid, can never release the current occupant.
@@ -706,21 +650,23 @@ impl ManagerActor {
                 lease_id: lease_id.clone(),
             });
         };
-        if entitlement.slot_index != proof.slot_index {
+        if entitlement.slot_index != proof.slot_index() {
             return Err(CpuManagerError::ProofMismatch {
                 lease_id,
                 detail: format!(
                     "proof slot {} != recorded slot {}",
-                    proof.slot_index, entitlement.slot_index
+                    proof.slot_index(),
+                    entitlement.slot_index
                 ),
             });
         }
-        if entitlement.vmm_pid != proof.vmm_pid {
+        if entitlement.vmm_pid != proof.vmm_pid() {
             return Err(CpuManagerError::ProofMismatch {
                 lease_id,
                 detail: format!(
                     "proof pid {} != recorded pid {}",
-                    proof.vmm_pid, entitlement.vmm_pid
+                    proof.vmm_pid(),
+                    entitlement.vmm_pid
                 ),
             });
         }
@@ -858,8 +804,13 @@ mod tests {
         mgr.admit_and_attach(req, pid).expect("admit").quota_millis
     }
 
-    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownObservation {
-        TeardownObservation::observed(lease, slot, pid, ProcessExitEvidence::Reaped)
+    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownConfirmed {
+        super::super::runner_cpu_teardown::confirm_vm_teardown(
+            lease,
+            slot,
+            pid,
+            super::super::runner_cpu_teardown::ProcessExitEvidence::Reaped,
+        )
     }
 
     /// Model a real teardown then release: the VMM leaves the slot cgroup, then

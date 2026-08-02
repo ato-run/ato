@@ -221,6 +221,21 @@ impl FirecrackerConfig {
     }
 }
 
+/// A hook invoked with the VMM host pid AFTER the Firecracker process is spawned
+/// but BEFORE the guest runs a single instruction — on the restore path that is
+/// before `PUT /snapshot/load {resume_vm:true}`, on cold boot before
+/// `InstanceStart`. Returning `Err` aborts the launch: the guest never resumes
+/// and the backend tears the VMM down.
+///
+/// This is the seam ADR-016 uses to attach the VMM to a host CPU cgroup before
+/// it can consume any CPU. The snapshot crate defines only the trait and calls
+/// it; the implementation (and any dependency on the runner's entitlement
+/// manager) lives in the cli crate, so this crate stays free of that coupling.
+/// The default is no hook, so nothing changes for callers that do not set one.
+pub trait PreResumeHook: std::fmt::Debug + Send + Sync {
+    fn on_vmm_spawned(&self, host_pid: u32) -> Result<(), String>;
+}
+
 /// Firecracker microVM snapshot backend.
 #[derive(Debug, Clone, Default)]
 pub struct FirecrackerBackend {
@@ -232,6 +247,9 @@ pub struct FirecrackerBackend {
     /// for the session (faults arrive lazily) and joined on `stop()`. Empty unless
     /// `ATO_FC_UFFD` selected the Uffd `mem_backend` for that restore.
     page_servers: Arc<Mutex<HashMap<String, crate::uffd_page_server::PageServerHandle>>>,
+    /// ADR-016: optional pre-resume attach hook (see [`PreResumeHook`]). `None`
+    /// (the default) means the launch path is byte-for-byte its previous self.
+    pre_resume_hook: Option<Arc<dyn PreResumeHook>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,7 +281,16 @@ impl FirecrackerBackend {
             config,
             sessions: Arc::default(),
             page_servers: Arc::default(),
+            pre_resume_hook: None,
         }
+    }
+
+    /// Attach a [`PreResumeHook`] invoked with the VMM host pid before the guest
+    /// resumes. Returns the backend by value for builder-style chaining. Cloning
+    /// shares the hook (`Arc`).
+    pub fn with_pre_resume_hook(mut self, hook: Arc<dyn PreResumeHook>) -> Self {
+        self.pre_resume_hook = Some(hook);
+        self
     }
 
     /// Return a clone of this backend with a per-job readiness `boot_timeout`
@@ -758,6 +785,20 @@ impl FirecrackerBackend {
 
     fn start_fc(&self, sock: &Path, console_log: &Path) -> Result<FcProcess, SnapshotError> {
         self.start_fc_with(sock, console_log, false)
+    }
+
+    /// Run the configured [`PreResumeHook`] (if any) against the freshly-spawned
+    /// VMM, BEFORE the guest is resumed. A hook error aborts the launch; the
+    /// caller drops `fc`, whose `Drop` kills and reaps the VMM. No hook = no-op.
+    fn run_pre_resume_hook(&self, fc: &FcProcess) -> Result<(), SnapshotError> {
+        let Some(hook) = &self.pre_resume_hook else {
+            return Ok(());
+        };
+        let pid = fc
+            .host_pid()
+            .ok_or_else(|| self.backend_err("pre-resume hook: VMM pid unavailable"))?;
+        hook.on_vmm_spawned(pid)
+            .map_err(|e| self.backend_err(format!("pre-resume hook rejected launch: {e}")))
     }
 
     fn start_fc_with(
@@ -3130,6 +3171,10 @@ impl SnapshotBackend for FirecrackerBackend {
             let fc = bench::time("restore.start_fc", || {
                 self.start_fc_with(&input.overlay_root.join("api.sock"), &input.overlay_root.join("console.log"), vsock_isolation)
             })?;
+            // ADR-016: attach the VMM to its host CPU cgroup BEFORE the guest is
+            // resumed by /snapshot/load below — so no restored guest instruction
+            // ever runs unthrottled. No-op unless a hook is configured.
+            self.run_pre_resume_hook(&fc)?;
             // Phase 8a-HW (#912): the snapshot carries the vsock device with its baked
             // uds_path; FC re-creates that socket on load, so its directory must exist.
             // The artifact self-describes vsock (manifest.has_vsock) so restore preps it
@@ -3493,6 +3538,71 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct RecordingHook {
+        seen: std::sync::Mutex<Vec<u32>>,
+        reject: bool,
+    }
+    impl PreResumeHook for RecordingHook {
+        fn on_vmm_spawned(&self, host_pid: u32) -> Result<(), String> {
+            self.seen.lock().unwrap().push(host_pid);
+            if self.reject {
+                Err("rejected by test".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// An FcProcess whose child is a real, short-lived host process so host_pid()
+    /// is a genuine pid (a `sleep` we reap immediately after).
+    fn fc_with_live_pid() -> (FcProcess, u32) {
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        (
+            FcProcess {
+                child: Some(child),
+                sock: std::path::PathBuf::from("/tmp/ato-test-nonexistent.sock"),
+            },
+            pid,
+        )
+    }
+
+    #[test]
+    fn pre_resume_hook_default_is_noop() {
+        let backend = FirecrackerBackend::default();
+        let (fc, _pid) = fc_with_live_pid();
+        // No hook configured → Ok, nothing observed.
+        assert!(backend.run_pre_resume_hook(&fc).is_ok());
+    }
+
+    #[test]
+    fn pre_resume_hook_receives_the_vmm_pid() {
+        let hook = Arc::new(RecordingHook {
+            seen: std::sync::Mutex::new(Vec::new()),
+            reject: false,
+        });
+        let backend = FirecrackerBackend::default().with_pre_resume_hook(hook.clone());
+        let (fc, pid) = fc_with_live_pid();
+        backend.run_pre_resume_hook(&fc).expect("hook ok");
+        assert_eq!(hook.seen.lock().unwrap().as_slice(), &[pid]);
+    }
+
+    #[test]
+    fn pre_resume_hook_rejection_aborts_launch() {
+        let hook = Arc::new(RecordingHook {
+            seen: std::sync::Mutex::new(Vec::new()),
+            reject: true,
+        });
+        let backend = FirecrackerBackend::default().with_pre_resume_hook(hook);
+        let (fc, _pid) = fc_with_live_pid();
+        // A rejecting hook makes the launch fail; fc's Drop reaps the child.
+        assert!(backend.run_pre_resume_hook(&fc).is_err());
+    }
 
     #[test]
     fn full_snapshot_creation_gets_a_multi_gib_write_budget() {
@@ -4688,6 +4798,7 @@ mod tests {
             },
             sessions: Arc::new(Mutex::new(HashMap::new())),
             page_servers: Arc::new(Mutex::new(HashMap::new())),
+            pre_resume_hook: None,
         };
         let session = RestoredSession {
             session_id: "fc-test".to_string(),
@@ -4752,6 +4863,7 @@ mod tests {
             },
             sessions: Arc::new(Mutex::new(HashMap::new())),
             page_servers: Arc::new(Mutex::new(HashMap::new())),
+            pre_resume_hook: None,
         };
         let session = RestoredSession {
             session_id: "fc-test-missing".to_string(),

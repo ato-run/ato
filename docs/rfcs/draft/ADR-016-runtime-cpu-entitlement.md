@@ -1,6 +1,6 @@
 # ADR-016: Runtime CPU Entitlement (host-side, snapshot-shape-preserving)
 
-Status: Draft
+Status: Accepted (runner core + integration implemented; staged rollout in progress)
 Date: 2026-08-02
 
 ## Context
@@ -109,3 +109,55 @@ ingress allowlist rows.
   model.
 - **PR 4 (ato-pwa):** Standard/Economy two-way choice on the Run surface.
 - **PR 5:** staged rollout + E2E.
+
+## Implementation facts (as landed)
+
+- Runner PRs: ato#1225 (allocator), ato#1226 (std-thread manager + cgroup v2
+  backend), ato#1228 (integration). API: ato-api#454 (policy + capability gate +
+  lease contract + migration 0150). PWA: ato-pwa#247 (Standard/Economy,
+  `VITE_RUNTIME_CPU_PREFERENCE_ENABLED`). Ingress prerequisite: ato-api#455
+  (grow-only capacity expansion).
+- The manager is a dedicated std::thread actor (`ato-cpu-entitlement`) with
+  sync_channel request/reply: safe to call synchronously from the pre-resume
+  hook on any runtime; admissions refuse on a full queue (ManagerBusy);
+  releases use a blocking send (a refused release would leak the slot).
+- Admission completes only after a cgroup membership READ-BACK proves the pid
+  landed; release verifies lease+slot+pid and reclaims (empty + removed)
+  BEFORE freeing budget; post-reclaim survivor-rebalance failures never leak
+  the slot (CpuReleaseOutcome).
+- **enforce requires systemd >= 254**: `DelegateSubgroup=main` keeps the
+  delegated unit cgroup free of interior processes (the cgroup v2 rule that
+  otherwise makes children `domain invalid` on `+cpu`). Older systemd fails
+  preflight → the runtime FAULTS (claims stop, heartbeat continues) — never a
+  silent unthrottled fallback. `resolve_delegated_root` steps up from the
+  DelegateSubgroup child to the unit cgroup.
+- Environment: `ATO_RUNNER_CPU_ENTITLEMENT=off|enforce` (default off),
+  `ATO_RUNNER_CPU_BUDGET_MILLIS` (default 8000), `ATO_RUNNER_CPU_CGROUP_ROOT`
+  (override; tests), `ATO_RUNNER_CGROUP_MOUNT` (default /sys/fs/cgroup).
+  systemd drop-in `<unit>.d/50-cpu-delegation.conf` written by
+  `ato runner setup` ONLY when the env file sets enforce.
+- States: Off (legacy), Active (capability `runtime-cpu-entitlement-v1`
+  advertised while Healthy), Faulted (enforce requested, host can't deliver —
+  claims stop). Active→Unhealthy: capability dropped next heartbeat, new lease
+  polling stops, existing VMs keep their last-applied quota, teardown/release
+  still processed.
+- Acceptance evidence (ubuntu-sugamo, 2026-08-02, recorded on ato#1228):
+  real-kernel cgroup acceptance + Firecracker E2E under enforce — pre-resume
+  admission, fc_vcpu=2 invariant, decrease-first reallocation (2000→1500),
+  quota burn capped at exactly 2.0 CPU (nr_throttled=49), survivor raise
+  (1500→2000), full reclaim, feature-off parity.
+
+## Rollback
+
+1. Runner: set `ATO_RUNNER_CPU_ENTITLEMENT=off` (or remove it) in
+   /etc/ato/runner.env, delete `<unit>.d/50-cpu-delegation.conf`,
+   `systemctl daemon-reload`, restart the runner. Off is byte-identical legacy
+   behavior; running VMs are unaffected by a restart-time flag flip apart from
+   the restart itself.
+2. PWA: unset `VITE_RUNTIME_CPU_PREFERENCE_ENABLED` and redeploy — the field
+   disappears from requests; the API treats absence as Standard.
+3. API: nothing to roll back — the composer only embeds for capability-
+   advertising runners, and the 0150 columns are nullable/forward-compatible
+   (no down migration by design).
+4. Slot expansion is NOT shrunk: lower `ATO_RUNNER_MAX_SLOTS` on the box and
+   let heartbeat capacity drop; extra ingress slot rows stay inert.
