@@ -1480,6 +1480,52 @@ pub(crate) fn base_image_and_install(
     })
 }
 
+/// The image-build-time production build for a vite `preview` launch, derived
+/// from filesystem evidence (same doctrine as [`base_image_and_install`]).
+///
+/// A `[run] command` of `<pm> run preview …` serves `dist/`, and `dist/` must
+/// exist BEFORE the guest boots: the guest rootfs is read-only (see
+/// `export_guest_rootfs_script_v1` — only tool-owned cache paths are redirected
+/// to tmpfs), so running `vite build` at boot fails on EROFS. The build
+/// therefore belongs in the image assembly, chained after dependency install,
+/// where its output is baked into the identity-bearing guest tree.
+///
+/// Fail-closed: only a plain `… vite build` script (no shell syntax) from a
+/// recognized package manager qualifies; anything else returns `None` and the
+/// image is assembled exactly as before.
+pub fn vite_production_prebuild_cmd(authored: &[String], source_root: &Path) -> Option<String> {
+    let pm = authored.first().map(String::as_str)?;
+    if !matches!(pm, "npm" | "pnpm" | "yarn" | "bun") {
+        return None;
+    }
+    if authored.get(1).map(String::as_str) != Some("run")
+        || authored.get(2).map(String::as_str) != Some("preview")
+    {
+        return None;
+    }
+    let raw = std::fs::read_to_string(source_root.join("package.json")).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let build = value
+        .get("scripts")
+        .and_then(|scripts| scripts.get("build"))
+        .and_then(|script| script.as_str())?;
+    if build.trim().is_empty()
+        || build.chars().any(|character| {
+            matches!(
+                character,
+                '\'' | '"' | '\\' | ';' | '|' | '&' | '$' | '<' | '>' | '(' | ')'
+            ) || character.is_control()
+        })
+    {
+        return None;
+    }
+    let tokens = build.split_ascii_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 || tokens[tokens.len() - 2..] != ["vite", "build"] {
+        return None;
+    }
+    Some(format!("{pm} run build"))
+}
+
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
 /// interpolated into the generated `supervisor.json` + the guest spawn script, so a
 /// malformed name is **rejected at emission** (fail-closed), never emitted — mirroring
@@ -3180,6 +3226,49 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         }
     }
 
+    fn preview_argv() -> Vec<String> {
+        ["npm", "run", "preview", "--", "--host", "0.0.0.0"]
+            .map(str::to_string)
+            .to_vec()
+    }
+
+    #[test]
+    fn vite_preview_launch_gets_an_image_time_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("fixture");
+        assert_eq!(
+            vite_production_prebuild_cmd(&preview_argv(), dir.path()),
+            Some("npm run build".to_string())
+        );
+    }
+
+    #[test]
+    fn compound_or_non_vite_build_scripts_get_no_image_time_build() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"npm run a && npm run b","preview":"vite preview"}}"#,
+        )
+        .expect("fixture");
+        assert_eq!(
+            vite_production_prebuild_cmd(&preview_argv(), dir.path()),
+            None
+        );
+
+        // A non-preview launch never gets one either, whatever the scripts say.
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .expect("fixture");
+        let dev = ["npm", "run", "dev"].map(str::to_string).to_vec();
+        assert_eq!(vite_production_prebuild_cmd(&dev, dir.path()), None);
+    }
+
     #[test]
     fn a_v1_spec_resolves_the_argv_the_author_wrote() {
         let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
@@ -3806,6 +3895,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     /// `docker build`) against an actual filesystem fixture, so this proves
     /// the real copy behavior rather than re-asserting the script's text.
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn a_repo_owned_src_subdirectory_survives_nested_under_the_staging_src_dir() {
         let source_root = tempfile::tempdir().expect("source root");
         std::fs::write(
@@ -6298,6 +6388,7 @@ readiness_probe = { http_get = "/health" }
     // --- builder script failure diagnostics (ato-api#443 §5) -------------------
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_classifies_npm_ci_lockfile_mismatch() {
         let error = run_builder_script(
             "assemble app image",
@@ -6312,6 +6403,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_classifies_generic_npm_ci_failure() {
         let error = run_builder_script(
             "assemble app image",
@@ -6326,6 +6418,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_does_not_npm_classify_unrelated_stages() {
         // Only the stage that actually runs a manifest-derived install
         // command gets an npm-flavored code; a docker/export failure that
@@ -6339,6 +6432,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_an_authorization_header() {
         let error = run_builder_script(
             "assemble app image",
@@ -6354,6 +6448,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_a_credentialed_registry_url() {
         let error = run_builder_script(
             "assemble app image",
@@ -6369,6 +6464,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_an_npmrc_auth_token_line() {
         let error = run_builder_script(
             "assemble app image",
@@ -6383,6 +6479,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_truncates_long_stderr_with_an_explicit_marker() {
         // A single stderr line well past the diagnostic bound: the tail must
         // be cut and the message must SAY it was truncated rather than
@@ -6405,6 +6502,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_does_not_truncate_short_stderr() {
         let error = run_builder_script(
             "assemble app image",
