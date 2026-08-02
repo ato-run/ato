@@ -3895,6 +3895,7 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
     /// `docker build`) against an actual filesystem fixture, so this proves
     /// the real copy behavior rather than re-asserting the script's text.
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn a_repo_owned_src_subdirectory_survives_nested_under_the_staging_src_dir() {
         let source_root = tempfile::tempdir().expect("source root");
         std::fs::write(
@@ -6387,6 +6388,7 @@ readiness_probe = { http_get = "/health" }
     // --- builder script failure diagnostics (ato-api#443 §5) -------------------
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_classifies_npm_ci_lockfile_mismatch() {
         let error = run_builder_script(
             "assemble app image",
@@ -6401,6 +6403,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_classifies_generic_npm_ci_failure() {
         let error = run_builder_script(
             "assemble app image",
@@ -6415,6 +6418,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_does_not_npm_classify_unrelated_stages() {
         // Only the stage that actually runs a manifest-derived install
         // command gets an npm-flavored code; a docker/export failure that
@@ -6428,6 +6432,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_an_authorization_header() {
         let error = run_builder_script(
             "assemble app image",
@@ -6443,6 +6448,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_a_credentialed_registry_url() {
         let error = run_builder_script(
             "assemble app image",
@@ -6458,6 +6464,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_redacts_an_npmrc_auth_token_line() {
         let error = run_builder_script(
             "assemble app image",
@@ -6472,6 +6479,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_truncates_long_stderr_with_an_explicit_marker() {
         // A single stderr line well past the diagnostic bound: the tail must
         // be cut and the message must SAY it was truncated rather than
@@ -6494,6 +6502,7 @@ readiness_probe = { http_get = "/health" }
     }
 
     #[test]
+    #[cfg(unix)] // runs a real `sh` builder script
     fn builder_script_failure_does_not_truncate_short_stderr() {
         let error = run_builder_script(
             "assemble app image",
