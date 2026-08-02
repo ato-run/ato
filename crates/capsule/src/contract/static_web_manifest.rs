@@ -4,6 +4,7 @@
 //! host assignment, delivery state, headers, and deployment credentials belong
 //! to the data plane and are never part of this content-addressed payload.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
@@ -15,8 +16,7 @@ use url::Url;
 /// Schema tag shared with the static-content Worker.
 pub const STATIC_WEB_MANIFEST_V1_SCHEMA: &str = "ato.static-web-manifest/v1";
 
-/// The only embedding origins v1 recognizes. A producer always emits all three;
-/// readers accept a non-empty subset for backward-compatible immutable artifacts.
+/// The only embedding origins v1 recognizes, in the only permitted order.
 pub const STATIC_WEB_FRAME_ANCESTORS_V1: &[&str] = &[
     "https://ato.run",
     "https://app.ato.run",
@@ -86,14 +86,15 @@ pub struct StaticWebSecurityV1 {
 }
 
 impl StaticWebSecurityV1 {
-    pub fn producer_policy(connect_src: Vec<String>) -> Self {
-        Self {
+    pub fn producer_policy(mut connect_src: Vec<String>) -> Result<Self, StaticWebManifestError> {
+        canonicalize_connect_sources(&mut connect_src)?;
+        Ok(Self {
             connect_src,
             frame_ancestors: STATIC_WEB_FRAME_ANCESTORS_V1
                 .iter()
                 .map(|origin| (*origin).to_owned())
                 .collect(),
-        }
+        })
     }
 }
 
@@ -145,8 +146,7 @@ impl StaticWebManifestV1 {
     /// RFC 8785 JCS bytes. No trailing newline is added.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, StaticWebManifestError> {
         self.validate()?;
-        serde_jcs::to_vec(self)
-            .map_err(|error| StaticWebManifestError::Canonicalization(error.to_string()))
+        canonical_jcs_bytes(self)
     }
 }
 
@@ -236,6 +236,99 @@ pub fn validate_connect_source(value: &str) -> Result<(), StaticWebManifestError
     Ok(())
 }
 
+/// Validates a policy set and converts it to its sole v1 representation.
+pub fn canonicalize_connect_sources(
+    connect_src: &mut Vec<String>,
+) -> Result<(), StaticWebManifestError> {
+    for value in connect_src.iter() {
+        validate_connect_source(value)?;
+    }
+    connect_src.sort_unstable();
+    if let Some(pair) = connect_src.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Err(StaticWebManifestError::DuplicateSecurityOrigin(
+            pair[0].clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Canonical RFC 8785 bytes for the static web contracts.
+///
+/// `serde_jcs` is used elsewhere in this workspace, but its v0.1 object-key
+/// comparator is UTF-8 byte ordered. RFC 8785 requires UTF-16 code-unit order;
+/// this bounded encoder is used here so astral Unicode keys match the Worker
+/// `canonicalize` implementation exactly. Static v1 has only strings,
+/// booleans, safe non-negative integers, arrays, and objects.
+pub fn canonical_jcs_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, StaticWebManifestError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| StaticWebManifestError::Canonicalization(error.to_string()))?;
+    let mut output = Vec::new();
+    write_jcs_value(&value, &mut output)?;
+    Ok(output)
+}
+
+fn write_jcs_value(
+    value: &serde_json::Value,
+    output: &mut Vec<u8>,
+) -> Result<(), StaticWebManifestError> {
+    match value {
+        serde_json::Value::Null => output.extend_from_slice(b"null"),
+        serde_json::Value::Bool(value) => {
+            output.extend_from_slice(if *value { b"true" } else { b"false" })
+        }
+        serde_json::Value::Number(number) if number.as_u64().is_some() => {
+            output.extend_from_slice(number.to_string().as_bytes())
+        }
+        serde_json::Value::Number(_) => {
+            return Err(StaticWebManifestError::Canonicalization(
+                "static web JCS accepts only non-negative integer values".to_owned(),
+            ));
+        }
+        serde_json::Value::String(value) => {
+            output.extend_from_slice(
+                serde_json::to_string(value)
+                    .map_err(|error| StaticWebManifestError::Canonicalization(error.to_string()))?
+                    .as_bytes(),
+            );
+        }
+        serde_json::Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                write_jcs_value(value, output)?;
+            }
+            output.push(b']');
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| compare_utf16(left, right));
+            output.push(b'{');
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(
+                    serde_json::to_string(key)
+                        .map_err(|error| {
+                            StaticWebManifestError::Canonicalization(error.to_string())
+                        })?
+                        .as_bytes(),
+                );
+                output.push(b':');
+                write_jcs_value(value, output)?;
+            }
+            output.push(b'}');
+        }
+    }
+    Ok(())
+}
+
+fn compare_utf16(left: &str, right: &str) -> Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
 fn validate_blob(blob: &str) -> Result<(), StaticWebManifestError> {
     let Some(hex) = blob.strip_prefix("sha256:") else {
         return Err(StaticWebManifestError::InvalidBlob);
@@ -251,30 +344,21 @@ fn validate_blob(blob: &str) -> Result<(), StaticWebManifestError> {
 }
 
 fn validate_security(security: &StaticWebSecurityV1) -> Result<(), StaticWebManifestError> {
-    let mut seen = std::collections::BTreeSet::new();
-    for value in &security.connect_src {
-        validate_connect_source(value)?;
-        if !seen.insert(value) {
-            return Err(StaticWebManifestError::DuplicateSecurityOrigin(
-                value.clone(),
-            ));
-        }
-    }
-    if security.frame_ancestors.is_empty() {
-        return Err(StaticWebManifestError::EmptyField(
-            "security.frame_ancestors",
+    let mut canonical = security.connect_src.clone();
+    canonicalize_connect_sources(&mut canonical)?;
+    if canonical != security.connect_src {
+        return Err(StaticWebManifestError::Canonicalization(
+            "security.connect_src must be sorted in ASCII dictionary order".to_owned(),
         ));
     }
-    seen.clear();
-    for value in &security.frame_ancestors {
-        if !STATIC_WEB_FRAME_ANCESTORS_V1.contains(&value.as_str()) {
-            return Err(StaticWebManifestError::InvalidFrameAncestor(value.clone()));
-        }
-        if !seen.insert(value) {
-            return Err(StaticWebManifestError::DuplicateSecurityOrigin(
-                value.clone(),
-            ));
-        }
+    let expected = STATIC_WEB_FRAME_ANCESTORS_V1
+        .iter()
+        .map(|origin| (*origin).to_owned())
+        .collect::<Vec<_>>();
+    if security.frame_ancestors != expected {
+        return Err(StaticWebManifestError::InvalidFrameAncestor(
+            "frame_ancestors must equal the fixed v1 trust set".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -294,7 +378,7 @@ mod tests {
         assert_eq!(canonical, expected.trim_end_matches('\n').as_bytes());
         assert_eq!(
             format!("sha256:{:x}", sha2::Sha256::digest(&canonical)),
-            "sha256:8a06c71db0519bb27f2dc92f88dcd8107f09e8cb52a1495f16cb1bac6a177abd"
+            "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2"
         );
     }
 
@@ -328,5 +412,18 @@ mod tests {
         ] {
             assert!(validate_relative_path(path).is_err(), "{path:?}");
         }
+    }
+
+    #[test]
+    fn requires_canonical_connect_order_and_fixed_frame_ancestors() {
+        let mut manifest: StaticWebManifestV1 = serde_json::from_str(include_str!(
+            "../../tests/fixtures/static-web-manifest-jcs-v1/input.json"
+        ))
+        .unwrap();
+        manifest.security.connect_src.reverse();
+        assert!(manifest.validate().is_err());
+        manifest.security.connect_src.reverse();
+        manifest.security.frame_ancestors.pop();
+        assert!(manifest.validate().is_err());
     }
 }
