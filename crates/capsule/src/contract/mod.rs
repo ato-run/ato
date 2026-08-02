@@ -15,4 +15,5 @@ pub mod program_source_projection;
 pub mod setup_journal;
 pub mod snapshot_manifest;
 pub mod static_web_manifest;
+pub mod static_web_receipt;
 pub mod tools;
