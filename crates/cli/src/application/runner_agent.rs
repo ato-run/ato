@@ -4426,6 +4426,11 @@ fn restore_hold_break_reason(
 /// release. Callers MUST hold the execution slot on `false`: CPU accounting and
 /// slot ownership are released as one transaction boundary.
 const CPU_RELEASE_ATTEMPTS: usize = 2;
+/// A failed reclaim must not make the execution slot reusable, but it must
+/// also not strand a successfully stopped VM forever.  This is deliberately
+/// an unbounded recovery cadence rather than a caller timeout: every attempt
+/// waits for the synchronous std-thread manager reply before trying again.
+const CPU_RELEASE_RECOVERY_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Release a confirmed VMM's CPU reservation. A reclaim failure is retried
 /// once synchronously from the same confirmed teardown observation before the
@@ -4504,6 +4509,36 @@ fn release_slot_after_cpu_reclaim(
     cpu_release?;
     release_slot();
     Ok(())
+}
+
+/// Keep the lease task alive after a confirmed VM teardown until the CPU
+/// manager has reclaimed its reservation. The SlotLease remains owned by this
+/// task throughout the wait, so no new execution can enter the slot while the
+/// cgroup state is uncertain. This retries the same manager transaction; it
+/// does not introduce an async manager API or a timeout/fencing race.
+async fn retry_cpu_reclaim_until_success<F>(
+    lease_id: &str,
+    mut reclaim: F,
+    retry_interval: Duration,
+) where
+    F: FnMut() -> Result<(), crate::application::runner_cpu_manager::CpuManagerError>,
+{
+    let mut retry = 0_u64;
+    loop {
+        tokio::time::sleep(retry_interval).await;
+        retry = retry.saturating_add(1);
+        match reclaim() {
+            Ok(()) => {
+                println!(
+                    "🔓 cpu-entitlement: lease {lease_id}: CPU reclaim recovered on retry {retry}"
+                );
+                return;
+            }
+            Err(error) => eprintln!(
+                "🚨 cpu-entitlement: lease {lease_id}: reclaim retry {retry} failed ({error}); execution slot remains held"
+            ),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4625,9 +4660,19 @@ async fn handle_restore_snapshot_lease(
         }
         match cpu_release.map(|result| release_slot_after_cpu_reclaim(result, || slot.release())) {
             Some(Ok(())) => {}
-            Some(Err(error)) => eprintln!(
-                "🚨 cpu-entitlement: lease {lease_id}: release failed ({error}); CPU reservation and execution slot retained fail-closed"
-            ),
+            Some(Err(error)) => {
+                eprintln!(
+                    "🚨 cpu-entitlement: lease {lease_id}: release failed ({error}); CPU reservation and execution slot retained fail-closed"
+                );
+                retry_cpu_reclaim_until_success(
+                    lease_id,
+                    || release_cpu_entitlement_after_teardown(lease_id, slot.index, None),
+                    CPU_RELEASE_RECOVERY_INTERVAL,
+                )
+                .await;
+                release_slot_after_cpu_reclaim(Ok(()), || slot.release())
+                    .expect("successful CPU recovery releases the execution slot");
+            }
             None => eprintln!(
                 "⚠️  restore lease {lease_id}: execution slot held because VM teardown was unconfirmed"
             ),
@@ -5684,6 +5729,7 @@ async fn handle_restore_snapshot_lease(
     // mirroring the slot-release rule below).
     let cpu_release = vm_stopped
         .then(|| release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid));
+    let cpu_reclaim_failed = matches!(cpu_release, Some(Err(_)));
     let cpu_released = match cpu_release {
         Some(Ok(())) => true,
         Some(Err(error)) => {
@@ -5718,6 +5764,19 @@ async fn handle_restore_snapshot_lease(
     if cleanup.slot_released {
         slot.release();
         println!("🔓 restore lease {lease_id}: VM stopped, gateway down, slot released");
+    } else if vm_stopped && gateway_stopped && cpu_reclaim_failed {
+        // The stopped acknowledgement above truthfully records that the slot
+        // is still held. Keep this task (and its SlotLease) alive until a
+        // later synchronous manager transaction confirms reclamation.
+        retry_cpu_reclaim_until_success(
+            &lease_id,
+            || release_cpu_entitlement_after_teardown(&lease_id, slot.index, cpu_vmm_pid),
+            CPU_RELEASE_RECOVERY_INTERVAL,
+        )
+        .await;
+        release_slot_after_cpu_reclaim(Ok(()), || slot.release())
+            .expect("successful CPU recovery releases the execution slot");
+        println!("🔓 restore lease {lease_id}: CPU reclaim recovered, slot released");
     } else {
         eprintln!(
             "⚠️  restore lease {lease_id}: teardown incomplete (vm_stopped={}, gateway_stopped={}); slot held",
@@ -8495,6 +8554,53 @@ mod tests {
         release_slot_after_cpu_reclaim(Ok(()), || slot.release())
             .expect("duplicate teardown release is idempotent");
         assert_eq!(pool.active(), 0, "duplicate teardown cannot double-release");
+    }
+
+    #[tokio::test]
+    async fn confirmed_teardown_retries_cpu_reclaim_before_releasing_its_slot() {
+        use std::cell::RefCell;
+
+        let pool = SlotPool::new(1, "127.0.0.1".to_string(), 8420);
+        let slot = pool.acquire().expect("slot claimed");
+        let attempts = RefCell::new(0_u8);
+        let order = RefCell::new(Vec::new());
+
+        // The first terminal-path release has already failed and retained the
+        // slot. The recovery loop is the real path that makes a later teardown
+        // retry reach the manager before calling SlotLease::release().
+        retry_cpu_reclaim_until_success(
+            "lease-retry",
+            || {
+                let mut attempts = attempts.borrow_mut();
+                *attempts += 1;
+                order.borrow_mut().push(format!("cpu-attempt-{attempts}"));
+                if *attempts == 1 {
+                    Err(
+                        crate::application::runner_cpu_manager::CpuManagerError::ManagerStopped {
+                            reason: "injected cgroup remove failure".to_string(),
+                        },
+                    )
+                } else {
+                    Ok(())
+                }
+            },
+            Duration::ZERO,
+        )
+        .await;
+
+        release_slot_after_cpu_reclaim(Ok(()), || {
+            order.borrow_mut().push("slot-release".to_string());
+            slot.release();
+        })
+        .expect("only a successful recovery may release the slot");
+
+        assert_eq!(
+            order.into_inner(),
+            vec!["cpu-attempt-1", "cpu-attempt-2", "slot-release"],
+            "the slot release is sequenced after the successful manager retry"
+        );
+        assert_eq!(pool.active(), 0, "the recovered slot is reusable");
+        assert!(pool.acquire().is_some(), "a later execution can claim it");
     }
 
     #[test]
