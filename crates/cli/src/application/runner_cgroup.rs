@@ -575,4 +575,108 @@ mod tests {
         // Slot dir never created → no procs file → empty, not error.
         assert_eq!(be.slot_pids(5).unwrap(), Vec::<u32>::new());
     }
+
+    /// Real-kernel acceptance for the Linux backend + manager (ADR-016 PR2b).
+    /// Requires a DELEGATED cgroup v2 directory this process may manage; run
+    /// via scripts/internal (see PR notes), e.g. under
+    /// `systemd-run --scope -p Delegate=yes` with
+    /// `ATO_CPU_ACCEPTANCE_CGROUP_ROOT` pointing at the delegated dir.
+    ///
+    /// Proves on a real kernel what the Fake cannot: `+cpu` subtree enabling,
+    /// probe round-trip, real `cgroup.procs` attach + strict read-back, quota
+    /// files carrying `<quota> 100000`, reclaim after real process exit, and
+    /// clean removal.
+    #[test]
+    #[ignore = "needs a delegated cgroup v2 root; see doc comment"]
+    fn linux_cgroup_v2_real_kernel_acceptance() {
+        use super::super::runner_cpu_manager::CpuEntitlementManager;
+        use super::super::runner_cpu_teardown::{ProcessExitEvidence, confirm_vm_teardown};
+        let root = std::path::PathBuf::from(
+            std::env::var("ATO_CPU_ACCEPTANCE_CGROUP_ROOT")
+                .expect("set ATO_CPU_ACCEPTANCE_CGROUP_ROOT to a delegated cgroup v2 dir"),
+        );
+        let be = std::sync::Arc::new(LinuxCgroupV2Backend::new(root.clone()));
+        let caps = be
+            .preflight()
+            .expect("preflight must pass on a delegated root");
+        assert!(caps.cpu_controller);
+
+        let std_req = |lease: &str, slot: usize| super::super::runner_cpu_allocator::CpuRequest {
+            lease_id: lease.to_string(),
+            slot_index: slot,
+            min_millis: 1000,
+            max_millis: 2000,
+        };
+        let mgr = CpuEntitlementManager::start(be.clone(), 6000, 8).unwrap();
+
+        // Three real processes, one per slot.
+        let mut children: Vec<std::process::Child> = (0..3)
+            .map(|_| {
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .expect("spawn sleep")
+            })
+            .collect();
+        let pids: Vec<u32> = children.iter().map(|c| c.id()).collect();
+        for (i, pid) in pids.iter().enumerate() {
+            let adm = mgr
+                .admit_and_attach(std_req(&format!("acc-{i}"), i), *pid)
+                .expect("admit on real kernel");
+            println!("admitted acc-{i} pid {pid} at {}m", adm.quota_millis);
+        }
+        // 3 x standard over 6000m -> 2000m each; verify the REAL cpu.max files.
+        for (i, pid) in pids.iter().copied().enumerate() {
+            let raw = std::fs::read_to_string(
+                root.join("ato-slots")
+                    .join(format!("ato-slot-{i}"))
+                    .join("cpu.max"),
+            )
+            .expect("cpu.max readable");
+            assert_eq!(
+                raw.split_whitespace().collect::<Vec<_>>(),
+                ["200000", "100000"]
+            );
+            let procs = be.slot_pids(i).unwrap();
+            assert_eq!(procs, vec![pid], "slot {i} holds exactly its pid");
+        }
+
+        // Real teardown of slot 2: kill + REAP, wait for cgroup.procs to empty,
+        // then release; the slot cgroup must be gone afterwards.
+        let mut victim = children.remove(2);
+        victim.kill().expect("kill");
+        victim.wait().expect("reap");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !be.slot_pids(2).unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "slot 2 never emptied");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let proof = confirm_vm_teardown("acc-2", 2, pids[2], ProcessExitEvidence::Reaped);
+        let outcome = mgr.release_after_teardown(proof).expect("release");
+        println!("release outcome: {:?}", outcome.rebalance);
+        assert!(
+            !root.join("ato-slots").join("ato-slot-2").exists(),
+            "slot 2 cgroup removed"
+        );
+
+        // Cleanup: kill+reap the survivors and release them too.
+        for (i, mut child) in children.into_iter().enumerate() {
+            child.kill().ok();
+            child.wait().ok();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !be.slot_pids(i).unwrap().is_empty() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            mgr.release_after_teardown(confirm_vm_teardown(
+                format!("acc-{i}"),
+                i,
+                pids[i],
+                ProcessExitEvidence::Killed,
+            ))
+            .expect("survivor release");
+        }
+        assert_eq!(mgr.snapshot().unwrap().applied.len(), 0);
+        println!("real-kernel acceptance PASSED");
+    }
 }

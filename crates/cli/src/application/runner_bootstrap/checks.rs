@@ -607,6 +607,52 @@ pub(crate) fn gather() -> Vec<Check> {
     let env_vals = std::fs::read_to_string(ENV_FILE)
         .map(|t| env_file_values(&t))
         .unwrap_or_default();
+
+    // ADR-016: the CPU-delegation drop-in exists IFF the env file explicitly
+    // selects enforce. Off (the default) plans NOTHING — zero unit diff; a
+    // stale drop-in left over from a former enforce is only warned about,
+    // never auto-removed (the operator may be mid-transition).
+    {
+        let enforce = env_vals
+            .get("ATO_RUNNER_CPU_ENTITLEMENT")
+            .is_some_and(|v| v.trim() == "enforce");
+        let dropin = super::setup::cpu_delegation_dropin_path();
+        let current = std::fs::read_to_string(&dropin).ok();
+        checks.push(if enforce {
+            match &current {
+                Some(text) if *text == super::setup::render_cpu_delegation_dropin() => Check::ok(
+                    "cpu_delegation_dropin",
+                    "CPU delegation drop-in",
+                    format!("{dropin} current"),
+                ),
+                Some(_) => Check::missing(
+                    "cpu_delegation_dropin",
+                    "CPU delegation drop-in",
+                    format!("{dropin} stale"),
+                    "ato runner setup --fix rewrites it (backup kept) and daemon-reloads",
+                ),
+                None => Check::missing(
+                    "cpu_delegation_dropin",
+                    "CPU delegation drop-in",
+                    format!("enforce set but {dropin} absent"),
+                    "ato runner setup --fix writes Delegate=yes + DelegateSubgroup=main and daemon-reloads",
+                ),
+            }
+        } else if current.is_some() {
+            Check::warn(
+                "cpu_delegation_dropin",
+                "CPU delegation drop-in",
+                format!("{dropin} exists but ATO_RUNNER_CPU_ENTITLEMENT is not 'enforce'"),
+                "delete the drop-in and `systemctl daemon-reload` to fully revert",
+            )
+        } else {
+            Check::ok(
+                "cpu_delegation_dropin",
+                "CPU delegation drop-in",
+                "not requested (entitlement off)".to_string(),
+            )
+        });
+    }
     checks.push(
         match std::env::var("ATO_RUNNER_PUBLIC_BASE_URL")
             .ok()
