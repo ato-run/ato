@@ -123,7 +123,7 @@ pub struct CpuManagerSnapshot {
 }
 
 /// Observed evidence that a VMM process has exited — the only thing that mints a
-/// [`TeardownConfirmed`]. Held by value so the proof cannot be forged from a
+/// [`TeardownObservation`]. Held by value so the proof cannot be forged from a
 /// bare marker; the runner constructs it from a real `wait`/`kill` result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessExitEvidence {
