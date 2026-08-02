@@ -42,7 +42,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use super::runner_cgroup::{CgroupError, CpuCgroupBackend};
 use super::runner_cpu_allocator::{CpuAllocationError, CpuRequest, allocate_cpu};
-use super::runner_cpu_teardown::TeardownObservation;
+use super::runner_cpu_teardown::TeardownConfirmed;
 
 /// An entitlement currently applied to a slot cgroup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,7 +157,7 @@ enum Command {
         reply: SyncSender<Result<CpuAdmission, CpuManagerError>>,
     },
     ReleaseAfterTeardown {
-        proof: TeardownObservation,
+        proof: TeardownConfirmed,
         reply: SyncSender<Result<CpuReleaseOutcome, CpuManagerError>>,
     },
     Snapshot {
@@ -281,7 +281,7 @@ impl CpuEntitlementManager {
     /// refused there.
     pub fn release_after_teardown(
         &self,
-        proof: TeardownObservation,
+        proof: TeardownConfirmed,
     ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         // A full queue must not lose a release: unlike an admission (where
         // refusing is the safe direction), a refused release leaks the slot. So
@@ -636,10 +636,7 @@ impl ManagerActor {
         );
     }
 
-    fn release(
-        &mut self,
-        proof: TeardownObservation,
-    ) -> Result<CpuReleaseOutcome, CpuManagerError> {
+    fn release(&mut self, proof: TeardownConfirmed) -> Result<CpuReleaseOutcome, CpuManagerError> {
         // NOTE: releases are processed even when Unhealthy — refusing them would
         // leak slots and cgroups forever. Only NEW admissions are refused there.
         // The reclaim below runs fully verified regardless of health; what an
@@ -807,7 +804,7 @@ mod tests {
         mgr.admit_and_attach(req, pid).expect("admit").quota_millis
     }
 
-    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownObservation {
+    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownConfirmed {
         super::super::runner_cpu_teardown::confirm_vm_teardown(
             lease,
             slot,
