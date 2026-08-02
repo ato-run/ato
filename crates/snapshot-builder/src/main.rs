@@ -85,7 +85,6 @@ use snapshot::{
     no_secret_scan,
 };
 
-mod authoring_gateway;
 mod authoring_runtime;
 /// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
 /// from the contract the control plane pinned on the claim. Its module doc states
@@ -1079,6 +1078,8 @@ struct ProducedBuild {
     boot_timeout_s: Option<u32>,
     /// Resolver-owned lock identity. Present only for the strict v1 producer.
     resolution_lock_digest: Option<String>,
+    /// Canonical execution contract bytes produced by the strict v1 lane.
+    execution_contract_jcs: Option<String>,
     /// The capsule's authored `[seal_at]` acceptance program (RFC §6.1/§6.3),
     /// validated at produce time.
     ///
@@ -1332,6 +1333,7 @@ fn produce_recipe_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        execution_contract_jcs: None,
         // The authored acceptance program, validated above. Only the interactive
         // HOLD reads it.
         seal_at,
@@ -1700,6 +1702,7 @@ fn produce_import_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        execution_contract_jcs: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // Import lane has no capsule.toml: operator opts into first-screen
@@ -1821,6 +1824,7 @@ fn produce_oci_image_import(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: None,
+        execution_contract_jcs: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         warmup_paths: warmup.warmup_paths,
@@ -1923,6 +1927,7 @@ fn produce_compose_import(
         compose_import_receipt: Some(compose_import_receipt),
         boot_timeout_s: params.boot_timeout_s,
         resolution_lock_digest: None,
+        execution_contract_jcs: None,
         // No capsule.toml, so no authored `[seal_at]` to read.
         seal_at: None,
         // ato#1049 compose lane (added on nightly after this flight was cut):
@@ -3253,6 +3258,20 @@ fn produce_pinned_v1_build(
         compose_import_receipt: None,
         boot_timeout_s: None,
         resolution_lock_digest: Some(resolution_lock_digest),
+        execution_contract_jcs: Some(
+            String::from_utf8(serde_jcs::to_vec(built.contract()).map_err(|error| {
+                fail(
+                    "execution_identity",
+                    format!("canonicalize resolved execution contract: {error}"),
+                )
+            })?)
+            .map_err(|error| {
+                fail(
+                    "execution_identity",
+                    format!("resolved execution contract is not UTF-8: {error}"),
+                )
+            })?,
+        ),
         seal_at,
         // A v1 manifest has no `[snapshot]` table, so the backend applies its
         // own warmup fallback — the same as a v0.3 capsule that authored none.
@@ -4087,27 +4106,15 @@ fn dispatch_interactive_capture_job(
 
 fn process_authoring_setup(
     cfg: &Config,
-    backend: &FirecrackerBackend,
+    _backend: &FirecrackerBackend,
     client: &authoring_runtime::AuthoringApiClient<'_>,
     work: &authoring_runtime::AuthoringWork,
 ) -> std::result::Result<(), (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
-    let slot = cfg.hold_slot.as_ref().ok_or_else(|| {
-        fail(
-            "setup",
-            "Authoring Session setup requires a registered builder hold slot".to_string(),
-        )
-    })?;
-    if slot.builder_id != cfg.agent_id {
-        return Err(fail(
-            "setup",
-            "registered hold slot builder_id does not match --agent-id".to_string(),
-        ));
-    }
     if work.setup_mode.as_deref() != Some("suggested") {
         return Err(fail(
             "setup",
-            "this builder slice accepts only the suggested reproducible setup path".to_string(),
+            "Build Plan detection accepts only the suggested reproducible path".to_string(),
         ));
     }
     let jobdir = authoring_work_directory(&cfg.work, "setup", &work.work_id)
@@ -4136,126 +4143,209 @@ fn process_authoring_setup(
         &inference_root,
     )
     .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
-    let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
-        .map_err(|error| fail("detect", error))?;
-    let generated_manifest = authoring_runtime::render_static_web_capsule_toml(&normalized)
-        .map_err(|error| fail("detect", error))?;
-    let produced = produce_pinned_v1_build(
-        cfg,
-        &work.work_id,
-        &jobdir,
-        &input,
-        verified,
-        Some(&generated_manifest),
-    )?;
-    let resolution_lock_digest = produced
-        .resolution_lock_digest
-        .clone()
-        .ok_or_else(|| fail("build", "v1 resolver emitted no lock identity".to_string()))?;
-    let store =
-        CasStore::open(jobdir.join("cas")).map_err(|error| fail("launch", error.to_string()))?;
-    let guest = backend
-        .boot_and_hold(BuildReadyStateInput {
-            store: &store,
-            capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
-            runner_class: None,
-            surface_requirement: produced.surface_requirement.clone(),
-            layers: BuildLayers {
-                rootfs: produced.rootfs,
-                runtime: None,
-                dependency: None,
-                app: None,
-                vmstate: Vec::new(),
-                memory: Vec::new(),
-            },
-            restore_contract: RestoreContract {
-                ports: vec![produced.port],
-                healthcheck: Some(produced.healthcheck.clone()),
-                expected_ready_ms: Some(8000),
-                warmup_paths: produced.warmup_paths,
-                stable_successes: produced.stable_successes,
-                stable_interval_ms: produced.stable_interval_ms,
-                content_ready_path: produced.content_ready_path,
-                endpoints: produced.endpoints,
-            },
-            sanitizer_contract: SanitizerContract::default(),
-            declared_secret_markers: Vec::new(),
-            execution_id: Some(produced.execution_id),
-            supervisor: None,
-        })
-        .map_err(|error| fail("launch", error.to_string()))?;
-    let workload_addr = guest.workload_addr();
-    let gateway = match authoring_gateway::AuthoringGateway::start(
-        slot.proxy_listen,
-        &workload_addr,
-        &work.work_id,
-        &cfg.token,
-        vec![
-            format!("Source closure: {}", work.source_closure_id),
-            format!("Program Intent: {}", normalized.digest),
-            format!("Resolution lock: {resolution_lock_digest}"),
-            "Build: static Web source; no dependency steps".to_string(),
-            "Launch: python3 -m http.server 8000 --bind 0.0.0.0".to_string(),
-            "Readiness: HTTP / on port 8000 succeeded".to_string(),
-        ],
-    ) {
-        Ok(gateway) => gateway,
-        Err(error) => {
-            guest.release();
-            return Err(fail(
-                "launch",
-                format!("front Authoring Preview and Terminal: {error}"),
-            ));
+    let authored_toml = work.source_overlay.as_ref().and_then(|overlay| {
+        let manifest = overlay.get("manifest")?;
+        manifest.get("base_manifest_digest")?;
+        (manifest.get("kind")?.as_str()? == "capsule_toml")
+            .then(|| manifest.get("capsule_toml")?.as_str())
+            .flatten()
+    });
+    let (origin, normalized, generated_manifest) = match authored_toml {
+        Some(capsule_toml) => (
+            "existing_config",
+            authoring_runtime::normalize_capsule_toml(capsule_toml)
+                .map_err(|error| fail("detect", error))?,
+            capsule_toml.to_string(),
+        ),
+        None => {
+            let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
+                .map_err(|error| fail("detect", error))?;
+            let generated = authoring_runtime::render_static_web_capsule_toml(&normalized)
+                .map_err(|error| fail("detect", error))?;
+            ("inferred", normalized, generated)
         }
     };
     client
-        .mark_setup_ready(
+        .mark_setup_detected(
             work,
-            &authoring_runtime::SetupReady {
+            &authoring_runtime::SetupDetected {
                 builder_id: &cfg.agent_id,
-                builder_session_id: &work.work_id,
-                builder_slot_id: &slot.slot_id,
-                origin: "inferred",
+                origin,
                 normalized_program_intent: &normalized,
-                resolution_lock_digest: &resolution_lock_digest,
+                source_closure_id: &work.source_closure_id,
                 generated_capsule_toml: &generated_manifest,
+                materialized_assets: Vec::new(),
             },
         )
-        .map_err(|error| fail("setup_ready", error))?;
+        .map_err(|error| fail("setup_detected", error))?;
     eprintln!(
-        "[builder] Authoring Session {} ready on slot {} (trace {})",
-        work.authoring_session_id, slot.slot_id, work.trace_id
+        "[builder] Authoring Session {} Build Plan detected without execution (trace {})",
+        work.authoring_session_id, work.trace_id
     );
-
-    loop {
-        match client.setup_control(work) {
-            Ok(control) if control.action == "continue" => {
-                std::thread::sleep(Duration::from_secs(2));
-            }
-            Ok(_) => break,
-            Err(error) => {
-                eprintln!(
-                    "[builder] Authoring Session {} control poll failed: {error}",
-                    work.authoring_session_id
-                );
-                break;
-            }
-        }
-    }
-    drop(gateway);
-    guest.release();
-    client
-        .mark_setup_stopped(work)
-        .map_err(|error| fail("setup_stop", error))?;
     Ok(())
 }
 
-struct BuilderCleanReplayAdapter<'a> {
+struct BuildEventEmitter<'a> {
+    client: &'a authoring_runtime::AuthoringApiClient<'a>,
+    work: &'a authoring_runtime::AuthoringWork,
+    sequence: u64,
+}
+
+impl BuildEventEmitter<'_> {
+    fn emit(
+        &mut self,
+        kind: &str,
+        step_id: Option<&str>,
+        fields: serde_json::Value,
+    ) -> Result<(), String> {
+        let mut event = serde_json::Map::new();
+        event.insert(
+            "schema".to_string(),
+            serde_json::Value::String("ato.build-event/v1".to_string()),
+        );
+        event.insert(
+            "sequence".to_string(),
+            serde_json::Value::from(self.sequence + 1),
+        );
+        event.insert(
+            "event_at".to_string(),
+            serde_json::Value::String(
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            ),
+        );
+        event.insert(
+            "kind".to_string(),
+            serde_json::Value::String(kind.to_string()),
+        );
+        if let Some(step_id) = step_id {
+            event.insert(
+                "step_id".to_string(),
+                serde_json::Value::String(step_id.to_string()),
+            );
+        }
+        if let serde_json::Value::Object(fields) = fields {
+            event.extend(fields);
+        }
+        self.client
+            .append_build_event(self.work, &serde_json::Value::Object(event))?;
+        self.sequence += 1;
+        Ok(())
+    }
+
+    fn attempt_started(&mut self) -> Result<(), String> {
+        self.emit(
+            "attempt_started",
+            None,
+            serde_json::json!({ "builder_image": "ato/snapshot-builder" }),
+        )
+    }
+
+    fn attempt_finished(
+        &mut self,
+        status: &str,
+        failure_category: Option<&str>,
+    ) -> Result<(), String> {
+        let fields = match failure_category {
+            Some(category) => serde_json::json!({
+                "status": status,
+                "failure_category": category,
+            }),
+            None => serde_json::json!({ "status": status }),
+        };
+        self.emit("attempt_finished", None, fields)
+    }
+
+    fn step_started(&mut self, step_id: &str) -> Result<std::time::Instant, String> {
+        self.emit("step_started", Some(step_id), serde_json::json!({}))?;
+        Ok(std::time::Instant::now())
+    }
+
+    fn step_finished(
+        &mut self,
+        step_id: &str,
+        status: &str,
+        started: std::time::Instant,
+        exit_code: Option<i32>,
+        failure_category: Option<&str>,
+    ) -> Result<(), String> {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "status".to_string(),
+            serde_json::Value::String(status.to_string()),
+        );
+        fields.insert(
+            "duration_ms".to_string(),
+            serde_json::Value::from(started.elapsed().as_millis() as u64),
+        );
+        if let Some(code) = exit_code {
+            fields.insert("exit_code".to_string(), serde_json::Value::from(code));
+        }
+        if let Some(category) = failure_category {
+            fields.insert(
+                "failure_category".to_string(),
+                serde_json::Value::String(category.to_string()),
+            );
+        }
+        self.emit(
+            "step_finished",
+            Some(step_id),
+            serde_json::Value::Object(fields),
+        )
+    }
+
+    fn diagnostic(&mut self, step_id: &str, message: &str) -> Result<(), String> {
+        self.emit(
+            "diagnostic",
+            Some(step_id),
+            serde_json::json!({ "data": message }),
+        )
+    }
+
+    fn planned_command_steps(&self) -> Vec<(String, Vec<String>, String, Vec<String>)> {
+        self.work
+            .effective_build_plan
+            .as_ref()
+            .and_then(|plan| plan.get("steps"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|step| {
+                let step_id = step.get("step_id")?.as_str()?;
+                if !step_id.starts_with("build.user") {
+                    return None;
+                }
+                let argv = step
+                    .get("command_argv")?
+                    .as_array()?
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()?;
+                let cwd = step
+                    .get("cwd")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(".")
+                    .to_string();
+                let environment_names = step
+                    .get("environment_names")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                Some((step_id.to_string(), argv, cwd, environment_names))
+            })
+            .collect()
+    }
+}
+
+struct BuilderCleanReplayAdapter<'a, 'events> {
     cfg: &'a Config,
     backend: &'a FirecrackerBackend,
     client: &'a authoring_runtime::AuthoringApiClient<'a>,
     work: &'a authoring_runtime::AuthoringWork,
     signer: &'a authoring_runtime::AuthoringSigner,
+    events: &'events mut BuildEventEmitter<'a>,
 }
 
 const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
@@ -4268,6 +4358,7 @@ struct CleanReplayBuilderArtifact {
     source_closure_id: String,
     program_intent_digest: String,
     resolution_lock_digest: String,
+    execution_contract_jcs: String,
     clean_replay_receipt_digest: Option<String>,
     rootfs_digest: String,
     capsule_manifest_hash: String,
@@ -4305,47 +4396,189 @@ fn persist_clean_replay_artifact(
         .map_err(|error| format!("write Clean Replay artifact: {error}"))
 }
 
-impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdapter<'_> {
+impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdapter<'_, '_> {
     fn replay(
         &mut self,
         request: &snapshot::authoring_evidence::CleanReplayRequestV1,
     ) -> std::result::Result<snapshot::authoring_evidence::CleanReplayObservationV1, String> {
         let started_at = chrono::Utc::now();
-        let jobdir = clean_replay_directory(self.cfg, &self.work.authoring_session_id)?;
-        if jobdir.exists() {
-            std::fs::remove_dir_all(&jobdir)
-                .map_err(|error| format!("clear Clean Replay workspace: {error}"))?;
-        }
-        std::fs::create_dir_all(&jobdir)
-            .map_err(|error| format!("create Clean Replay workspace: {error}"))?;
-        let input = authoring_runtime::archive_input(self.work)?;
-        let transport = authoring_runtime::AuthoringArchiveTransport {
-            client: self.client,
-            work: self.work,
+        let source_started = self.events.step_started("source.materialization")?;
+        let source_result = (|| {
+            let jobdir = clean_replay_directory(self.cfg, &self.work.authoring_session_id)?;
+            if jobdir.exists() {
+                std::fs::remove_dir_all(&jobdir)
+                    .map_err(|error| format!("clear Clean Replay workspace: {error}"))?;
+            }
+            std::fs::create_dir_all(&jobdir)
+                .map_err(|error| format!("create Clean Replay workspace: {error}"))?;
+            let input = authoring_runtime::archive_input(self.work)?;
+            let transport = authoring_runtime::AuthoringArchiveTransport {
+                client: self.client,
+                work: self.work,
+            };
+            let verified = source_archive_download::download_pinned_source(
+                &transport,
+                &self.work.work_id,
+                &input,
+                &jobdir.join("source-download"),
+            )
+            .map_err(|error| error.to_string())?;
+            Ok((jobdir, input, verified))
+        })();
+        let (jobdir, input, verified) = match source_result {
+            Ok(value) => {
+                self.events.step_finished(
+                    "source.materialization",
+                    "succeeded",
+                    source_started,
+                    None,
+                    None,
+                )?;
+                value
+            }
+            Err(reason) => {
+                let _ = self.events.step_finished(
+                    "source.materialization",
+                    "failed",
+                    source_started,
+                    None,
+                    Some("builder_provisioning_error"),
+                );
+                return Err(reason);
+            }
         };
-        let verified = source_archive_download::download_pinned_source(
-            &transport,
-            &self.work.work_id,
-            &input,
-            &jobdir.join("source-download"),
-        )
-        .map_err(|error| error.to_string())?;
-        let generated_manifest =
-            authoring_runtime::render_static_web_capsule_toml(&request.normalized_program_intent)?;
+
+        let metadata_started = self.events.step_started("metadata.validation")?;
+        let generated_manifest = match self.work.authoring_toml.as_deref() {
+            Some(manifest) => manifest,
+            None => {
+                let reason = "Build Attempt claim omitted its immutable authoring_toml";
+                let _ = self.events.step_finished(
+                    "metadata.validation",
+                    "failed",
+                    metadata_started,
+                    None,
+                    Some("configuration_error"),
+                );
+                return Err(reason.to_string());
+            }
+        };
+        match authoring_runtime::normalize_capsule_toml(generated_manifest) {
+            Ok(_) => {}
+            Err(reason) => {
+                let _ = self.events.step_finished(
+                    "metadata.validation",
+                    "failed",
+                    metadata_started,
+                    None,
+                    Some("configuration_error"),
+                );
+                return Err(reason);
+            }
+        }
+        self.events.step_finished(
+            "metadata.validation",
+            "succeeded",
+            metadata_started,
+            None,
+            None,
+        )?;
+
+        let builder_started = self.events.step_started("builder.provisioning")?;
+        self.events.step_finished(
+            "builder.provisioning",
+            "succeeded",
+            builder_started,
+            None,
+            None,
+        )?;
+
+        let runtime_started = self.events.step_started("runtime.provisioning")?;
+        let planned_commands = self.events.planned_command_steps();
+        let mut command_steps = Vec::new();
+        for (step_id, argv, cwd, environment_names) in &planned_commands {
+            let step_started = self.events.step_started(step_id)?;
+            self.events.emit(
+                "command_started",
+                Some(step_id),
+                serde_json::json!({
+                    "command_argv": argv,
+                    "cwd": cwd,
+                    "environment_names": environment_names,
+                }),
+            )?;
+            command_steps.push((step_id.clone(), step_started));
+        }
         let produced = produce_pinned_v1_build(
             self.cfg,
             &self.work.work_id,
             &jobdir,
             &input,
             verified,
-            Some(&generated_manifest),
-        )
-        .map_err(|(stage, reason)| format!("{stage}: {reason}"))?;
-        if produced.resolution_lock_digest.as_deref() != Some(&request.resolution_lock_digest) {
-            return Err(
-                "fresh resolver output does not match the Authoring Session lock".to_string(),
-            );
-        }
+            Some(generated_manifest),
+        );
+        let produced = match produced {
+            Ok(produced) => {
+                for ((step_id, argv, cwd, environment_names), (_, step_started)) in
+                    planned_commands.iter().zip(command_steps.iter())
+                {
+                    self.events.emit(
+                        "command_finished",
+                        Some(step_id),
+                        serde_json::json!({
+                            "command_argv": argv,
+                            "cwd": cwd,
+                            "environment_names": environment_names,
+                            "exit_code": 0,
+                            "duration_ms": step_started.elapsed().as_millis() as u64,
+                        }),
+                    )?;
+                    self.events.step_finished(
+                        step_id,
+                        "succeeded",
+                        *step_started,
+                        Some(0),
+                        None,
+                    )?;
+                }
+                self.events.step_finished(
+                    "runtime.provisioning",
+                    "succeeded",
+                    runtime_started,
+                    None,
+                    None,
+                )?;
+                produced
+            }
+            Err((stage, reason)) => {
+                let category = build_failure_category(&stage, &reason);
+                for (step_id, step_started) in command_steps {
+                    let _ = self.events.step_finished(
+                        &step_id,
+                        "failed",
+                        step_started,
+                        None,
+                        Some(category),
+                    );
+                }
+                let _ = self.events.step_finished(
+                    "runtime.provisioning",
+                    "failed",
+                    runtime_started,
+                    None,
+                    Some(category),
+                );
+                return Err(format!("{stage}: {reason}"));
+            }
+        };
+        let resolution_lock_digest = produced
+            .resolution_lock_digest
+            .clone()
+            .ok_or_else(|| "v1 resolver emitted no Resolution Lock".to_string())?;
+        let execution_contract_jcs = produced
+            .execution_contract_jcs
+            .clone()
+            .ok_or_else(|| "v1 producer emitted no execution contract".to_string())?;
         let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
         std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
             .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
@@ -4356,7 +4589,8 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 authoring_session_id: request.authoring_session_id.clone(),
                 source_closure_id: request.source_closure_id.clone(),
                 program_intent_digest: request.normalized_program_intent.digest.clone(),
-                resolution_lock_digest: request.resolution_lock_digest.clone(),
+                resolution_lock_digest: resolution_lock_digest.clone(),
+                execution_contract_jcs,
                 clean_replay_receipt_digest: None,
                 rootfs_digest,
                 capsule_manifest_hash: produced.capsule_manifest_hash.clone(),
@@ -4366,6 +4600,17 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             },
         )?;
         let execution_contract_digest = produced.execution_id.clone();
+        let launch_started = self.events.step_started("launch")?;
+        self.events.emit(
+            "command_started",
+            Some("launch"),
+            serde_json::json!({
+                "command_argv": request.normalized_program_intent.intent.launch.argv,
+                "cwd": request.normalized_program_intent.intent.launch.cwd.as_str(),
+                "environment_names": request.normalized_program_intent.intent.launch.requested_environment,
+            }),
+        )?;
+        let readiness_started = self.events.step_started("readiness")?;
         let store =
             CasStore::open(jobdir.join("cas")).map_err(|error| format!("open CAS: {error}"))?;
         let guest = self
@@ -4398,8 +4643,54 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 execution_id: Some(execution_contract_digest.clone()),
                 supervisor: None,
             })
-            .map_err(|error| format!("Clean Replay readiness: {error}"))?;
+            .map_err(|error| {
+                let _ = self.events.step_finished(
+                    "readiness",
+                    "failed",
+                    readiness_started,
+                    None,
+                    Some("readiness_timeout"),
+                );
+                let _ = self.events.step_finished(
+                    "launch",
+                    "failed",
+                    launch_started,
+                    None,
+                    Some("readiness_timeout"),
+                );
+                format!("Clean Replay readiness: {error}")
+            })?;
         guest.release();
+        self.events.emit(
+            "command_finished",
+            Some("launch"),
+            serde_json::json!({
+                "command_argv": request.normalized_program_intent.intent.launch.argv,
+                "cwd": request.normalized_program_intent.intent.launch.cwd.as_str(),
+                "environment_names": request.normalized_program_intent.intent.launch.requested_environment,
+                "exit_code": 0,
+                "duration_ms": launch_started.elapsed().as_millis() as u64,
+            }),
+        )?;
+        self.events
+            .step_finished("launch", "succeeded", launch_started, Some(0), None)?;
+        self.events
+            .step_finished("readiness", "succeeded", readiness_started, None, None)?;
+        let preview_started = self.events.step_started("preview.preparation")?;
+        self.events.step_finished(
+            "preview.preparation",
+            "succeeded",
+            preview_started,
+            None,
+            None,
+        )?;
+        let seal_started = self.events.step_started("ready_state.seal")?;
+        self.events.diagnostic(
+            "ready_state.seal",
+            "Ready-State Seal is deferred until the successful Build Attempt is confirmed.",
+        )?;
+        self.events
+            .step_finished("ready_state.seal", "skipped", seal_started, None, None)?;
 
         let completed_at = chrono::Utc::now();
         let expires_at = completed_at + chrono::Duration::minutes(15);
@@ -4408,7 +4699,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             &[
                 &request.source_closure_id,
                 &request.normalized_program_intent.digest,
-                &request.resolution_lock_digest,
+                &resolution_lock_digest,
             ],
         );
         Ok(snapshot::authoring_evidence::CleanReplayObservationV1 {
@@ -4416,6 +4707,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             builder_identity: format!("builder:{}", self.cfg.agent_id),
             materialization_inputs_digest,
             execution_contract_digest: execution_contract_digest.clone(),
+            resolution_lock_digest,
             readiness: snapshot::authoring_evidence::ReadinessResultV1 {
                 ready: true,
                 probe_digest: digest_authoring_parts(
@@ -4464,66 +4756,132 @@ fn receipt_id(prefix: &str, work_id: &str) -> String {
     format!("{prefix}_{}", &digest[..26])
 }
 
+fn build_failure_category(stage: &str, reason: &str) -> &'static str {
+    let combined = format!("{stage} {reason}").to_ascii_lowercase();
+    if combined.contains("manifest")
+        || combined.contains("configuration")
+        || combined.contains("program intent")
+    {
+        "configuration_error"
+    } else if combined.contains("readiness")
+        || combined.contains("health")
+        || combined.contains("timeout")
+    {
+        "readiness_timeout"
+    } else if combined.contains("command")
+        || combined.contains("build")
+        || combined.contains("exit")
+    {
+        "command_failed"
+    } else if combined.contains("builder")
+        || combined.contains("provision")
+        || combined.contains("source")
+    {
+        "builder_provisioning_error"
+    } else {
+        "platform_internal_error"
+    }
+}
+
 fn process_authoring_clean_replay(
     cfg: &Config,
     backend: &FirecrackerBackend,
     client: &authoring_runtime::AuthoringApiClient<'_>,
     work: &authoring_runtime::AuthoringWork,
 ) -> Result<()> {
-    let normalized = work
-        .normalized_program_intent
-        .clone()
-        .context("Clean Replay claim omitted Normalized Program Intent")?;
-    let resolution_lock_digest = work
-        .resolution_lock_digest
-        .clone()
-        .context("Clean Replay claim omitted Resolution Lock")?;
-    let previous_receipt_digest = work
-        .previous_receipt_digest
-        .clone()
-        .context("Clean Replay claim omitted Source Resolution receipt")?;
-    let signer = cfg
-        .authoring_signer
-        .as_ref()
-        .context("Authoring receipt signer is unavailable")?;
-    let request = snapshot::authoring_evidence::CleanReplayRequestV1 {
-        authoring_session_id: work.authoring_session_id.clone(),
-        capsule_revision_id: work.capsule_revision_id.clone(),
-        source_closure_id: work.source_closure_id.clone(),
-        previous_receipt_digest,
-        source_overlays: Vec::new(),
-        normalized_program_intent: normalized,
-        resolution_lock_digest,
-        allowed_cache_digests: Vec::new(),
-    };
-    let mut adapter = BuilderCleanReplayAdapter {
-        cfg,
-        backend,
+    let mut events = BuildEventEmitter {
         client,
         work,
-        signer,
+        sequence: 0,
     };
-    let (receipt, classified) =
-        snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
-            .map_err(|error| anyhow!("execute Clean Replay: {error}"))?;
-    let jobdir =
-        clean_replay_directory(cfg, &work.authoring_session_id).map_err(|error| anyhow!(error))?;
-    let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
-        &std::fs::read(clean_replay_artifact_path(&jobdir))
-            .context("read Clean Replay builder artifact")?,
-    )
-    .context("decode Clean Replay builder artifact")?;
-    artifact.clean_replay_receipt_digest = Some(
-        receipt
-            .payload_digest()
-            .map_err(|error| anyhow!("digest Clean Replay receipt: {error}"))?,
-    );
-    persist_clean_replay_artifact(&jobdir, &artifact).map_err(|error| anyhow!(error))?;
-    client
-        .complete_clean_replay(work, &receipt, &classified)
-        .map_err(|error| anyhow!("report Clean Replay: {error}"))?;
+    events
+        .attempt_started()
+        .map_err(|error| anyhow!("start Build Attempt event stream: {error}"))?;
+    let attempt = (|| -> Result<_> {
+        let normalized = work
+            .normalized_program_intent
+            .clone()
+            .context("Build Attempt claim omitted Normalized Program Intent")?;
+        work.build_config_revision_id
+            .as_deref()
+            .context("Build Attempt claim omitted Build Config Revision")?;
+        work.build_attempt_number
+            .context("Build Attempt claim omitted attempt number")?;
+        work.authoring_toml
+            .as_deref()
+            .context("Build Attempt claim omitted immutable capsule.toml")?;
+        work.effective_build_plan
+            .as_ref()
+            .context("Build Attempt claim omitted Effective Build Plan")?;
+        let previous_receipt_digest = work
+            .previous_receipt_digest
+            .clone()
+            .context("Build Attempt claim omitted Source Resolution receipt")?;
+        let signer = cfg
+            .authoring_signer
+            .as_ref()
+            .context("Authoring receipt signer is unavailable")?;
+        let request = snapshot::authoring_evidence::CleanReplayRequestV1 {
+            authoring_session_id: work.authoring_session_id.clone(),
+            capsule_revision_id: work.capsule_revision_id.clone(),
+            source_closure_id: work.source_closure_id.clone(),
+            previous_receipt_digest,
+            source_overlays: Vec::new(),
+            normalized_program_intent: normalized,
+            resolution_lock_digest: work.resolution_lock_digest.clone(),
+            allowed_cache_digests: Vec::new(),
+        };
+        let (receipt, classified) = {
+            let mut adapter = BuilderCleanReplayAdapter {
+                cfg,
+                backend,
+                client,
+                work,
+                signer,
+                events: &mut events,
+            };
+            snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
+                .map_err(|error| anyhow!("execute Build Attempt: {error}"))?
+        };
+        let jobdir = clean_replay_directory(cfg, &work.authoring_session_id)
+            .map_err(|error| anyhow!(error))?;
+        let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+            &std::fs::read(clean_replay_artifact_path(&jobdir))
+                .context("read Build Attempt artifact")?,
+        )
+        .context("decode Build Attempt artifact")?;
+        artifact.clean_replay_receipt_digest = Some(
+            receipt
+                .payload_digest()
+                .map_err(|error| anyhow!("digest Build Attempt receipt: {error}"))?,
+        );
+        persist_clean_replay_artifact(&jobdir, &artifact).map_err(|error| anyhow!(error))?;
+        Ok((receipt, classified, artifact))
+    })();
+    let (receipt, classified, artifact) = match attempt {
+        Ok(result) => result,
+        Err(error) => {
+            let detail = format!("{error:#}");
+            let category = build_failure_category("build_attempt", &detail);
+            let _ = events.attempt_finished("failed", Some(category));
+            let _ = client.fail_job(work, category, &detail);
+            return Err(error);
+        }
+    };
+    events
+        .attempt_finished("succeeded", None)
+        .map_err(|error| anyhow!("finish Build Attempt event stream: {error}"))?;
+    if let Err(error) = client.complete_clean_replay(
+        work,
+        &receipt,
+        &classified,
+        &artifact.execution_contract_jcs,
+    ) {
+        let _ = client.fail_job(work, "platform_internal_error", &error);
+        return Err(anyhow!("report Build Attempt: {error}"));
+    }
     eprintln!(
-        "[builder] Authoring Session {} Clean Replay complete (trace {})",
+        "[builder] Authoring Session {} Build Attempt complete (trace {})",
         work.authoring_session_id, work.trace_id
     );
     Ok(())
@@ -4779,9 +5137,6 @@ fn process_authoring_ready_state_seal(
 }
 
 fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
-    if cfg.hold_slot.is_none() {
-        return Ok(0);
-    }
     let client = authoring_runtime::AuthoringApiClient {
         api_url: &cfg.api_url,
         builder_token: &cfg.token,
@@ -4796,6 +5151,12 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
     match work.kind.as_str() {
         "setup" => {
             if let Err((stage, reason)) = process_authoring_setup(cfg, backend, &client, &work) {
+                let error_code = if stage == "detect" {
+                    "configuration_error"
+                } else {
+                    "builder_provisioning_error"
+                };
+                let _ = client.fail_setup(&work, &stage, error_code, &reason);
                 return Err(anyhow!(
                     "Authoring Session {} failed at {stage}: {reason}",
                     work.authoring_session_id
