@@ -35,6 +35,10 @@ use super::runner_cpu_allocator::{CpuAllocationError, CpuRequest, allocate_cpu};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppliedEntitlement {
     pub slot_index: usize,
+    /// Host pid of the VMM attached to this slot's cgroup. Recorded so a
+    /// teardown proof is verified against the exact process, not merely the
+    /// lease+slot — a stale proof for a reused slot cannot release the new one.
+    pub vmm_pid: u32,
     pub request: CpuRequest,
     pub quota_millis: u32,
 }
@@ -83,6 +87,32 @@ pub struct CpuAdmission {
     pub allocation_generation: u64,
 }
 
+/// Result of a successful release. The session's slot IS reclaimed — the caller
+/// MUST proceed to free the runner slot regardless of `rebalance`, so a
+/// survivor-rebalance hiccup can never leak the freed slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpuReleaseOutcome {
+    pub allocation_generation: u64,
+    pub rebalance: RebalanceOutcome,
+}
+
+/// What happened to the survivors' quotas after a reclaim. `RolledBack` /
+/// `Unhealthy` are informational — the release already succeeded and the slot
+/// is gone; they signal that survivors did not grow into the freed budget yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebalanceOutcome {
+    /// Survivors raised into the freed budget.
+    Applied,
+    /// No survivors remained; nothing to rebalance.
+    NoSurvivors,
+    /// The survivor quota-raise failed and was rolled back to prior quotas; the
+    /// manager stays healthy and will re-attempt on the next allocation change.
+    RolledBack { error: CgroupError },
+    /// The survivor raise AND its rollback failed; the manager is now Unhealthy.
+    /// The freed slot is STILL released (it was reclaimed before this step).
+    Unhealthy { reason: String },
+}
+
 /// A read-only view of manager state for diagnostics / tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CpuManagerSnapshot {
@@ -103,25 +133,30 @@ pub enum ProcessExitEvidence {
     Killed,
 }
 
-/// Identity-bound proof that a specific session's VM has been torn down.
+/// An observation that a specific session's VM has been torn down, carrying the
+/// session identity (`lease_id` / `slot_index` / `vmm_pid`) and the evidence.
 ///
-/// This is a capability type: `release_after_teardown` cannot be called without
-/// one, and one cannot be minted except by the runner's confirmed-teardown seam
-/// (which alone observes the [`ProcessExitEvidence`]). The manager additionally
-/// checks the proof's `lease_id` / `slot_index` / `vmm_pid` against the recorded
-/// entitlement, so a proof for one session can never release another.
-#[derive(Debug, Clone)]
-pub struct TeardownConfirmed {
+/// `release()` requires one and verifies ALL THREE identity fields against the
+/// recorded entitlement, so a proof for one session — or a stale proof for a
+/// slot that has since been reused by a different pid — can never release the
+/// current occupant. Not `Clone`: a capability to release should not be
+/// duplicable.
+///
+/// Named "observation" rather than "confirmed" deliberately: `observed()` is
+/// `pub(crate)`, which does not by itself prove the caller watched the exit.
+/// PR 2b moves the constructor into the real teardown module so the type
+/// becomes a genuine capability; until then it is an identity-checked argument.
+#[derive(Debug)]
+pub struct TeardownObservation {
     lease_id: String,
     slot_index: usize,
     vmm_pid: u32,
     observed_exit: ProcessExitEvidence,
 }
 
-impl TeardownConfirmed {
-    /// Mint the proof at the runner's confirmed-teardown seam. `evidence` must
-    /// come from a real process-exit observation (reap or confirmed kill), never
-    /// speculatively.
+impl TeardownObservation {
+    /// Build from a real process-exit observation (reap or confirmed kill),
+    /// never speculatively.
     pub(crate) fn observed(
         lease_id: impl Into<String>,
         slot_index: usize,
@@ -148,8 +183,8 @@ enum Command {
         reply: oneshot::Sender<Result<CpuAdmission, CpuManagerError>>,
     },
     ReleaseAfterTeardown {
-        proof: TeardownConfirmed,
-        reply: oneshot::Sender<Result<(), CpuManagerError>>,
+        proof: TeardownObservation,
+        reply: oneshot::Sender<Result<CpuReleaseOutcome, CpuManagerError>>,
     },
     Snapshot {
         reply: oneshot::Sender<CpuManagerSnapshot>,
@@ -206,11 +241,13 @@ impl CpuEntitlementManager {
 
     /// Release a session AFTER its VM teardown is confirmed, then rebalance the
     /// survivors upward into the freed budget. The `proof` carries the session
-    /// identity the manager verifies against its record.
+    /// identity the manager verifies against its record. On `Ok`, the slot IS
+    /// reclaimed and the caller must free the runner slot; `outcome.rebalance`
+    /// reports what happened to survivors.
     pub async fn release_after_teardown(
         &self,
-        proof: TeardownConfirmed,
-    ) -> Result<(), CpuManagerError> {
+        proof: TeardownObservation,
+    ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(Command::ReleaseAfterTeardown { proof, reply })
@@ -349,8 +386,38 @@ impl ManagerActor {
         if let Err(e) = self.backend.ensure_slot(slot_index) {
             return Err(self.rollback(e, None));
         }
-        // From here the candidate cgroup exists; every rollback must also clean
-        // it up (Blocker 5).
+        // BEFORE touching any existing session's quota, confirm the candidate
+        // slot is empty. ensure_slot is idempotent, so it could have reused a
+        // cgroup that already holds a process; discovering that only after
+        // rebalancing existing sessions would have already disturbed them. A
+        // lingering pid, or an unreadable proc list, fails closed to Unhealthy
+        // and leaves every existing session's quota untouched.
+        match self.backend.slot_pids(slot_index) {
+            Ok(pids) if pids.is_empty() => {}
+            Ok(pids) => {
+                // Candidate cgroup already exists and holds a process — remove it
+                // was never ours to create, so do NOT tear it down; just refuse.
+                self.go_unhealthy(format!(
+                    "admit {lease_id}: candidate slot {slot_index} already holds \
+                     {} pid(s) before quota change",
+                    pids.len()
+                ));
+                return Err(CpuManagerError::Unhealthy {
+                    reason: format!("candidate slot {slot_index} not empty at admit"),
+                });
+            }
+            Err(read_err) => {
+                self.go_unhealthy(format!(
+                    "admit {lease_id}: candidate slot {slot_index} pid read failed \
+                     before quota change: {read_err}"
+                ));
+                return Err(CpuManagerError::Unhealthy {
+                    reason: format!("candidate slot {slot_index} pid read failed at admit"),
+                });
+            }
+        }
+        // From here the candidate cgroup exists and is empty; every rollback must
+        // also clean it up (Blocker 5).
         // Set the new slot's quota to its target FIRST at floor via write (it
         // holds no live budget). Order among existing slots is decrease-first.
         if let Err(e) = self.apply_quotas(&target) {
@@ -367,8 +434,8 @@ impl ManagerActor {
             return Err(self.rollback(e, Some(slot_index)));
         }
 
-        // Commit: record every lease at its new quota.
-        self.commit(&target, request);
+        // Commit: record every lease at its new quota, including the pid.
+        self.commit(&target, request, vmm_pid);
         self.allocation_generation += 1;
         Ok(CpuAdmission {
             lease_id,
@@ -429,7 +496,7 @@ impl ManagerActor {
         CpuManagerError::CgroupRolledBack(cause)
     }
 
-    fn commit(&mut self, target: &BTreeMap<String, u32>, new_request: CpuRequest) {
+    fn commit(&mut self, target: &BTreeMap<String, u32>, new_request: CpuRequest, vmm_pid: u32) {
         // Update existing entries' quotas.
         for entitlement in self.applied.values_mut() {
             if let Some(&q) = target.get(&entitlement.request.lease_id) {
@@ -442,21 +509,26 @@ impl ManagerActor {
             new_request.lease_id.clone(),
             AppliedEntitlement {
                 slot_index: new_request.slot_index,
+                vmm_pid,
                 request: new_request,
                 quota_millis: q,
             },
         );
     }
 
-    fn release(&mut self, proof: TeardownConfirmed) -> Result<(), CpuManagerError> {
+    fn release(
+        &mut self,
+        proof: TeardownObservation,
+    ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         if let CpuManagerHealth::Unhealthy { reason } = &self.health {
             return Err(CpuManagerError::Unhealthy {
                 reason: reason.clone(),
             });
         }
         let lease_id = proof.lease_id.clone();
-        // Verify the proof matches the recorded entitlement BEFORE mutating any
-        // state — a proof for one session can never release another.
+        // Verify ALL THREE identity fields against the record BEFORE mutating any
+        // state — a proof for one session, or a stale proof for a slot since
+        // reused by a different pid, can never release the current occupant.
         let Some(entitlement) = self.applied.get(&lease_id) else {
             return Err(CpuManagerError::UnknownLease {
                 lease_id: lease_id.clone(),
@@ -468,6 +540,15 @@ impl ManagerActor {
                 detail: format!(
                     "proof slot {} != recorded slot {}",
                     proof.slot_index, entitlement.slot_index
+                ),
+            });
+        }
+        if entitlement.vmm_pid != proof.vmm_pid {
+            return Err(CpuManagerError::ProofMismatch {
+                lease_id,
+                detail: format!(
+                    "proof pid {} != recorded pid {}",
+                    proof.vmm_pid, entitlement.vmm_pid
                 ),
             });
         }
@@ -514,41 +595,57 @@ impl ManagerActor {
             });
         }
 
-        // Slot proven reclaimed — now it is safe to drop the accounting and hand
-        // its budget to survivors.
+        // Slot proven reclaimed — the release has SUCCEEDED and the caller must
+        // free the runner slot no matter what the survivor rebalance does next.
+        // From here we never return Err: a rebalance hiccup is reported inside
+        // CpuReleaseOutcome, not as a release failure (which would leak the slot).
         self.applied.remove(&lease_id);
+        self.allocation_generation += 1;
 
         if self.applied.is_empty() {
-            self.allocation_generation += 1;
-            return Ok(());
+            return Ok(CpuReleaseOutcome {
+                allocation_generation: self.allocation_generation,
+                rebalance: RebalanceOutcome::NoSurvivors,
+            });
         }
         let requests: Vec<CpuRequest> = self.applied.values().map(|a| a.request.clone()).collect();
-        // Cannot exceed a floor here: we removed a request, so min-sum only
-        // shrank; recompute must succeed.
+        // Removing a request only shrank the floor sum, so this recompute cannot
+        // exceed the budget; a failure here is defensive-only.
         let target = match self.compute(&requests) {
             Ok(t) => t,
             Err(e) => {
-                // Should be unreachable (removing a request never breaks the
-                // floor sum), but treat defensively as unhealthy rather than
-                // leaving survivors with stale quotas.
-                self.go_unhealthy(format!("post-release allocation failed: {e}"));
-                return Err(CpuManagerError::Unhealthy {
-                    reason: format!("post-release allocation failed: {e}"),
+                let reason = format!("post-release allocation failed: {e}");
+                self.go_unhealthy(reason.clone());
+                return Ok(CpuReleaseOutcome {
+                    allocation_generation: self.allocation_generation,
+                    rebalance: RebalanceOutcome::Unhealthy { reason },
                 });
             }
         };
-        // Survivors only ever RISE after a release (freed budget), so this is
-        // all increases — still safe to apply directly. No candidate slot here.
-        if let Err(e) = self.apply_quotas(&target) {
-            return Err(self.rollback(e, None));
-        }
-        for entitlement in self.applied.values_mut() {
-            if let Some(&q) = target.get(&entitlement.request.lease_id) {
-                entitlement.quota_millis = q;
+        // Survivors only ever RISE after a release (freed budget), so this is all
+        // increases. If the raise fails, roll survivors back to their prior
+        // quotas; the release itself still stands (slot already reclaimed).
+        let rebalance = if let Err(apply_err) = self.apply_quotas(&target) {
+            if let Err(rollback_err) = self.restore_applied() {
+                let reason =
+                    format!("survivor rebalance {apply_err} rollback failed: {rollback_err}");
+                self.go_unhealthy(reason.clone());
+                RebalanceOutcome::Unhealthy { reason }
+            } else {
+                RebalanceOutcome::RolledBack { error: apply_err }
             }
-        }
-        self.allocation_generation += 1;
-        Ok(())
+        } else {
+            for entitlement in self.applied.values_mut() {
+                if let Some(&q) = target.get(&entitlement.request.lease_id) {
+                    entitlement.quota_millis = q;
+                }
+            }
+            RebalanceOutcome::Applied
+        };
+        Ok(CpuReleaseOutcome {
+            allocation_generation: self.allocation_generation,
+            rebalance,
+        })
     }
 }
 
@@ -581,19 +678,19 @@ mod tests {
             .quota_millis
     }
 
-    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownConfirmed {
-        TeardownConfirmed::observed(lease, slot, pid, ProcessExitEvidence::Reaped)
+    fn proof(lease: &str, slot: usize, pid: u32) -> TeardownObservation {
+        TeardownObservation::observed(lease, slot, pid, ProcessExitEvidence::Reaped)
     }
 
     /// Model a real teardown then release: the VMM leaves the slot cgroup, then
-    /// the confirmed-teardown proof is presented.
+    /// the teardown proof is presented.
     async fn teardown_and_release(
         mgr: &CpuEntitlementManager,
         be: &FakeCgroupBackend,
         lease: &str,
         slot: usize,
         pid: u32,
-    ) -> Result<(), CpuManagerError> {
+    ) -> Result<CpuReleaseOutcome, CpuManagerError> {
         be.simulate_process_exit(slot, pid);
         mgr.release_after_teardown(proof(lease, slot, pid)).await
     }
@@ -696,24 +793,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admit_candidate_with_lingering_pid_goes_unhealthy() {
-        // A candidate slot that already holds a pid when a later admit step
-        // fails must NOT be silently reused: the host state is uncertain, so the
-        // manager goes Unhealthy.
-        let be = Arc::new(FakeCgroupBackend::new());
-        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
-        admit(&mgr, std_req("a", 0), 100).await;
-        // Pre-seed slot 1 with a stray pid, then fail the attach so rollback
-        // inspects the candidate and finds it non-empty.
-        be.seed_slot_pids(1, vec![7777]);
-        be.fail_at(FakeFailPoint::AttachPid);
-        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
-        assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
-        let snap = mgr.snapshot().await.unwrap();
-        assert!(matches!(snap.health, CpuManagerHealth::Unhealthy { .. }));
-    }
-
-    #[tokio::test]
     async fn admit_candidate_cleanup_remove_failure_goes_unhealthy() {
         // attach fails → rollback inspects the empty candidate and tries to
         // remove it → the remove ALSO fails → Unhealthy. Both points armed at
@@ -770,6 +849,94 @@ mod tests {
         // Nothing released: 'a' still holds its slot.
         assert_eq!(be.quota_of(0), Some(2000));
         assert_eq!(mgr.snapshot().await.unwrap().applied.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn release_proof_with_wrong_pid_is_rejected() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        be.simulate_process_exit(0, 100);
+        // Correct lease + slot, WRONG pid.
+        let res = mgr.release_after_teardown(proof("a", 0, 999)).await;
+        assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
+        assert_eq!(be.quota_of(0), Some(2000), "not released");
+    }
+
+    #[tokio::test]
+    async fn stale_proof_cannot_release_reused_slot() {
+        // A slot is used by pid 100, released, then reused by pid 200. A stale
+        // proof carrying pid 100 must not release the new occupant.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 8000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        teardown_and_release(&mgr, &be, "a", 0, 100)
+            .await
+            .expect("first release");
+        // Reuse slot 0 for a new session 'b' with pid 200.
+        admit(&mgr, std_req("b", 0), 200).await;
+        // Stale proof: lease 'b' is on slot 0, but with pid 100 (the old one).
+        let res = mgr.release_after_teardown(proof("b", 0, 100)).await;
+        assert!(matches!(res, Err(CpuManagerError::ProofMismatch { .. })));
+        assert_eq!(be.quota_of(0), Some(2000), "new occupant not released");
+    }
+
+    #[tokio::test]
+    async fn admit_rejects_preexisting_pid_before_quota_changes() {
+        // A candidate slot that already holds a process (ensure_slot reused a
+        // non-empty cgroup) must be refused BEFORE any existing session's quota
+        // is touched.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        admit(&mgr, std_req("a", 0), 100).await; // slot 0 → 2000m
+        be.seed_slot_pids(1, vec![7777]); // slot 1 already occupied
+        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
+        // Existing session 'a' quota UNCHANGED (2000, not lowered toward 1500).
+        assert_eq!(be.quota_of(0), Some(2000), "existing quota untouched");
+    }
+
+    #[tokio::test]
+    async fn admit_pid_read_failure_does_not_rebalance_existing_sessions() {
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        admit(&mgr, std_req("a", 0), 100).await;
+        be.fail_at(FakeFailPoint::SlotPidsRead);
+        let res = mgr.admit_and_attach(std_req("b", 1), 200).await;
+        assert!(matches!(res, Err(CpuManagerError::Unhealthy { .. })));
+        assert_eq!(be.quota_of(0), Some(2000), "existing quota untouched");
+    }
+
+    #[tokio::test]
+    async fn survivor_rebalance_failure_still_releases_slot() {
+        // Post-reclaim, the survivor raise fails but rolls back cleanly: the
+        // release SUCCEEDS (slot reclaimed) with a RolledBack rebalance, and the
+        // manager stays Healthy.
+        let be = Arc::new(FakeCgroupBackend::new());
+        let mgr = CpuEntitlementManager::spawn(be.clone(), 6000);
+        for i in 0..4 {
+            admit(&mgr, std_req(&format!("s{i}"), i), 100 + i as u32).await;
+        }
+        be.simulate_process_exit(3, 103);
+        be.fail_at(FakeFailPoint::WriteQuotaIncrease); // survivor raise fails
+        let outcome = mgr
+            .release_after_teardown(proof("s3", 3, 103))
+            .await
+            .expect("release still succeeds");
+        assert!(matches!(
+            outcome.rebalance,
+            RebalanceOutcome::RolledBack { .. }
+        ));
+        // Slot 3 IS gone (reclaimed); survivors stayed at their prior 1500m.
+        assert_eq!(
+            be.quota_of(3),
+            None,
+            "slot reclaimed despite rebalance fail"
+        );
+        assert!(matches!(
+            mgr.snapshot().await.unwrap().health,
+            CpuManagerHealth::Healthy
+        ));
     }
 
     #[tokio::test]
