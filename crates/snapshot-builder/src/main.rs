@@ -4167,6 +4167,13 @@ fn process_authoring_setup(
             ("inferred", normalized, generated)
         }
     };
+    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&generated_manifest)
+        .map_err(|error| fail("detect", error.to_string()))?;
+    snapshot::rootfs_builder::derive_build_spec_v1(
+        &manifest,
+        &snapshot::rootfs_builder::SourceProbe::scan(&inference_root),
+    )
+    .map_err(|error| fail("detect", error))?;
     client
         .mark_setup_detected(
             work,
