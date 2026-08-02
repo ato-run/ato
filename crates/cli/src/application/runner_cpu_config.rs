@@ -1,11 +1,13 @@
 //! Runtime CPU entitlement configuration and manager factory (ADR-016 PR2b).
 //!
 //! Reads the feature flag and budget from the environment and, ONLY when
-//! `enforce` is selected, runs the cgroup preflight and spawns the
-//! [`CpuEntitlementManager`]. When the flag is unset or `off`, [`build`] returns
-//! `None` and NOTHING happens — no cgroup discovery, no manager, no capability.
-//! This is the single gate behind which the whole feature lives, so a
-//! feature-off runner is byte-for-byte its previous self.
+//! `enforce` is selected, runs the cgroup preflight and starts the
+//! [`CpuEntitlementManager`] thread. When the flag is unset or `off`, [`build`]
+//! returns [`CpuEntitlementRuntime::Off`] and NOTHING happens — no cgroup
+//! discovery, no manager, no capability. This is the single gate behind which
+//! the whole feature lives, so a feature-off runner is byte-for-byte its
+//! previous self. `enforce` on a host that cannot deliver it FAULTS (claims
+//! stop) instead of silently falling back to unthrottled execution.
 
 #![allow(dead_code)]
 
@@ -82,47 +84,93 @@ pub struct CpuEntitlement {
     pub budget_millis: u32,
 }
 
-/// Build the entitlement subsystem from config.
+/// The runtime state of the entitlement feature — a deliberate THREE-state
+/// value, because `enforce`-with-a-broken-host must not collapse into `Off`:
 ///
-/// * `Off` → `Ok(None)`: complete no-op.
-/// * `Enforce` → resolve the delegated cgroup root, run [`CpuCgroupBackend::preflight`],
-///   and on success spawn the manager. A preflight FAILURE returns `Ok(None)`
-///   with the reason logged: the runner still starts and serves, it just does
-///   not advertise the capability or claim leases under entitlement — never a
-///   hard crash (fail-safe for an optional feature). A config PARSE error is a
-///   hard error (the operator asked for something impossible).
-pub fn build(config: &CpuEntitlementConfig) -> Result<Option<CpuEntitlement>, String> {
+/// * `Off` — operator did not ask for entitlement. Claims proceed as before,
+///   no capability.
+/// * `Active` — enforce + preflight proved delegation. Claims proceed under
+///   entitlement; the capability is advertised while the manager is Healthy.
+/// * `Faulted` — the operator asked for `enforce` but the host cannot deliver
+///   it (unresolvable root, failed preflight, manager start failure). The
+///   runner process and its heartbeat keep running so the fault is observable,
+///   but WORKLOAD CLAIMS STOP and no capability is advertised. Silently
+///   running unthrottled when the operator demanded enforcement would invert
+///   their intent.
+pub enum CpuEntitlementRuntime {
+    Off,
+    Active(CpuEntitlement),
+    Faulted { reason: String },
+}
+
+impl CpuEntitlementRuntime {
+    /// May the runner claim workload leases at all?
+    pub fn claims_allowed(&self) -> bool {
+        !matches!(self, CpuEntitlementRuntime::Faulted { .. })
+    }
+
+    /// Should the runner advertise `runtime-cpu-entitlement-v1` right now?
+    /// (Active AND currently Healthy — health is re-read per heartbeat.)
+    pub fn capability_advertised(&self) -> bool {
+        match self {
+            CpuEntitlementRuntime::Active(e) => matches!(
+                e.manager.health(),
+                super::runner_cpu_manager::CpuManagerHealth::Healthy
+            ),
+            _ => false,
+        }
+    }
+}
+
+/// Manager queue capacity for a runner with `max_slots` execution slots: room
+/// for one admit + one release per slot in flight, plus diagnostics headroom.
+pub fn queue_capacity_for(max_slots: usize) -> usize {
+    (max_slots * 2 + 4).max(8)
+}
+
+/// Build the entitlement runtime from config.
+///
+/// * `Off` → `CpuEntitlementRuntime::Off`: complete no-op.
+/// * `Enforce` → resolve the delegated cgroup root, run
+///   [`CpuCgroupBackend::preflight`], and start the manager thread. ANY failure
+///   → `Faulted` (claims stop, no capability, runner keeps heartbeating) —
+///   never a silent fallback to unthrottled execution, and never a crash.
+///
+/// A config PARSE error is a hard `Err` (the operator asked for something
+/// unintelligible; guessing would be worse than stopping).
+pub fn build(config: &CpuEntitlementConfig, max_slots: usize) -> CpuEntitlementRuntime {
     match config.mode {
-        EntitlementMode::Off => Ok(None),
+        EntitlementMode::Off => CpuEntitlementRuntime::Off,
         EntitlementMode::Enforce => {
             let root = match &config.cgroup_root {
                 Some(explicit) => explicit.clone(),
                 None => match resolve_delegated_root() {
                     Ok(r) => r,
                     Err(reason) => {
-                        eprintln!(
-                            "⚠️  cpu-entitlement: cannot resolve delegated cgroup root ({reason}); \
-                             running WITHOUT entitlement"
-                        );
-                        return Ok(None);
+                        return CpuEntitlementRuntime::Faulted {
+                            reason: format!("cannot resolve delegated cgroup root: {reason}"),
+                        };
                     }
                 },
             };
             let backend: Arc<dyn CpuCgroupBackend> = Arc::new(LinuxCgroupV2Backend::new(root));
-            match backend.preflight() {
-                Ok(_caps) => {
-                    let manager = CpuEntitlementManager::spawn(backend, config.budget_millis);
-                    Ok(Some(CpuEntitlement {
-                        manager,
-                        budget_millis: config.budget_millis,
-                    }))
-                }
-                Err(e) => {
-                    eprintln!(
-                        "⚠️  cpu-entitlement: preflight failed ({e}); running WITHOUT entitlement"
-                    );
-                    Ok(None)
-                }
+            if let Err(e) = backend.preflight() {
+                return CpuEntitlementRuntime::Faulted {
+                    reason: format!("preflight failed: {e}"),
+                };
+            }
+            match CpuEntitlementManager::start(
+                backend,
+                config.budget_millis,
+                queue_capacity_for(max_slots),
+            ) {
+                Ok(manager) => CpuEntitlementRuntime::Active(CpuEntitlement {
+                    manager,
+                    budget_millis: config.budget_millis,
+                }),
+                Err(e) => CpuEntitlementRuntime::Faulted {
+                    reason: format!("manager start failed: {e}"),
+                },
             }
         }
     }
@@ -208,24 +256,38 @@ mod tests {
     }
 
     #[test]
-    fn build_off_is_none() {
+    fn build_off_is_off() {
         let c = CpuEntitlementConfig {
             mode: EntitlementMode::Off,
             budget_millis: 8000,
             cgroup_root: None,
         };
-        assert!(build(&c).unwrap().is_none());
+        let rt = build(&c, 4);
+        assert!(matches!(rt, CpuEntitlementRuntime::Off));
+        assert!(rt.claims_allowed());
+        assert!(!rt.capability_advertised());
     }
 
     #[test]
-    fn build_enforce_with_bad_root_is_none_not_crash() {
-        // A non-existent explicit root fails preflight → Ok(None), never a panic
-        // or hard error. The runner keeps serving without entitlement.
+    fn build_enforce_with_bad_root_is_faulted_not_fallback() {
+        // enforce + a host that can't deliver it must FAULT (claims stop, no
+        // capability), never silently run unthrottled and never panic.
         let c = CpuEntitlementConfig {
             mode: EntitlementMode::Enforce,
             budget_millis: 8000,
             cgroup_root: Some(PathBuf::from("/nonexistent/ato-cgroup-test")),
         };
-        assert!(build(&c).unwrap().is_none());
+        let rt = build(&c, 4);
+        assert!(matches!(rt, CpuEntitlementRuntime::Faulted { .. }));
+        assert!(!rt.claims_allowed());
+        assert!(!rt.capability_advertised());
+    }
+
+    #[test]
+    fn queue_capacity_scales_with_slots() {
+        assert_eq!(queue_capacity_for(0), 8);
+        assert_eq!(queue_capacity_for(2), 8);
+        assert_eq!(queue_capacity_for(4), 12);
+        assert_eq!(queue_capacity_for(8), 20);
     }
 }
