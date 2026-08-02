@@ -122,7 +122,7 @@ pub use fake::{FAKE_BACKEND_ID, FakeSnapshotBackend};
 pub use firecracker::vsock_uds_path_for_capsule as firecracker_vsock_uds_path_for_capsule;
 pub use firecracker::{
     FIRECRACKER_BACKEND_ID, FirecrackerBackend, FirecrackerConfig, HeldCandidate,
-    HeldCaptureFailure, HeldGuest,
+    HeldCaptureFailure, HeldGuest, PreResumeHook,
 };
 pub use kata::{KATA_BACKEND_ID, KataBackend};
 pub use manifest::{
