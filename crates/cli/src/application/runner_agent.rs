@@ -4795,15 +4795,19 @@ async fn handle_restore_snapshot_lease(
     // hook on THIS backend clone — the VMM pid is admitted + attached to its
     // slot cgroup (with membership read-back) before /snapshot/load resumes the
     // guest; a refused admission aborts the launch. Off → None → byte-identical
-    // legacy path.
+    // legacy path. The request bounds come from the lease command's
+    // server-composed `runtime_cpu_request` (economy 1000/1000, standard
+    // 1000/2000); an absent or unintelligible field uses the standard default.
     let cpu_hook: Option<std::sync::Arc<dyn snapshot::PreResumeHook>> =
         match crate::application::runner_cpu_config::cpu_entitlement() {
             Some(crate::application::runner_cpu_config::CpuEntitlementRuntime::Active(e)) => {
                 Some(std::sync::Arc::new(
                     crate::application::runner_cpu_hook::RunnerCpuPreResumeHook::new(
                         e.manager.clone(),
-                        crate::application::runner_cpu_hook::standard_request(
-                            &lease_id, slot.index,
+                        crate::application::runner_cpu_hook::request_from_lease_command(
+                            &lease.command,
+                            &lease_id,
+                            slot.index,
                         ),
                     ),
                 ))
