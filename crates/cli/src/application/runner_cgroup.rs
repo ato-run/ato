@@ -584,12 +584,13 @@ mod tests {
     ///
     /// Proves on a real kernel what the Fake cannot: `+cpu` subtree enabling,
     /// probe round-trip, real `cgroup.procs` attach + strict read-back, quota
-    /// files carrying `<quota> 100000`, reclaim after real process exit, and
-    /// clean removal.
+    /// files carrying `<quota> 100000`, a controlled reclaim failure that
+    /// holds the reservation and blocks a new admission, retry recovery using
+    /// the same proof, and clean removal.
     #[test]
     #[ignore = "needs a delegated cgroup v2 root; see doc comment"]
     fn linux_cgroup_v2_real_kernel_acceptance() {
-        use super::super::runner_cpu_manager::CpuEntitlementManager;
+        use super::super::runner_cpu_manager::{CpuEntitlementManager, CpuManagerError};
         use super::super::runner_cpu_teardown::{ProcessExitEvidence, confirm_vm_teardown};
         let root = std::path::PathBuf::from(
             std::env::var("ATO_CPU_ACCEPTANCE_CGROUP_ROOT")
@@ -641,19 +642,67 @@ mod tests {
             assert_eq!(procs, vec![pid], "slot {i} holds exactly its pid");
         }
 
-        // Real teardown of slot 2: kill + REAP, wait for cgroup.procs to empty,
-        // then release; the slot cgroup must be gone afterwards.
+        // Controlled release failure: attach an unrelated sleeper after the
+        // VMM admission. Killing/reaping the VMM leaves that helper in the
+        // same cgroup, so release must fail closed, hold accounting, and reject
+        // any new admission while Unhealthy.
+        let mut lingering = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn lingering sleep");
+        let lingering_pid = lingering.id();
+        be.attach_pid(2, lingering_pid)
+            .expect("attach controlled lingering pid");
         let mut victim = children.remove(2);
         victim.kill().expect("kill");
         victim.wait().expect("reap");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while be.slot_pids(2).unwrap() != vec![lingering_pid] {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slot 2 did not retain only the injected pid"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let first_release = mgr.release_after_teardown(confirm_vm_teardown(
+            "acc-2",
+            2,
+            pids[2],
+            ProcessExitEvidence::Reaped,
+        ));
+        assert!(matches!(
+            first_release,
+            Err(CpuManagerError::SlotNotReclaimed { .. })
+        ));
+        assert_eq!(mgr.snapshot().unwrap().applied.len(), 3, "reservation held");
+        assert!(matches!(
+            mgr.admit_and_attach(std_req("blocked", 3), lingering_pid),
+            Err(CpuManagerError::Unhealthy { .. })
+        ));
+
+        // Recovery: after the controlled lingering process is gone, the same
+        // verified teardown observation is accepted even while Unhealthy. The
+        // slot is reclaimed; survivor acceleration remains safely skipped.
+        lingering.kill().expect("kill lingering sleep");
+        lingering.wait().expect("reap lingering sleep");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !be.slot_pids(2).unwrap().is_empty() {
             assert!(std::time::Instant::now() < deadline, "slot 2 never emptied");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
-        let proof = confirm_vm_teardown("acc-2", 2, pids[2], ProcessExitEvidence::Reaped);
-        let outcome = mgr.release_after_teardown(proof).expect("release");
-        println!("release outcome: {:?}", outcome.rebalance);
+        let outcome = mgr
+            .release_after_teardown(confirm_vm_teardown(
+                "acc-2",
+                2,
+                pids[2],
+                ProcessExitEvidence::Reaped,
+            ))
+            .expect("retry release after recovery");
+        assert!(matches!(
+            outcome.rebalance,
+            super::super::runner_cpu_manager::RebalanceOutcome::SkippedUnhealthy { .. }
+        ));
+        println!("release retry outcome: {:?}", outcome.rebalance);
         assert!(
             !root.join("ato-slots").join("ato-slot-2").exists(),
             "slot 2 cgroup removed"
