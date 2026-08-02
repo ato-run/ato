@@ -324,12 +324,20 @@ impl AuthoringApiClient<'_> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DetectorProvenance<'a> {
+    pub producer: &'a str,
+    pub inputs: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct SetupDetected<'a> {
     pub builder_id: &'a str,
     pub origin: &'a str,
     pub normalized_program_intent: &'a NormalizedProgramIntentEnvelopeV1,
     pub source_closure_id: &'a str,
     pub generated_capsule_toml: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detector: Option<DetectorProvenance<'a>>,
     pub materialized_assets: Vec<serde_json::Value>,
 }
 

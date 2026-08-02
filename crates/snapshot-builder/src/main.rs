@@ -4174,6 +4174,14 @@ fn process_authoring_setup(
         &snapshot::rootfs_builder::SourceProbe::scan(&inference_root),
     )
     .map_err(|error| fail("detect", error))?;
+    let detector = (origin == "inferred").then(|| authoring_runtime::DetectorProvenance {
+        producer: "Static Web detector",
+        inputs: if inference_root.join("index.html").is_file() {
+            vec!["index.html".to_string()]
+        } else {
+            vec!["public/index.html".to_string()]
+        },
+    });
     client
         .mark_setup_detected(
             work,
@@ -4183,6 +4191,7 @@ fn process_authoring_setup(
                 normalized_program_intent: &normalized,
                 source_closure_id: &work.source_closure_id,
                 generated_capsule_toml: &generated_manifest,
+                detector,
                 materialized_assets: Vec::new(),
             },
         )
