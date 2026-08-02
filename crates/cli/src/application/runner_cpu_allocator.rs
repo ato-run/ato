@@ -1,4 +1,4 @@
-//! Deterministic integer max-min-fair CPU entitlement allocation.
+//! Deterministic integer floor-first capped equal-share CPU entitlement.
 //!
 //! The runner serves several restored snapshots at once, each pinned to a fixed
 //! guest Machine Shape (2 vCPU / 3 GiB — see ADR-016). This module does NOT
@@ -7,11 +7,19 @@
 //! each running session is entitled to out of a shared millicore budget — a
 //! knob entirely outside snapshot identity.
 //!
-//! The policy is max-min fairness: every active session is guaranteed its
-//! minimum first, then the leftover budget is filled evenly up to each
-//! session's maximum, and any session that saturates below the even share
-//! releases the difference to the others. It is intentionally NOT weighted —
-//! v1 has no priority classes beyond the min/max a request already carries.
+//! The policy: every active session is guaranteed its minimum first, then the
+//! leftover budget is filled evenly up to each session's maximum, and any
+//! session that saturates below the even share releases the difference to the
+//! others. It is intentionally NOT weighted — v1 has no priority classes beyond
+//! the min/max a request already carries.
+//!
+//! v1 additionally requires every request to share ONE floor (`min_millis`).
+//! Both performance classes — economy (1000/1000) and standard (1000/2000) —
+//! use a 1000m floor, so this holds by construction, and under a shared floor
+//! "floor-first capped equal-share" IS textbook max-min fairness. Mixed floors
+//! are rejected (`NonUniformMinimum`) rather than silently producing a result
+//! that only *looks* max-min-fair; lifting that restriction is a later slice if
+//! a class with a different floor is ever introduced.
 //!
 //! Everything here is pure integer arithmetic over millicores (1000m = 1 CPU):
 //! no floats (a float rounding difference across hosts would make two runners
@@ -66,6 +74,25 @@ pub enum CpuAllocationError {
     /// poison the shared allocation.
     #[error("invalid CPU request for lease {lease_id}: {reason}")]
     InvalidRequest { lease_id: String, reason: String },
+    /// Two requests carry the same `lease_id`. The allocation is a map keyed by
+    /// lease id, so a duplicate would silently overwrite an entry and let two
+    /// requests share one slot's accounting — floors, caps and the budget sum
+    /// would all lose meaning. Rejected fail-closed.
+    #[error("duplicate lease_id {lease_id} in CPU request set")]
+    DuplicateLeaseId { lease_id: String },
+    /// v1 requires every active request to share one floor (see module docs):
+    /// the allocation policy is floor-first capped equal-share, which only
+    /// coincides with true max-min fairness when all minimums are equal. Mixed
+    /// floors are rejected rather than silently mis-shared.
+    #[error(
+        "non-uniform CPU minimums ({first_min_millis}m vs {other_min_millis}m for \
+         lease {other_lease_id}); v1 requires a single shared floor"
+    )]
+    NonUniformMinimum {
+        first_min_millis: u32,
+        other_lease_id: String,
+        other_min_millis: u32,
+    },
 }
 
 /// The resolved per-lease entitlement, keyed by `lease_id`, in millicores.
@@ -107,6 +134,32 @@ pub fn allocate_cpu(
         }
     }
 
+    // Reject duplicate lease ids: the allocation is keyed by lease_id, so a
+    // duplicate would collapse two requests onto one map entry and corrupt every
+    // floor/cap/budget guarantee.
+    let mut seen_lease_ids = std::collections::BTreeSet::new();
+    for request in requests {
+        if !seen_lease_ids.insert(request.lease_id.as_str()) {
+            return Err(CpuAllocationError::DuplicateLeaseId {
+                lease_id: request.lease_id.clone(),
+            });
+        }
+    }
+
+    // v1 shared-floor invariant: a single common minimum is what makes
+    // floor-first capped equal-share equal to max-min fairness.
+    if let Some(first) = requests.first() {
+        for request in &requests[1..] {
+            if request.min_millis != first.min_millis {
+                return Err(CpuAllocationError::NonUniformMinimum {
+                    first_min_millis: first.min_millis,
+                    other_lease_id: request.lease_id.clone(),
+                    other_min_millis: request.min_millis,
+                });
+            }
+        }
+    }
+
     // Work over a slot-ordered copy so leftover distribution is deterministic
     // and a duplicate slot_index (a bug upstream) is caught rather than making
     // the fill order ambiguous.
@@ -121,13 +174,23 @@ pub fn allocate_cpu(
         }
     }
 
-    let min_total: u32 = ordered.iter().map(|request| request.min_millis).sum();
-    if min_total > budget_millis {
+    // Sum floors in u64 so a pathological request set (many slots × large min)
+    // cannot overflow before the budget check; budget is bounded to u32 so the
+    // comparison and the subtraction below are exact once we know min fits.
+    let min_total: u64 = ordered
+        .iter()
+        .map(|request| u64::from(request.min_millis))
+        .sum();
+    if min_total > u64::from(budget_millis) {
         return Err(CpuAllocationError::InsufficientMinimumCapacity {
             budget_millis,
-            requested_min_millis: min_total,
+            // Saturating cast for the diagnostic only; the comparison above used
+            // the exact u64 value.
+            requested_min_millis: min_total.min(u64::from(u32::MAX)) as u32,
         });
     }
+    // Safe: min_total <= budget_millis (u32), so it fits u32.
+    let min_total = min_total as u32;
 
     // Everyone starts at their floor; `remaining` is the spare budget to fill.
     let mut allocation: CpuAllocation = ordered
@@ -323,19 +386,27 @@ mod tests {
 
     #[test]
     fn freed_session_lets_survivors_grow() {
-        // Two standard over 6000: both cap at 2000 (4000 used, 2000 idle). Drop
-        // one and re-run: the survivor still caps at 2000 (its max), unchanged —
-        // the freed budget cannot lift it past its ceiling. Then widen the max
-        // to prove the reallocation actually flows.
-        let two = vec![
-            request("a", 0, STD_MIN, STD_MAX),
-            request("b", 1, STD_MIN, STD_MAX),
-        ];
-        assert_eq!(allocate_cpu(6000, &two).unwrap()["a"], 2000);
+        // The core rebalance the PR 2 manager relies on: four standard sessions
+        // over a 6000m budget each get a constrained 1500m; when one ends, the
+        // remaining three re-run against the same budget and each rises to its
+        // 2000m ceiling. No request field changes between the two calls — only
+        // the membership of the active set.
+        let four: Vec<_> = (0..4)
+            .map(|i| request(&format!("s{i}"), i, STD_MIN, STD_MAX))
+            .collect();
+        let before = allocate_cpu(6000, &four).unwrap();
+        for i in 0..4 {
+            assert_eq!(before[&format!("s{i}")], 1500, "constrained: slot {i}");
+        }
 
-        let one_wide = vec![request("a", 0, 1000, 6000)];
-        // Alone with a 6000 ceiling, the survivor absorbs the whole budget.
-        assert_eq!(allocate_cpu(6000, &one_wide).unwrap()["a"], 6000);
+        let three: Vec<_> = (0..3)
+            .map(|i| request(&format!("s{i}"), i, STD_MIN, STD_MAX))
+            .collect();
+        let after = allocate_cpu(6000, &three).unwrap();
+        for i in 0..3 {
+            assert_eq!(after[&format!("s{i}")], 2000, "freed budget: slot {i}");
+        }
+        assert_eq!(sum(&after), 6000);
     }
 
     #[test]
@@ -388,11 +459,44 @@ mod tests {
             CpuAllocationError::InvalidRequest { .. }
         ));
 
-        let dup = allocate_cpu(
+        let dup_slot = allocate_cpu(
             8000,
             &[request("a", 0, 1000, 2000), request("b", 0, 1000, 2000)],
         )
         .expect_err("duplicate slot");
-        assert!(matches!(dup, CpuAllocationError::InvalidRequest { .. }));
+        assert!(matches!(
+            dup_slot,
+            CpuAllocationError::InvalidRequest { .. }
+        ));
+    }
+
+    #[test]
+    fn duplicate_lease_id_is_rejected() {
+        let err = allocate_cpu(
+            4000,
+            &[
+                request("same", 0, 1000, 2000),
+                request("same", 1, 1000, 2000),
+            ],
+        )
+        .expect_err("duplicate lease_id must fail closed");
+        assert_eq!(
+            err,
+            CpuAllocationError::DuplicateLeaseId {
+                lease_id: "same".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn non_uniform_floor_is_rejected() {
+        // v1 requires one shared floor; 1000 vs 1500 must fail rather than be
+        // silently mis-shared.
+        let err = allocate_cpu(
+            3000,
+            &[request("a", 0, 1000, 2000), request("b", 1, 1500, 2000)],
+        )
+        .expect_err("mixed floors must fail closed");
+        assert!(matches!(err, CpuAllocationError::NonUniformMinimum { .. }));
     }
 }
