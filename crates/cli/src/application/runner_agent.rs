@@ -4428,9 +4428,10 @@ fn restore_hold_break_reason(
 const CPU_RELEASE_ATTEMPTS: usize = 2;
 
 /// Release a confirmed VMM's CPU reservation. A reclaim failure is retried
-/// once synchronously before the lease task gives up and holds its execution
-/// slot. This is deliberately a transaction retry, not a timeout: the manager
-/// reply still defines whether the request committed.
+/// once synchronously from the same confirmed teardown observation before the
+/// lease task gives up and holds its execution slot. This is deliberately a
+/// transaction retry, not a timeout: the manager reply still defines whether
+/// the request committed.
 fn release_cpu_entitlement_after_teardown(
     lease_id: &str,
     slot_index: usize,
