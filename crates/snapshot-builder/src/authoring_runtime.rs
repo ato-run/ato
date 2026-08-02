@@ -11,8 +11,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
-    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, normalize_program_intent,
-    to_capsule_manifest_v1,
+    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
+    normalize_program_intent, to_capsule_manifest_v1,
 };
 use capsule::types::manifest_v1::SealAtV1;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -71,8 +71,8 @@ pub struct AuthoringWork {
     pub work_id: String,
     /// Per-claim fencing generation for queued builder jobs. Setup leases
     /// predate job fencing and therefore legitimately omit this field.
-    #[serde(default, rename = "worker_claim_id")]
-    pub _worker_claim_id: Option<String>,
+    #[serde(default)]
+    pub worker_claim_id: Option<String>,
     pub authoring_session_id: String,
     pub capsule_revision_id: String,
     pub source_revision_id: String,
@@ -83,9 +83,23 @@ pub struct AuthoringWork {
     #[serde(default)]
     pub setup_mode: Option<String>,
     #[serde(default)]
+    pub source_overlay: Option<serde_json::Value>,
+    #[serde(default, rename = "store_metadata")]
+    pub _store_metadata: Option<serde_json::Value>,
+    #[serde(default, rename = "setup_journal_sequence")]
+    pub _setup_journal_sequence: Option<u64>,
+    #[serde(default)]
     pub normalized_program_intent: Option<NormalizedProgramIntentEnvelopeV1>,
     #[serde(default)]
     pub resolution_lock_digest: Option<String>,
+    #[serde(default)]
+    pub build_config_revision_id: Option<String>,
+    #[serde(default)]
+    pub build_attempt_number: Option<u64>,
+    #[serde(default)]
+    pub authoring_toml: Option<String>,
+    #[serde(default)]
+    pub effective_build_plan: Option<serde_json::Value>,
     #[serde(default)]
     #[serde(rename = "request")]
     pub _request: Option<serde_json::Value>,
@@ -157,13 +171,13 @@ impl AuthoringApiClient<'_> {
             .ok_or_else(|| "archive authorization omitted download_url".to_string())
     }
 
-    pub fn mark_setup_ready(
+    pub fn mark_setup_detected(
         &self,
         work: &AuthoringWork,
-        input: &SetupReady<'_>,
+        input: &SetupDetected<'_>,
     ) -> Result<(), String> {
         ureq::post(&format!(
-            "{}{AUTHORING_BASE_PATH}/setup/{}/ready",
+            "{}{AUTHORING_BASE_PATH}/setup/{}/detected",
             self.api_url.trim_end_matches('/'),
             work.work_id
         ))
@@ -171,38 +185,85 @@ impl AuthoringApiClient<'_> {
         .set("x-ato-authoring-lease-token", work.lease_token.expose())
         .send_json(
             serde_json::to_value(input)
-                .map_err(|error| format!("encode setup-ready evidence: {error}"))?,
+                .map_err(|error| format!("encode setup detection evidence: {error}"))?,
         )
-        .map_err(|error| http_error("report setup ready", error))?;
+        .map_err(|error| http_error("report setup detection", error))?;
         Ok(())
     }
 
-    pub fn setup_control(&self, work: &AuthoringWork) -> Result<SetupControl, String> {
-        let response = ureq::get(&format!(
-            "{}{AUTHORING_BASE_PATH}/setup/{}/control",
+    pub fn append_build_event(
+        &self,
+        work: &AuthoringWork,
+        event: &serde_json::Value,
+    ) -> Result<(), String> {
+        let worker_claim_id = work
+            .worker_claim_id
+            .as_deref()
+            .ok_or_else(|| "Build Attempt claim omitted worker_claim_id".to_string())?;
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/events",
             self.api_url.trim_end_matches('/'),
             work.work_id
         ))
         .set("authorization", &format!("Bearer {}", self.builder_token))
         .set("x-ato-authoring-lease-token", work.lease_token.expose())
-        .query("builder_id", self.builder_id)
-        .call()
-        .map_err(|error| http_error("poll setup control", error))?;
-        response
-            .into_json()
-            .map_err(|error| format!("decode setup control: {error}"))
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "worker_claim_id": worker_claim_id,
+            "event": event,
+        }))
+        .map_err(|error| http_error("append Build Attempt event", error))?;
+        Ok(())
     }
 
-    pub fn mark_setup_stopped(&self, work: &AuthoringWork) -> Result<(), String> {
+    pub fn fail_job(
+        &self,
+        work: &AuthoringWork,
+        error_code: &str,
+        error_message: &str,
+    ) -> Result<(), String> {
+        let worker_claim_id = work
+            .worker_claim_id
+            .as_deref()
+            .ok_or_else(|| "Authoring job claim omitted worker_claim_id".to_string())?;
         ureq::post(&format!(
-            "{}{AUTHORING_BASE_PATH}/setup/{}/stopped",
+            "{}{AUTHORING_BASE_PATH}/jobs/{}/failed",
             self.api_url.trim_end_matches('/'),
             work.work_id
         ))
         .set("authorization", &format!("Bearer {}", self.builder_token))
         .set("x-ato-authoring-lease-token", work.lease_token.expose())
-        .send_json(serde_json::json!({ "builder_id": self.builder_id }))
-        .map_err(|error| http_error("report setup stopped", error))?;
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "worker_claim_id": worker_claim_id,
+            "error_code": error_code,
+            "error_message": bounded_diagnostic(error_message),
+        }))
+        .map_err(|error| http_error("report Authoring job failure", error))?;
+        Ok(())
+    }
+
+    pub fn fail_setup(
+        &self,
+        work: &AuthoringWork,
+        stage: &str,
+        error_code: &str,
+        error_message: &str,
+    ) -> Result<(), String> {
+        ureq::post(&format!(
+            "{}{AUTHORING_BASE_PATH}/setup/{}/failed",
+            self.api_url.trim_end_matches('/'),
+            work.work_id
+        ))
+        .set("authorization", &format!("Bearer {}", self.builder_token))
+        .set("x-ato-authoring-lease-token", work.lease_token.expose())
+        .send_json(serde_json::json!({
+            "builder_id": self.builder_id,
+            "stage": stage,
+            "error_code": error_code,
+            "error_message": bounded_diagnostic(error_message),
+        }))
+        .map_err(|error| http_error("report setup detection failure", error))?;
         Ok(())
     }
 
@@ -211,6 +272,7 @@ impl AuthoringApiClient<'_> {
         work: &AuthoringWork,
         receipt: &CleanReplayReceiptV1,
         classified_state_diff: &ClassifiedStateDiffV1,
+        execution_contract_jcs: &str,
     ) -> Result<(), String> {
         let classified = serde_jcs::to_vec(classified_state_diff)
             .map_err(|error| format!("canonicalize classified state diff: {error}"))?;
@@ -225,6 +287,7 @@ impl AuthoringApiClient<'_> {
             "builder_id": self.builder_id,
             "receipt": receipt,
             "classified_state_diff_jcs_base64": BASE64.encode(classified),
+            "execution_contract_jcs_base64": BASE64.encode(execution_contract_jcs.as_bytes()),
         }))
         .map_err(|error| http_error("report Clean Replay completion", error))?;
         Ok(())
@@ -261,20 +324,13 @@ impl AuthoringApiClient<'_> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct SetupReady<'a> {
+pub struct SetupDetected<'a> {
     pub builder_id: &'a str,
-    pub builder_session_id: &'a str,
-    pub builder_slot_id: &'a str,
     pub origin: &'a str,
     pub normalized_program_intent: &'a NormalizedProgramIntentEnvelopeV1,
-    pub resolution_lock_digest: &'a str,
+    pub source_closure_id: &'a str,
     pub generated_capsule_toml: &'a str,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SetupControl {
-    pub action: String,
+    pub materialized_assets: Vec<serde_json::Value>,
 }
 
 pub struct AuthoringArchiveTransport<'a> {
@@ -428,6 +484,14 @@ fn parse_http_rejection(body: &str, status: u16) -> (String, Option<String>) {
     (code, detail)
 }
 
+fn bounded_diagnostic(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\t')
+        .take(2_048)
+        .collect()
+}
+
 /// Infer the narrow static-Web subset used by the first browser E2E.
 ///
 /// The inference is intentionally source-based and fail-closed. A repository
@@ -490,6 +554,16 @@ pub fn render_static_web_capsule_toml(
     toml::to_string(&manifest).map_err(|error| format!("serialize inferred capsule.toml: {error}"))
 }
 
+pub fn normalize_capsule_toml(
+    capsule_toml: &str,
+) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
+    let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(capsule_toml)
+        .map_err(|error| format!("parse authored capsule.toml: {error}"))?;
+    let draft = draft_from_capsule_manifest_v1(&manifest)
+        .map_err(|error| format!("derive Program Intent from capsule.toml: {error}"))?;
+    normalize_program_intent(draft).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,7 +591,7 @@ mod tests {
         }))
         .expect("job claim");
 
-        assert_eq!(work._worker_claim_id.as_deref(), Some("claim_01KYN2Z"));
+        assert_eq!(work.worker_claim_id.as_deref(), Some("claim_01KYN2Z"));
     }
 
     #[test]
@@ -542,7 +616,7 @@ mod tests {
         }))
         .expect("setup claim");
 
-        assert_eq!(work._worker_claim_id, None);
+        assert_eq!(work.worker_claim_id, None);
     }
 
     #[test]
@@ -581,6 +655,8 @@ mod tests {
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.web.expect("surface").port, 8000);
+        let authored = normalize_capsule_toml(&manifest).expect("normalize authored manifest");
+        assert_eq!(authored.intent.launch.argv, normalized.intent.launch.argv);
     }
 
     #[test]
