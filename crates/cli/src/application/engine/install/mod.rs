@@ -674,12 +674,45 @@ pub(crate) fn is_ato_site_url(input: &str) -> bool {
     ato_url_host_rest(input).is_some()
 }
 
+/// Whether `input` is a retired web **share** link (`ato.run/s/<id>`).
+///
+/// Web sharing was removed (2026-08) along with the `encap`/`decap` aliases and
+/// the `/v1/shares` endpoint; these links can no longer be resolved. Kept
+/// separate from store references so callers can give a migration error instead
+/// of routing them to store resolution.
+pub(crate) fn is_retired_share_link(input: &str) -> bool {
+    let trimmed = input.trim();
+    // Match any `.ato.run` host (site, staging, app) with an `/s/` path, in any
+    // of the spellings users may paste.
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("www."))
+        .unwrap_or(trimmed);
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    let path = path.trim_start_matches('/');
+    (host == "ato.run" || host.ends_with(".ato.run")) && (path == "s" || path.starts_with("s/"))
+}
+
+/// Error message explaining how to move off a retired web share link.
+pub(crate) fn retired_share_link_error() -> String {
+    "This workspace share link has been retired.\n\n\
+     Web sharing (`ato.run/s/<id>`) was removed; ask the sender for\n\
+     `share.spec.json` and `share.lock.json`, then run:\n\n\
+     \x20 ato run ./share.spec.json\n\n\
+     or:\n\n\
+     \x20 ato workspace setup ./share.spec.json --into ./workspace"
+        .to_string()
+}
+
 /// Reduce an `ato.run` store/open URL to its canonical `publisher/slug` scoped
 /// id (unvalidated — the result is parsed by [`parse_capsule_request`]).
 ///
 /// Returns `None` when `input` is not an `ato.run` URL, is the bare host, or is
-/// a share link (`/s/...`). Share links are resolved by the share runner, not
-/// the store, so they must never be mistaken for an `s/<id>` scoped id.
+/// a share link (`/s/...`). Share links are never store references, so they must
+/// not be mistaken for an `s/<id>` scoped id.
 pub(crate) fn strip_ato_store_url(input: &str) -> Option<String> {
     let rest = ato_url_host_rest(input)?.trim_start_matches('/');
     if rest == "s" || rest.starts_with("s/") {
@@ -690,36 +723,6 @@ pub(crate) fn strip_ato_store_url(input: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
-}
-
-/// Whether `input` is an `ato.run` **share** link (`/s/<id>`) in any spelling.
-/// Share links are executed by the share runner, not resolved as store capsules.
-pub(crate) fn is_ato_share_url(input: &str) -> bool {
-    match ato_url_host_rest(input) {
-        Some(rest) => {
-            let rest = rest.trim_start_matches('/');
-            rest == "s" || rest.starts_with("s/")
-        }
-        None => false,
-    }
-}
-
-/// Canonicalize an `ato.run` share link to the scheme-qualified
-/// `https://ato.run/s/<id>` form the share runner can parse, collapsing the
-/// bare-host and `www.` spellings. Returns `None` for non-share inputs or a
-/// share path with no id.
-///
-/// `ato run ato.run/s/<id>` (no scheme) otherwise misses
-/// `share::looks_like_share_run_input` — which requires a scheme — and falls
-/// through to capsule resolution; normalizing here lets every share-link
-/// spelling reach the share runner consistently.
-pub(crate) fn canonical_ato_share_url(input: &str) -> Option<String> {
-    let rest = ato_url_host_rest(input)?.trim_start_matches('/');
-    let id = rest.strip_prefix("s/")?;
-    if id.is_empty() {
-        return None;
-    }
-    Some(format!("https://ato.run/s/{id}"))
 }
 
 fn split_capsule_request(input: &str) -> Result<(String, Option<String>)> {
@@ -1714,11 +1717,11 @@ fn materialize_ato_managed_environment(
         return Ok(None);
     }
 
-    let Some(lock) = extract_embedded_ato_lock_from_capsule(bytes)? else {
+    let Some(lock) = extract_embedded_capsule_lock_from_capsule(bytes)? else {
         return Ok(None);
     };
     let Some(environment) =
-        capsule::ato_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
+        capsule::capsule_lock::delivery_environment(&lock).map_err(|err| anyhow::anyhow!(err))?
     else {
         return Ok(None);
     };

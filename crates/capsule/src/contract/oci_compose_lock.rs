@@ -2,7 +2,7 @@
 //!
 //! Writes `ato.oci.lock.json` in the project directory. Keeps OCI image
 //! resolution state separate from `capsule.lock.json` (source capsule locks)
-//! and `ato.lock.json` (canonical Ato lock).
+//! and `capsule.lock` (canonical lock).
 //!
 //! # Identity contract
 //! [`OciComposeLock::execution_identity_hash`] hashes only the fields that

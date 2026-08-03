@@ -30,7 +30,7 @@ async fn ensure_store_runtime_tree_for_dependency(
     let artifact_url = locked.artifact_url.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
             "{} capsule dependency '{}' is missing artifact_url",
-            capsule::lockfile::CAPSULE_LOCK_FILE_NAME,
+            capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME,
             locked.name
         )
     })?;

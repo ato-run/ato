@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use capsule::CapsuleReporter;
-use capsule::ato_lock::AtoLock;
+use capsule::capsule_lock::CapsuleLock;
 use capsule::dependency_contracts::{
     DependencyLock, DependencyLockInput, ResolvedProviderManifest, verify_and_lock,
 };
@@ -17,7 +17,7 @@ use capsule::execution_identity::EnvOrigin;
 use capsule::execution_plan::error::AtoExecutionError;
 use capsule::execution_plan::guard::ExecutorKind;
 use capsule::lockfile::{
-    CAPSULE_LOCK_FILE_NAME, CapsuleLock, manifest_external_capsule_dependencies,
+    LEGACY_CAPSULE_LOCK_JSON_FILE_NAME, LegacyCapsuleLock, manifest_external_capsule_dependencies,
     verify_lockfile_external_dependencies,
 };
 use capsule::types::{
@@ -73,12 +73,12 @@ pub(crate) trait ConsumerRunProgress {
 pub(crate) struct CompatibilityLegacyLockContext {
     pub(crate) manifest_path: PathBuf,
     pub(crate) path: PathBuf,
-    pub(crate) lock: CapsuleLock,
+    pub(crate) lock: LegacyCapsuleLock,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RunAuthoritativeInput {
-    pub(crate) lock: AtoLock,
+    pub(crate) lock: CapsuleLock,
     pub(crate) lock_path: PathBuf,
     pub(crate) workspace_root: PathBuf,
     pub(crate) materialization_root: PathBuf,
@@ -97,7 +97,7 @@ pub(crate) struct RunExecutionOverride {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRunContext {
-    pub(crate) authoritative_lock: Option<AtoLock>,
+    pub(crate) authoritative_lock: Option<CapsuleLock>,
     pub(crate) lock_path: Option<PathBuf>,
     pub(crate) workspace_root: PathBuf,
     pub(crate) effective_state: Option<EffectiveLockState>,
@@ -963,7 +963,7 @@ fn detach_dependency_contracts_for_background(dep_contracts: &mut Option<Depende
 pub(crate) async fn start_dependency_contracts_for_run(
     prepared: &PreparedRunContext,
     plan: &capsule::router::ManifestData,
-    lockfile: &CapsuleLock,
+    lockfile: &LegacyCapsuleLock,
 ) -> Result<DependencyContractGuard> {
     let consumer =
         router::CompatManifestBridge::from_manifest_value(prepared.bridge_manifest.as_toml())
@@ -1378,7 +1378,7 @@ pub(crate) async fn setup_dependency_contracts_launch_context(
             let bytes = std::fs::read(&lock_path).with_context(|| {
                 format!("failed to read auto-generated lock {}", lock_path.display())
             })?;
-            let lock: capsule::lockfile::CapsuleLock = serde_json::from_slice(&bytes)
+            let lock: capsule::lockfile::LegacyCapsuleLock = serde_json::from_slice(&bytes)
                 .with_context(|| {
                     format!(
                         "failed to parse auto-generated lock {}",
@@ -2094,7 +2094,7 @@ where
             prepared.compatibility_legacy_lock.as_ref().ok_or_else(|| {
                 AtoExecutionError::lock_incomplete(
                     "external capsule dependencies require capsule.lock.json",
-                    Some(CAPSULE_LOCK_FILE_NAME),
+                    Some(LEGACY_CAPSULE_LOCK_JSON_FILE_NAME),
                 )
             })?;
         // PR-4a: bundle-derived primary, legacy parity in debug.
@@ -3424,6 +3424,32 @@ fn resolve_dep_template_inner(value: &str, graph: &RunningGraph) -> String {
     result
 }
 
+/// Refuse an unverified cold launch of a Capsule v1 lock.
+///
+/// `CAPSULE_V1_EXECUTION_MODEL_SPEC` §10.2 routes `ato run` to cold
+/// reconstruction only when no compatible Snapshot was selected, and §11 makes
+/// that path conditional on reconstructing the resolved execution contract and
+/// matching every identity-bearing output digest — any mismatch MUST fail
+/// closed rather than launch under the stored `execution_id`. No launch
+/// adapter in this build produces that reconstruction evidence, so the only
+/// spec-conforming outcome here is §10.2's deployment-policy "forbid": refuse.
+/// A lock without an `execution_contract` is not a v1 identity and keeps
+/// today's legacy cold behaviour unchanged.
+fn ensure_cold_launch_allowed(lock: Option<&CapsuleLock>) -> Result<()> {
+    let Some(envelope) = lock.and_then(|lock| lock.execution_contract.as_ref()) else {
+        return Ok(());
+    };
+    Err(anyhow!(
+        "refusing to cold-launch Capsule v1 execution identity {}: no compatible Snapshot was \
+         selected, and this build cannot reconstruct and verify the locked execution contract's \
+         identity-bearing digests. Verified cold reconstruction is required before a locked \
+         execution identity may run without a Snapshot \
+         (CAPSULE_V1_EXECUTION_MODEL_SPEC §10.2, §11); routing it through the legacy unverified \
+         cold path would launch unverified outputs under the stored execution_id",
+        envelope.execution_id
+    ))
+}
+
 pub(crate) async fn run_execute_phase<P, H>(
     request: &ConsumerRunRequest,
     progress: &P,
@@ -3748,7 +3774,7 @@ where
         // `decision.plan.manifest` is the derived/normalized ExecutionPlan manifest:
         // it drops the top-level `[snapshot]` section (→ never Ready-State-eligible)
         // and canonicalizes differently (→ a different `capsule_manifest_hash` than
-        // the seal). And `decision.plan.manifest_path` is the resolved `ato.lock.json`,
+        // the seal). And `decision.plan.manifest_path` is the resolved `capsule.lock`,
         // not the capsule manifest. Either made `ato run` silently cold-path past
         // every sealed artifact. Read the raw `capsule.toml` from the source dir
         // (`manifest_dir`) — the same bytes the build sealed; fall back to the plan
@@ -3761,7 +3787,13 @@ where
         let rs_manifest = capsule::types::CapsuleManifest::from_toml(&toml::to_string(&rs_raw)?)?;
         let rs_hash = ready_state::capsule_manifest_hash(&rs_raw)?;
         let rs_root = ready_state::state_root();
-        if let Some(plan) = ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root)? {
+        // No caller yet supplies a verified Capsule v1 execution identity here
+        // (that requires loading + verifying an `ato.lock`'s
+        // `execution_contract` envelope, not yet wired into `ato run`) — the
+        // legacy `capsule_manifest_hash` lookup is unchanged.
+        if let Some(plan) =
+            ready_state::decide_ready_state_run(&rs_manifest, &rs_hash, &rs_root, None)?
+        {
             // Phase 8a-RunGate (#912): the binding-preview decision (names only, never
             // values). D2 routes a binding-required capsule through the post-restore
             // bound-ready gate ONLY under ATO_READY_STATE_BINDINGS_PREVIEW=1; otherwise
@@ -3825,7 +3857,15 @@ where
                     ready_state::bindings::BindingGuardMode::VerifyOnly,
                 )?;
             }
-            let backend = ready_state::backend::select_backend()?;
+            // A v1 exact-execution_id lookup already selected (and proved
+            // compatible) a backend during candidate selection; reuse it
+            // rather than re-running (and potentially re-choosing
+            // differently from) `select_backend` here. The legacy path
+            // (`selected_backend: None`) is unchanged.
+            let backend = match plan.selected_backend {
+                Some(selected) => selected,
+                None => ready_state::backend::select_backend()?,
+            };
             // L2 (#912): placement capability gate. A binding-required preview must
             // fail closed BEFORE restore if this backend/host cannot deliver bindings
             // (no vsock / not firecracker / not x86_64) — never silently fall back.
@@ -3846,8 +3886,16 @@ where
             // reaped/quarantined by the canonical startup sweep
             // (`RuntimeProcessRegistry::sweep_run_dir_orphans` → Class 4); no
             // separate sweep is wired here.
-            let store =
-                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?;
+            //
+            // A v1 candidate's CAS lives at ITS OWN immutable artifact
+            // directory (`<root>/snapshots/<execution_id>/<snapshot_id>/cas`),
+            // never the legacy `capsule_manifest_hash`-keyed one — open by
+            // exact artifact directory whenever this plan resolved one.
+            let store = if plan.v1_manifest.is_some() {
+                ready_state::store::open_store_at_artifact_dir(&plan.artifact_dir)?
+            } else {
+                ready_state::store::open_store(&plan.state_root, &plan.capsule_manifest_hash)?
+            };
             // U10 (#877): opt-in mem_backend selection diagnostics — record what a
             // selector WOULD choose, then restore via File EXACTLY as before. Pure
             // observation; no behavior change.
@@ -3948,10 +3996,23 @@ where
             } else {
                 false
             };
+            // A v1 candidate carries its own authenticated identity/envelope —
+            // verify against it. Otherwise (the ordinary `ato build` → `ato
+            // run` local flow) there is no cross-host lease to verify
+            // against; restore proceeds straight through (`backend.restore`
+            // still enforces its own fail-closed runner-class gate).
+            let verification = match (plan.v1_manifest, plan.v1_envelope) {
+                (Some(manifest), Some(envelope)) => ready_state::restore::RestoreVerification::V1 {
+                    manifest: Box::new(manifest),
+                    envelope: Box::new(envelope),
+                },
+                _ => ready_state::restore::RestoreVerification::LegacyLocal,
+            };
             let receipt = ready_state::restore::restore_and_expose(
                 backend.as_ref(),
                 &store,
                 plan.manifest,
+                verification,
                 overlay,
                 plan.host_runner_class,
                 uffd_preview,
@@ -4186,6 +4247,12 @@ where
             return Ok(());
         }
     }
+
+    // Cold-path fork: every Ready-State restore above returns, so reaching here
+    // means no compatible Snapshot was selected and the launch would proceed on
+    // the legacy cold path. A lock carrying a Capsule v1 execution contract may
+    // not take it unverified (spec §10.2/§11).
+    ensure_cold_launch_allowed(prepared.authoritative_lock.as_ref())?;
 
     let run_command_uses_specialized_executor = decision
         .plan
@@ -5900,7 +5967,7 @@ mod tests {
         resolve_sandbox_grants, sandbox_session_data_env, sandbox_session_data_env_dir,
         unavailable_service_message, validate_sandbox_grants_best_effort,
     };
-    use capsule::ato_lock::AtoLock;
+    use capsule::capsule_lock::CapsuleLock;
     use capsule::types::{CapsuleManifest, ParamValue};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
@@ -6697,9 +6764,42 @@ image = "ghcr.io/example/app:latest"
     }
 
     #[test]
+    fn cold_launch_is_refused_for_a_lock_carrying_an_execution_contract() {
+        let envelope = crate::application::ready_state::build::tests::test_execution_envelope(0x11);
+        let execution_id = envelope.execution_id.to_string();
+        let lock = CapsuleLock {
+            execution_contract: Some(envelope),
+            ..CapsuleLock::default()
+        };
+
+        let error = super::ensure_cold_launch_allowed(Some(&lock))
+            .expect_err("a Capsule v1 lock must not take the unverified cold path");
+        let message = error.to_string();
+        assert!(message.contains("refusing to cold-launch"), "{message}");
+        assert!(message.contains(&execution_id), "{message}");
+        assert!(
+            message.contains("no compatible Snapshot was selected"),
+            "{message}"
+        );
+        assert!(message.contains("reconstruct and verify"), "{message}");
+        assert!(message.contains("§10.2, §11"), "{message}");
+    }
+
+    #[test]
+    fn cold_launch_is_unaffected_without_an_execution_contract() {
+        // Today's behaviour: no v1 identity in the lock (and no lock at all)
+        // both stay on the legacy cold path exactly as before.
+        let lock = CapsuleLock::default();
+        assert!(lock.execution_contract.is_none());
+        super::ensure_cold_launch_allowed(Some(&lock))
+            .expect("a lock without a v1 execution contract must not be gated");
+        super::ensure_cold_launch_allowed(None).expect("no lock must not be gated");
+    }
+
+    #[test]
     fn prepared_run_context_with_bridge_manifest_retains_authority() {
         let prepared = PreparedRunContext {
-            authoritative_lock: Some(AtoLock::default()),
+            authoritative_lock: Some(CapsuleLock::default()),
             lock_path: None,
             workspace_root: PathBuf::from("."),
             effective_state: Some(

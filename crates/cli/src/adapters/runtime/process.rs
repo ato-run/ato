@@ -945,6 +945,14 @@ impl ProcessManager {
     /// runtime dir (#73 v0.6.0 work); a startup-only sweep is the
     /// minimum reliable cleanup we can do at the current path.
     pub fn sweep_run_dir_orphans(&self) -> Result<RunDirSweepReport> {
+        self.sweep_run_dir_orphans_at(SystemTime::now())
+    }
+
+    /// Body of [`Self::sweep_run_dir_orphans`] with the reference "now" injected
+    /// so the socket-grace boundary can be asserted deterministically in tests
+    /// instead of racing the real wall clock. Production always passes
+    /// `SystemTime::now()`.
+    fn sweep_run_dir_orphans_at(&self, now: SystemTime) -> Result<RunDirSweepReport> {
         let socket_grace = Duration::from_secs(30);
         let mut report = RunDirSweepReport::default();
 
@@ -970,7 +978,6 @@ impl ProcessManager {
                 return Ok(report);
             }
         };
-        let now = SystemTime::now();
         for entry in entries.flatten() {
             let path = entry.path();
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
@@ -1001,7 +1008,15 @@ impl ProcessManager {
             };
             let mtime = metadata.modified().ok();
             let age = mtime.and_then(|t| now.duration_since(t).ok());
-            if age.is_some_and(|a| a < socket_grace) {
+            // Reap only when the socket is *provably* older than the grace
+            // window. An indeterminate age — stat gave no mtime, or the mtime is
+            // ahead of `now` because the filesystem clock and the syscall clock
+            // momentarily disagree under load, so `duration_since` returns `Err`
+            // and `age` is `None` — must be treated as "fresh" and preserved.
+            // The grace window exists precisely to avoid racing a sibling that
+            // just bound this socket; an unknown age can never authorize a reap.
+            let past_grace = age.is_some_and(|a| a >= socket_grace);
+            if !past_grace {
                 continue;
             }
             match fs::remove_file(&path) {
@@ -2268,6 +2283,13 @@ mod tests {
         assert_eq!(parse_socket_pid("ato-desktop-1.lock"), None);
     }
 
+    // Fixed anchor for the grace-window tests so socket age is a pure function
+    // of (injected `now` - injected mtime), never of the real wall clock. Any
+    // instant well clear of the epoch works; the value itself is irrelevant.
+    fn socket_grace_anchor() -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+    }
+
     #[test]
     fn sweep_run_dir_orphans_reaps_dead_socket_past_grace_period() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -2283,14 +2305,14 @@ mod tests {
         let stale_socket = run_dir.join(format!("ato-desktop-{dead_pid}.sock"));
         fs::write(&stale_socket, b"").expect("write stale socket");
 
-        // Make the socket older than the 30s grace window.
-        let one_hour_ago = SystemTime::now() - Duration::from_secs(3600);
-        let _ = filetime::set_file_mtime(
-            &stale_socket,
-            filetime::FileTime::from_system_time(one_hour_ago),
-        );
+        // Anchor the socket mtime and drive the sweep with a `now` one hour
+        // later: age is deterministically 3600s > the 30s grace window.
+        let mtime = socket_grace_anchor();
+        let _ =
+            filetime::set_file_mtime(&stale_socket, filetime::FileTime::from_system_time(mtime));
+        let now = mtime + Duration::from_secs(3600);
 
-        let report = pm.sweep_run_dir_orphans().expect("sweep");
+        let report = pm.sweep_run_dir_orphans_at(now).expect("sweep");
         assert_eq!(report.sockets_removed, 1);
         assert!(!stale_socket.exists());
     }
@@ -2306,15 +2328,49 @@ mod tests {
 
         // Dead pid + fresh mtime → kept (defends against rapid restart
         // race where the new process binds the socket within the
-        // first 30s after the old one exits).
+        // first 30s after the old one exits). Age is pinned to 1s via the
+        // injected clock so the assertion never races the real wall clock —
+        // the historical flake was a loaded-machine skew making the sweep's
+        // real `now()` read land before the socket's mtime.
         let dead_pid = i32::MAX;
         let fresh_socket = run_dir.join(format!("ato-desktop-{dead_pid}.sock"));
         fs::write(&fresh_socket, b"").expect("write fresh socket");
-        // mtime defaults to "now" on write — explicitly leave it.
+        let mtime = socket_grace_anchor();
+        let _ =
+            filetime::set_file_mtime(&fresh_socket, filetime::FileTime::from_system_time(mtime));
+        let now = mtime + Duration::from_secs(1);
 
-        let report = pm.sweep_run_dir_orphans().expect("sweep");
+        let report = pm.sweep_run_dir_orphans_at(now).expect("sweep");
         assert_eq!(report.sockets_removed, 0);
         assert!(fresh_socket.exists());
+    }
+
+    #[test]
+    fn sweep_run_dir_orphans_preserves_socket_with_future_mtime() {
+        // Regression for the residual flake: when the socket's mtime is *ahead*
+        // of the sweep's `now` (the filesystem clock momentarily leads the
+        // syscall clock under load), `now.duration_since(mtime)` returns `Err`
+        // and the age is unknown. An unknown age must be treated as fresh and
+        // preserved — never reaped — or a socket a sibling is about to bind is
+        // wrongly removed. Before the fix this reaped the socket (removed == 1).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let run_dir = tmp.path().join("run");
+        fs::create_dir_all(&run_dir).expect("mkdir run");
+        let pm = ProcessManager {
+            run_dir: run_dir.clone(),
+        };
+
+        let dead_pid = i32::MAX;
+        let socket = run_dir.join(format!("ato-desktop-{dead_pid}.sock"));
+        fs::write(&socket, b"").expect("write socket");
+        let mtime = socket_grace_anchor();
+        let _ = filetime::set_file_mtime(&socket, filetime::FileTime::from_system_time(mtime));
+        // `now` is two seconds BEFORE the mtime → duration_since Err → age None.
+        let now = mtime - Duration::from_secs(2);
+
+        let report = pm.sweep_run_dir_orphans_at(now).expect("sweep");
+        assert_eq!(report.sockets_removed, 0);
+        assert!(socket.exists());
     }
 
     #[test]

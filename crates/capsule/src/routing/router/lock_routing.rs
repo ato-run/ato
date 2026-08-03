@@ -1,17 +1,17 @@
 //! Private lock-routing helpers.
 //!
-//! Translates an `AtoLock` into a synthesized `toml::Value` manifest used by
+//! Translates an `CapsuleLock` into a synthesized `toml::Value` manifest used by
 //! the public `route_lock_*` family of functions.
 
-use crate::ato_lock::AtoLock;
+use crate::capsule_lock::CapsuleLock;
 use crate::lock_runtime::ResolvedLockRuntimeModel;
 use crate::types::MANIFEST_SCHEMA_V03;
 
-/// Build a synthesized `capsule.toml`-shaped `toml::Value` from an `AtoLock`
+/// Build a synthesized `capsule.toml`-shaped `toml::Value` from an `CapsuleLock`
 /// plus its resolved runtime model. The resulting value is fed into
 /// `CompatManifestBridge::from_manifest_value` to produce a full bridge.
 pub(super) fn synthesize_manifest_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     runtime_model: &ResolvedLockRuntimeModel,
 ) -> toml::Value {
     let mut manifest = toml::map::Map::new();
@@ -185,7 +185,7 @@ pub(super) fn synthesize_manifest_from_lock(
 }
 
 fn resolved_target_string_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     target_label: &str,
     key: &str,
 ) -> Option<String> {
@@ -220,7 +220,7 @@ fn resolved_target_string_from_lock(
 }
 
 fn resolved_target_table_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     target_label: &str,
     keys: &[&str],
 ) -> Option<toml::value::Table> {

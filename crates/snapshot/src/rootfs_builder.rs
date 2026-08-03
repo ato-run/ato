@@ -40,6 +40,19 @@ pub enum RuntimeKind {
     Python,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Receives bounded chunks from the container build as they are produced.
+/// Implementations must not retain `bytes`; returning an error makes the build
+/// fail closed because an immutable attempt may not silently lose its log.
+pub trait BuildOutputSink {
+    fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String>;
+}
+
 /// A cheap probe of the source tree, so [`derive_build_spec`] stays pure + testable
 /// without a real checkout. Populated by [`SourceProbe::scan`] over the materialized dir.
 #[derive(Debug, Clone, Default)]
@@ -325,26 +338,7 @@ pub fn derive_build_spec(
         .to_ascii_lowercase();
     let runtime = match rt.normalize() {
         RuntimeType::Web => RuntimeKind::StaticWeb,
-        RuntimeType::Source => {
-            if driver == "node"
-                || lang == "javascript"
-                || lang == "typescript"
-                || probe.has_package_json
-            {
-                RuntimeKind::Node
-            } else if driver == "python"
-                || lang == "python"
-                || probe.has_requirements_txt
-                || probe.has_pyproject
-                || probe.has_py_files
-            {
-                RuntimeKind::Python
-            } else if driver == "static" || probe.has_index_html {
-                RuntimeKind::StaticWeb
-            } else {
-                return Err("source runtime: no node (package.json/driver) or python (requirements.txt/pyproject/driver) detected".into());
-            }
-        }
+        RuntimeType::Source => detect_runtime_kind(&driver, &lang, probe)?,
         other => {
             return Err(format!(
                 "unsupported runtime {other:?} (v1 supports: static web, node source, python source)"
@@ -352,7 +346,832 @@ pub fn derive_build_spec(
         }
     };
 
-    let (base_image, install_cmd) = match runtime {
+    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+
+    Ok(RootfsBuildSpec {
+        runtime,
+        base_image,
+        install_cmd,
+        build_cmd,
+        start_cmd,
+        declared_start_cmd,
+        port,
+        healthcheck,
+        probe_synthesized,
+        supervisor: None,
+    })
+}
+
+/// Where a v1 build places the source in the guest, and therefore the working
+/// directory its launch runs in.
+///
+/// The BUILD decides this, not the author: the v1 manifest has no
+/// working-directory field and should not gain one, because requiring the
+/// author to restate `/app` only creates a way for the manifest to be wrong
+/// about where the builder put things. It is a resolved facet of the Execution
+/// Contract (ADR-015 §4.1 `launch.cwd`), and this constant is the single place
+/// the generated Dockerfile's `WORKDIR` and the init's `cd` agree on it.
+pub const V1_GUEST_WORKING_DIRECTORY: &str = "/app";
+
+/// argv a runtime prepends to the authored command — and the fact that a
+/// producer looked.
+///
+/// A bare `Vec<String>` cannot carry that second half. An empty vector reads
+/// both as "the runtime prepends nothing" and as "nobody measured this", and
+/// the Execution Contract must never record the latter as the former:
+/// `runtime.dynamic_contract` is a measured facet (ADR-015 §4.1), so an absent
+/// measurement has to refuse the mint rather than mint an empty one. The only
+/// way to construct this value is to say which of the two you observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ObservedInvocationPrefix(Vec<String>);
+
+impl ObservedInvocationPrefix {
+    /// The producer confirmed the runtime prepends nothing and execs the
+    /// authored argv directly. A measurement, not a default.
+    #[must_use]
+    pub fn observed_none() -> Self {
+        Self(Vec::new())
+    }
+
+    /// The producer confirmed the runtime prepends exactly `words`.
+    ///
+    /// Refuses an empty `words`: that is [`Self::observed_none`]'s meaning, and
+    /// allowing it here would reintroduce the ambiguity the type exists to
+    /// remove — a caller with nothing measured could reach the "nothing
+    /// prepended" value by passing the vector it happens to hold.
+    pub fn observed(words: Vec<String>) -> Result<Self, String> {
+        if words.is_empty() {
+            return Err(
+                "an observed invocation prefix is empty; use observed_none() to record that \
+                 the runtime prepends nothing"
+                    .into(),
+            );
+        }
+        Ok(Self(words))
+    }
+
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn into_words(self) -> Vec<String> {
+        self.0
+    }
+}
+
+/// A buildable rootfs for a `schema_version = "1"` capsule.
+///
+/// The difference from [`RootfsBuildSpec`] that matters is `resolved_argv`.
+/// v0.3 carries a `start_cmd: String` that the init hands to `sh -lc`, so the
+/// guest re-parses it and argument boundaries are whatever the shell decides.
+/// v1's `[run] command` is exact argv (RFC §6.1), and the Execution Contract
+/// commits it as a list — so re-joining it into a shell string here would
+/// destroy the very boundaries the contract promises to have preserved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RootfsBuildSpecV1 {
+    pub runtime: RuntimeKind,
+    pub base_image: String,
+    pub install_cmd: Option<String>,
+    /// Authored build commands, in declaration order. Every entry remains an
+    /// exact argv and is emitted with Dockerfile exec-form `RUN`.
+    pub build_steps: Vec<Vec<String>>,
+    /// Authored non-secret environment values baked into the guest launch.
+    pub environment: BTreeMap<String, String>,
+    /// argv the runtime prepends to the authored command.
+    ///
+    /// Nothing for every family in the Step-4 subset, and that is a measurement
+    /// rather than a gap: v1 argv is exact, so the v0.3 bare-`.py`
+    /// normalization (which silently turns `app.py` into `python3 app.py`)
+    /// deliberately does NOT apply — an author who wants an interpreter names
+    /// it. The field exists because a future runtime may genuinely prepend one,
+    /// and the contract must be able to say so.
+    pub runtime_invocation_prefix: ObservedInvocationPrefix,
+    /// The complete argv init execs: `runtime_invocation_prefix` ++ the
+    /// authored `[run] command`.
+    pub resolved_argv: Vec<String>,
+    pub port: u16,
+}
+
+/// Derive a v1 rootfs spec from the authored manifest and a source probe.
+///
+/// Fail-closed on everything the interactive capture subset does not cover.
+/// Runtime selection can only pin the primary detected runtime; the exported
+/// rootfs digest commits the effects of every exact-argv build step.
+pub fn derive_build_spec_v1(
+    m: &capsule::types::manifest_v1::CapsuleManifestV1,
+    probe: &SourceProbe,
+) -> Result<RootfsBuildSpecV1, String> {
+    m.validate_for_interactive_capture()
+        .map_err(|error| error.to_string())?;
+
+    let web = m
+        .web
+        .as_ref()
+        .ok_or("a v1 build needs a [web] surface to serve")?;
+
+    // v1 has no driver/language hints — the tree is the whole declaration.
+    let runtime = detect_runtime_kind("", "", probe)?;
+    let (base_image, _) = v1_base_image_and_install(runtime, probe, &m.tools)?;
+
+    let authored = &m.run.command;
+    if authored.is_empty() {
+        return Err("[run] command is empty; there is no argv to launch".into());
+    }
+    // Each word is emitted single-quoted into the generated init, so a control
+    // character could break out of the quoting or the heredoc delimiter. Reject
+    // at derivation rather than escaping at emission (fail-closed).
+    for (index, word) in authored.iter().enumerate() {
+        reject_control_chars(&format!("[run] command argv[{index}]"), word)?;
+        // argv[0] identifies the executable. Later empty words are valid exact
+        // arguments and must survive materialization unchanged.
+        if index == 0 && word.trim().is_empty() {
+            return Err("[run] command argv[0] is empty; an executable is required".to_string());
+        }
+    }
+
+    // Measured, not assumed: none of the three families in the Step-4 subset
+    // wraps the authored argv — the generated init execs it directly.
+    let runtime_invocation_prefix = ObservedInvocationPrefix::observed_none();
+    let resolved_argv = runtime_invocation_prefix
+        .words()
+        .iter()
+        .chain(authored.iter())
+        .cloned()
+        .collect();
+
+    Ok(RootfsBuildSpecV1 {
+        runtime,
+        base_image,
+        // v1 is declare-first: dependency installation is an authored build
+        // step. Source-probe heuristics must never create a hidden RUN command
+        // that is absent from the Effective Build Plan.
+        install_cmd: None,
+        build_steps: m
+            .build
+            .as_ref()
+            .map(|build| {
+                build
+                    .steps
+                    .iter()
+                    .map(|step| step.command.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        environment: m.env.clone(),
+        runtime_invocation_prefix,
+        resolved_argv,
+        port: web.port,
+    })
+}
+
+/// The init line that launches a v1 capsule: every argv word single-quoted,
+/// which the guest `/bin/sh` parses back into EXACTLY the same argv.
+///
+/// This is the whole reason v1 does not reuse `sh -lc '<joined>'`. Quoting each
+/// word preserves boundaries — `["python3", "app one.py"]` stays two arguments
+/// — whereas joining and re-splitting would turn the space into a separator and
+/// launch a different program than the contract committed to.
+pub(crate) fn launch_argv_line(argv: &[String]) -> String {
+    let words = argv
+        .iter()
+        .map(|word| shell_single_quote(word))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{words} >/tmp/app.log 2>&1 &")
+}
+
+/// Assemble the v1 app image and STOP — the image survives the script under
+/// `$ATO_IMAGE`, unpacked.
+///
+/// v0.3 builds and packs in one bash invocation because nothing ever needs to
+/// look at the intermediate image. v1 does: `target.{os,architecture,abi,libc}`
+/// has to be measured off the image the guest actually boots, not off the base
+/// image it was derived from, and by the time the pack half has run the image
+/// is gone (the pack script's EXIT trap `rmi`s it). Splitting the two is what
+/// makes the measurement land on the built artifact.
+///
+/// `pinned_base_ref` is the base image resolved to `repo@sha256:…`, never the
+/// tag the spec derived. A tag can move between the resolution that recorded
+/// `runtime.digest` and the build that consumes it, and then the contract would
+/// name bytes the guest never ran.
+///
+/// Security: same properties as [`build_rootfs_script`] — the Dockerfile is a
+/// QUOTED heredoc so the builder-host shell expands nothing in its body, and
+/// the manifest-derived install command is embedded as a single-quoted argument
+/// to `/bin/sh -lc`, so it runs only inside Docker's RUN.
+///
+/// env: `ATO_SRC` (the PROJECTED source tree), `ATO_IMAGE`.
+pub(crate) fn assemble_app_image_script_v1(
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    tool: &str,
+) -> String {
+    assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, false)
+}
+
+fn assemble_app_image_script_v1_mode(
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    tool: &str,
+    live_output: bool,
+) -> String {
+    let install_step = spec
+        .install_cmd
+        .as_deref()
+        .map(|command| format!("RUN /bin/sh -lc {}", shell_single_quote(command)))
+        .unwrap_or_default();
+    let build_steps = spec
+        .build_steps
+        .iter()
+        .enumerate()
+        .map(|(index, argv)| {
+            if live_output {
+                let step_id = format!("build.user.{}", index + 1);
+                let wrapper = format!(
+                    "printf '\\036ATO_STEP_START:{step_id}\\037\\n'; \
+                     \"$@\"; ato_status=$?; \
+                     printf '\\036ATO_STEP_END:{step_id}:%s\\037\\n' \"$ato_status\"; \
+                     exit \"$ato_status\""
+                );
+                let mut wrapped = vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    wrapper,
+                    "ato-step".to_string(),
+                ];
+                wrapped.extend(argv.iter().cloned());
+                return format!(
+                    "RUN {}",
+                    serde_json::to_string(&wrapped)
+                        .expect("a wrapped argv always serializes as JSON")
+                );
+            }
+            format!(
+                "RUN {}",
+                serde_json::to_string(argv).expect("an argv always serializes as JSON")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    // The projection goes in a SUBDIRECTORY of the build context, and the
+    // generated Dockerfile sits beside it rather than inside it.
+    //
+    // v0.3 copies the source to the context root and writes its Dockerfile
+    // there, which is harmless when nothing claims what the guest contains. It
+    // is not harmless here: a repository carrying its own `Dockerfile` would
+    // have it overwritten by the generated one and then shipped to `/app` by
+    // `COPY .`, so `source.digest` would commit a tree — the one holding the
+    // AUTHOR's Dockerfile — that the guest does not have. Editing that file
+    // would move the execution id without changing anything the guest sees, and
+    // a repository with no Dockerfile would still get one at `/app` that is not
+    // in the projection. Copying `src/.` makes the guest's `{workdir}` exactly
+    // the projection, byte for byte.
+    let build_invocation = if live_output {
+        format!(r#"{tool} build --no-cache -t "$ATO_IMAGE" "$BUILD""#)
+    } else {
+        format!(r#"{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null"#)
+    };
+    format!(
+        r#"set -euo pipefail
+BUILD=$(mktemp -d)
+cleanup() {{
+  [ -n "$BUILD" ] && rm -rf "$BUILD" 2>/dev/null || true
+}}
+trap cleanup EXIT
+mkdir -p "$BUILD/src"
+cp -a "$ATO_SRC/." "$BUILD/src/"
+# QUOTED heredoc: no host expansion; commands run inside Docker RUN via sh -lc '<literal>'.
+cat > "$BUILD/Dockerfile" <<'DOCKER'
+FROM {base}
+WORKDIR {workdir}
+COPY src/. {workdir}/
+{install_step}
+{build_steps}
+DOCKER
+{build_invocation}
+"#,
+        base = pinned_base_ref,
+        workdir = V1_GUEST_WORKING_DIRECTORY,
+        install_step = install_step,
+        build_steps = build_steps,
+        build_invocation = build_invocation,
+    )
+}
+
+/// The timestamp every file in a v1 guest image carries.
+///
+/// A constant, not the clock. `filesystem.view_digest` is blake3 over the packed
+/// image and is committed by the Execution Identity, so any wall-clock value
+/// reaching those bytes makes the identity a function of WHEN the build ran —
+/// two builds of one program source would be two executions, `capsule.lock`
+/// would be rewritten every time, and two builder hosts would never agree.
+///
+/// `1` rather than `0` because a zero mtime reads as "unset" to some tooling,
+/// and the distinction costs nothing. It is exported as `SOURCE_DATE_EPOCH`
+/// for `mke2fs`, which honours it for the superblock timestamps (e2fsprogs
+/// 1.45.7+), and applied to the tree with `touch` for the inode timestamps,
+/// which nothing else normalizes.
+pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
+
+/// Export the assembled `$ATO_IMAGE` into `$ATO_ROOTFS` and install the init.
+///
+/// The first of the two pack halves. It is separate because what lands here is
+/// what the Execution Identity commits: the lane digests this tree with
+/// [`crate::guest_filesystem_digest`] before it is turned into a filesystem
+/// image, so the identity names the guest's CONTENTS rather than one ext4
+/// serialization of them (see that module for why the serialization cannot be
+/// the answer).
+///
+/// Timestamps are still normalized here. They no longer bear on the identity,
+/// but a guest whose files all claim the same mtime is easier to reason about
+/// than one stamped with whenever its builder happened to run, and it costs one
+/// `find`.
+///
+/// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
+pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
+    let authored_environment = spec
+        .environment
+        .iter()
+        .map(|(name, value)| format!("export {name}={}\n", shell_single_quote(value)))
+        .collect::<String>();
+    format!(
+        r#"set -euo pipefail
+TAG="$ATO_IMAGE"
+CID=""
+cleanup() {{
+  [ -n "$CID" ] && {tool} rm -f "$CID" >/dev/null 2>&1 || true
+  {tool} rmi -f "$TAG" >/dev/null 2>&1 || true
+}}
+trap cleanup EXIT
+CID=$({tool} create "$TAG")
+{tool} export "$CID" | tar -x -C "$ATO_ROOTFS"
+{tool} rm -f "$CID" >/dev/null; CID=""
+# Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
+# pseudo + tmpfs filesystems, then run the capsule start command in the background
+# (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
+# single-quoted, so the guest shell parses back EXACTLY the argv the contract commits.
+rm -f "$ATO_ROOTFS/sbin/init"
+cat > "$ATO_ROOTFS/sbin/init" <<'INIT'
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+{authored_environment}mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t tmpfs tmpfs /tmp 2>/dev/null
+mount -t tmpfs tmpfs /run 2>/dev/null
+mount -t tmpfs tmpfs /var/tmp 2>/dev/null
+cd {init_cwd}
+{launch}
+while true; do sleep 1000; done
+INIT
+chmod +x "$ATO_ROOTFS/sbin/init"
+# Not identity-bearing any more, but a guest that claims one mtime everywhere is
+# easier to reason about than one stamped with its builder's clock. `-h` so a
+# symlink's own timestamps are set rather than its target's twice.
+find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
+"#,
+        tool = tool,
+        launch = launch_argv_line(&spec.resolved_argv),
+        init_cwd = V1_GUEST_WORKING_DIRECTORY,
+        port = spec.port,
+        epoch = V1_GUEST_IMAGE_EPOCH,
+        authored_environment = authored_environment,
+    )
+}
+
+/// Turn an exported rootfs into a bootable ext4.
+///
+/// The second half. `mke2fs -d` populates at mkfs time, so there is no loop
+/// mount to unwind and no running kernel deciding the allocation order.
+///
+/// The UUID, the hash seed and the superblock clocks are pinned even though the
+/// identity no longer depends on them: a stable UUID is what a filesystem UUID
+/// is FOR, and an image that differs only where it must is easier to cache and
+/// to diff. It is not byte-identical — `mke2fs` stamps every inode it creates
+/// with the wall clock and ignores `SOURCE_DATE_EPOCH` (measured, e2fsprogs
+/// 1.47.0) — and chasing that was what made the identity hostage to the tool.
+///
+/// env: `ATO_ROOTFS`, `ATO_OUT`, `ATO_FS_UUID`.
+pub(crate) fn mkfs_guest_rootfs_script_v1(size_mib: u64) -> String {
+    format!(
+        r#"set -euo pipefail
+rm -f "$ATO_OUT"
+dd if=/dev/zero of="$ATO_OUT" bs=1M count={size} status=none
+mkfs.ext4 -q -F \
+  -U "$ATO_FS_UUID" \
+  -E hash_seed="$ATO_FS_UUID" \
+  -d "$ATO_ROOTFS" \
+  "$ATO_OUT"
+# SOURCE_DATE_EPOCH on debugfs and NOT on mke2fs: mke2fs ignores it, while every
+# e2fsprogs tool stamps `s_wtime` from `fs->now` as it flushes — so without it
+# debugfs would write the clock over the wtime set below, and the superblock
+# checksum with it.
+SOURCE_DATE_EPOCH={epoch} debugfs -w -f - "$ATO_OUT" >/dev/null 2>&1 <<'DEBUGFS'
+set_super_value mkfs_time {epoch}
+set_super_value lastcheck {epoch}
+set_super_value mtime 0
+set_super_value wtime {epoch}
+quit
+DEBUGFS
+"#,
+        size = size_mib,
+        epoch = V1_GUEST_IMAGE_EPOCH,
+    )
+}
+
+/// A guest image that exists on the builder host and has not been packed yet.
+///
+/// Holding it is what lets `measure_guest_target` run against the artifact the
+/// guest boots. It is not `Copy` and not `Clone`: exactly one owner is
+/// responsible for either packing it (which consumes it) or discarding it, so
+/// a failure between assembly and packing cannot leak an image.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AssembledGuestImage {
+    image_ref: String,
+}
+
+impl AssembledGuestImage {
+    /// Take responsibility for an image that already exists under `image_ref`.
+    ///
+    /// The value is a claim that there is an image to pack;
+    /// [`assemble_app_image_v1`] earns that claim by building one. This lets a
+    /// caller that produced the image another way take the same obligation —
+    /// pack it or discard it — which is what a producer standing in for docker
+    /// in a test needs, and what a second assembly backend would need. It is
+    /// not a way to conjure an image: nothing downstream checks that the
+    /// reference resolves, so an `adopt` of a name nothing built fails at the
+    /// first command that addresses it.
+    #[must_use]
+    pub fn adopt(image_ref: String) -> Self {
+        Self { image_ref }
+    }
+
+    /// The local reference the assembled image is tagged with. Use it as
+    /// `measure_guest_target`'s `image_ref`.
+    #[must_use]
+    pub fn image_ref(&self) -> &str {
+        &self.image_ref
+    }
+}
+
+/// Build the v1 app image from the PROJECTED source tree.
+///
+/// `projected_source` must be the materialized program-source projection — the
+/// tree `source.digest` names — and not the workspace checkout. Passing the
+/// checkout would put `capsule.toml` and the lock into the guest at
+/// `/app`, and the contract would then commit a digest for a tree the guest
+/// does not have.
+///
+/// Shells out to `docker`. Docker is a build tool here, not a trust boundary.
+pub fn assemble_app_image_v1(
+    projected_source: &Path,
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    image_ref: &str,
+    tool: &str,
+) -> Result<AssembledGuestImage, String> {
+    // Both land in a generated script — the base ref inside a quoted heredoc,
+    // the image ref as a shell variable. A newline in either could break out.
+    reject_control_chars("pinned base image reference", pinned_base_ref)?;
+    reject_control_chars("assembled image reference", image_ref)?;
+
+    let script = assemble_app_image_script_v1(spec, pinned_base_ref, tool);
+    run_builder_script(
+        "assemble app image",
+        &script,
+        &[
+            ("ATO_SRC", projected_source.as_os_str().to_os_string()),
+            ("ATO_IMAGE", image_ref.into()),
+        ],
+    )?;
+    Ok(AssembledGuestImage {
+        image_ref: image_ref.to_string(),
+    })
+}
+
+pub fn assemble_app_image_v1_with_output(
+    projected_source: &Path,
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    image_ref: &str,
+    tool: &str,
+    output: &mut dyn BuildOutputSink,
+) -> Result<AssembledGuestImage, String> {
+    reject_control_chars("pinned base image reference", pinned_base_ref)?;
+    reject_control_chars("assembled image reference", image_ref)?;
+    let script = assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, true);
+    run_builder_script_with_output(
+        "assemble app image",
+        &script,
+        &[
+            ("ATO_SRC", projected_source.as_os_str().to_os_string()),
+            ("ATO_IMAGE", image_ref.into()),
+        ],
+        output,
+    )?;
+    Ok(AssembledGuestImage {
+        image_ref: image_ref.to_string(),
+    })
+}
+
+/// Export an assembled image's filesystem into `rootfs_dir` and install the
+/// guest init.
+///
+/// Consumes the image: the emitted script removes it on exit. `rootfs_dir` must
+/// exist and be empty — what ends up there is what the Execution Identity
+/// commits, so a leftover file would be committed as part of the guest.
+///
+/// Requires root: `tar -x` must restore the ownership the image records.
+pub fn export_guest_rootfs_v1(
+    image: AssembledGuestImage,
+    spec: &RootfsBuildSpecV1,
+    rootfs_dir: &Path,
+    tool: &str,
+) -> Result<(), String> {
+    let script = export_guest_rootfs_script_v1(spec, tool);
+    run_builder_script(
+        "export guest rootfs",
+        &script,
+        &[
+            ("ATO_IMAGE", image.image_ref.as_str().into()),
+            ("ATO_ROOTFS", rootfs_dir.as_os_str().to_os_string()),
+        ],
+    )
+}
+
+/// Pack an exported rootfs into `out_ext4`, returning its size in bytes.
+///
+/// Requires root (`mke2fs -d` records the tree's ownership) and e2fsprogs.
+pub fn mkfs_guest_rootfs_v1(
+    rootfs_dir: &Path,
+    out_ext4: &Path,
+    size_mib: u64,
+    filesystem_uuid: &str,
+) -> Result<u64, String> {
+    // Interpolated nowhere, but it reaches `mke2fs` as two arguments, so a
+    // malformed value is refused rather than passed on.
+    if !is_uuid(filesystem_uuid) {
+        return Err(format!(
+            "filesystem uuid {filesystem_uuid:?} is not a canonical 8-4-4-4-12 hex UUID"
+        ));
+    }
+    let script = mkfs_guest_rootfs_script_v1(size_mib);
+    run_builder_script(
+        "pack guest rootfs",
+        &script,
+        &[
+            ("ATO_ROOTFS", rootfs_dir.as_os_str().to_os_string()),
+            ("ATO_OUT", out_ext4.as_os_str().to_os_string()),
+            ("ATO_FS_UUID", filesystem_uuid.into()),
+        ],
+    )?;
+    std::fs::metadata(out_ext4)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("stat packed rootfs {}: {error}", out_ext4.display()))
+}
+
+/// Remove an assembled image that will not be packed.
+///
+/// Best-effort by design: this runs on the failure path, where the caller is
+/// already returning a more informative error and a leaked image is a disk
+/// cost rather than a correctness problem. Consuming the image means a caller
+/// cannot discard one and then pack it.
+pub fn discard_app_image_v1(image: AssembledGuestImage, tool: &str) {
+    let _ = Command::new(tool)
+        .args(["rmi", "-f", &image.image_ref])
+        .output();
+}
+
+/// The filesystem UUID and directory-hash seed a v1 guest image is built with.
+///
+/// `mke2fs` would generate both at random, and both land in the packed bytes
+/// that `filesystem.view_digest` commits — so they have to be a function of the
+/// build rather than of entropy. Deriving them from inputs fixed BEFORE the pack
+/// (the projected source, the pinned base image, the exact argv) keeps them
+/// stable for one program and distinct between programs, which is what a
+/// filesystem UUID is for: a constant shared by every capsule would make two
+/// different images collide for anything resolving a device by UUID.
+///
+/// Domain-separated so this can never coincide with another blake3 the identity
+/// also commits. It is NOT itself an identity input — the contract commits the
+/// packed bytes, and this is one of the things that determines them.
+#[must_use]
+pub fn v1_filesystem_uuid(source_digest: &str, pinned_base_ref: &str, argv: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ato.v1-guest-image-uuid/v1\0");
+    hasher.update(source_digest.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(pinned_base_ref.as_bytes());
+    for word in argv {
+        hasher.update(b"\0");
+        hasher.update(word.as_bytes());
+    }
+    let bytes = hasher.finalize();
+    let hex = bytes.to_hex();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// A canonical 8-4-4-4-12 lowercase-hex UUID.
+fn is_uuid(value: &str) -> bool {
+    let groups: Vec<&str> = value.split('-').collect();
+    groups.len() == 5
+        && [8usize, 4, 4, 4, 12]
+            .iter()
+            .zip(&groups)
+            .all(|(width, group)| {
+                group.len() == *width
+                    && group
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+}
+
+/// Run one generated builder script under `bash -c`, reporting the stderr tail
+/// on failure. The shared spawn half of [`build_rootfs`] and the two v1 halves.
+fn run_builder_script(
+    stage: &str,
+    script: &str,
+    env: &[(&str, std::ffi::OsString)],
+) -> Result<(), String> {
+    let mut command = Command::new("bash");
+    command.arg("-c").arg(script);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let out = command
+        .output()
+        .map_err(|error| format!("spawn {stage}: {error}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let tail: String = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("{stage} failed: {tail}"))
+}
+
+fn run_builder_script_with_output(
+    stage: &str,
+    script: &str,
+    env: &[(&str, std::ffi::OsString)],
+    output: &mut dyn BuildOutputSink,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn {stage}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("capture {stage} stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("capture {stage} stderr"))?;
+    fn spawn_reader<R: Read + Send + 'static>(
+        stream: BuildOutputStream,
+        mut pipe: R,
+        sender: std::sync::mpsc::SyncSender<(BuildOutputStream, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 8 * 1024];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.send((stream, buffer[..count].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send((
+                            stream,
+                            format!("Ato could not read build output: {error}\n").into_bytes(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(256);
+    let readers = vec![
+        spawn_reader(BuildOutputStream::Stdout, stdout, sender.clone()),
+        spawn_reader(BuildOutputStream::Stderr, stderr, sender.clone()),
+    ];
+    drop(sender);
+
+    let mut telemetry_error = None;
+    let mut stderr_tail = Vec::new();
+    for (stream, bytes) in receiver {
+        if stream == BuildOutputStream::Stderr {
+            stderr_tail.extend_from_slice(&bytes);
+            if stderr_tail.len() > 32 * 1024 {
+                stderr_tail.drain(..stderr_tail.len() - 32 * 1024);
+            }
+        }
+        if telemetry_error.is_none()
+            && let Err(error) = output.write(stream, &bytes)
+        {
+            telemetry_error = Some(error);
+        }
+    }
+    for reader in readers {
+        if reader.join().is_err() && telemetry_error.is_none() {
+            telemetry_error = Some("a build output reader panicked".to_string());
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for {stage}: {error}"))?;
+    if let Some(error) = telemetry_error {
+        return Err(format!("stream {stage} output: {error}"));
+    }
+    if status.success() {
+        return Ok(());
+    }
+    let tail = String::from_utf8_lossy(&stderr_tail)
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("{stage} failed: {tail}"))
+}
+
+/// Which runtime family a source tree belongs to.
+///
+/// Shared by the v0.3 recipe path and the v1 authoring surface so the two can
+/// never disagree about what "a python capsule" is. `driver`/`language` are the
+/// v0.3 target's explicit hints (lowercased, empty when absent); v1 has no
+/// counterpart for them by design — a v1 manifest declares no runtime, so the
+/// tree is the whole declaration and the probe decides alone.
+pub(crate) fn detect_runtime_kind(
+    driver: &str,
+    language: &str,
+    probe: &SourceProbe,
+) -> Result<RuntimeKind, String> {
+    if driver == "node"
+        || language == "javascript"
+        || language == "typescript"
+        || probe.has_package_json
+    {
+        Ok(RuntimeKind::Node)
+    } else if driver == "python"
+        || language == "python"
+        || probe.has_requirements_txt
+        || probe.has_pyproject
+        || probe.has_py_files
+    {
+        Ok(RuntimeKind::Python)
+    } else if driver == "static" || probe.has_index_html {
+        Ok(RuntimeKind::StaticWeb)
+    } else {
+        Err("source runtime: no node (package.json/driver) or python (requirements.txt/pyproject/driver) detected".into())
+    }
+}
+
+/// The base image a runtime family boots on, and the install step its
+/// dependency manifest implies. Both are RESOLVED values — the builder's
+/// choice, not the author's — which is why the Execution Contract records the
+/// base image by resolved digest rather than by the tag chosen here.
+pub(crate) fn base_image_and_install(
+    runtime: RuntimeKind,
+    probe: &SourceProbe,
+) -> (String, Option<String>) {
+    match runtime {
         RuntimeKind::StaticWeb => ("python:3.11-slim".to_string(), None),
         RuntimeKind::Node => (
             "node:20-slim".to_string(),
@@ -373,20 +1192,37 @@ pub fn derive_build_spec(
                 "true".to_string()
             }),
         ),
-    };
+    }
+}
 
-    Ok(RootfsBuildSpec {
-        runtime,
-        base_image,
-        install_cmd,
-        build_cmd,
-        start_cmd,
-        declared_start_cmd,
-        port,
-        healthcheck,
-        probe_synthesized,
-        supervisor: None,
-    })
+fn v1_base_image_and_install(
+    runtime: RuntimeKind,
+    probe: &SourceProbe,
+    tools: &BTreeMap<String, String>,
+) -> Result<(String, Option<String>), String> {
+    let primary = match runtime {
+        RuntimeKind::Node => "node",
+        RuntimeKind::Python | RuntimeKind::StaticWeb => "python",
+    };
+    if let Some(unsupported) = tools.keys().find(|name| name.as_str() != primary) {
+        return Err(format!(
+            "[tools].{unsupported} is not the detected primary runtime {primary}; \
+             interactive capture currently pins only the primary runtime"
+        ));
+    }
+    let (mut base_image, install) = base_image_and_install(runtime, probe);
+    if let Some(version) = tools.get(primary) {
+        if !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+        {
+            return Err(format!(
+                "[tools].{primary} version {version:?} contains unsupported characters"
+            ));
+        }
+        base_image = format!("{primary}:{version}-slim");
+    }
+    Ok((base_image, install))
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -1483,9 +2319,9 @@ pub fn materialize_source(
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
-    git_checkout_pinned(owner, repo, commit, dest)?;
-
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
     let root = contained_source_root(dest, subdir, manifest_override.is_none())?;
+    remove_checkout_git_metadata(dest)?;
     if let Some(toml) = manifest_override {
         // The recipe manifest is authoritative for Store-recipe jobs: write it at the
         // contained root (overwriting a repo capsule.toml if one exists) so every later
@@ -1505,6 +2341,10 @@ pub fn materialize_source(
 /// one. Same identity validation, full-SHA pin, and lexical+canonical containment as the
 /// recipe lane — it reuses the same [`git_checkout_pinned`] + [`contained_source_root`]
 /// helpers, only passing `require_manifest = false`.
+///
+/// The returned root carries no `.git` ([`remove_checkout_git_metadata`]): the archive
+/// this feeds must hash reproducibly and, under ADR-014 §1, a working tree is not a
+/// pinned source materialization.
 pub fn checkout_source_tree(
     owner: &str,
     repo: &str,
@@ -1516,8 +2356,62 @@ pub fn checkout_source_tree(
     if let Some(s) = subdir.filter(|s| !s.is_empty()) {
         validate_subdir(s)?;
     }
-    git_checkout_pinned(owner, repo, commit, dest)?;
-    contained_source_root(dest, subdir, false)
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
+    let root = contained_source_root(dest, subdir, false)?;
+    remove_checkout_git_metadata(dest)?;
+    Ok(root)
+}
+
+/// A pinned checkout whose Git metadata is deliberately still present.
+///
+/// Source eligibility must inspect the commit tree (`HEAD`, `ls-tree`, and
+/// `check-attr`) before the working tree is frozen. The repository root and the
+/// materialization root are distinct when `subdirectory` is selected.
+#[derive(Debug)]
+pub struct PinnedSourceCheckout {
+    repository_root: PathBuf,
+    materialization_root: PathBuf,
+}
+
+impl PinnedSourceCheckout {
+    pub fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub fn materialization_root(&self) -> &Path {
+        &self.materialization_root
+    }
+
+    /// Remove only the checkout's root `.git`, after Git-backed eligibility has
+    /// completed. Nested metadata remains visible to the archive admissibility
+    /// gate and is never silently stripped.
+    pub fn strip_root_git_metadata(&self) -> Result<(), String> {
+        remove_checkout_git_metadata(&self.repository_root)
+    }
+}
+
+/// Checkout an exact commit for source materialization while retaining `.git`
+/// long enough for the authoritative eligibility checks.
+pub fn checkout_source_tree_with_metadata(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    subdir: Option<&str>,
+    dest: &Path,
+) -> Result<PinnedSourceCheckout, String> {
+    validate_source_identity(owner, repo, commit)?;
+    if let Some(s) = subdir.filter(|s| !s.is_empty()) {
+        validate_subdir(s)?;
+    }
+    git_checkout_pinned_with_metadata(owner, repo, commit, dest)?;
+    let materialization_root = contained_source_root(dest, subdir, false)?;
+    let repository_root = dest
+        .canonicalize()
+        .map_err(|e| format!("canonicalize checkout: {e}"))?;
+    Ok(PinnedSourceCheckout {
+        repository_root,
+        materialization_root,
+    })
 }
 
 /// Validate the server-resolved source identity as an input boundary: `owner`/`repo`
@@ -1543,7 +2437,16 @@ fn validate_source_identity(owner: &str, repo: &str, commit: &str) -> Result<(),
 /// git steps shared by [`materialize_source`] (recipe lane) and [`checkout_source_tree`]
 /// (source_materialize lane); callers validate the identity (`validate_source_identity`)
 /// and any subdir before calling, and resolve/contain the source root afterward.
-fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Result<(), String> {
+///
+/// The checkout's own `.git` remains until the caller has completed any
+/// Git-backed validation. Callers that expose a materialized tree must invoke
+/// [`remove_checkout_git_metadata`] before using it as build input.
+fn git_checkout_pinned_with_metadata(
+    owner: &str,
+    repo: &str,
+    commit: &str,
+    dest: &Path,
+) -> Result<(), String> {
     let url = format!("https://github.com/{owner}/{repo}.git");
     let run = |args: &[&str], cwd: Option<&Path>| -> Result<(), String> {
         let mut c = Command::new("git");
@@ -1567,8 +2470,57 @@ fn git_checkout_pinned(owner: &str, repo: &str, commit: &str, dest: &Path) -> Re
         &["fetch", "-q", "--depth", "1", "origin", commit],
         Some(dest),
     )?;
-    run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))?;
-    Ok(())
+    run(&["checkout", "-q", "FETCH_HEAD"], Some(dest))
+}
+
+/// Delete the `.git` that [`git_checkout_pinned_with_metadata`]'s `git init` created, turning the
+/// checkout into a plain materialized source tree. Fail-closed: an IO error here is an
+/// error, never a silently retained working tree.
+///
+/// Removing it is required, not hygiene:
+///
+/// * `.git` content is **not reproducible** — `.git/index` records per-file stat data
+///   (inode, mtime), so two checkouts of the same commit on the same host differ. A1v2
+///   (`materialized_source_tree_hash`) hashes a ROOT `.git` as an ordinary directory
+///   (only a NESTED one is a submodule signal), so leaving it made an identity-bearing
+///   value — `ExecutionContractV1.source.digest`, and the `source_materialize` job's
+///   reported tree hash — depend on when and where the checkout ran. The subdir case hid
+///   this; `subdirectory` is optional, so the no-subdir case is reachable by design.
+/// * ADR-014 §1 refuses a root-level `.git` of ANY node type as a pinned source
+///   materialization, so a `.tar.zst` frozen from such a tree can never yield a
+///   `capsule_program_id`.
+/// * The recipe lane `cp -a`s this tree into the rootfs build context, so `.git` would
+///   also bloat the image and ship repo metadata into the guest.
+///
+/// Only the ROOT entry is removed. A NESTED `.git` stays: A1v2 rejects it as a submodule
+/// / embedded-repo signal, and stripping it would hide that. A `--depth 1` fetch +
+/// `checkout` without `--recurse-submodules` never creates one — a gitlink materializes
+/// as an empty directory — so this is a fail-closed invariant, not a case to clean up.
+///
+/// Same shape as the CLI's GitHub import path, which already removes `.git` after its
+/// own pinned checkout before hashing (`crates/cli/src/cli/dispatch/import_cmd.rs`), and
+/// what `capsule::source_identity::materialized_tree_hash` has always demanded of its
+/// callers ("callers must remove `.git` metadata before invoking this function").
+///
+/// **Cache invalidation:** a no-subdir source archived or hashed before this change gets
+/// a DIFFERENT A1v2 digest afterwards. Those digests were never reproducible in the first
+/// place — that is the defect — so a digest change here is the fix landing, not drift.
+fn remove_checkout_git_metadata(dest: &Path) -> Result<(), String> {
+    let git = dest.join(".git");
+    let meta = match std::fs::symlink_metadata(&git) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("inspect {}: {e}", git.display())),
+    };
+    // `git init` writes a directory; a gitfile/symlink `.git` is not something this
+    // helper's own checkout produces, but ADR-014 rejects every node type, so remove
+    // whatever is there rather than leaving a shape the gate would refuse.
+    if meta.file_type().is_dir() {
+        std::fs::remove_dir_all(&git)
+    } else {
+        std::fs::remove_file(&git)
+    }
+    .map_err(|e| format!("remove checkout git metadata {}: {e}", git.display()))
 }
 
 /// Resolve `dest`/`subdir` to a source root that is provably **inside** the checkout.
@@ -1944,6 +2896,547 @@ mod tests {
     use super::*;
     use capsule::foundation::types::manifest::CapsuleManifest;
 
+    // --- v1 authoring surface ---------------------------------------------------
+
+    const V1_MINIMAL: &str = r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python3", "app.py"]
+
+[web]
+port = 8080
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
+"#;
+
+    fn v1(text: &str) -> capsule::types::manifest_v1::CapsuleManifestV1 {
+        capsule::types::manifest_v1::CapsuleManifestV1::from_toml(text).expect("v1 manifest parses")
+    }
+
+    fn python_probe() -> SourceProbe {
+        SourceProbe {
+            has_py_files: true,
+            ..SourceProbe::default()
+        }
+    }
+
+    #[test]
+    fn a_v1_spec_resolves_the_argv_the_author_wrote() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+
+        assert_eq!(spec.runtime, RuntimeKind::Python);
+        assert_eq!(spec.base_image, "python:3.11-slim");
+        assert_eq!(spec.port, 8080);
+        // Nothing prepended, and that is a measurement rather than a gap.
+        assert_eq!(
+            spec.runtime_invocation_prefix,
+            ObservedInvocationPrefix::observed_none()
+        );
+        assert!(spec.runtime_invocation_prefix.words().is_empty());
+        assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
+        assert_eq!(
+            spec.install_cmd, None,
+            "v1 must not infer hidden install RUNs"
+        );
+    }
+
+    #[test]
+    fn a_v1_spec_preserves_an_empty_non_program_argument() {
+        let manifest =
+            V1_MINIMAL.replace(r#"["python3", "app.py"]"#, r#"["python3", "app.py", ""]"#);
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.resolved_argv, ["python3", "app.py", ""]);
+    }
+
+    #[test]
+    fn v1_tool_pin_and_build_steps_drive_the_measured_guest() {
+        let manifest = V1_MINIMAL.replace(
+            "[run]",
+            "[tools]\npython = \"3.12\"\n\n[[build.steps]]\ncommand = [\"python3\", \"build.py\", \"arg with space\"]\n\n[run]",
+        );
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.base_image, "python:3.12-slim");
+        assert_eq!(
+            spec.build_steps,
+            [vec![
+                "python3".to_string(),
+                "build.py".to_string(),
+                "arg with space".to_string(),
+            ]]
+        );
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        assert!(
+            script.contains(r#"RUN ["python3","build.py","arg with space"]"#),
+            "build argv must use Dockerfile exec form: {script}"
+        );
+        let live = assemble_app_image_script_v1_mode(&spec, PINNED_BASE, "docker", true);
+        assert!(live.contains("ATO_STEP_START:build.user.1"), "{live}");
+        assert!(live.contains("ATO_STEP_END:build.user.1"), "{live}");
+        assert!(
+            live.contains(r#","ato-step","python3","build.py","arg with space"]"#),
+            "the wrapper must pass the exact authored argv through \"$@\": {live}"
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingOutput {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    impl BuildOutputSink for CapturingOutput {
+        fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String> {
+            match stream {
+                BuildOutputStream::Stdout => self.stdout.extend_from_slice(bytes),
+                BuildOutputStream::Stderr => self.stderr.extend_from_slice(bytes),
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn builder_script_streams_stdout_and_stderr_before_returning() {
+        let mut output = CapturingOutput::default();
+        run_builder_script_with_output(
+            "stream test",
+            "printf 'one\\ntwo\\n'; printf 'warning\\n' >&2",
+            &[],
+            &mut output,
+        )
+        .expect("script succeeds");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "one\ntwo\n");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "warning\n");
+    }
+
+    #[test]
+    fn v1_refuses_a_secondary_tool_it_cannot_provision() {
+        let manifest = V1_MINIMAL.replace("[run]", "[tools]\nnode = \"22\"\n\n[run]");
+        let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
+            .expect_err("python source cannot claim an unprovisioned node tool");
+        assert!(error.contains("detected primary runtime python"), "{error}");
+    }
+
+    #[test]
+    fn v1_authored_environment_is_exported_without_shell_reparsing() {
+        let manifest = V1_MINIMAL.replace("[run]", "[env]\nGREETING = \"hello 'world'\"\n\n[run]");
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        let script = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(
+            script.contains(r#"export GREETING='hello '\''world'\'''"#),
+            "{script}"
+        );
+    }
+
+    /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command
+    /// is a shell string that has to exec somehow. v1 argv is exact, so the same
+    /// input must survive untouched — an author who wants an interpreter names
+    /// one, and inventing it here would put a word into the Execution Identity
+    /// that nobody wrote.
+    #[test]
+    fn a_v1_bare_script_argv_is_not_rewritten_the_way_v0_3_rewrites_it() {
+        let bare = V1_MINIMAL.replace(r#"["python3", "app.py"]"#, r#"["app.py"]"#);
+        let spec = derive_build_spec_v1(&v1(&bare), &python_probe()).expect("derives");
+        assert_eq!(spec.resolved_argv, ["app.py"]);
+
+        // The v0.3 path, same input shape, DOES rewrite it — so this is a real
+        // divergence between the two surfaces, not an untested coincidence.
+        let legacy = derive_build_spec(
+            &CapsuleManifest::from_toml(&base_toml().replace("python3 app.py", "app.py"))
+                .expect("v0.3 manifest parses"),
+            &python_probe(),
+        )
+        .expect("derives");
+        assert_eq!(legacy.start_cmd, "python3 app.py");
+    }
+
+    /// The launch line must round-trip through the guest shell to the SAME
+    /// argv, including a word containing a space, a single quote, and an empty
+    /// word. This is asserted by actually running `/bin/sh` over the emitted
+    /// line rather than by eyeballing the quoting.
+    #[cfg(unix)]
+    #[test]
+    fn the_emitted_launch_line_parses_back_to_the_exact_argv() {
+        let argv: Vec<String> = vec![
+            "python3".into(),
+            "my app.py".into(),
+            "it's".into(),
+            String::new(),
+            "--flag=a b".into(),
+        ];
+        let line = launch_argv_line(&argv);
+        let words = line
+            .strip_suffix(" >/tmp/app.log 2>&1 &")
+            .expect("the launch line ends with the redirect");
+
+        // `printf '%s\0'` writes each argument the shell parsed, NUL-separated,
+        // so the boundaries are readable without guessing.
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf '%s\\0' {words}"))
+            .output()
+            .expect("run /bin/sh");
+        assert!(out.status.success(), "{:?}", out);
+        let mut parsed: Vec<String> = String::from_utf8(out.stdout)
+            .expect("utf8")
+            .split('\0')
+            .map(String::from)
+            .collect();
+        parsed.pop(); // trailing empty piece after the final NUL
+
+        assert_eq!(parsed, argv);
+    }
+
+    /// A newline in an argv word could break out of the single quoting or the
+    /// heredoc delimiter, so it is refused at derivation rather than escaped at
+    /// emission.
+    #[test]
+    fn a_control_character_in_the_argv_is_refused() {
+        let evil = V1_MINIMAL.replace(
+            r#"["python3", "app.py"]"#,
+            r#"["python3", "app.py\nINIT\nrm -rf /"]"#,
+        );
+        let error = derive_build_spec_v1(&v1(&evil), &python_probe()).expect_err("must refuse");
+        assert!(error.contains("newline"), "{error}");
+    }
+
+    /// The generated init and the generated Dockerfile must agree on where the
+    /// source lives — a `WORKDIR` the init does not `cd` into would launch the
+    /// argv from the wrong directory while the contract recorded the other one.
+    #[test]
+    fn the_v1_script_puts_the_source_and_the_launch_in_the_same_directory() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+
+        assert!(
+            assemble.contains(&format!("WORKDIR {V1_GUEST_WORKING_DIRECTORY}")),
+            "{assemble}"
+        );
+        assert!(
+            export.contains(&format!("cd {V1_GUEST_WORKING_DIRECTORY}")),
+            "{export}"
+        );
+        // And it launches the argv directly — no `sh -lc` re-parsing.
+        assert!(
+            export.contains("'python3' 'app.py' >/tmp/app.log"),
+            "{export}"
+        );
+        assert!(
+            !export.contains("/bin/sh -lc 'python3 app.py'"),
+            "the v1 init must not re-parse a joined command: {export}"
+        );
+    }
+
+    const PINNED_BASE: &str = "docker.io/library/python@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /// The image is built FROM the digest-pinned reference the lane resolved,
+    /// never from the tag the spec derived. A tag can move between the
+    /// resolution that recorded `runtime.digest` and this build, and then the
+    /// contract would name bytes the guest never ran.
+    #[test]
+    fn the_assembled_image_is_built_from_the_pinned_reference() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+
+        assert!(script.contains(&format!("FROM {PINNED_BASE}")), "{script}");
+        assert_eq!(spec.base_image, "python:3.11-slim");
+        assert!(
+            !script.contains("FROM python:3.11-slim"),
+            "the mutable tag must not reach the Dockerfile: {script}"
+        );
+    }
+
+    /// The author's own `Dockerfile` must reach the guest unchanged, and the
+    /// generated one must not reach it at all.
+    ///
+    /// Writing the generated Dockerfile into the copied tree — which is what
+    /// v0.3 does, harmlessly, because it claims nothing about the guest's
+    /// contents — would overwrite an author's file and then ship Ato's
+    /// three-liner to `/app`. `source.digest` would then commit a tree the
+    /// guest does not have.
+    #[test]
+    fn the_generated_dockerfile_never_enters_the_guest() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+
+        // The projection lands in a subdirectory; the Dockerfile sits beside it.
+        assert!(
+            script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/src/""#),
+            "{script}"
+        );
+        assert!(script.contains(r#"cat > "$BUILD/Dockerfile""#), "{script}");
+        assert!(
+            !script.contains(r#"cp -a "$ATO_SRC/." "$BUILD/""#),
+            "the projection must not be copied to the context root, where the \
+             generated Dockerfile would overwrite the author's: {script}"
+        );
+        // And only the projection is copied into the guest.
+        assert!(
+            script.contains(&format!("COPY src/. {V1_GUEST_WORKING_DIRECTORY}/")),
+            "{script}"
+        );
+        assert!(
+            !script.contains(&format!("COPY . {V1_GUEST_WORKING_DIRECTORY}")),
+            "COPY . would ship the generated Dockerfile to the guest: {script}"
+        );
+    }
+
+    /// Every step must drive the SAME container tool.
+    ///
+    /// The resolution and the measurement go through one tool's local image
+    /// store; building through another's would look up a digest in a store that
+    /// does not hold the image the build produced. The scripts used to hardcode
+    /// `docker` while the CLI probed for `podman` first — a host with podman and
+    /// no docker would have failed at the build, and a host with both would have
+    /// measured one image and packed another.
+    #[test]
+    fn every_step_drives_the_probed_tool() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        for tool in ["docker", "podman"] {
+            let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, tool);
+            let pack = export_guest_rootfs_script_v1(&spec, tool);
+            assert!(
+                assemble.contains(&format!("{tool} build -q -t")),
+                "{assemble}"
+            );
+            for verb in ["create", "export", "rm -f", "rmi -f"] {
+                assert!(
+                    pack.contains(&format!("{tool} {verb}")),
+                    "{tool} {verb}: {pack}"
+                );
+            }
+            if tool != "docker" {
+                assert!(!assemble.contains("docker "), "{assemble}");
+                assert!(!pack.contains("docker "), "{pack}");
+            }
+        }
+    }
+
+    /// The pack pins what it can of the ARTIFACT — a stable UUID, a stable hash
+    /// seed, fixed superblock clocks.
+    ///
+    /// None of it bears on the Execution Identity, which commits the guest's
+    /// contents (`crate::guest_filesystem_digest`) precisely because the image
+    /// cannot be made byte-stable: `mke2fs` stamps every inode with the wall
+    /// clock. This is a check that the recipe still asks for the controls that
+    /// DO work, so an artifact differs only where it must and stays cheap to
+    /// cache and to diff. It is not, and must not be read as, a claim of
+    /// byte-equality.
+    #[test]
+    fn the_pack_pins_what_it_can_of_the_artifact_without_claiming_byte_equality() {
+        let script = mkfs_guest_rootfs_script_v1(512);
+
+        // The two values mke2fs would otherwise draw at random.
+        assert!(script.contains(r#"-U "$ATO_FS_UUID""#), "{script}");
+        assert!(
+            script.contains(r#"-E hash_seed="$ATO_FS_UUID""#),
+            "{script}"
+        );
+        // The superblock clocks. mke2fs does NOT honour SOURCE_DATE_EPOCH —
+        // measured on e2fsprogs 1.47.0, where two runs ten seconds apart
+        // produced two "Filesystem created" values ten seconds apart — so they
+        // are set afterwards through debugfs, which recomputes the superblock
+        // checksum that a raw byte patch would invalidate.
+        for field in ["mkfs_time", "lastcheck", "wtime"] {
+            assert!(
+                script.contains(&format!("set_super_value {field} {V1_GUEST_IMAGE_EPOCH}")),
+                "{field}: {script}"
+            );
+        }
+        // SOURCE_DATE_EPOCH belongs on debugfs and NOT on mke2fs, and the
+        // difference is measured rather than stylistic: mke2fs ignores it (its
+        // `s_mkfs_time` was wall-clock with it set), while debugfs stamps
+        // `s_wtime` from `fs->now` as it flushes and would otherwise overwrite
+        // the value it was just told to set. Putting it back on mke2fs would
+        // read as a control that works.
+        assert!(
+            script.contains(&format!("SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} debugfs")),
+            "{script}"
+        );
+        assert!(
+            !script.contains("SOURCE_DATE_EPOCH={V1_GUEST_IMAGE_EPOCH} mkfs"),
+            "{script}"
+        );
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(
+            export.contains(&format!(r#"-exec touch -h -d @{V1_GUEST_IMAGE_EPOCH}"#)),
+            "{export}"
+        );
+        // And the allocation order: populated by mke2fs, not by the running
+        // kernel through a loop mount.
+        assert!(script.contains(r#"-d "$ATO_ROOTFS""#), "{script}");
+        assert!(
+            !script.contains("mount -o loop"),
+            "a loop mount leaves allocation to the running kernel: {script}"
+        );
+        assert!(!script.contains(r#"cp -a "$BUILD/rootfs/.""#), "{script}");
+    }
+
+    /// v0.3 keeps its mount-and-copy pack, byte for byte. It makes no claim
+    /// about what its image IS, so the determinism work does not apply to it —
+    /// and changing a working producer to share one would be a regression risk
+    /// taken for nothing.
+    #[test]
+    fn the_v03_pack_is_unchanged() {
+        let manifest = CapsuleManifest::from_toml(&base_toml()).expect("v0.3 manifest");
+        let script = build_rootfs_script(
+            &derive_build_spec(&manifest, &python_probe()).expect("derives"),
+            512,
+        );
+        assert!(script.contains("mkfs.ext4 -q -F \"$ATO_OUT\""), "{script}");
+        assert!(script.contains("mount -o loop"), "{script}");
+        assert!(!script.contains("SOURCE_DATE_EPOCH"), "{script}");
+    }
+
+    /// The UUID is a function of the build's inputs: stable for one program,
+    /// distinct between programs. A constant shared by every capsule would make
+    /// two different images collide for anything resolving a device by UUID;
+    /// a random one would put entropy into the identity.
+    #[test]
+    fn the_filesystem_uuid_is_derived_from_the_builds_own_inputs() {
+        let argv = vec!["python3".to_string(), "app.py".to_string()];
+        let uuid =
+            |source: &str, base: &str, argv: &[String]| v1_filesystem_uuid(source, base, argv);
+
+        let baseline = uuid("sha256:aa", PINNED_BASE, &argv);
+        assert_eq!(baseline, uuid("sha256:aa", PINNED_BASE, &argv), "stable");
+        assert!(is_uuid(&baseline), "{baseline}");
+
+        // Each input moves it.
+        assert_ne!(baseline, uuid("sha256:bb", PINNED_BASE, &argv));
+        assert_ne!(baseline, uuid("sha256:aa", "docker.io/x@sha256:ff", &argv));
+        assert_ne!(
+            baseline,
+            uuid("sha256:aa", PINNED_BASE, &["python3".to_string()])
+        );
+        // And argv boundaries are not lost to concatenation.
+        assert_ne!(
+            uuid("sha256:aa", PINNED_BASE, &["a".into(), "b".into()]),
+            uuid("sha256:aa", PINNED_BASE, &["ab".into()])
+        );
+    }
+
+    /// A malformed UUID is refused rather than handed to `mke2fs`.
+    #[test]
+    fn the_pack_refuses_a_uuid_it_did_not_derive() {
+        let out = tempfile::tempdir().expect("tempdir");
+        let error = mkfs_guest_rootfs_v1(
+            &out.path().join("rootfs"),
+            &out.path().join("guest.img"),
+            512,
+            "not-a-uuid",
+        )
+        .expect_err("refused");
+        assert!(error.contains("canonical"), "{error}");
+        assert!(is_uuid("0123abcd-4567-89ef-0123-456789abcdef"));
+        assert!(
+            !is_uuid("0123ABCD-4567-89ef-0123-456789abcdef"),
+            "uppercase"
+        );
+        assert!(!is_uuid("0123abcd-4567-89ef-0123-456789abcde"), "short");
+    }
+
+    /// The assemble half must leave the image behind — the whole reason the
+    /// pipeline is split is so `measure_guest_target` can inspect the artifact
+    /// the guest boots, and an `rmi` here would delete it first.
+    #[test]
+    fn assembling_does_not_remove_the_image_but_packing_does() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+
+        let assemble = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        assert!(
+            !assemble.contains("rmi"),
+            "the assembled image must survive for measurement: {assemble}"
+        );
+
+        // The EXPORT half is the last user of the image, so it cleans it up.
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(export.contains("rmi -f \"$TAG\""), "{export}");
+        assert!(export.contains("TAG=\"$ATO_IMAGE\""), "{export}");
+        // And the mkfs half never refers to the image at all: by then the
+        // filesystem is an exported tree that has already been digested.
+        assert!(!mkfs_guest_rootfs_script_v1(512).contains("ATO_IMAGE"));
+    }
+
+    /// The two halves that handle the image must name the same one, or the
+    /// export would unpack whatever else happened to carry that tag.
+    #[test]
+    fn both_image_halves_address_it_through_the_same_variable() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        assert!(
+            assemble_app_image_script_v1(&spec, PINNED_BASE, "docker")
+                .contains("docker build -q -t \"$ATO_IMAGE\""),
+        );
+        assert!(export_guest_rootfs_script_v1(&spec, "docker").contains("TAG=\"$ATO_IMAGE\""));
+    }
+
+    /// The base reference is interpolated into the generated Dockerfile, so a
+    /// newline in it could add a `RUN` line the author never wrote. It is
+    /// refused before any script is generated, not escaped at emission — and
+    /// the refusal happens before docker is ever spawned.
+    #[test]
+    fn a_control_character_in_an_image_reference_is_refused() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        let source = tempfile::tempdir().expect("tempdir");
+
+        let error = assemble_app_image_v1(
+            source.path(),
+            &spec,
+            "python@sha256:aaa\nRUN rm -rf /",
+            "ato-v1-test",
+            "docker",
+        )
+        .expect_err("a newline in the base ref is refused");
+        assert!(error.contains("newline"), "{error}");
+
+        let error = assemble_app_image_v1(
+            source.path(),
+            &spec,
+            PINNED_BASE,
+            "ato-v1-test\nRUN rm -rf /",
+            "docker",
+        )
+        .expect_err("a newline in the image ref is refused");
+        assert!(error.contains("newline"), "{error}");
+    }
+
+    /// The image reference reaches the script only as an environment variable
+    /// inside double quotes — it is never interpolated into the script text, so
+    /// a metacharacter in a tag cannot become shell syntax.
+    #[test]
+    fn the_image_reference_is_never_interpolated_into_the_script() {
+        let spec = derive_build_spec_v1(&v1(V1_MINIMAL), &python_probe()).expect("derives");
+        // Both scripts that touch the image are generated without knowing the
+        // reference at all — it arrives only as an environment variable.
+        for script in [
+            assemble_app_image_script_v1(&spec, PINNED_BASE, "docker"),
+            export_guest_rootfs_script_v1(&spec, "docker"),
+        ] {
+            assert!(script.contains("$ATO_IMAGE"), "{script}");
+        }
+    }
+
+    /// An observed prefix and an unmeasured one must not be spellable the same
+    /// way: the empty vector is reachable only through the constructor that
+    /// says the runtime prepends nothing.
+    #[test]
+    fn an_empty_observed_prefix_must_name_which_emptiness_it_is() {
+        assert!(ObservedInvocationPrefix::observed(Vec::new()).is_err());
+        assert_eq!(
+            ObservedInvocationPrefix::observed(vec!["uv".into(), "run".into()])
+                .expect("a real prefix")
+                .words(),
+            ["uv", "run"]
+        );
+        assert!(ObservedInvocationPrefix::observed_none().words().is_empty());
+    }
+
     fn base_toml() -> String {
         r#"
 schema_version = "0.3"
@@ -2170,6 +3663,132 @@ readiness_probe = { http_get = "/health" }
                 .unwrap_err()
                 .contains("..")
         );
+    }
+
+    /// Commit a `git init`ed tree with pinned identity/dates and no ambient config, so
+    /// the only thing that can differ between two such repos is `.git`'s own
+    /// machine-dependent state (chiefly `.git/index`'s per-file stat data).
+    fn commit_local_repo(dir: &Path, files: &[(&str, &str)]) {
+        for (rel, body) in files {
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create source parent dir");
+            }
+            std::fs::write(&path, body).expect("write source file");
+        }
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                // Isolate from the developer's global/system config (signing, hooks,
+                // autocrlf, default branch) so both repos are built identically.
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "ato")
+                .env("GIT_AUTHOR_EMAIL", "ato@example.invalid")
+                .env("GIT_COMMITTER_NAME", "ato")
+                .env("GIT_COMMITTER_EMAIL", "ato@example.invalid")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00+0000")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00+0000")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "pinned"]);
+    }
+
+    #[test]
+    fn pinned_checkouts_of_identical_content_hash_identically() {
+        // The regression this closes: `git_checkout_pinned` used to leave its own `.git`
+        // in the tree callers receive, and A1v2 hashes a ROOT `.git` as an ordinary
+        // directory — so `materialized_source_tree_hash`, an identity-bearing value
+        // (`ExecutionContractV1.source.digest`, the source_materialize ack), differed
+        // between two checkouts of byte-identical source.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let files = [
+            ("capsule.toml", "name = \"demo\"\n"),
+            ("app.py", "print('hi')\n"),
+            ("static/index.html", "<h1>hi</h1>\n"),
+        ];
+        commit_local_repo(a.path(), &files);
+        commit_local_repo(b.path(), &files);
+        assert!(a.path().join(".git").is_dir() && b.path().join(".git").is_dir());
+
+        remove_checkout_git_metadata(a.path()).unwrap();
+        remove_checkout_git_metadata(b.path()).unwrap();
+
+        let ha = capsule::blob::materialized_source_tree_hash(a.path()).unwrap();
+        let hb = capsule::blob::materialized_source_tree_hash(b.path()).unwrap();
+        assert_eq!(
+            ha, hb,
+            "two checkouts of the same content must yield the same A1v2 tree hash"
+        );
+        assert!(ha.starts_with("sha256:"), "{ha}");
+    }
+
+    #[test]
+    fn root_git_metadata_removal_is_what_makes_the_hash_agree() {
+        // The same proof without git: two trees whose SOURCE bytes match but whose root
+        // `.git` differs (as real ones always do — `.git/index` carries per-file stat
+        // data) hash DIFFERENTLY before the removal and identically after, so the
+        // regression test above cannot pass vacuously.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for (dir, index_bytes) in [(a.path(), "stat-data-a"), (b.path(), "stat-data-b")] {
+            std::fs::write(dir.join("app.py"), "print('hi')\n").unwrap();
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            std::fs::write(dir.join(".git").join("index"), index_bytes).unwrap();
+            std::fs::write(dir.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        }
+        let before_a = capsule::blob::materialized_source_tree_hash(a.path()).unwrap();
+        let before_b = capsule::blob::materialized_source_tree_hash(b.path()).unwrap();
+        assert_ne!(
+            before_a, before_b,
+            "a retained root .git must be what perturbs the hash"
+        );
+
+        remove_checkout_git_metadata(a.path()).unwrap();
+        remove_checkout_git_metadata(b.path()).unwrap();
+        assert_eq!(
+            capsule::blob::materialized_source_tree_hash(a.path()).unwrap(),
+            capsule::blob::materialized_source_tree_hash(b.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn source_root_carries_no_git_metadata_with_or_without_a_subdir() {
+        // Both source roots `contained_source_root` can return must be `.git`-free: the
+        // checkout root itself (no subdir — reachable for any capsule at the repo root)
+        // and a subdir root. A NESTED `.git` is left alone: A1v2 rejects it as a
+        // submodule signal and removing it would hide that.
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(root.join("app").join("vendor").join(".git")).unwrap();
+        std::fs::write(root.join("app").join("capsule.toml"), b"x").unwrap();
+
+        remove_checkout_git_metadata(root).unwrap();
+
+        let no_subdir = contained_source_root(root, None, false).unwrap();
+        assert!(!no_subdir.join(".git").exists());
+        let subdir = contained_source_root(root, Some("app"), true).unwrap();
+        assert!(!subdir.join(".git").exists());
+        assert!(
+            subdir.join("vendor").join(".git").is_dir(),
+            "a nested .git is a submodule signal A1v2 must still see"
+        );
+
+        // Idempotent + absent-is-fine: re-running on a tree with no `.git` is not an error.
+        remove_checkout_git_metadata(root).unwrap();
     }
 
     #[test]

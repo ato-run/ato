@@ -1,7 +1,8 @@
 //! Share specification, lock, and runtime state types.
 //!
 //! These types define the wire format for `share.spec.json`, `share.lock.json`,
-//! and `state.json` used by `ato encap`, `ato decap`, `ato run <share>`, and
+//! and `state.json` used by `ato workspace share`, `ato workspace setup`,
+//! `ato run <share>`, and
 //! ato-desktop's share URL execution path.
 
 use serde::{Deserialize, Serialize};

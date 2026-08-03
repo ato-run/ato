@@ -527,6 +527,23 @@ fn dock_runtime(cx: &mut App) -> Result<Arc<Mutex<DockRuntimeState>>> {
     Ok(entity.update(cx, |view, _cx| view.runtime_state.clone()))
 }
 
+/// Returns a handle to the Dock's live event queue, if the Dock window is
+/// currently open. Events pushed onto it reach the Dock WebView's
+/// `window.__ATO_DOCK_EVENT__` callback via the existing ~20/sec drain loop
+/// (`spawn_dock_event_loop`).
+///
+/// The returned `Arc<Mutex<..>>` needs no further GPUI access, so callers may
+/// clone it and push events from a background thread (e.g. while watching a
+/// spawned child process's stdout) as well as from the GPUI foreground
+/// thread.
+pub fn dock_event_queue(cx: &mut App) -> Result<Arc<Mutex<Vec<Value>>>> {
+    let runtime = dock_runtime(cx)?;
+    let guard = runtime
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Dock runtime lock poisoned"))?;
+    Ok(guard.event_queue.clone())
+}
+
 fn spawn_dock_event_loop(cx: &mut App, queue: DockEventQueue, host: AnyWindowHandle) {
     let async_app = cx.to_async();
     let fe = async_app.foreground_executor().clone();

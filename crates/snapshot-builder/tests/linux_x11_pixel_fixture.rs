@@ -6,7 +6,7 @@ const HEALTH_SCRIPT: &str = include_str!("../fixtures/linux-x11-pixel/health.py"
 fn fixture_pins_linux_image_and_declares_the_curated_mvp_stack() {
     let first_line = DOCKERFILE.lines().next().expect("Dockerfile has FROM");
     assert!(first_line.starts_with("FROM docker.io/library/ubuntu:24.04@sha256:"));
-    for component in ["xvfb", "openbox", "x11vnc", "xterm"] {
+    for component in ["xvfb", "openbox", "tigervnc-scraping-server", "xterm"] {
         assert!(
             DOCKERFILE.to_ascii_lowercase().contains(component),
             "missing {component}"
@@ -14,7 +14,6 @@ fn fixture_pins_linux_image_and_declares_the_curated_mvp_stack() {
     }
     assert!(START_SCRIPT.contains("1280x720x24"));
     assert!(START_SCRIPT.contains("setxkbmap -display \"$DISPLAY\" us"));
-    assert!(START_SCRIPT.contains("-wait 33"));
 }
 
 #[test]
@@ -53,7 +52,8 @@ fn fixture_generates_no_session_or_vnc_credentials_before_seal() {
             "fixture must not generate or embed {forbidden_marker}"
         );
     }
-    assert!(START_SCRIPT.contains("-nopw"));
-    assert!(START_SCRIPT.contains("-noclipboard"));
-    assert!(START_SCRIPT.contains("-nosetclipboard"));
+    // TigerVNC's scraping server: no password prompt path at all; the
+    // credential-free contract is the explicit no-auth security type (the
+    // host gateway owns session authorization after restore).
+    assert!(START_SCRIPT.contains("-SecurityTypes None"));
 }

@@ -16,8 +16,8 @@ use super::project::{ProjectCommands, ScaffoldCommands};
 use super::receipts::ReceiptsCommands;
 use super::registry::RegistryCommands;
 use super::shared::{
-    CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, GitMode, ProviderToolchain,
-    RunAgentMode, ShareToolRuntime, cli_styles,
+    CacheStrategyArg, CompatibilityFallbackBackend, EnforcementMode, ProviderToolchain,
+    RunAgentMode, cli_styles,
 };
 use super::source::SourceCommands;
 use super::state::StateCommands;
@@ -330,81 +330,6 @@ pub(crate) enum Commands {
         command: WorkspaceCommands,
     },
 
-    #[command(
-        hide = true,
-        about = "Share your current workspace (deprecated: use `ato workspace share`)"
-    )]
-    Encap {
-        /// Local workspace path to capture (default: current directory)
-        #[arg(default_value = ".")]
-        path: PathBuf,
-
-        /// Upload with organisation-internal visibility (conflicts with --private, --local)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["private", "local"])]
-        internal: bool,
-
-        /// Upload with private visibility — authenticated owner only (conflicts with --internal, --local)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "local"])]
-        private: bool,
-
-        /// Write local outputs only; do not upload (conflicts with --internal, --private)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "private"])]
-        local: bool,
-
-        /// Print the detected capture plan without writing files
-        #[arg(long, default_value_t = false)]
-        print_plan: bool,
-
-        /// Scan workspace for secret patterns and show what would be included; no files written
-        #[arg(long, default_value_t = false)]
-        dry_run: bool,
-
-        /// How to resolve the git revision: same-commit (default) or latest-at-encap
-        #[arg(long, value_enum, default_value_t = GitMode::SameCommit)]
-        git_mode: GitMode,
-
-        /// Runtime strategy for install steps: auto (default), ato, or system
-        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
-        tool_runtime: ShareToolRuntime,
-
-        /// Allow encap even when repositories have uncommitted changes
-        #[arg(long, default_value_t = false)]
-        allow_dirty: bool,
-
-        /// Accept all detected items without prompting (CI-friendly)
-        #[arg(long, short = 'y', default_value_t = false)]
-        yes: bool,
-
-        /// Write detected share settings to capsule.toml [share] after capture
-        #[arg(long, default_value_t = false)]
-        save_config: bool,
-    },
-
-    #[command(
-        hide = true,
-        about = "Materialize a shared workspace descriptor into a target directory (deprecated: use `ato workspace setup`)"
-    )]
-    Decap {
-        /// Share URL, share.spec.json, or share.lock.json
-        input: String,
-
-        /// Target directory to materialize into
-        #[arg(long, value_name = "PATH")]
-        into: PathBuf,
-
-        /// Print the materialization plan without executing it
-        #[arg(long, default_value_t = false)]
-        plan: bool,
-
-        /// Runtime strategy for install steps: auto (default), ato, or system
-        #[arg(long, value_enum, default_value_t = ShareToolRuntime::Auto)]
-        tool_runtime: ShareToolRuntime,
-
-        /// Treat any verification issue as a fatal error (exit 1)
-        #[arg(long, default_value_t = false)]
-        strict: bool,
-    },
-
     #[command(hide = true, about = "Register a durable local app from the store")]
     Install {
         /// Capsule scoped ID (publisher/slug)
@@ -617,7 +542,7 @@ pub(crate) enum Commands {
 
     #[command(
         hide = true,
-        about = "Materialize a durable ato.lock.json baseline for a local workspace"
+        about = "Materialize a durable capsule.lock baseline for a local workspace"
     )]
     Init {
         /// Local workspace path to initialize
@@ -938,9 +863,11 @@ pub(crate) enum Commands {
         token: Option<String>,
         #[arg(long, default_value_t = false)]
         headless: bool,
-        /// Emit NDJSON events instead of opening a browser (used by ato-desktop).
-        #[arg(long = "desktop-webview", hide = true, default_value_t = false)]
-        desktop_webview: bool,
+        /// Non-interactive login with NDJSON progress on stdout (used when
+        /// ato-desktop spawns this as a child process with no TTY). Opens
+        /// the OS default browser exactly like plain `ato login`.
+        #[arg(long = "desktop", hide = true, default_value_t = false)]
+        desktop: bool,
     },
 
     #[command(hide = true, about = "Logout")]

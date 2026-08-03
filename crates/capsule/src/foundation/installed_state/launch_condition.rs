@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! capsule.toml              = app-owned declaration
-//! ato.lock / capsule lock   = portable resolved description
+//! capsule.lock (canonical)   = portable resolved description
 //! Installed-State DB        = device/provider-local SOT for installed-app
 //!                             launch conditions
 //! ```

@@ -411,7 +411,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
+    use tokio::{net::TcpListener, time::sleep};
 
     async fn fixture_server(security_types: Vec<u8>) -> SocketAddr {
         fixture_server_with_input(security_types, false).await
@@ -423,6 +423,15 @@ mod tests {
     ) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        spawn_fixture_server(listener, security_types, expect_pointer_input);
+        addr
+    }
+
+    fn spawn_fixture_server(
+        listener: TcpListener,
+        security_types: Vec<u8>,
+        expect_pointer_input: bool,
+    ) {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             stream.write_all(RFB_3_8_VERSION).await.unwrap();
@@ -468,7 +477,6 @@ mod tests {
                 .unwrap();
             stream.write_all(&[0_u8; 4]).await.unwrap();
         });
-        addr
     }
 
     struct TestAuthorizer;
@@ -506,6 +514,7 @@ mod tests {
         PixelGatewayConfig {
             listen_addr,
             private_rfb_addr,
+            private_rfb_connect_timeout: Duration::from_secs(2),
             scope: crate::pixel_gateway::PixelGatewayScope {
                 session_id: "session-1".to_string(),
                 surface_id: "surface-1".to_string(),
@@ -592,6 +601,33 @@ mod tests {
         assert_eq!(frame.width, 2);
         assert_eq!(frame.height, 1);
         assert_eq!(frame.bytes, 8);
+        gateway.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn authenticated_gateway_probe_retries_until_private_rfb_starts() {
+        let private_rfb_addr = reserved_listen_addr().await;
+        let listen_addr = reserved_listen_addr().await;
+        let ready_url = format!("http://{listen_addr}/");
+        let config = gateway_config(listen_addr, private_rfb_addr);
+        let delayed_server = tokio::spawn(async move {
+            sleep(Duration::from_millis(150)).await;
+            let listener = TcpListener::bind(private_rfb_addr).await.unwrap();
+            spawn_fixture_server(listener, vec![SECURITY_TYPE_NONE], true);
+        });
+        let request = PixelGatewayProbeRequest::new(&ready_url, "http://localhost:5173", "valid");
+
+        let (gateway, frame) = start_ready_pixel_gateway(
+            config,
+            Arc::new(TestAuthorizer),
+            request,
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("gateway probe should retry while the private RFB endpoint starts");
+
+        delayed_server.await.unwrap();
+        assert_eq!(frame.width, 2);
         gateway.stop().await.unwrap();
     }
 

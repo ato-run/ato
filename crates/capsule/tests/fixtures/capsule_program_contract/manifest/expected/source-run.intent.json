@@ -1,0 +1,20 @@
+{
+  "capsule_type": "app",
+  "default_target": "app",
+  "schema": "ato.capsule-program-manifest-intent/v1",
+  "services": {
+    "main": {
+      "entrypoint": "node server.js"
+    }
+  },
+  "targets": {
+    "targets": {
+      "app": {
+        "driver": "node",
+        "port": 8082,
+        "run_command": "node server.js",
+        "runtime": "source"
+      }
+    }
+  }
+}

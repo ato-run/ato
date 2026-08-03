@@ -61,6 +61,163 @@ pub struct SnapshotConfig {
     /// cannot meet it. `None` means unspecified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_restore_seconds: Option<u32>,
+
+    /// User-facing paths the build must warm up before sealing the snapshot —
+    /// each path receives an HTTP GET (after the healthcheck answers) so the
+    /// sealed memory already contains the user's first-screen work (template
+    /// generation, JIT, DB init, First Frame prep). Empty ⇒ unchanged v1
+    /// behavior (healthcheck-only seal point). Each path must start with `/`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warmup_paths: Vec<String>,
+
+    /// Consecutive stable successes required across `warmup_paths` (plus the
+    /// healthcheck) before the Pause+Snapshot. `1` reuses the v1 behavior: the
+    /// first 2xx/3xx of every path is enough. Higher values reduce the chance
+    /// the snapshot captures a half-started state (a server that answers /
+    /// once then reloads routes, for instance) at the cost of build time.
+    #[serde(
+        default = "default_stable_successes",
+        skip_serializing_if = "is_default_stable_successes"
+    )]
+    pub stable_successes: u32,
+
+    /// Polling interval between stability checks, in milliseconds. Default 250.
+    #[serde(
+        default = "default_stable_interval_ms",
+        skip_serializing_if = "is_default_stable_interval_ms"
+    )]
+    pub stable_interval_ms: u64,
+
+    /// The path the runner hits to judge RESTORE readiness — i.e. the path the
+    /// browser actually loads first. Defaults to `healthcheck`, then `/` when
+    /// neither is set. Without this, runners report "ready" after only `/health`
+    /// answers, while the user's first request to `/` still hits template/DB
+    /// init that was NOT in the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ready_path: Option<String>,
+}
+
+/// `[seal_at]` — the Capsule-authored Snapshot acceptance program
+/// (`CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §6/§6.3).
+///
+/// `command` is an arbitrary verification program (an HTTP request, an API
+/// workflow, browser automation, a database-init check, …). Ato interprets ONLY
+/// its process result: exit 0 accepts the candidate Snapshot, any other exit
+/// status or a timeout rejects it (§6.3). There is deliberately no Ato-specific
+/// HTTP / gate / readiness-level / publish-at DSL here.
+///
+/// It is evaluated against a **disposable restore** of an immutable candidate,
+/// never against the build guest whose state is sealed (§8.1), so what this
+/// command does cannot enter the accepted Snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SealAtConfig {
+    /// Exact argv, executed with no implicit shell; argument boundaries are
+    /// preserved exactly (§6.1). Shell behavior is available only through an
+    /// explicitly selected shell in the argv, e.g. `["sh", "-lc", "…"]`.
+    pub command: Vec<String>,
+
+    /// Per-attempt verification timeout. MUST be positive and bounded by
+    /// platform policy (§6.1) — see [`MAX_SEAL_AT_TIMEOUT_SECONDS`]. `None`
+    /// leaves the bound to the acceptance-loop default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
+}
+
+/// Platform-policy ceiling for `seal_at.timeout_seconds` (§6.1: "bounded by
+/// platform policy").
+///
+/// Kept in lockstep with the ceiling this repo already expresses for a per-job
+/// builder timeout — `snapshot::firecracker::MAX_JOB_BOOT_TIMEOUT_S` and
+/// `snapshot-builder`'s `MAX_BOOT_TIMEOUT_S`, both 600 s with the same
+/// rationale: a single build job must not be able to pin the builder
+/// indefinitely. `seal_at` verification runs inside that same build job, so it
+/// inherits that job's ceiling rather than introducing a second policy number.
+pub const MAX_SEAL_AT_TIMEOUT_SECONDS: u32 = 600;
+
+/// Validate an authored `[seal_at]` table per §6.1/§6.3, naming the offender.
+///
+/// Shared by manifest validation and any producer that reads the table
+/// directly, so both reject the same inputs. The argv rules mirror
+/// `snapshot::acceptance`'s `AcceptanceConfig` contract exactly (argv[0] is the
+/// program and must be non-empty; later arguments MAY be empty strings — a real
+/// argv element; no argument may contain a NUL, which no exec boundary carries).
+pub fn validate_seal_at(seal_at: &SealAtConfig) -> Result<(), String> {
+    if seal_at.command.is_empty() {
+        return Err("seal_at.command must be a non-empty argv array".to_string());
+    }
+    if seal_at.command[0].is_empty() {
+        return Err("seal_at.command[0] (the program) must not be empty".to_string());
+    }
+    if let Some(index) = seal_at
+        .command
+        .iter()
+        .position(|argument| argument.contains('\0'))
+    {
+        return Err(format!(
+            "seal_at.command[{index}] must not contain a NUL byte"
+        ));
+    }
+    match seal_at.timeout_seconds {
+        None => Ok(()),
+        Some(seconds) if (1..=MAX_SEAL_AT_TIMEOUT_SECONDS).contains(&seconds) => Ok(()),
+        Some(seconds) => Err(format!(
+            "seal_at.timeout_seconds must be an integer in 1..={MAX_SEAL_AT_TIMEOUT_SECONDS}, \
+             got {seconds}"
+        )),
+    }
+}
+
+/// v1 warmup stability: the first 2xx/3xx of every path is enough.
+pub const DEFAULT_STABLE_SUCCESSES: u32 = 1;
+/// v1 warmup poll interval between stability rounds.
+pub const DEFAULT_STABLE_INTERVAL_MS: u64 = 250;
+
+fn default_stable_successes() -> u32 {
+    DEFAULT_STABLE_SUCCESSES
+}
+fn default_stable_interval_ms() -> u64 {
+    DEFAULT_STABLE_INTERVAL_MS
+}
+fn is_default_stable_successes(v: &u32) -> bool {
+    *v == DEFAULT_STABLE_SUCCESSES
+}
+fn is_default_stable_interval_ms(v: &u64) -> bool {
+    *v == DEFAULT_STABLE_INTERVAL_MS
+}
+
+/// Is `p` usable as the request-target of the HTTP/1.0 probe the build (warmup)
+/// and the runner (content-ready) send into the guest?
+///
+/// The probe formats `GET {p} HTTP/1.0\r\nHost: …`, so `p` must be origin-form
+/// (leading `/`) and free of any character that would break out of the request
+/// line — a space would shift the version token, a CR/LF would split the request
+/// into two. Rejecting here keeps an authoring typo from surfacing as an opaque
+/// "never stabilized" build failure or a full boot-timeout restore hang.
+pub fn is_valid_probe_path(p: &str) -> bool {
+    p.starts_with('/') && !p.chars().any(|c| c == ' ' || c.is_control())
+}
+
+/// Validate every author-supplied probe path, naming the offender. Shared by the
+/// builder lanes and the snapshot backend so both reject the same inputs.
+pub fn validate_probe_paths(
+    warmup_paths: &[String],
+    content_ready_path: Option<&str>,
+) -> Result<(), String> {
+    for p in warmup_paths {
+        if !is_valid_probe_path(p) {
+            return Err(format!(
+                "warmup_paths: {p:?} is not a valid probe path \
+                 (must start with `/` and contain no spaces or control characters)"
+            ));
+        }
+    }
+    match content_ready_path {
+        Some(p) if !is_valid_probe_path(p) => Err(format!(
+            "content_ready_path: {p:?} is not a valid probe path \
+             (must start with `/` and contain no spaces or control characters)"
+        )),
+        _ => Ok(()),
+    }
 }
 
 impl Default for SnapshotConfig {
@@ -71,6 +228,10 @@ impl Default for SnapshotConfig {
             sanitize_after_restore: true,
             runner_class: None,
             max_restore_seconds: None,
+            warmup_paths: Vec::new(),
+            stable_successes: default_stable_successes(),
+            stable_interval_ms: default_stable_interval_ms(),
+            content_ready_path: None,
         }
     }
 }

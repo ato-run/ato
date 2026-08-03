@@ -1,0 +1,101 @@
+name: cli unit tests
+
+# Focused gate for the `cli` crate's own unit tests.
+#
+# The workspace `rust-ci.yml` only runs on PRs to `main` / `dev`, so 0.7 feature
+# PRs targeting `nightly` (where the 0.7 line integrates) get no Rust test job
+# for `crates/cli` at all — the pollution-lint and dep-direction workflows are
+# the only checks a cli-touching nightly PR triggers, and neither runs a test.
+# Concretely, ato-run/ato#1114 adds unit tests to
+# crates/cli/src/application/pipeline/phases/run.rs and CI never runs them.
+#
+# Rather than widen `rust-ci.yml`'s branch filter to `nightly` (which would drag
+# the whole workspace's pre-existing fmt/clippy debt into every nightly PR),
+# this path-filtered workflow runs exactly the cli crate's own gates on any PR
+# that touches `crates/cli` — mirroring `capsule-contract-ci.yml`.
+#
+# Deliberately NOT gated here (each verified on nightly):
+#  - `cargo fmt -p cli -- --check`: crates/cli carries 19 pre-existing rustfmt
+#    diffs on `nightly`. A fmt gate would be red on arrival and train reviewers
+#    to ignore it; fixing those 19 files is a separate cleanup, not this gate.
+#  - the heavier end-to-end tests in `crates/cli/tests/**` that spawn
+#    `ato`/`nacelle` and need bubblewrap + PATH + free-disk setup (see
+#    rust-ci.yml's elaborate `test` job). They are integration tests, not
+#    `--lib` unit tests, and stay covered by rust-ci.yml on main/dev.
+#
+# Exception: `share_run_local_e2e` IS gated here. It pins the local-file share
+# contract (the capsule ShareExecutor must materialize via `ato workspace setup
+# --dev`, not the removed `decap`), runs with `--compatibility-fallback host`,
+# and is hermetic (no nacelle, no network) — cheap and CI-stable. The executor
+# it exercises lives in `crates/capsule/src/engine/share/`, so that path is in
+# the filter to trigger this workflow for executor-only PRs.
+
+on:
+  pull_request:
+    paths:
+      - "crates/cli/**"
+      - "crates/capsule/src/engine/share/**"
+      - ".github/workflows/cli-ci.yml"
+  push:
+    branches: [main, dev, nightly]
+    paths:
+      - "crates/cli/**"
+      - "crates/capsule/src/engine/share/**"
+      - ".github/workflows/cli-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  cli-unit-tests:
+    name: cli unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pin to the repo's rust-toolchain.toml channel (1.96.0), as
+      # capsule-contract-ci.yml does. The `@stable` used by rust-ci.yml floats
+      # to the newest stable, whose clippy can diverge from the pinned channel
+      # and surface version-dependent lints; this gate must match the tree's pin.
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Prove the active toolchain is the pinned 1.96.0 (visible in the log).
+      - run: rustc --version && cargo --version
+      # bubblewrap + unprivileged userns: some cli unit tests exercise the Linux
+      # sandbox path (mirrors rust-ci.yml's cli setup). Harmless where unused.
+      - name: Install sandbox deps (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+      # The cli crate's unit tests, deliberately UNFILTERED. `crates/cli` is a
+      # lib + bin: every `#[test]` / `#[tokio::test]` lives in the library
+      # (src/**, e.g. #1114's run.rs tests), which `--lib` runs; the bin
+      # (src/main.rs) has no tests, so `--bins` would run nothing and is omitted.
+      #
+      # No curated module filter, on purpose: a filtered `cargo test` exits 0
+      # when the filter matches NOTHING (libtest has no `--fail-if-no-tests`;
+      # that flag is nextest-only), so a rename would silently retire the gate.
+      # Running the whole lib removes that failure mode by construction, and
+      # staying scoped to `-p cli` keeps unrelated crates' debt out of this gate.
+      - run: cargo test -p cli --lib
+      # Share-contract gate: pins that `ato run <local share file>` still works
+      # on a clean ATO_HOME (materialization via `ato workspace setup --dev`,
+      # content-bound cache identity, digest fail-closed). Hermetic: uses
+      # `--compatibility-fallback host` and never needs nacelle or network.
+      - run: cargo test -p cli --test share_run_local_e2e
+      # The capsule share executor's unit tests (identity / envelope / entry).
+      - run: cargo test -p capsule --lib share
+      # The interactive capture path (PTY) and the run dispatch semantics.
+      - run: cargo test -p cli --test share_encap_interactive_e2e
+      - run: cargo test -p cli --test run_install_semantics
+      # clippy is clean for `-p cli --all-targets` on `nightly` today, so gate
+      # it. Scoped to `-p cli` so it never surfaces pre-existing warnings
+      # elsewhere in the workspace.
+      - run: cargo clippy -p cli --all-targets -- -D warnings

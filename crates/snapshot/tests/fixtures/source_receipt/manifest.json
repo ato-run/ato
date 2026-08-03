@@ -1,0 +1,18 @@
+{
+  "description": "Shared Rust/TypeScript vectors. Both implementations must reproduce canonical_json and digest byte-for-byte. Not called RFC 8785 compatible: the bytes are the contract, not a description of them.",
+  "digest_algorithm": "blake3",
+  "digest_encoding": "lowercase hex, prefixed `blake3:`",
+  "domain_separator": null,
+  "key_order": "object keys sorted; all keys are ASCII so byte order and UTF-16 code-unit order agree",
+  "schema": "ato.source-receipt-vectors/v1",
+  "vector_count": 7,
+  "vectors": [
+    "baseline",
+    "sha256-commit",
+    "codeberg-provider",
+    "unicode-values",
+    "escaped-values",
+    "materialization-baseline",
+    "materialization-zero-size"
+  ]
+}

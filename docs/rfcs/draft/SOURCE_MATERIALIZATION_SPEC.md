@@ -79,11 +79,64 @@ Provided by ato-api when the candidate enters `fetching`:
    A1 `sha256` digest of the admissible tree).
 5. **Archive**: write a deterministic `tar.zst`; compute
    `source_archive_hash = sha256(exact tar.zst bytes)`.
-6. **Upload (API-mediated)**: hand the archive to ato-api for the R2 write at
-   `source-archives/v1/sha256/{source_archive_hash}.tar.zst`. The builder does
-   not hold R2 credentials; the write is mediated by the API.
+6. **Upload (API-mediated)**: the builder asks ato-api to authorize the write
+   and receives a short-lived presigned `PUT` for exactly one object key. The
+   builder never holds R2 credentials and never names the object: ato-api
+   derives the key from the archive digest.
+
+   ```text
+   source-archives/{algorithm}/{digest}
+   ```
+
+   This is the implemented and authoritative form — `object_key_for_archive`
+   (Rust), `expectedObjectKey` (TypeScript), and the
+   `source_materializations_object_key_ck` CHECK in ato-api drizzle/0131 all
+   derive it identically, so a locator that disagrees with its content address
+   is unwritable rather than merely discouraged.
+
+   It replaces the earlier draft form
+   `source-archives/v1/sha256/{source_archive_hash}.tar.zst`, for two reasons.
+   The `v1` and the `.tar.zst` suffix both encode the archive FORMAT into the
+   locator, and the format already has a home — `archive_format_version` in the
+   materialization receipt — so carrying it twice invites the two to disagree.
+   And pinning `sha256` in the path makes the key un-derivable the day the
+   digest algorithm moves, whereas `{algorithm}` carries it.
+
+   The colon of `<algorithm>:<hex>` is split rather than kept, because object
+   stores differ on whether a colon in a key is legal and a key that works on
+   one and not another is a portability problem discovered at the worst time.
 7. **Emit a receipt** recording commit OID, both hashes, caps observed, and the
    final state, and advance the candidate to `analyzing`.
+
+### 3.3.1 What is identity, and what is not
+
+The two are kept apart deliberately, because collapsing them makes a re-encoding
+of the same source look like different source.
+
+```text
+source_tree_digest      = source IDENTITY
+                          what the source IS; immutable
+
+object key              = derived from the digest of the SERIALIZED ARCHIVE
+                          bytes; a locator, not an identity
+
+source_archive_digest   = the archive BYTES; one encoding of the source
+
+archive_format_version  = carried in the materialization receipt, and in the
+                          uniqueness key of `source_materializations`
+```
+
+Neither the object key nor the archive digest is part of a Source Revision's
+identity. A Source Revision is keyed on six elements — provider, canonical
+repository, commit algorithm, resolved commit sha, `source_tree_digest`,
+resolver contract version — and none of them describe how the bytes were packed.
+
+That is what allows one revision to have more than one materialization: a new
+archive format is a second legitimate encoding of the *same* source, recorded as
+a new row under a new `archive_format_version`, never as a new identity and never
+as an update to the immutable one. Within a single format archiving is
+deterministic, so two materializations that disagree are contradictory evidence
+rather than a duplicate, and are refused.
 
 ### 3.4 Caps
 

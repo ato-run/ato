@@ -1,9 +1,11 @@
 use std::path::Path;
 
 use anyhow::Result;
-use capsule::ato_lock::{ATO_LOCK_SCHEMA_VERSION, AtoLock, UnresolvedReason, UnresolvedValue};
+use capsule::capsule_lock::{
+    CAPSULE_LOCK_SCHEMA_VERSION, CapsuleLock, UnresolvedReason, UnresolvedValue,
+};
 use capsule::input_resolver::ResolvedCompatibilityProject;
-use capsule::lockfile::CapsuleLock;
+use capsule::lockfile::LegacyCapsuleLock;
 use capsule::manifest::LoadedManifest;
 use serde::Serialize;
 
@@ -42,7 +44,7 @@ pub(crate) struct UnresolvedSummary {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct CompatibilityCompileResult {
-    pub draft_lock: AtoLock,
+    pub draft_lock: CapsuleLock,
     pub guarantee: DraftGuarantee,
     pub unresolved_summary: UnresolvedSummary,
     pub diagnostics: Vec<CompatibilityDiagnostic>,
@@ -52,14 +54,14 @@ pub(crate) struct CompatibilityCompileResult {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CompatibilityCompilerInput<'a> {
     pub manifest: &'a LoadedManifest,
-    pub legacy_lock: Option<&'a CapsuleLock>,
+    pub legacy_lock: Option<&'a LegacyCapsuleLock>,
     pub legacy_lock_path: Option<&'a Path>,
 }
 
 impl<'a> CompatibilityCompilerInput<'a> {
     pub(crate) fn new(
         manifest: &'a LoadedManifest,
-        legacy_lock: Option<&'a CapsuleLock>,
+        legacy_lock: Option<&'a LegacyCapsuleLock>,
         legacy_lock_path: Option<&'a Path>,
     ) -> Self {
         Self {
@@ -118,7 +120,7 @@ pub(crate) fn compile_compatibility_input(
         }
     }
 
-    manifest_result.draft_lock.schema_version = ATO_LOCK_SCHEMA_VERSION;
+    manifest_result.draft_lock.schema_version = CAPSULE_LOCK_SCHEMA_VERSION;
     manifest_result.diagnostics.push(CompatibilityDiagnostic::new(
         CompatibilityDiagnosticCode::DraftNotExecutionUsable,
         CompatibilityDiagnosticSeverity::Warning,
@@ -156,7 +158,7 @@ pub(crate) fn compile_compatibility_input(
     })
 }
 
-fn summarize_unresolved(lock: &AtoLock) -> UnresolvedSummary {
+fn summarize_unresolved(lock: &CapsuleLock) -> UnresolvedSummary {
     let resolution = lock.resolution.unresolved.len();
     let contract = lock.contract.unresolved.len();
     let binding = lock.binding.unresolved.len();

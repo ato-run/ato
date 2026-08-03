@@ -5,23 +5,25 @@
 //!   `LaunchEnvelopeDraft`   = per-node payload (AppTarget / WorkerTarget)
 //!   `LockDraft`             = compatibility projection (lossy)
 //!   `capsule.toml`          = export/import projection (user-visible)
-//!   `ato.lock.json`         = resolved execution state (after lock finalization)
+//!   `capsule.lock`          = resolved execution state (after lock finalization)
 //!
 //! Invariants:
 //!   - Pure engine: no filesystem / network / env / clock access. Only reads input.
 //!   - Inference results and candidate/evidence IDs are deterministic.
 //!   - `relative_confidence` is beam-relative, not a success probability.
 //!   - Ambiguity is fail-closed: AutoAccept requires sufficient unambiguous evidence.
-//!   - Observations are redacted local provenance only; never in ato.lock.json.
+//!   - Observations are redacted local provenance only; never in capsule.lock.
 //!   - capsule.toml is a projection target, not an inference source.
-//!   - ato.lock.json existence triggers lock-first mode in source_inference.
+//!   - capsule.lock existence triggers lock-first mode in source_inference.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{ExistingAtoLockSummary, ManifestSource, RepoFileEntry, RepoFileKind, SelectedTarget};
+use super::{
+    ExistingCapsuleLockSummary, ManifestSource, RepoFileEntry, RepoFileKind, SelectedTarget,
+};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -285,8 +287,12 @@ pub struct LeipInput {
     pub file_text_map: BTreeMap<String, String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_source: Option<ManifestSource>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub existing_ato_lock_summary: Option<ExistingAtoLockSummary>,
+    // Wire key keeps the historical `ato_lock` name (wasm-boundary contract).
+    #[serde(
+        rename = "existing_ato_lock_summary",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub existing_capsule_lock_summary: Option<ExistingCapsuleLockSummary>,
 }
 
 // ── VerificationObservation ───────────────────────────────────────────────────
@@ -323,7 +329,7 @@ pub enum VerificationFailureClass {
 
 /// Redacted local provenance record. Written ONLY to
 /// `~/.ato/runs/<session-id>/observations.jsonl`. Never included in
-/// ato.lock.json, publish artifacts, or share artifacts.
+/// capsule.lock, publish artifacts, or share artifacts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationObservation {
     pub candidate_id: String,
@@ -607,7 +613,7 @@ pub fn evaluate_launch_envelopes_json(input_json: &str) -> Result<String, LeipEr
         repo_file_index: raw.repo_file_index,
         file_text_map: raw.file_text_map,
         manifest_source: raw.manifest_source,
-        existing_ato_lock_summary: raw.existing_ato_lock_summary,
+        existing_capsule_lock_summary: raw.existing_capsule_lock_summary,
     };
     let result = evaluate_launch_graphs(&leip_input);
     serde_json::to_string(&result).map_err(LeipError::InvalidInput)

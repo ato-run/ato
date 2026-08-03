@@ -104,6 +104,136 @@ pub struct ResolvedBaseImage {
     pub resolved_digest: String,
 }
 
+/// The runtime artifact a source-runtime capsule actually executes on, resolved
+/// to an immutable identity.
+///
+/// A source capsule's interpreter is not fetched by the provider cache — it
+/// comes from the Docker BASE IMAGE the rootfs is built on (`python:3.11-slim`,
+/// `node:20-slim`). That is a TAG: a mutable reference that names different
+/// bytes on different days, which is exactly what RFC §4.2 refuses as an
+/// identity ("an authored version selector such as `node = "22"` is not
+/// sufficient by itself").
+///
+/// So the tag is resolved to its registry digest — the same resolution, through
+/// the same function, that the Dockerfile-import lane already performs on every
+/// base it pins. One resolver, so a recipe capsule and an import capsule cannot
+/// disagree about what "the runtime artifact" is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRuntimeArtifact {
+    /// What the build asked for, e.g. `python:3.11-slim`.
+    pub original_ref: String,
+    /// The digest-pinned reference, e.g. `docker.io/library/python@sha256:…`.
+    pub resolved_ref: String,
+    /// The identity-bearing half, as the Execution Contract records it.
+    pub digest: capsule::execution_contract::ContentDigest,
+}
+
+/// Resolve one base image reference to the immutable artifact identity behind
+/// it.
+///
+/// Fails closed on a reference that will not resolve to a registry digest,
+/// because a tag cannot be an Execution Identity input — the same refusal the
+/// import lane makes, for the same reason.
+pub fn resolve_runtime_artifact(
+    runner: &dyn build::ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<ResolvedRuntimeArtifact, String> {
+    let resolved =
+        build::resolve_base_digests(runner, tool, std::slice::from_ref(&image_ref.to_string()))?;
+    let base = resolved
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("no resolution returned for {image_ref:?}"))?;
+    // `repo@sha256:<hex>` — the identity is the digest half; the repository
+    // that served it is provenance, not identity (RFC §4.2: two refs resolving
+    // to the same bytes are the same execution).
+    let digest_text = base
+        .resolved_digest
+        .rsplit_once('@')
+        .map(|(_, digest)| digest)
+        .ok_or_else(|| {
+            format!(
+                "resolved reference {:?} is not repo@digest",
+                base.resolved_digest
+            )
+        })?;
+    let digest = capsule::execution_contract::ContentDigest::try_from(digest_text.to_string())
+        .map_err(|error| {
+            format!(
+                "resolved runtime digest {digest_text:?} is not a canonical ContentDigest: {error}"
+            )
+        })?;
+    Ok(ResolvedRuntimeArtifact {
+        original_ref: base.original_ref,
+        resolved_ref: base.resolved_digest,
+        digest,
+    })
+}
+
+/// Measure the guest target the sealed image actually runs on
+/// (`target.{os,architecture,abi,libc}`, RFC §4.2).
+///
+/// Every value here is read off the IMAGE, never off the builder host. That
+/// distinction is the whole point: the host is an x86-64 Linux box today and
+/// may be an arm64 Mac tomorrow, while the guest platform is pinned by
+/// [`DOCKER_IMPORT_PLATFORM`] and by the base image the build chose. A target
+/// facet derived from `std::env::consts` would record the machine that
+/// happened to run the build, which is not what the capsule executes on.
+///
+/// Two measurements, both fail-closed:
+///
+/// * `os` / `architecture` come from `image inspect`'s TOP-LEVEL fields (not
+///   `Config` — that object describes the process, this describes the
+///   platform). An empty value is refused rather than defaulted.
+/// * `libc` is probed by running `ldd --version` INSIDE the image, because
+///   nothing in the image metadata records it: `python:3.11-slim` and
+///   `python:3.11-alpine` are the same `linux/amd64` and a different libc, and
+///   that difference is exactly what makes a native extension load or not.
+///
+/// `abi` is then resolved from the measured libc rather than defaulted — for
+/// Linux the toolchain env IS the libc flavour (`gnu` for glibc, `musl` for
+/// musl), the same component a Rust target triple carries. A libc the probe
+/// cannot classify, or a non-Linux image, is refused: ADR-015 §4.1 requires
+/// `abi` to be resolved, and there is no value here that would be honest to
+/// assume.
+pub fn measure_guest_target(
+    runner: &dyn build::ImportCommandRunner,
+    tool: BuildTool,
+    image_ref: &str,
+) -> Result<capsule::execution_contract::ResolvedTargetContract, String> {
+    let platform = build::inspect_image_platform(runner, tool, image_ref)?;
+    if platform.os != "linux" {
+        return Err(format!(
+            "image {image_ref:?} targets os {:?}; only linux guests can have their abi \
+             resolved from a libc probe, and defaulting one would be an identity claim \
+             about something nobody measured (fail-closed)",
+            platform.os
+        ));
+    }
+    let libc = build::probe_image_libc(runner, tool, image_ref)?;
+    let abi = match libc.as_str() {
+        "glibc" => "gnu",
+        "musl" => "musl",
+        other => {
+            return Err(format!(
+                "image {image_ref:?} reported libc {other:?}, which has no known ABI name; \
+                 refusing to guess (fail-closed)"
+            ));
+        }
+    };
+    Ok(capsule::execution_contract::ResolvedTargetContract {
+        os: platform.os,
+        architecture: platform.architecture,
+        abi: abi.to_string(),
+        libc: Some(libc),
+        // Nothing is claimed here. An observable feature is a capability the
+        // capsule DECLARES it depends on and the target was checked for; the
+        // Step-4 subset declares none, so an empty map is the measurement.
+        observable_features: std::collections::BTreeMap::new(),
+    })
+}
+
 /// The resolved, pre-build import request. Non-secret; safe in a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DockerImportSpec {
@@ -181,6 +311,13 @@ pub struct DockerImportOptions {
     /// opted-in build intentionally gets a NEW identity (its init differs).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub host_bind_relay: bool,
+    /// Pixel Stream v1: the guest-private RFB port this import seals a
+    /// `pixel_rfb` restore endpoint for (`ato.pixel-stream.v1`). Skipped when
+    /// absent so every pre-existing (Web-only) import keeps a byte-identical
+    /// descriptor envelope (same identity digest); a pixel build intentionally
+    /// gets a NEW identity (its sealed restore contract differs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_rfb_port: Option<u16>,
 }
 
 /// Non-secret provenance of a completed Dockerfile import build. Recorded alongside
@@ -631,6 +768,10 @@ pub struct DockerfileImportRequest<'a> {
     pub ephemeral_mounts: Vec<rootfs::EphemeralMountSpec>,
     /// ato#1026: start the localhost→guest-IP relay (default off).
     pub host_bind_relay: bool,
+    /// Pixel Stream v1: guest-private RFB port to seal a `pixel_rfb` restore
+    /// endpoint for. Must differ from the derived public app port (validated
+    /// fail-closed after plan derivation). `None` = Web-only import.
+    pub pixel_rfb_port: Option<u16>,
     /// Tag for the ephemeral built image (removed after export).
     pub image_tag: String,
     pub out_ext4: &'a std::path::Path,
@@ -697,6 +838,17 @@ pub fn run_dockerfile_import(
         req.ephemeral_mounts.clone(),
         req.host_bind_relay,
     )?;
+    // Pixel Stream v1: the sealed pixel_rfb endpoint is guest-private while the
+    // app port is the public readiness/proxy port — the same port cannot serve
+    // both contracts. Fail closed before any packing work.
+    if let Some(rfb_port) = req.pixel_rfb_port
+        && rfb_port == plan.port
+    {
+        return Err(format!(
+            "pixel_rfb_port {rfb_port} collides with the derived public app port {} (the guest-private RFB endpoint must be a different port)",
+            plan.port
+        ));
+    }
     // Stage the mounts' recipe-owned seed files from the build context (the
     // recipe root) — resolve each source without escaping the root, secret-scan
     // the content, and fill every `source_digest`, fail-closed. The digest-filled
@@ -712,6 +864,7 @@ pub fn run_dockerfile_import(
         &seed_contents,
         req.out_ext4,
         req.size_mib,
+        req.pixel_rfb_port,
     )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
@@ -724,6 +877,7 @@ pub fn run_dockerfile_import(
         // identity/receipt record.
         ephemeral_mounts: plan.ephemeral_mounts.clone(),
         host_bind_relay: req.host_bind_relay,
+        pixel_rfb_port: req.pixel_rfb_port,
     };
     let receipt = assemble_receipt(
         &probe,
@@ -1002,6 +1156,7 @@ pub fn run_oci_image_import(
         &[],
         req.out_ext4,
         req.size_mib,
+        None,
     )?;
     let exported_rootfs_digest = format!("sha256:{}", build::sha256_file_hex(req.out_ext4)?);
     let import_options = DockerImportOptions {
@@ -1015,6 +1170,9 @@ pub fn run_oci_image_import(
         // `files`).
         ephemeral_mounts: plan.ephemeral_mounts.clone(),
         host_bind_relay: req.host_bind_relay,
+        // The OCI job shape has no pixel opt-in; None keeps every OCI import's
+        // options envelope byte-identical (the field is skipped when absent).
+        pixel_rfb_port: None,
     };
     let receipt = OciImageImportReceipt {
         importer_version: DOCKER_IMPORTER_VERSION.to_string(),
@@ -1314,6 +1472,144 @@ mod compose_import_tests {
 
 #[cfg(test)]
 mod tests {
+
+    // ── the source-runtime artifact resolver ────────────────────────────────
+
+    /// A tag is resolved to the immutable bytes behind it.
+    ///
+    /// `python:3.11-slim` names different bytes on different days. RFC §4.2 is
+    /// explicit that a version selector is not an identity, so the recipe lane
+    /// resolves its base image exactly as the import lane resolves every base it
+    /// pins — through the same function, so the two cannot disagree about what
+    /// the runtime artifact is.
+    #[test]
+    fn a_source_runtimes_base_tag_resolves_to_its_registry_digest() {
+        let digest_hex = "b".repeat(64);
+        let runner = crate::docker_import::build::testing::FakeRunner::new(vec![
+            ("docker pull --platform", 0, "", ""),
+            (
+                "docker image inspect",
+                0,
+                &format!("docker.io/library/python@sha256:{digest_hex}\n"),
+                "",
+            ),
+        ]);
+        let resolved = resolve_runtime_artifact(&runner, BuildTool::Docker, "python:3.11-slim")
+            .expect("resolves");
+
+        assert_eq!(resolved.original_ref, "python:3.11-slim");
+        assert_eq!(
+            resolved.resolved_ref,
+            format!("docker.io/library/python@sha256:{digest_hex}")
+        );
+        // The identity is the DIGEST half — the repository that served it is
+        // provenance, since two refs resolving to the same bytes are the same
+        // execution.
+        assert_eq!(resolved.digest.to_string(), format!("sha256:{digest_hex}"));
+    }
+
+    /// A reference that will not resolve to a registry digest fails the build.
+    /// A tag cannot be an Execution Identity input, so there is nothing to fall
+    /// back to.
+    #[test]
+    fn a_tag_that_does_not_resolve_to_a_digest_fails_closed() {
+        let runner = crate::docker_import::build::testing::FakeRunner::new(vec![
+            ("docker pull --platform", 0, "", ""),
+            // A locally-built image has no RepoDigest.
+            ("docker image inspect", 0, "\n", ""),
+        ]);
+        let error = resolve_runtime_artifact(&runner, BuildTool::Docker, "local-only:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("not a reproducible identity"), "{error}");
+    }
+
+    // --- measure_guest_target ---------------------------------------------------
+
+    fn target_runner(platform: &str, libc_line: &str) -> build::testing::FakeRunner {
+        build::testing::FakeRunner::new(vec![
+            ("docker image inspect", 0, platform, ""),
+            ("docker run --rm", 0, libc_line, ""),
+        ])
+    }
+
+    /// The target is read off the IMAGE, and `abi` is resolved from the measured
+    /// libc rather than defaulted.
+    #[test]
+    fn a_glibc_image_measures_a_linux_gnu_target() {
+        let runner = target_runner("linux\tamd64\n", "ldd (Debian GLIBC 2.36-9+deb12u7) 2.36\n");
+        let target =
+            measure_guest_target(&runner, BuildTool::Docker, "python:3.11-slim").expect("measures");
+
+        assert_eq!(target.os, "linux");
+        assert_eq!(target.architecture, "amd64");
+        assert_eq!(target.abi, "gnu");
+        assert_eq!(target.libc.as_deref(), Some("glibc"));
+        assert!(target.observable_features.is_empty());
+    }
+
+    /// The libc probe is the reason this runs the image at all: two images that
+    /// are the same `linux/amd64` still have different targets, and only asking
+    /// them apart tells them apart.
+    #[test]
+    fn a_musl_image_of_the_same_platform_measures_a_different_target() {
+        let glibc = measure_guest_target(
+            &target_runner("linux\tamd64\n", "ldd (GNU libc) 2.36\n"),
+            BuildTool::Docker,
+            "python:3.11-slim",
+        )
+        .expect("glibc measures");
+        let musl = measure_guest_target(
+            &target_runner("linux\tamd64\n", "musl libc (x86_64)\n"),
+            BuildTool::Docker,
+            "python:3.11-alpine",
+        )
+        .expect("musl measures");
+
+        assert_eq!(glibc.os, musl.os);
+        assert_eq!(glibc.architecture, musl.architecture);
+        assert_ne!(
+            glibc, musl,
+            "same platform, different libc — the targets must not be equal"
+        );
+        assert_eq!(musl.abi, "musl");
+        assert_eq!(musl.libc.as_deref(), Some("musl"));
+    }
+
+    /// A libc the probe cannot name has no honest ABI, so there is nothing to
+    /// record. Refusing here is the point: an assumed `gnu` would be an identity
+    /// claim about something nobody measured.
+    #[test]
+    fn an_unidentifiable_libc_refuses_rather_than_assuming_an_abi() {
+        let runner = target_runner("linux\tamd64\n", "sh: ldd: not found\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "distroless:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("neither glibc nor musl"), "{error}");
+    }
+
+    /// An image that declares no platform is refused rather than backfilled from
+    /// the builder host — the host is not what the capsule runs on.
+    #[test]
+    fn an_image_with_no_declared_platform_fails_closed() {
+        let runner = target_runner("\t\n", "ldd (GNU libc) 2.36\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "broken:latest")
+            .expect_err("must refuse");
+        assert!(error.contains("empty os/architecture"), "{error}");
+    }
+
+    /// The ABI resolution rule is stated for Linux only, so a non-Linux image is
+    /// refused before the probe runs rather than being given a Linux ABI.
+    #[test]
+    fn a_non_linux_image_is_refused_before_the_libc_probe() {
+        let runner = target_runner("windows\tamd64\n", "unreachable\n");
+        let error = measure_guest_target(&runner, BuildTool::Docker, "mcr:windows")
+            .expect_err("must refuse");
+        assert!(error.contains("only linux guests"), "{error}");
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "the libc probe must not run for a platform whose abi rule does not apply"
+        );
+    }
     use super::*;
 
     // --- normalize_binding_name -------------------------------------------------
@@ -1652,6 +1948,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![],
         }
@@ -1950,6 +2247,38 @@ mod tests {
     }
 
     #[test]
+    fn pixel_rfb_port_is_skipped_when_absent_and_shifts_identity_when_set() {
+        // Pixel Stream v1: pixel_rfb_port=None is dropped from the serialized
+        // envelope (skip_serializing_if), so every pre-existing Web-only import
+        // keeps a byte-identical descriptor + identity digest; a set port is a
+        // new input => new identity (its sealed restore contract differs).
+        let base = sample_receipt(); // import_options.pixel_rfb_port defaults None
+        assert!(base.import_options.pixel_rfb_port.is_none());
+        let json = serde_json::to_string(&base.import_options).unwrap();
+        assert!(
+            !json.contains("pixel_rfb_port"),
+            "None must be omitted: {json}"
+        );
+
+        let mut pixel = base.clone();
+        pixel.import_options.pixel_rfb_port = Some(5900);
+        let pixel_json = serde_json::to_string(&pixel.import_options).unwrap();
+        assert!(
+            pixel_json.contains("\"pixel_rfb_port\":5900"),
+            "set port must serialize: {pixel_json}"
+        );
+
+        assert_ne!(
+            import_descriptor_blake3(&pixel),
+            import_descriptor_blake3(&base)
+        );
+        assert_ne!(
+            import_identity_digest(&pixel),
+            import_identity_digest(&base)
+        );
+    }
+
+    #[test]
     fn ephemeral_mounts_skipped_when_empty_and_shift_identity_when_present() {
         // Phase 1: an empty mount list is dropped from the serialized envelope
         // (skip_serializing_if Vec::is_empty), so a pre-existing (no-mount)
@@ -2190,6 +2519,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![DockerImportWarning::DockerUserIgnored],
         };
@@ -2267,6 +2597,7 @@ mod tests {
                 size_mib: 2048,
                 ephemeral_mounts: vec![],
                 host_bind_relay: false,
+                pixel_rfb_port: None,
             },
             warnings: vec![],
         }

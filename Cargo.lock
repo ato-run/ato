@@ -1035,6 +1035,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",
+ "roxmltree",
  "rusqlite",
  "schemars 1.2.1",
  "serde",
@@ -1292,6 +1293,7 @@ dependencies = [
  "rpassword",
  "rusqlite",
  "rust-embed",
+ "rustls 0.23.40",
  "semver",
  "serde",
  "serde_jcs",
@@ -2329,6 +2331,15 @@ dependencies = [
  "cfg-if",
  "rustix 1.1.4",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "fdeflate"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+dependencies = [
+ "simd-adler32",
 ]
 
 [[package]]
@@ -3429,6 +3440,7 @@ dependencies = [
  "byteorder-lite",
  "moxcms",
  "num-traits",
+ "png",
 ]
 
 [[package]]
@@ -4977,6 +4989,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "png"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+dependencies = [
+ "bitflags 2.13.0",
+ "crc32fast",
+ "fdeflate",
+ "flate2",
+ "miniz_oxide",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5726,6 +5751,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -6511,9 +6545,12 @@ name = "snapshot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
  "capsule",
  "capsulefs",
+ "hex",
+ "image",
  "libc",
  "protocol",
  "serde",
@@ -6530,12 +6567,22 @@ name = "snapshot-builder"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake3",
  "capsule",
  "capsulefs",
+ "chrono",
+ "ed25519-dalek",
+ "protocol",
  "serde",
+ "serde_jcs",
  "serde_json",
+ "sha2",
  "snapshot",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+ "tungstenite",
  "ureq",
 ]
 

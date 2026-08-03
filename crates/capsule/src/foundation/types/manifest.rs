@@ -795,6 +795,16 @@ pub struct CapsuleManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<super::ready_state::SnapshotConfig>,
 
+    /// Capsule v1 Snapshot acceptance program (`[seal_at]`).
+    ///
+    /// The author-supplied verification argv the disposable-restore acceptance
+    /// loop runs against a candidate Snapshot; exit 0 accepts, anything else
+    /// rejects (`CAPSULE_V1_EXECUTION_MODEL_SPEC.md` §6.3). Absent means no v1
+    /// Snapshot is minted — the build stays on its legacy path. `skip` when
+    /// absent so every existing manifest keeps its `capsule_manifest_hash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seal_at: Option<super::ready_state::SealAtConfig>,
+
     /// Required secrets declared as refs (`[secrets.<name>]`), never values.
     ///
     /// Resolved post-restore via the existing secret-injection path. Parse-only
@@ -1557,9 +1567,34 @@ pub struct ModelConfig {
     pub quantization: Option<Quantization>,
 }
 
+/// Effective `[network] enabled` for a manifest that declares no posture.
+///
+/// `true` = today's behavior: a capsule with no `[network] enabled` key gets
+/// outbound network. This is deliberately NOT flipped to a fail-closed `false`
+/// by ato#786 — see the note on [`NetworkConfig::enabled`]. Every read of the
+/// undeclared default goes through [`NetworkConfig::network_enabled`] or this
+/// constant, so flipping the platform default is a one-line change with tests
+/// pinned to it rather than a hunt through the runtime.
+pub const NETWORK_ENABLED_WHEN_UNDECLARED: bool = true;
+
 /// Network configuration for Egress Control
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
+    /// Whether the workload may use the network at all (L3 on/off).
+    ///
+    /// `None` = the author declared no posture; the effective value is then
+    /// [`NETWORK_ENABLED_WHEN_UNDECLARED`]. Keeping this an `Option` rather
+    /// than a `bool` is load-bearing for ato#786: a plain `bool` cannot tell
+    /// "absent" apart from "explicitly true", so an authored
+    /// `enabled = false` was silently re-defaulted to `true` on the
+    /// `capsule.lock` round trip and the sandbox launched with
+    /// `bwrap --share-net` — full egress for a capsule that had denied
+    /// network. Absent stays absent through serialization
+    /// (`skip_serializing_if`), so locks for capsules that declare no posture
+    /// are byte-identical to before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
     /// List of allowlisted domains (L7/Proxy)
     #[serde(default)]
     pub egress_allow: Vec<String>,
@@ -1567,6 +1602,26 @@ pub struct NetworkConfig {
     /// List of allowlisted IPs/CIDRs (L3/Firewall)
     #[serde(default)]
     pub egress_id_allow: Vec<EgressIdRule>,
+}
+
+impl NetworkConfig {
+    /// The effective network posture: the author's declaration when present,
+    /// otherwise [`NETWORK_ENABLED_WHEN_UNDECLARED`].
+    pub fn network_enabled(&self) -> bool {
+        self.enabled.unwrap_or(NETWORK_ENABLED_WHEN_UNDECLARED)
+    }
+
+    /// A posture-only view of this config (no egress lists).
+    ///
+    /// Used where the egress allowlist is deliberately dropped but the on/off
+    /// decision must still survive — see `lock_runtime::network_from_lock`'s
+    /// `job` branch.
+    pub fn posture_only(&self) -> Option<Self> {
+        self.enabled.map(|enabled| Self {
+            enabled: Some(enabled),
+            ..Self::default()
+        })
+    }
 }
 
 /// Rule for L3 Egress Control

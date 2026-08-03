@@ -46,7 +46,7 @@ struct PreparedCommand {
 /// `None` falls through to [`spawn`] without installing the override.
 pub fn spawn_with_selected_port(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -64,7 +64,7 @@ pub fn spawn_with_selected_port(
 
 pub fn spawn(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -167,7 +167,7 @@ pub fn spawn(
 /// caller controls stdio and spawn timing.
 fn build_orchestration_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -256,7 +256,7 @@ fn resolve_readiness_port(launch_spec: &capsule::launch_spec::LaunchSpec) -> Opt
 /// Returns a `CapsuleProcess` with port-based readiness detection.
 pub fn spawn_background(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -307,7 +307,7 @@ pub fn spawn_background(
 /// behavior (no fake ready), matching the host source executor (#623).
 pub fn spawn_foreground(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     launch_ctx: &RuntimeLaunchContext,
     dangerously_skip_permissions: bool,
@@ -384,7 +384,7 @@ fn run_provisioning(
 
 fn maybe_build_direct_node_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -453,7 +453,7 @@ fn allow_net_hosts_for_resolved_port(
 fn build_runtime_command(
     deno_bin: &Path,
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -630,7 +630,7 @@ fn log_runtime_cmd(cmd: &Command, runtime_dir: &Path, entrypoint: &str) {
 
 fn build_host_node_package_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     package_bin: &str,
@@ -674,7 +674,7 @@ fn build_host_node_package_command(
 
 fn build_host_node_entrypoint_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -803,7 +803,7 @@ fn resolve_package_manager_bin(node_bin: &Path, pm: &str) -> std::path::PathBuf 
 #[allow(clippy::too_many_arguments)]
 fn build_package_manager_command(
     plan: &ManifestData,
-    authoritative_lock: Option<&capsule::ato_lock::AtoLock>,
+    authoritative_lock: Option<&capsule::capsule_lock::CapsuleLock>,
     execution_plan: &ExecutionPlan,
     runtime_dir: &Path,
     entrypoint: &str,
@@ -1470,14 +1470,22 @@ run = "node lib.js fixtures/db.json --port 3000"
         // No need to touch the file — prepend_managed_node_to_path just uses the
         // parent directory; it does not check the binary exists.
 
-        // Force a deterministic baseline PATH for this test.
-        let original_path = std::env::var_os("PATH");
-        // SAFETY: tests are currently single-threaded per integration runner for
-        // this crate; if that ever changes we'll need a test fixture instead of
-        // mutating process env. For a pinpoint regression this is acceptable.
-        unsafe {
-            std::env::set_var("PATH", "/usr/bin:/bin");
-        }
+        // `prepend_managed_node_to_path` derives the child command's PATH from
+        // this process's inherited `PATH` (`prepend_dirs_to_path` reads
+        // `env::var("PATH")`). Hold the crate-wide env lock and read that PATH
+        // ourselves so no concurrent env-touching test can mutate it between our
+        // snapshot and the prepend's own read, then assert against it.
+        //
+        // This test used to `set_var("PATH", "/usr/bin:/bin")` for a
+        // deterministic baseline — an *unlocked* global mutation that raced
+        // every concurrent bare-name spawn in the same test binary (the
+        // source-inference `uv`/`deno` materialize tests) into ENOENT, and was
+        // itself stomped by `runtime_setup`'s podman probe (which scrubs PATH).
+        // Asserting against the real inherited PATH needs no mutation and checks
+        // the same invariant (#294): the managed bin dir is prepended, ahead of
+        // the inherited entries.
+        let _env = crate::tests::env_lock().lock().expect("env lock");
+        let inherited_path = std::env::var("PATH").unwrap_or_default();
 
         let mut cmd = std::process::Command::new(&node_bin);
         prepend_managed_node_to_path(&mut cmd, &node_bin);
@@ -1493,15 +1501,12 @@ run = "node lib.js fixtures/db.json --port 3000"
             })
             .expect("PATH must be set on the command");
 
-        // restore before asserting so a panic doesn't poison env
-        match original_path {
-            Some(v) => unsafe { std::env::set_var("PATH", v) },
-            None => unsafe { std::env::remove_var("PATH") },
-        }
-
         let managed_dir = node_bin.parent().unwrap().display().to_string();
         let separator = if cfg!(windows) { ";" } else { ":" };
-        let expected = format!("{}{}{}", managed_dir, separator, "/usr/bin:/bin");
+        let expected = match inherited_path.is_empty() {
+            true => managed_dir,
+            false => format!("{managed_dir}{separator}{inherited_path}"),
+        };
         assert_eq!(
             applied_path, expected,
             "managed Node bin dir must be first entry of PATH (#294)"

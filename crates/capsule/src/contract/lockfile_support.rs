@@ -90,7 +90,7 @@ pub(super) fn capsule_error_config(message: String) -> CapsuleError {
     CapsuleError::Config(message)
 }
 
-pub(super) fn write_atomic_bytes_with_os_lock<E>(
+pub(crate) fn write_atomic_bytes_with_os_lock<E>(
     path: &Path,
     bytes: &[u8],
     label: &str,

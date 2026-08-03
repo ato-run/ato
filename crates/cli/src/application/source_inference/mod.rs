@@ -24,8 +24,8 @@ use crate::project::init::recipe::{ProjectInfo, project_info_from_detection};
 use crate::reporters::CliReporter;
 use anyhow::{Context, Result};
 use capsule::CapsuleReporter;
-use capsule::ato_lock::{
-    self, AtoLock, UnresolvedReason, UnresolvedValue, closure_info, normalize_lock_closure,
+use capsule::capsule_lock::{
+    self, CapsuleLock, UnresolvedReason, UnresolvedValue, closure_info, normalize_lock_closure,
 };
 use capsule::common::paths::{ato_cache_dir, ato_runs_dir, path_contains_workspace_state_dir};
 use capsule::execution_plan::error::AtoExecutionError;
@@ -33,8 +33,8 @@ use capsule::importer::{
     ImportedEvidence, probe_ecosystem_lockfile_evidence, probe_native_framework_evidence,
 };
 use capsule::input_resolver::{
-    ATO_LOCK_FILE_NAME, ResolvedCanonicalLock, ResolvedCompatibilityProject, ResolvedSingleScript,
-    ResolvedSourceOnly, SingleScriptLanguage,
+    CAPSULE_LOCK_FILE_NAME, ResolvedCanonicalLock, ResolvedCompatibilityProject,
+    ResolvedSingleScript, ResolvedSourceOnly, SingleScriptLanguage,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -66,7 +66,7 @@ pub(crate) struct SourceEvidenceInput {
 #[derive(Debug, Clone)]
 pub(crate) struct DraftLockInput {
     pub(crate) project_root: PathBuf,
-    pub(crate) draft_lock: AtoLock,
+    pub(crate) draft_lock: CapsuleLock,
     pub(crate) provenance: Vec<SourceInferenceProvenance>,
 }
 
@@ -74,7 +74,7 @@ pub(crate) struct DraftLockInput {
 pub(crate) struct CanonicalLockInput {
     pub(crate) project_root: PathBuf,
     pub(crate) canonical_path: PathBuf,
-    pub(crate) lock: AtoLock,
+    pub(crate) lock: CapsuleLock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub(crate) enum MaterializationMode {
 #[derive(Debug, Clone)]
 pub(crate) struct SourceInferenceResult {
     pub(crate) input_kind: SourceInferenceInputKind,
-    pub(crate) lock: AtoLock,
+    pub(crate) lock: CapsuleLock,
     pub(crate) provenance: Vec<SourceInferenceProvenance>,
     pub(crate) diagnostics: Vec<SourceInferenceDiagnostic>,
     pub(crate) infer: InferResult,
@@ -264,7 +264,7 @@ pub(crate) struct RunMaterialization {
     pub(crate) project_root: PathBuf,
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) raw_manifest: Option<toml::Value>,
-    pub(crate) lock: AtoLock,
+    pub(crate) lock: CapsuleLock,
     pub(crate) lock_path: PathBuf,
 }
 
@@ -805,7 +805,7 @@ pub(crate) fn materialize_run_from_compatibility_manifest(
     // like `build_command` because `from_materialized` falls back to
     // synthesizing a producer manifest from the lock when no
     // `original_manifest` is present, and the lock contract only carries
-    // run-time semantics. When the project ships both `ato.lock.json`
+    // run-time semantics. When the project ships both the canonical lock
     // and `capsule.toml`, prefer the source manifest as the bridge
     // input so the published artifact preserves the publisher's build
     // lifecycle. Fall back to None (lock-derived synthesis) when no
@@ -830,7 +830,7 @@ pub(crate) fn materialize_run_from_compatibility_manifest(
 /// that exercise this exact split.
 fn manifest_identity_matches_canonical_lock(
     manifest: &toml::Value,
-    lock: &capsule::ato_lock::AtoLock,
+    lock: &capsule::capsule_lock::CapsuleLock,
 ) -> bool {
     use serde_json::Value as Json;
     let table = match manifest.as_table() {
@@ -1058,7 +1058,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     // which would fall through to `pnpm start` and produce a confusing runtime error.
     if let Some(DesktopOverrideResult::Unsupported(msg)) = &desktop_override {
         let msg = msg.clone();
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         let metadata = source_metadata(
             &detected,
             input
@@ -1133,7 +1133,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     // LEIP v1 inference — runs only when no explicit desktop_execution override is
     // present (desktop_execution takes highest precedence).
     // LaunchGraphDraft is the canonical inference object; the legacy contract below
-    // is a lossy projection of it.  ato.lock.json existence is checked before this
+    // is a lossy projection of it.  Canonical-lock (capsule.lock) existence is checked before this
     // function is ever reached (lock-first invariant upstream).
     let leip_projection = if desktop_execution.is_none() {
         leip_projection_from_root(&input.project_root)
@@ -1183,7 +1183,7 @@ fn infer_from_source_evidence(input: SourceEvidenceInput) -> Result<SourceInfere
     } else {
         inferred_runtime_kind
     };
-    let mut lock = AtoLock::default();
+    let mut lock = CapsuleLock::default();
     let mut provenance = vec![SourceInferenceProvenance {
         field: "contract.metadata".to_string(),
         kind: SourceInferenceProvenanceKind::ExplicitArtifact,
@@ -1588,7 +1588,7 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         source_path: Some(input.canonical_path),
         importer_id: None,
         evidence_kind: None,
-        source_field: Some(ATO_LOCK_FILE_NAME.to_string()),
+        source_field: Some(CAPSULE_LOCK_FILE_NAME.to_string()),
         note: Some("persisted canonical lock reused as shared source inference input".to_string()),
     }];
     let mut infer_unresolved = Vec::new();
@@ -1604,7 +1604,7 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
         source_path: Some(input.project_root),
         importer_id: None,
         evidence_kind: None,
-        source_field: Some("ato.lock.json".to_string()),
+        source_field: Some(CAPSULE_LOCK_FILE_NAME.to_string()),
         note: Some(
             "canonical lock drives run/init materialization without re-inferring semantics"
                 .to_string(),
@@ -1633,7 +1633,7 @@ fn infer_from_canonical_lock(input: CanonicalLockInput) -> Result<SourceInferenc
 }
 
 fn promote_draft_execution_resolution(
-    lock: &mut AtoLock,
+    lock: &mut CapsuleLock,
     project_root: &Path,
     provenance: &mut Vec<SourceInferenceProvenance>,
 ) {
@@ -1683,7 +1683,7 @@ fn promote_draft_execution_resolution(
     }
 }
 
-fn draft_runtime_from_resolution(lock: &AtoLock) -> Option<Value> {
+fn draft_runtime_from_resolution(lock: &CapsuleLock) -> Option<Value> {
     let selected_target = selected_draft_target(lock)?;
     let kind = selected_target
         .get("driver")
@@ -1749,7 +1749,7 @@ fn draft_runtime_from_resolution(lock: &AtoLock) -> Option<Value> {
     Some(Value::Object(runtime))
 }
 
-fn selected_draft_target(lock: &AtoLock) -> Option<&Value> {
+fn selected_draft_target(lock: &CapsuleLock) -> Option<&Value> {
     let targets = lock
         .resolution
         .entries
@@ -1954,7 +1954,7 @@ fn apply_source_native_delivery_inference(
     project_root: &Path,
     detected: &DetectedProject,
     explicit_native_artifact: Option<&Path>,
-    lock: &mut AtoLock,
+    lock: &mut CapsuleLock,
     provenance: &mut Vec<SourceInferenceProvenance>,
     diagnostics: &mut Vec<SourceInferenceDiagnostic>,
 ) -> Result<()> {
@@ -2868,7 +2868,7 @@ fn result_project_root(result: &SourceInferenceResult) -> Option<PathBuf> {
     Some(path.parent().map(Path::to_path_buf).unwrap_or(path))
 }
 
-fn ensure_incomplete_closure_unresolved_marker(lock: &mut AtoLock) -> Result<()> {
+fn ensure_incomplete_closure_unresolved_marker(lock: &mut CapsuleLock) -> Result<()> {
     let Some(closure) = lock.resolution.entries.get("closure") else {
         return Ok(());
     };
@@ -3021,8 +3021,8 @@ fn materialize_run_result(
         scope.register_remove_dir(run_state_dir.clone());
     }
 
-    let lock_path = run_state_dir.join(ATO_LOCK_FILE_NAME);
-    ato_lock::write_pretty_to_path(&result.lock, &lock_path)?;
+    let lock_path = run_state_dir.join(CAPSULE_LOCK_FILE_NAME);
+    capsule_lock::write_pretty_to_path(&result.lock, &lock_path)?;
 
     let sidecar_path = run_state_dir.join("provenance.json");
     write_sidecar(&sidecar_path, &result, MaterializationMode::RunAttempt)?;
@@ -3191,7 +3191,7 @@ fn apply_selection(
 }
 
 fn selection_gate_from_lock(
-    lock: &AtoLock,
+    lock: &CapsuleLock,
     candidate_sets: &[CandidateSet],
 ) -> Option<SelectionGate> {
     let unresolved = lock.contract.unresolved.iter().find(|value| {
@@ -3905,7 +3905,7 @@ fn join_shell_tokens(tokens: &[String]) -> String {
     tokens.join(" ")
 }
 
-fn collect_unresolved_paths(lock: &AtoLock) -> Vec<String> {
+fn collect_unresolved_paths(lock: &CapsuleLock) -> Vec<String> {
     let mut paths = Vec::new();
     if !lock.contract.unresolved.is_empty() {
         paths.push("contract".to_string());
@@ -3919,7 +3919,7 @@ fn collect_unresolved_paths(lock: &AtoLock) -> Vec<String> {
     paths
 }
 
-fn explicit_candidates(lock: &AtoLock) -> Vec<String> {
+fn explicit_candidates(lock: &CapsuleLock) -> Vec<String> {
     lock.contract
         .unresolved
         .iter()
@@ -4150,7 +4150,7 @@ fn extract_pyproject_dependencies(content: &str) -> Vec<String> {
 //   LaunchEnvelopeDraft = payload of an AppTarget node in the graph
 //   legacy source_inference contract = compatibility projection from top candidate
 //   capsule.toml       = export/import projection of the contract
-//   ato.lock.json      = resolved execution state (lock-first when present)
+//   capsule.lock       = resolved execution state (lock-first when present)
 //
 // LEIP sits between desktop_execution (explicit native) and legacy detect_project
 // heuristics.  Only AutoAccept decisions override the legacy path.
@@ -4277,7 +4277,7 @@ fn build_leip_input_from_root(root: &Path) -> lock_draft_engine::leip::LeipInput
         file_text_map,
         target_hint: None,
         manifest_source: None,
-        existing_ato_lock_summary: None,
+        existing_capsule_lock_summary: None,
     }
 }
 
@@ -4354,9 +4354,9 @@ fn process_value_from_leip_cmd(cmd: &[String]) -> Value {
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::MutexGuard;
 
-    use capsule::ato_lock::{self, AtoLock};
+    use capsule::capsule_lock::{self, CapsuleLock};
     use capsule::input_resolver::{
         ResolveInputOptions, ResolvedInput, ResolvedSingleScript, ResolvedSourceOnly,
         SingleScriptLanguage, resolve_authoritative_input,
@@ -4365,11 +4365,16 @@ mod tests {
 
     use super::*;
 
+    /// Delegates to the crate-wide env lock (`crate::tests::env_lock`) instead
+    /// of a module-private mutex. These tests spawn `uv`/`deno` by bare name, so
+    /// they depend on the process-global `PATH`; tests in *other* modules mutate
+    /// `PATH` under the crate-wide lock (`runtime_setup`'s podman probe,
+    /// `node_compat`'s prepend test). A module-private lock would not exclude
+    /// those, so a concurrent `PATH` clobber could make a `uv`/`deno` spawn fail
+    /// with ENOENT ("No such file or directory") mid-test. Sharing the one
+    /// documented lock closes that race.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
+        crate::tests::env_lock().lock().expect("env lock")
     }
 
     struct EnvVarGuard {
@@ -4412,8 +4417,8 @@ mod tests {
         (guard, env_guard)
     }
 
-    fn load_materialized_lock(path: &Path) -> AtoLock {
-        ato_lock::load_unvalidated_from_path(path).expect("load durable ato.lock.json")
+    fn load_materialized_lock(path: &Path) -> CapsuleLock {
+        capsule_lock::load_unvalidated_from_path(path).expect("load durable capsule.lock")
     }
 
     fn write_macos_app_bundle(path: &Path) {
@@ -4636,7 +4641,7 @@ mod tests {
 
     #[test]
     fn draft_lock_input_preserves_existing_process_without_reinference() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "custom", "cmd": ["serve"]}),
@@ -4665,7 +4670,7 @@ mod tests {
 
     #[test]
     fn canonical_lock_infer_phase_does_not_generate_source_candidates() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -4691,7 +4696,7 @@ mod tests {
 
         let inferred = infer_phase(SourceInferenceInput::CanonicalLock(CanonicalLockInput {
             project_root: PathBuf::from("."),
-            canonical_path: PathBuf::from("ato.lock.json"),
+            canonical_path: PathBuf::from("capsule.lock"),
             lock,
         }))
         .expect("infer phase");
@@ -4731,6 +4736,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_typescript_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `deno` by bare
+        // name (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("deno")
             .arg("--version")
             .output()
@@ -4762,6 +4772,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_javascript_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `deno` by bare
+        // name (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("deno")
             .arg("--version")
             .output()
@@ -4793,6 +4808,11 @@ mod tests {
 
     #[test]
     fn durable_init_materializes_single_python_script_into_workspace() {
+        // Hold the crate-wide env lock: the materialize spawns `uv` by bare name
+        // (PATH-resolved), and the probe below does too. Without the lock a
+        // concurrent env test's `PATH` clobber makes those spawns ENOENT. See
+        // `env_lock` above.
+        let _env = env_lock();
         if std::process::Command::new("uv")
             .arg("--version")
             .output()
@@ -5161,7 +5181,7 @@ mod tests {
 
         let materialized = execute_init_from_source_only(dir.path(), reporter(), true)
             .expect("materialize workspace");
-        let lock = capsule::ato_lock::load_unvalidated_from_path(&materialized.lock_path)
+        let lock = capsule::capsule_lock::load_unvalidated_from_path(&materialized.lock_path)
             .expect("read materialized lock");
 
         // LEIP picks index.js (conventional Node.js entry) — process is resolved.
@@ -6567,7 +6587,7 @@ target = "worker"
 
     #[test]
     fn draft_lock_run_fails_closed_when_runtime_promotion_cannot_resolve() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -6605,7 +6625,7 @@ target = "worker"
 
     #[test]
     fn draft_lock_normalizes_legacy_complete_closure_shape() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -6653,7 +6673,7 @@ target = "worker"
 
     #[test]
     fn canonical_run_fails_closed_when_resolved_targets_missing() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -6674,7 +6694,7 @@ target = "worker"
         let error = execute_shared_engine(
             SourceInferenceInput::CanonicalLock(CanonicalLockInput {
                 project_root: PathBuf::from("."),
-                canonical_path: PathBuf::from("ato.lock.json"),
+                canonical_path: PathBuf::from("capsule.lock"),
                 lock,
             }),
             MaterializationMode::RunAttempt,
@@ -6693,7 +6713,7 @@ target = "worker"
 
     #[test]
     fn canonical_run_fails_closed_when_closure_missing() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -6716,7 +6736,7 @@ target = "worker"
         let error = execute_shared_engine(
             SourceInferenceInput::CanonicalLock(CanonicalLockInput {
                 project_root: PathBuf::from("."),
-                canonical_path: PathBuf::from("ato.lock.json"),
+                canonical_path: PathBuf::from("capsule.lock"),
                 lock,
             }),
             MaterializationMode::RunAttempt,
@@ -6730,7 +6750,7 @@ target = "worker"
 
     #[test]
     fn canonical_lock_normalizes_legacy_complete_closure_shape() {
-        let mut lock = AtoLock::default();
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "main.ts", "cmd": []}),
@@ -6757,7 +6777,7 @@ target = "worker"
         let result = execute_shared_engine(
             SourceInferenceInput::CanonicalLock(CanonicalLockInput {
                 project_root: PathBuf::from("."),
-                canonical_path: PathBuf::from("ato.lock.json"),
+                canonical_path: PathBuf::from("capsule.lock"),
                 lock,
             }),
             MaterializationMode::InitWorkspace,
@@ -6926,7 +6946,7 @@ target = "worker"
     fn empty_run_result() -> SourceInferenceResult {
         SourceInferenceResult {
             input_kind: SourceInferenceInputKind::SourceEvidence,
-            lock: AtoLock::default(),
+            lock: CapsuleLock::default(),
             provenance: Vec::new(),
             diagnostics: Vec::new(),
             infer: InferResult {

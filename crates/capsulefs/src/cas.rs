@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::hash::{ContentHash, hash_bytes};
+use crate::manifest::BlobManifest;
 use crate::{CapsuleFsError, Result};
 
 /// A filesystem-backed content-addressed chunk store.
@@ -45,6 +46,25 @@ impl CasStore {
     /// Whether a chunk is present.
     pub fn has_chunk(&self, hash: &ContentHash) -> bool {
         self.chunk_path(hash).exists()
+    }
+
+    /// Whether this store holds **every** chunk `blob` references — i.e. the blob
+    /// can be served entirely from local bytes with no fetch.
+    ///
+    /// This is the residency predicate. [`CasStore::open`] is NOT one: it
+    /// `create_dir_all`s the layout and therefore succeeds on any writable path,
+    /// including an empty store. A caller that must know "are the bytes here?"
+    /// (a UFFD demand-paging restore, which has no fetch path once the guest is
+    /// running) has to ask this, not `open`.
+    ///
+    /// Checks the whole chunk list, not just the first: a partially-resident blob
+    /// (interrupted fetch, an archive that extracted without its `cas/` entries,
+    /// or a chunk deduped in from an unrelated artifact) has chunk 0 present and a
+    /// later chunk missing. Uses the deduplicated
+    /// [`BlobManifest::referenced_chunks`], so a blob whose chunks repeat is
+    /// stat()ed once per distinct hash.
+    pub fn has_all_chunks(&self, blob: &BlobManifest) -> bool {
+        blob.referenced_chunks().all(|h| self.has_chunk(h))
     }
 
     /// Store chunk bytes, returning their content address. Idempotent: if the
@@ -159,6 +179,51 @@ mod tests {
         let h2 = store.put_chunk(b"same").unwrap();
         assert_eq!(h1, h2);
         assert_eq!(store.list_chunks().unwrap().len(), 1);
+    }
+
+    /// `open` is not a residency check and `has_all_chunks` is: an empty store
+    /// opens fine, and a blob missing any single chunk — first, middle, or last —
+    /// is not resident.
+    #[test]
+    fn has_all_chunks_is_residency_not_openability() {
+        use crate::manifest::{ChunkingKind, LayerKind};
+        use crate::writer::store_blob;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = CasStore::open(dir.path()).unwrap();
+        let payload: Vec<u8> = (0..64u8).collect();
+        let blob = store_blob(
+            &store,
+            LayerKind::Memory,
+            &payload,
+            ChunkingKind::PageAligned { page_size: 8 },
+        )
+        .unwrap();
+        assert!(blob.chunks.len() > 1, "need a multi-chunk blob");
+        assert!(
+            store.has_all_chunks(&blob),
+            "freshly stored blob is resident"
+        );
+
+        // An empty store still opens — openability says nothing about residency.
+        let empty_root = dir.path().join("empty");
+        let empty = CasStore::open(&empty_root).unwrap();
+        assert!(!empty.has_all_chunks(&blob));
+
+        // Removing ANY one chunk breaks residency, including a non-first one
+        // (which a first-chunk probe would miss).
+        for idx in [0usize, blob.chunks.len() / 2, blob.chunks.len() - 1] {
+            let victim = blob.chunks[idx].hash.clone();
+            let path = store.chunk_path(&victim);
+            let bytes = fs::read(&path).unwrap();
+            fs::remove_file(&path).unwrap();
+            assert!(
+                !store.has_all_chunks(&blob),
+                "chunk {idx} missing ⇒ blob is not resident"
+            );
+            fs::write(&path, &bytes).unwrap();
+            assert!(store.has_all_chunks(&blob), "restored ⇒ resident again");
+        }
     }
 
     #[test]

@@ -41,7 +41,6 @@ use anyhow::Result;
 
 use crate::application::ports::OutputPort;
 use crate::auth;
-use crate::cli::shared::EncapVisibility;
 use crate::cli::workspace::WorkspaceCommands;
 use crate::cli::{Cli, Commands};
 use crate::commands;
@@ -191,9 +190,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share {
                 path,
-                internal,
-                private,
-                local,
                 print_plan,
                 dry_run,
                 git_mode,
@@ -202,30 +198,18 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 yes,
                 save_config,
                 dev,
-            } => {
-                let visibility = if internal {
-                    EncapVisibility::Internal
-                } else if private {
-                    EncapVisibility::Private
-                } else if local {
-                    EncapVisibility::Local
-                } else {
-                    EncapVisibility::Public
-                };
-                share::execute_encap_command(share::EncapCommandArgs {
-                    path,
-                    visibility,
-                    print_plan,
-                    dry_run,
-                    git_mode,
-                    tool_runtime,
-                    allow_dirty,
-                    yes,
-                    save_config,
-                    dev,
-                    reporter: reporter.clone(),
-                })
-            }
+            } => share::execute_encap_command(share::EncapCommandArgs {
+                path,
+                print_plan,
+                dry_run,
+                git_mode,
+                tool_runtime,
+                allow_dirty,
+                yes,
+                save_config,
+                dev,
+                reporter: reporter.clone(),
+            }),
 
             WorkspaceCommands::Setup {
                 input,
@@ -244,63 +228,6 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                 reporter: reporter.clone(),
             }),
         },
-
-        Commands::Encap {
-            path,
-            internal,
-            private,
-            local,
-            print_plan,
-            dry_run,
-            git_mode,
-            tool_runtime,
-            allow_dirty,
-            yes,
-            save_config,
-        } => {
-            eprintln!("warning: `ato encap` is deprecated. Use `ato workspace share` instead.");
-            let visibility = if internal {
-                EncapVisibility::Internal
-            } else if private {
-                EncapVisibility::Private
-            } else if local {
-                EncapVisibility::Local
-            } else {
-                EncapVisibility::Public
-            };
-            share::execute_encap_command(share::EncapCommandArgs {
-                path,
-                visibility,
-                print_plan,
-                dry_run,
-                git_mode,
-                tool_runtime,
-                allow_dirty,
-                yes,
-                save_config,
-                dev: false,
-                reporter: reporter.clone(),
-            })
-        }
-
-        Commands::Decap {
-            input,
-            into,
-            plan,
-            tool_runtime,
-            strict,
-        } => {
-            eprintln!("warning: `ato decap` is deprecated. Use `ato workspace setup` instead.");
-            share::execute_decap_command(share::DecapCommandArgs {
-                input,
-                into,
-                plan,
-                tool_runtime,
-                strict,
-                dev: true,
-                reporter: reporter.clone(),
-            })
-        }
 
         Commands::Engine { command } => {
             engine::execute_engine_command(command, nacelle, reporter.clone())
@@ -799,6 +726,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                     public_base_url,
                     max_slots,
                     caddyfile,
+                    hold_proxy_listen,
                 } => {
                     // clap enforces official_preview ⇔ public_base_url via `requires`.
                     let official = official_preview.then(|| {
@@ -809,6 +737,7 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
                                 crate::application::runner_bootstrap::official_preview::DEFAULT_CADDYFILE_PATH
                                     .to_string()
                             }),
+                            hold_proxy_listen,
                         }
                     });
                     crate::application::runner_bootstrap::setup::run(
@@ -873,14 +802,12 @@ pub(crate) fn execute(cli: Cli, reporter: Reporter) -> Result<()> {
         Commands::Login {
             token,
             headless,
-            desktop_webview,
+            desktop,
         } => {
             let rt = tokio::runtime::Runtime::new()?;
             match token {
                 Some(token) => rt.block_on(auth::login_with_token(token)),
-                None if desktop_webview => {
-                    rt.block_on(auth::login_with_store_device_flow_desktop())
-                }
+                None if desktop => rt.block_on(auth::login_with_store_device_flow_desktop()),
                 None => rt.block_on(auth::login_with_store_device_flow(headless)),
             }
         }

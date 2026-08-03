@@ -106,6 +106,13 @@ fn semver_prefers_highest_stable_release() {
 }
 
 #[test]
+fn cli_startup_installs_a_rustls_crypto_provider() {
+    install_default_rustls_crypto_provider();
+
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
+#[test]
 fn select_capsule_file_is_deterministic() {
     let tmp = tempfile::tempdir().unwrap();
     let version_dir = tmp.path().join("1.0.0");
@@ -324,6 +331,66 @@ fn run_command_parses_agent_mode() {
     }
 }
 
+#[test]
+fn login_command_defaults_to_plain_interactive_flow() {
+    let cli = parse_cli(["ato", "login"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token, None);
+            assert!(!headless);
+            assert!(!desktop);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn login_command_parses_hidden_desktop_flag() {
+    // Regression guard for ato#1077: `ato-desktop` spawns `ato login --desktop`
+    // as a non-interactive child process (dispatch/mod.rs routes this to
+    // `login_with_store_device_flow_desktop`, not the plain interactive flow).
+    // If this flag were ever renamed/dropped without updating the spawn site
+    // in `ato_dock::trigger_login`, ato-desktop's login button would silently
+    // fall through to the interactive flow instead. This test only proves the
+    // flag still parses to `desktop: true`; it does not exercise dispatch's
+    // routing (that arm calls straight into networked async auth code) or the
+    // spawn site itself.
+    let cli = parse_cli(["ato", "login", "--desktop"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token, None);
+            assert!(!headless);
+            assert!(desktop);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
+#[test]
+fn login_command_desktop_and_token_are_independent_flags() {
+    let cli = parse_cli(["ato", "login", "--token", "abc123", "--headless"]).expect("parse");
+    match cli.command {
+        Commands::Login {
+            token,
+            headless,
+            desktop,
+        } => {
+            assert_eq!(token.as_deref(), Some("abc123"));
+            assert!(headless);
+            assert!(!desktop);
+        }
+        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
+    }
+}
+
 /// Parse argv and return the `Launch` command's `detached_session` flag.
 /// (`parse_cli` already runs the stack-heavy parse on a wide-stack thread.)
 fn launch_detached_flag(argv: &'static [&'static str]) -> bool {
@@ -362,7 +429,7 @@ fn run_command_parses_entry_and_env_flags() {
     let cli = parse_cli([
         "ato",
         "run",
-        "https://ato.run/s/demo",
+        "./share.spec.json",
         "--entry",
         "dashboard",
         "--env-file",
@@ -379,7 +446,7 @@ fn run_command_parses_entry_and_env_flags() {
             prompt_env,
             ..
         } => {
-            assert_eq!(path, PathBuf::from("https://ato.run/s/demo"));
+            assert_eq!(path, PathBuf::from("./share.spec.json"));
             assert_eq!(entry.as_deref(), Some("dashboard"));
             assert_eq!(env_file, Some(PathBuf::from("./local.env")));
             assert!(prompt_env);
@@ -389,143 +456,17 @@ fn run_command_parses_entry_and_env_flags() {
 }
 
 #[test]
-fn encap_command_parses_default_flags() {
-    let cli = parse_cli(["ato", "encap", "."]).expect("parse");
-    match cli.command {
-        Commands::Encap {
-            path,
-            internal,
-            private,
-            local,
-            print_plan,
-            ..
-        } => {
-            assert_eq!(path, PathBuf::from("."));
-            assert!(!internal);
-            assert!(!private);
-            assert!(!local);
-            assert!(!print_plan);
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn encap_command_parses_internal_flag() {
-    let cli = parse_cli(["ato", "encap", "--internal"]).expect("parse");
-    match cli.command {
-        Commands::Encap {
-            internal,
-            private,
-            local,
-            ..
-        } => {
-            assert!(internal);
-            assert!(!private);
-            assert!(!local);
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn encap_command_parses_private_flag() {
-    let cli = parse_cli(["ato", "encap", "--private"]).expect("parse");
-    match cli.command {
-        Commands::Encap {
-            internal,
-            private,
-            local,
-            ..
-        } => {
-            assert!(!internal);
-            assert!(private);
-            assert!(!local);
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn encap_command_parses_local_flag() {
-    let cli = parse_cli(["ato", "encap", "--local"]).expect("parse");
-    match cli.command {
-        Commands::Encap {
-            internal,
-            private,
-            local,
-            ..
-        } => {
-            assert!(!internal);
-            assert!(!private);
-            assert!(local);
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn encap_command_mutual_exclusion_fails() {
-    assert!(parse_cli(["ato", "encap", "--internal", "--private"]).is_err());
-    assert!(parse_cli(["ato", "encap", "--internal", "--local"]).is_err());
-    assert!(parse_cli(["ato", "encap", "--private", "--local"]).is_err());
-}
-
-#[test]
-fn encap_command_default_path_is_cwd() {
-    let cli = parse_cli(["ato", "encap"]).expect("parse");
-    match cli.command {
-        Commands::Encap { path, .. } => assert_eq!(path, PathBuf::from(".")),
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn decap_command_requires_into_and_parses_plan() {
-    let cli = parse_cli([
-        "ato",
-        "decap",
-        "https://ato.run/s/demo",
-        "--into",
-        "./demo",
-        "--plan",
-    ])
-    .expect("parse");
-    match cli.command {
-        Commands::Decap {
-            input, into, plan, ..
-        } => {
-            assert_eq!(input, "https://ato.run/s/demo");
-            assert_eq!(into, PathBuf::from("./demo"));
-            assert!(plan);
-        }
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-
-    let error = parse_cli(["ato", "decap", "https://ato.run/s/demo"]);
-    assert!(error.is_err(), "missing --into must fail");
-    let rendered = error.err().expect("parse error").to_string();
-    assert!(rendered.contains("--into"));
-}
-
-#[test]
 fn workspace_share_command_parses_default_flags() {
     let cli = parse_cli(["ato", "workspace", "share", "."]).expect("parse");
     match cli.command {
         Commands::Workspace { command } => match command {
             WorkspaceCommands::Share {
                 path,
-                internal,
-                private,
-                local,
                 print_plan,
                 dev,
                 ..
             } => {
                 assert_eq!(path, PathBuf::from("."));
-                assert!(!internal);
-                assert!(!private);
-                assert!(!local);
                 assert!(!print_plan);
                 assert!(!dev);
             }
@@ -568,33 +509,12 @@ fn workspace_share_command_parses_dev_and_print_plan() {
 }
 
 #[test]
-fn workspace_share_command_parses_visibility_flags() {
-    let cli = parse_cli(["ato", "workspace", "share", "--internal"]).expect("parse");
-    match cli.command {
-        Commands::Workspace { command } => match command {
-            WorkspaceCommands::Share { internal, .. } => {
-                assert!(internal);
-            }
-            _ => panic!("unexpected workspace subcommand"),
-        },
-        other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
-    }
-}
-
-#[test]
-fn workspace_share_command_mutual_exclusion_fails() {
-    assert!(parse_cli(["ato", "workspace", "share", "--internal", "--private"]).is_err());
-    assert!(parse_cli(["ato", "workspace", "share", "--internal", "--local"]).is_err());
-    assert!(parse_cli(["ato", "workspace", "share", "--private", "--local"]).is_err());
-}
-
-#[test]
 fn workspace_setup_command_parses_into_and_plan() {
     let cli = parse_cli([
         "ato",
         "workspace",
         "setup",
-        "https://ato.run/s/demo",
+        "./share.spec.json",
         "--into",
         "./demo",
         "--plan",
@@ -609,7 +529,7 @@ fn workspace_setup_command_parses_into_and_plan() {
                 dev,
                 ..
             } => {
-                assert_eq!(input, "https://ato.run/s/demo");
+                assert_eq!(input, "./share.spec.json");
                 assert_eq!(into, PathBuf::from("./demo"));
                 assert!(plan);
                 assert!(!dev);
@@ -619,7 +539,7 @@ fn workspace_setup_command_parses_into_and_plan() {
         other => panic!("unexpected command: {:?}", std::mem::discriminant(&other)),
     }
 
-    let error = parse_cli(["ato", "workspace", "setup", "https://ato.run/s/demo"]);
+    let error = parse_cli(["ato", "workspace", "setup", "./share.spec.json"]);
     assert!(error.is_err(), "missing --into must fail");
     let rendered = error.err().expect("parse error").to_string();
     assert!(rendered.contains("--into"));
@@ -631,7 +551,7 @@ fn workspace_setup_command_parses_dev_flag() {
         "ato",
         "workspace",
         "setup",
-        "https://ato.run/s/demo",
+        "./share.spec.json",
         "--into",
         "./demo",
         "--dev",
@@ -654,7 +574,7 @@ fn workspace_setup_command_parses_dev_and_plan() {
         "ato",
         "workspace",
         "setup",
-        "https://ato.run/s/demo",
+        "./share.spec.json",
         "--into",
         "./demo",
         "--dev",

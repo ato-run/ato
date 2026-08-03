@@ -19,10 +19,26 @@ path = "src/lib.rs"
 name = "ready-state-bench"
 path = "src/bin/ready_state_bench.rs"
 
+[features]
+# Exposes the `#[cfg(test)]` eligibility test constructors
+# (`VerifiedRunningSnapshotEligibility::{for_test, analyze_for_test}`) to sibling
+# crates' test harnesses (PR-2: the `snapshot-builder` HoldPhase unit tests).
+# Non-default and dev-dependency-only, so a normal build/library consumer never
+# gains a non-production eligibility constructor.
+test-support = []
+
 [dependencies]
 anyhow = "1.0"
+# Build-time screenshot capture (store thumbnail automation): base64-encodes
+# the captured PNG for the snapshot-builder ack body. Already a workspace
+# dependency (capsule/cli/desktop/nacelle/netd) — reused here, same version.
+base64 = "0.22"
 blake3 = "1.5"
 capsule = { path = "../capsule" }
+# Hex encoding for the source-receipt digest label. Already a transitive dep via
+# capsule; declared directly because this crate now formats digests itself.
+hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
 capsulefs = { path = "../capsulefs" }
 # BindingName: the rootfs_builder validates each secret's derived binding name against
 # the SAME canonical rule the guest-agent enforces, so an unbootable supervisor.json
@@ -40,6 +56,10 @@ thiserror = "2.0"
 # U1 (#854): the UFFD page-server uses raw userfaultfd ioctls + SCM_RIGHTS recvmsg
 # (Linux-only; the module body is cfg(target_os="linux")-gated).
 libc = "0.2"
+# Scratch directory for the source-archive round-trip check: the archive is
+# extracted back and re-digested before anything is stored. Already a
+# dev-dependency; promoted because this now runs in a shipped path.
+tempfile = "3"
 
 [dev-dependencies]
 serde_json = "1.0"

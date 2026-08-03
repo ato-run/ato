@@ -40,10 +40,11 @@ use capsule::execution_plan::error::AtoExecutionError;
 #[cfg(test)]
 use capsule::execution_plan::guard::ExecutorKind;
 use capsule::input_resolver::{
-    ATO_LOCK_FILE_NAME, ResolveInputOptions, ResolvedInput, resolve_authoritative_input,
+    CAPSULE_LOCK_FILE_NAME, DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME, ResolveInputOptions,
+    ResolvedInput, resolve_authoritative_input,
 };
 use capsule::lifecycle::LifecycleEvent;
-use capsule::lockfile::{CAPSULE_LOCK_FILE_NAME, LEGACY_CAPSULE_LOCK_FILE_NAME};
+use capsule::lockfile::LEGACY_CAPSULE_LOCK_JSON_FILE_NAME;
 use capsule::types::CapsuleManifest;
 use capsule::{CapsuleReporter, router};
 
@@ -367,8 +368,9 @@ async fn copy_source_files(
         }
 
         if file_name == "capsule.toml"
+            || file_name == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             || file_name == CAPSULE_LOCK_FILE_NAME
-            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
+            || file_name == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             || file_name == "config.json"
         {
             continue;
@@ -426,8 +428,9 @@ fn check_has_source_files(dir: &Path) -> bool {
         let path = entry.path();
 
         if file_name == "capsule.toml"
+            || file_name == LEGACY_CAPSULE_LOCK_JSON_FILE_NAME
             || file_name == CAPSULE_LOCK_FILE_NAME
-            || file_name == LEGACY_CAPSULE_LOCK_FILE_NAME
+            || file_name == DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME
             || file_name == "config.json"
             || file_name == "signature.json"
         {
@@ -1320,7 +1323,9 @@ async fn normalize_run_target_after_install(
 
     if target_path.is_dir()
         || target_path.file_name().and_then(|value| value.to_str()) == Some("capsule.toml")
-        || target_path.file_name().and_then(|value| value.to_str()) == Some(ATO_LOCK_FILE_NAME)
+        || target_path.file_name().and_then(|value| value.to_str()) == Some(CAPSULE_LOCK_FILE_NAME)
+        || target_path.file_name().and_then(|value| value.to_str())
+            == Some(DEPRECATED_CAPSULE_LOCK_ALIAS_FILE_NAME)
         || target_path
             .extension()
             .and_then(|value| value.to_str())
@@ -1647,7 +1652,7 @@ mod tests {
     use crate::executors::launch_context::{InjectedMount, RuntimeLaunchContext};
     use crate::registry::store::RegistryStore;
     use crate::reporters::CliReporter;
-    use capsule::ato_lock::{self, AtoLock};
+    use capsule::capsule_lock::{self, CapsuleLock};
     use capsule::execution_plan::guard::ExecutorKind;
     use capsule::lifecycle::LifecycleEvent;
     use capsule::router::{self, ExecutionProfile, ManifestData};
@@ -1655,6 +1660,56 @@ mod tests {
     use serde_json::{Value, json};
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    /// Serializes and isolates `ATO_HOME` for tests that drive
+    /// `normalize_run_target_after_install` through source-inference
+    /// materialization.
+    ///
+    /// That path writes run-state under `$ATO_HOME/runs/source-inference/`
+    /// (`ato_runs_dir()`). Reading the ambient process-global `ATO_HOME` races
+    /// every other env-touching test that repoints it: the run-state write then
+    /// lands in a foreign test's tempdir, and if that test tears its tempdir
+    /// down mid-materialize the write fails and the `.expect(..)` panics. The
+    /// guard holds the crate-wide env lock (`crate::tests::env_lock()` — the
+    /// documented "all env-touching tests must hold this lock" contract) and
+    /// points `ATO_HOME` at a private dir for the test's duration, restoring the
+    /// prior value on drop.
+    struct IsolatedAtoHome {
+        previous: Option<std::ffi::OsString>,
+        _home: tempfile::TempDir,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedAtoHome {
+        fn acquire() -> Self {
+            let lock = crate::tests::env_lock().lock().expect("env lock");
+            let home = tempfile::tempdir().expect("ato home tempdir");
+            let previous = std::env::var_os("ATO_HOME");
+            // SAFETY: process-env mutation is serialized by the env lock held above.
+            unsafe {
+                std::env::set_var("ATO_HOME", home.path());
+            }
+            Self {
+                previous,
+                _home: home,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for IsolatedAtoHome {
+        fn drop(&mut self) {
+            // Restore `ATO_HOME` before the tempdir/lock fields drop so no other
+            // env-locked test observes this test's (about-to-be-removed) dir.
+            // SAFETY: the env lock (`_lock`) is still held until this returns.
+            unsafe {
+                match self.previous.take() {
+                    Some(value) => std::env::set_var("ATO_HOME", value),
+                    None => std::env::remove_var("ATO_HOME"),
+                }
+            }
+        }
+    }
 
     #[test]
     fn resolve_python_dependency_lock_path_prefers_source_uv_lock() {
@@ -2038,9 +2093,12 @@ run = "node server.js""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_run_target_accepts_direct_canonical_lock_file() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
-        let lock_path = tmp.path().join("ato.lock.json");
-        let mut lock = AtoLock::default();
+        let lock_path = tmp.path().join("capsule.lock");
+        let mut lock = CapsuleLock::default();
         lock.contract.entries.insert(
             "process".to_string(),
             json!({"entrypoint": "node", "cmd": ["index.js"]}),
@@ -2063,7 +2121,7 @@ run = "node server.js""#,
             "closure".to_string(),
             json!({"kind": "metadata_only", "status": "incomplete", "observed_lockfiles": []}),
         );
-        ato_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
+        capsule_lock::write_pretty_to_path(&lock, &lock_path).expect("write lock");
 
         let args = RunArgs {
             target: lock_path.clone(),
@@ -2128,6 +2186,9 @@ run = "node server.js""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_provider_target_persists_authoritative_lock_in_workspace() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace_root = tmp.path().join("provider-workspace");
         std::fs::create_dir_all(workspace_root.join(".ato").join("provider"))
@@ -2242,13 +2303,13 @@ run = "main.py""#,
             .authoritative_input
             .as_ref()
             .expect("provider authoritative input");
-        let persisted_lock_path = workspace_root.join("ato.lock.json");
+        let persisted_lock_path = workspace_root.join("capsule.lock");
         assert!(
             persisted_lock_path.exists(),
-            "persisted provider ato.lock.json missing"
+            "persisted provider capsule.lock missing"
         );
 
-        let persisted_lock = ato_lock::load_unvalidated_from_path(&persisted_lock_path)
+        let persisted_lock = capsule_lock::load_unvalidated_from_path(&persisted_lock_path)
             .expect("load persisted provider lock");
         assert!(persisted_lock.lock_id.is_some());
         assert_eq!(
@@ -2279,6 +2340,9 @@ run = "main.py""#,
 
     #[tokio::test(flavor = "current_thread")]
     async fn normalize_run_target_accepts_direct_appimage_file() {
+        // Isolate `ATO_HOME`: this test materializes run-state under it. See
+        // `IsolatedAtoHome`. Held for the whole test.
+        let _ato_home = IsolatedAtoHome::acquire();
         let tmp = tempfile::tempdir().expect("tempdir");
         let appimage_path = tmp.path().join("dist").join("MyApp.AppImage");
         std::fs::create_dir_all(appimage_path.parent().expect("dist parent")).expect("create dist");
