@@ -741,6 +741,64 @@ pub fn validate_materialized_asset(asset: &MaterializedAsset) -> Result<(), Stri
     Ok(())
 }
 
+/// Materialize the manifest's path-locator assets from the workspace and
+/// validate each one, producing the `setupReady.materialized_assets` payload
+/// ato-api's `ingestBuilderPathAssets` expects. A path asset that is missing,
+/// unreadable, of an unknown media type, or that fails the passive-SVG / magic
+/// check is refused — the builder never reports an asset it has not validated.
+pub fn materialized_assets_from_workspace(
+    workspace_root: &std::path::Path,
+    manifest: &capsule::types::manifest_v1::CapsuleManifestV1,
+) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine;
+    use capsule::types::manifest_v1::AssetLocatorV1;
+
+    let Some(assets) = &manifest.metadata.assets else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (kind, locator) in [
+        ("icon", assets.icon.as_ref()),
+        ("banner", assets.banner.as_ref()),
+    ] {
+        let Some(AssetLocatorV1::Path(path)) = locator else {
+            continue;
+        };
+        let full_path = workspace_root.join(&path.path);
+        let bytes = std::fs::read(&full_path).map_err(|source| {
+            format!(
+                "materialize {kind} asset {:?}: {source}",
+                full_path.display()
+            )
+        })?;
+        let media_type = capsule::types::assets::AssetMediaType::detect(&bytes, &path.path)
+            .ok_or_else(|| {
+                format!(
+                    "materialize {kind} asset {:?}: cannot determine an authoring media type",
+                    full_path.display()
+                )
+            })?
+            .as_str();
+        let content_digest = sha256_digest(&bytes);
+        validate_materialized_asset(&MaterializedAsset {
+            kind,
+            origin_path: path.path.clone(),
+            content_digest: content_digest.clone(),
+            media_type: media_type.to_string(),
+            bytes: bytes.clone(),
+        })
+        .map_err(|error| format!("materialize {kind} asset: {error}"))?;
+        out.push(serde_json::json!({
+            "kind": kind,
+            "origin_path": path.path,
+            "content_digest": content_digest,
+            "media_type": media_type,
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedBuildContract {
     pub timeout_seconds: u64,

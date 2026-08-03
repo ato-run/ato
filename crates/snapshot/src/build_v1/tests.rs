@@ -1537,8 +1537,8 @@ path = "assets/icon.svg"
     validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect("passive svg ok");
 
     workspace.write("assets/icon.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><script>alert(1)</script></svg>");
-    let error =
-        validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("active svg");
+    let error = validate_path_assets(workspace.dir.path(), &read_manifest(&workspace))
+        .expect_err("active svg");
     assert!(error.to_string().contains("not allowed"), "{error}");
 }
 
@@ -1550,8 +1550,8 @@ fn path_asset_missing_file_is_refused() {
 path = "assets/banner.png"
 "#,
     ));
-    let error =
-        validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("missing");
+    let error = validate_path_assets(workspace.dir.path(), &read_manifest(&workspace))
+        .expect_err("missing");
     assert!(error.to_string().contains("unreadable"), "{error}");
 }
 
@@ -1563,7 +1563,10 @@ fn path_asset_unknown_type_is_refused() {
 path = "assets/icon.gif"
 "#,
     ));
-    workspace.write("assets/icon.gif", "GIF89a\u{01}\u{00}\u{01}\u{00}\u{00}\u{00}\u{00};");
+    workspace.write(
+        "assets/icon.gif",
+        "GIF89a\u{01}\u{00}\u{01}\u{00}\u{00}\u{00}\u{00};",
+    );
     let error =
         validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("gif");
     assert!(error.to_string().contains("media type"), "{error}");
@@ -1577,11 +1580,13 @@ fn path_asset_url_locators_are_skipped() {
 url = "https://assets.example/icon.png"
 "#,
     ));
-    validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect("url is not read");
+    validate_path_assets(workspace.dir.path(), &read_manifest(&workspace))
+        .expect("url is not read");
 }
 
 /// Parse the workspace's capsule.toml, bypassing the lane's pin gate.
 fn read_manifest(workspace: &Workspace) -> capsule::types::manifest_v1::CapsuleManifestV1 {
-    let text = std::fs::read_to_string(workspace.dir.path().join("capsule.toml")).expect("manifest");
+    let text =
+        std::fs::read_to_string(workspace.dir.path().join("capsule.toml")).expect("manifest");
     capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&text).expect("valid manifest")
 }
