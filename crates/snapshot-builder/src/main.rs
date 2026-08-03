@@ -5674,6 +5674,24 @@ fn process_authoring_ready_state_seal(
     Ok(())
 }
 
+fn report_authoring_operation_failure<T>(
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+    error_code: &str,
+    result: Result<T>,
+) -> Result<T> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let detail = format!("{error:#}");
+            if let Err(report_error) = client.fail_job(work, error_code, &detail) {
+                return Err(error.context(format!("report Authoring job failure: {report_error}")));
+            }
+            Err(error)
+        }
+    }
+}
+
 fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usize> {
     let client = authoring_runtime::AuthoringApiClient {
         api_url: &cfg.api_url,
@@ -5702,7 +5720,12 @@ fn run_authoring_once(cfg: &Config, backend: &FirecrackerBackend) -> Result<usiz
             }
         }
         "clean_replay" => process_authoring_clean_replay(cfg, backend, &client, &work)?,
-        "ready_state_seal" => process_authoring_ready_state_seal(cfg, backend, &client, &work)?,
+        "ready_state_seal" => report_authoring_operation_failure(
+            &client,
+            &work,
+            "platform_internal_error",
+            process_authoring_ready_state_seal(cfg, backend, &client, &work),
+        )?,
         other => {
             return Err(anyhow!(
                 "Authoring claim returned unsupported operation {other:?}"
@@ -8387,6 +8410,110 @@ targets = ["web"]
             authoring_work_directory(root, "clean", "abjob_attempt_2").expect("attempt 2"),
             "a retry must never replace a prior Build Attempt artifact"
         );
+    }
+
+    #[test]
+    fn ready_state_seal_errors_are_reported_as_terminal_job_failures() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("listener address");
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept failure report");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let expected_len = loop {
+                let read = stream.read(&mut chunk).expect("read failure report");
+                assert!(read > 0, "client closed before sending failure report");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .expect("content-length header");
+                let total = header_end + 4 + content_length;
+                if request.len() >= total {
+                    break total;
+                }
+            };
+            request.truncate(expected_len);
+            request_tx.send(request).expect("record failure report");
+            let body = b"{}";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write response headers");
+            stream.write_all(body).expect("write response body");
+        });
+
+        let work: authoring_runtime::AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "ready_state_seal",
+            "work_id": "abjob_seal_failure",
+            "worker_claim_id": "abclaim_seal_failure",
+            "authoring_session_id": "auth_seal_failure",
+            "capsule_revision_id": "caprev_seal_failure",
+            "source_revision_id": "srev_seal_failure",
+            "source_closure_id": format!("sha256:{}", "1".repeat(64)),
+            "pinned_source": {
+                "source_revision_id": "srev_seal_failure",
+                "source_materialization_id": "smat_seal_failure",
+                "source_archive_digest": format!("sha256:{}", "2".repeat(64)),
+                "source_archive_object_key": "authoring/seal-failure.tar.gz",
+                "source_tree_digest": format!("sha256:{}", "1".repeat(64))
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-08-03T00:00:00.000Z",
+            "trace_id": "trace_seal_failure"
+        }))
+        .expect("authoring work");
+        let client = authoring_runtime::AuthoringApiClient {
+            api_url: &format!("http://{address}"),
+            builder_token: "builder-token",
+            builder_id: "builder-seal",
+        };
+        let error = report_authoring_operation_failure::<()>(
+            &client,
+            &work,
+            "platform_internal_error",
+            Err(anyhow!("snapshot capture returned EAGAIN")),
+        )
+        .expect_err("Seal failure must remain an error");
+
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot capture returned EAGAIN")
+        );
+        let request = request_rx.recv().expect("failure report request");
+        let header_end = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .expect("request headers");
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        assert!(
+            headers.starts_with(
+                "POST /v1/capsule-snapshots/authoring/jobs/abjob_seal_failure/failed HTTP/1.1"
+            ),
+            "{headers}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request[header_end + 4..]).expect("failure report body");
+        assert_eq!(body["builder_id"], "builder-seal");
+        assert_eq!(body["worker_claim_id"], "abclaim_seal_failure");
+        assert_eq!(body["error_code"], "platform_internal_error");
+        assert_eq!(body["error_message"], "snapshot capture returned EAGAIN");
+        server.join().expect("failure report server");
     }
 
     #[test]
