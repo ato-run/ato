@@ -48,11 +48,11 @@ EOF
 }
 
 test_5b() {
-    log "--- Test 5b: ato encap --dry-run → secret detected ---"
+    log "--- Test 5b: ato workspace share --dry-run → secret detected ---"
     setup_5b
 
     local out="$RESULTS_DIR/5b_output.txt"
-    gtimeout 15 ato encap --dry-run "$ATO_TEST_DIR/test-5b" >"$out" 2>&1 || true
+    gtimeout 15 ato workspace share --dry-run "$ATO_TEST_DIR/test-5b" >"$out" 2>&1 || true
 
     if grep -qi 'secret\|sk-\|potential\|found\|detect' "$out"; then
         pass "5b"
@@ -168,7 +168,7 @@ test_5e() {
     setup_5e
 
     local out="$RESULTS_DIR/5e_output.txt"
-    gtimeout 15 ato encap --dry-run "$ATO_TEST_DIR/test-5e" >"$out" 2>&1 || true
+    gtimeout 15 ato workspace share --dry-run "$ATO_TEST_DIR/test-5e" >"$out" 2>&1 || true
 
     # .env は PackFilter で除外されるため、secretスキャンにもかからない
     if grep -qi 'No secret\|no.*secret\|0 potential\|clean' "$out"; then

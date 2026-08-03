@@ -1,7 +1,7 @@
 # capsule / schema
 
 Canonical JSON Schema sources for ato capsules. These are the definitions that
-external consumers (the registry web-api, `SKILL.md`, future `ato encap` /
+external consumers (the registry web-api, `SKILL.md`, future `ato workspace share` /
 `ato validate` lints) must agree on.
 
 ## Modules
