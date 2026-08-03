@@ -4657,13 +4657,12 @@ impl<'events, 'client> AuthoringBuildOutputSink<'events, 'client> {
     }
 
     fn marker(line: &str, prefix: &str) -> Option<String> {
-        let start = line.find(prefix)? + prefix.len();
+        let framed_prefix = format!("\u{1e}{prefix}");
+        let start = line.find(&framed_prefix)? + framed_prefix.len();
         let value = &line[start..];
-        let end = value
-            .find(|character: char| character == '\u{1f}' || character.is_whitespace())
-            .unwrap_or(value.len());
+        let end = value.find('\u{1f}')?;
         let value = &value[..end];
-        (!value.is_empty()).then(|| value.to_string())
+        (!value.is_empty() && !value.chars().any(char::is_whitespace)).then(|| value.to_string())
     }
 
     fn start_command(&mut self, step_id: String) -> Result<(), String> {
@@ -8498,6 +8497,13 @@ targets = ["web"]
         assert_eq!(
             AuthoringBuildOutputSink::marker(end, "ATO_STEP_END:").as_deref(),
             Some("build.user.2:1")
+        );
+        let displayed_run =
+            "#8 [4/4] RUN printf '\\036ATO_STEP_START:%s\\037\\n' 'build.user.2';\n";
+        assert_eq!(
+            AuthoringBuildOutputSink::marker(displayed_run, "ATO_STEP_START:"),
+            None,
+            "BuildKit's Dockerfile command display is not an emitted control frame"
         );
     }
 }
