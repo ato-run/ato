@@ -4252,7 +4252,13 @@ fn process_authoring_preview(
         .resolution_lock_digest
         .as_deref()
         .ok_or_else(|| fail("metadata", "Preview omitted Resolution Lock".to_string()))?;
-    let clean_dir = clean_replay_directory(cfg, &work.authoring_session_id)
+    let source_build_attempt_id = work.source_build_attempt_id.as_deref().ok_or_else(|| {
+        fail(
+            "metadata",
+            "Preview omitted source Build Attempt".to_string(),
+        )
+    })?;
+    let clean_dir = clean_replay_directory(cfg, source_build_attempt_id)
         .map_err(|error| fail("preview", error))?;
     let artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
         &std::fs::read(clean_replay_artifact_path(&clean_dir))
@@ -4260,6 +4266,7 @@ fn process_authoring_preview(
     )
     .map_err(|error| fail("preview", format!("decode Build Attempt artifact: {error}")))?;
     if artifact.schema != CLEAN_REPLAY_ARTIFACT_SCHEMA
+        || artifact.build_attempt_id != source_build_attempt_id
         || artifact.authoring_session_id != work.authoring_session_id
         || artifact.build_config_revision_id != build_config_revision_id
         || artifact.authoring_toml_digest != authored_toml_digest
@@ -4861,7 +4868,11 @@ impl snapshot::rootfs_builder::BuildOutputSink for AuthoringBuildOutputSink<'_, 
         stream: snapshot::rootfs_builder::BuildOutputStream,
         bytes: &[u8],
     ) -> Result<(), String> {
-        self.consume(stream, bytes)
+        self.consume(stream, bytes)?;
+        // A read chunk is at most 8 KiB. Flush it before waiting for the next
+        // chunk so a command that prints once and then blocks does not hide
+        // its last observable output until command completion.
+        self.events.flush()
     }
 }
 
@@ -4881,6 +4892,7 @@ const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1
 #[serde(deny_unknown_fields)]
 struct CleanReplayBuilderArtifact {
     schema: String,
+    build_attempt_id: String,
     authoring_session_id: String,
     build_config_revision_id: String,
     authoring_toml_digest: String,
@@ -4908,8 +4920,8 @@ fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf
     Ok(root.join(format!("authoring-{kind}-{id}")))
 }
 
-fn clean_replay_directory(cfg: &Config, authoring_session_id: &str) -> Result<PathBuf, String> {
-    authoring_work_directory(&cfg.work, "clean", authoring_session_id)
+fn clean_replay_directory(cfg: &Config, build_attempt_id: &str) -> Result<PathBuf, String> {
+    authoring_work_directory(&cfg.work, "clean", build_attempt_id)
 }
 
 fn clean_replay_artifact_path(jobdir: &Path) -> PathBuf {
@@ -4934,7 +4946,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         let started_at = chrono::Utc::now();
         let source_started = self.events.step_started("source.materialization")?;
         let source_result = (|| {
-            let jobdir = clean_replay_directory(self.cfg, &self.work.authoring_session_id)?;
+            let jobdir = clean_replay_directory(self.cfg, &self.work.work_id)?;
             if jobdir.exists() {
                 std::fs::remove_dir_all(&jobdir)
                     .map_err(|error| format!("clear Clean Replay workspace: {error}"))?;
@@ -5081,6 +5093,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             &jobdir,
             &CleanReplayBuilderArtifact {
                 schema: CLEAN_REPLAY_ARTIFACT_SCHEMA.to_string(),
+                build_attempt_id: self.work.work_id.clone(),
                 authoring_session_id: request.authoring_session_id.clone(),
                 build_config_revision_id: self
                     .work
@@ -5364,8 +5377,7 @@ fn process_authoring_clean_replay(
             snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
                 .map_err(|error| anyhow!("execute Build Attempt: {error}"))?
         };
-        let jobdir = clean_replay_directory(cfg, &work.authoring_session_id)
-            .map_err(|error| anyhow!(error))?;
+        let jobdir = clean_replay_directory(cfg, &work.work_id).map_err(|error| anyhow!(error))?;
         let mut artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
             &std::fs::read(clean_replay_artifact_path(&jobdir))
                 .context("read Build Attempt artifact")?,
@@ -5429,13 +5441,19 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
             .clean_replay_receipt
             .payload_digest()
             .map_err(|error| format!("digest Clean Replay receipt: {error}"))?;
-        let clean_dir = clean_replay_directory(self.cfg, &clean_payload.authoring_session_id)?;
+        let source_build_attempt_id = self
+            .work
+            .source_build_attempt_id
+            .as_deref()
+            .ok_or_else(|| "Ready-State Seal omitted source Build Attempt".to_string())?;
+        let clean_dir = clean_replay_directory(self.cfg, source_build_attempt_id)?;
         let artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
             &std::fs::read(clean_replay_artifact_path(&clean_dir))
                 .map_err(|error| format!("read Clean Replay artifact: {error}"))?,
         )
         .map_err(|error| format!("decode Clean Replay artifact: {error}"))?;
         if artifact.schema != CLEAN_REPLAY_ARTIFACT_SCHEMA
+            || artifact.build_attempt_id != source_build_attempt_id
             || artifact.authoring_session_id != clean_payload.authoring_session_id
             || artifact.source_closure_id != clean_payload.source_closure_id
             || artifact.program_intent_digest != clean_payload.program_intent_digest
@@ -8360,11 +8378,113 @@ targets = ["web"]
         assert!(authoring_work_directory(root, "clean", "../host").is_err());
         assert!(authoring_work_directory(root, "clean", "session/other").is_err());
         assert_eq!(
-            authoring_work_directory(root, "clean", "as_01ABC")
+            authoring_work_directory(root, "clean", "abjob_01ABC")
                 .expect("safe")
                 .to_string_lossy(),
-            "/builder/work/authoring-clean-as_01ABC",
+            "/builder/work/authoring-clean-abjob_01ABC",
         );
+        assert_ne!(
+            authoring_work_directory(root, "clean", "abjob_attempt_1").expect("attempt 1"),
+            authoring_work_directory(root, "clean", "abjob_attempt_2").expect("attempt 2"),
+            "a retry must never replace a prior Build Attempt artifact"
+        );
+    }
+
+    #[test]
+    fn a_short_output_chunk_is_persisted_before_command_completion() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+        let address = listener.local_addr().expect("listener address");
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept event append");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let expected_len = loop {
+                let read = stream.read(&mut chunk).expect("read event append");
+                assert!(read > 0, "client closed before sending event append");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content length"))
+                    })
+                    .expect("content-length header");
+                let total = header_end + 4 + content_length;
+                if request.len() >= total {
+                    break total;
+                }
+            };
+            request.truncate(expected_len);
+            request_tx.send(request).expect("record request");
+            let body = br#"{"lastSequence":1,"truncated":false}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write response headers");
+            stream.write_all(body).expect("write response body");
+        });
+
+        let work: authoring_runtime::AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "abjob_flush",
+            "worker_claim_id": "abclaim_flush",
+            "authoring_session_id": "as_flush",
+            "capsule_revision_id": "caprev_flush",
+            "source_revision_id": "srev_flush",
+            "source_closure_id": format!("sha256:{}", "1".repeat(64)),
+            "pinned_source": {
+                "source_revision_id": "srev_flush",
+                "source_materialization_id": "smat_flush",
+                "source_archive_digest": format!("sha256:{}", "2".repeat(64)),
+                "source_archive_object_key": "authoring/flush.tar.gz",
+                "source_tree_digest": format!("sha256:{}", "1".repeat(64))
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-08-03T00:00:00.000Z",
+            "trace_id": "trace_flush"
+        }))
+        .expect("authoring work");
+        let client = authoring_runtime::AuthoringApiClient {
+            api_url: &format!("http://{address}"),
+            builder_token: "builder-token",
+            builder_id: "builder-flush",
+        };
+        let mut events = BuildEventEmitter {
+            client: &client,
+            work: &work,
+            sequence: 0,
+            acknowledged_sequence: 0,
+            pending: Vec::new(),
+            pending_bytes: 0,
+            last_flush: std::time::Instant::now(),
+            output_truncated: false,
+        };
+        let mut output = AuthoringBuildOutputSink::new(&mut events, &[]);
+
+        snapshot::rootfs_builder::BuildOutputSink::write(
+            &mut output,
+            snapshot::rootfs_builder::BuildOutputStream::Stdout,
+            b"before sleep\n",
+        )
+        .expect("persist output chunk");
+
+        let request = request_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("event was observable before command completion");
+        let request = String::from_utf8_lossy(&request);
+        assert!(request.contains("before sleep\\n"), "{request}");
+        server.join().expect("event server");
     }
 
     #[test]

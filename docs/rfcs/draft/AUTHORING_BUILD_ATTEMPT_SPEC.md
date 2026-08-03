@@ -81,10 +81,14 @@ is appended and close it with the observed exit code. Output-event persistence
 is fail-closed: an attempt does not report success if its append-only console
 record could not be stored.
 
-Events are buffered to at least 16 KiB or 100 ms, then appended as one fenced
-batch naming `expected_previous_sequence`. The API acknowledgement is the only
-cursor the builder trusts. Once the API reports durable truncation, the builder
-stops emitting output/diagnostic payloads but continues lifecycle events.
+Events are buffered up to 16 KiB or 100 ms, then appended as one fenced batch
+naming `expected_previous_sequence`. Every bounded pipe read chunk flushes its
+pending output before the reader waits for another chunk. Thus a command such as
+`print; sleep` exposes the printed event while it is still running even when no
+later byte arrives to trigger the time threshold. The API acknowledgement is
+the only cursor the builder trusts. Once the API reports durable truncation,
+the builder stops emitting output/diagnostic payloads but continues lifecycle
+events.
 
 The builder reports terminal failures through the fenced job-failure endpoint in
 addition to emitting the terminal event. A success receipt remains the authority
@@ -93,11 +97,17 @@ for moving the Authoring Session to `clean_replay_verified`.
 ## Compatibility
 
 The default suggested setup remains detect-only. After a successful attempt, a
-separate `setup_mode = preview` claim is routed to the same builder, validates
-the persisted artifact against Config Revision/TOML/plan/source/intent/lock
-digests, boots that artifact, and reports a setup-ready Preview Session. Seal
-capture stops the preview first. The legacy interactive setup terminal remains
-outside this primary flow.
+separate `setup_mode = preview` claim carries `source_build_attempt_id`, is
+routed to that Attempt's builder, validates the persisted artifact against the
+Attempt and Config Revision/TOML/plan/source/intent/lock digests, boots that
+artifact, and reports a setup-ready Preview Session. Ready-State Seal carries
+the same source Attempt identity and reads the same artifact.
+
+Clean Replay workspaces are named by Build Attempt ID, not Authoring Session ID.
+A retry clears only its own directory; it must never replace or delete a prior
+successful Attempt artifact. Reclamation is a separate TTL/GC concern after the
+evidence chain no longer needs the artifact. Seal capture stops the preview
+first. The legacy interactive setup terminal remains outside this primary flow.
 
 The current materializer accepts a default `[source]` declaration only
 (`root = "."`, empty authored ignore). A non-default source scope is rejected
