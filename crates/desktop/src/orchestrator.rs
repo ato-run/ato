@@ -3034,7 +3034,7 @@ fn session_root() -> Result<PathBuf> {
     ato_path("apps/ato-desktop/sessions").context("failed to resolve ato home for session root")
 }
 
-/// Parsed `.ato/share/state.json` written by `ato decap` on success.
+/// Parsed `.ato/share/state.json` written by `ato workspace setup` on success.
 #[derive(Deserialize)]
 struct ShareStateJson {
     sources: Vec<ShareStateSource>,
@@ -3258,7 +3258,7 @@ fn start_web_service_from_workspace(
     if state.sources.is_empty() {
         bail!(
             "share {} has no sources — it was captured without any source content.\n\
-             Re-share the project with the current ato-cli: ato encap <dir> --share",
+             Re-share the project with the current ato-cli: ato workspace share",
             share_url
         );
     }
@@ -3281,9 +3281,9 @@ fn start_web_service_from_workspace(
     let (pm, install_root) = detect_package_manager(&source_dir);
     info!(share_url, pm, dir = %source_dir.display(), "spawning web dev server");
 
-    // If the install_root has no node_modules, the ato decap install step either
-    // ran the wrong runtime (e.g. Python) or was skipped.  Run install now so
-    // that dev-script binaries (next, vite, …) are available.
+    // If the install_root has no node_modules, the workspace setup install step
+    // either ran the wrong runtime (e.g. Python) or was skipped.  Run install now
+    // so that dev-script binaries (next, vite, …) are available.
     if !install_root.join("node_modules").exists() {
         info!(
             share_url,

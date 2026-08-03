@@ -54,6 +54,6 @@ pnpm-store/
 # Large test artifacts
 test_sync_update/
 
-# ato encap artifacts (leak past build/ filter)
+# ato workspace share artifacts (leak past build/ filter)
 *.sync
 *.capsule
