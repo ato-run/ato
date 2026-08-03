@@ -51,14 +51,14 @@ Preview は author intent を書き換えない derived state として扱う。
 
 ### 3.1 Primary Commands
 
-CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語は `Try -> Keep -> Share` とし、他コマンドは互換・高度機能として help 上の優先度を下げる。
+CLI の front-door は `run`, `workspace share`, `workspace setup` に固定する。物語は `Try -> Keep -> Share` とし、他コマンドは互換・高度機能として help 上の優先度を下げる。
 
-- `ato run [path|publisher/slug|github.com/owner/repo|https://ato.run/s/<id>] [-t <label>] [--entry <id>] [--env-file <path>] [--prompt-env] [--watch] [--background] [--nacelle] [--registry] [--enforcement] [-y|--yes]`
+- `ato run [path|publisher/slug|github.com/owner/repo|local share.spec.json|local share.lock.json] [-t <label>] [--entry <id>] [--env-file <path>] [--prompt-env] [--watch] [--background] [--nacelle] [--registry] [--enforcement] [-y|--yes]`
   - 既定で `path="."`。`.capsule` または `capsule.toml` を実行。
   - `run` は常に ephemeral execution とする。repo や workspace を永続配置してはならない。
   - `capsule://...` canonical handle は Phase 1 では拒否する。CLI の run surface は terse ref と local path のみに保つ。
   - `github.com/owner/repo` 入力は PreviewSession を内部生成し、`preview metadata` → optional retry/manual edit → build → promotion → installed run の順で進む。
-  - share URL (`https://ato.run/s/<id>` / `https://ato.run/s/<id>@r<revision>`) は first-class input として受理し、mutable URL は内部で immutable revision に固定してから run / next-step を組み立てる。
+  - ローカルの `share.spec.json` / `share.lock.json` は workspace target として受理し、run / next-step を組み立てる（web 経由の share URL は受け付けない）。
   - workspace target を run する場合、resolver は runnable `entries[]` を返し、`run` はその中から 1 つを ephemeral 実行する。
     - runnable entry が 1 つなら自動選択
     - 複数なら TTY では対話選択
@@ -86,34 +86,34 @@ CLI の front-door は `run`, `decap`, `encap` の 3 つに固定する。物語
     2. smoke failure 後の retry draft 適用前
     3. manual intervention が必要と判断された時点
     4. successful build 後、promotion 済み install object を run する直前
-- `ato decap <target> --into <dir> [--plan]`
-  - `decap` は persistent local setup に固定する。
+- `ato workspace setup <target> --into <dir> [--plan]`
+  - `setup` は persistent local setup に固定する。
   - `run` と同じ resolver を使うが、intent は workspace materialization とする。
-  - `target` は少なくとも `github.com/owner/repo`, `publisher/slug`, share URL, local `share.spec.json`, local `share.lock.json` を受理する。
-  - share URL と GitHub repo は immutable revision / pinned source を正本にする。
+  - `target` はローカル `share.spec.json`, ローカル `share.lock.json` を受理する。web 経由の share URL は受け付けない。
+  - ローカル share ファイルは immutable revision / pinned source を正本にする。
   - `--into` は必須で、非空 directory への暗黙上書きは拒否する。
   - 実行後は `.ato/share/state.json` を残し、人間向け summary は local setup 継続に寄せる。
-- `ato encap [path] [--internal|--private|--local] [--print-plan]`
+- `ato workspace share [path] [--print-plan] [--dry-run] [--save-config]`
   - `path` は省略可。省略時はカレントディレクトリを対象にする。
-  - デフォルト動作は public URL 生成付きアップロード (`"unlisted"` スコープ)。
-  - `--internal`: 組織内限定 visibility でアップロード。`--private`: 認証済みオーナーのみ。`--local`: ローカル保存のみ (アップロードなし)。
-  - `--internal` / `--private` / `--local` は相互排他。
-  - `encap` は current workspace を観測し、確認済み setup 情報を share descriptor に落とす。
+  - ローカル保存のみ（web アップロードはしない）。出力は `share.spec.json` / `share.lock.json` / `guide.md`。
+  - `share` は current workspace を観測し、確認済み setup 情報を share descriptor に落とす。
   - source of truth は `share.spec.json` であり、`guide.md` は説明レイヤに留める。
-  - capture は `observed -> confirm -> save/share` を強制し、high-confidence 推定でも無確認 publish はしない。
+  - capture は `observed -> confirm -> save` を強制し、high-confidence 推定でも無確認 publish はしない。
 
 #### 内部実装注記 — Narrative と Pipeline の分離
 
 `Try / Keep / Share` は **narrative 階層**での分類であり、内部 pipeline の実装構造とは独立している。
 
-現在の実装では `encap`/`decap` は `HourglassFlow` の外に置かれているが、v0.5.x では以下の variant を追加し、§14 エラー分類・rollback 機構・progress UI・capability gate を共通化する計画がある:
+現在の実装では `workspace share`/`workspace setup` は `HourglassFlow` の外に置かれているが、v0.5.x では以下の variant を追加し、§14 エラー分類・rollback 機構・progress UI・capability gate を共通化する計画がある:
 
 | variant | 対応コマンド | 含む stage | 含まない stage |
 |---|---|---|---|
-| `WorkspaceMaterialize` | `decap` | Install, Verify | Build, Execute, Publish |
-| `WorkspaceCapture` | `encap` (local capture) | Prepare, Verify | Install, Execute, Publish |
+| `WorkspaceMaterialize` | `workspace setup` | Install, Verify | Build, Execute, Publish |
+| `WorkspaceCapture` | `workspace share` (local capture) | Prepare, Verify | Install, Execute, Publish |
 
-この変更のトリガー: §04 sandbox network enforcement を hourglass Verify に追加する時点で、同じ enforcement ロジックを `decap` 側にも書く重複が顕在化するため。
+> 注記: 旧 `encap`/`decap` の web アップロード/フェッチ（`/v1/shares`, `ato.run/s/<id>` リンク）は 2026-08 に廃止された。共有はローカルファイル（`share.spec.json` / `share.lock.json`）のみで行う。本表の `WorkspaceCapture` は upload のない local capture のみを指す。
+
+この変更のトリガー: §04 sandbox network enforcement を hourglass Verify に追加する時点で、同じ enforcement ロジックを `workspace setup` 側にも書く重複が顕在化するため。
 
 **v0.5 (現在)**: 現状の分離実装を維持。本注記が設計意図の単一ソース。  
 **v0.5.x**: `WorkspaceMaterialize` / `WorkspaceCapture` を切り出し、enforcement を 1 箇所に集約。

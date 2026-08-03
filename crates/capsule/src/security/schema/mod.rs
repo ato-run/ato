@@ -1,5 +1,5 @@
 //! Canonical schema definitions exported as JSON Schema for external consumers
-//! (web-api registry search, SKILL.md, future `ato encap` / `ato validate` lints).
+//! (web-api registry search, SKILL.md, future `ato workspace share` / `ato validate` lints).
 //!
 //! See `README.md` for the reconciliation rules between `health.toml` and these
 //! capability enums.
