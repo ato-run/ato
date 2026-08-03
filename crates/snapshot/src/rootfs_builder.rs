@@ -474,7 +474,7 @@ pub fn derive_build_spec_v1(
 
     // v1 has no driver/language hints — the tree is the whole declaration.
     let runtime = detect_runtime_kind("", "", probe)?;
-    let (base_image, install_cmd) = v1_base_image_and_install(runtime, probe, &m.tools)?;
+    let (base_image, _) = v1_base_image_and_install(runtime, probe, &m.tools)?;
 
     let authored = &m.run.command;
     if authored.is_empty() {
@@ -485,16 +485,10 @@ pub fn derive_build_spec_v1(
     // at derivation rather than escaping at emission (fail-closed).
     for (index, word) in authored.iter().enumerate() {
         reject_control_chars(&format!("[run] command argv[{index}]"), word)?;
-        // The Execution Contract refuses an empty or whitespace-only argv word
-        // (`launch.argv` must be resolved). Refusing it here means the recipe
-        // never builds an image whose identity could not be minted — the same
-        // refusal, before anything is spent on it, and pointing at the manifest
-        // line rather than at a contract field.
-        if word.trim().is_empty() {
-            return Err(format!(
-                "[run] command argv[{index}] is empty; every word of an exact argv must \
-                 resolve to something, so an empty argument cannot be committed"
-            ));
+        // argv[0] identifies the executable. Later empty words are valid exact
+        // arguments and must survive materialization unchanged.
+        if index == 0 && word.trim().is_empty() {
+            return Err("[run] command argv[0] is empty; an executable is required".to_string());
         }
     }
 
@@ -511,7 +505,10 @@ pub fn derive_build_spec_v1(
     Ok(RootfsBuildSpecV1 {
         runtime,
         base_image,
-        install_cmd,
+        // v1 is declare-first: dependency installation is an authored build
+        // step. Source-probe heuristics must never create a hidden RUN command
+        // that is absent from the Effective Build Plan.
+        install_cmd: None,
         build_steps: m
             .build
             .as_ref()
@@ -581,7 +578,11 @@ fn assemble_app_image_script_v1_mode(
     tool: &str,
     live_output: bool,
 ) -> String {
-    let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    let install_step = spec
+        .install_cmd
+        .as_deref()
+        .map(|command| format!("RUN /bin/sh -lc {}", shell_single_quote(command)))
+        .unwrap_or_default();
     let build_steps = spec
         .build_steps
         .iter()
@@ -647,14 +648,14 @@ cat > "$BUILD/Dockerfile" <<'DOCKER'
 FROM {base}
 WORKDIR {workdir}
 COPY src/. {workdir}/
-RUN /bin/sh -lc {install_q}
+{install_step}
 {build_steps}
 DOCKER
 {build_invocation}
 "#,
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
-        install_q = install_q,
+        install_step = install_step,
         build_steps = build_steps,
         build_invocation = build_invocation,
     )
@@ -2938,6 +2939,18 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         );
         assert!(spec.runtime_invocation_prefix.words().is_empty());
         assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
+        assert_eq!(
+            spec.install_cmd, None,
+            "v1 must not infer hidden install RUNs"
+        );
+    }
+
+    #[test]
+    fn a_v1_spec_preserves_an_empty_non_program_argument() {
+        let manifest =
+            V1_MINIMAL.replace(r#"["python3", "app.py"]"#, r#"["python3", "app.py", ""]"#);
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.resolved_argv, ["python3", "app.py", ""]);
     }
 
     #[test]

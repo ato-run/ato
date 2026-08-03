@@ -16,6 +16,10 @@ Authoring detection and execution are separate operations:
    stored for that revision.
 3. The builder creates a fresh workspace and executes only those claimed bytes.
    It must not re-render a recommendation during execution.
+4. Before execution, the builder recomputes the raw TOML SHA-256 and Effective
+   Plan SHA-256 (canonical JSON excluding display-only identities), normalizes
+   TOML to Program Intent again, and compares exact build/launch/readiness/
+   network/timeout fields. Any disagreement is a configuration failure.
 
 This keeps `capsule.toml` as declaration, the Effective Build Plan as normalized
 execution policy, and the produced Resolution Lock as observed materialization
@@ -39,6 +43,16 @@ facets:
 Authoring attempts use `--no-cache` for these steps. Standard retry therefore
 starts with a fresh authoring workspace and cannot silently substitute a cached
 successful command for the current revision.
+
+Dependency installation is never inferred as a hidden Dockerfile `RUN` in v1.
+It must be an explicit `[[build.steps]]` argv and therefore appears in the
+Effective Build Plan and Build Event stream. Empty argv words after argv[0] are
+valid exact arguments and remain unchanged; an empty argv[0] is refused.
+
+`[env]` contains public identity-bearing literals only. Secret-looking names or
+credential-shaped literals are rejected at both API and Builder boundaries.
+Secret values are late-bound references and do not enter TOML, plan, events,
+rootfs, receipts, or failure diagnostics.
 
 ## First attempt and Resolution Lock
 
@@ -67,12 +81,25 @@ is appended and close it with the observed exit code. Output-event persistence
 is fail-closed: an attempt does not report success if its append-only console
 record could not be stored.
 
+Events are buffered to at least 16 KiB or 100 ms, then appended as one fenced
+batch naming `expected_previous_sequence`. The API acknowledgement is the only
+cursor the builder trusts. Once the API reports durable truncation, the builder
+stops emitting output/diagnostic payloads but continues lifecycle events.
+
 The builder reports terminal failures through the fenced job-failure endpoint in
 addition to emitting the terminal event. A success receipt remains the authority
 for moving the Authoring Session to `clean_replay_verified`.
 
 ## Compatibility
 
-The legacy setup-ready endpoint may remain during rollout, but the default
-suggested path uses detect-only completion. Interactive setup terminal and held
-preview are not part of this MVP.
+The default suggested setup remains detect-only. After a successful attempt, a
+separate `setup_mode = preview` claim is routed to the same builder, validates
+the persisted artifact against Config Revision/TOML/plan/source/intent/lock
+digests, boots that artifact, and reports a setup-ready Preview Session. Seal
+capture stops the preview first. The legacy interactive setup terminal remains
+outside this primary flow.
+
+The current materializer accepts a default `[source]` declaration only
+(`root = "."`, empty authored ignore). A non-default source scope is rejected
+before execution because honoring it requires rematerializing and signing a new
+Source Revision; silently applying it to an already-pinned archive is forbidden.

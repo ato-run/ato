@@ -131,6 +131,13 @@ pub struct CapsuleManifestV1 {
     pub name: String,
     pub version: String,
 
+    /// `[source]` is an authoring-time selection declaration. The current v1
+    /// materializer accepts only the already-pinned root projection; broader
+    /// root/ignore editing requires a new Source Revision and is refused by
+    /// validation until that rematerialization lane exists.
+    #[serde(default, skip_serializing_if = "SourceSelectionV1::is_default")]
+    pub source: SourceSelectionV1,
+
     /// `[tools]` — pinned tool versions, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, String>,
@@ -162,6 +169,34 @@ pub struct CapsuleManifestV1 {
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSelectionV1 {
+    #[serde(default = "default_source_root")]
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+}
+
+fn default_source_root() -> String {
+    ".".to_string()
+}
+
+impl Default for SourceSelectionV1 {
+    fn default() -> Self {
+        Self {
+            root: default_source_root(),
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl SourceSelectionV1 {
+    fn is_default(&self) -> bool {
+        self.root == "." && self.ignore.is_empty()
+    }
 }
 
 /// One launch-supplied variable. BOTH fields are explicit.
@@ -327,6 +362,12 @@ impl CapsuleManifestV1 {
             if value.trim().is_empty() {
                 return Err(ManifestV1Error::Missing { field });
             }
+        }
+        if !self.source.is_default() {
+            return Err(ManifestV1Error::Unsupported {
+                feature: "[source] root/ignore",
+                why: "changing source scope requires a newly materialized and signed Source Revision",
+            });
         }
 
         validate_argv("run.command", &self.run.command)?;

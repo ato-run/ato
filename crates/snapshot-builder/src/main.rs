@@ -85,6 +85,7 @@ use snapshot::{
     no_secret_scan,
 };
 
+mod authoring_gateway;
 mod authoring_runtime;
 /// Submission Wizard PR-2 (slice 3) — eligibility for a running capture, minted
 /// from the contract the control plane pinned on the claim. Its module doc states
@@ -4108,11 +4109,14 @@ fn dispatch_interactive_capture_job(
 
 fn process_authoring_setup(
     cfg: &Config,
-    _backend: &FirecrackerBackend,
+    backend: &FirecrackerBackend,
     client: &authoring_runtime::AuthoringApiClient<'_>,
     work: &authoring_runtime::AuthoringWork,
 ) -> std::result::Result<(), (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    if work.setup_mode.as_deref() == Some("preview") {
+        return process_authoring_preview(cfg, backend, client, work);
+    }
     if work.setup_mode.as_deref() != Some("suggested") {
         return Err(fail(
             "setup",
@@ -4203,19 +4207,237 @@ fn process_authoring_setup(
     Ok(())
 }
 
+fn process_authoring_preview(
+    cfg: &Config,
+    backend: &FirecrackerBackend,
+    client: &authoring_runtime::AuthoringApiClient<'_>,
+    work: &authoring_runtime::AuthoringWork,
+) -> std::result::Result<(), (String, String)> {
+    let fail = |stage: &str, reason: String| (stage.to_string(), reason);
+    let slot = cfg.hold_slot.as_ref().ok_or_else(|| {
+        fail(
+            "preview",
+            "Preview Session requires a registered builder hold slot".to_string(),
+        )
+    })?;
+    if slot.builder_id != cfg.agent_id {
+        return Err(fail(
+            "preview",
+            "registered hold slot builder_id does not match --agent-id".to_string(),
+        ));
+    }
+    let contract = authoring_runtime::validate_build_contract(work)
+        .map_err(|error| fail("metadata", error))?;
+    let build_config_revision_id = work
+        .build_config_revision_id
+        .as_deref()
+        .ok_or_else(|| fail("metadata", "Preview omitted Config Revision".to_string()))?;
+    let authored_toml = work
+        .authoring_toml
+        .as_deref()
+        .ok_or_else(|| fail("metadata", "Preview omitted capsule.toml".to_string()))?;
+    let authored_toml_digest = work
+        .authoring_toml_digest
+        .as_deref()
+        .ok_or_else(|| fail("metadata", "Preview omitted TOML digest".to_string()))?;
+    let plan_digest = work
+        .plan_digest
+        .as_deref()
+        .ok_or_else(|| fail("metadata", "Preview omitted plan digest".to_string()))?;
+    let normalized = work
+        .normalized_program_intent
+        .as_ref()
+        .ok_or_else(|| fail("metadata", "Preview omitted Program Intent".to_string()))?;
+    let resolution_lock_digest = work
+        .resolution_lock_digest
+        .as_deref()
+        .ok_or_else(|| fail("metadata", "Preview omitted Resolution Lock".to_string()))?;
+    let clean_dir = clean_replay_directory(cfg, &work.authoring_session_id)
+        .map_err(|error| fail("preview", error))?;
+    let artifact: CleanReplayBuilderArtifact = serde_json::from_slice(
+        &std::fs::read(clean_replay_artifact_path(&clean_dir))
+            .map_err(|error| fail("preview", format!("read Build Attempt artifact: {error}")))?,
+    )
+    .map_err(|error| fail("preview", format!("decode Build Attempt artifact: {error}")))?;
+    if artifact.schema != CLEAN_REPLAY_ARTIFACT_SCHEMA
+        || artifact.authoring_session_id != work.authoring_session_id
+        || artifact.build_config_revision_id != build_config_revision_id
+        || artifact.authoring_toml_digest != authored_toml_digest
+        || artifact.plan_digest != plan_digest
+        || artifact.source_closure_id != work.source_closure_id
+        || artifact.program_intent_digest != normalized.digest
+        || artifact.resolution_lock_digest != resolution_lock_digest
+        || artifact.clean_replay_receipt_digest.is_none()
+    {
+        return Err(fail(
+            "preview",
+            "Build Attempt artifact does not match the requested Config Revision".to_string(),
+        ));
+    }
+    let rootfs = std::fs::read(clean_dir.join("clean-rootfs.img"))
+        .map_err(|error| fail("preview", format!("read Build Attempt rootfs: {error}")))?;
+    if format!("blake3:{}", blake3::hash(&rootfs).to_hex()) != artifact.rootfs_digest {
+        return Err(fail(
+            "preview",
+            "Build Attempt rootfs digest mismatch".to_string(),
+        ));
+    }
+    let preview_dir = authoring_work_directory(&cfg.work, "preview", &work.work_id)
+        .map_err(|error| fail("preview", error))?;
+    if preview_dir.exists() {
+        std::fs::remove_dir_all(&preview_dir)
+            .map_err(|error| fail("preview", format!("clear Preview workspace: {error}")))?;
+    }
+    std::fs::create_dir_all(&preview_dir)
+        .map_err(|error| fail("preview", format!("create Preview workspace: {error}")))?;
+    let store = CasStore::open(preview_dir.join("cas"))
+        .map_err(|error| fail("preview", format!("open Preview CAS: {error}")))?;
+    let preview_backend = backend.with_boot_timeout(Some(contract.timeout_seconds));
+    let guest = preview_backend
+        .boot_and_hold(BuildReadyStateInput {
+            store: &store,
+            capsule_manifest_hash: artifact.capsule_manifest_hash.clone(),
+            runner_class: None,
+            surface_requirement: None,
+            layers: BuildLayers {
+                rootfs,
+                runtime: None,
+                dependency: None,
+                app: None,
+                vmstate: Vec::new(),
+                memory: Vec::new(),
+            },
+            restore_contract: RestoreContract {
+                ports: vec![artifact.port],
+                healthcheck: Some(artifact.healthcheck.clone()),
+                expected_ready_ms: Some(contract.timeout_seconds.saturating_mul(1000) as u32),
+                warmup_paths: Vec::new(),
+                stable_successes: None,
+                stable_interval_ms: None,
+                content_ready_path: None,
+                endpoints: Vec::new(),
+            },
+            sanitizer_contract: SanitizerContract::default(),
+            declared_secret_markers: Vec::new(),
+            execution_id: Some(artifact.execution_id.clone()),
+            supervisor: None,
+        })
+        .map_err(|error| fail("preview", format!("boot Build Attempt artifact: {error}")))?;
+    let workload_addr = guest.workload_addr();
+    let gateway = match authoring_gateway::AuthoringGateway::start(
+        slot.proxy_listen,
+        &workload_addr,
+        &work.work_id,
+        &cfg.token,
+        vec![
+            format!("Build Config Revision: {build_config_revision_id}"),
+            format!("Effective Build Plan: {plan_digest}"),
+            format!("Source closure: {}", work.source_closure_id),
+            format!("Program Intent: {}", normalized.digest),
+            "Preview: successful immutable Build Attempt artifact".to_string(),
+        ],
+    ) {
+        Ok(gateway) => gateway,
+        Err(error) => {
+            guest.release();
+            return Err(fail("preview", format!("front Preview Session: {error}")));
+        }
+    };
+    if let Err(error) = client.mark_setup_ready(
+        work,
+        &authoring_runtime::SetupReady {
+            builder_id: &cfg.agent_id,
+            builder_session_id: &work.work_id,
+            builder_slot_id: &slot.slot_id,
+            origin: "existing_config",
+            normalized_program_intent: normalized,
+            resolution_lock_digest,
+            source_closure_id: &work.source_closure_id,
+            generated_capsule_toml: authored_toml,
+            materialized_assets: Vec::new(),
+        },
+    ) {
+        drop(gateway);
+        guest.release();
+        return Err(fail("preview", error));
+    }
+    eprintln!(
+        "[builder] Preview Session {} is serving Config Revision {} (trace {})",
+        work.authoring_session_id, build_config_revision_id, work.trace_id
+    );
+    loop {
+        match client.setup_control(work) {
+            Ok(control) if control.action == "continue" => {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(_) => break,
+            Err(error) => {
+                eprintln!(
+                    "[builder] Preview Session {} control poll failed: {error}",
+                    work.authoring_session_id
+                );
+                break;
+            }
+        }
+    }
+    drop(gateway);
+    guest.release();
+    client
+        .mark_setup_stopped(work)
+        .map_err(|error| fail("preview_stop", error))?;
+    Ok(())
+}
+
 struct BuildEventEmitter<'a> {
     client: &'a authoring_runtime::AuthoringApiClient<'a>,
     work: &'a authoring_runtime::AuthoringWork,
     sequence: u64,
+    acknowledged_sequence: u64,
+    pending: Vec<serde_json::Value>,
+    pending_bytes: usize,
+    last_flush: std::time::Instant,
+    output_truncated: bool,
 }
 
 impl BuildEventEmitter<'_> {
+    fn flush(&mut self) -> Result<(), String> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let expected_last = self
+            .pending
+            .last()
+            .and_then(|event| event.get("sequence"))
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "pending Build Event omitted its sequence".to_string())?;
+        let acknowledged = self.client.append_build_events(
+            self.work,
+            self.acknowledged_sequence,
+            &self.pending,
+        )?;
+        if acknowledged.last_sequence != expected_last {
+            return Err(format!(
+                "Build Event acknowledgement stopped at {}, expected {expected_last}",
+                acknowledged.last_sequence
+            ));
+        }
+        self.acknowledged_sequence = acknowledged.last_sequence;
+        self.output_truncated |= acknowledged.truncated;
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.last_flush = std::time::Instant::now();
+        Ok(())
+    }
+
     fn emit(
         &mut self,
         kind: &str,
         step_id: Option<&str>,
         fields: serde_json::Value,
     ) -> Result<(), String> {
+        if self.output_truncated && matches!(kind, "output" | "diagnostic") {
+            return Ok(());
+        }
         let mut event = serde_json::Map::new();
         event.insert(
             "schema".to_string(),
@@ -4244,9 +4466,18 @@ impl BuildEventEmitter<'_> {
         if let serde_json::Value::Object(fields) = fields {
             event.extend(fields);
         }
-        self.client
-            .append_build_event(self.work, &serde_json::Value::Object(event))?;
+        let event = serde_json::Value::Object(event);
+        self.pending_bytes += serde_json::to_vec(&event)
+            .map_err(|error| format!("size Build Event: {error}"))?
+            .len();
+        self.pending.push(event);
         self.sequence += 1;
+        if kind != "output"
+            || self.pending_bytes >= 16 * 1024
+            || self.last_flush.elapsed() >= Duration::from_millis(100)
+        {
+            self.flush()?;
+        }
         Ok(())
     }
 
@@ -4641,6 +4872,7 @@ struct BuilderCleanReplayAdapter<'a, 'events> {
     work: &'a authoring_runtime::AuthoringWork,
     signer: &'a authoring_runtime::AuthoringSigner,
     events: &'events mut BuildEventEmitter<'a>,
+    timeout_seconds: u64,
 }
 
 const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1";
@@ -4650,6 +4882,9 @@ const CLEAN_REPLAY_ARTIFACT_SCHEMA: &str = "ato.clean-replay-builder-artifact/v1
 struct CleanReplayBuilderArtifact {
     schema: String,
     authoring_session_id: String,
+    build_config_revision_id: String,
+    authoring_toml_digest: String,
+    plan_digest: String,
     source_closure_id: String,
     program_intent_digest: String,
     resolution_lock_digest: String,
@@ -4847,6 +5082,21 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             &CleanReplayBuilderArtifact {
                 schema: CLEAN_REPLAY_ARTIFACT_SCHEMA.to_string(),
                 authoring_session_id: request.authoring_session_id.clone(),
+                build_config_revision_id: self
+                    .work
+                    .build_config_revision_id
+                    .clone()
+                    .ok_or_else(|| "Build Attempt omitted Config Revision".to_string())?,
+                authoring_toml_digest: self
+                    .work
+                    .authoring_toml_digest
+                    .clone()
+                    .ok_or_else(|| "Build Attempt omitted TOML digest".to_string())?,
+                plan_digest: self
+                    .work
+                    .plan_digest
+                    .clone()
+                    .ok_or_else(|| "Build Attempt omitted plan digest".to_string())?,
                 source_closure_id: request.source_closure_id.clone(),
                 program_intent_digest: request.normalized_program_intent.digest.clone(),
                 resolution_lock_digest: resolution_lock_digest.clone(),
@@ -4873,8 +5123,8 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         let readiness_started = self.events.step_started("readiness")?;
         let store =
             CasStore::open(jobdir.join("cas")).map_err(|error| format!("open CAS: {error}"))?;
-        let guest = self
-            .backend
+        let job_backend = self.backend.with_boot_timeout(Some(self.timeout_seconds));
+        let guest = job_backend
             .boot_and_hold(BuildReadyStateInput {
                 store: &store,
                 capsule_manifest_hash: produced.capsule_manifest_hash,
@@ -4891,7 +5141,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 restore_contract: RestoreContract {
                     ports: vec![produced.port],
                     healthcheck: Some(produced.healthcheck),
-                    expected_ready_ms: Some(8000),
+                    expected_ready_ms: Some(self.timeout_seconds.saturating_mul(1000) as u32),
                     warmup_paths: produced.warmup_paths,
                     stable_successes: produced.stable_successes,
                     stable_interval_ms: produced.stable_interval_ms,
@@ -4904,6 +5154,9 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 supervisor: None,
             })
             .map_err(|error| {
+                let detail = format!("Clean Replay readiness: {error}");
+                let _ = self.events.output("readiness", "stderr", &detail);
+                let _ = self.events.diagnostic("readiness", &detail);
                 let _ = self.events.step_finished(
                     "readiness",
                     "failed",
@@ -4918,7 +5171,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                     None,
                     Some("readiness_timeout"),
                 );
-                format!("Clean Replay readiness: {error}")
+                detail
             })?;
         guest.release();
         self.events.emit(
@@ -5053,11 +5306,18 @@ fn process_authoring_clean_replay(
         client,
         work,
         sequence: 0,
+        acknowledged_sequence: 0,
+        pending: Vec::new(),
+        pending_bytes: 0,
+        last_flush: std::time::Instant::now(),
+        output_truncated: false,
     };
     events
         .attempt_started()
         .map_err(|error| anyhow!("start Build Attempt event stream: {error}"))?;
     let attempt = (|| -> Result<_> {
+        let contract = authoring_runtime::validate_build_contract(work)
+            .map_err(|error| anyhow!("validate immutable Build Contract: {error}"))?;
         let normalized = work
             .normalized_program_intent
             .clone()
@@ -5099,6 +5359,7 @@ fn process_authoring_clean_replay(
                 work,
                 signer,
                 events: &mut events,
+                timeout_seconds: contract.timeout_seconds,
             };
             snapshot::authoring_evidence::execute_clean_replay(&mut adapter, &request)
                 .map_err(|error| anyhow!("execute Build Attempt: {error}"))?
