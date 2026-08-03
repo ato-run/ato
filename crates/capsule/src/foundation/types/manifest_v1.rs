@@ -1500,7 +1500,7 @@ timeout_seconds = {seconds}
     }
 
     #[test]
-    fn unified_source_and_metadata_are_strict_and_identity_bearing() {
+    fn unified_metadata_is_strict_and_identity_bearing() {
         let base = parse(
             r#"
 schema_version = "1"
@@ -1509,7 +1509,7 @@ version = "0.1.0"
 
 [source]
 root = "."
-ignore = ["dist/**", "!dist/store-card.png"]
+ignore = []
 
 [metadata]
 short_description = "First description"
@@ -1537,16 +1537,11 @@ command = ["python"]
             changed.normalized_digest().expect("metadata digest"),
             "Store metadata is part of the normalized manifest identity"
         );
-        assert!(
-            base.source_path_is_included("dist/store-card.png", false)
-                .unwrap()
-        );
-        assert!(!base.source_path_is_included("dist/app.js", false).unwrap());
     }
 
     #[test]
-    fn safety_ignore_cannot_be_reincluded() {
-        let manifest = parse(
+    fn source_ignore_requires_a_new_signed_source_revision() {
+        let error = parse(
             r#"
 schema_version = "1"
 name = "demo"
@@ -1559,26 +1554,27 @@ ignore = ["!.env", "!keys/id_rsa"]
 command = ["python"]
 "#,
         )
-        .expect("patterns are valid author intent");
-        assert!(!manifest.source_path_is_included(".env", false).unwrap());
+        .expect_err("source scope is not rematerialized by this lane");
         assert!(
-            !manifest
-                .source_path_is_included("keys/id_rsa", false)
-                .unwrap()
+            matches!(
+                error,
+                ManifestV1Error::Unsupported {
+                    feature: "[source] root/ignore",
+                    ..
+                }
+            ),
+            "{error}"
         );
     }
 
     #[test]
     fn ignored_or_traversing_asset_paths_are_refused() {
-        for asset in ["../icon.png", "dist/icon.png"] {
+        for asset in ["../icon.png", ".env"] {
             let error = parse(&format!(
                 r#"
 schema_version = "1"
 name = "demo"
 version = "0.1.0"
-
-[source]
-ignore = ["dist/**"]
 
 [metadata.assets.icon]
 path = "{asset}"

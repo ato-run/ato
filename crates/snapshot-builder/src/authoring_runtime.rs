@@ -14,7 +14,7 @@ use capsule::authoring_intent::{
     ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
     normalize_program_intent, to_capsule_manifest_v1,
 };
-use capsule::types::manifest_v1::SealAtV1;
+use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest as _, Sha256};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
@@ -67,6 +67,24 @@ pub struct PinnedAuthoringSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AuthoringStoreMetadata {
+    pub name: String,
+    pub short_description: String,
+    pub full_description: String,
+    #[serde(default)]
+    pub primary_category: Option<String>,
+    #[serde(default)]
+    pub primary_subcategory: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub license: Option<String>,
+    #[serde(default)]
+    pub assets: Option<MetadataAssetsV1>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthoringWork {
     pub kind: String,
     pub work_id: String,
@@ -85,8 +103,8 @@ pub struct AuthoringWork {
     pub setup_mode: Option<String>,
     #[serde(default)]
     pub source_overlay: Option<serde_json::Value>,
-    #[serde(default, rename = "store_metadata")]
-    pub _store_metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub store_metadata: Option<AuthoringStoreMetadata>,
     #[serde(default, rename = "setup_journal_sequence")]
     pub _setup_journal_sequence: Option<u64>,
     #[serde(default)]
@@ -659,6 +677,36 @@ pub fn normalize_capsule_toml(
     normalize_program_intent(draft).map_err(|error| error.to_string())
 }
 
+/// Apply the Store listing draft to an inferred declaration before either the
+/// API or Builder normalizes it. An explicit capsule.toml overlay remains the
+/// exact author-edited declaration and therefore bypasses this merge.
+pub fn merge_store_metadata(
+    capsule_toml: &str,
+    metadata: Option<&AuthoringStoreMetadata>,
+) -> Result<String, String> {
+    let Some(metadata) = metadata else {
+        return Ok(capsule_toml.to_string());
+    };
+    let mut manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(capsule_toml)
+        .map_err(|error| format!("parse inferred capsule.toml: {error}"))?;
+    manifest.name = metadata.name.clone();
+    manifest.metadata.short_description = Some(metadata.short_description.clone());
+    manifest.metadata.description = Some(metadata.full_description.clone());
+    manifest.metadata.license = metadata.license.clone();
+    manifest.metadata.tags = metadata.tags.clone();
+    manifest.metadata.store = metadata
+        .primary_category
+        .as_ref()
+        .map(|category| StoreMetadataV1 {
+            category: category.clone(),
+            subcategory: metadata.primary_subcategory.clone(),
+        });
+    if metadata.assets.is_some() {
+        manifest.metadata.assets = metadata.assets.clone();
+    }
+    toml::to_string(&manifest).map_err(|error| format!("serialize Effective capsule.toml: {error}"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedBuildContract {
     pub timeout_seconds: u64,
@@ -982,6 +1030,46 @@ mod tests {
         assert_eq!(parsed.web.expect("surface").port, 8000);
         let authored = normalize_capsule_toml(&manifest).expect("normalize authored manifest");
         assert_eq!(authored.intent.launch.argv, normalized.intent.launch.argv);
+    }
+
+    #[test]
+    fn inferred_manifest_merges_store_metadata_before_normalization() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<h1>Hextris</h1>").expect("index.html");
+        let inferred = infer_static_web_intent(root.path()).expect("infer");
+        let generated = render_static_web_capsule_toml(&inferred).expect("render");
+        let effective = merge_store_metadata(
+            &generated,
+            Some(&AuthoringStoreMetadata {
+                name: "hextris".to_string(),
+                short_description: "Fast puzzle game".to_string(),
+                full_description: "Fast paced HTML5 puzzle game".to_string(),
+                primary_category: Some("Creative & Media".to_string()),
+                primary_subcategory: Some("3D / Game".to_string()),
+                tags: vec!["game".to_string(), "browser".to_string()],
+                license: None,
+                assets: None,
+            }),
+        )
+        .expect("merge metadata");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&effective)
+            .expect("effective manifest");
+
+        assert_eq!(manifest.name, "hextris");
+        assert_eq!(
+            manifest.metadata.short_description.as_deref(),
+            Some("Fast puzzle game")
+        );
+        assert_eq!(manifest.metadata.tags, ["game", "browser"]);
+        assert_eq!(
+            manifest
+                .metadata
+                .store
+                .as_ref()
+                .map(|store| store.category.as_str()),
+            Some("Creative & Media")
+        );
+        normalize_capsule_toml(&effective).expect("normalize exact Effective Manifest");
     }
 
     #[test]
