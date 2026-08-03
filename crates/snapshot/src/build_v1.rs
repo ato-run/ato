@@ -759,7 +759,10 @@ fn validate_path_assets(
         let media_type = AssetMediaType::detect(&bytes, &path.path).ok_or_else(|| {
             V1BuildError::AssetValidationFailed {
                 field: field.to_string(),
-                reason: format!("cannot determine an authoring media type for {:?}", full_path.display()),
+                reason: format!(
+                    "cannot determine an authoring media type for {:?}",
+                    full_path.display()
+                ),
             }
         })?;
         validate_asset_bytes(media_type, &bytes).map_err(|asset_error| {

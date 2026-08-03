@@ -4192,6 +4192,9 @@ fn process_authoring_setup(
         .map_err(|error| fail("detect", error))?;
     let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&generated_manifest)
         .map_err(|error| fail("detect", error.to_string()))?;
+    let materialized_assets =
+        authoring_runtime::materialized_assets_from_workspace(&inference_root, &manifest)
+            .map_err(|error| fail("detect", error))?;
     snapshot::rootfs_builder::derive_build_spec_v1(
         &manifest,
         &snapshot::rootfs_builder::SourceProbe::scan(&inference_root),
@@ -4215,7 +4218,7 @@ fn process_authoring_setup(
                 source_closure_id: &work.source_closure_id,
                 generated_capsule_toml: &generated_manifest,
                 detector,
-                materialized_assets: Vec::new(),
+                materialized_assets,
             },
         )
         .map_err(|error| fail("setup_detected", error))?;

@@ -1,13 +1,14 @@
 // Capsule type definitions (extracted from capsule to eliminate external dependency)
 // This module provides UARC V1.1.0 compliant types used by both nacelle and CLI.
 
+pub mod assets;
 pub mod bridge;
 pub mod command_spec;
 pub mod error;
 pub mod identity;
 pub mod license;
 pub mod manifest;
-pub mod assets;/// `schema_version = "1"` — the authoring surface an Execution Identity may be
+/// `schema_version = "1"` — the authoring surface an Execution Identity may be
 /// minted from. Deliberately NOT convertible from v0.3 (ADR-015 §1).
 pub mod manifest_v1;
 pub mod oci;
