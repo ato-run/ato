@@ -4,7 +4,7 @@
 //! - `capsule.toml [requirements.capabilities]` (this crate)
 //! - `api.ato.run/v1/search` capability filters (web-api, vendored copy)
 //! - `SKILL.md` enum vocabulary (agent-facing, vendored copy)
-//! - future `ato encap` / `ato validate` lints
+//! - future `ato workspace share` / `ato validate` lints
 //!
 //! The JSON Schema equivalent lives at
 //! `apps/ato-cli/core/schema/capabilities.schema.json` (regenerated from this
