@@ -114,6 +114,8 @@ pub struct AuthoringWork {
     #[serde(default)]
     pub build_config_revision_id: Option<String>,
     #[serde(default)]
+    pub source_build_attempt_id: Option<String>,
+    #[serde(default)]
     pub build_attempt_number: Option<u64>,
     #[serde(default)]
     pub authoring_toml: Option<String>,
