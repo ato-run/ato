@@ -882,8 +882,9 @@ fn ack_source_materialize_failed(
 /// Persist a sealed manifest beside its CAS and return the location the registry
 /// records for it.
 ///
-/// `cas://<job_id>/<hash>` names `<work>/<job_id>/{manifest.json, cas/}`: a runner
-/// restores by loading `manifest.json`, verifying `manifest.id() == hash`
+/// `cas://<artifact-directory>/<hash>` names the exact local
+/// `<work>/<artifact-directory>/{manifest.json, cas/}` pair: a runner restores
+/// by loading `manifest.json`, verifying `manifest.id() == hash`
 /// (fail-closed), then restoring from the co-located CAS. With the artifact store
 /// configured (ato#1002 Snapshot Serving v1), the pair is packed into one
 /// `artifact.tar.gz` and uploaded BEFORE anything is acked, and the returned
@@ -927,8 +928,26 @@ fn persist_and_locate_artifact(
                 artifact_manifest_hash,
             )
             .map_err(|e| fail("artifact_upload", e)),
-        None => Ok(upload::cas_location(job_id, artifact_manifest_hash)),
+        None => local_artifact_location(jobdir, artifact_manifest_hash)
+            .map_err(|reason| fail("artifact_metadata", reason)),
     }
+}
+
+fn local_artifact_location(
+    jobdir: &Path,
+    artifact_manifest_hash: &str,
+) -> std::result::Result<String, String> {
+    let namespace = jobdir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .ok_or_else(|| {
+            format!(
+                "artifact directory has no safe local CAS namespace: {}",
+                jobdir.display()
+            )
+        })?;
+    Ok(upload::cas_location(namespace, artifact_manifest_hash))
 }
 
 fn sealed_identity(
@@ -5898,6 +5917,20 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_artifact_location_uses_the_persisted_directory_namespace() {
+        let work = tempfile::tempdir().unwrap();
+        assert_eq!(
+            local_artifact_location(&work.path().join("job_1"), "blake3:abc").unwrap(),
+            "cas://job_1/blake3:abc"
+        );
+        assert_eq!(
+            local_artifact_location(&work.path().join("authoring-seal-abjob_1"), "blake3:def")
+                .unwrap(),
+            "cas://authoring-seal-abjob_1/blake3:def"
+        );
+    }
 
     #[test]
     fn interactive_candidate_uses_the_claim_execution_identity() {
