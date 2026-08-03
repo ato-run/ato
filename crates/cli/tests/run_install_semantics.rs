@@ -209,7 +209,7 @@ fn assert_plan_only_run_succeeds(stage: &RunStage) -> std::process::Output {
     );
 
     // The reporter writes the plan envelope plus may write follow-up notify
-    // lines (e.g. "Share it next: ato encap"), so stdout is JSONL. We only
+    // lines (e.g. "Share it next: ato workspace share"), so stdout is JSONL. We only
     // need to confirm at least one line is a JSON object — i.e. the run
     // dispatch reached its emit site instead of bailing out early.
     let stdout = String::from_utf8_lossy(&output.stdout);
