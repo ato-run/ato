@@ -1,9 +1,9 @@
-//! Share URL execution via nacelle sandbox.
+//! Share workspace execution via nacelle sandbox.
 //!
-//! Provides a unified API for running share URLs in both CLI (blocking) and
-//! Desktop (async PTY streaming) contexts. The executor materializes the share
-//! workspace using `ato decap`, then spawns nacelle to run the entry command
-//! inside a sandbox.
+//! Provides a unified API for running shared workspaces in both CLI (blocking)
+//! and Desktop (async PTY streaming) contexts. The executor materializes the
+//! share workspace using `ato workspace setup`, then spawns nacelle to run the
+//! entry command inside a sandbox.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -30,9 +30,9 @@ pub enum ShareExecutionMode {
     Piped { cols: u16, rows: u16 },
 }
 
-/// Request to execute a share URL.
+/// Request to execute a shared workspace.
 pub struct ShareRunRequest {
-    /// Share URL (`https://ato.run/s/...`) or local share path.
+    /// Local share path (`share.spec.json` / `share.lock.json`).
     pub input: String,
     /// Entry selector — `None` auto-selects primary.
     pub entry: Option<String>,
@@ -44,7 +44,7 @@ pub struct ShareRunRequest {
     pub mode: ShareExecutionMode,
     /// Override nacelle binary path.
     pub nacelle_path: Option<PathBuf>,
-    /// Override ato binary path (for decap).
+    /// Override ato binary path (for materialization via `ato workspace setup`).
     pub ato_path: Option<PathBuf>,
     /// When true, bypass nacelle and run the entry command directly on the host.
     /// Mirrors `--compatibility-fallback host` for local `ato run` invocations.
@@ -69,9 +69,9 @@ pub enum ShareExecutionResult {
 
 // ── Main entry point ─────────────────────────────────────────────────────────
 
-/// Execute a share URL through nacelle sandbox.
+/// Execute a shared workspace through nacelle sandbox.
 ///
-/// 1. Materializes the share workspace via `ato decap`
+/// 1. Materializes the share workspace via `ato workspace setup`
 /// 2. Reads the entry from the materialized spec
 /// 3. Spawns nacelle with the entry command
 pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
@@ -84,9 +84,9 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
         ))
     })?;
 
-    // Step 2: Materialize via ato decap
+    // Step 2: Materialize via ato workspace setup
     let ato_bin = resolve_ato_binary(request.ato_path.as_deref())?;
-    decap_into(&ato_bin, &request.input, &workspace)?;
+    materialize_into(&ato_bin, &request.input, &workspace)?;
 
     // Step 3: Read materialized state to find the spec
     let spec = load_materialized_spec(&workspace)?;
@@ -127,8 +127,9 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
         ShareExecutionMode::Inherited => {
             let exit_code =
                 spawn_nacelle_inherited(&nacelle_bin, &run_command, &run_cwd, &env_pairs)?;
-            // Workspace is intentionally kept for caching — decap_into reuses it
-            // on the next invocation if state.json shows all sources are ok.
+            // Workspace is intentionally kept for caching — materialize_into
+            // reuses it on the next invocation if state.json shows all sources
+            // are ok.
             Ok(ShareExecutionResult::Completed { exit_code })
         }
         ShareExecutionMode::Piped { cols, rows } => {
@@ -157,8 +158,11 @@ fn share_workspace_dir(input: &str) -> Result<PathBuf> {
     )
 }
 
-/// Run `ato decap <input> --into <workspace>`.
-fn decap_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
+/// Run `ato workspace setup <input> --into <workspace> --dev`.
+///
+/// `--dev` is required so captured `install_steps` run during materialization —
+/// the old hidden `ato decap` alias passed `dev: true` internally.
+fn materialize_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
     // Check if already materialized (state.json exists and sources are ok)
     let state_path = workspace.join(".ato").join("share").join(SHARE_STATE_FILE);
     if state_path.exists() {
@@ -167,33 +171,36 @@ fn decap_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
         {
             let all_ok = state.sources.iter().all(|s| s.status == "ok");
             if all_ok && !state.sources.is_empty() {
-                info!(input, "reusing cached decap workspace");
+                info!(input, "reusing cached workspace");
                 return Ok(());
             }
         }
-        // Stale or broken — clear and re-decap
-        warn!(input, "clearing stale workspace for re-decap");
+        // Stale or broken — clear and re-materialize
+        warn!(input, "clearing stale workspace for re-materialization");
         let _ = std::fs::remove_dir_all(workspace);
         std::fs::create_dir_all(workspace)?;
     }
 
-    info!(input, dest = %workspace.display(), "running ato decap");
+    info!(input, dest = %workspace.display(), "running ato workspace setup");
     let output = Command::new(ato_bin)
-        .args(["decap", input, "--into"])
+        .args(["workspace", "setup", input, "--into"])
         .arg(workspace)
+        .arg("--dev")
         .output()
         .map_err(|e| {
-            CapsuleError::Runtime(format!("failed to spawn ato decap for {input}: {e}"))
+            CapsuleError::Runtime(format!(
+                "failed to spawn ato workspace setup for {input}: {e}"
+            ))
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        error!(input, %stderr, "ato decap failed");
+        error!(input, %stderr, "ato workspace setup failed");
         return Err(CapsuleError::Execution(format!(
-            "ato decap failed for {input}: {stderr}"
+            "ato workspace setup failed for {input}: {stderr}"
         )));
     }
-    info!(input, "ato decap completed");
+    info!(input, "ato workspace setup completed");
     Ok(())
 }
 

@@ -17,7 +17,7 @@ E2E suites (some require Docker):
 |-------|------|----------------|
 | CLI unit & integration | `tests/cli_tests.rs` | command parsing, manifest handling |
 | Fail-closed | `tests/fail_closed_*.rs` | security boundary enforcement |
-| Share / encap / decap | `tests/share_*.rs` | `ato encap`, `ato run <url>`, `ato decap` |
+| Share / workspace | `tests/share_*.rs` | `ato workspace share`, `ato run <share file>`, `ato workspace setup` |
 | Host isolation | `tests/e2e-host-isolation/` | PATH poisoning, shim injection, wrong-runtime |
 | Provider (PyPI, npm) | `tests/provider_*.rs` | dependency resolution |
 | IPC | `tests/ipc_*.rs` | Unix socket bridge |

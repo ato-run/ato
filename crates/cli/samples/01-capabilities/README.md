@@ -6,7 +6,7 @@ One `ato` feature per sample. Each sample is the smallest program that meaningfu
 
 | Slug | Runtime | Capability exercised |
 |---|---|---|
-| `encap-decap-roundtrip` | `web/static` | `ato encap` + `ato decap` |
+| `workspace-share-roundtrip` | `web/static` | `ato workspace share` + `ato workspace setup` |
 | `watch-mode-live-reload` | `source/node` | `--watch` |
 | `background-ps-logs` | `source/node` | `--background` + `ato ps` / `logs` / `stop` |
 | `ipc-python-node` | `source/python` + `source/node` | `ato ipc` cross-language |

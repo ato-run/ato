@@ -55,12 +55,12 @@
   </tr>
 </table>
 
-Ato is a desktop app and command-line runtime for trying local projects, GitHub repositories, and shared app links in a controlled local runtime. It detects what the project needs, prepares missing tools, and runs it without asking you to manually install Python, Node, Rust, or other project-specific dependencies first.
+Ato is a desktop app and command-line runtime for trying local projects, GitHub repositories, and shared recipes in a controlled local runtime. It detects what the project needs, prepares missing tools, and runs it without asking you to manually install Python, Node, Rust, or other project-specific dependencies first.
 
 ```bash
 ato run .                      # run the current project
 ato run github.com/owner/repo  # try a GitHub repository
-ato run https://ato.run/s/demo # open a shared Ato recipe
+ato run ./share.spec.json      # run a shared recipe (local share file)
 ```
 
 Ato is useful when you want to try a repository without reading its setup instructions first, share a runnable project with someone else, run a project with a repeatable setup, or keep the project's runtime separate from your machine as much as possible.
@@ -235,7 +235,7 @@ A lock file records the resolved runtime setup for the project. Commit it when y
 ato workspace share
 
 # Materialize a shared project into a local directory
-ato workspace setup https://ato.run/s/demo --into ./demo
+ato workspace setup ./share.spec.json --into ./demo
 ```
 
 A shared Ato project is represented as a recipe: a portable, inspectable description of source, runtime requirements, entrypoints, state expectations, and policy. In local projects, that recipe is usually written in `capsule.toml`. In practice, a recipe lets another machine reconstruct the launch without repeating the setup work by hand.
@@ -310,8 +310,8 @@ ato run ./crates/my-tool
 ### Shared recipe
 
 ```bash
-# Opens a shared Ato recipe from a link
-ato run https://ato.run/s/demo
+# Runs a shared recipe from its local share files
+ato run ./share.spec.json
 ```
 
 ## What Ato is not
@@ -362,7 +362,7 @@ or inspect the repository first.
 ```bash
 ato run .                       # rehearse a local project in a managed session
 ato run github.com/o/r          # rehearse a GitHub repository
-ato run https://ato.run/s/demo  # run a shared recipe
+ato run ./share.spec.json       # run a shared recipe (local share file)
 ato install publisher/slug      # register a durable local app
 ato lock .                      # generate a lock file
 ato workspace share             # create a shareable recipe description
@@ -463,7 +463,7 @@ cargo xtask bundle linux-x86_64
 
 ## Notes for existing users
 
-Older documentation may refer to `ato encap` and `ato decap`. Prefer `ato workspace share` and `ato workspace setup` for new examples.
+The web-based share flow was retired on 2026-08: `ato encap` / `ato decap` and `ato.run/s/<id>` share links are gone. Sharing is local-file only — `ato workspace share` writes `share.spec.json` / `share.lock.json` that recipients run with `ato run ./share.spec.json` or materialize with `ato workspace setup ./share.spec.json --into ./demo`.
 
 ## Contributing
 

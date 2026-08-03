@@ -674,6 +674,39 @@ pub(crate) fn is_ato_site_url(input: &str) -> bool {
     ato_url_host_rest(input).is_some()
 }
 
+/// Whether `input` is a retired web **share** link (`ato.run/s/<id>`).
+///
+/// Web sharing was removed (2026-08) along with the `encap`/`decap` aliases and
+/// the `/v1/shares` endpoint; these links can no longer be resolved. Kept
+/// separate from store references so callers can give a migration error instead
+/// of routing them to store resolution.
+pub(crate) fn is_retired_share_link(input: &str) -> bool {
+    let trimmed = input.trim();
+    // Match any `.ato.run` host (site, staging, app) with an `/s/` path, in any
+    // of the spellings users may paste.
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("www."))
+        .unwrap_or(trimmed);
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    let path = path.trim_start_matches('/');
+    (host == "ato.run" || host.ends_with(".ato.run")) && (path == "s" || path.starts_with("s/"))
+}
+
+/// Error message explaining how to move off a retired web share link.
+pub(crate) fn retired_share_link_error() -> String {
+    "This workspace share link has been retired.\n\n\
+     Web sharing (`ato.run/s/<id>`) was removed; ask the sender for\n\
+     `share.spec.json` and `share.lock.json`, then run:\n\n\
+     \x20 ato run ./share.spec.json\n\n\
+     or:\n\n\
+     \x20 ato workspace setup ./share.spec.json --into ./workspace"
+        .to_string()
+}
+
 /// Reduce an `ato.run` store/open URL to its canonical `publisher/slug` scoped
 /// id (unvalidated — the result is parsed by [`parse_capsule_request`]).
 ///
