@@ -18,20 +18,29 @@ name: cli unit tests
 #  - `cargo fmt -p cli -- --check`: crates/cli carries 19 pre-existing rustfmt
 #    diffs on `nightly`. A fmt gate would be red on arrival and train reviewers
 #    to ignore it; fixing those 19 files is a separate cleanup, not this gate.
-#  - the end-to-end tests in `crates/cli/tests/**`: they spawn `ato`/`nacelle`
-#    and need bubblewrap + PATH + free-disk setup (see rust-ci.yml's elaborate
-#    `test` job). They are integration tests, not `--lib` unit tests, and stay
-#    covered by rust-ci.yml on main/dev.
+#  - the heavier end-to-end tests in `crates/cli/tests/**` that spawn
+#    `ato`/`nacelle` and need bubblewrap + PATH + free-disk setup (see
+#    rust-ci.yml's elaborate `test` job). They are integration tests, not
+#    `--lib` unit tests, and stay covered by rust-ci.yml on main/dev.
+#
+# Exception: `share_run_local_e2e` IS gated here. It pins the local-file share
+# contract (the capsule ShareExecutor must materialize via `ato workspace setup
+# --dev`, not the removed `decap`), runs with `--compatibility-fallback host`,
+# and is hermetic (no nacelle, no network) — cheap and CI-stable. The executor
+# it exercises lives in `crates/capsule/src/engine/share/`, so that path is in
+# the filter to trigger this workflow for executor-only PRs.
 
 on:
   pull_request:
     paths:
       - "crates/cli/**"
+      - "crates/capsule/src/engine/share/**"
       - ".github/workflows/cli-ci.yml"
   push:
     branches: [main, dev, nightly]
     paths:
       - "crates/cli/**"
+      - "crates/capsule/src/engine/share/**"
       - ".github/workflows/cli-ci.yml"
   workflow_dispatch:
 
@@ -76,6 +85,16 @@ jobs:
       # Running the whole lib removes that failure mode by construction, and
       # staying scoped to `-p cli` keeps unrelated crates' debt out of this gate.
       - run: cargo test -p cli --lib
+      # Share-contract gate: pins that `ato run <local share file>` still works
+      # on a clean ATO_HOME (materialization via `ato workspace setup --dev`,
+      # content-bound cache identity, digest fail-closed). Hermetic: uses
+      # `--compatibility-fallback host` and never needs nacelle or network.
+      - run: cargo test -p cli --test share_run_local_e2e
+      # The capsule share executor's unit tests (identity / envelope / entry).
+      - run: cargo test -p capsule --lib share
+      # The interactive capture path (PTY) and the run dispatch semantics.
+      - run: cargo test -p cli --test share_encap_interactive_e2e
+      - run: cargo test -p cli --test run_install_semantics
       # clippy is clean for `-p cli --all-targets` on `nightly` today, so gate
       # it. Scoped to `-p cli` so it never surfaces pre-existing warnings
       # elsewhere in the workspace.

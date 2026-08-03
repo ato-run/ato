@@ -1,6 +1,6 @@
 # Manual Testing Scripts — ato-cli
 
-> Bash scripts for manual testing of `ato run`, `ato secrets`, `ato encap` commands.
+> Bash scripts for manual testing of `ato run`, `ato secrets`, `ato workspace share` commands.
 
 ## Quick Start
 

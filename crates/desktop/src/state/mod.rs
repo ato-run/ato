@@ -2046,165 +2046,100 @@ impl AppState {
         let normalized = Self::normalize_input(input);
         info!(input, normalized = %normalized, "navigate_to_url");
 
-        // Share URL fast-path: route share URLs into the unified ato://cli
-        // REPL panel. The REPL auto-executes `<share-url>` as its prelude
-        // (echoed at the `ato>` prompt), so users get a single terminal
-        // experience with egress policy, `.allow`, Ctrl-C, and bare-slug
-        // dispatch. Web-type shares still resolve through this path —
-        // their `ato run` invocation prints the local URL and exits back
-        // to the prompt (Phase 5 will add a browser-pane hint).
-        if crate::orchestrator::is_share_url(&normalized) {
-            let share_id = normalized
-                .rsplit('/')
-                .find(|seg| !seg.is_empty())
-                .unwrap_or("share")
-                .to_string();
-            let short_id = share_id.chars().take(8).collect::<String>();
-            let host = url::Url::parse(&normalized)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned));
-            // Seed both the share host (e.g. `ato.run`) and its wildcard
-            // subdomain pattern (`*.ato.run`). The second entry is crucial:
-            // `ato run` fetches share metadata from the API host
-            // (`api.ato.run` / `staging.api.ato.run`), which is a distinct
-            // host from the share URL's own host. Without the wildcard the
-            // egress proxy blocks that fetch and `ato run` exits with
-            // "Failed to fetch share URL".
-            let mut initial_allow_hosts = Vec::new();
-            if let Some(h) = host
-                && !h.is_empty()
-            {
-                initial_allow_hosts.push(h.clone());
-                // Don't add wildcard for localhost / bare IP — HostPattern::parse
-                // would reject "*.localhost" and the exact form already suffices.
-                let is_ip = h.parse::<std::net::IpAddr>().is_ok();
-                let is_localhost = h.eq_ignore_ascii_case("localhost");
-                if !is_ip && !is_localhost {
-                    initial_allow_hosts.push(format!("*.{h}"));
-                }
-            }
-            info!(
-                share_url = %normalized,
-                share_id = %share_id,
-                allow_hosts = ?initial_allow_hosts,
-                "share URL detected — opening unified ato://cli REPL panel"
+        // Retired web share links (`ato.run/s/<id>`) no longer resolve. Surface
+        // the migration guidance instead of opening a dead landing page in an
+        // external browser.
+        if is_retired_share_link(&normalized) {
+            self.push_activity(
+                ActivityTone::Error,
+                "This workspace share link has been retired. Web sharing ".to_string()
+                    + "(`ato.run/s/<id>`) was removed; ask the sender for "
+                    + "`share.spec.json` and `share.lock.json`, then run "
+                    + "`ato run ./share.spec.json` or "
+                    + "`ato workspace setup ./share.spec.json --into ./workspace`.",
             );
-            let spec = CliLaunchSpec::AtoRunRepl {
-                prelude: Some(normalized.clone()),
-                initial_allow_hosts,
-            };
-            self.open_cli_panel_with_spec(spec, Some(format!("share:{short_id}")));
             return;
         }
 
         let (next_route, capabilities, profile, source_label, trust_state, restricted, session) =
-            if crate::orchestrator::is_share_url(&normalized) {
-                // Share URLs must be routed as CapsuleHandle so the orchestrator can
-                // materialise them via `ato decap` before starting the session.
-                // classify_surface_input would classify them as WebUrl (external browser).
-                let share_id = normalized
-                    .rsplit('/')
-                    .find(|seg| !seg.is_empty())
-                    .unwrap_or("share")
-                    .to_string();
-                info!(share_url = %normalized, share_id = %share_id, "detected share URL — routing via decap");
-                (
-                    GuestRoute::CapsuleHandle {
-                        handle: normalized.clone(),
-                        label: format!("share:{share_id}"),
-                        community_toml_id: None,
-                    },
-                    vec![
-                        CapabilityGrant::ReadFile,
-                        CapabilityGrant::WorkspaceInfo,
-                        CapabilityGrant::Automation,
-                    ],
-                    "tauri".to_string(),
-                    Some("share".to_string()),
-                    Some("untrusted".to_string()),
-                    true,
-                    WebSessionState::Resolving,
-                )
-            } else {
-                match classify_surface_input(HandleInput {
-                    raw: normalized.clone(),
-                    surface: CapsuleInputSurface::DesktopOmnibar,
-                }) {
-                    Ok(CapsuleSurfaceInput::Capsule { canonical }) => {
-                        let label = canonical.display_string();
-                        (
-                            GuestRoute::CapsuleHandle {
-                                handle: label.clone(),
-                                label,
-                                community_toml_id: None,
-                            },
-                            vec![
-                                CapabilityGrant::ReadFile,
-                                CapabilityGrant::WorkspaceInfo,
-                                CapabilityGrant::Automation,
-                            ],
-                            route_profile_for_source(canonical.source_label()).to_string(),
-                            Some(canonical.source_label().to_string()),
-                            Some(if canonical.source_label() == "local" {
-                                "local".to_string()
-                            } else {
-                                "untrusted".to_string()
-                            }),
-                            true,
-                            WebSessionState::Resolving,
-                        )
-                    }
-                    Ok(CapsuleSurfaceInput::HostRoute { route: _ }) => {
-                        // Route ato:// URLs entered via the omnibar / MCP
-                        // browser_navigate through the same deep-link dispatcher
-                        // used for OS-level URL handlers. This enables, e.g.,
-                        // `ato://cli` to open the interactive CLI panel.
-                        self.handle_host_route(&normalized);
-                        return;
-                    }
-                    Ok(CapsuleSurfaceInput::WebUrl { url }) => {
-                        let Ok(url) = Url::parse(&url) else {
-                            self.push_activity(
-                                ActivityTone::Error,
-                                format!("Unable to navigate to invalid URL: {input}"),
-                            );
-                            return;
-                        };
-                        (
-                            GuestRoute::ExternalUrl(url),
-                            vec![CapabilityGrant::OpenExternal],
-                            "electron".to_string(),
-                            Some("web".to_string()),
-                            None,
-                            false,
-                            WebSessionState::Launching,
-                        )
-                    }
-                    Ok(CapsuleSurfaceInput::SearchQuery { query }) => {
-                        let fallback = Self::search_fallback(&query);
-                        let Ok(url) = Url::parse(&fallback) else {
-                            self.push_activity(
-                                ActivityTone::Error,
-                                format!("Unable to navigate to invalid URL: {input}"),
-                            );
-                            return;
-                        };
-                        (
-                            GuestRoute::ExternalUrl(url),
-                            vec![CapabilityGrant::OpenExternal],
-                            "electron".to_string(),
-                            Some("web".to_string()),
-                            None,
-                            false,
-                            WebSessionState::Launching,
-                        )
-                    }
-                    Err(error) => {
-                        self.push_activity(ActivityTone::Error, error.to_string());
-                        return;
-                    }
+            match classify_surface_input(HandleInput {
+                raw: normalized.clone(),
+                surface: CapsuleInputSurface::DesktopOmnibar,
+            }) {
+                Ok(CapsuleSurfaceInput::Capsule { canonical }) => {
+                    let label = canonical.display_string();
+                    (
+                        GuestRoute::CapsuleHandle {
+                            handle: label.clone(),
+                            label,
+                            community_toml_id: None,
+                        },
+                        vec![
+                            CapabilityGrant::ReadFile,
+                            CapabilityGrant::WorkspaceInfo,
+                            CapabilityGrant::Automation,
+                        ],
+                        route_profile_for_source(canonical.source_label()).to_string(),
+                        Some(canonical.source_label().to_string()),
+                        Some(if canonical.source_label() == "local" {
+                            "local".to_string()
+                        } else {
+                            "untrusted".to_string()
+                        }),
+                        true,
+                        WebSessionState::Resolving,
+                    )
                 }
-            }; // end if is_share_url else match
+                Ok(CapsuleSurfaceInput::HostRoute { route: _ }) => {
+                    // Route ato:// URLs entered via the omnibar / MCP
+                    // browser_navigate through the same deep-link dispatcher
+                    // used for OS-level URL handlers. This enables, e.g.,
+                    // `ato://cli` to open the interactive CLI panel.
+                    self.handle_host_route(&normalized);
+                    return;
+                }
+                Ok(CapsuleSurfaceInput::WebUrl { url }) => {
+                    let Ok(url) = Url::parse(&url) else {
+                        self.push_activity(
+                            ActivityTone::Error,
+                            format!("Unable to navigate to invalid URL: {input}"),
+                        );
+                        return;
+                    };
+                    (
+                        GuestRoute::ExternalUrl(url),
+                        vec![CapabilityGrant::OpenExternal],
+                        "electron".to_string(),
+                        Some("web".to_string()),
+                        None,
+                        false,
+                        WebSessionState::Launching,
+                    )
+                }
+                Ok(CapsuleSurfaceInput::SearchQuery { query }) => {
+                    let fallback = Self::search_fallback(&query);
+                    let Ok(url) = Url::parse(&fallback) else {
+                        self.push_activity(
+                            ActivityTone::Error,
+                            format!("Unable to navigate to invalid URL: {input}"),
+                        );
+                        return;
+                    };
+                    (
+                        GuestRoute::ExternalUrl(url),
+                        vec![CapabilityGrant::OpenExternal],
+                        "electron".to_string(),
+                        Some("web".to_string()),
+                        None,
+                        false,
+                        WebSessionState::Launching,
+                    )
+                }
+                Err(error) => {
+                    self.push_activity(ActivityTone::Error, error.to_string());
+                    return;
+                }
+            };
         let label = next_route.to_string();
         debug!(route = %label, "navigate_to_url resolved route");
         let partition_id = sanitize(&label);
@@ -2369,6 +2304,19 @@ impl AppState {
                     .find(|(k, _)| k == "handle")
                     .map(|(_, v)| v.into_owned())
             {
+                // Retired web share links must not leave an empty tab behind —
+                // show the guidance instead of creating one.
+                if is_retired_share_link(&handle) {
+                    self.push_activity(
+                        ActivityTone::Error,
+                        "This workspace share link has been retired. Web sharing ".to_string()
+                            + "(`ato.run/s/<id>`) was removed; ask the sender for "
+                            + "`share.spec.json` and `share.lock.json`, then run "
+                            + "`ato run ./share.spec.json` or "
+                            + "`ato workspace setup ./share.spec.json --into ./workspace`.",
+                    );
+                    return;
+                }
                 self.push_activity(
                     ActivityTone::Info,
                     format!("Opening capsule from deep link: {handle}"),
@@ -3517,10 +3465,10 @@ impl AppState {
 
     /// Open a CLI panel with an explicit `CliLaunchSpec`.
     ///
-    /// Used by share URL integration (`navigate_to_url`) to open an `ato://cli`
-    /// REPL pre-loaded with `ato run <share-url>` as its prelude command. When
-    /// `title_suffix` is provided it is appended to the base title (e.g.
-    /// `"ato CLI · share:abcd1234"`), otherwise the default title derived from
+    /// Used by `handle_host_route` for `ato://cli` deep links to open an
+    /// `ato://cli` REPL pre-loaded with a prelude command. When `title_suffix`
+    /// is provided it is appended to the base title (e.g.
+    /// `"ato CLI · my-suffix"`), otherwise the default title derived from
     /// the spec is used.
     pub fn open_cli_panel_with_spec(&mut self, spec: CliLaunchSpec, title_suffix: Option<String>) {
         let base_title = match &spec {
@@ -3897,6 +3845,24 @@ impl TaskSet {
             .iter_mut()
             .find(|pane| pane.id == self.focused_pane)
     }
+}
+
+/// Whether `input` is a retired web share link (`ato.run/s/<id>`).
+///
+/// Web sharing was removed (2026-08); these URLs can no longer be resolved, so
+/// `navigate_to_url` shows migration guidance instead of opening a dead page.
+fn is_retired_share_link(input: &str) -> bool {
+    let trimmed = input.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("www."))
+        .unwrap_or(trimmed);
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    let path = path.trim_start_matches('/');
+    (host == "ato.run" || host.ends_with(".ato.run")) && (path == "s" || path.starts_with("s/"))
 }
 
 fn uuid_v4_simple() -> String {
@@ -4826,98 +4792,45 @@ mod tests {
     }
 
     #[test]
-    fn navigate_to_share_url_opens_unified_cli_repl_panel() {
-        // New design: share URLs open in the unified ato://cli REPL panel
-        // with the share URL as an auto-executed prelude. This is the only
-        // share-URL path now — the legacy CapsuleHandle/Resolving pane is
-        // gone (dead code retained in `navigate_to_url` is unreachable).
+    fn navigate_to_retired_share_link_shows_migration_guidance_not_tab() {
         let mut state = AppState::demo();
-        state.navigate_to_url("https://ato.run/s/abc123xyz");
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
 
-        let workspace = state.active_workspace().expect("workspace");
-        let task = workspace.tasks.last().expect("task");
-        let pane = task
-            .panes
-            .iter()
-            .find(|p| p.id == task.focused_pane)
-            .expect("focused pane");
+        state.navigate_to_url("https://ato.run/s/abc123");
 
-        // Share URL → Terminal pane (unified ato://cli REPL).
-        let session_id = match &pane.surface {
-            PaneSurface::Terminal(term) => term.session_id.clone(),
-            other => panic!("expected Terminal surface for share URL, got {other:?}"),
-        };
-
-        // Title must carry the share short-id so the user still sees the
-        // share origin in the tab label.
-        assert!(
-            pane.title.contains("share:abc123xy"),
-            "title should include share short-id, got {:?}",
-            pane.title
-        );
-
-        // The pending CLI spec must be AtoRunRepl with the share URL as
-        // prelude and the share's host auto-allowed.
-        let spec = crate::orchestrator::take_pending_cli_command(&session_id)
-            .expect("pending CLI spec for share URL pane");
-        match spec {
-            crate::orchestrator::CliLaunchSpec::AtoRunRepl {
-                prelude,
-                initial_allow_hosts,
-            } => {
-                assert_eq!(
-                    prelude.as_deref(),
-                    Some("https://ato.run/s/abc123xyz"),
-                    "prelude must be the share URL so the REPL auto-runs it"
-                );
-                assert!(
-                    initial_allow_hosts.iter().any(|h| h == "ato.run"),
-                    "share host must be in initial_allow_hosts, got {initial_allow_hosts:?}"
-                );
-            }
-            other => panic!("expected AtoRunRepl, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn navigate_to_share_url_extracts_share_id_into_pane_title() {
-        let mut state = AppState::demo();
-        state.navigate_to_url("https://ato.run/s/myspecialrun");
-
-        let workspace = state.active_workspace().expect("workspace");
-        let task = workspace.tasks.last().expect("task");
-        let pane = task
-            .panes
-            .iter()
-            .find(|p| p.id == task.focused_pane)
-            .expect("focused pane");
-
-        // Short-id is the first 8 chars of the share segment.
-        assert!(
-            pane.title.contains("myspecia"),
-            "title should contain share short-id, got {:?}",
-            pane.title
-        );
-        assert!(matches!(pane.surface, PaneSurface::Terminal(_)));
-    }
-
-    #[test]
-    fn navigate_share_url_is_idempotent_and_opens_fresh_panel_each_time() {
-        // The share URL flow creates a new tab each navigation (there is no
-        // per-pane "retry" state in the REPL world — each `ato> <url>` run
-        // is just another submit). Confirm that back-to-back navigations
-        // produce distinct pending CLI specs.
-        let mut state = AppState::demo();
-        let initial_tasks = state.active_workspace().expect("workspace").tasks.len();
-
-        state.navigate_to_url("https://ato.run/s/abc123xyz");
-        state.navigate_to_url("https://ato.run/s/abc123xyz");
-
-        let tasks_after = state.active_workspace().expect("workspace").tasks.len();
+        // No new tab/workspace; the retired-share message lands in the activity log.
         assert_eq!(
-            tasks_after,
-            initial_tasks + 2,
-            "each share navigation creates a fresh tab"
+            state.active_workspace().expect("workspace").tasks.len(),
+            initial_task_count,
+            "retired share link must not open a new tab"
+        );
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("retired") && e.message.contains("share.spec.json")),
+            "activity log must carry the migration guidance"
+        );
+    }
+
+    #[test]
+    fn host_route_open_with_retired_share_handle_does_not_create_tab() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.handle_host_route("ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123");
+
+        assert_eq!(
+            state.active_workspace().expect("workspace").tasks.len(),
+            initial_task_count,
+            "ato://open?handle=<retired share> must not leave an empty tab behind"
+        );
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("retired") && e.message.contains("share.spec.json")),
+            "deep-link path must show the migration guidance"
         );
     }
 
@@ -4949,34 +4862,6 @@ mod tests {
         // GuestRoute::CapsuleHandle.to_string() returns the label (= display_string of canonical)
         assert!(pane.route.to_string().contains("acme") && pane.route.to_string().contains("chat"));
         assert_eq!(pane.session, WebSessionState::Resolving);
-    }
-
-    #[test]
-    fn handle_host_route_open_with_share_url_routes_to_unified_cli_panel() {
-        // New design: `ato://open?handle=<share-url>` routes the share URL
-        // through `navigate_to_url`, which now opens the unified ato://cli
-        // REPL panel (Terminal surface) rather than a Resolving Web pane.
-        let mut state = AppState::demo();
-
-        state.handle_host_route("ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123");
-
-        let workspace = state.active_workspace().expect("workspace");
-        let task = workspace.tasks.last().expect("task");
-        let pane = task
-            .panes
-            .iter()
-            .find(|p| p.id == task.focused_pane)
-            .expect("focused pane");
-        assert!(
-            matches!(pane.surface, PaneSurface::Terminal(_)),
-            "share deep-link must open a Terminal (REPL) surface, got {:?}",
-            pane.surface
-        );
-        assert!(
-            pane.title.contains("share:abc123"),
-            "pane title must carry the share short-id, got {:?}",
-            pane.title
-        );
     }
 
     #[test]
@@ -5150,66 +5035,6 @@ mod tests {
             .find(|(k, _)| k == "handle")
             .map(|(_, v)| v.into_owned());
         assert_eq!(handle.as_deref(), Some("capsule://ato.run/acme/chat"));
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // E2E: real share URL state-machine test (unified ato://cli REPL)
-    //
-    // Under the unified CLI design, pasting a share URL into the omnibar
-    // opens an `ato://cli` REPL panel whose prelude auto-executes the share
-    // URL. This test verifies that the Terminal pane is created with the
-    // correct pending CliLaunchSpec (prelude = share URL, host auto-allow).
-    // ────────────────────────────────────────────────────────────────────────
-    #[test]
-    fn e2e_share_url_state_routes_to_unified_cli_repl() {
-        const SHARE_URL: &str = "https://ato.run/s/01KP5WDF81SQQTVZRF88RNY8MR";
-
-        let mut state = AppState::demo();
-        state.navigate_to_url(SHARE_URL);
-
-        let workspace = state.active_workspace().expect("workspace");
-        let task = workspace.tasks.last().expect("task");
-        let pane = task
-            .panes
-            .iter()
-            .find(|p| p.id == task.focused_pane)
-            .expect("focused pane");
-
-        let session_id = match &pane.surface {
-            PaneSurface::Terminal(term) => term.session_id.clone(),
-            other => panic!("expected Terminal surface for share URL, got {other:?}"),
-        };
-
-        // Pane title carries the share short-id so users can tell which
-        // capsule this panel was opened for.
-        assert!(
-            pane.title.contains("share:01KP5WDF"),
-            "pane title must carry share short-id, got {:?}",
-            pane.title
-        );
-
-        // The pending CliLaunchSpec must be AtoRunRepl with:
-        //  - prelude = the exact share URL (so the REPL auto-runs it)
-        //  - initial_allow_hosts containing the share's host (ato.run)
-        let spec = crate::orchestrator::take_pending_cli_command(&session_id)
-            .expect("pending CLI spec must be registered for share URL pane");
-        match spec {
-            crate::orchestrator::CliLaunchSpec::AtoRunRepl {
-                prelude,
-                initial_allow_hosts,
-            } => {
-                assert_eq!(
-                    prelude.as_deref(),
-                    Some(SHARE_URL),
-                    "prelude must equal the share URL so the REPL runs it"
-                );
-                assert!(
-                    initial_allow_hosts.iter().any(|h| h == "ato.run"),
-                    "share host must be in initial_allow_hosts, got {initial_allow_hosts:?}"
-                );
-            }
-            other => panic!("expected AtoRunRepl, got {other:?}"),
-        }
     }
 
     // ── community_toml_id threading through pending resolution ─────────────

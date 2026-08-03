@@ -5,7 +5,7 @@ Demonstrates `ato`'s workspace persistence across runs. The script appends a tim
 ## What this proves
 
 - `workspace/` directory is mounted and writable inside the capsule
-- State written in one run is readable in the next (`ato decap` promotes to a named workspace)
+- State written in one run is readable in the next (`ato workspace setup` promotes to a named workspace)
 - The capsule itself remains read-only; only `workspace/` accumulates state
 
 ## Run it

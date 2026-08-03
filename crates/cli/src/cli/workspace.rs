@@ -12,18 +12,6 @@ pub(crate) enum WorkspaceCommands {
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Upload with organisation-internal visibility (conflicts with --private, --local)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["private", "local"])]
-        internal: bool,
-
-        /// Upload with private visibility — authenticated owner only (conflicts with --internal, --local)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "local"])]
-        private: bool,
-
-        /// Write local outputs only; do not upload (conflicts with --internal, --private)
-        #[arg(long, default_value_t = false, conflicts_with_all = ["internal", "private"])]
-        local: bool,
-
         /// Print the detected capture plan without writing files
         #[arg(long, default_value_t = false)]
         print_plan: bool,
@@ -59,7 +47,7 @@ pub(crate) enum WorkspaceCommands {
 
     #[command(about = "Set up a shared workspace locally")]
     Setup {
-        /// Share URL, share.spec.json, or share.lock.json
+        /// Local share.spec.json or share.lock.json path
         input: String,
 
         /// Target directory to materialize into

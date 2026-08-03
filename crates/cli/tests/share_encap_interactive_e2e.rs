@@ -1,6 +1,6 @@
-//! E2E interactive tests for `ato encap` primary entry selection via PTY.
+//! E2E interactive tests for `ato workspace share` primary entry selection via PTY.
 //!
-//! These tests drive `ato encap --local --save-config .` through a PTY session and verify
+//! These tests drive `ato workspace share --save-config .` through a PTY session and verify
 //! that primary-entry changes are persisted in the saved `share.spec.json`.
 //!
 //! Prompt patterns used:
@@ -108,7 +108,7 @@ fn encap_pty_command(workspace: &Path, home: &Path) -> std::process::Command {
     );
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c")
-        .arg(format!("'{ato}' encap --local --save-config . 2>&1"))
+        .arg(format!("'{ato}' workspace share --save-config . 2>&1"))
         .current_dir(workspace)
         .env("HOME", home);
     cmd

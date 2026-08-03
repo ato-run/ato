@@ -6,8 +6,8 @@
 launching the resulting execution. Its command-level contract is an ephemeral
 local production rehearsal, not durable app registration.
 
-It accepts a local directory, GitHub repository, Store reference, share URL,
-local share artifact, or canonical capsule handle. The CLI surface defaults
+It accepts a local directory, GitHub repository, Store reference, local share
+artifact, or canonical capsule handle. The CLI surface defaults
 `path` to `.` and routes every input through the same run pipeline.
 
 ## Recipe selection
@@ -38,7 +38,7 @@ determines the execution identity for this launch.
 At a high level, the flow is:
 
 1. Parse the CLI and dispatch `Commands::Run`
-2. Normalize special run inputs such as `capsule://...` handles and share URLs
+2. Normalize special run inputs such as `capsule://...` handles and local share files
 3. Apply environment assistance (`~/.ato/env/targets/<fingerprint>.env`,
    `--env-file`, SecretStore, and optional prompt)
 4. Resolve or install the target and materialize an isolated run workspace
@@ -62,7 +62,7 @@ The detailed CLI surface and routing rules live in
 
 - `ato run` MUST treat execution as ephemeral, not as persistent installation.
 - `ato run` MUST accept local paths, GitHub repositories, scoped Store references,
-  share URLs, local share artifacts, and canonical capsule handles.
+  local share artifacts, and canonical capsule handles.
 - required env MUST fail closed before process launch, with CI refusing the
   interactive fallback path.
 - saved per-target env values MAY be reused from `~/.ato/env/targets/`.

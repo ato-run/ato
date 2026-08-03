@@ -51,9 +51,9 @@ pub(crate) enum HourglassFlow {
     ConsumerRun,
     ProducerPublish,
     ProducerPublishFinalize,
-    // v0.5.x: Add WorkspaceMaterialize (decap) and WorkspaceCapture (encap local capture).
+    // v0.5.x: Add WorkspaceMaterialize (workspace setup) and WorkspaceCapture (workspace share, local capture).
     //
-    // decap already runs semantically equivalent Install + Verify stages:
+    // workspace setup already runs semantically equivalent Install + Verify stages:
     //   - "install steps" from share spec   ≡  Install stage
     //   - manifest hash / signature / payload_hash checks  ≡  Verify stage
     //
