@@ -709,6 +709,38 @@ pub fn merge_store_metadata(
     toml::to_string(&manifest).map_err(|error| format!("serialize Effective capsule.toml: {error}"))
 }
 
+/// One materialized authoring asset a builder reports back, matching the
+/// ato-api `setupReady.materialized_assets` item schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedAsset {
+    pub kind: &'static str,
+    pub origin_path: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Validate a materialized asset before it is reported back to ato-api.
+///
+/// Mirrors the ato-api `ingestBuilderPathAssets` inspect step (ato-api#459):
+/// the bytes must match the declared media type (SVG through the passive
+/// profile, binaries by magic bytes) and the content_digest must be the sha256
+/// of the bytes. A builder must never report an asset it has not validated.
+pub fn validate_materialized_asset(asset: &MaterializedAsset) -> Result<(), String> {
+    let media_type = capsule::types::assets::AssetMediaType::parse(&asset.media_type)
+        .map_err(|error| format!("asset {} media_type: {error}", asset.kind))?;
+    capsule::types::assets::validate_asset_bytes(media_type, &asset.bytes)
+        .map_err(|error| format!("asset {} bytes: {error}", asset.kind))?;
+    let digest = sha256_digest(&asset.bytes);
+    if asset.content_digest != digest {
+        return Err(format!(
+            "asset {} content_digest does not match its bytes (expected {digest})",
+            asset.kind
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedBuildContract {
     pub timeout_seconds: u64,
@@ -1224,6 +1256,83 @@ timeout_seconds = 60
             validate_build_contract(&work)
                 .expect_err("plan must fail")
                 .contains("launch differs")
+        );
+    }
+
+    #[test]
+    fn materialized_asset_accepts_a_passive_svg_matching_its_digest() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\"/></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        validate_materialized_asset(&asset).expect("passive svg accepted");
+    }
+
+    #[test]
+    fn materialized_asset_rejects_active_svg() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><script>alert(1)</script></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&asset)
+                .expect_err("active svg must fail")
+                .contains("not allowed")
+        );
+    }
+
+    #[test]
+    fn materialized_asset_rejects_a_digest_mismatch() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: format!("sha256:{}", "f".repeat(64)),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&asset)
+                .expect_err("digest mismatch must fail")
+                .contains("content_digest does not match")
+        );
+    }
+
+    #[test]
+    fn materialized_asset_rejects_unsupported_media_type_and_bad_magic() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"></svg>";
+        let unsupported = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.gif".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/gif".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&unsupported)
+                .expect_err("gif must fail")
+                .contains("media_type")
+        );
+
+        let wrong_bytes = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/png".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&wrong_bytes)
+                .expect_err("svg bytes as png must fail")
+                .contains("bytes")
         );
     }
 }
