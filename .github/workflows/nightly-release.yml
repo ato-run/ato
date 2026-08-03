@@ -50,7 +50,7 @@ jobs:
       - id: v
         run: |
           set -euo pipefail
-          base=$(grep -m1 '^version' crates/ato-cli/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          base=$(grep -m1 '^version' crates/cli/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
           sha=$(git rev-parse HEAD)
           short=$(git rev-parse --short=8 HEAD)
           date=$(date -u +%Y%m%d)
@@ -83,7 +83,7 @@ jobs:
       - name: Build ato + nacelle (dist profile)
         run: |
           set -euo pipefail
-          cargo build --profile dist -p ato-cli --bin ato --target ${{ matrix.target }}
+          cargo build --profile dist -p cli --bin ato --target ${{ matrix.target }}
           cargo build --profile dist -p nacelle --bin nacelle --target ${{ matrix.target }}
       - name: Package
         run: |
