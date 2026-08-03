@@ -4156,21 +4156,21 @@ fn process_authoring_setup(
             .then(|| manifest.get("capsule_toml")?.as_str())
             .flatten()
     });
-    let (origin, normalized, generated_manifest) = match authored_toml {
-        Some(capsule_toml) => (
-            "manual_setup",
-            authoring_runtime::normalize_capsule_toml(capsule_toml)
-                .map_err(|error| fail("detect", error))?,
-            capsule_toml.to_string(),
-        ),
+    let (origin, generated_manifest) = match authored_toml {
+        Some(capsule_toml) => ("manual_setup", capsule_toml.to_string()),
         None => {
             let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
                 .map_err(|error| fail("detect", error))?;
             let generated = authoring_runtime::render_static_web_capsule_toml(&normalized)
                 .map_err(|error| fail("detect", error))?;
-            ("inferred", normalized, generated)
+            let effective =
+                authoring_runtime::merge_store_metadata(&generated, work.store_metadata.as_ref())
+                    .map_err(|error| fail("detect", error))?;
+            ("inferred", effective)
         }
     };
+    let normalized = authoring_runtime::normalize_capsule_toml(&generated_manifest)
+        .map_err(|error| fail("detect", error))?;
     let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&generated_manifest)
         .map_err(|error| fail("detect", error.to_string()))?;
     snapshot::rootfs_builder::derive_build_spec_v1(
