@@ -283,6 +283,18 @@ pub struct AssetPathLocatorV1 {
 #[serde(deny_unknown_fields)]
 pub struct AssetUrlLocatorV1 {
     pub url: String,
+    /// A materialized URL asset descriptor carries all three identity fields
+    /// together, or none (ato-api#459): `content_digest`, `artifact_ref` and
+    /// `media_type`. `artifact_ref` must be `ato-asset://sha256/<hex>` derived
+    /// from `content_digest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 /// One launch-supplied variable. BOTH fields are explicit.
 ///
@@ -498,6 +510,89 @@ fn build_ignore_matcher(
     })
 }
 
+/// Whether `value` is `sha256:` followed by exactly 64 lowercase hex digits.
+fn is_sha256_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Validate an HTTPS URL field (credential-free, with a host).
+fn validate_asset_https_url(
+    field: &'static str,
+    key: &str,
+    value: &str,
+) -> Result<(), ManifestV1Error> {
+    let parsed = Url::parse(value).map_err(|error| ManifestV1Error::Invalid {
+        field,
+        reason: format!("{key} must be an HTTPS URL: {error}"),
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(ManifestV1Error::Invalid {
+            field,
+            reason: format!("{key} must be a credential-free HTTPS URL with a host"),
+        });
+    }
+    Ok(())
+}
+
+/// Enforce the materialized URL asset descriptor contract (ato-api#459): the
+/// three identity fields (`content_digest`, `artifact_ref`, `media_type`) are
+/// all present or all absent, `artifact_ref` is derived from `content_digest`,
+/// and `media_type` is on the authoring allowlist.
+fn validate_materialized_asset_identity(
+    field: &'static str,
+    url: &AssetUrlLocatorV1,
+) -> Result<(), ManifestV1Error> {
+    let identity_fields = [
+        url.content_digest.as_ref(),
+        url.artifact_ref.as_ref(),
+        url.media_type.as_ref(),
+    ];
+    let present = identity_fields.iter().filter(|value| value.is_some()).count();
+    if present != 0 && present != identity_fields.len() {
+        return Err(ManifestV1Error::Invalid {
+            field,
+            reason: "a materialized URL asset descriptor must include all identity \
+                     fields (content_digest, artifact_ref, media_type) or none"
+                .to_string(),
+        });
+    }
+    if let (Some(content_digest), Some(artifact_ref)) = (&url.content_digest, &url.artifact_ref) {
+        if !is_sha256_digest(content_digest) {
+            return Err(ManifestV1Error::Invalid {
+                field,
+                reason: "content_digest must be a sha256:<64 hex> digest".to_string(),
+            });
+        }
+        let expected_artifact_ref = format!(
+            "ato-asset://sha256/{}",
+            &content_digest["sha256:".len()..]
+        );
+        if *artifact_ref != expected_artifact_ref {
+            return Err(ManifestV1Error::Invalid {
+                field,
+                reason: "asset artifact_ref must match content_digest".to_string(),
+            });
+        }
+    }
+    if let Some(media_type) = &url.media_type {
+        super::assets::AssetMediaType::parse(media_type).map_err(|error| ManifestV1Error::Invalid {
+            field,
+            reason: format!("media_type: {error}"),
+        })?;
+    }
+    Ok(())
+}
+
 impl CapsuleManifestV1 {
     /// Parse and validate. There is no lenient mode: a manifest that does not
     /// validate is not a v1 manifest.
@@ -652,6 +747,10 @@ impl CapsuleManifestV1 {
                                 reason: "must be a credential-free HTTPS URL with a host"
                                     .to_string(),
                             });
+                        }
+                        validate_materialized_asset_identity(field, url)?;
+                        if let Some(origin_url) = &url.origin_url {
+                            validate_asset_https_url(field, "origin_url", origin_url)?;
                         }
                     }
                     None => {}
@@ -1642,6 +1741,152 @@ command = ["python"]
             ))
             .expect_err("unknown unified manifest field");
             assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn materialized_url_asset_identity_fields_are_all_or_none() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let artifact_ref = format!("ato-asset://sha256/{}", "a".repeat(64));
+        let url_asset = |extra: &str| {
+            parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.banner]
+url = "https://assets.example/banner.webp"
+{extra}
+
+[run]
+command = ["python"]
+"#
+            ))
+        };
+
+        url_asset("").expect("a bare URL asset descriptor is allowed");
+        url_asset(&format!(
+            "content_digest = \"{digest}\"\nartifact_ref = \"{artifact_ref}\"\nmedia_type = \"image/webp\""
+        ))
+        .expect("a full materialized descriptor is allowed");
+
+        let partial = url_asset(
+            "content_digest = \"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        )
+        .expect_err("a partial identity is refused");
+        assert!(
+            matches!(
+                partial,
+                ManifestV1Error::Invalid { ref reason, .. }
+                    if reason.contains("all identity fields")
+            ),
+            "{partial}"
+        );
+
+        let mismatched = url_asset(&format!(
+            "content_digest = \"{digest}\"\nartifact_ref = \"ato-asset://sha256/{}\"\nmedia_type = \"image/webp\"",
+            "b".repeat(64)
+        ))
+        .expect_err("artifact_ref must match content_digest");
+        assert!(
+            matches!(
+                mismatched,
+                ManifestV1Error::Invalid { ref reason, .. }
+                    if reason.contains("artifact_ref must match")
+            ),
+            "{mismatched}"
+        );
+
+        let bad_digest = url_asset(&format!(
+            "content_digest = \"md5:{}\"\nartifact_ref = \"ato-asset://md5/{}\"\nmedia_type = \"image/webp\"",
+            "a".repeat(32),
+            "a".repeat(32)
+        ))
+        .expect_err("digest must be sha256");
+        assert!(
+            matches!(
+                bad_digest,
+                ManifestV1Error::Invalid { ref reason, .. } if reason.contains("sha256")
+            ),
+            "{bad_digest}"
+        );
+    }
+
+    #[test]
+    fn materialized_url_asset_media_type_is_allowlisted() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let artifact_ref = format!("ato-asset://sha256/{}", "a".repeat(64));
+        let media = |media_type: &str| {
+            parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.banner]
+url = "https://assets.example/banner.svg"
+content_digest = "{digest}"
+artifact_ref = "{artifact_ref}"
+media_type = "{media_type}"
+
+[run]
+command = ["python"]
+"#
+            ))
+        };
+
+        for allowed in ["image/png", "image/jpeg", "image/webp", "image/svg+xml"] {
+            media(allowed).expect("allowlisted media type");
+        }
+        let error = media("image/gif").expect_err("gif is not an authoring asset");
+        assert!(
+            matches!(
+                error,
+                ManifestV1Error::Invalid { ref reason, .. } if reason.contains("media_type")
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn asset_origin_url_must_be_credential_free_https() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let artifact_ref = format!("ato-asset://sha256/{}", "a".repeat(64));
+        let origin = |origin_url: &str| {
+            parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+url = "https://assets.example/icon.svg"
+content_digest = "{digest}"
+artifact_ref = "{artifact_ref}"
+media_type = "image/svg+xml"
+origin_url = "{origin_url}"
+
+[run]
+command = ["python"]
+"#
+            ))
+        };
+
+        origin("https://assets.example/icon.svg").expect("credential-free https origin");
+        for bad in [
+            "http://assets.example/icon.svg",
+            "https://user:pass@assets.example/icon.svg",
+        ] {
+            let error = origin(bad).expect_err("unsafe origin_url");
+            assert!(
+                matches!(
+                    error,
+                    ManifestV1Error::Invalid { ref reason, .. }
+                        if reason.contains("origin_url")
+                ),
+                "{bad}: {error}"
+            );
         }
     }
 }
