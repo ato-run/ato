@@ -62,8 +62,8 @@ pub(crate) use secrets::SecretsCommands;
 pub(crate) use session::IdentitySessionCommands;
 #[allow(unused_imports)]
 pub(crate) use shared::{
-    CompatibilityFallbackBackend, DEFAULT_RUN_REGISTRY_URL, EncapVisibility, EnforcementMode,
-    GitHubAutoFixMode, GitMode, ProviderToolchain, RunAgentMode, ShareToolRuntime,
+    CompatibilityFallbackBackend, DEFAULT_RUN_REGISTRY_URL, EnforcementMode, GitHubAutoFixMode,
+    GitMode, ProviderToolchain, RunAgentMode, ShareToolRuntime,
 };
 #[allow(unused_imports)]
 pub(crate) use source::SourceCommands;

@@ -198,15 +198,6 @@ pub(crate) fn classify_run_target(raw: &str, expanded_local: &Path) -> Result<Pa
     // into `parse_provider_target_ref` below, which splits on the scheme colon
     // and bails with a cryptic "unknown provider `https`".
     if super::is_ato_site_url(raw) {
-        if super::is_ato_share_url(raw) {
-            // Share links (`ato.run/s/<id>`) are executed by the share runner —
-            // the run path intercepts them (in any spelling) before
-            // classification, so this branch is only reached by the
-            // side-effect-free preflight, which cannot run them itself.
-            bail!(
-                "'{raw}' is an Ato share link, not a store capsule reference.\n\nRun it directly with:\n  ato run {raw}"
-            );
-        }
         if super::strip_ato_store_url(raw).is_some() {
             return Ok(ParsedRunTarget::RegistryReference);
         }
@@ -2062,11 +2053,11 @@ Tag: py3-none-any\n";
     }
 
     #[test]
-    fn classify_run_target_directs_share_links_to_run_not_store() {
-        // `/s/` share links are executed by the share runner, not resolved as
-        // store capsules. When classification is reached (preflight), the error
-        // must point at `ato run <url>` and must NOT claim it is a malformed
-        // store link or surface the cryptic provider error.
+    fn classify_run_target_rejects_share_links_as_non_runnable_store_links() {
+        // Web share links (`ato.run/s/<id>`) are no longer supported — there is
+        // no share runner to redirect them to. They must fail cleanly as
+        // non-runnable ato.run capsule links (not the cryptic provider error,
+        // and not a fetch attempt).
         for raw in [
             "https://ato.run/s/abc123",
             "http://ato.run/s/abc123",
@@ -2075,19 +2066,15 @@ Tag: py3-none-any\n";
             "ato.run/s/abc123@r3",
         ] {
             let err = classify_run_target(raw, Path::new(raw))
-                .expect_err("share link is not a store capsule");
+                .expect_err("share link is not a runnable store capsule");
             let message = err.to_string();
             assert!(
                 !message.contains("unknown provider"),
                 "'{raw}' must not surface the cryptic provider error: {message}"
             );
             assert!(
-                !message.contains("not a runnable ato.run capsule link"),
-                "'{raw}' must not be reported as a malformed store link: {message}"
-            );
-            assert!(
-                message.contains("share link") && message.contains("ato run"),
-                "'{raw}' should point the user at `ato run <url>`: {message}"
+                message.contains("not a runnable ato.run capsule link"),
+                "'{raw}' should be reported as a malformed store link: {message}"
             );
         }
     }

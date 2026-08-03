@@ -23,8 +23,8 @@ pub(crate) use github::login_with_token;
 pub(crate) use store::{
     bridge_authenticate_ephemeral, current_publisher_handle, current_session_token,
     default_store_registry_url, desktop_auth_handoff, login_with_store_device_flow,
-    login_with_store_device_flow_desktop, logout, require_session_token, share_display_base_url,
-    status, store_api_base_url, store_site_base_url,
+    login_with_store_device_flow_desktop, logout, require_session_token, status,
+    store_api_base_url, store_site_base_url,
 };
 
 pub(super) const DEFAULT_STORE_API_URL: &str = "https://api.ato.run";
