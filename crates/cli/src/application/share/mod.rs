@@ -19,11 +19,10 @@ use chrono::Utc;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::application::auth;
-use crate::cli::{EncapVisibility, GitMode, ShareToolRuntime};
+use crate::cli::{GitMode, ShareToolRuntime};
 use crate::fs_copy;
 use crate::reporters::CliReporter;
 
@@ -32,7 +31,6 @@ use share_types::{
     default_runtime_source_str,
 };
 const SHARE_GUIDE_FILE: &str = "guide.md";
-const DEFAULT_API_TIMEOUT_SECS: u64 = 20;
 
 /// Emit an informational hint (not an execution result, not a warning) to stderr.
 ///
@@ -108,7 +106,6 @@ struct CapsuleTomlShare {
 #[derive(Debug, Clone)]
 pub(crate) struct EncapArgs {
     pub(crate) path: PathBuf,
-    pub(crate) visibility: EncapVisibility,
     pub(crate) print_plan: bool,
     pub(crate) dry_run: bool,
     pub(crate) git_mode: GitMode,
@@ -142,30 +139,6 @@ pub(crate) struct RunShareArgs {
     pub(crate) reporter: Arc<CliReporter>,
     /// When true, bypass nacelle and run directly on the host (mirrors --compatibility-fallback host).
     pub(crate) compat_host: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ShareApiCreateRequest {
-    title: String,
-    visibility: String,
-    spec: ShareSpec,
-    lock: ShareLock,
-    guide_markdown: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ShareRevisionPayload {
-    #[serde(alias = "id")]
-    share_id: String,
-    title: String,
-    visibility: String,
-    revision: u32,
-    share_url: String,
-    revision_url: String,
-    spec: ShareSpec,
-    lock: ShareLock,
-    guide_markdown: String,
-    updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -317,7 +290,7 @@ fn execute_encap_dry_run(
             )))?;
         }
         futures::executor::block_on(reporter.warn(
-            "Add these files to [pack] exclude in capsule.toml or .atoignore before running ato encap.".to_string(),
+            "Add these files to [pack] exclude in capsule.toml or .atoignore before running ato workspace share.".to_string(),
         ))?;
     }
 
@@ -442,31 +415,13 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
         output.guide_path.display()
     )))?;
 
-    if args.visibility != EncapVisibility::Local {
-        match upload_share(&spec, &lock, &guide, args.visibility.as_api_str()) {
-            Ok(uploaded) => {
-                futures::executor::block_on(reporter.notify(format!(
-                    "🔗 Share URL: {}\n🔒 Revision URL: {}",
-                    rewrite_api_to_site_url(&uploaded.share_url),
-                    rewrite_api_to_site_url(&uploaded.revision_url)
-                )))?;
-            }
-            Err(error) => {
-                futures::executor::block_on(reporter.warn(format!(
-                    "Local capture was saved, but share upload failed: {}",
-                    error
-                )))?;
-            }
-        }
-    }
-
     Ok(())
 }
 
 pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let into = args.into;
     ensure_target_root_ready(&into)?;
-    if looks_like_share_run_input(&args.input) || looks_like_local_share_file(&args.input) {
+    if looks_like_local_share_file(&args.input) {
         let loaded = load_share_input(&args.input)?;
         if args.plan {
             println!("{}", serde_json::to_string_pretty(&loaded.spec)?);
@@ -502,10 +457,10 @@ pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Resu
 #[allow(dead_code)]
 pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     if args.watch {
-        anyhow::bail!("`ato run <share-url>` does not support --watch in this MVP.");
+        anyhow::bail!("`ato run <share.spec.json>` does not support --watch in this MVP.");
     }
     if args.background {
-        anyhow::bail!("`ato run <share-url>` does not support --background in this MVP.");
+        anyhow::bail!("`ato run <share.spec.json>` does not support --background in this MVP.");
     }
 
     // CLI-specific: interactive entry selection + env prompt (stays in CLI layer)
@@ -527,7 +482,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
     // so the actual program output stands out. See `emit_dim_hint` for the
     // dim ANSI sequence + non-TTY fallback.
     emit_dim_hint(&format!(
-        "Try now: `{}`\nSet up locally later: ato decap {} --into ./{}",
+        "Try now: `{}`\nSet up locally later: ato workspace setup {} --into ./{}",
         entry.run, next_command, loaded.spec.root
     ));
 
@@ -790,7 +745,7 @@ fn build_generic_decap_summary(input: &str, into: &Path, state: &WorkspaceShareS
         format!("Verification: {}", state.verification.result),
         "Next:".to_string(),
         "  - Open the workspace locally".to_string(),
-        "  - Share it later with: ato encap".to_string(),
+        "  - Share it later with: ato workspace share".to_string(),
     ];
     if !state.verification.issues.is_empty() {
         lines.push("Issues:".to_string());
@@ -822,13 +777,13 @@ fn capture_workspace(
             if allow_dirty {
                 futures::executor::block_on(reporter.warn(format!(
                     "⚠️  Repository {} has uncommitted changes. \
-                     Recipients will not see these changes after decap.",
+                     Recipients will not see these changes after setup.",
                     repo.rel_path
                 )))?;
             } else {
                 anyhow::bail!(
                     "Repository {} has uncommitted changes. \
-                     Commit or stash your changes before encap, \
+                     Commit or stash your changes before sharing, \
                      or pass --allow-dirty to proceed anyway.",
                     repo.rel_path
                 );
@@ -2245,85 +2200,6 @@ fn generate_guide(spec: &ShareSpec) -> String {
     lines.join("\n")
 }
 
-/// Rewrites a server-returned share URL to use the canonical user-facing domain.
-///
-/// The API server (`api.ato.run`) returns `share_url`/`revision_url` fields using its
-/// own host. For user-facing display we always show the site domain (`ato.run/s/...`)
-/// instead. Respects `ATO_STORE_SITE_URL` for staging / dev overrides.
-fn rewrite_api_to_site_url(url: &str) -> String {
-    let Ok(mut parsed) = reqwest::Url::parse(url) else {
-        return url.to_string();
-    };
-    let api_base = auth::default_store_registry_url();
-    let Ok(api_parsed) = reqwest::Url::parse(&api_base) else {
-        return url.to_string();
-    };
-    if parsed.host_str() == api_parsed.host_str() && parsed.path().starts_with("/s/") {
-        let site_base = auth::share_display_base_url();
-        let Ok(site_parsed) = reqwest::Url::parse(&site_base) else {
-            return url.to_string();
-        };
-        if let Some(host) = site_parsed.host_str() {
-            let _ = parsed.set_host(Some(host));
-        }
-    }
-    parsed.to_string()
-}
-
-/// Maps the host of a share URL to the correct API base URL for server calls.
-///
-/// Users receive `ato.run/s/...` URLs but API calls must go to `api.ato.run`.
-/// This avoids a 404 when `fetch_share_url` is handed a site-domain URL.
-fn api_base_for_share_host(host: &str) -> String {
-    let site_base = auth::share_display_base_url();
-    if let Ok(site_parsed) = reqwest::Url::parse(&site_base)
-        && site_parsed.host_str() == Some(host)
-    {
-        return auth::default_store_registry_url();
-    }
-    // Preserve scheme-less host references (e.g. staging.api.ato.run) as-is.
-    format!("https://{}", host)
-}
-
-fn upload_share(
-    spec: &ShareSpec,
-    lock: &ShareLock,
-    guide: &str,
-    visibility: &str,
-) -> Result<ShareRevisionPayload> {
-    let token = auth::require_session_token()?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_API_TIMEOUT_SECS))
-        .build()
-        .context("Failed to build share upload HTTP client")?;
-    let response = client
-        .post(format!("{}/v1/shares", auth::default_store_registry_url()))
-        .bearer_auth(token)
-        .header("Accept", "application/json")
-        .json(&ShareApiCreateRequest {
-            title: spec.name.clone(),
-            visibility: visibility.to_string(),
-            spec: spec.clone(),
-            lock: lock.clone(),
-            guide_markdown: guide.to_string(),
-        })
-        .send()
-        .context("Failed to upload share")?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        anyhow::bail!("share upload failed ({}): {}", status, body);
-    }
-    let body = response
-        .json::<serde_json::Value>()
-        .context("Failed to parse share upload response")?;
-    serde_json::from_value(body["share"].clone()).context("Invalid share upload response payload")
-}
-
-pub(crate) fn looks_like_share_run_input(input: &str) -> bool {
-    (input.starts_with("http://") || input.starts_with("https://")) && input.contains("/s/")
-}
-
 fn looks_like_local_share_file(input: &str) -> bool {
     let path = Path::new(input);
     matches!(
@@ -2333,10 +2209,6 @@ fn looks_like_local_share_file(input: &str) -> bool {
 }
 
 fn load_share_input(input: &str) -> Result<LoadedShareInput> {
-    if input.starts_with("http://") || input.starts_with("https://") {
-        return fetch_share_url(input);
-    }
-
     let path = PathBuf::from(input);
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("Failed to read share input {}", path.display()))?;
@@ -2390,50 +2262,6 @@ fn load_share_input(input: &str) -> Result<LoadedShareInput> {
     })
 }
 
-fn fetch_share_url(url: &str) -> Result<LoadedShareInput> {
-    let parsed = reqwest::Url::parse(url).context("Invalid share URL")?;
-    let segment = parsed
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .filter(|segment| !segment.is_empty())
-        .context("Share URL is missing an id")?;
-    let (share_id, revision) = parse_share_revision_segment(segment)?;
-    // Always route API calls to the correct API base, never to the site domain.
-    // Users receive ato.run/s/... URLs, but the REST API lives at api.ato.run.
-    let api_base = api_base_for_share_host(parsed.host_str().unwrap_or("api.ato.run"));
-    let endpoint = if let Some(revision) = revision {
-        format!("{}/v1/shares/{}/revisions/{}", api_base, share_id, revision)
-    } else {
-        format!("{}/v1/shares/{}", api_base, share_id)
-    };
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(DEFAULT_API_TIMEOUT_SECS))
-        .build()
-        .context("Failed to build share fetch client")?;
-    let response = client
-        .get(&endpoint)
-        .header("Accept", "application/json")
-        .send()
-        .context("Failed to fetch share URL")?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        anyhow::bail!("share fetch failed ({}): {}", status, body);
-    }
-    let body = response
-        .json::<serde_json::Value>()
-        .context("Failed to parse share response")?;
-    let share = serde_json::from_value::<ShareRevisionPayload>(body["share"].clone())
-        .context("Invalid share response payload")?;
-    Ok(LoadedShareInput {
-        share_url: Some(rewrite_api_to_site_url(&share.share_url)),
-        resolved_revision_url: Some(rewrite_api_to_site_url(&share.revision_url)),
-        spec: share.spec,
-        lock: share.lock,
-        spec_digest_verified: true,
-    })
-}
-
 fn effective_entries(spec: &ShareSpec) -> Vec<ShareEntrySpec> {
     if !spec.entries.is_empty() {
         return spec.entries.clone();
@@ -2450,7 +2278,7 @@ fn select_run_entry(
 ) -> Result<ShareEntrySpec> {
     if entries.is_empty() {
         anyhow::bail!(
-            "This target looks like a workspace but has no runnable entries. Set it up locally with: ato decap {} --into ./{}",
+            "This target looks like a workspace but has no runnable entries. Set it up locally with: ato workspace setup {} --into ./{}",
             loaded.resolved_revision_url.as_deref().unwrap_or(input),
             loaded.spec.root
         );
@@ -2609,7 +2437,7 @@ fn resolve_entry_env_overlay(
         let normalized = confirm.trim().to_ascii_lowercase();
         if matches!(normalized.as_str(), "n" | "no") {
             anyhow::bail!(
-                "Cancelled before supplying required environment. Re-run with --env-file or use ato decap {} --into ./{}.",
+                "Cancelled before supplying required environment. Re-run with --env-file or use ato workspace setup {} --into ./{}.",
                 input,
                 entry.cwd.split('/').next().unwrap_or("workspace")
             );
@@ -2751,20 +2579,6 @@ fn env_value_present(key: &str, overlay: &BTreeMap<String, String>) -> bool {
             .unwrap_or(false)
 }
 
-fn parse_share_revision_segment(segment: &str) -> Result<(&str, Option<u32>)> {
-    if let Some((share_id, revision)) = segment.rsplit_once("@r") {
-        return Ok((
-            share_id,
-            Some(
-                revision
-                    .parse::<u32>()
-                    .with_context(|| format!("Invalid share revision: {}", revision))?,
-            ),
-        ));
-    }
-    Ok((segment, None))
-}
-
 fn ensure_target_root_ready(target: &Path) -> Result<()> {
     if !target.exists() {
         return Ok(());
@@ -2773,7 +2587,7 @@ fn ensure_target_root_ready(target: &Path) -> Result<()> {
         fs::read_dir(target).with_context(|| format!("Failed to inspect {}", target.display()))?;
     if read_dir.next().is_some() {
         anyhow::bail!(
-            "`ato decap` requires an empty target directory. Refusing to overwrite {}",
+            "`ato workspace setup` requires an empty target directory. Refusing to overwrite {}",
             target.display()
         );
     }
@@ -3144,17 +2958,6 @@ mod tests {
     use share_types::default_git_mode_str;
 
     #[test]
-    fn parse_share_revision_segment_supports_mutable_and_immutable() {
-        let (share_id, revision) = parse_share_revision_segment("abc123").expect("mutable");
-        assert_eq!(share_id, "abc123");
-        assert_eq!(revision, None);
-
-        let (share_id, revision) = parse_share_revision_segment("abc123@r7").expect("immutable");
-        assert_eq!(share_id, "abc123");
-        assert_eq!(revision, Some(7));
-    }
-
-    #[test]
     fn ensure_target_root_ready_rejects_non_empty_directory() {
         let temp = tempfile::tempdir().expect("tempdir");
         fs::write(temp.path().join("hello.txt"), "hello").expect("write");
@@ -3405,95 +3208,6 @@ mod tests {
                 .unwrap_or_default(),
             vec!["dashboard/.env.local".to_string()]
         );
-    }
-
-    #[test]
-    fn share_revision_payload_accepts_api_id_alias() {
-        let payload = serde_json::json!({
-            "id": "share-123",
-            "title": "demo",
-            "visibility": "unlisted",
-            "revision": 1,
-            "share_url": "https://api.ato.run/s/share-123",
-            "revision_url": "https://api.ato.run/s/share-123@r1",
-            "spec": {
-                "schema_version": "1",
-                "name": "demo",
-                "root": "demo",
-                "sources": [],
-                "tool_requirements": [],
-                "env_requirements": [],
-                "install_steps": [],
-                "entries": [],
-                "services": [],
-                "notes": { "team_notes": "" },
-                "generated_from": {
-                    "root_path": "/tmp/demo",
-                    "captured_at": "2026-04-10T00:00:00Z",
-                    "host_os": "macos"
-                }
-            },
-            "lock": {
-                "schema_version": "1",
-                "spec_digest": "sha256:abc",
-                "generated_guide_digest": "sha256:def",
-                "revision": 1,
-                "created_at": "2026-04-10T00:00:00Z",
-                "resolved_sources": [],
-                "resolved_tools": []
-            },
-            "guide_markdown": "# demo",
-            "updated_at": "2026-04-10T00:00:00Z"
-        });
-
-        let parsed = serde_json::from_value::<ShareRevisionPayload>(payload)
-            .expect("share payload should deserialize with id alias");
-        assert_eq!(parsed.share_id, "share-123");
-    }
-
-    #[test]
-    fn rewrite_api_to_site_url_rewrites_api_host() {
-        // api.ato.run/s/... should become ato.run/s/...
-        let result = rewrite_api_to_site_url("https://api.ato.run/s/share-123");
-        assert_eq!(result, "https://ato.run/s/share-123");
-
-        let result = rewrite_api_to_site_url("https://api.ato.run/s/share-123@r1");
-        assert_eq!(result, "https://ato.run/s/share-123@r1");
-    }
-
-    #[test]
-    fn rewrite_api_to_site_url_leaves_site_url_unchanged() {
-        // ato.run/s/... is already the correct display URL
-        let result = rewrite_api_to_site_url("https://ato.run/s/share-123");
-        assert_eq!(result, "https://ato.run/s/share-123");
-    }
-
-    #[test]
-    fn rewrite_api_to_site_url_leaves_non_share_paths_unchanged() {
-        // Only /s/ paths should be rewritten
-        let result = rewrite_api_to_site_url("https://api.ato.run/v1/shares/share-123");
-        assert_eq!(result, "https://api.ato.run/v1/shares/share-123");
-    }
-
-    #[test]
-    fn api_base_for_share_host_maps_site_host_to_api() {
-        // ato.run (site domain) must resolve to api.ato.run for API calls
-        let result = api_base_for_share_host("ato.run");
-        assert_eq!(result, "https://api.ato.run");
-    }
-
-    #[test]
-    fn api_base_for_share_host_passes_api_host_through() {
-        // api.ato.run is already the API host; should not change
-        let result = api_base_for_share_host("api.ato.run");
-        assert_eq!(result, "https://api.ato.run");
-    }
-
-    #[test]
-    fn api_base_for_share_host_passes_staging_host_through() {
-        // Staging or custom hosts are passed through unchanged
-        let result = api_base_for_share_host("staging.api.ato.run");
-        assert_eq!(result, "https://staging.api.ato.run");
     }
 
     fn init_git_repo(path: &Path, remote: &str) {

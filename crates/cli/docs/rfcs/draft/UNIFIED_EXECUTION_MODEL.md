@@ -81,7 +81,12 @@ Phase の意味論は variant ごとに可変 — `WorkspaceMaterialize::Install
 - `ProducerPublish`: 手元で build → verify → registry に登録 (Install 意味論: "registry に入れる") → dry-run → publish
 - `ProducerPublishFinalize`: `Install` (registry 登録) → `Finalize` (native delivery の codesign / notarization 等、post-install な後処理) → `Verify` (post-finalize 状態の検証) → publish。Finalize は Install 後・Verify 前に来るのが意味論として必然
 - `WorkspaceMaterialize`: source を展開して install_steps を走らせる (Install) → tool/env 検証 (Verify)
-- `WorkspaceCapture`: capture 準備 (Prepare) → filter/summary (Verify) → upload (Publish)
+- `WorkspaceCapture`: capture 準備 (Prepare) → filter/summary (Verify) → local save（Publish は使わない）
+
+> 注記 (2026-08): 旧 `encap`/`decap` の **web アップロード計画は廃止**された。共有はローカルファイル
+> （`share.spec.json` / `share.lock.json`）のみで行い、`/v1/shares` や `ato.run/s/<id>` リンクの
+> 生成・フェッチは行わない。本ドラフトの unified-pipeline の方向性（1 状態マシン + 1 runtime 抽象）は
+> 維持し、`WorkspaceCapture` は upload のない local capture として定義する。
 
 ### 3.2 共通 machinery (variant 非依存)
 

@@ -73,7 +73,7 @@ test_4b() {
 # ---------------------------------------------------------------------------
 test_4c() {
     log "--- Test 4c: Share URL (SKIP — requires pre-generated share URL) ---"
-    print_status "SKIP" "4c: Share URL test requires manual setup (ato encap --share)"
+    print_status "SKIP" "4c: Share URL test requires manual setup (ato workspace share)"
     log "[SKIP] 4c: Share URL test skipped"
     # Count as pass for automation (manual verification required)
     ((PASSED++))
