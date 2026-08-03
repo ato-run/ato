@@ -178,9 +178,7 @@ pub fn inspect_svg_markup(bytes: &[u8]) -> Result<SvgInspection, AssetError> {
     let document = roxmltree::Document::parse(text)
         .map_err(|error| AssetError::NotWellFormed(error.to_string()))?;
     let root = document.root_element();
-    if root.tag_name().name() != "svg"
-        || root.tag_name().namespace() != Some(SVG_NAMESPACE)
-    {
+    if root.tag_name().name() != "svg" || root.tag_name().namespace() != Some(SVG_NAMESPACE) {
         return Err(AssetError::InvalidRoot);
     }
 
@@ -209,7 +207,10 @@ pub fn validate_asset_bytes(
                     media_type: "image/png",
                 });
             }
-            Ok(SvgInspection { width: 0, height: 0 })
+            Ok(SvgInspection {
+                width: 0,
+                height: 0,
+            })
         }
         AssetMediaType::Jpeg => {
             if !bytes.starts_with(&JPEG_MAGIC) {
@@ -217,15 +218,23 @@ pub fn validate_asset_bytes(
                     media_type: "image/jpeg",
                 });
             }
-            Ok(SvgInspection { width: 0, height: 0 })
+            Ok(SvgInspection {
+                width: 0,
+                height: 0,
+            })
         }
         AssetMediaType::Webp => {
-            if !bytes.starts_with(&WEBP_MAGIC) || !bytes.get(8..12).is_some_and(|tail| tail == b"WEBP") {
+            if !bytes.starts_with(&WEBP_MAGIC)
+                || bytes.get(8..12).is_none_or(|tail| tail != b"WEBP")
+            {
                 return Err(AssetError::InvalidBytes {
                     media_type: "image/webp",
                 });
             }
-            Ok(SvgInspection { width: 0, height: 0 })
+            Ok(SvgInspection {
+                width: 0,
+                height: 0,
+            })
         }
     }
 }
@@ -261,7 +270,9 @@ fn reject_disallowed_constructs(text: &str) -> Result<(), AssetError> {
         let rest = &text[start..];
 
         if rest.starts_with("<!--") {
-            let end = text[start + 4..].find("-->").map(|offset| start + 4 + offset);
+            let end = text[start + 4..]
+                .find("-->")
+                .map(|offset| start + 4 + offset);
             let Some(end) = end else {
                 return Err(AssetError::DisallowedConstruct("unterminated comment"));
             };
@@ -275,7 +286,9 @@ fn reject_disallowed_constructs(text: &str) -> Result<(), AssetError> {
             return Err(AssetError::DisallowedConstruct("markup declarations"));
         }
         if rest.starts_with("<?") {
-            let end = text[start + 2..].find("?>").map(|offset| start + 2 + offset);
+            let end = text[start + 2..]
+                .find("?>")
+                .map(|offset| start + 2 + offset);
             let Some(end) = end else {
                 return Err(AssetError::DisallowedConstruct(
                     "unterminated processing instruction",
@@ -306,27 +319,21 @@ fn validate_xml_declaration(body: &str) -> Result<(), AssetError> {
     if let Some(start) = lower.find("encoding") {
         let after = &lower[start + "encoding".len()..];
         let Some(rest) = after.strip_prefix(|c: char| c == ' ' || c == '\t') else {
-            return Err(AssetError::DisallowedConstruct(
-                "malformed XML declaration",
-            ));
+            return Err(AssetError::DisallowedConstruct("malformed XML declaration"));
         };
-        let rest = rest.strip_prefix('=').ok_or(AssetError::DisallowedConstruct(
-            "malformed XML declaration",
-        ))?;
+        let rest = rest
+            .strip_prefix('=')
+            .ok_or(AssetError::DisallowedConstruct("malformed XML declaration"))?;
         let rest = rest.trim_start();
         let rest = rest
             .strip_prefix('"')
             .or_else(|| rest.strip_prefix('\''))
-            .ok_or(AssetError::DisallowedConstruct(
-                "malformed XML declaration",
-            ))?;
+            .ok_or(AssetError::DisallowedConstruct("malformed XML declaration"))?;
         let value = rest
             .split_once('"')
             .or_else(|| rest.split_once('\''))
             .map(|(value, _)| value)
-            .ok_or(AssetError::DisallowedConstruct(
-                "malformed XML declaration",
-            ))?;
+            .ok_or(AssetError::DisallowedConstruct("malformed XML declaration"))?;
         if !value.eq_ignore_ascii_case("utf-8") && !value.eq_ignore_ascii_case("us-ascii") {
             return Err(AssetError::DisallowedConstruct("non-UTF-8 encoding"));
         }
@@ -390,7 +397,9 @@ fn validate_attribute(name: &str, namespace: Option<&str>, value: &str) -> Resul
             "{name} event handler"
         )));
     }
-    if lower == "xml:base" || (namespace == Some("http://www.w3.org/XML/1998/namespace") && name == "base") {
+    if lower == "xml:base"
+        || (namespace == Some("http://www.w3.org/XML/1998/namespace") && name == "base")
+    {
         return Err(AssetError::AttributeNotAllowed("xml:base".to_string()));
     }
 
@@ -447,8 +456,12 @@ fn validate_css_value(name: &str, value: &str) -> Result<(), AssetError> {
     let mut rest = value;
     while let Some(start) = rest.to_ascii_lowercase().find("url(") {
         let tail = &rest[start + 4..];
-        let tail = tail.trim_start().strip_prefix('"').or_else(|| tail.trim_start().strip_prefix('\'')).unwrap_or(tail.trim_start());
-        let end = tail.find(|c: char| c == ')' || c == '"' || c == '\'' || c == ' ').unwrap_or(tail.len());
+        let tail = tail
+            .trim_start()
+            .strip_prefix('"')
+            .or_else(|| tail.trim_start().strip_prefix('\''))
+            .unwrap_or(tail.trim_start());
+        let end = tail.find([')', '"', '\'', ' ']).unwrap_or(tail.len());
         let raw = tail[..end].trim();
         let id = raw.strip_prefix('#').unwrap_or(raw);
         if !is_fragment_name(id) {
@@ -464,7 +477,12 @@ fn validate_css_value(name: &str, value: &str) -> Result<(), AssetError> {
 /// Derive intrinsic dimensions: fixed width+height (bare or `px`) first, then
 /// `viewBox` (`min-x min-y width height`), else reject.
 fn svg_dimensions(attrs: &[(&str, &str)]) -> Result<SvgInspection, AssetError> {
-    let get = |key: &str| attrs.iter().find(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| *value);
+    let get = |key: &str| {
+        attrs
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .map(|(_, value)| *value)
+    };
 
     let fixed_width = get("width").and_then(parse_fixed_dimension);
     let fixed_height = get("height").and_then(parse_fixed_dimension);
@@ -498,7 +516,7 @@ fn parse_fixed_dimension(value: &str) -> Option<i64> {
 /// are the width and height.
 fn parse_view_box(value: &str) -> Result<(i64, i64), AssetError> {
     let parts: Vec<f64> = value
-        .split(|c: char| c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r')
+        .split([' ', ',', '\t', '\n', '\r'])
         .filter(|part| !part.is_empty())
         .filter_map(|part| part.parse().ok())
         .collect();
@@ -533,10 +551,9 @@ mod tests {
 
     #[test]
     fn derives_dimensions_from_view_box_when_no_fixed_size() {
-        let inspected = svg(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 200"></svg>"#,
-        )
-        .expect("viewBox svg");
+        let inspected =
+            svg(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 200"></svg>"#)
+                .expect("viewBox svg");
         assert_eq!((inspected.width, inspected.height), (100, 200));
     }
 
@@ -560,20 +577,24 @@ mod tests {
 
     #[test]
     fn rejects_doctype_and_entities() {
-        assert!(svg(
-            "<!DOCTYPE svg><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>"
-        )
-        .is_err());
-        assert!(svg(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\">&foo;</svg>"
-        )
-        .is_err());
+        assert!(
+            svg(
+                "<!DOCTYPE svg><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>"
+            )
+            .is_err()
+        );
+        assert!(
+            svg("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\">&foo;</svg>")
+                .is_err()
+        );
     }
 
     #[test]
     fn rejects_cdata_and_processing_instructions() {
         assert!(matches!(
-            svg("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><![CDATA[\n]]></svg>"),
+            svg(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><![CDATA[\n]]></svg>"
+            ),
             Err(AssetError::DisallowedConstruct("CDATA sections"))
         ));
         assert!(svg("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><?php x() ?></svg>").is_err());
@@ -589,7 +610,9 @@ mod tests {
     fn rejects_non_svg_root_and_foreign_namespace() {
         assert!(svg("<div width=\"1\" height=\"1\"/>").is_err());
         assert!(matches!(
-            svg("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><m:xhtml xmlns:m=\"http://www.w3.org/1999/xhtml\"/></svg>"),
+            svg(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><m:xhtml xmlns:m=\"http://www.w3.org/1999/xhtml\"/></svg>"
+            ),
             Err(AssetError::ForeignNamespace(_))
         ));
     }
@@ -643,7 +666,8 @@ mod tests {
         assert!(svg(
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><defs><linearGradient id="g"/></defs><rect fill="url(#g)"/><use href="#g"/></svg>"##,
         )
-        .is_ok());    }
+        .is_ok());
+    }
 
     #[test]
     fn accepts_the_static_logo_fixture_pattern() {
@@ -657,7 +681,9 @@ mod tests {
     #[test]
     fn rejects_non_utf8_bytes() {
         let mut bytes = vec![0xff, 0xfe];
-        bytes.extend_from_slice(b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>");
+        bytes.extend_from_slice(
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>",
+        );
         assert!(matches!(
             inspect_svg_markup(&bytes),
             Err(AssetError::InvalidBytes { .. })
@@ -707,11 +733,13 @@ mod tests {
         assert!(validate_asset_bytes(AssetMediaType::Webp, &webp).is_ok());
         assert!(validate_asset_bytes(AssetMediaType::Webp, b"RIFF0000XXXX").is_err());
 
-        assert!(validate_asset_bytes(
-            AssetMediaType::Svg,
-            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>"
-        )
-        .is_ok());
+        assert!(
+            validate_asset_bytes(
+                AssetMediaType::Svg,
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>"
+            )
+            .is_ok()
+        );
         assert!(validate_asset_bytes(
             AssetMediaType::Svg,
             b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><script/></svg>"

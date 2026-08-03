@@ -557,7 +557,10 @@ fn validate_materialized_asset_identity(
         url.artifact_ref.as_ref(),
         url.media_type.as_ref(),
     ];
-    let present = identity_fields.iter().filter(|value| value.is_some()).count();
+    let present = identity_fields
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
     if present != 0 && present != identity_fields.len() {
         return Err(ManifestV1Error::Invalid {
             field,
@@ -573,10 +576,8 @@ fn validate_materialized_asset_identity(
                 reason: "content_digest must be a sha256:<64 hex> digest".to_string(),
             });
         }
-        let expected_artifact_ref = format!(
-            "ato-asset://sha256/{}",
-            &content_digest["sha256:".len()..]
-        );
+        let expected_artifact_ref =
+            format!("ato-asset://sha256/{}", &content_digest["sha256:".len()..]);
         if *artifact_ref != expected_artifact_ref {
             return Err(ManifestV1Error::Invalid {
                 field,
@@ -585,9 +586,11 @@ fn validate_materialized_asset_identity(
         }
     }
     if let Some(media_type) = &url.media_type {
-        super::assets::AssetMediaType::parse(media_type).map_err(|error| ManifestV1Error::Invalid {
-            field,
-            reason: format!("media_type: {error}"),
+        super::assets::AssetMediaType::parse(media_type).map_err(|error| {
+            ManifestV1Error::Invalid {
+                field,
+                reason: format!("media_type: {error}"),
+            }
         })?;
     }
     Ok(())
