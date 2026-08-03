@@ -7,6 +7,8 @@
 //! below. Binary types are checked by magic bytes only (their pixels are not
 //! decoded here).
 
+use std::path::Path;
+
 use thiserror::Error;
 
 use super::manifest_v1::ManifestV1Error;
@@ -56,6 +58,32 @@ impl AssetMediaType {
             Self::Jpeg => "image/jpeg",
             Self::Webp => "image/webp",
             Self::Svg => "image/svg+xml",
+        }
+    }
+
+    /// Detect the media type from bytes (magic signatures) or a file extension.
+    /// Used where a path asset declares no media type.
+    pub fn detect(bytes: &[u8], path: &str) -> Option<Self> {
+        if bytes.starts_with(&PNG_MAGIC) {
+            return Some(Self::Png);
+        }
+        if bytes.starts_with(&JPEG_MAGIC) {
+            return Some(Self::Jpeg);
+        }
+        if bytes.starts_with(&WEBP_MAGIC) {
+            return Some(Self::Webp);
+        }
+        match Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("svg") => Some(Self::Svg),
+            Some("png") => Some(Self::Png),
+            Some("jpg") | Some("jpeg") => Some(Self::Jpeg),
+            Some("webp") => Some(Self::Webp),
+            _ => None,
         }
     }
 }
@@ -165,6 +193,49 @@ pub fn inspect_svg_markup(bytes: &[u8]) -> Result<SvgInspection, AssetError> {
         .collect();
     svg_dimensions(&attrs)
 }
+
+/// Validate asset bytes against their declared media type. Binary formats are
+/// magic-byte checked only (their pixels are never decoded); SVG is run through
+/// the passive inspection profile. Mirrors ato-api's `inspectAuthoringImage`.
+pub fn validate_asset_bytes(
+    media_type: AssetMediaType,
+    bytes: &[u8],
+) -> Result<SvgInspection, AssetError> {
+    match media_type {
+        AssetMediaType::Svg => inspect_svg_markup(bytes),
+        AssetMediaType::Png => {
+            if !bytes.starts_with(&PNG_MAGIC) {
+                return Err(AssetError::InvalidBytes {
+                    media_type: "image/png",
+                });
+            }
+            Ok(SvgInspection { width: 0, height: 0 })
+        }
+        AssetMediaType::Jpeg => {
+            if !bytes.starts_with(&JPEG_MAGIC) {
+                return Err(AssetError::InvalidBytes {
+                    media_type: "image/jpeg",
+                });
+            }
+            Ok(SvgInspection { width: 0, height: 0 })
+        }
+        AssetMediaType::Webp => {
+            if !bytes.starts_with(&WEBP_MAGIC) || !bytes.get(8..12).is_some_and(|tail| tail == b"WEBP") {
+                return Err(AssetError::InvalidBytes {
+                    media_type: "image/webp",
+                });
+            }
+            Ok(SvgInspection { width: 0, height: 0 })
+        }
+    }
+}
+
+/// PNG signature: 0x89 'P' 'N' 'G' 0x0D 0x0A 0x1A 0x0A.
+const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+/// JPEG signature: 0xFF 0xD8 0xFF.
+const JPEG_MAGIC: [u8; 3] = [0xff, 0xd8, 0xff];
+/// WebP container: "RIFF" .... "WEBP".
+const WEBP_MAGIC: [u8; 4] = [0x52, 0x49, 0x46, 0x46];
 
 /// Decode bytes as strict UTF-8, tolerating a leading UTF-8 BOM. UTF-16
 /// encodings fail the UTF-8 check outright.
@@ -591,5 +662,60 @@ mod tests {
             inspect_svg_markup(&bytes),
             Err(AssetError::InvalidBytes { .. })
         ));
+    }
+
+    #[test]
+    fn validates_media_type_strings() {
+        assert_eq!(
+            AssetMediaType::parse("image/png").expect("png"),
+            AssetMediaType::Png
+        );
+        assert_eq!(
+            AssetMediaType::parse("image/jpeg").expect("jpeg"),
+            AssetMediaType::Jpeg
+        );
+        assert_eq!(
+            AssetMediaType::parse("image/webp").expect("webp"),
+            AssetMediaType::Webp
+        );
+        assert_eq!(
+            AssetMediaType::parse("image/svg+xml").expect("svg"),
+            AssetMediaType::Svg
+        );
+        assert!(matches!(
+            AssetMediaType::parse("image/gif"),
+            Err(AssetError::UnsupportedMediaType(_))
+        ));
+        assert_eq!(AssetMediaType::Svg.as_str(), "image/svg+xml");
+    }
+
+    #[test]
+    fn validates_binary_magic_bytes() {
+        let png: Vec<u8> = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+            .into_iter()
+            .chain([0x00, 0x00, 0x00, 0x0d])
+            .collect();
+        assert!(validate_asset_bytes(AssetMediaType::Png, &png).is_ok());
+        assert!(validate_asset_bytes(AssetMediaType::Png, b"not a png").is_err());
+
+        let jpeg: Vec<u8> = vec![0xff, 0xd8, 0xff, 0xe0];
+        assert!(validate_asset_bytes(AssetMediaType::Jpeg, &jpeg).is_ok());
+        assert!(validate_asset_bytes(AssetMediaType::Jpeg, b"gif").is_err());
+
+        let mut webp = vec![0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00];
+        webp.extend_from_slice(b"WEBPVP8 ");
+        assert!(validate_asset_bytes(AssetMediaType::Webp, &webp).is_ok());
+        assert!(validate_asset_bytes(AssetMediaType::Webp, b"RIFF0000XXXX").is_err());
+
+        assert!(validate_asset_bytes(
+            AssetMediaType::Svg,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"/>"
+        )
+        .is_ok());
+        assert!(validate_asset_bytes(
+            AssetMediaType::Svg,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><script/></svg>"
+        )
+        .is_err());
     }
 }

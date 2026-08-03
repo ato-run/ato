@@ -1524,3 +1524,64 @@ fn no_producer_method_can_supply_the_identity() {
         "the producer was asked to pack, not to measure"
     );
 }
+
+#[test]
+fn path_asset_svg_is_validated_against_the_passive_profile() {
+    let workspace = Workspace::new(&minimal_manifest(
+        r#"
+[metadata.assets.icon]
+path = "assets/icon.svg"
+"#,
+    ));
+    workspace.write("assets/icon.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\"/></svg>");
+    validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect("passive svg ok");
+
+    workspace.write("assets/icon.svg", "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><script>alert(1)</script></svg>");
+    let error =
+        validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("active svg");
+    assert!(error.to_string().contains("not allowed"), "{error}");
+}
+
+#[test]
+fn path_asset_missing_file_is_refused() {
+    let workspace = Workspace::new(&minimal_manifest(
+        r#"
+[metadata.assets.banner]
+path = "assets/banner.png"
+"#,
+    ));
+    let error =
+        validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("missing");
+    assert!(error.to_string().contains("unreadable"), "{error}");
+}
+
+#[test]
+fn path_asset_unknown_type_is_refused() {
+    let workspace = Workspace::new(&minimal_manifest(
+        r#"
+[metadata.assets.icon]
+path = "assets/icon.gif"
+"#,
+    ));
+    workspace.write("assets/icon.gif", "GIF89a\u{01}\u{00}\u{01}\u{00}\u{00}\u{00}\u{00};");
+    let error =
+        validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect_err("gif");
+    assert!(error.to_string().contains("media type"), "{error}");
+}
+
+#[test]
+fn path_asset_url_locators_are_skipped() {
+    let workspace = Workspace::new(&minimal_manifest(
+        r#"
+[metadata.assets.icon]
+url = "https://assets.example/icon.png"
+"#,
+    ));
+    validate_path_assets(workspace.dir.path(), &read_manifest(&workspace)).expect("url is not read");
+}
+
+/// Parse the workspace's capsule.toml, bypassing the lane's pin gate.
+fn read_manifest(workspace: &Workspace) -> capsule::types::manifest_v1::CapsuleManifestV1 {
+    let text = std::fs::read_to_string(workspace.dir.path().join("capsule.toml")).expect("manifest");
+    capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&text).expect("valid manifest")
+}
