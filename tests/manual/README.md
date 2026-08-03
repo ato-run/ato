@@ -14,7 +14,7 @@ tests/manual/
 ├── 03-first-run-download/       # §3  5GB 級モデルの初回ダウンロード UX
 ├── 04-sandbox-boundary/         # §4  サンドボックス境界の実測
 ├── 05-cross-os/                 # §5  クロス OS の挙動差検証
-├── 06-share-url/                # §6  Share URL の実 URL 配布フロー
+├── 06-share-url/                # §6  Workspace share の実配布フロー (local-file)
 ├── 07-ato-desktop-ux/           # §7  ato-desktop の実 UX
 ├── 08-trust-ux/                 # §8  Trust UX の実体験
 ├── 09-network-isolation/        # §9  ネットワーク隔離の実観測
@@ -31,7 +31,7 @@ tests/manual/
 - `ato` installed and in `$PATH`
 - `curl` available
 - `python3` available (for sandbox probe scripts)
-- Internet access (for store/share URL tests)
+- Internet access (for store/API tests)
 - For §2 (GPU tests): machine with Metal/CUDA/ROCm hardware
 
 ## Running
@@ -55,8 +55,8 @@ bash tests/manual/04-sandbox-boundary/test.sh
 When a test reaches a section requiring human judgment, it prints numbered steps and prompts:
 
 ```
-  [1] Open the share URL on a different machine
-  [2] Confirm ato runs the capsule without extra steps
+  [1] Open the shared workspace on a different machine
+  [2] Confirm ato runs the workspace without extra steps
   ...
   Pass [p], Fail [f], Skip [s]?
 ```
@@ -71,12 +71,12 @@ Each suite writes a log to `tests/manual/results/result_NN_<name>.log`. The log 
 
 ## Priority
 
-Per the specification, **§3 (5GB first-run download)** and **§6 (share URL on another machine)** are release blockers. These two suites must be verified with at least 10 external testers before release.
+Per the specification, **§3 (5GB first-run download)** and **§6 (workspace share on another machine)** are release blockers. These two suites must be verified with at least 10 external testers before release.
 
 | Suite | Category | Priority | Hardware Required |
 |-------|----------|----------|-------------------|
 | 03 | First-run download | 🔴 P0 | Any |
-| 06 | Share URL | 🔴 P0 | Any + second machine |
+| 06 | Workspace share | 🔴 P0 | Any + second machine |
 | 04 | Sandbox boundary | 🔴 P0 | Any |
 | 01 | Install / upgrade | 🟠 P1 | Fresh machine |
 | 02 | GPU | 🟠 P1 | GPU hardware |

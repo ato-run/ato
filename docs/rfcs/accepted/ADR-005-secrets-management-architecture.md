@@ -18,7 +18,7 @@ ato-cli は capsule ベースのアプリ配布ツールであり、実行時に
 2. **カプセルごとに重複入力**: 同じ `OPENAI_API_KEY` を10カプセル分10回入力する必要がある
 3. **アクセス制御なし**: 一度設定した値はどのカプセルからも参照可能 — 信頼できないカプセルに本番キーが漏洩するリスク
 4. **チーム共有なし**: チームメンバー間でシークレットを安全に共有する手段がない
-5. **アーカイブ漏洩リスク**: `ato encap` 時に `.env` ファイルが `.capsule` アーカイブに混入しうる
+5. **アーカイブ漏洩リスク**: `ato workspace share` 時に `.env` ファイルが `.capsule` アーカイブに混入しうる
 
 ### 設計原則
 
@@ -312,7 +312,7 @@ fn resolve_secret(
 
 ### 2.7 アーカイブ安全性
 
-#### `ato encap` のデフォルト除外
+#### `ato workspace share` のデフォルト除外
 
 ```rust
 // pack_filter.rs — SMART_DEFAULT_EXCLUDES に追加
@@ -504,7 +504,7 @@ OPENAI_API_KEY = { secret = true, scope = "global" }
 | ------------------------------------ | ---------------------------------------------- |
 | Interactive prompt with scope choice | 「Global / Allow this capsule / Capsule only」 |
 | `ato secrets inspect`                | 利用履歴、ポリシー詳細                         |
-| `ato encap --dry-run` + secret scan  | アーカイブ前の安全チェック                     |
+| `ato workspace share --dry-run` + secret scan  | アーカイブ前の安全チェック                     |
 | Headless/CI mode (`--no-prompt`)     | Missing → error                                |
 
 ### Phase 5: capsule.toml v1.1 スキーマ（2-3 days）
