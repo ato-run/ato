@@ -1,6 +1,7 @@
 // Capsule type definitions (extracted from capsule to eliminate external dependency)
 // This module provides UARC V1.1.0 compliant types used by both nacelle and CLI.
 
+pub mod assets;
 pub mod bridge;
 pub mod command_spec;
 pub mod error;
