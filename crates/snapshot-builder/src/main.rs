@@ -4194,7 +4194,7 @@ fn process_authoring_setup(
         .map_err(|error| fail("detect", error.to_string()))?;
     let materialized_assets =
         authoring_runtime::materialized_assets_from_workspace(&inference_root, &manifest)
-            .map_err(|error| fail("detect", error))?;
+            .map_err(|error| fail("metadata_assets", error))?;
     snapshot::rootfs_builder::derive_build_spec_v1(
         &manifest,
         &snapshot::rootfs_builder::SourceProbe::scan(&inference_root),
