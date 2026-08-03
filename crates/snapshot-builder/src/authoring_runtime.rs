@@ -765,6 +765,20 @@ pub fn materialized_assets_from_workspace(
             continue;
         };
         let full_path = workspace_root.join(&path.path);
+        let max_bytes = capsule::types::assets::MAX_AUTHORING_IMAGE_BYTES;
+        let meta = std::fs::metadata(&full_path).map_err(|source| {
+            format!(
+                "materialize {kind} asset {:?}: {source}",
+                full_path.display()
+            )
+        })?;
+        if meta.len() == 0 || meta.len() > max_bytes as u64 {
+            return Err(format!(
+                "materialize {kind} asset {:?}: must be 1..={max_bytes} bytes, got {}",
+                full_path.display(),
+                meta.len()
+            ));
+        }
         let bytes = std::fs::read(&full_path).map_err(|source| {
             format!(
                 "materialize {kind} asset {:?}: {source}",
@@ -1392,5 +1406,73 @@ timeout_seconds = 60
                 .expect_err("svg bytes as png must fail")
                 .contains("bytes")
         );
+    }
+
+    #[test]
+    fn materialized_assets_from_workspace_rejects_oversized_files() {
+        let dir = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(dir.path().join("assets")).expect("assets dir");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+path = "assets/icon.svg"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("manifest");
+
+        let header = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\">";
+        let footer = b"</svg>";
+        let max = capsule::types::assets::MAX_AUTHORING_IMAGE_BYTES;
+        let mut oversized = header.to_vec();
+        let padding = (max + 1).saturating_sub(oversized.len() + footer.len());
+        oversized.resize(oversized.len() + padding, b' ');
+        oversized.extend_from_slice(footer);
+        std::fs::write(dir.path().join("assets/icon.svg"), &oversized).expect("write asset");
+
+        let error = materialized_assets_from_workspace(dir.path(), &manifest)
+            .expect_err("oversized asset must fail");
+        assert!(error.contains("1..="), "{error}");
+    }
+
+    #[test]
+    fn materialized_assets_from_workspace_produces_the_api_payload_shape() {
+        let dir = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(dir.path().join("assets")).expect("assets dir");
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\"/></svg>";
+        std::fs::write(dir.path().join("assets/icon.svg"), bytes).expect("write asset");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+path = "assets/icon.svg"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("manifest");
+
+        let payload = materialized_assets_from_workspace(dir.path(), &manifest)
+            .expect("a passive svg materializes");
+        assert_eq!(payload.len(), 1);
+        let item = &payload[0];
+        assert_eq!(item["kind"], "icon");
+        assert_eq!(item["origin_path"], "assets/icon.svg");
+        assert_eq!(item["media_type"], "image/svg+xml");
+        assert_eq!(item["content_digest"], sha256_digest(bytes));
+        let round_trip = base64::engine::general_purpose::STANDARD
+            .decode(item["bytes_base64"].as_str().expect("base64"))
+            .expect("decodes");
+        assert_eq!(round_trip, bytes);
     }
 }

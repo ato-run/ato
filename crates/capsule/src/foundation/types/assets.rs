@@ -23,6 +23,9 @@ pub const MAX_SVG_DEPTH: usize = 64;
 pub const MAX_SVG_ATTRS_PER_ELEMENT: usize = 40;
 /// Dimensions (fixed or viewBox) are clamped to this inclusive maximum.
 pub const MAX_DIMENSION: i64 = 16_384;
+/// An authoring metadata image must be at least 1 byte and at most 5 MiB,
+/// matching the ato-api contract (ato-api#459).
+pub const MAX_AUTHORING_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 /// The media types accepted as authoring metadata assets, in the same order
 /// as the ato-api `AUTHORING_IMAGE_MEDIA_TYPES`.
@@ -95,6 +98,8 @@ pub enum AssetError {
     UnsupportedMediaType(String),
     #[error("asset is not decodable {media_type} bytes")]
     InvalidBytes { media_type: &'static str },
+    #[error("asset must be 1..={max} bytes, got {actual}")]
+    InvalidSize { actual: usize, max: usize },
     #[error("SVG is not well-formed XML: {0}")]
     NotWellFormed(String),
     #[error("SVG must not contain {0}")]
@@ -199,6 +204,12 @@ pub fn validate_asset_bytes(
     media_type: AssetMediaType,
     bytes: &[u8],
 ) -> Result<SvgInspection, AssetError> {
+    if bytes.is_empty() || bytes.len() > MAX_AUTHORING_IMAGE_BYTES {
+        return Err(AssetError::InvalidSize {
+            actual: bytes.len(),
+            max: MAX_AUTHORING_IMAGE_BYTES,
+        });
+    }
     match media_type {
         AssetMediaType::Svg => inspect_svg_markup(bytes),
         AssetMediaType::Png => {
@@ -437,7 +448,7 @@ fn is_fragment_name(id: &str) -> bool {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
         _ => return false,
     }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
 }
 
 /// Scan every `url(...)` in a value and require fragment-only targets. Also
@@ -463,10 +474,14 @@ fn validate_css_value(name: &str, value: &str) -> Result<(), AssetError> {
             .unwrap_or(tail.trim_start());
         let end = tail.find([')', '"', '\'', ' ']).unwrap_or(tail.len());
         let raw = tail[..end].trim();
-        let id = raw.strip_prefix('#').unwrap_or(raw);
+        let id = raw.strip_prefix('#').ok_or_else(|| {
+            AssetError::ExternalReference(format!(
+                "{name} url() must reference a local fragment (#local)"
+            ))
+        })?;
         if !is_fragment_name(id) {
             return Err(AssetError::ExternalReference(format!(
-                "{name} url() must reference a local fragment"
+                "{name} url() must reference a local fragment (#local)"
             )));
         }
         rest = &tail[end..];
@@ -512,17 +527,21 @@ fn parse_fixed_dimension(value: &str) -> Option<i64> {
     Some(dim)
 }
 
-/// Parse a `viewBox` — four whitespace/comma separated numbers. The last two
-/// are the width and height.
+/// Parse a `viewBox` — exactly four whitespace/comma separated numbers, every
+/// one of which must parse. The last two are the width and height.
 fn parse_view_box(value: &str) -> Result<(i64, i64), AssetError> {
-    let parts: Vec<f64> = value
+    let raw_parts: Vec<&str> = value
         .split([' ', ',', '\t', '\n', '\r'])
         .filter(|part| !part.is_empty())
-        .filter_map(|part| part.parse().ok())
         .collect();
-    if parts.len() != 4 {
+    if raw_parts.len() != 4 {
         return Err(AssetError::MissingDimensions);
     }
+    let parts: Vec<f64> = raw_parts
+        .into_iter()
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| AssetError::MissingDimensions)?;
     let width = parts[2].ceil() as i64;
     let height = parts[3].ceil() as i64;
     if width <= 0 || height <= 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
@@ -667,6 +686,79 @@ mod tests {
             r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><defs><linearGradient id="g"/></defs><rect fill="url(#g)"/><use href="#g"/></svg>"##,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn url_targets_must_be_same_document_fragments() {
+        for fill in [
+            "url(evil)",
+            "url(data:image)",
+            "url(javascript:evil)",
+            "url(#safe) url(evil)",
+            "url(https://attacker.example/paint.svg#gradient)",
+        ] {
+            assert!(
+                svg(&format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect fill="{fill}"/></svg>"#
+                ))
+                .is_err(),
+                "should reject fill={fill}"
+            );
+        }
+        assert!(
+            svg(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><defs><linearGradient id="safe"/></defs><rect fill="url(#safe)"/></svg>"#
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn view_box_requires_exactly_four_parseable_tokens() {
+        for view_box in ["0 junk 0 100 100", "0 0 100", "0 0 100 100 200"] {
+            assert!(
+                svg(&format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="{view_box}"></svg>"#
+                ))
+                .is_err(),
+                "should reject viewBox={view_box}"
+            );
+        }
+        let inspected =
+            svg(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 200"></svg>"#)
+                .expect("a well-formed viewBox is accepted");
+        assert_eq!((inspected.width, inspected.height), (100, 200));
+    }
+
+    #[test]
+    fn asset_bytes_are_bounded_by_the_five_mib_contract() {
+        let max = MAX_AUTHORING_IMAGE_BYTES;
+        // A valid passive SVG whose byte length is exactly `max` (a single text
+        // run of spaces inside the root keeps it well-formed XML).
+        let mut exactly_max =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\">".to_vec();
+        let footer = b"</svg>";
+        let padding = max.saturating_sub(exactly_max.len() + footer.len());
+        exactly_max.resize(exactly_max.len() + padding, b' ');
+        exactly_max.extend_from_slice(footer);
+        assert_eq!(exactly_max.len(), max);
+        assert!(validate_asset_bytes(AssetMediaType::Svg, &exactly_max).is_ok());
+
+        let mut over_max =
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\">".to_vec();
+        let padding = (max + 1).saturating_sub(over_max.len() + footer.len());
+        over_max.resize(over_max.len() + padding, b' ');
+        over_max.extend_from_slice(footer);
+        assert_eq!(over_max.len(), max + 1);
+        assert!(matches!(
+            validate_asset_bytes(AssetMediaType::Svg, &over_max),
+            Err(AssetError::InvalidSize { .. })
+        ));
+
+        assert!(matches!(
+            validate_asset_bytes(AssetMediaType::Svg, b""),
+            Err(AssetError::InvalidSize { .. })
+        ));
     }
 
     #[test]
