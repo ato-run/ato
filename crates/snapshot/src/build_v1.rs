@@ -126,9 +126,11 @@ pub enum V1BuildError {
     #[error("the execution identity could not be minted: {reason}")]
     MintFailed { reason: String },
 
+    #[error("authoring metadata asset {field} is not valid: {reason}")]
+    AssetValidationFailed { field: String, reason: String },
+
     #[error("the lock at {path} could not be published: {reason}")]
     LockPersistFailed { path: PathBuf, reason: String },
-
     #[error("the lock written at {path} does not read back: {reason}")]
     TrustedLoadFailed { path: PathBuf, reason: String },
 
@@ -479,6 +481,10 @@ pub fn run(
     // The manifest is read from the WORKSPACE, not from the projection: the
     // projection is precisely the tree with the manifest removed.
     let manifest = read_v1_manifest(request.workspace_root)?;
+    // Authoring metadata assets referenced by path are materialized bytes the
+    // build will ship; enforce the authoring asset contract before the identity
+    // is minted over a manifest that points at hostile or corrupt images.
+    validate_path_assets(request.workspace_root, &manifest)?;
 
     // 4. Derive the recipe from the projected tree. Probing the projection
     // rather than the checkout matters: the probe decides the runtime family
@@ -711,6 +717,59 @@ fn read_v1_manifest(workspace_root: &Path) -> Result<CapsuleManifestV1, V1BuildE
     CapsuleManifestV1::from_toml(&text).map_err(|source| V1BuildError::RecipeDerivationFailed {
         reason: source.to_string(),
     })
+}
+
+/// Validate the authoring metadata assets the manifest references by path.
+///
+/// A path asset is a file the build ships; if it exists in the workspace, its
+/// bytes must match the authoring asset contract. SVG is run through the
+/// passive inspection profile; binary formats are magic-byte checked. A missing
+/// file is refused (the manifest already promised the path ships). Mirrors the
+/// ato-api `inspectAuthoringImage` gate at the build-time boundary.
+fn validate_path_assets(
+    workspace_root: &Path,
+    manifest: &CapsuleManifestV1,
+) -> Result<(), V1BuildError> {
+    use capsule::types::assets::{AssetMediaType, validate_asset_bytes};
+    use capsule::types::manifest_v1::AssetLocatorV1;
+
+    let Some(assets) = &manifest.metadata.assets else {
+        return Ok(());
+    };
+    for (field, locator) in [
+        ("metadata.assets.icon", assets.icon.as_ref()),
+        ("metadata.assets.banner", assets.banner.as_ref()),
+    ] {
+        let Some(AssetLocatorV1::Path(path)) = locator else {
+            continue;
+        };
+        let full_path = workspace_root.join(&path.path);
+        let bytes = match std::fs::read(&full_path) {
+            Ok(bytes) => bytes,
+            Err(source) => {
+                return Err(V1BuildError::AssetValidationFailed {
+                    field: field.to_string(),
+                    reason: format!(
+                        "referenced path {:?} is unreadable: {source}",
+                        full_path.display()
+                    ),
+                });
+            }
+        };
+        let media_type = AssetMediaType::detect(&bytes, &path.path).ok_or_else(|| {
+            V1BuildError::AssetValidationFailed {
+                field: field.to_string(),
+                reason: format!("cannot determine an authoring media type for {:?}", full_path.display()),
+            }
+        })?;
+        validate_asset_bytes(media_type, &bytes).map_err(|asset_error| {
+            V1BuildError::AssetValidationFailed {
+                field: field.to_string(),
+                reason: asset_error.to_string(),
+            }
+        })?;
+    }
+    Ok(())
 }
 
 /// The runtime family name the contract records. Resolved from the recipe, so
