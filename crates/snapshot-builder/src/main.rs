@@ -5427,6 +5427,30 @@ struct BuilderReadyStateSealAdapter<'a> {
     screenshot_png_base64: Option<String>,
 }
 
+const POST_RESTORE_SCREENSHOT_ATTEMPTS: usize = 3;
+
+fn retry_post_restore_screenshot_with<F>(mut capture: F) -> Option<String>
+where
+    F: FnMut() -> Option<String>,
+{
+    for attempt in 1..=POST_RESTORE_SCREENSHOT_ATTEMPTS {
+        if let Some(screenshot) = capture() {
+            return Some(screenshot);
+        }
+        if attempt < POST_RESTORE_SCREENSHOT_ATTEMPTS {
+            eprintln!(
+                "[builder] post-restore screenshot attempt {attempt}/{} failed; retrying",
+                POST_RESTORE_SCREENSHOT_ATTEMPTS
+            );
+        }
+    }
+    None
+}
+
+fn capture_post_restore_screenshot(address: std::net::SocketAddr) -> Option<String> {
+    retry_post_restore_screenshot_with(|| snapshot::capture_screenshot_best_effort(address))
+}
+
 impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSealAdapter<'_> {
     fn capture_and_verify(
         &mut self,
@@ -5560,7 +5584,7 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
             .ok_or_else(|| "restored Seal exposed no Web workload address".to_string())?
             .parse::<std::net::SocketAddr>()
             .map_err(|_| "restored workload address is invalid".to_string())?;
-        let screenshot = snapshot::capture_screenshot_best_effort(restored_address);
+        let screenshot = capture_post_restore_screenshot(restored_address);
         let verified_at = chrono::Utc::now();
         let stop_result = self.backend.stop(restored.session);
         if let Err(error) = stop_result {
@@ -8514,6 +8538,27 @@ targets = ["web"]
         assert_eq!(body["error_code"], "platform_internal_error");
         assert_eq!(body["error_message"], "snapshot capture returned EAGAIN");
         server.join().expect("failure report server");
+    }
+
+    #[test]
+    fn post_restore_screenshot_retries_are_bounded_and_can_recover() {
+        let mut attempts = 0;
+        let screenshot = retry_post_restore_screenshot_with(|| {
+            attempts += 1;
+            (attempts == 2).then(|| "screenshot-base64".to_string())
+        });
+
+        assert_eq!(screenshot.as_deref(), Some("screenshot-base64"));
+        assert_eq!(attempts, 2);
+
+        let mut exhausted_attempts = 0;
+        let missing = retry_post_restore_screenshot_with(|| {
+            exhausted_attempts += 1;
+            None
+        });
+
+        assert_eq!(missing, None);
+        assert_eq!(exhausted_attempts, POST_RESTORE_SCREENSHOT_ATTEMPTS);
     }
 
     #[test]
