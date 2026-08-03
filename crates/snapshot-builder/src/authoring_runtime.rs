@@ -709,6 +709,110 @@ pub fn merge_store_metadata(
     toml::to_string(&manifest).map_err(|error| format!("serialize Effective capsule.toml: {error}"))
 }
 
+/// One materialized authoring asset a builder reports back, matching the
+/// ato-api `setupReady.materialized_assets` item schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedAsset {
+    pub kind: &'static str,
+    pub origin_path: String,
+    pub content_digest: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Validate a materialized asset before it is reported back to ato-api.
+///
+/// Mirrors the ato-api `ingestBuilderPathAssets` inspect step (ato-api#459):
+/// the bytes must match the declared media type (SVG through the passive
+/// profile, binaries by magic bytes) and the content_digest must be the sha256
+/// of the bytes. A builder must never report an asset it has not validated.
+pub fn validate_materialized_asset(asset: &MaterializedAsset) -> Result<(), String> {
+    let media_type = capsule::types::assets::AssetMediaType::parse(&asset.media_type)
+        .map_err(|error| format!("asset {} media_type: {error}", asset.kind))?;
+    capsule::types::assets::validate_asset_bytes(media_type, &asset.bytes)
+        .map_err(|error| format!("asset {} bytes: {error}", asset.kind))?;
+    let digest = sha256_digest(&asset.bytes);
+    if asset.content_digest != digest {
+        return Err(format!(
+            "asset {} content_digest does not match its bytes (expected {digest})",
+            asset.kind
+        ));
+    }
+    Ok(())
+}
+
+/// Materialize the manifest's path-locator assets from the workspace and
+/// validate each one, producing the `setupReady.materialized_assets` payload
+/// ato-api's `ingestBuilderPathAssets` expects. A path asset that is missing,
+/// unreadable, of an unknown media type, or that fails the passive-SVG / magic
+/// check is refused — the builder never reports an asset it has not validated.
+pub fn materialized_assets_from_workspace(
+    workspace_root: &std::path::Path,
+    manifest: &capsule::types::manifest_v1::CapsuleManifestV1,
+) -> Result<Vec<serde_json::Value>, String> {
+    use base64::Engine;
+    use capsule::types::manifest_v1::AssetLocatorV1;
+
+    let Some(assets) = &manifest.metadata.assets else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (kind, locator) in [
+        ("icon", assets.icon.as_ref()),
+        ("banner", assets.banner.as_ref()),
+    ] {
+        let Some(AssetLocatorV1::Path(path)) = locator else {
+            continue;
+        };
+        let full_path = workspace_root.join(&path.path);
+        let max_bytes = capsule::types::assets::MAX_AUTHORING_IMAGE_BYTES;
+        let meta = std::fs::metadata(&full_path).map_err(|source| {
+            format!(
+                "materialize {kind} asset {:?}: {source}",
+                full_path.display()
+            )
+        })?;
+        if meta.len() == 0 || meta.len() > max_bytes as u64 {
+            return Err(format!(
+                "materialize {kind} asset {:?}: must be 1..={max_bytes} bytes, got {}",
+                full_path.display(),
+                meta.len()
+            ));
+        }
+        let bytes = std::fs::read(&full_path).map_err(|source| {
+            format!(
+                "materialize {kind} asset {:?}: {source}",
+                full_path.display()
+            )
+        })?;
+        let media_type = capsule::types::assets::AssetMediaType::detect(&bytes, &path.path)
+            .ok_or_else(|| {
+                format!(
+                    "materialize {kind} asset {:?}: cannot determine an authoring media type",
+                    full_path.display()
+                )
+            })?
+            .as_str();
+        let content_digest = sha256_digest(&bytes);
+        validate_materialized_asset(&MaterializedAsset {
+            kind,
+            origin_path: path.path.clone(),
+            content_digest: content_digest.clone(),
+            media_type: media_type.to_string(),
+            bytes: bytes.clone(),
+        })
+        .map_err(|error| format!("materialize {kind} asset: {error}"))?;
+        out.push(serde_json::json!({
+            "kind": kind,
+            "origin_path": path.path,
+            "content_digest": content_digest,
+            "media_type": media_type,
+            "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedBuildContract {
     pub timeout_seconds: u64,
@@ -1225,5 +1329,150 @@ timeout_seconds = 60
                 .expect_err("plan must fail")
                 .contains("launch differs")
         );
+    }
+
+    #[test]
+    fn materialized_asset_accepts_a_passive_svg_matching_its_digest() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\"/></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        validate_materialized_asset(&asset).expect("passive svg accepted");
+    }
+
+    #[test]
+    fn materialized_asset_rejects_active_svg() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><script>alert(1)</script></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&asset)
+                .expect_err("active svg must fail")
+                .contains("not allowed")
+        );
+    }
+
+    #[test]
+    fn materialized_asset_rejects_a_digest_mismatch() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"></svg>";
+        let asset = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: format!("sha256:{}", "f".repeat(64)),
+            media_type: "image/svg+xml".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&asset)
+                .expect_err("digest mismatch must fail")
+                .contains("content_digest does not match")
+        );
+    }
+
+    #[test]
+    fn materialized_asset_rejects_unsupported_media_type_and_bad_magic() {
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"></svg>";
+        let unsupported = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.gif".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/gif".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&unsupported)
+                .expect_err("gif must fail")
+                .contains("media_type")
+        );
+
+        let wrong_bytes = MaterializedAsset {
+            kind: "icon",
+            origin_path: "assets/icon.svg".to_string(),
+            content_digest: sha256_digest(bytes),
+            media_type: "image/png".to_string(),
+            bytes: bytes.to_vec(),
+        };
+        assert!(
+            validate_materialized_asset(&wrong_bytes)
+                .expect_err("svg bytes as png must fail")
+                .contains("bytes")
+        );
+    }
+
+    #[test]
+    fn materialized_assets_from_workspace_rejects_oversized_files() {
+        let dir = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(dir.path().join("assets")).expect("assets dir");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+path = "assets/icon.svg"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("manifest");
+
+        let header = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\">";
+        let footer = b"</svg>";
+        let max = capsule::types::assets::MAX_AUTHORING_IMAGE_BYTES;
+        let mut oversized = header.to_vec();
+        let padding = (max + 1).saturating_sub(oversized.len() + footer.len());
+        oversized.resize(oversized.len() + padding, b' ');
+        oversized.extend_from_slice(footer);
+        std::fs::write(dir.path().join("assets/icon.svg"), &oversized).expect("write asset");
+
+        let error = materialized_assets_from_workspace(dir.path(), &manifest)
+            .expect_err("oversized asset must fail");
+        assert!(error.contains("1..="), "{error}");
+    }
+
+    #[test]
+    fn materialized_assets_from_workspace_produces_the_api_payload_shape() {
+        let dir = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir_all(dir.path().join("assets")).expect("assets dir");
+        let bytes = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"32\"><rect width=\"32\" height=\"32\"/></svg>";
+        std::fs::write(dir.path().join("assets/icon.svg"), bytes).expect("write asset");
+        let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+path = "assets/icon.svg"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("manifest");
+
+        let payload = materialized_assets_from_workspace(dir.path(), &manifest)
+            .expect("a passive svg materializes");
+        assert_eq!(payload.len(), 1);
+        let item = &payload[0];
+        assert_eq!(item["kind"], "icon");
+        assert_eq!(item["origin_path"], "assets/icon.svg");
+        assert_eq!(item["media_type"], "image/svg+xml");
+        assert_eq!(item["content_digest"], sha256_digest(bytes));
+        let round_trip = base64::engine::general_purpose::STANDARD
+            .decode(item["bytes_base64"].as_str().expect("base64"))
+            .expect("decodes");
+        assert_eq!(round_trip, bytes);
     }
 }
