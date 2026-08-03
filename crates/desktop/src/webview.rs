@@ -46,7 +46,7 @@ use crate::logging::TARGET_FAVICON;
 use crate::orchestrator::{
     CommunityTomlInput, DesktopLaunchInput, GuestLaunchSession, LaunchError, SpawnKind, SpawnSpec,
     resolve_and_start_guest_with_input, spawn_cli_session, spawn_log_tail_session, spawn_terminal,
-    stop_guest_session, take_pending_cli_command, take_pending_share_terminal,
+    stop_guest_session, take_pending_cli_command,
 };
 
 /// Local helpers to construct `DesktopLaunchInput` from `ensure_pending_local_launch`
@@ -894,14 +894,8 @@ impl WebViewManager {
             if !self.terminal_sessions.contains_key(&session_id)
                 && !self.completed_terminal_sessions.contains(&session_id)
             {
-                // Priority 1: pending share terminal (spawned by capsule executor).
-                if let Some(proc) = take_pending_share_terminal(&session_id) {
-                    info!(session_id = %session_id, "Using share-spawned terminal session");
-                    self.terminal_sessions
-                        .insert(session_id.clone(), Box::new(proc));
-                    state.sync_web_session_state(active.pane_id, WebSessionState::Mounted);
-                } else if let Some(spec) = take_pending_cli_command(&session_id) {
-                    // Priority 2: pending CLI launch spec from an `ato://cli` deep link.
+                // Pending CLI launch spec from an `ato://cli` deep link.
+                if let Some(spec) = take_pending_cli_command(&session_id) {
                     match spawn_cli_session(session_id.clone(), 80, 24, spec.clone(), Vec::new()) {
                         Ok(proc) => {
                             info!(session_id = %session_id, ?spec, "Spawned CLI session from ato://cli");
@@ -1620,41 +1614,25 @@ impl WebViewManager {
                             title.clone(),
                         );
 
-                        // Check for a pending share terminal (piped PTY from capsule executor)
-                        // before falling back to log-tail.
-                        let terminal_ok = if let Some(proc) =
-                            take_pending_share_terminal(&terminal_session_id)
-                        {
-                            info!(pane_id, session_id = %terminal_session_id, "using share-spawned piped terminal session");
-                            self.terminal_sessions
-                                .insert(terminal_session_id.clone(), Box::new(proc));
-                            true
-                        } else {
-                            // Fallback: log-tail for capsule sessions managed by ato-cli
-                            match log_path {
-                                Some(lp) => {
-                                    match spawn_log_tail_session(terminal_session_id.clone(), lp) {
-                                        Ok(proc) => {
-                                            info!(pane_id, session_id = %terminal_session_id, "log-tail session spawned for terminal_stream");
-                                            self.terminal_sessions.insert(
-                                                terminal_session_id.clone(),
-                                                Box::new(proc),
-                                            );
-                                            true
-                                        }
-                                        Err(e) => {
-                                            error!(pane_id, error = %e, "failed to spawn log-tail session");
-                                            false
-                                        }
+                        // Fallback: log-tail for capsule sessions managed by ato-cli
+                        let terminal_ok = match log_path {
+                            Some(lp) => {
+                                match spawn_log_tail_session(terminal_session_id.clone(), lp) {
+                                    Ok(proc) => {
+                                        info!(pane_id, session_id = %terminal_session_id, "log-tail session spawned for terminal_stream");
+                                        self.terminal_sessions
+                                            .insert(terminal_session_id.clone(), Box::new(proc));
+                                        true
+                                    }
+                                    Err(e) => {
+                                        error!(pane_id, error = %e, "failed to spawn log-tail session");
+                                        false
                                     }
                                 }
-                                None => {
-                                    error!(
-                                        pane_id,
-                                        "terminal_stream session has no log_path and no pending share terminal"
-                                    );
-                                    false
-                                }
+                            }
+                            None => {
+                                error!(pane_id, "terminal_stream session has no log_path");
+                                false
                             }
                         };
 
