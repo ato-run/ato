@@ -1,218 +1,123 @@
 #!/bin/bash
 # =============================================================================
-# §6 Share URL の実 URL 配布フロー
+# §6 Workspace share の実配布フロー (local-file)
 # =============================================================================
+# Web share flow (ato.run/s/<id>) was retired 2026-08; sharing is local-file
+# only. This suite verifies the current contract: `ato workspace share` writes
+# share.spec.json / share.lock.json, `ato run <share file>` executes the shared
+# workspace, and `ato workspace setup` materializes it.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
 RESULT_FILE="$RESULTS_DIR/result_06_share_url.log"
 : > "$RESULT_FILE"
 
-SUITE="§6 Share URL Distribution"
+SUITE="§6 Workspace Share Distribution (local-file)"
 echo "══════════════════════════════════"
 echo " $SUITE"
 echo "══════════════════════════════════"
 check_ato
 
 # ---------------------------------------------------------------------------
-# Automated: ato publish output contains a valid https://ato.run/s/<id> URL
+# Automated: ato workspace share writes share.spec.json / share.lock.json / guide.md
 # ---------------------------------------------------------------------------
-test_publish_url_format() {
-    local tmp_dir="$ATO_TEST_TMP/share-url-capsule"
+test_workspace_share_outputs() {
+    local tmp_dir="$ATO_TEST_TMP/share-capsule"
     mkdir -p "$tmp_dir"
     cat > "$tmp_dir/capsule.toml" <<'EOF'
 schema_version = "0.3"
-name = "share-url-test"
+name = "share-test"
 version = "0.1.0"
 type = "app"
 run = "python3 -c 'print(\"hello from share\")'"
 runtime = "source/python"
 EOF
-    provision_python_capsule "$tmp_dir"
-    local out="$ATO_TEST_TMP/publish_output.txt"
-    if ( cd "$tmp_dir" && run_cmd 60 "$out" ato publish ) ; then
-        local url
-        url=$(grep -oE 'https://ato\.run/s/[A-Za-z0-9_-]+' "$out" | head -1)
-        if [ -n "$url" ]; then
-            pass "ato publish outputs share URL: $url"
-            # Store for follow-up tests
-            echo "$url" > "$ATO_TEST_TMP/last_share_url.txt"
+    local out="$ATO_TEST_TMP/share_output.txt"
+    if ( cd "$tmp_dir" && run_cmd 60 "$out" ato workspace share --yes ); then
+        if [ -f "$tmp_dir/.ato/share/share.spec.json" ] \
+            && [ -f "$tmp_dir/.ato/share/share.lock.json" ] \
+            && [ -f "$tmp_dir/.ato/share/guide.md" ]; then
+            pass "ato workspace share writes share.spec.json / share.lock.json / guide.md"
         else
-            fail "ato publish outputs share URL" "No https://ato.run/s/<id> found in output: $(cat "$out")"
+            fail "ato workspace share outputs" "Missing share files in .ato/share/: $(ls -la "$tmp_dir/.ato/share" 2>&1)"
         fi
     else
-        if grep -qi "auth\|login\|permission\|unauthorized" "$out"; then
-            skip "ato publish — requires authenticated session (run: ato login first)"
-        else
-            fail "ato publish" "Publish failed: $(tail -5 "$out")"
-        fi
+        fail "ato workspace share" "$(tail -5 "$out")"
     fi
     rm -rf "$tmp_dir"
 }
 
 # ---------------------------------------------------------------------------
-# Automated: published URL is reachable (HEAD request)
+# Automated: ato run <share.spec.json> runs the shared workspace
 # ---------------------------------------------------------------------------
-test_published_url_reachable() {
-    local url_file="$ATO_TEST_TMP/last_share_url.txt"
-    if [ ! -f "$url_file" ]; then
-        skip "Published URL not available (publish test skipped or failed)"
+test_run_share_file_local() {
+    local spec_file="$ATO_TEST_TMP/share-capsule/.ato/share/share.spec.json"
+    if [ ! -f "$spec_file" ]; then
+        skip "share.spec.json not available (share test skipped)"
         return
     fi
-    local url
-    url=$(cat "$url_file")
-    local http_status
-    http_status=$(curl -sIo /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null)
-    if [ "$http_status" = "200" ]; then
-        pass "Published URL is reachable (HTTP 200): $url"
-    elif [ "$http_status" = "302" ] || [ "$http_status" = "301" ]; then
-        pass "Published URL redirects ($http_status) — expected for capsule landing page"
-    else
-        fail "Published URL reachable" "HTTP $http_status for $url"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Automated: OG meta tags on share URL
-# ---------------------------------------------------------------------------
-test_og_meta_tags() {
-    local url_file="$ATO_TEST_TMP/last_share_url.txt"
-    if [ ! -f "$url_file" ]; then
-        skip "Share URL not available for OG tag check"
-        return
-    fi
-    local url
-    url=$(cat "$url_file")
-    local body
-    body=$(curl -sfL --max-time 15 "$url" 2>/dev/null)
-    if echo "$body" | grep -qi 'og:title\|og:description\|og:image'; then
-        pass "Share URL page has OG meta tags"
-    else
-        fail "Share URL OG meta tags" "No og: meta tags found in page source"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Automated: revoked share URL returns 404 or appropriate error
-# ---------------------------------------------------------------------------
-test_revoked_url() {
-    # Use a known-dead share ID format to verify 404 handling
-    local fake_url="https://ato.run/s/this-id-does-not-exist-000000"
-    local http_status
-    http_status=$(curl -sIo /dev/null -w "%{http_code}" --max-time 10 "$fake_url" 2>/dev/null)
-    if [ "$http_status" = "404" ] || [ "$http_status" = "410" ]; then
-        pass "Non-existent share URL returns HTTP $http_status (expected 404/410)"
-    elif [ "$http_status" = "200" ]; then
-        fail "Non-existent share URL" "HTTP 200 returned for fake ID — should be 404"
-    else
-        pass "Non-existent share URL returns HTTP $http_status (not 200)"
-    fi
-}
-
-# ---------------------------------------------------------------------------
-# Automated: ato run <share-url> works on this machine
-# ---------------------------------------------------------------------------
-test_run_share_url_local() {
-    local url_file="$ATO_TEST_TMP/last_share_url.txt"
-    if [ ! -f "$url_file" ]; then
-        skip "Share URL not available — publish test skipped"
-        return
-    fi
-    local url
-    url=$(cat "$url_file")
     local out="$ATO_TEST_TMP/share_run_local.txt"
-    if run_cmd 60 "$out" ato run "$url"; then
+    if run_cmd 60 "$out" ato run "$spec_file"; then
         if grep -qi "hello from share" "$out"; then
-            pass "ato run <share-url> produces expected output on same machine"
+            pass "ato run <share.spec.json> produces expected output on same machine"
         else
-            pass "ato run <share-url> exited 0 (output may differ due to capsule)"
+            pass "ato run <share.spec.json> exited 0 (output may differ due to capsule)"
         fi
     else
-        fail "ato run <share-url>" "$(tail -5 "$out")"
+        fail "ato run <share.spec.json>" "$(tail -5 "$out")"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Automated: point-in-time identity — running same share URL twice gives same result
+# Automated: ato workspace setup <share.spec.json> --into materializes
 # ---------------------------------------------------------------------------
-test_reproducible_share_url() {
-    local url_file="$ATO_TEST_TMP/last_share_url.txt"
-    if [ ! -f "$url_file" ]; then
-        skip "Share URL not available"
+test_workspace_setup_materializes() {
+    local spec_file="$ATO_TEST_TMP/share-capsule/.ato/share/share.spec.json"
+    if [ ! -f "$spec_file" ]; then
+        skip "share.spec.json not available"
         return
     fi
-    local url
-    url=$(cat "$url_file")
-    local out1="$ATO_TEST_TMP/share_repro_1.txt"
-    local out2="$ATO_TEST_TMP/share_repro_2.txt"
-    run_cmd 60 "$out1" ato run "$url" || true
-    sleep 2
-    run_cmd 60 "$out2" ato run "$url" || true
-    if diff -q "$out1" "$out2" &>/dev/null; then
-        pass "Share URL is reproducible — identical output on two runs"
+    local into_dir="$ATO_TEST_TMP/share-materialized"
+    rm -rf "$into_dir" && mkdir -p "$into_dir"
+    local out="$ATO_TEST_TMP/share_setup.txt"
+    if run_cmd 60 "$out" ato workspace setup "$spec_file" --into "$into_dir/ws" --dev; then
+        if grep -qi "Workspace ready" "$out"; then
+            pass "ato workspace setup materializes the shared workspace"
+        else
+            pass "ato workspace setup exited 0 (verify materialized files below)"
+        fi
     else
-        fail "Share URL reproducibility" "Outputs differ between runs (non-deterministic capsule?)"
+        fail "ato workspace setup" "$(tail -5 "$out")"
     fi
 }
 
 # ---------------------------------------------------------------------------
-# Human: click URL on a different machine
+# Human: distribute share files to a different machine
 # ---------------------------------------------------------------------------
-test_share_url_different_machine() {
-    local url=""
-    [ -f "$ATO_TEST_TMP/last_share_url.txt" ] && url=$(cat "$ATO_TEST_TMP/last_share_url.txt")
-    checklist "Share URL works on a different machine" \
-        "Publish a capsule and copy the share URL${url:+: $url}" \
-        "Send the URL to another person / paste into another machine's terminal" \
-        "Run: ato run <share-url> on the OTHER machine" \
-        "Confirm it downloads and runs the capsule correctly" \
+test_share_files_different_machine() {
+    checklist "Share files work on a different machine" \
+        "Run: ato workspace share (or use an existing .ato/share/share.spec.json)" \
+        "Copy share.spec.json + share.lock.json to another machine (git, chat, USB)" \
+        "Run: ato run ./share.spec.json on the OTHER machine" \
+        "Confirm it materializes and runs the workspace correctly" \
         "Test on macOS → Linux, macOS → Windows, Linux → macOS cross-machine"
 }
 
 # ---------------------------------------------------------------------------
-# Human: ato:// URL handler registration
-# ---------------------------------------------------------------------------
-test_ato_url_handler() {
-    checklist "ato:// URL scheme handler is registered" \
-        "macOS: open ato://run/<share-id> in Terminal → ato is invoked" \
-        "Linux: xdg-open ato://run/<share-id> triggers ato (check xdg-mime query)" \
-        "Windows: clicking ato:// link in browser invokes ato (check registry)" \
-        "Test competing handler: if another app registers ato://, confirm ato wins or error is clear"
-}
-
-# ---------------------------------------------------------------------------
-# Human: uninstalled user clicks share URL
+# Human: uninstalled user receives share files
 # ---------------------------------------------------------------------------
 test_uninstalled_user_flow() {
-    checklist "Uninstalled user clicks share URL" \
-        "On a machine with NO ato installed, open: https://ato.run/s/<share-id> in browser" \
-        "Browser redirects to install page or shows install instructions" \
-        "Install instructions are correct and actionable for macOS/Linux/Windows" \
-        "After installing, re-clicking (or running) the same URL launches the capsule" \
+    checklist "Uninstalled user receives share files" \
+        "On a machine with NO ato installed, copy share.spec.json + share.lock.json over" \
+        "Install ato via https://ato.run/install.sh (or package manager)" \
+        "Run: ato run ./share.spec.json" \
         "Flow completes end-to-end with no dead ends"
 }
 
-# ---------------------------------------------------------------------------
-# Human: social media URL preview
-# ---------------------------------------------------------------------------
-test_social_preview() {
-    checklist "Share URL social preview rendering" \
-        "Paste share URL into Slack — OG preview (title, description, image) renders" \
-        "Paste into Discord — preview renders" \
-        "Paste into Twitter/X — card renders with title and description" \
-        "Paste into iMessage — link preview shows capsule name" \
-        "Gmail 'This link goes to an untrusted site' warning does NOT appear"
-}
-
-test_publish_url_format
-test_published_url_reachable
-test_og_meta_tags
-test_revoked_url
-test_run_share_url_local
-test_reproducible_share_url
-test_share_url_different_machine
-test_ato_url_handler
+test_workspace_share_outputs
+test_run_share_file_local
+test_workspace_setup_materializes
+test_share_files_different_machine
 test_uninstalled_user_flow
-test_social_preview
 
 print_suite_summary "$SUITE"

@@ -421,6 +421,11 @@ pub(crate) fn execute_encap(args: EncapArgs, reporter: Arc<CliReporter>) -> Resu
 pub(crate) fn execute_decap(args: DecapArgs, reporter: Arc<CliReporter>) -> Result<()> {
     let into = args.into;
     ensure_target_root_ready(&into)?;
+    // Retired web share links (`ato.run/s/<id>`) no longer resolve; explain the
+    // migration instead of attempting a file read or an API fetch.
+    if crate::install::is_retired_share_link(&args.input) {
+        anyhow::bail!("{}", crate::install::retired_share_link_error());
+    }
     if looks_like_local_share_file(&args.input) {
         let loaded = load_share_input(&args.input)?;
         if args.plan {
@@ -486,7 +491,9 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         entry.run, next_command, loaded.spec.root
     ));
 
-    // Delegate to capsule ShareExecutor (nacelle-sandboxed execution)
+    // Delegate to capsule ShareExecutor (nacelle-sandboxed execution). Pin the
+    // ato binary to the currently-running executable so materialization invokes
+    // the same version instead of whatever `ato` happens to be on PATH.
     let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
         input: args.input.clone(),
         entry: Some(entry.id.clone()),
@@ -494,7 +501,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         env_overlay,
         mode: capsule::share::ShareExecutionMode::Inherited,
         nacelle_path: None,
-        ato_path: None,
+        ato_path: std::env::current_exe().ok(),
         compat_host: args.compat_host,
     })?;
 
@@ -669,7 +676,7 @@ fn materialize_loaded_share(
     if strict && !state.verification.issues.is_empty() {
         let issues = state.verification.issues.join("\n  - ");
         anyhow::bail!(
-            "decap completed with verification issues (--strict):\n  - {}",
+            "workspace setup completed with verification issues (--strict):\n  - {}",
             issues
         );
     }

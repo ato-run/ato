@@ -191,6 +191,13 @@ pub(crate) fn classify_run_target(raw: &str, expanded_local: &Path) -> Result<Pa
         return Ok(ParsedRunTarget::GitHubRepository(repository));
     }
 
+    // Retired web share links (`ato.run/s/<id>`, including `staging.`/`www.`
+    // spellings) no longer resolve. Check before provider-sugar detection so the
+    // migration guidance is shown instead of a cryptic "unknown provider" error.
+    if super::is_retired_share_link(raw) {
+        bail!("{}", super::retired_share_link_error());
+    }
+
     // Pasted ato.run store/open links — and the bare `ato.run/<publisher>/<slug>`
     // and `www.` spellings — resolve to the same registry reference the store
     // path already accepts (the URL is reduced to its `publisher/slug` scoped id
@@ -2053,28 +2060,28 @@ Tag: py3-none-any\n";
     }
 
     #[test]
-    fn classify_run_target_rejects_share_links_as_non_runnable_store_links() {
-        // Web share links (`ato.run/s/<id>`) are no longer supported — there is
-        // no share runner to redirect them to. They must fail cleanly as
-        // non-runnable ato.run capsule links (not the cryptic provider error,
-        // and not a fetch attempt).
+    fn classify_run_target_rejects_share_links_as_retired() {
+        // Web share links (`ato.run/s/<id>`) are retired — they must fail with
+        // the migration error (not the cryptic provider error, and not a fetch
+        // attempt).
         for raw in [
             "https://ato.run/s/abc123",
             "http://ato.run/s/abc123",
             "https://www.ato.run/s/abc123",
             "ato.run/s/abc123",
+            "https://staging.ato.run/s/abc123",
             "ato.run/s/abc123@r3",
         ] {
             let err = classify_run_target(raw, Path::new(raw))
-                .expect_err("share link is not a runnable store capsule");
+                .expect_err("share link is retired, not a store capsule");
             let message = err.to_string();
             assert!(
                 !message.contains("unknown provider"),
                 "'{raw}' must not surface the cryptic provider error: {message}"
             );
             assert!(
-                message.contains("not a runnable ato.run capsule link"),
-                "'{raw}' should be reported as a malformed store link: {message}"
+                message.contains("retired") && message.contains("share.spec.json"),
+                "'{raw}' should explain the migration: {message}"
             );
         }
     }

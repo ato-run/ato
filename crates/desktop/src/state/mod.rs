@@ -2046,6 +2046,21 @@ impl AppState {
         let normalized = Self::normalize_input(input);
         info!(input, normalized = %normalized, "navigate_to_url");
 
+        // Retired web share links (`ato.run/s/<id>`) no longer resolve. Surface
+        // the migration guidance instead of opening a dead landing page in an
+        // external browser.
+        if is_retired_share_link(&normalized) {
+            self.push_activity(
+                ActivityTone::Error,
+                "This workspace share link has been retired. Web sharing ".to_string()
+                    + "(`ato.run/s/<id>`) was removed; ask the sender for "
+                    + "`share.spec.json` and `share.lock.json`, then run "
+                    + "`ato run ./share.spec.json` or "
+                    + "`ato workspace setup ./share.spec.json --into ./workspace`.",
+            );
+            return;
+        }
+
         let (next_route, capabilities, profile, source_label, trust_state, restricted, session) =
             match classify_surface_input(HandleInput {
                 raw: normalized.clone(),
@@ -3819,6 +3834,24 @@ impl TaskSet {
     }
 }
 
+/// Whether `input` is a retired web share link (`ato.run/s/<id>`).
+///
+/// Web sharing was removed (2026-08); these URLs can no longer be resolved, so
+/// `navigate_to_url` shows migration guidance instead of opening a dead page.
+fn is_retired_share_link(input: &str) -> bool {
+    let trimmed = input.trim();
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .or_else(|| trimmed.strip_prefix("www."))
+        .unwrap_or(trimmed);
+    let Some((host, path)) = rest.split_once('/') else {
+        return false;
+    };
+    let path = path.trim_start_matches('/');
+    (host == "ato.run" || host.ends_with(".ato.run")) && (path == "s" || path.starts_with("s/"))
+}
+
 fn uuid_v4_simple() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -4742,6 +4775,28 @@ mod tests {
         assert_eq!(
             state.auth_sessions.last().expect("session").status,
             AuthSessionStatus::Failed
+        );
+    }
+
+    #[test]
+    fn navigate_to_retired_share_link_shows_migration_guidance_not_tab() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.navigate_to_url("https://ato.run/s/abc123");
+
+        // No new tab/workspace; the retired-share message lands in the activity log.
+        assert_eq!(
+            state.active_workspace().expect("workspace").tasks.len(),
+            initial_task_count,
+            "retired share link must not open a new tab"
+        );
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("retired") && e.message.contains("share.spec.json")),
+            "activity log must carry the migration guidance"
         );
     }
 
