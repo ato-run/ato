@@ -870,7 +870,8 @@ pub struct ResolvedBuildOutputContract {
     pub projection_digest: OpaqueContractDigestV1,
 }
 
-/// Resolved launch facet. `argv` is the exact entrypoint and `cwd` is the
+/// Resolved launch facet. `argv` is the exact entrypoint: `argv[0]` names a
+/// non-empty program while later elements may be empty strings. `cwd` is the
 /// canonical guest working directory ([`GuestPath`]).
 /// `process_model_digest` is the opaque sub-contract digest committing the
 /// *process model* (root process, daemonization/PID-1 role, supervised child
@@ -1186,9 +1187,7 @@ impl ExecutionContractV1 {
         ] {
             validate_ascii_identifier(field, value)?;
         }
-        if self.launch.argv.is_empty()
-            || self.launch.argv.iter().any(|value| value.trim().is_empty())
-        {
+        if self.launch.argv.is_empty() || self.launch.argv[0].trim().is_empty() {
             return Err(ExecutionContractError::UnresolvedField("launch.argv"));
         }
         if let Some(libc) = &self.target.libc {

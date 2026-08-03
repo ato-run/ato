@@ -62,9 +62,13 @@
 //! saying so is more useful than minting an identity that omits them.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
 
 /// The only schema version that may mint an Execution Identity.
 pub const MANIFEST_SCHEMA_V1: &str = "1";
@@ -131,6 +135,18 @@ pub struct CapsuleManifestV1 {
     pub name: String,
     pub version: String,
 
+    /// `[source]` is an authoring-time selection declaration. The current v1
+    /// materializer accepts only the already-pinned root projection; broader
+    /// root/ignore editing requires a new Source Revision and is refused by
+    /// validation until that rematerialization lane exists.
+    #[serde(default, skip_serializing_if = "SourceSelectionV1::is_default")]
+    pub source: SourceSelectionV1,
+
+    /// `[metadata]` — Store-facing authored intent. It is part of the
+    /// normalized manifest digest even though it does not alter launch.
+    #[serde(default, skip_serializing_if = "MetadataV1::is_empty")]
+    pub metadata: MetadataV1,
+
     /// `[tools]` — pinned tool versions, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub tools: BTreeMap<String, String>,
@@ -164,6 +180,110 @@ pub struct CapsuleManifestV1 {
     pub state: BTreeMap<String, StateV1>,
 }
 
+pub const SOURCE_FILTER_POLICY_VERSION_V1: &str = "ato-source-filter/v1";
+pub const MAX_SOURCE_IGNORE_PATTERNS_V1: usize = 256;
+pub const MAX_SOURCE_IGNORE_PATTERN_BYTES_V1: usize = 1024;
+pub const MAX_SOURCE_IGNORE_TOTAL_BYTES_V1: usize = 64 * 1024;
+
+/// Safety exclusions are policy, not author intent. A later manifest negation
+/// can never re-include one of these paths.
+pub const SYSTEM_SOURCE_IGNORE_V1: &[&str] = &[
+    ".git/**",
+    ".env",
+    ".env.*",
+    "**/*.pem",
+    "**/*.key",
+    "**/id_rsa",
+    "**/id_ed25519",
+    "**/.aws/**",
+    "**/.ssh/**",
+];
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSelectionV1 {
+    #[serde(default = "default_source_root")]
+    pub root: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+}
+
+fn default_source_root() -> String {
+    ".".to_string()
+}
+
+impl Default for SourceSelectionV1 {
+    fn default() -> Self {
+        Self {
+            root: default_source_root(),
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl SourceSelectionV1 {
+    fn is_default(&self) -> bool {
+        self.root == "." && self.ignore.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<StoreMetadataV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets: Option<MetadataAssetsV1>,
+}
+
+impl MetadataV1 {
+    fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StoreMetadataV1 {
+    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcategory: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataAssetsV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<AssetLocatorV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub banner: Option<AssetLocatorV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AssetLocatorV1 {
+    Path(AssetPathLocatorV1),
+    Url(AssetUrlLocatorV1),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetPathLocatorV1 {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetUrlLocatorV1 {
+    pub url: String,
+}
 /// One launch-supplied variable. BOTH fields are explicit.
 ///
 /// v0.3's equivalent has no `required` at all and defaults its kind to
@@ -308,6 +428,76 @@ fn looks_secret(name: &str) -> bool {
     crate::execution_contract_finalize::is_sensitive_env_key(name)
 }
 
+fn validate_source_relative_path(
+    field: &'static str,
+    value: &str,
+    allow_root: bool,
+) -> Result<(), ManifestV1Error> {
+    if value == "." {
+        return if allow_root {
+            Ok(())
+        } else {
+            Err(ManifestV1Error::Invalid {
+                field,
+                reason: "must name a file below the source root".to_string(),
+            })
+        };
+    }
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains('\\')
+        || value.contains('\0')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field,
+            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, or a leading slash".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_ignore_pattern(pattern: &str) -> Result<(), ManifestV1Error> {
+    let body = pattern.strip_prefix('!').unwrap_or(pattern);
+    let body = body.strip_prefix('/').unwrap_or(body);
+    if body.is_empty()
+        || pattern.contains('\\')
+        || pattern.contains('\0')
+        || pattern.starts_with("//")
+        || body.split('/').any(|segment| segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field: "source.ignore[]",
+            reason: format!(
+                "{pattern:?} is not a supported source-root-relative gitignore pattern"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn build_ignore_matcher(
+    patterns: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<Gitignore, ManifestV1Error> {
+    let mut builder = GitignoreBuilder::new(".");
+    for pattern in patterns {
+        let pattern = pattern.as_ref();
+        builder
+            .add_line(None, pattern)
+            .map_err(|error| ManifestV1Error::Invalid {
+                field: "source.ignore[]",
+                reason: format!("{pattern:?}: {error}"),
+            })?;
+    }
+    builder.build().map_err(|error| ManifestV1Error::Invalid {
+        field: "source.ignore[]",
+        reason: error.to_string(),
+    })
+}
+
 impl CapsuleManifestV1 {
     /// Parse and validate. There is no lenient mode: a manifest that does not
     /// validate is not a v1 manifest.
@@ -321,11 +511,151 @@ impl CapsuleManifestV1 {
         Ok(manifest)
     }
 
+    /// SHA-256 over the canonical JSON form of the normalized v1 manifest.
+    /// Defaults are expanded by deserialization before this is computed, so
+    /// omitted and explicitly-defaulted source/metadata sections agree.
+    pub fn normalized_digest(&self) -> Result<String, ManifestV1Error> {
+        self.validate()?;
+        let bytes = serde_jcs::to_vec(self).map_err(|error| ManifestV1Error::Invalid {
+            field: "capsule.toml",
+            reason: format!("failed to canonicalize the normalized manifest: {error}"),
+        })?;
+        Ok(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+    }
+
+    /// Whether a source-relative path survives both the immutable system
+    /// safety policy and the manifest's last-match-wins ignore rules.
+    pub fn source_path_is_included(
+        &self,
+        relative_path: &str,
+        is_dir: bool,
+    ) -> Result<bool, ManifestV1Error> {
+        validate_source_relative_path("source path", relative_path, false)?;
+        let path = Path::new(relative_path);
+        let system = build_ignore_matcher(SYSTEM_SOURCE_IGNORE_V1)?;
+        if system.matched_path_or_any_parents(path, is_dir).is_ignore() {
+            return Ok(false);
+        }
+        let authored = build_ignore_matcher(&self.source.ignore)?;
+        Ok(!authored
+            .matched_path_or_any_parents(path, is_dir)
+            .is_ignore())
+    }
+
     pub fn validate(&self) -> Result<(), ManifestV1Error> {
         require_manifest_v1(&self.schema_version)?;
         for (field, value) in [("name", &self.name), ("version", &self.version)] {
             if value.trim().is_empty() {
                 return Err(ManifestV1Error::Missing { field });
+            }
+        }
+        if !self.source.is_default() {
+            return Err(ManifestV1Error::Unsupported {
+                feature: "[source] root/ignore",
+                why: "changing source scope requires a newly materialized and signed Source Revision",
+            });
+        }
+
+        validate_source_relative_path("source.root", &self.source.root, true)?;
+        if self.source.ignore.len() > MAX_SOURCE_IGNORE_PATTERNS_V1 {
+            return Err(ManifestV1Error::Invalid {
+                field: "source.ignore",
+                reason: format!(
+                    "contains {} patterns; the limit is {MAX_SOURCE_IGNORE_PATTERNS_V1}",
+                    self.source.ignore.len()
+                ),
+            });
+        }
+        let total_ignore_bytes = self
+            .source
+            .ignore
+            .iter()
+            .try_fold(0usize, |total, pattern| {
+                if pattern.len() > MAX_SOURCE_IGNORE_PATTERN_BYTES_V1 {
+                    return Err(ManifestV1Error::Invalid {
+                        field: "source.ignore[]",
+                        reason: format!(
+                            "pattern is {} bytes; the limit is {MAX_SOURCE_IGNORE_PATTERN_BYTES_V1}",
+                            pattern.len()
+                        ),
+                    });
+                }
+                validate_ignore_pattern(pattern)?;
+                Ok(total + pattern.len())
+            })?;
+        if total_ignore_bytes > MAX_SOURCE_IGNORE_TOTAL_BYTES_V1 {
+            return Err(ManifestV1Error::Invalid {
+                field: "source.ignore",
+                reason: format!(
+                    "contains {total_ignore_bytes} bytes; the limit is {MAX_SOURCE_IGNORE_TOTAL_BYTES_V1}"
+                ),
+            });
+        }
+        // Compile once during validation so malformed glob syntax is refused
+        // before any source walk starts.
+        build_ignore_matcher(&self.source.ignore)?;
+
+        if let Some(store) = &self.metadata.store {
+            if store.category.trim().is_empty() {
+                return Err(ManifestV1Error::Missing {
+                    field: "metadata.store.category",
+                });
+            }
+            if store
+                .subcategory
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            {
+                return Err(ManifestV1Error::Invalid {
+                    field: "metadata.store.subcategory",
+                    reason: "must not be empty when present".to_string(),
+                });
+            }
+        }
+        if self.metadata.tags.iter().any(|tag| tag.trim().is_empty()) {
+            return Err(ManifestV1Error::Invalid {
+                field: "metadata.tags[]",
+                reason: "must not contain empty tags".to_string(),
+            });
+        }
+        if let Some(assets) = &self.metadata.assets {
+            for (field, locator) in [
+                ("metadata.assets.icon", assets.icon.as_ref()),
+                ("metadata.assets.banner", assets.banner.as_ref()),
+            ] {
+                match locator {
+                    Some(AssetLocatorV1::Path(path)) => {
+                        validate_source_relative_path(field, &path.path, false)?;
+                        if !self.source_path_is_included(&path.path, false)? {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: format!(
+                                    "referenced path {:?} is excluded by the effective source policy",
+                                    path.path
+                                ),
+                            });
+                        }
+                    }
+                    Some(AssetLocatorV1::Url(url)) => {
+                        let parsed =
+                            Url::parse(&url.url).map_err(|error| ManifestV1Error::Invalid {
+                                field,
+                                reason: format!("must be an HTTPS URL: {error}"),
+                            })?;
+                        if parsed.scheme() != "https"
+                            || parsed.host_str().is_none()
+                            || !parsed.username().is_empty()
+                            || parsed.password().is_some()
+                        {
+                            return Err(ManifestV1Error::Invalid {
+                                field,
+                                reason: "must be a credential-free HTTPS URL with a host"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                    None => {}
+                }
             }
         }
 
@@ -341,6 +671,27 @@ impl CapsuleManifestV1 {
                         other => other,
                     },
                 )?;
+            }
+        }
+        for (name, version) in &self.tools {
+            if name.trim().is_empty() || version.trim().is_empty() {
+                return Err(ManifestV1Error::Invalid {
+                    field: "tools.<NAME>",
+                    reason: "tool names and version constraints must be non-empty".to_string(),
+                });
+            }
+            if name
+                .chars()
+                .any(|character| matches!(character, '\0' | '\n' | '\r'))
+                || version
+                    .chars()
+                    .any(|character| matches!(character, '\0' | '\n' | '\r'))
+            {
+                return Err(ManifestV1Error::Invalid {
+                    field: "tools.<NAME>",
+                    reason: "tool names and version constraints must not contain control lines"
+                        .to_string(),
+                });
             }
         }
 
@@ -453,24 +804,10 @@ impl CapsuleManifestV1 {
     pub fn validate_for_interactive_capture(&self) -> Result<(), ManifestV1Error> {
         self.validate()?;
 
-        if !self.tools.is_empty() {
-            return Err(ManifestV1Error::Unsupported {
-                feature: "[tools]",
-                why: "a pinned tool is a dependency, and per-dependency derivation and output \
-                      digests have no producer yet, so its identity could not be measured",
-            });
-        }
-        if self
-            .build
-            .as_ref()
-            .is_some_and(|build| !build.steps.is_empty())
-        {
-            return Err(ManifestV1Error::Unsupported {
-                feature: "[[build.steps]]",
-                why: "a build output has no name and no guest placement in this build, so its \
-                      projection could not be committed",
-            });
-        }
+        // Runtime/tool compatibility is checked by the producer after it has
+        // inspected the pinned source. Build steps are exact argv and mutate
+        // the single exported guest tree whose filesystem.view_digest is
+        // measured below; they do not create an unmeasured side artifact.
         if !self.state.is_empty() {
             return Err(ManifestV1Error::Unsupported {
                 feature: "[state.<name>]",
@@ -841,36 +1178,20 @@ snapshot = "exclude"
         }
     }
 
-    /// Outside the Step-4 subset is a REFUSAL BY NAME, not an approximation —
-    /// and not a parse error either, because these are perfectly good capsules.
+    /// External state still requires an idle lifecycle and is refused by name,
+    /// while tool pins and exact build argv are eligible for measured capture.
     #[test]
-    fn features_outside_the_step_four_subset_are_refused_by_name() {
-        let cases: [(&str, &str); 3] = [
-            (
-                r#"
-[tools]
-python = "3.12""#,
-                "[tools]",
-            ),
-            (
-                r#"
-[[build.steps]]
-command = ["make"]"#,
-                "[[build.steps]]",
-            ),
-            (
-                r#"
-[state.data]
-mount = "/data"
-access = "read-write"
-schema = "s"
-snapshot = "exclude""#,
-                "[state.<name>]",
-            ),
-        ];
-        for (extra, feature) in cases {
-            let manifest = parse(&format!(
-                r#"
+    fn measured_build_inputs_are_allowed_but_external_state_is_refused() {
+        let build_manifest = parse(&format!(
+            "{MINIMAL}\n[tools]\npython = \"3.12\"\n\n[[build.steps]]\ncommand = [\"python\", \"build.py\"]\n"
+        ))
+        .expect("build manifest parses");
+        build_manifest
+            .validate_for_interactive_capture()
+            .expect("tool pin and build result are measured by the producer");
+
+        let manifest = parse(
+            r#"
 schema_version = "1"
 name = "demo"
 version = "0.1.0"
@@ -884,19 +1205,23 @@ bind = "0.0.0.0"
 
 [seal_at]
 command = ["true"]
-{extra}
-"#
-            ))
-            .expect("it PARSES — it is a valid v1 manifest");
-            let error = manifest
-                .validate_for_interactive_capture()
-                .expect_err("outside the subset");
-            match error {
-                ManifestV1Error::Unsupported { feature: named, .. } => {
-                    assert_eq!(named, feature)
-                }
-                other => panic!("expected Unsupported({feature}), got {other}"),
+
+[state.data]
+mount = "/data"
+access = "read-write"
+schema = "s"
+snapshot = "exclude"
+"#,
+        )
+        .expect("state manifest parses");
+        let error = manifest
+            .validate_for_interactive_capture()
+            .expect_err("external state stays outside the subset");
+        match error {
+            ManifestV1Error::Unsupported { feature, .. } => {
+                assert_eq!(feature, "[state.<name>]")
             }
+            other => panic!("expected Unsupported([state.<name>]), got {other}"),
         }
     }
 
@@ -1172,5 +1497,151 @@ timeout_seconds = {seconds}
             CapsuleManifestV1::from_toml(&text).expect("reparse"),
             manifest
         );
+    }
+
+    #[test]
+    fn unified_metadata_is_strict_and_identity_bearing() {
+        let base = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[source]
+root = "."
+ignore = []
+
+[metadata]
+short_description = "First description"
+tags = ["developer-tool"]
+
+[metadata.store]
+category = "developer_tools"
+subcategory = "utilities"
+
+[metadata.assets.icon]
+path = "assets/icon.png"
+
+[metadata.assets.banner]
+url = "https://assets.example/banner.webp"
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect("unified manifest parses");
+        let mut changed = base.clone();
+        changed.metadata.short_description = Some("Second description".to_string());
+        assert_ne!(
+            base.normalized_digest().expect("base digest"),
+            changed.normalized_digest().expect("metadata digest"),
+            "Store metadata is part of the normalized manifest identity"
+        );
+    }
+
+    #[test]
+    fn source_ignore_requires_a_new_signed_source_revision() {
+        let error = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[source]
+ignore = ["!.env", "!keys/id_rsa"]
+
+[run]
+command = ["python"]
+"#,
+        )
+        .expect_err("source scope is not rematerialized by this lane");
+        assert!(
+            matches!(
+                error,
+                ManifestV1Error::Unsupported {
+                    feature: "[source] root/ignore",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ignored_or_traversing_asset_paths_are_refused() {
+        for asset in ["../icon.png", ".env"] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+path = "{asset}"
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("unsafe asset path");
+            assert!(
+                matches!(
+                    error,
+                    ManifestV1Error::Invalid {
+                        field: "metadata.assets.icon",
+                        ..
+                    }
+                ),
+                "{asset}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_asset_locator_requires_exactly_one_known_locator() {
+        for locator in [
+            r#"path = "assets/icon.png"
+url = "https://assets.example/icon.png""#,
+            r#"digest = "sha256:abc""#,
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[metadata.assets.icon]
+{locator}
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("ambiguous or unknown asset locator");
+            assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn source_and_metadata_unknown_fields_are_refused() {
+        for extra in [
+            "[source]\nroot = \".\"\ninclude = [\"src/**\"]",
+            "[metadata]\nshort_description = \"demo\"\nfeatured = true",
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+{extra}
+
+[run]
+command = ["python"]
+"#
+            ))
+            .expect_err("unknown unified manifest field");
+            assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
     }
 }

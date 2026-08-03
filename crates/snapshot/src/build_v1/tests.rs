@@ -623,15 +623,10 @@ fn an_empty_argv_is_refused_before_anything_is_built() {
     assert!(!workspace.dir.path().join("capsule.lock").exists());
 }
 
-/// An empty WORD inside an argv is refused too, and refused early.
-///
-/// `launch.argv` must be resolved, and the contract counts an empty string as
-/// unresolved — so a capsule declaring one could be built but never minted. The
-/// recipe refuses it instead, before a registry round trip and an image build
-/// are spent on something that has no identity, and while the message can still
-/// point at the manifest line rather than at a contract field.
+/// An empty non-program word is a real argv value, not an unresolved field.
+/// It survives the manifest, recipe, producer input, and execution contract.
 #[test]
-fn an_empty_word_inside_the_argv_is_refused_before_anything_is_built() {
+fn an_empty_non_program_word_survives_into_the_execution_contract() {
     let manifest = minimal_manifest("").replace(
         r#"command = ["python3", "app.py"]"#,
         r#"command = ["python3", "", "app.py"]"#,
@@ -639,13 +634,21 @@ fn an_empty_word_inside_the_argv_is_refused_before_anything_is_built() {
     let workspace = Workspace::new(&manifest);
     let producer = FakeProducer::healthy();
 
-    let error = workspace.build(&producer).expect_err("refused");
-    assert!(
-        matches!(error, V1BuildError::RecipeDerivationFailed { .. }),
-        "{error:?}"
+    workspace.build(&producer).expect("empty argument is valid");
+    let contract = workspace
+        .lock()
+        .execution_contract
+        .expect("execution envelope")
+        .execution_contract;
+    assert_eq!(contract.launch.argv, ["python3", "", "app.py"]);
+    assert_eq!(
+        producer.log().assembled_argv,
+        [vec![
+            "python3".to_string(),
+            "".to_string(),
+            "app.py".to_string()
+        ]]
     );
-    assert!(format!("{error}").contains("argv[1] is empty"), "{error}");
-    assert!(producer.log().resolved_images.is_empty());
 }
 
 // ── The runtime artifact ─────────────────────────────────────────────────────
@@ -968,11 +971,13 @@ fn a_secret_named_env_value_is_refused_before_anything_is_built() {
 /// A capsule outside the Step-4 subset never reaches a measurement.
 #[test]
 fn a_capsule_outside_the_subset_is_refused_before_measuring() {
-    let workspace = Workspace::new(&minimal_manifest("\n[tools]\npython = \"3.12\"\n"));
+    let workspace = Workspace::new(&minimal_manifest(
+        "\n[state.data]\nmount = \"/data\"\naccess = \"read-write\"\nschema = \"v1\"\nsnapshot = \"exclude\"\n",
+    ));
     let producer = FakeProducer::healthy();
 
     let error = workspace.build(&producer).expect_err("refused");
-    assert!(format!("{error}").contains("[tools]"), "{error}");
+    assert!(format!("{error}").contains("[state.<name>]"), "{error}");
     assert!(producer.log().resolved_images.is_empty());
 }
 

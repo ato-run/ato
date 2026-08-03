@@ -93,9 +93,10 @@ const SEALED_WRITABLE_PATHS: &[&str] = &["/run", "/tmp", "/var/tmp"];
 /// Assemble the observation. Every facet is set — `into_contract` requires all
 /// of them, and a facet left unset would refuse the mint rather than default.
 pub fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV1> {
-    // The subset gate has already run, so these are genuinely empty rather than
-    // unmeasured: the manifest declares no dependencies, no build outputs and
-    // no external state, and a manifest that did would have been refused.
+    // The subset gate has already run. Tool pins select the measured primary
+    // runtime and authored build commands mutate the exported rootfs committed
+    // by filesystem.view_digest; neither creates a separate dependency or
+    // named build-output artifact. External state is still refused.
     build
         .manifest
         .validate_for_interactive_capture()
@@ -438,7 +439,9 @@ required = true
     #[test]
     fn a_capsule_outside_the_subset_is_refused_before_measuring() {
         let error = observe_v1(V1BuildObservation {
-            manifest: &manifest("\n[tools]\npython = \"3.12\"\n"),
+            manifest: &manifest(
+                "\n[state.data]\nmount = \"/data\"\naccess = \"read-write\"\nschema = \"v1\"\nsnapshot = \"exclude\"\n",
+            ),
             source_digest: ContentDigest::new(DigestAlgorithm::Blake3, [7u8; 32]),
             excluded_control_files: vec!["capsule.toml".into()],
             runtime_kind: "python".into(),
@@ -450,6 +453,6 @@ required = true
             working_directory: "/app".into(),
         })
         .expect_err("outside the subset");
-        assert!(format!("{error:#}").contains("[tools]"), "{error:#}");
+        assert!(format!("{error:#}").contains("[state.<name>]"), "{error:#}");
     }
 }

@@ -91,6 +91,19 @@ const NETWORK_MODEL: &str = "tap";
 /// that hasn't reached readiness in 10 min is wedged; the cap keeps a single job
 /// from pinning the builder forever regardless of what the job requests.
 const MAX_JOB_BOOT_TIMEOUT_S: u64 = 600;
+const FC_API_READ_TIMEOUT: Duration = Duration::from_secs(15);
+// Firecracker writes the complete guest memory image before replying to this
+// synchronous call. A 6 GiB staging guest routinely takes more than the normal
+// 15-second control-plane budget, so keep this operation bounded separately.
+const FC_SNAPSHOT_CREATE_READ_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn fc_api_read_timeout(method: &str, path: &str) -> Duration {
+    if method == "PUT" && path == "/snapshot/create" {
+        FC_SNAPSHOT_CREATE_READ_TIMEOUT
+    } else {
+        FC_API_READ_TIMEOUT
+    }
+}
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
@@ -1625,6 +1638,7 @@ fn fc_request(
     _method: &str,
     _path: &str,
     _body: Option<&str>,
+    _read_timeout: Duration,
 ) -> std::io::Result<(u16, String)> {
     Err(std::io::Error::other(
         "Firecracker is only supported on Unix hosts",
@@ -1637,9 +1651,10 @@ fn fc_request(
     method: &str,
     path: &str,
     body: Option<&str>,
+    read_timeout: Duration,
 ) -> std::io::Result<(u16, String)> {
     let mut stream = UnixStream::connect(sock)?;
-    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     let body = body.unwrap_or("");
     let req = format!(
@@ -1709,8 +1724,14 @@ impl FcProcess {
         path: &str,
         body: Option<&str>,
     ) -> Result<(), SnapshotError> {
-        let (status, text) = fc_request(&self.sock, method, path, body)
-            .map_err(|e| b.backend_err(format!("api {method} {path}: {e}")))?;
+        let (status, text) = fc_request(
+            &self.sock,
+            method,
+            path,
+            body,
+            fc_api_read_timeout(method, path),
+        )
+        .map_err(|e| b.backend_err(format!("api {method} {path}: {e}")))?;
         if (200..300).contains(&status) {
             Ok(())
         } else {
@@ -3463,6 +3484,19 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_create_uses_a_longer_bounded_api_timeout() {
+        assert_eq!(
+            fc_api_read_timeout("PUT", "/snapshot/create"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(fc_api_read_timeout("PATCH", "/vm"), Duration::from_secs(15));
+        assert_eq!(
+            fc_api_read_timeout("PUT", "/snapshot/load"),
+            Duration::from_secs(15)
+        );
+    }
 
     // ── readiness status classification: 2xx/3xx = the app answered ──
 

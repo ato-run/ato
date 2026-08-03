@@ -33,7 +33,7 @@
 //! released for acceptance. See its doc for why continuing to relay there would
 //! be actively wrong rather than merely useless.
 
-use std::io::{self};
+use std::io::{self, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +47,12 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Advisory only. It is sized to one cold disposable restore plus the author's
 /// `seal_at` command, which is the window the gate is open for.
 const VERIFICATION_RETRY_AFTER_SECS: u32 = 15;
+
+/// Bound the bytes and time spent draining a gated request after sending 503.
+/// Draining prevents an unread request from turning the graceful response into
+/// a TCP reset on platforms such as macOS.
+const GATE_REQUEST_DRAIN_LIMIT: u64 = 64 * 1024;
+const GATE_REQUEST_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A running relay: `listen` -> the held guest.
 pub struct HoldIngress {
@@ -176,8 +182,16 @@ fn accept_loop(
         // rather than once, because the gate closes while the loop is parked in
         // `accept()` and every connection after that point must be refused.
         if gated.load(Ordering::SeqCst) {
-            let _ = write_verification_gate_response(&client);
-            let _ = client.shutdown(Shutdown::Both);
+            // Keep the accept loop responsive while the connection drains. A
+            // peer can otherwise hold every later preview request behind this
+            // bounded graceful-close window.
+            let _ = std::thread::Builder::new()
+                .name("ato-hold-ingress-gate".to_string())
+                .spawn(move || {
+                    if let Err(error) = write_verification_gate_response(client) {
+                        eprintln!("[builder] hold ingress gate response ended: {error}");
+                    }
+                });
             continue;
         }
         let upstream = upstream.clone();
@@ -206,8 +220,7 @@ fn accept_loop(
 /// `Connection: close` and a fixed `Content-Length`: the client is a browser
 /// that may be mid-keepalive, and a partial or unframed reply would render as a
 /// network error — the exact thing the gate exists to avoid.
-fn write_verification_gate_response(client: &TcpStream) -> io::Result<()> {
-    use std::io::Write;
+fn write_verification_gate_response(mut client: TcpStream) -> io::Result<()> {
     const BODY: &str = "Verifying this capsule's snapshot. The preview returns when it finishes.";
     let response = format!(
         "HTTP/1.1 503 Service Unavailable\r\n\
@@ -220,9 +233,27 @@ fn write_verification_gate_response(client: &TcpStream) -> io::Result<()> {
          {BODY}",
         BODY.len()
     );
-    let mut w = client;
-    w.write_all(response.as_bytes())?;
-    w.flush()
+    client.write_all(response.as_bytes())?;
+    client.flush()?;
+    client.shutdown(Shutdown::Write)?;
+
+    // Closing a socket with unread peer data may emit RST and discard the 503
+    // the browser is supposed to see. Drain only a small bounded window: this
+    // is connection hygiene, not HTTP parsing, and never reaches the guest.
+    client.set_read_timeout(Some(GATE_REQUEST_DRAIN_TIMEOUT))?;
+    let mut request = (&mut client).take(GATE_REQUEST_DRAIN_LIMIT);
+    match io::copy(&mut request, &mut io::sink()) {
+        Ok(_) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Pipe one client connection to the guest, both directions, until either ends.
