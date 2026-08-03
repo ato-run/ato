@@ -2304,6 +2304,19 @@ impl AppState {
                     .find(|(k, _)| k == "handle")
                     .map(|(_, v)| v.into_owned())
             {
+                // Retired web share links must not leave an empty tab behind —
+                // show the guidance instead of creating one.
+                if is_retired_share_link(&handle) {
+                    self.push_activity(
+                        ActivityTone::Error,
+                        "This workspace share link has been retired. Web sharing ".to_string()
+                            + "(`ato.run/s/<id>`) was removed; ask the sender for "
+                            + "`share.spec.json` and `share.lock.json`, then run "
+                            + "`ato run ./share.spec.json` or "
+                            + "`ato workspace setup ./share.spec.json --into ./workspace`.",
+                    );
+                    return;
+                }
                 self.push_activity(
                     ActivityTone::Info,
                     format!("Opening capsule from deep link: {handle}"),
@@ -4797,6 +4810,27 @@ mod tests {
                 .iter()
                 .any(|e| e.message.contains("retired") && e.message.contains("share.spec.json")),
             "activity log must carry the migration guidance"
+        );
+    }
+
+    #[test]
+    fn host_route_open_with_retired_share_handle_does_not_create_tab() {
+        let mut state = AppState::demo();
+        let initial_task_count = state.active_workspace().expect("workspace").tasks.len();
+
+        state.handle_host_route("ato://open?handle=https%3A%2F%2Fato.run%2Fs%2Fabc123");
+
+        assert_eq!(
+            state.active_workspace().expect("workspace").tasks.len(),
+            initial_task_count,
+            "ato://open?handle=<retired share> must not leave an empty tab behind"
+        );
+        assert!(
+            state
+                .activity
+                .iter()
+                .any(|e| e.message.contains("retired") && e.message.contains("share.spec.json")),
+            "deep-link path must show the migration guidance"
         );
     }
 
