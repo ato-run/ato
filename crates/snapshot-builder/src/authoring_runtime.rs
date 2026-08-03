@@ -112,6 +112,11 @@ pub struct AuthoringWork {
     pub clean_replay_receipt: Option<CleanReplayReceiptV1>,
     #[serde(default)]
     pub classified_state_diff: Option<ClassifiedStateDiffV1>,
+    /// Existing seal evidence is present on the shared Authoring claim shape
+    /// even when the current operation is a clean Build Attempt. Keep it in
+    /// the strict decoder so unrelated optional evidence cannot break claims.
+    #[serde(default, rename = "ready_state_seal_receipt")]
+    pub _ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
     pub lease_token: AuthoringLeaseToken,
     #[serde(rename = "lease_expires_at")]
     pub _lease_expires_at: String,
@@ -1082,6 +1087,7 @@ timeout_seconds = 60
             "normalized_program_intent": normalized,
             "effective_build_plan": plan,
             "plan_digest": plan_digest,
+            "ready_state_seal_receipt": null,
             "lease_token": "lease-token-with-at-least-thirty-two-bytes",
             "lease_expires_at": "2026-08-03T00:00:00.000Z",
             "trace_id": "trace_contract"
