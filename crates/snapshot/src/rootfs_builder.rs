@@ -40,6 +40,19 @@ pub enum RuntimeKind {
     Python,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Receives bounded chunks from the container build as they are produced.
+/// Implementations must not retain `bytes`; returning an error makes the build
+/// fail closed because an immutable attempt may not silently lose its log.
+pub trait BuildOutputSink {
+    fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String>;
+}
+
 /// A cheap probe of the source tree, so [`derive_build_spec`] stays pure + testable
 /// without a real checkout. Populated by [`SourceProbe::scan`] over the materialized dir.
 #[derive(Debug, Clone, Default)]
@@ -422,6 +435,11 @@ pub struct RootfsBuildSpecV1 {
     pub runtime: RuntimeKind,
     pub base_image: String,
     pub install_cmd: Option<String>,
+    /// Authored build commands, in declaration order. Every entry remains an
+    /// exact argv and is emitted with Dockerfile exec-form `RUN`.
+    pub build_steps: Vec<Vec<String>>,
+    /// Authored non-secret environment values baked into the guest launch.
+    pub environment: BTreeMap<String, String>,
     /// argv the runtime prepends to the authored command.
     ///
     /// Nothing for every family in the Step-4 subset, and that is a measurement
@@ -439,9 +457,9 @@ pub struct RootfsBuildSpecV1 {
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
 ///
-/// Fail-closed on everything the Step-4 subset does not cover — the subset gate
-/// runs first, so a manifest with `[tools]`, `[[build.steps]]` or `[state.*]`
-/// never reaches the runtime detection below.
+/// Fail-closed on everything the interactive capture subset does not cover.
+/// Runtime selection can only pin the primary detected runtime; the exported
+/// rootfs digest commits the effects of every exact-argv build step.
 pub fn derive_build_spec_v1(
     m: &capsule::types::manifest_v1::CapsuleManifestV1,
     probe: &SourceProbe,
@@ -456,7 +474,7 @@ pub fn derive_build_spec_v1(
 
     // v1 has no driver/language hints — the tree is the whole declaration.
     let runtime = detect_runtime_kind("", "", probe)?;
-    let (base_image, install_cmd) = base_image_and_install(runtime, probe);
+    let (base_image, _) = v1_base_image_and_install(runtime, probe, &m.tools)?;
 
     let authored = &m.run.command;
     if authored.is_empty() {
@@ -467,16 +485,10 @@ pub fn derive_build_spec_v1(
     // at derivation rather than escaping at emission (fail-closed).
     for (index, word) in authored.iter().enumerate() {
         reject_control_chars(&format!("[run] command argv[{index}]"), word)?;
-        // The Execution Contract refuses an empty or whitespace-only argv word
-        // (`launch.argv` must be resolved). Refusing it here means the recipe
-        // never builds an image whose identity could not be minted — the same
-        // refusal, before anything is spent on it, and pointing at the manifest
-        // line rather than at a contract field.
-        if word.trim().is_empty() {
-            return Err(format!(
-                "[run] command argv[{index}] is empty; every word of an exact argv must \
-                 resolve to something, so an empty argument cannot be committed"
-            ));
+        // argv[0] identifies the executable. Later empty words are valid exact
+        // arguments and must survive materialization unchanged.
+        if index == 0 && word.trim().is_empty() {
+            return Err("[run] command argv[0] is empty; an executable is required".to_string());
         }
     }
 
@@ -493,7 +505,22 @@ pub fn derive_build_spec_v1(
     Ok(RootfsBuildSpecV1 {
         runtime,
         base_image,
-        install_cmd,
+        // v1 is declare-first: dependency installation is an authored build
+        // step. Source-probe heuristics must never create a hidden RUN command
+        // that is absent from the Effective Build Plan.
+        install_cmd: None,
+        build_steps: m
+            .build
+            .as_ref()
+            .map(|build| {
+                build
+                    .steps
+                    .iter()
+                    .map(|step| step.command.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        environment: m.env.clone(),
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
@@ -542,7 +569,53 @@ pub(crate) fn assemble_app_image_script_v1(
     pinned_base_ref: &str,
     tool: &str,
 ) -> String {
-    let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, false)
+}
+
+fn assemble_app_image_script_v1_mode(
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    tool: &str,
+    live_output: bool,
+) -> String {
+    let install_step = spec
+        .install_cmd
+        .as_deref()
+        .map(|command| format!("RUN /bin/sh -lc {}", shell_single_quote(command)))
+        .unwrap_or_default();
+    let build_steps = spec
+        .build_steps
+        .iter()
+        .enumerate()
+        .map(|(index, argv)| {
+            if live_output {
+                let step_id = format!("build.user.{}", index + 1);
+                let wrapper = format!(
+                    "printf '\\036ATO_STEP_START:{step_id}\\037\\n'; \
+                     \"$@\"; ato_status=$?; \
+                     printf '\\036ATO_STEP_END:{step_id}:%s\\037\\n' \"$ato_status\"; \
+                     exit \"$ato_status\""
+                );
+                let mut wrapped = vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    wrapper,
+                    "ato-step".to_string(),
+                ];
+                wrapped.extend(argv.iter().cloned());
+                return format!(
+                    "RUN {}",
+                    serde_json::to_string(&wrapped)
+                        .expect("a wrapped argv always serializes as JSON")
+                );
+            }
+            format!(
+                "RUN {}",
+                serde_json::to_string(argv).expect("an argv always serializes as JSON")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     // The projection goes in a SUBDIRECTORY of the build context, and the
     // generated Dockerfile sits beside it rather than inside it.
     //
@@ -556,6 +629,11 @@ pub(crate) fn assemble_app_image_script_v1(
     // a repository with no Dockerfile would still get one at `/app` that is not
     // in the projection. Copying `src/.` makes the guest's `{workdir}` exactly
     // the projection, byte for byte.
+    let build_invocation = if live_output {
+        format!(r#"{tool} build --no-cache -t "$ATO_IMAGE" "$BUILD""#)
+    } else {
+        format!(r#"{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null"#)
+    };
     format!(
         r#"set -euo pipefail
 BUILD=$(mktemp -d)
@@ -570,14 +648,16 @@ cat > "$BUILD/Dockerfile" <<'DOCKER'
 FROM {base}
 WORKDIR {workdir}
 COPY src/. {workdir}/
-RUN /bin/sh -lc {install_q}
+{install_step}
+{build_steps}
 DOCKER
-{tool} build -q -t "$ATO_IMAGE" "$BUILD" >/dev/null
+{build_invocation}
 "#,
-        tool = tool,
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
-        install_q = install_q,
+        install_step = install_step,
+        build_steps = build_steps,
+        build_invocation = build_invocation,
     )
 }
 
@@ -612,6 +692,11 @@ pub const V1_GUEST_IMAGE_EPOCH: &str = "1";
 ///
 /// env: `ATO_IMAGE`, `ATO_ROOTFS` (must exist and be empty).
 pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str) -> String {
+    let authored_environment = spec
+        .environment
+        .iter()
+        .map(|(name, value)| format!("export {name}={}\n", shell_single_quote(value)))
+        .collect::<String>();
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
@@ -633,7 +718,7 @@ cat > "$ATO_ROOTFS/sbin/init" <<'INIT'
 #!/bin/sh
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
-mount -t proc proc /proc 2>/dev/null
+{authored_environment}mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 mount -t tmpfs tmpfs /tmp 2>/dev/null
@@ -654,6 +739,7 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
+        authored_environment = authored_environment,
     )
 }
 
@@ -761,6 +847,31 @@ pub fn assemble_app_image_v1(
             ("ATO_SRC", projected_source.as_os_str().to_os_string()),
             ("ATO_IMAGE", image_ref.into()),
         ],
+    )?;
+    Ok(AssembledGuestImage {
+        image_ref: image_ref.to_string(),
+    })
+}
+
+pub fn assemble_app_image_v1_with_output(
+    projected_source: &Path,
+    spec: &RootfsBuildSpecV1,
+    pinned_base_ref: &str,
+    image_ref: &str,
+    tool: &str,
+    output: &mut dyn BuildOutputSink,
+) -> Result<AssembledGuestImage, String> {
+    reject_control_chars("pinned base image reference", pinned_base_ref)?;
+    reject_control_chars("assembled image reference", image_ref)?;
+    let script = assemble_app_image_script_v1_mode(spec, pinned_base_ref, tool, true);
+    run_builder_script_with_output(
+        "assemble app image",
+        &script,
+        &[
+            ("ATO_SRC", projected_source.as_os_str().to_os_string()),
+            ("ATO_IMAGE", image_ref.into()),
+        ],
+        output,
     )?;
     Ok(AssembledGuestImage {
         image_ref: image_ref.to_string(),
@@ -916,6 +1027,110 @@ fn run_builder_script(
     Err(format!("{stage} failed: {tail}"))
 }
 
+fn run_builder_script_with_output(
+    stage: &str,
+    script: &str,
+    env: &[(&str, std::ffi::OsString)],
+    output: &mut dyn BuildOutputSink,
+) -> Result<(), String> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut command = Command::new("bash");
+    command
+        .arg("-c")
+        .arg(script)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("spawn {stage}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("capture {stage} stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("capture {stage} stderr"))?;
+    fn spawn_reader<R: Read + Send + 'static>(
+        stream: BuildOutputStream,
+        mut pipe: R,
+        sender: std::sync::mpsc::SyncSender<(BuildOutputStream, Vec<u8>)>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let mut buffer = [0_u8; 8 * 1024];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        if sender.send((stream, buffer[..count].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send((
+                            stream,
+                            format!("Ato could not read build output: {error}\n").into_bytes(),
+                        ));
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(256);
+    let readers = vec![
+        spawn_reader(BuildOutputStream::Stdout, stdout, sender.clone()),
+        spawn_reader(BuildOutputStream::Stderr, stderr, sender.clone()),
+    ];
+    drop(sender);
+
+    let mut telemetry_error = None;
+    let mut stderr_tail = Vec::new();
+    for (stream, bytes) in receiver {
+        if stream == BuildOutputStream::Stderr {
+            stderr_tail.extend_from_slice(&bytes);
+            if stderr_tail.len() > 32 * 1024 {
+                stderr_tail.drain(..stderr_tail.len() - 32 * 1024);
+            }
+        }
+        if telemetry_error.is_none()
+            && let Err(error) = output.write(stream, &bytes)
+        {
+            telemetry_error = Some(error);
+        }
+    }
+    for reader in readers {
+        if reader.join().is_err() && telemetry_error.is_none() {
+            telemetry_error = Some("a build output reader panicked".to_string());
+        }
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for {stage}: {error}"))?;
+    if let Some(error) = telemetry_error {
+        return Err(format!("stream {stage} output: {error}"));
+    }
+    if status.success() {
+        return Ok(());
+    }
+    let tail = String::from_utf8_lossy(&stderr_tail)
+        .lines()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!("{stage} failed: {tail}"))
+}
+
 /// Which runtime family a source tree belongs to.
 ///
 /// Shared by the v0.3 recipe path and the v1 authoring surface so the two can
@@ -978,6 +1193,36 @@ pub(crate) fn base_image_and_install(
             }),
         ),
     }
+}
+
+fn v1_base_image_and_install(
+    runtime: RuntimeKind,
+    probe: &SourceProbe,
+    tools: &BTreeMap<String, String>,
+) -> Result<(String, Option<String>), String> {
+    let primary = match runtime {
+        RuntimeKind::Node => "node",
+        RuntimeKind::Python | RuntimeKind::StaticWeb => "python",
+    };
+    if let Some(unsupported) = tools.keys().find(|name| name.as_str() != primary) {
+        return Err(format!(
+            "[tools].{unsupported} is not the detected primary runtime {primary}; \
+             interactive capture currently pins only the primary runtime"
+        ));
+    }
+    let (mut base_image, install) = base_image_and_install(runtime, probe);
+    if let Some(version) = tools.get(primary) {
+        if !version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'+' | b'-'))
+        {
+            return Err(format!(
+                "[tools].{primary} version {version:?} contains unsupported characters"
+            ));
+        }
+        base_image = format!("{primary}:{version}-slim");
+    }
+    Ok((base_image, install))
 }
 
 /// A POSIX-ish environment variable name: `^[A-Za-z_][A-Za-z0-9_]*$`. The name is
@@ -2694,6 +2939,97 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         );
         assert!(spec.runtime_invocation_prefix.words().is_empty());
         assert_eq!(spec.resolved_argv, ["python3", "app.py"]);
+        assert_eq!(
+            spec.install_cmd, None,
+            "v1 must not infer hidden install RUNs"
+        );
+    }
+
+    #[test]
+    fn a_v1_spec_preserves_an_empty_non_program_argument() {
+        let manifest =
+            V1_MINIMAL.replace(r#"["python3", "app.py"]"#, r#"["python3", "app.py", ""]"#);
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.resolved_argv, ["python3", "app.py", ""]);
+    }
+
+    #[test]
+    fn v1_tool_pin_and_build_steps_drive_the_measured_guest() {
+        let manifest = V1_MINIMAL.replace(
+            "[run]",
+            "[tools]\npython = \"3.12\"\n\n[[build.steps]]\ncommand = [\"python3\", \"build.py\", \"arg with space\"]\n\n[run]",
+        );
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        assert_eq!(spec.base_image, "python:3.12-slim");
+        assert_eq!(
+            spec.build_steps,
+            [vec![
+                "python3".to_string(),
+                "build.py".to_string(),
+                "arg with space".to_string(),
+            ]]
+        );
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        assert!(
+            script.contains(r#"RUN ["python3","build.py","arg with space"]"#),
+            "build argv must use Dockerfile exec form: {script}"
+        );
+        let live = assemble_app_image_script_v1_mode(&spec, PINNED_BASE, "docker", true);
+        assert!(live.contains("ATO_STEP_START:build.user.1"), "{live}");
+        assert!(live.contains("ATO_STEP_END:build.user.1"), "{live}");
+        assert!(
+            live.contains(r#","ato-step","python3","build.py","arg with space"]"#),
+            "the wrapper must pass the exact authored argv through \"$@\": {live}"
+        );
+    }
+
+    #[derive(Default)]
+    struct CapturingOutput {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+
+    impl BuildOutputSink for CapturingOutput {
+        fn write(&mut self, stream: BuildOutputStream, bytes: &[u8]) -> Result<(), String> {
+            match stream {
+                BuildOutputStream::Stdout => self.stdout.extend_from_slice(bytes),
+                BuildOutputStream::Stderr => self.stderr.extend_from_slice(bytes),
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn builder_script_streams_stdout_and_stderr_before_returning() {
+        let mut output = CapturingOutput::default();
+        run_builder_script_with_output(
+            "stream test",
+            "printf 'one\\ntwo\\n'; printf 'warning\\n' >&2",
+            &[],
+            &mut output,
+        )
+        .expect("script succeeds");
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "one\ntwo\n");
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "warning\n");
+    }
+
+    #[test]
+    fn v1_refuses_a_secondary_tool_it_cannot_provision() {
+        let manifest = V1_MINIMAL.replace("[run]", "[tools]\nnode = \"22\"\n\n[run]");
+        let error = derive_build_spec_v1(&v1(&manifest), &python_probe())
+            .expect_err("python source cannot claim an unprovisioned node tool");
+        assert!(error.contains("detected primary runtime python"), "{error}");
+    }
+
+    #[test]
+    fn v1_authored_environment_is_exported_without_shell_reparsing() {
+        let manifest = V1_MINIMAL.replace("[run]", "[env]\nGREETING = \"hello 'world'\"\n\n[run]");
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        let script = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(
+            script.contains(r#"export GREETING='hello '\''world'\'''"#),
+            "{script}"
+        );
     }
 
     /// v0.3 rewrites a bare `app.py` into `python3 app.py` because its command

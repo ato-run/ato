@@ -63,9 +63,10 @@ use crate::docker_import::{
 };
 use crate::guest_filesystem_digest::guest_filesystem_digest;
 use crate::rootfs_builder::{
-    AssembledGuestImage, RootfsBuildSpecV1, SourceProbe, V1_GUEST_WORKING_DIRECTORY,
-    assemble_app_image_v1, derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1,
-    mkfs_guest_rootfs_v1, v1_filesystem_uuid,
+    AssembledGuestImage, BuildOutputSink, RootfsBuildSpecV1, SourceProbe,
+    V1_GUEST_WORKING_DIRECTORY, assemble_app_image_v1, assemble_app_image_v1_with_output,
+    derive_build_spec_v1, discard_app_image_v1, export_guest_rootfs_v1, mkfs_guest_rootfs_v1,
+    v1_filesystem_uuid,
 };
 use crate::v1_materialization::{V1MaterializationReceipt, measure_guest_artifact, target_triple};
 use capsule::capsule_lock::{self, CapsuleLock, LockEnvironmentValue, LockLaunchSection};
@@ -334,25 +335,39 @@ pub trait V1GuestProducer {
 /// base image and measuring the guest go through one tool's local image store,
 /// and building through another's would look up a digest in a store that does
 /// not hold the image the build produced.
-pub struct HostV1GuestProducer {
+pub struct HostV1GuestProducer<'output> {
     runner: crate::docker_import::build::SystemImportCommandRunner,
     tool: BuildTool,
+    output: Option<std::cell::RefCell<&'output mut dyn BuildOutputSink>>,
 }
 
-impl HostV1GuestProducer {
+impl HostV1GuestProducer<'static> {
     /// Probe the builder host for its container tool. Fails closed when none is
     /// available rather than deferring the discovery to a half-run build.
     pub fn probe() -> Result<Self, String> {
+        Self::probe_with_optional_output(None)
+    }
+}
+
+impl<'output> HostV1GuestProducer<'output> {
+    pub fn probe_with_output(output: &'output mut dyn BuildOutputSink) -> Result<Self, String> {
+        Self::probe_with_optional_output(Some(output))
+    }
+
+    pub fn probe_with_optional_output(
+        output: Option<&'output mut dyn BuildOutputSink>,
+    ) -> Result<Self, String> {
         let runner = crate::docker_import::build::SystemImportCommandRunner;
         let probe = crate::docker_import::build::probe_build_tool(&runner)?;
         Ok(Self {
             runner,
             tool: probe.tool,
+            output: output.map(std::cell::RefCell::new),
         })
     }
 }
 
-impl V1GuestProducer for HostV1GuestProducer {
+impl V1GuestProducer for HostV1GuestProducer<'_> {
     fn assemble(
         &self,
         projected_source: &Path,
@@ -360,13 +375,23 @@ impl V1GuestProducer for HostV1GuestProducer {
         pinned_base_ref: &str,
         image_ref: &str,
     ) -> Result<AssembledGuestImage, String> {
-        assemble_app_image_v1(
-            projected_source,
-            spec,
-            pinned_base_ref,
-            image_ref,
-            self.tool.as_str(),
-        )
+        match &self.output {
+            Some(output) => assemble_app_image_v1_with_output(
+                projected_source,
+                spec,
+                pinned_base_ref,
+                image_ref,
+                self.tool.as_str(),
+                &mut **output.borrow_mut(),
+            ),
+            None => assemble_app_image_v1(
+                projected_source,
+                spec,
+                pinned_base_ref,
+                image_ref,
+                self.tool.as_str(),
+            ),
+        }
     }
 
     fn measure_target(&self, image_ref: &str) -> Result<ResolvedTargetContract, String> {

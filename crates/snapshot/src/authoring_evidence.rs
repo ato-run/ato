@@ -28,7 +28,10 @@ pub struct CleanReplayRequestV1 {
     #[serde(default)]
     pub source_overlays: Vec<SourceOverlayArtifactV1>,
     pub normalized_program_intent: NormalizedProgramIntentEnvelopeV1,
-    pub resolution_lock_digest: String,
+    /// Present on retries to pin the resolver output observed by a previous
+    /// successful attempt. The first Build Attempt resolves and records it.
+    #[serde(default)]
+    pub resolution_lock_digest: Option<String>,
     #[serde(default)]
     pub allowed_cache_digests: Vec<String>,
 }
@@ -120,6 +123,7 @@ pub struct CleanReplayObservationV1 {
     pub builder_identity: String,
     pub materialization_inputs_digest: String,
     pub execution_contract_digest: String,
+    pub resolution_lock_digest: String,
     pub readiness: ReadinessResultV1,
     pub isolation: EffectiveIsolationPostureV1,
     pub state_diff: Vec<StateDiffEntryV1>,
@@ -157,6 +161,19 @@ pub fn execute_clean_replay(
         "execution_contract_digest",
         &observation.execution_contract_digest,
     )?;
+    validate_digest(
+        "resolution_lock_digest",
+        &observation.resolution_lock_digest,
+    )?;
+    if request
+        .resolution_lock_digest
+        .as_deref()
+        .is_some_and(|expected| expected != observation.resolution_lock_digest)
+    {
+        return Err(AuthoringEvidenceError::Adapter(
+            "fresh resolver output does not match the pinned Resolution Lock".to_string(),
+        ));
+    }
     let classified = classify_state_diff(
         &observation.state_diff,
         &request.normalized_program_intent.intent.build_output_roots,
@@ -169,7 +186,7 @@ pub fn execute_clean_replay(
         capsule_revision_id: request.capsule_revision_id.clone(),
         source_closure_id: request.source_closure_id.clone(),
         program_intent_digest: request.normalized_program_intent.digest.clone(),
-        resolution_lock_digest: request.resolution_lock_digest.clone(),
+        resolution_lock_digest: observation.resolution_lock_digest,
         previous_receipt_digest: request.previous_receipt_digest.clone(),
         builder_identity: observation.builder_identity,
         materialization_inputs_digest: observation.materialization_inputs_digest,
@@ -761,7 +778,9 @@ fn validate_replay_request(request: &CleanReplayRequestV1) -> Result<(), Authori
         "normalized_program_intent.digest",
         &request.normalized_program_intent.digest,
     )?;
-    validate_digest("resolution_lock_digest", &request.resolution_lock_digest)?;
+    if let Some(expected) = request.resolution_lock_digest.as_deref() {
+        validate_digest("resolution_lock_digest", expected)?;
+    }
     validate_digest("previous_receipt_digest", &request.previous_receipt_digest)?;
     for overlay in &request.source_overlays {
         validate_digest("source_overlay.content_digest", &overlay.content_digest)?;
@@ -946,7 +965,7 @@ mod tests {
                 },
                 digest: digest('a'),
             },
-            resolution_lock_digest: digest('b'),
+            resolution_lock_digest: Some(digest('b')),
             allowed_cache_digests: vec![digest('c')],
         }
     }
@@ -963,6 +982,7 @@ mod tests {
                 builder_identity: "builder:test".to_string(),
                 materialization_inputs_digest: digest('d'),
                 execution_contract_digest: digest('e'),
+                resolution_lock_digest: digest('b'),
                 readiness: ReadinessResultV1 {
                     ready: true,
                     probe_digest: digest('f'),
@@ -1082,6 +1102,37 @@ mod tests {
         assert_eq!(payload.previous_receipt_digest, digest('9'));
         assert_eq!(classified.entries[0].class, StateDiffClassV1::BuildOutput);
         assert!(classified.entries[0].include_in_seal);
+    }
+
+    #[test]
+    fn first_build_attempt_records_the_observed_resolution_lock() {
+        let mut request = request();
+        request.resolution_lock_digest = None;
+        let mut adapter = ReplayAdapter {
+            isolation: isolated(),
+            diff: Vec::new(),
+        };
+
+        let (receipt, _) = execute_clean_replay(&mut adapter, &request).expect("first attempt");
+
+        assert_eq!(
+            receipt.payload().expect("payload").resolution_lock_digest,
+            digest('b')
+        );
+    }
+
+    #[test]
+    fn retry_refuses_resolution_lock_drift() {
+        let mut request = request();
+        request.resolution_lock_digest = Some(digest('c'));
+        let mut adapter = ReplayAdapter {
+            isolation: isolated(),
+            diff: Vec::new(),
+        };
+
+        let error = execute_clean_replay(&mut adapter, &request).expect_err("lock drift");
+
+        assert!(error.to_string().contains("does not match"));
     }
 
     #[test]
