@@ -18,7 +18,10 @@ use tracing::{error, info, warn};
 
 use crate::error::{CapsuleError, Result};
 
-use super::types::{SHARE_STATE_FILE, ShareEntrySpec, ShareSpec, WorkspaceShareState};
+use super::types::{
+    SHARE_LOCK_FILE, SHARE_SPEC_FILE, SHARE_STATE_FILE, ShareEntrySpec, ShareSpec,
+    WorkspaceShareState,
+};
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -75,8 +78,13 @@ pub enum ShareExecutionResult {
 /// 2. Reads the entry from the materialized spec
 /// 3. Spawns nacelle with the entry command
 pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
+    // Step 0: Content identity — binds the workspace cache to the actual
+    // spec/lock content so `ato run ./share.spec.json` from different projects
+    // (or an edited file at the same path) never aliases each other.
+    let identity = local_share_identity(&request.input)?;
+
     // Step 1: Create workspace directory
-    let workspace = share_workspace_dir(&request.input)?;
+    let workspace = share_workspace_dir(&identity)?;
     std::fs::create_dir_all(&workspace).map_err(|e| {
         CapsuleError::Runtime(format!(
             "failed to create workspace {}: {e}",
@@ -86,7 +94,7 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
 
     // Step 2: Materialize via ato workspace setup
     let ato_bin = resolve_ato_binary(request.ato_path.as_deref())?;
-    materialize_into(&ato_bin, &request.input, &workspace)?;
+    materialize_into(&ato_bin, &request.input, &workspace, &identity)?;
 
     // Step 3: Read materialized state to find the spec
     let spec = load_materialized_spec(&workspace)?;
@@ -145,37 +153,109 @@ pub fn execute_share(request: ShareRunRequest) -> Result<ShareExecutionResult> {
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
 
-/// Compute a stable workspace directory for a share URL.
-fn share_workspace_dir(input: &str) -> Result<PathBuf> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    let hash = hasher.finish();
-    Ok(
-        crate::common::paths::ato_path_or_workspace_tmp("apps/share-runs")
-            .join(format!("{hash:016x}")),
-    )
+/// Content-identity marker stored in a materialized workspace. Reuse of a cached
+/// workspace is only allowed when the stored marker equals the identity computed
+/// from the current input files.
+const SHARE_RUN_IDENTITY_FILE: &str = ".ato/share-run.identity";
+/// Materialization contract version included in the identity hash. Bump when the
+/// semantics of `ato workspace setup --dev` change (e.g. install-step handling).
+const SHARE_RUN_IDENTITY_CONTRACT: &str = "ato-share-run-v1";
+
+/// Compute a content-bound identity for a local share input.
+///
+/// Reads the actual `share.spec.json` / `share.lock.json` pair (whichever file is
+/// given plus its sibling), canonicalizes both, and hashes them with SHA-256
+/// together with the materialization contract version.
+///
+/// The raw input string is deliberately **not** part of the identity: two
+/// different projects both run as `ato run ./share.spec.json` from different
+/// directories, and the same file is edited between runs. Keying a cache on the
+/// string alone would execute the wrong code.
+fn local_share_identity(input: &str) -> Result<String> {
+    let (spec_path, lock_path) = resolve_share_pair(Path::new(input))?;
+    let spec_raw = std::fs::read(&spec_path).map_err(|e| {
+        CapsuleError::Runtime(format!("failed to read {}: {e}", spec_path.display()))
+    })?;
+    let lock_raw = std::fs::read(&lock_path).map_err(|e| {
+        CapsuleError::Runtime(format!("failed to read {}: {e}", lock_path.display()))
+    })?;
+    let spec_value: serde_json::Value = serde_json::from_slice(&spec_raw)
+        .map_err(|e| CapsuleError::Config(format!("failed to parse share spec: {e}")))?;
+    let spec_canon = serde_json::to_vec(&spec_value)
+        .map_err(|e| CapsuleError::Config(format!("failed to canonicalize share spec: {e}")))?;
+    let lock_value: serde_json::Value = serde_json::from_slice(&lock_raw)
+        .map_err(|e| CapsuleError::Config(format!("failed to parse share lock: {e}")))?;
+    let lock_canon = serde_json::to_vec(&lock_value)
+        .map_err(|e| CapsuleError::Config(format!("failed to canonicalize share lock: {e}")))?;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(SHARE_RUN_IDENTITY_CONTRACT.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&spec_canon);
+    hasher.update(b"\0");
+    hasher.update(&lock_canon);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Resolve the spec/lock pair for a local share input (whichever file is given,
+/// the sibling is located in the same directory).
+fn resolve_share_pair(input: &Path) -> Result<(PathBuf, PathBuf)> {
+    let parent = input.parent().unwrap_or_else(|| Path::new("."));
+    match input.file_name().and_then(|n| n.to_str()) {
+        Some(SHARE_SPEC_FILE) => Ok((input.to_path_buf(), parent.join(SHARE_LOCK_FILE))),
+        Some(SHARE_LOCK_FILE) => Ok((parent.join(SHARE_SPEC_FILE), input.to_path_buf())),
+        _ => Err(CapsuleError::Config(format!(
+            "unsupported share input {}: expected share.spec.json or share.lock.json",
+            input.display()
+        ))),
+    }
+}
+
+/// Compute a stable, content-bound workspace directory for a share identity.
+///
+/// Uses SHA-256 (not `DefaultHasher`) so the directory name is stable and
+/// collision-resistant across processes.
+fn share_workspace_dir(identity: &str) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"ato-share-run-dir\0");
+    hasher.update(identity.as_bytes());
+    let hash = hex::encode(hasher.finalize());
+    Ok(crate::common::paths::ato_path_or_workspace_tmp("apps/share-runs").join(&hash[..32]))
 }
 
 /// Run `ato workspace setup <input> --into <workspace> --dev`.
 ///
 /// `--dev` is required so captured `install_steps` run during materialization —
 /// the old hidden `ato decap` alias passed `dev: true` internally.
-fn materialize_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()> {
-    // Check if already materialized (state.json exists and sources are ok)
+///
+/// A cached workspace is reused only when ALL of the following hold:
+///   - the stored content identity matches the current input files, and
+///   - every source materialized (`sources` non-empty and all `ok`), and
+///   - `verification.result == "ok"`, and
+///   - every install step succeeded.
+///
+/// Any other state is cleared and re-materialized from the current input.
+fn materialize_into(ato_bin: &Path, input: &str, workspace: &Path, identity: &str) -> Result<()> {
     let state_path = workspace.join(".ato").join("share").join(SHARE_STATE_FILE);
-    if state_path.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&state_path)
+    let identity_path = workspace.join(SHARE_RUN_IDENTITY_FILE);
+    if identity_path.exists() && state_path.exists() {
+        let stored_identity = std::fs::read_to_string(&identity_path).unwrap_or_default();
+        if stored_identity.trim() == identity
+            && let Ok(raw) = std::fs::read_to_string(&state_path)
             && let Ok(state) = serde_json::from_str::<WorkspaceShareState>(&raw)
         {
-            let all_ok = state.sources.iter().all(|s| s.status == "ok");
-            if all_ok && !state.sources.is_empty() {
-                info!(input, "reusing cached workspace");
+            let sources_ok =
+                !state.sources.is_empty() && state.sources.iter().all(|s| s.status == "ok");
+            let verification_ok = state.verification.result == "ok";
+            let install_ok = state.install_steps.iter().all(|s| s.status == "ok");
+            if sources_ok && verification_ok && install_ok {
+                info!(input, "reusing verified cached workspace");
                 return Ok(());
             }
         }
-        // Stale or broken — clear and re-materialize
+        // Stale, broken, mismatched identity, or failed install steps — clear and
+        // re-materialize from the current input so we never run stale code.
         warn!(input, "clearing stale workspace for re-materialization");
         let _ = std::fs::remove_dir_all(workspace);
         std::fs::create_dir_all(workspace)?;
@@ -200,6 +280,9 @@ fn materialize_into(ato_bin: &Path, input: &str, workspace: &Path) -> Result<()>
             "ato workspace setup failed for {input}: {stderr}"
         )));
     }
+    // Record the content identity so a later run only reuses a matching workspace.
+    std::fs::write(workspace.join(SHARE_RUN_IDENTITY_FILE), identity)
+        .map_err(|e| CapsuleError::Runtime(format!("failed to write share-run identity: {e}")))?;
     info!(input, "ato workspace setup completed");
     Ok(())
 }
@@ -607,13 +690,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn share_workspace_dir_is_stable() {
-        let dir1 = share_workspace_dir("https://ato.run/s/abc123").unwrap();
-        let dir2 = share_workspace_dir("https://ato.run/s/abc123").unwrap();
+    fn share_workspace_dir_is_stable_and_content_bound() {
+        // Same identity → same directory.
+        let dir1 = share_workspace_dir("identity-aaa").unwrap();
+        let dir2 = share_workspace_dir("identity-aaa").unwrap();
         assert_eq!(dir1, dir2);
 
-        let dir3 = share_workspace_dir("https://ato.run/s/different").unwrap();
+        // Different identity (different share content) → different directory.
+        let dir3 = share_workspace_dir("identity-bbb").unwrap();
         assert_ne!(dir1, dir3);
+
+        // Directory name is a fixed-length SHA-256 hex digest.
+        let name = dir1.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            name.len(),
+            32,
+            "dir name should be a 32-char hex digest: {name}"
+        );
+        assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// Write a spec/lock pair and return the content identity for `input`.
+    fn identity_for_pair(dir: &Path, entry_run: &str) -> String {
+        let spec = serde_json::json!({
+            "schema_version": "2", "name": "demo", "root": "demo",
+            "sources": [], "tool_requirements": [], "env_requirements": [],
+            "install_steps": [], "entries": [{
+                "id": "demo", "label": "Demo", "cwd": ".", "run": entry_run,
+                "kind": "command", "primary": true, "depends_on": [],
+                "env": {"required": [], "optional": [], "files": []}, "evidence": []
+            }],
+            "services": [], "notes": {"team_notes": ""},
+            "generated_from": {"root_path": "/tmp", "captured_at": "2026-01-01T00:00:00Z", "host_os": "macos"}
+        });
+        let lock = serde_json::json!({
+            "schema_version": "2", "spec_digest": "sha256:test", "generated_guide_digest": "sha256:test",
+            "revision": 1, "created_at": "2026-01-01T00:00:00Z",
+            "resolved_sources": [], "resolved_tools": []
+        });
+        std::fs::write(
+            dir.join(SHARE_SPEC_FILE),
+            serde_json::to_vec(&spec).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(SHARE_LOCK_FILE),
+            serde_json::to_vec(&lock).unwrap(),
+        )
+        .unwrap();
+        local_share_identity(&dir.join(SHARE_SPEC_FILE).display().to_string()).unwrap()
+    }
+
+    #[test]
+    fn local_share_identity_is_content_bound_not_path_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir_a = temp.path().join("a");
+        let dir_b = temp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let identity_a1 = identity_for_pair(&dir_a, "echo A");
+        let identity_b = identity_for_pair(&dir_b, "echo B");
+        let identity_a2 = identity_for_pair(&dir_a, "echo A");
+
+        // Two different files both named ./share.spec.json (different content).
+        assert_ne!(identity_a1, identity_b, "different content must not alias");
+        // Re-writing the same content at the same path is stable.
+        assert_eq!(identity_a1, identity_a2);
+    }
+
+    #[test]
+    fn local_share_identity_changes_when_spec_content_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
+        let before = identity_for_pair(dir, "echo A");
+        let after = identity_for_pair(dir, "echo B");
+        assert_ne!(before, after, "editing the spec must change the identity");
     }
 
     #[test]

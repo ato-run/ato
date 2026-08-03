@@ -6,6 +6,10 @@
 # only. This suite verifies the current contract: `ato workspace share` writes
 # share.spec.json / share.lock.json, `ato run <share file>` executes the shared
 # workspace, and `ato workspace setup` materializes it.
+#
+# The share fixture is created ONCE and kept alive for the whole suite so every
+# test exercises the real files (a per-test cleanup would make the dependent
+# tests SKIP instead of PASS). It is removed by the EXIT trap.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../config.sh"
@@ -18,47 +22,74 @@ echo " $SUITE"
 echo "══════════════════════════════════"
 check_ato
 
+SHARE_FIXTURE_DIR="$ATO_TEST_TMP/share-capsule"
+SHARE_SPEC_FILE="$SHARE_FIXTURE_DIR/.ato/share/share.spec.json"
+SHARE_LOCK_FILE="$SHARE_FIXTURE_DIR/.ato/share/share.lock.json"
+MATERIALIZED_DIR="$ATO_TEST_TMP/share-materialized"
+
+cleanup() {
+    rm -rf "$SHARE_FIXTURE_DIR" "$MATERIALIZED_DIR"
+}
+trap cleanup EXIT
+
 # ---------------------------------------------------------------------------
 # Automated: ato workspace share writes share.spec.json / share.lock.json / guide.md
 # ---------------------------------------------------------------------------
 test_workspace_share_outputs() {
-    local tmp_dir="$ATO_TEST_TMP/share-capsule"
-    mkdir -p "$tmp_dir"
-    cat > "$tmp_dir/capsule.toml" <<'EOF'
-schema_version = "0.3"
-name = "share-test"
-version = "0.1.0"
-type = "app"
-run = "python3 -c 'print(\"hello from share\")'"
-runtime = "source/python"
+    mkdir -p "$SHARE_FIXTURE_DIR"
+    # package.json gives the capture a runnable entry (dev script); an empty
+    # package-lock.json makes the detected `npm ci` install step succeed fast.
+    # The dev script is a shell builtin so the entry needs no runtime provisioning.
+    cat > "$SHARE_FIXTURE_DIR/package.json" <<'EOF'
+{
+  "name": "share-test",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "dev": "echo hello-from-share" }
+}
+EOF
+    cat > "$SHARE_FIXTURE_DIR/package-lock.json" <<'EOF'
+{
+  "name": "share-test",
+  "version": "0.1.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": { "": { "name": "share-test", "version": "0.1.0" } }
+}
 EOF
     local out="$ATO_TEST_TMP/share_output.txt"
-    if ( cd "$tmp_dir" && run_cmd 60 "$out" ato workspace share --yes ); then
-        if [ -f "$tmp_dir/.ato/share/share.spec.json" ] \
-            && [ -f "$tmp_dir/.ato/share/share.lock.json" ] \
-            && [ -f "$tmp_dir/.ato/share/guide.md" ]; then
+    if ( cd "$SHARE_FIXTURE_DIR" && run_cmd 60 "$out" ato workspace share --yes ); then
+        if [ -f "$SHARE_SPEC_FILE" ] \
+            && [ -f "$SHARE_LOCK_FILE" ] \
+            && [ -f "$SHARE_FIXTURE_DIR/.ato/share/guide.md" ]; then
             pass "ato workspace share writes share.spec.json / share.lock.json / guide.md"
         else
-            fail "ato workspace share outputs" "Missing share files in .ato/share/: $(ls -la "$tmp_dir/.ato/share" 2>&1)"
+            fail "ato workspace share outputs" "Missing share files in .ato/share/: $(ls -la "$SHARE_FIXTURE_DIR/.ato/share" 2>&1)"
         fi
     else
         fail "ato workspace share" "$(tail -5 "$out")"
     fi
-    rm -rf "$tmp_dir"
+}
+
+# Fixture must exist for the follow-up tests. The producer test creates it, so a
+# missing fixture is a FAILURE (not a silent skip) — it means the suite order or
+# fixture lifecycle broke.
+require_fixture() {
+    if [ ! -f "$SHARE_SPEC_FILE" ] || [ ! -f "$SHARE_LOCK_FILE" ]; then
+        fail "share fixture missing" "$SHARE_SPEC_FILE / $SHARE_LOCK_FILE absent (producer test did not run?)"
+        return 1
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
 # Automated: ato run <share.spec.json> runs the shared workspace
 # ---------------------------------------------------------------------------
 test_run_share_file_local() {
-    local spec_file="$ATO_TEST_TMP/share-capsule/.ato/share/share.spec.json"
-    if [ ! -f "$spec_file" ]; then
-        skip "share.spec.json not available (share test skipped)"
-        return
-    fi
+    require_fixture || return
     local out="$ATO_TEST_TMP/share_run_local.txt"
-    if run_cmd 60 "$out" ato run "$spec_file"; then
-        if grep -qi "hello from share" "$out"; then
+    if run_cmd 60 "$out" ato run "$SHARE_SPEC_FILE"; then
+        if grep -qi "hello-from-share" "$out"; then
             pass "ato run <share.spec.json> produces expected output on same machine"
         else
             pass "ato run <share.spec.json> exited 0 (output may differ due to capsule)"
@@ -72,15 +103,10 @@ test_run_share_file_local() {
 # Automated: ato workspace setup <share.spec.json> --into materializes
 # ---------------------------------------------------------------------------
 test_workspace_setup_materializes() {
-    local spec_file="$ATO_TEST_TMP/share-capsule/.ato/share/share.spec.json"
-    if [ ! -f "$spec_file" ]; then
-        skip "share.spec.json not available"
-        return
-    fi
-    local into_dir="$ATO_TEST_TMP/share-materialized"
-    rm -rf "$into_dir" && mkdir -p "$into_dir"
+    require_fixture || return
+    rm -rf "$MATERIALIZED_DIR" && mkdir -p "$MATERIALIZED_DIR"
     local out="$ATO_TEST_TMP/share_setup.txt"
-    if run_cmd 60 "$out" ato workspace setup "$spec_file" --into "$into_dir/ws" --dev; then
+    if run_cmd 60 "$out" ato workspace setup "$SHARE_SPEC_FILE" --into "$MATERIALIZED_DIR/ws" --dev; then
         if grep -qi "Workspace ready" "$out"; then
             pass "ato workspace setup materializes the shared workspace"
         else
@@ -96,7 +122,7 @@ test_workspace_setup_materializes() {
 # ---------------------------------------------------------------------------
 test_share_files_different_machine() {
     checklist "Share files work on a different machine" \
-        "Run: ato workspace share (or use an existing .ato/share/share.spec.json)" \
+        "Run: ato workspace share (or use the fixture's share.spec.json)" \
         "Copy share.spec.json + share.lock.json to another machine (git, chat, USB)" \
         "Run: ato run ./share.spec.json on the OTHER machine" \
         "Confirm it materializes and runs the workspace correctly" \
