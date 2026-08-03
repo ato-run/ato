@@ -5428,6 +5428,7 @@ struct BuilderReadyStateSealAdapter<'a> {
 }
 
 const POST_RESTORE_SCREENSHOT_ATTEMPTS: usize = 3;
+const READY_STATE_SEAL_CAPTURE_ATTEMPTS: usize = 3;
 
 fn retry_post_restore_screenshot_with<F>(mut capture: F) -> Option<String>
 where
@@ -5449,6 +5450,41 @@ where
 
 fn capture_post_restore_screenshot(address: std::net::SocketAddr) -> Option<String> {
     retry_post_restore_screenshot_with(|| snapshot::capture_screenshot_best_effort(address))
+}
+
+fn retryable_ready_state_seal_capture_error(
+    error: &snapshot::authoring_evidence::AuthoringEvidenceError,
+) -> bool {
+    matches!(
+        error,
+        snapshot::authoring_evidence::AuthoringEvidenceError::Adapter(detail)
+            if detail.contains("snapshot backend 'firecracker'")
+                && detail.contains("Resource temporarily unavailable (os error 11)")
+    )
+}
+
+fn retry_ready_state_seal_capture_with<T, F>(
+    mut capture: F,
+) -> std::result::Result<T, snapshot::authoring_evidence::AuthoringEvidenceError>
+where
+    F: FnMut() -> std::result::Result<T, snapshot::authoring_evidence::AuthoringEvidenceError>,
+{
+    for attempt in 1..=READY_STATE_SEAL_CAPTURE_ATTEMPTS {
+        match capture() {
+            Ok(receipt) => return Ok(receipt),
+            Err(error)
+                if attempt < READY_STATE_SEAL_CAPTURE_ATTEMPTS
+                    && retryable_ready_state_seal_capture_error(&error) =>
+            {
+                eprintln!(
+                    "[builder] transient Ready-State Seal capture failure on attempt {attempt}/{}; retrying with a fresh guest",
+                    READY_STATE_SEAL_CAPTURE_ATTEMPTS
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("bounded Ready-State Seal capture loop always returns")
 }
 
 impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSealAdapter<'_> {
@@ -5682,8 +5718,10 @@ fn process_authoring_ready_state_seal(
         signer,
         screenshot_png_base64: None,
     };
-    let receipt = snapshot::authoring_evidence::generate_ready_state_seal(&mut adapter, &request)
-        .map_err(|error| anyhow!("generate Ready-State Seal: {error}"))?;
+    let receipt = retry_ready_state_seal_capture_with(|| {
+        snapshot::authoring_evidence::generate_ready_state_seal(&mut adapter, &request)
+    })
+    .map_err(|error| anyhow!("generate Ready-State Seal: {error}"))?;
     let screenshot = adapter
         .screenshot_png_base64
         .as_deref()
@@ -8559,6 +8597,41 @@ targets = ["web"]
 
         assert_eq!(missing, None);
         assert_eq!(exhausted_attempts, POST_RESTORE_SCREENSHOT_ATTEMPTS);
+    }
+
+    #[test]
+    fn transient_firecracker_eagain_retries_seal_capture_with_a_fresh_guest() {
+        use snapshot::authoring_evidence::AuthoringEvidenceError;
+
+        let transient = || {
+            AuthoringEvidenceError::Adapter(
+                "capture Ready-State Seal: snapshot backend 'firecracker' error: api PUT /snapshot/create: Resource temporarily unavailable (os error 11) (source_lost=true)"
+                    .to_string(),
+            )
+        };
+        let mut attempts = 0;
+        let recovered = retry_ready_state_seal_capture_with(|| {
+            attempts += 1;
+            if attempts == 2 {
+                Ok("seal-receipt")
+            } else {
+                Err(transient())
+            }
+        });
+
+        assert_eq!(recovered.expect("retry succeeds"), "seal-receipt");
+        assert_eq!(attempts, 2);
+
+        let mut non_retryable_attempts = 0;
+        let blocked = retry_ready_state_seal_capture_with::<(), _>(|| {
+            non_retryable_attempts += 1;
+            Err(AuthoringEvidenceError::Adapter(
+                "Clean Replay builder artifact receipt binding mismatch".to_string(),
+            ))
+        });
+
+        assert!(blocked.is_err());
+        assert_eq!(non_retryable_attempts, 1);
     }
 
     #[test]
