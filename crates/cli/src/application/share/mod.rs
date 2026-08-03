@@ -470,6 +470,17 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
 
     // CLI-specific: interactive entry selection + env prompt (stays in CLI layer)
     let loaded = load_share_input(&args.input)?;
+
+    // Fail-closed: local-file sharing is the only share mechanism, so the spec
+    // must match the lock before any entry executes. A digest mismatch means the
+    // pair was edited inconsistently — running it would execute an unverified
+    // spec. `ato workspace setup` remains available as an explicit recovery path.
+    if !loaded.spec_digest_verified {
+        anyhow::bail!(
+            "share.spec.json does not match share.lock.json; refusing to execute an unverified share"
+        );
+    }
+
     let entries = effective_entries(&loaded.spec);
     let entry = select_run_entry(&args.input, &loaded, &entries, args.entry.as_deref())?;
     let env_overlay = resolve_entry_env_overlay(
@@ -493,7 +504,11 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
 
     // Delegate to capsule ShareExecutor (nacelle-sandboxed execution). Pin the
     // ato binary to the currently-running executable so materialization invokes
-    // the same version instead of whatever `ato` happens to be on PATH.
+    // the same version instead of whatever `ato` happens to be on PATH. Fail
+    // closed if the running executable cannot be resolved — never silently fall
+    // back to a different `ato` from PATH.
+    let ato_path = std::env::current_exe()
+        .with_context(|| "failed to resolve the currently running ato executable")?;
     let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
         input: args.input.clone(),
         entry: Some(entry.id.clone()),
@@ -501,7 +516,7 @@ pub(crate) fn execute_run_share(args: RunShareArgs) -> Result<()> {
         env_overlay,
         mode: capsule::share::ShareExecutionMode::Inherited,
         nacelle_path: None,
-        ato_path: std::env::current_exe().ok(),
+        ato_path: Some(ato_path),
         compat_host: args.compat_host,
     })?;
 
