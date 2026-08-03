@@ -36,24 +36,6 @@ use crate::terminal::{TerminalCore, TryRecvOutput};
 /// below 500 ms once WebView creation + navigation (~50 ms) is added.
 const FAST_PATH_HEALTHCHECK_TIMEOUT: Duration = Duration::from_millis(200);
 
-/// Pending terminal processes spawned by share URL executor.
-/// `webview.rs` drains these when creating Terminal panes.
-static PENDING_SHARE_TERMINALS: std::sync::OnceLock<Mutex<HashMap<String, TerminalProcess>>> =
-    std::sync::OnceLock::new();
-
-fn pending_share_terminals() -> &'static Mutex<HashMap<String, TerminalProcess>> {
-    PENDING_SHARE_TERMINALS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Take a pending share terminal process by session_id.
-/// Called by `webview.rs` when spawning a Terminal pane.
-pub fn take_pending_share_terminal(session_id: &str) -> Option<TerminalProcess> {
-    pending_share_terminals()
-        .lock()
-        .ok()
-        .and_then(|mut map| map.remove(session_id))
-}
-
 /// Launch specification for a bare CLI panel opened via `ato://cli`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CliLaunchSpec {
@@ -1059,25 +1041,6 @@ struct StoredSessionRecord {
     log_path: String,
 }
 
-/// Returns true when `s` looks like an ato.run share URL (`https://ato.run/s/...`).
-/// Used by both the orchestrator and the state layer to intercept share URLs before
-/// `classify_surface_input` routes them as plain external web pages.
-pub fn is_share_url(s: &str) -> bool {
-    // Only match known ato.run domains and localhost dev server, followed by /s/<token>
-    let known_host = s.starts_with("https://ato.run/s/")
-        || s.starts_with("https://staging.ato.run/s/")
-        || s.starts_with("http://localhost:");
-    if !known_host {
-        return false;
-    }
-    // For localhost, still require /s/ path segment
-    if s.starts_with("http://localhost:") {
-        // e.g. http://localhost:8787/s/token
-        return s.contains("/s/");
-    }
-    true
-}
-
 pub fn resolve_and_start_capsule(
     handle: &str,
     secrets: &[SecretEntry],
@@ -1093,17 +1056,6 @@ pub fn resolve_and_start_capsule(
     // and store it on the launch session so downstream consumers
     // (WebView creation, navigation finished) can resolve it.
     let click_origin = ClickOrigin::now();
-
-    if is_share_url(handle) {
-        // Share-URL launches don't go through preflight/E103 today —
-        // any failure is opaque, matching pre-Day-3 behavior.
-        return resolve_and_start_from_share(handle)
-            .map(|mut session| {
-                session.click_origin = Some(click_origin);
-                session
-            })
-            .map_err(LaunchError::from);
-    }
 
     // Phase 1 fast path (RFC v0.3 §3.2 — PR 4A.1): try to reuse a
     // recorded session without spawning the CLI. Records the
@@ -3548,104 +3500,6 @@ fn url_port(url: &str) -> Option<u16> {
         .and_then(|(_, rest)| rest.trim_end_matches('/').parse().ok())
 }
 
-/// Returns a stable temporary directory path derived from the share URL.
-/// Stored under ~/.ato/apps/ato-desktop/shared-runs/<hash> so the same share URL
-/// always materializes to the same location, enabling session resume.
-fn share_tmp_dir(share_url: &str) -> Result<PathBuf> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    share_url.hash(&mut hasher);
-    let hash = hasher.finish();
-    ato_path(format!("apps/ato-desktop/shared-runs/{hash:016x}"))
-        .context("failed to resolve ato home for shared run temp dir")
-}
-
-/// Resolve and start a capsule from a share URL by materializing it locally first.
-fn resolve_and_start_from_share(share_url: &str) -> Result<CapsuleLaunchSession> {
-    info!(
-        share_url,
-        "starting share URL execution via nacelle sandbox"
-    );
-
-    let result = capsule::share::execute_share(capsule::share::ShareRunRequest {
-        input: share_url.to_string(),
-        entry: None,
-        extra_args: vec![],
-        env_overlay: std::collections::BTreeMap::new(),
-        mode: capsule::share::ShareExecutionMode::Piped {
-            cols: 120,
-            rows: 40,
-        },
-        nacelle_path: resolve_nacelle_binary(),
-        ato_path: std::env::var("ATO_DESKTOP_ATO_BIN")
-            .ok()
-            .map(PathBuf::from)
-            .or_else(|| resolve_ato_binary().ok()),
-        compat_host: false,
-    })?;
-
-    match result {
-        capsule::share::ShareExecutionResult::Spawned(piped) => {
-            let session_id = piped.session_id.clone();
-            info!(share_url, %session_id, "share terminal session spawned via nacelle");
-
-            // Convert SharePipedSession to TerminalProcess and stash for webview.rs
-            let terminal_process = TerminalProcess {
-                session_id: session_id.clone(),
-                input_tx: piped.input_tx,
-                resize_tx: piped.resize_tx,
-                output_rx: piped.output_rx,
-            };
-            if let Ok(mut map) = pending_share_terminals().lock() {
-                map.insert(session_id.clone(), terminal_process);
-            }
-
-            // Build a synthetic CapsuleLaunchSession with TerminalStream strategy
-            let workspace = share_tmp_dir(share_url).unwrap_or_else(|_| PathBuf::from("/tmp"));
-            Ok(CapsuleLaunchSession {
-                handle: share_url.to_string(),
-                normalized_handle: share_url.to_string(),
-                canonical_handle: None,
-                source: Some("share".to_string()),
-                trust_state: "untrusted".to_string(),
-                restricted: false,
-                snapshot_label: None,
-                session_id,
-                runtime: CapsuleRuntimeDescriptor {
-                    target_label: "share".to_string(),
-                    runtime: Some("shell".to_string()),
-                    driver: Some("nacelle".to_string()),
-                    language: None,
-                    port: None,
-                },
-                display_strategy: CapsuleDisplayStrategy::TerminalStream,
-                manifest_path: workspace.join(".ato/share/state.json"),
-                app_root: workspace,
-                target_label: "share".to_string(),
-                adapter: None,
-                frontend_entry: None,
-                invoke_url: None,
-                healthcheck_url: None,
-                capabilities: vec!["terminal".to_string()],
-                local_url: None,
-                served_by: Some("nacelle".to_string()),
-                log_path: None,
-                notes: vec!["Share URL executed via nacelle sandbox.".to_string()],
-                // Share-URL terminal launches go straight through nacelle and
-                // do not pass the receipt-emitting session start path.
-                execution_id: None,
-                execution_receipt_schema_version: None,
-                click_origin: None,
-                install_profile_key: None,
-            })
-        }
-        capsule::share::ShareExecutionResult::Completed { exit_code } => {
-            bail!("share execution completed unexpectedly (code {exit_code}) in piped mode")
-        }
-    }
-}
-
 fn process_is_alive(pid: i32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -3822,30 +3676,6 @@ mod tests {
             "capsule://github.com/acme/chat",
             &resolved
         ));
-    }
-
-    #[test]
-    fn is_share_url_detects_share_paths() {
-        assert!(super::is_share_url("https://ato.run/s/abc123"));
-        assert!(super::is_share_url("https://ato.run/s/abc123?extra=1"));
-        assert!(super::is_share_url("http://localhost:8787/s/test-run"));
-        assert!(super::is_share_url("https://staging.ato.run/s/xyz"));
-    }
-
-    #[test]
-    fn is_share_url_rejects_non_share_urls() {
-        // publisher/slug registry handles must NOT be treated as share URLs
-        assert!(!super::is_share_url(
-            "https://ato.run/koh0920/ato-onboarding"
-        ));
-        assert!(!super::is_share_url("capsule://ato.run/acme/chat"));
-        assert!(!super::is_share_url("https://ato.run/dock"));
-        assert!(!super::is_share_url("acme/chat"));
-        assert!(!super::is_share_url(""));
-        // These should NOT match even though they contain /s/
-        assert!(!super::is_share_url("https://example.com/s/something"));
-        assert!(!super::is_share_url("https://evil.ato.run/s/inject"));
-        assert!(!super::is_share_url("https://ato.run.evil.com/s/inject"));
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -4064,75 +3894,6 @@ mod tests {
         assert_eq!(pm, "yarn");
         assert_eq!(install_root, root);
         std::fs::remove_dir_all(&root).ok();
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // E2E: full decap + session start for the real share URL
-    //
-    // This test calls the real `ato` binary and requires:
-    //   1. `ato` to be on PATH (or ATO_DESKTOP_ATO_BIN to be set)
-    //   2. network access to ato.run
-    //
-    // Skipped by default.  Set env var ATO_E2E_TEST=1 to run:
-    //   ATO_E2E_TEST=1 cargo test -p ato-desktop e2e_share_url_decap_and_start -- --nocapture
-    // ────────────────────────────────────────────────────────────────────────
-    #[test]
-    fn e2e_share_url_decap_and_start() {
-        const SHARE_URL: &str = "https://ato.run/s/01KP5WDF81SQQTVZRF88RNY8MR";
-
-        if std::env::var("ATO_E2E_TEST").as_deref() != Ok("1") {
-            eprintln!("[e2e] skipped — set ATO_E2E_TEST=1 to run");
-            return;
-        }
-
-        // Materialise the share URL and start a session.
-        let session = super::resolve_and_start_capsule(SHARE_URL, &[], &[], None, None)
-            .expect("resolve_and_start_capsule should succeed for the share URL");
-
-        eprintln!("[e2e] session_id  = {}", session.session_id);
-        eprintln!("[e2e] handle      = {}", session.handle);
-        eprintln!("[e2e] target      = {}", session.target_label);
-        eprintln!("[e2e] local_url   = {:?}", session.local_url);
-        eprintln!("[e2e] invoke_url  = {:?}", session.invoke_url);
-        eprintln!("[e2e] notes       = {:?}", session.notes);
-
-        // Session must have an ID.
-        assert!(
-            !session.session_id.is_empty(),
-            "session_id must not be empty"
-        );
-
-        // The handle stored on the session must reference the share URL.
-        assert_eq!(
-            session.handle, SHARE_URL,
-            "session.handle must equal the original share URL"
-        );
-
-        // For web-only share URLs (no capsule.toml) the session carries a local_url
-        // and uses the WebUrl display strategy.
-        if session.display_strategy == CapsuleDisplayStrategy::WebUrl {
-            assert!(
-                session.local_url.is_some(),
-                "WebUrl session must have a local_url"
-            );
-            eprintln!("[e2e] display     = WebUrl (web dev server)");
-            // Kill the spawned dev-server process via the pid embedded in session_id.
-            if let Some(pid_str) = session.session_id.strip_prefix("share-web-") {
-                if let Ok(pid) = pid_str.parse::<u32>() {
-                    std::process::Command::new("kill")
-                        .args(["-TERM", &pid.to_string()])
-                        .status()
-                        .ok();
-                    eprintln!("[e2e] killed dev server pid={pid}");
-                }
-            }
-        } else {
-            eprintln!("[e2e] display     = {:?}", session.display_strategy);
-            // Clean up: stop the ato-managed session.
-            let stopped = super::stop_capsule_session(&session.session_id)
-                .expect("stop_capsule_session should succeed");
-            eprintln!("[e2e] stopped     = {stopped}");
-        }
     }
 
     #[test]
