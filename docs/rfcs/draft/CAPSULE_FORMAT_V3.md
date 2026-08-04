@@ -110,11 +110,14 @@ could disagree on for the same logical bundle.
 Invariants (all enforced structurally, before any signature or trust
 decision — see [Verification](#verification-two-stage-api)):
 
-- `manifest` role: exactly 1, `path` MUST be `capsule.toml`
+- `manifest` role: exactly 1, `path` MUST be `capsule.toml`, `media_type`
+  MUST be the exact literal `application/toml`
 - `source` role: exactly 1, `path` MUST be `source.tar.zst`,
   `media_type` MUST be `application/vnd.ato.source-archive.v1+zstd`
 - `lock` role: rejected in v1 (see above)
 - any other `role` value: rejected
+- `sha256` MUST match `^sha256:[0-9a-f]{64}$` — lowercase only, no
+  unlabelled hex, no uppercase
 - `path` values MUST be unique (duplicate `path` is rejected even across
   different `role`s)
 - `members` MUST be in ascending UTF-8 byte order of `path`; out-of-order is
@@ -191,7 +194,20 @@ the verified value differ from the displayed one:
   `SHA256:` or mixed-case hex
 - `signature`: MUST be canonical **unpadded** base64url (no `+`/`/`, no `=`
   padding) — a padded or standard-base64 signature is rejected, not
-  normalized and accepted
+  normalized and accepted — AND MUST decode to **exactly 64 bytes**, the
+  fixed length of an Ed25519 signature; a decode-valid-but-wrong-length
+  value is rejected here rather than surfacing as a confusing failure
+  further down in the actual signature check
+- no `previous_key` field in Slice 1. `TRUST_AND_KEYS.md` §3.2's rotation
+  flow (new key signs, `previous_key` carried for a grace window) is real,
+  but Slice 1's strict `signature.json` schema above has no field for it —
+  adding one now, unused, would let an implementation branch on a field this
+  slice never populates. Slice 1's only rotation mechanism is the **current +
+  next fixed 2-key pin array** per [Store trust roots](#store-trust-roots);
+  a signed in-bundle rotation record is out of scope until a later slice
+  actually needs `trusted_publisher` (which is what motivates a rotation
+  record — a Store-pinned key rotation is already covered by re-pinning the
+  next key server-side, no bundle-carried record needed).
 
 ## Signer trust (not just signature validity)
 
@@ -207,9 +223,10 @@ SignerTrust        = "trusted_store" | "trusted_publisher" | "trusted_local_key"
 
 - `trusted_store` — the signing key matches a Store distribution public key
   pinned to the API origin the bundle was fetched from (see
-  [Store trust roots](#store-trust-roots) below), or a signed key-rotation
-  record chains to one (per `TRUST_AND_KEYS.md` §3.2, `previous_key` /
-  30-day grace window convention — reused here, not reinvented)
+  [Store trust roots](#store-trust-roots) below). Rotation in Slice 1 is
+  handled entirely by that origin's fixed 2-key pin array, not by a
+  bundle-carried `previous_key` record — `signature.json` has no such field
+  (see the strict-schema note above)
 - `trusted_publisher` — **deferred past Slice 1.** There is currently no
   mechanism for a publisher's private key to reach a builder process, so no
   bundle can legitimately claim this trust level yet. The enum value is
@@ -438,12 +455,26 @@ index.json present at the outer archive root
     fallback to v2 parsing
 
 index.json absent
-  → the reader accepts the bundle only if it matches the EXACT v2 outer
-    shape: capsule.toml, capsule.lock.json, signature.json, payload.tar.zst,
-    all required, plus the OPTIONAL sbom.spdx.json member that the current
-    v2 writer (packers/capsule.rs) may emit. Any other shape without
-    index.json is rejected by both readers.
+  → dispatch to the EXISTING v2 reader/contract, unmodified by this RFC.
+    Whether a given v2-shaped archive is valid is entirely v2's own
+    question to answer, not this document's.
 ```
+
+An earlier revision of this section tried to restate the exact v2 outer
+member allowlist here (`capsule.toml`, `capsule.lock.json`, `signature.json`,
+`payload.tar.zst`, optionally `sbom.spdx.json`). That list was wrong and
+would have regressed the current writer: `packers/capsule.rs` can also emit
+an outer `PAYLOAD_MANIFEST_PATH` member and an outer README (via
+`find_nearest_readme_candidate`/`README_CANDIDATES`), neither of which was
+in that list — a v3 reader built strictly from it would reject legitimately
+current-writer-produced v2 bundles, directly contradicting this RFC's own
+"v2 read path is maintained, not replaced" goal. Rather than maintain a
+second, RFC-owned copy of v2's outer shape that can drift from the writer
+that actually defines it, **this RFC does not enumerate v2's shape at all**
+— `index.json` absence is purely a dispatch signal to hand off to v2's
+existing reader, which owns its own validity rules. If v2 itself needs a
+stricter/updated outer allowlist, that is a v2-scoped change, tracked and
+specified separately from this v3 format.
 
 There is no implicit v2-to-v3 upgrade path. A v2 bundle is never silently
 reinterpreted as v3.
