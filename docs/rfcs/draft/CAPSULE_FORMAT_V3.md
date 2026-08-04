@@ -1,10 +1,10 @@
 ---
 title: "Capsule Bundle Format v3 (source-only import)"
-status: accepted
+status: draft
 date: "2026-08-04"
 author: "@egamikohsuke"
 ssot:
-  - "crates/capsule/src/import_bundle/"
+  - "this document"
 related:
   - "SIGNATURE_SPEC.md"
   - "TRUST_AND_KEYS.md"
@@ -71,18 +71,41 @@ deferred to the slice that defines VM/OCI/Wasm materializations.
       "path": "capsule.toml",
       "media_type": "application/toml",
       "sha256": "sha256:...",
-      "size_bytes": 1234
+      "size_bytes": "1234"
     },
     {
       "role": "source",
       "path": "source.tar.zst",
       "media_type": "application/vnd.ato.source-archive.v1+zstd",
       "sha256": "sha256:...",
-      "size_bytes": 5678
+      "size_bytes": "5678"
     }
   ]
 }
 ```
+
+**`size_bytes` is a decimal string, not a JSON number.** This format
+deliberately sets no normative upper bound on bundle or member size (see
+[Resource policy](#resource-policy-not-a-format-limit)), which means an
+arbitrarily large value must round-trip identically through both a Rust
+writer/reader and a TypeScript verifier (the ato-api-side isolated verifier
+job). JSON numbers do not guarantee that: JavaScript's `number` cannot
+exactly represent every `u64`, so a sufficiently large value could parse to
+a different number on each side, and the two sides would then compute
+different JCS canonical bytes for the same logical `index.json` — silently
+breaking the signature target the whole format depends on. Rules for the
+string:
+
+- ASCII decimal digits only
+- `"0"`, or a digit `1`-`9` followed by zero or more digits — **no leading
+  zero** other than the literal value `"0"` itself
+- no sign, no decimal point, no exponent
+
+`members` array order is fixed as **ascending UTF-8 byte order of `path`**.
+JCS canonicalizes JSON *object* key order but does not reorder JSON arrays,
+so this format defines its own array-ordering rule rather than leaving
+`members` order as incidental writer behavior that two independent writers
+could disagree on for the same logical bundle.
 
 Invariants (all enforced structurally, before any signature or trust
 decision — see [Verification](#verification-two-stage-api)):
@@ -94,6 +117,8 @@ decision — see [Verification](#verification-two-stage-api)):
 - any other `role` value: rejected
 - `path` values MUST be unique (duplicate `path` is rejected even across
   different `role`s)
+- `members` MUST be in ascending UTF-8 byte order of `path`; out-of-order is
+  rejected, not silently re-sorted
 - unknown top-level or per-member JSON fields: rejected
 - **duplicate JSON object keys within a single member or the top-level
   object: rejected.** A generic JSON map parser that silently keeps the last
@@ -148,6 +173,25 @@ semantically meaningful).
   degrade-to-unsigned path). This intentionally differs from `capsule.lock`
   handling: signature presence is a format-level structural requirement,
   trust in *who* signed is a separate, policy-level question (next section).
+
+`signature.json` gets the same strict-parsing treatment as `index.json` — a
+lenient parser here is exactly as exploitable as a lenient `index.json`
+parser, since a duplicate `key_id` or `signature` key lets an attacker make
+the verified value differ from the displayed one:
+
+- unknown top-level field: rejected
+- duplicate JSON key: rejected (golden vector required, same rationale as
+  `index.json`'s duplicate-key case)
+- `algorithm`: MUST be the exact literal string `"ed25519"` — no case
+  variation, no other value
+- `key_id`: MUST be a canonical `did:key` per `SIGNATURE_SPEC.md` §"Public
+  Key Format" — rejects on decode failure, wrong multicodec prefix, or wrong
+  decoded key length, exactly as that spec's verification steps already do
+- `index_digest`: MUST match `^sha256:[0-9a-f]{64}$` — lowercase only, no
+  `SHA256:` or mixed-case hex
+- `signature`: MUST be canonical **unpadded** base64url (no `+`/`/`, no `=`
+  padding) — a padded or standard-base64 signature is rejected, not
+  normalized and accepted
 
 ## Signer trust (not just signature validity)
 
@@ -233,6 +277,32 @@ carried for the grace window, old key is dropped after). General-purpose
 key-rotation infrastructure beyond this 2-key array is not needed for Slice
 1.
 
+**This origin scoping must reach `verify_capsule_envelope` as an input, not
+live only in prose.** A `CapsuleTrustPolicy` holding pins for *every* known
+origin and asking "does this signature match any pinned key" would collapse
+the origin boundary this section just established — a key pinned only for
+staging would then also authenticate a bundle claimed to be from
+`api.ato.run`. The caller supplies which origin (if any) it fetched the
+bundle from, and only that origin's pins are eligible to produce
+`trusted_store`:
+
+```rust
+enum CapsuleImportContext {
+    LocalFile,
+    Store {
+        api_origin: NormalizedOrigin,
+        expected_bundle_digest: Sha256Digest,
+    },
+}
+```
+
+This replaces the bare `expected_bundle_digest: Option<Sha256Digest>`
+parameter shown in [Verification](#verification-two-stage-api) below — the
+digest and the origin travel together, since a Store-fetched bundle always
+has both and a local file has neither. `SignerTrust::trusted_store` is
+produced only when the signing key matches a pin registered for the exact
+`api_origin` in the `Store` variant actually passed in for *this* call.
+
 ## Program authority: outer manifest vs. archive contents
 
 `source.tar.zst` is the existing, already-deterministic
@@ -256,6 +326,28 @@ the archive's own root `capsule.toml` as authoritative — it has no parameter
 for an external manifest override. **This RFC does not change that
 function.** A new function is added alongside it for the import path:
 
+### Inner control file disposition (normative)
+
+The previous revision of this document said both "inner control files are
+excluded and the outer manifest wins" and listed several inner-control-file
+shapes under "invalid" without saying which of those are a rejection versus
+a silent exclusion. Exactly one of these two outcomes applies to each shape,
+with no third option:
+
+| Inner archive state at the projected root | Outcome |
+| --- | --- |
+| No `capsule.toml`, or one that fails to parse, or one that differs from the outer `capsule.toml` | **Accepted.** The outer `capsule.toml` is authoritative regardless; the inner file (if any) is excluded from the source projection and never inspected for content beyond identifying it as a control file to exclude. |
+| Exactly one of `capsule.lock` or `ato.lock.json` present | **Accepted.** Excluded from the source projection, same as `capsule.toml`. Neither ever reaches the local resolver — see [Container layout](#container-layout): `capsule.lock` is not a bundle member in v1, and this inner-archive copy is not it either. |
+| Both `capsule.lock` and `ato.lock.json` present simultaneously | **Rejected.** This is the pre-existing split-brain-lock admissibility rule (A1v2), unchanged and un-relaxed by this import path — two lock files at once is evidence of a corrupted or adversarially constructed tree, not an ordinary authoring artifact. |
+| Any control file (`capsule.toml`, `capsule.lock`, `ato.lock.json`) is a symlink, hardlink, device file, or otherwise fails the existing A1v2 admissibility check | **Rejected.** Admissibility runs (step 3 below) before control-file exclusion (step 4) — a tree that fails admissibility never reaches the exclusion step at all. |
+
+The golden vector suite (§[Golden vectors](#golden-vectors)) separates these
+into their correct valid/invalid buckets accordingly — "inner manifest
+differs from outer" and "inner `capsule.lock` present" (alone) are **valid**
+vectors that assert on the *resulting projection*, not rejection; "both
+`capsule.lock` and `ato.lock.json` present" is the one **invalid** vector in
+this group.
+
 ## Verification: two-stage API
 
 ```rust
@@ -278,7 +370,7 @@ pub struct ImportedCapsuleWorkspace {
 
 pub fn verify_capsule_envelope(
     reader: impl Read + Seek,
-    expected_bundle_digest: Option<Sha256Digest>,  // Store Install: required. Local file: optional.
+    context: CapsuleImportContext,  // see Store trust roots — carries origin + expected digest together
     trust_policy: &CapsuleTrustPolicy,
     import_policy: &CapsuleImportPolicy,
 ) -> Result<VerifiedCapsuleEnvelope, CapsuleImportError>;
@@ -319,13 +411,23 @@ trait over different `Read + Seek` sources) share this exact function. This
 is what makes file-sharing and Store Install provably go through the same
 byte-level verification path, not just structurally similar ones.
 
-Golden-vector cases for `derive_imported_capsule` (§[Golden vectors](#golden-vectors)):
-inner manifest differs from outer manifest; inner manifest absent; inner
-manifest malformed; inner `capsule.lock` present; both `capsule.lock` and
-`ato.lock.json` present inside the archive; outer manifest bytes tampered
-after signing. In every case, the inner control file MUST NOT be able to
-influence the derived `capsule_program_id` or the runnable workspace
-contents.
+Per the [disposition table](#inner-control-file-disposition-normative) above,
+golden-vector cases for `derive_imported_capsule` split into two groups. In
+every **valid** case, the assertion is that the derived `capsule_program_id`
+and runnable workspace are identical to the same outer manifest imported
+against a source archive with no inner control files at all — i.e. the inner
+file demonstrably had zero effect, not merely that import "succeeded":
+
+- inner manifest differs from outer manifest (valid — outer wins)
+- inner manifest absent (valid — outer applies regardless)
+- inner manifest malformed/unparseable (valid — never parsed, only excluded by name)
+- inner `capsule.lock` present alone (valid — excluded, same as the manifest)
+- inner `ato.lock.json` present alone (valid — excluded, same as the manifest)
+
+And the one **invalid** case in this group:
+
+- both `capsule.lock` and `ato.lock.json` present inside the archive
+  (rejected — pre-existing A1v2 split-brain-lock rule, not new to this RFC)
 
 ## v2 / v3 dispatch
 
@@ -384,8 +486,20 @@ size in `index.json` is caught by the digest/size mismatch check
 ## Golden vectors
 
 `crates/capsule/tests/` gains a `capsule_format_v3/` fixture directory with
-paired valid/invalid vectors. Required invalid cases (non-exhaustive floor —
-implementers should add more as edge cases are found):
+paired valid/invalid vectors.
+
+Required **valid** cases beyond the straightforward baseline bundle
+(non-exhaustive floor):
+
+- inner archive manifest differs from outer manifest (outer wins; see
+  [Inner control file disposition](#inner-control-file-disposition-normative))
+- inner archive manifest absent
+- inner archive manifest malformed/unparseable
+- inner archive `capsule.lock` present alone
+- inner archive `ato.lock.json` present alone
+
+Required **invalid** cases (non-exhaustive floor — implementers should add
+more as edge cases are found):
 
 - duplicate outer member path
 - duplicate outer member with different role
@@ -393,6 +507,8 @@ implementers should add more as edge cases are found):
 - unknown `role` value
 - unknown top-level or member JSON field in `index.json`
 - duplicate JSON key inside `index.json`
+- duplicate JSON key inside `signature.json`
+- unknown field in `signature.json`
 - `index.json` bytes not exact JCS canonicalization of their own content
 - member digest mismatch
 - member `size_bytes` mismatch
@@ -403,10 +519,14 @@ implementers should add more as edge cases are found):
   resolve to `untrusted_key`, not `trusted_store` — the specific regression
   this format is designed to prevent)
 - path traversal / absolute path / symlink / device / FIFO in outer archive
-- inner manifest differs from outer manifest
-- inner `capsule.lock` present alongside outer `capsule.toml`
 - both `capsule.lock` and `ato.lock.json` present inside `source.tar.zst`
-- outer `capsule.toml` bytes tampered after signing (index_digest mismatch)
+  (the one inner-control-file case that IS invalid — see the disposition
+  table)
+- outer `capsule.toml` member bytes tampered post-signing, `index.json` left
+  untouched — this is a **manifest member digest mismatch** (caught first,
+  before signature verification is even reached), not an `index_digest`
+  mismatch; `index_digest` mismatch is the distinct case immediately above,
+  where `index.json` itself was altered
 - v2-shaped bundle that is missing one required v2 member (must be rejected
   by the v2 reader, not silently accepted as v3)
 
