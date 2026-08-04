@@ -40,6 +40,17 @@
 //!    own cap-exceeded shapes and re-categorises them as
 //!    `ResourceBudgetExceeded`, leaving every other failure `CapsuleInvalid`.
 //!
+//! 3. **The post-substitution side.** Derivation does not only *read* the source
+//!    archive: it re-archives the manifest-substituted tree through
+//!    [`crate::blob::materialize_source_archive`], which applies its **own** fixed
+//!    caps to that derived tree. Those are a third, independent set of limits —
+//!    the pre-check never saw the substituted tree, and the SSOT reclassifier
+//!    never sees this error type — so
+//!    [`classify_source_materialize_error`] gives them the same treatment. It can
+//!    do so by *type* rather than by message, because
+//!    [`SourceMaterializeError`] keeps size caps, admissibility violations, and
+//!    I/O in separate variants.
+//!
 //! Why both, rather than the pre-check alone: the pre-check is a *different*
 //! measurement than the SSOT's (it counts decompressed stream bytes and regular
 //! entries; the SSOT counts declared entry sizes after its own admissibility
@@ -68,6 +79,7 @@ use super::CapsuleImportError;
 use super::policy::CapsuleImportPolicy;
 use crate::blob::{
     MAX_COMPRESSED_BYTES, MAX_FILE_COUNT, MAX_FILE_SIZE_BYTES, MAX_UNCOMPRESSED_BYTES,
+    SourceAdmissibilityError, SourceMaterializeError,
 };
 use crate::capsule_program_contract::CapsuleProgramError;
 #[cfg(doc)]
@@ -260,6 +272,81 @@ fn ssot_cap_needles() -> [String; 4] {
         format!("{MAX_FILE_SIZE_BYTES}-byte per-file cap"),
         format!("more than {MAX_FILE_COUNT} files"),
     ]
+}
+
+/// Re-categorise an error out of [`crate::blob::materialize_source_archive`].
+///
+/// This is the *other side* of the same pipeline
+/// [`classify_projection_error`] guards. The derivation re-archives the
+/// manifest-substituted tree, and `materialize_source_archive` applies its own
+/// fixed production caps to that derived tree —
+/// [`MAX_FILE_SIZE_BYTES`] / [`MAX_FILE_COUNT`] (inside the admissibility walk)
+/// and [`MAX_UNCOMPRESSED_BYTES`] / [`MAX_COMPRESSED_BYTES`] (archive-level) —
+/// which are entirely separate from the importer's pre-scan limits enforced on
+/// the *original* source archive. A tree that only crosses one of them once the
+/// outer manifest has been substituted in is not a malformed bundle, and RFC
+/// §"Resource policy (not a format limit)" forbids reporting it as one.
+///
+/// Unlike [`classify_projection_error`], nothing here inspects a message: this
+/// error type keeps the categories apart at the type level, so the mapping is
+/// exhaustive by construction and a new variant is a compile error rather than a
+/// silent fall-through to `CapsuleInvalid`.
+pub(crate) fn classify_source_materialize_error(
+    error: &SourceMaterializeError,
+) -> CapsuleImportError {
+    match error {
+        SourceMaterializeError::Inadmissible(inner) => classify_admissibility_error(inner),
+        SourceMaterializeError::UncompressedTooLarge { .. }
+        | SourceMaterializeError::CompressedTooLarge { .. } => {
+            fixed_cap_refusal(&error.to_string())
+        }
+        SourceMaterializeError::Io { .. } => CapsuleImportError::Io(error.to_string()),
+    }
+}
+
+/// Split the A1v2 admissibility rules into "the tree is wrong" and "the tree is
+/// merely bigger than this implementation's fixed caps".
+///
+/// [`SourceAdmissibilityError::TooManyFiles`] and
+/// [`SourceAdmissibilityError::FileTooLarge`] are the typed spellings of exactly
+/// the two caps [`ssot_cap_needles`] has to recognise from message text one layer
+/// down, so they are classified the same way here — the two classifiers stay
+/// consistent in spirit because they agree on which rules are size policy.
+/// Everything else (symlink, submodule, LFS pointer, device node, non-NFC or
+/// non-UTF-8 path, case-fold collision) is a genuine structural violation and
+/// stays [`CapsuleImportError::CapsuleInvalid`].
+fn classify_admissibility_error(error: &SourceAdmissibilityError) -> CapsuleImportError {
+    match error {
+        SourceAdmissibilityError::TooManyFiles { .. }
+        | SourceAdmissibilityError::FileTooLarge { .. } => fixed_cap_refusal(&error.to_string()),
+        SourceAdmissibilityError::Io { .. } => CapsuleImportError::Io(error.to_string()),
+        SourceAdmissibilityError::NonUtf8Path { .. }
+        | SourceAdmissibilityError::NonNfcPath { .. }
+        | SourceAdmissibilityError::CaseFoldCollision { .. }
+        | SourceAdmissibilityError::Symlink { .. }
+        | SourceAdmissibilityError::Submodule { .. }
+        | SourceAdmissibilityError::LfsPointer { .. }
+        | SourceAdmissibilityError::UnsupportedNodeType { .. } => {
+            CapsuleImportError::invalid(error.to_string())
+        }
+    }
+}
+
+/// Classify the A1v2 tree hash taken directly (not through
+/// `materialize_source_archive`), so the full-tree digest the registration slice
+/// needs is subject to the same category split as everything else on this path.
+pub(crate) fn classify_tree_hash_error(error: &SourceAdmissibilityError) -> CapsuleImportError {
+    classify_admissibility_error(error)
+}
+
+/// The one phrasing every fixed-cap refusal on this path shares, so the message
+/// a caller sees does not depend on which of the two classifiers produced it.
+fn fixed_cap_refusal(message: &str) -> CapsuleImportError {
+    CapsuleImportError::ResourceBudgetExceeded(format!(
+        "{message} — this is a fixed cap inside the source-materialization \
+         implementation, not a limit the v3 bundle format imposes; the bundle itself is not \
+         malformed"
+    ))
 }
 
 /// Total bytes of every regular file under `root`.

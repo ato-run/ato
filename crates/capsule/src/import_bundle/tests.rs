@@ -18,7 +18,7 @@ use tar::{Builder, EntryType, Header};
 use tempfile::TempDir;
 
 use super::*;
-use crate::blob::materialize_source_archive;
+use crate::blob::{MAX_FILE_SIZE_BYTES, materialize_source_archive};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -114,6 +114,18 @@ fn unbounded() -> CapsuleImportPolicy {
 /// Uses the existing materializer rather than a hand-rolled archiver, so every
 /// vector's source member is genuinely the encoding the format reuses.
 fn source_archive(files: &[(&str, &str)]) -> Vec<u8> {
+    source_archive_and_tree_hash(files).0
+}
+
+/// The archive bytes **and** the A1v2 `materialized_source_tree_hash` of the tree
+/// they encode, taken from the materializer's own receipt.
+///
+/// That hash is the independent ground truth for
+/// [`VerifiedImportedSourceArchive::source_tree_digest`]: it is computed here over
+/// the tree exactly as authored — no outer manifest substituted, no control file
+/// excluded — so a test can prove the importer reports *that* value and not the
+/// projection digest.
+fn source_archive_and_tree_hash(files: &[(&str, &str)]) -> (Vec<u8>, String) {
     let tree = TempDir::new().expect("source tree");
     for (path, contents) in files {
         let target = tree.path().join(path);
@@ -124,8 +136,12 @@ fn source_archive(files: &[(&str, &str)]) -> Vec<u8> {
     }
     let out = TempDir::new().expect("archive dir");
     let archive = out.path().join("source.tar.zst");
-    materialize_source_archive(tree.path(), &archive).expect("materialize source archive");
-    fs::read(&archive).expect("read source archive")
+    let receipt =
+        materialize_source_archive(tree.path(), &archive).expect("materialize source archive");
+    (
+        fs::read(&archive).expect("read source archive"),
+        receipt.materialized_source_tree_hash,
+    )
 }
 
 fn baseline_source_archive() -> Vec<u8> {
@@ -134,9 +150,14 @@ fn baseline_source_archive() -> Vec<u8> {
 
 /// A source archive carrying the ordinary files plus extra root entries.
 fn source_archive_with(extra: &[(&str, &str)]) -> Vec<u8> {
+    source_archive_with_tree_hash(extra).0
+}
+
+/// The same, paired with the full-tree hash of what went in.
+fn source_archive_with_tree_hash(extra: &[(&str, &str)]) -> (Vec<u8>, String) {
     let mut files: Vec<(&str, &str)> = SOURCE_FILES.to_vec();
     files.extend_from_slice(extra);
-    source_archive(&files)
+    source_archive_and_tree_hash(&files)
 }
 
 fn bundle_from(manifest: &str, source: &[u8]) -> Vec<u8> {
@@ -1552,6 +1573,224 @@ fn derivation_temporary_storage_is_charged_against_the_budget() {
     }
 }
 
+// ── The post-substitution side: materialize_source_archive's own fixed caps ──
+
+/// The derivation re-archives the **manifest-substituted** tree, and
+/// `materialize_source_archive` applies its own fixed production caps to that
+/// derived tree — caps no ingest-side check ever evaluated, because the outer
+/// `capsule.toml` is not part of the source archive the pre-scan measured.
+///
+/// This fixture crosses exactly one of them and nothing else: the source archive
+/// is the tiny baseline (well inside every cap and every configured policy), and
+/// the outer manifest alone is over [`MAX_FILE_SIZE_BYTES`]. Nothing rejects it
+/// before the rebuild — the outer member has no size limit of its own here, the
+/// pre-scan looks only at `source.tar.zst`, and the pre-substitution tree hash
+/// sees a root `capsule.toml` that is either absent or tiny. The rebuild is the
+/// first and only step that sees the 50 MiB+ manifest as a tree entry.
+///
+/// Per RFC §"Resource policy", that must be `resource_budget_exceeded`: the v3
+/// format sets no manifest size limit, so this bundle is not malformed.
+#[test]
+fn a_rebuild_only_cap_violation_is_a_budget_refusal_not_invalidity() {
+    let mut manifest = String::from(OUTER_MANIFEST);
+    manifest.push_str("\n# ");
+    manifest.push_str(&"x".repeat(MAX_FILE_SIZE_BYTES as usize + 1024));
+    manifest.push('\n');
+    assert!(manifest.len() as u64 > MAX_FILE_SIZE_BYTES);
+
+    let source = baseline_source_archive();
+    // The ingest side is genuinely clean: the source member is far inside a
+    // policy that would refuse anything sizeable.
+    let policy = CapsuleImportPolicy {
+        max_source_compressed_bytes: Some(1024 * 1024),
+        max_source_expanded_bytes: Some(1024 * 1024),
+        max_source_file_count: Some(1024),
+        max_source_file_bytes: Some(1024 * 1024),
+        ..CapsuleImportPolicy::default()
+    };
+
+    let bundle = bundle_from(&manifest, &source);
+    drop(manifest);
+    let envelope = verify_capsule_envelope(
+        Cursor::new(bundle),
+        local_context(),
+        &permissive_local_policy(),
+        &policy,
+    )
+    .expect("the bundle is format-valid and the source member is inside policy");
+
+    match derive_imported_capsule(envelope) {
+        Err(CapsuleImportError::ResourceBudgetExceeded(message)) => {
+            assert!(
+                message.contains("not malformed"),
+                "the refusal must say the bundle is still valid, got {message}"
+            );
+        }
+        other => panic!(
+            "a fixed cap inside the re-archive must not surface as invalidity, got {other:?}"
+        ),
+    }
+}
+
+/// The line that mapping must not blur: a genuine admissibility violation in the
+/// substituted tree is still `capsule_invalid`. Same call, same classifier,
+/// opposite category — so the fix is a classification by variant, not a blanket
+/// re-label of everything `materialize_source_archive` reports.
+#[test]
+fn a_rebuild_admissibility_violation_is_still_capsule_invalid() {
+    use crate::blob::{SourceAdmissibilityError, SourceMaterializeError};
+
+    let structural = SourceMaterializeError::Inadmissible(SourceAdmissibilityError::Symlink {
+        path: PathBuf::from("link.py"),
+    });
+    assert!(matches!(
+        super::source_policy::classify_source_materialize_error(&structural),
+        CapsuleImportError::CapsuleInvalid(_)
+    ));
+
+    for capped in [
+        SourceMaterializeError::UncompressedTooLarge { bytes: 1, limit: 0 },
+        SourceMaterializeError::CompressedTooLarge { bytes: 1, limit: 0 },
+        SourceMaterializeError::Inadmissible(SourceAdmissibilityError::FileTooLarge {
+            path: PathBuf::from("big.bin"),
+            size: 1,
+            limit: 0,
+        }),
+        SourceMaterializeError::Inadmissible(SourceAdmissibilityError::TooManyFiles {
+            path: PathBuf::from("dir"),
+            limit: 0,
+        }),
+    ] {
+        assert!(
+            matches!(
+                super::source_policy::classify_source_materialize_error(&capped),
+                CapsuleImportError::ResourceBudgetExceeded(_)
+            ),
+            "a fixed cap must be a budget refusal: {capped}"
+        );
+    }
+
+    let io = SourceMaterializeError::Io {
+        context: "write archive".to_string(),
+        source: std::io::Error::other("disk went away"),
+    };
+    assert!(matches!(
+        super::source_policy::classify_source_materialize_error(&io),
+        CapsuleImportError::Io(_)
+    ));
+}
+
+// ── Major: control members are the only ones read whole ──────────────────────
+
+/// A source archive whose compressed member is comfortably larger than a small
+/// control-member limit, so the exemption below is actually exercised.
+fn incompressible_source_archive() -> Vec<u8> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+    let mut contents = String::with_capacity(64 * 1024);
+    for _ in 0..64 * 1024 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        contents.push(ALPHABET[(state >> 33) as usize % ALPHABET.len()] as char);
+    }
+    source_archive(&[("noise.txt", contents.as_str())])
+}
+
+/// `index.json`, `signature.json`, and `capsule.toml` are the three members read
+/// whole into memory. The format sets no size limit on them, so an oversized one
+/// is an importer refusal — never `capsule_invalid`.
+#[test]
+fn an_oversized_control_member_is_a_budget_refusal_not_invalidity() {
+    let policy = CapsuleImportPolicy {
+        max_control_member_bytes: Some(8),
+        ..CapsuleImportPolicy::default()
+    };
+    match verify_capsule_envelope(
+        Cursor::new(baseline_bundle()),
+        local_context(),
+        &permissive_local_policy(),
+        &policy,
+    ) {
+        Err(CapsuleImportError::ResourceBudgetExceeded(message)) => {
+            assert!(
+                message.contains("not malformed"),
+                "the refusal must say the bundle is still valid, got {message}"
+            );
+        }
+        other => panic!("expected a control-member budget refusal, got {other:?}"),
+    }
+}
+
+/// The limit is checked against staged bytes, so it fires **before** the member
+/// is read whole or parsed. Proven by an `index.json` that is both oversized and
+/// structurally garbage: with the limit configured the size wins, without it the
+/// parse failure surfaces instead. If the check ran after `read_bytes()` the
+/// first arm would be `CapsuleInvalid` too.
+#[test]
+fn the_control_member_limit_is_enforced_before_the_member_is_parsed() {
+    let manifest = OUTER_MANIFEST.as_bytes();
+    let source = baseline_source_archive();
+    let junk_index = vec![b'{'; 8 * 1024];
+    let bundle = bundle_with_index(manifest, &source, junk_index);
+
+    match verify_capsule_envelope(
+        Cursor::new(bundle.clone()),
+        local_context(),
+        &permissive_local_policy(),
+        &CapsuleImportPolicy {
+            max_control_member_bytes: Some(4096),
+            ..CapsuleImportPolicy::default()
+        },
+    ) {
+        Err(CapsuleImportError::ResourceBudgetExceeded(message)) => {
+            assert!(
+                message.contains(INDEX_MEMBER_PATH),
+                "the refusal must name the member it refused, got {message}"
+            );
+        }
+        other => panic!("the size check must precede the parse, got {other:?}"),
+    }
+
+    assert_invalid(
+        verify_capsule_envelope(
+            Cursor::new(bundle),
+            local_context(),
+            &permissive_local_policy(),
+            &unbounded(),
+        ),
+        "unbounded: the same bytes must still fail to parse",
+    );
+}
+
+/// `source.tar.zst` is deliberately outside the control-member limit: it is never
+/// read whole, and it has its own `max_source_*` fields. A limit that every
+/// control member fits under must not refuse a larger source archive.
+#[test]
+fn the_control_member_limit_does_not_bound_the_source_archive() {
+    let limit: u64 = 4096;
+    let source = incompressible_source_archive();
+    assert!(
+        source.len() as u64 > limit,
+        "the fixture must exceed the limit to prove the exemption"
+    );
+
+    let import = import_with_policy(
+        &bundle_from(OUTER_MANIFEST, &source),
+        CapsuleImportPolicy {
+            max_control_member_bytes: Some(limit),
+            ..CapsuleImportPolicy::default()
+        },
+    )
+    .expect("the source member is not a control member");
+    assert!(
+        import
+            .capsule_program_id()
+            .to_string()
+            .starts_with("blake3:")
+    );
+}
+
 // ── Blocker 2: the verified source archive survives derivation ───────────────
 
 #[test]
@@ -1603,12 +1842,13 @@ fn verified_source_archive_open_yields_exactly_the_verified_bytes() {
 }
 
 #[test]
-fn verified_source_archive_reports_the_projections_own_tree_digest() {
+fn verified_source_archive_reports_the_projections_own_program_source_digest() {
     let import = import_local(&baseline_bundle()).expect("import");
-    let tree_digest = import.source_archive().source_tree_digest().to_string();
+    let program_source_digest = import.source_archive().program_source_digest().to_string();
     assert!(
-        tree_digest.starts_with("sha256:"),
-        "the tree digest must be the SSOT's ProgramSourceDigest, got {tree_digest}"
+        program_source_digest.starts_with("sha256:"),
+        "the projection digest must be the SSOT's ProgramSourceDigest, got \
+         {program_source_digest}"
     );
 
     // The inner control files must not move it, exactly as they must not move
@@ -1619,8 +1859,85 @@ fn verified_source_archive_reports_the_projections_own_tree_digest() {
     ))
     .expect("import");
     assert_eq!(
-        with_inner.source_archive().source_tree_digest().to_string(),
-        tree_digest
+        with_inner
+            .source_archive()
+            .program_source_digest()
+            .to_string(),
+        program_source_digest
+    );
+}
+
+// ── The two digests are different values, and each is the right one ──────────
+
+/// `source_tree_digest` must be the A1v2 hash of the WHOLE delivered archive —
+/// the value B1 registers a Source Revision against — not the control-file
+/// excluded projection digest. The ground truth is computed independently, by the
+/// same materializer, over the tree as authored.
+#[test]
+fn source_tree_digest_is_the_full_archive_not_the_projection() {
+    let (archive, full_tree_hash) =
+        source_archive_with_tree_hash(&[("capsule.lock", "{\"schema\":\"cloud-built\"}\n")]);
+    let import = import_local(&bundle_from(OUTER_MANIFEST, &archive)).expect("import");
+    let evidence = import.source_archive();
+
+    assert_eq!(
+        evidence.source_tree_digest().to_string(),
+        full_tree_hash,
+        "source_tree_digest must be the full, unmodified source tree's A1v2 digest"
+    );
+
+    // The projection digest is the "outer wins, inner had zero effect" baseline:
+    // identical to importing the same outer manifest against an archive that
+    // carried no control file at all.
+    let baseline = import_local(&baseline_bundle()).expect("import");
+    assert_eq!(
+        evidence.program_source_digest(),
+        baseline.source_archive().program_source_digest(),
+        "the projection digest must be invariant across inner control files"
+    );
+
+    // And the whole point: for this fixture they are genuinely two values.
+    assert_ne!(
+        evidence.source_tree_digest(),
+        evidence.program_source_digest(),
+        "an archive carrying an inner control file must make the two digests differ"
+    );
+}
+
+/// Taken *before* the outer manifest is written over the extracted root: an
+/// archive whose inner `capsule.toml` differs from the outer one must report the
+/// digest of the tree carrying the INNER bytes. If the value were captured after
+/// substitution it would equal the second hash below instead.
+#[test]
+fn source_tree_digest_predates_the_outer_manifest_substitution() {
+    let (archive, as_delivered) =
+        source_archive_with_tree_hash(&[("capsule.toml", INNER_MANIFEST_DIFFERENT)]);
+    let (_, as_substituted) = source_archive_with_tree_hash(&[("capsule.toml", OUTER_MANIFEST)]);
+    assert_ne!(
+        as_delivered, as_substituted,
+        "the fixture must actually distinguish the two trees"
+    );
+
+    let import = import_local(&bundle_from(OUTER_MANIFEST, &archive)).expect("import");
+    let evidence = import.source_archive();
+    assert_eq!(evidence.source_tree_digest().to_string(), as_delivered);
+    assert_ne!(
+        evidence.source_tree_digest(),
+        evidence.program_source_digest()
+    );
+}
+
+/// The one case where they legitimately coincide, pinned so the distinction above
+/// is understood as "different inputs", not "different algorithms".
+#[test]
+fn the_two_digests_coincide_only_without_an_inner_control_file() {
+    let (archive, full_tree_hash) = source_archive_and_tree_hash(&SOURCE_FILES);
+    let import = import_local(&bundle_from(OUTER_MANIFEST, &archive)).expect("import");
+    let evidence = import.source_archive();
+    assert_eq!(evidence.source_tree_digest().to_string(), full_tree_hash);
+    assert_eq!(
+        evidence.source_tree_digest(),
+        evidence.program_source_digest()
     );
 }
 

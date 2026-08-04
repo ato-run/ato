@@ -520,6 +520,14 @@ struct CapsuleImportPolicy {
     max_source_expanded_bytes: Option<u64>,
     max_source_file_count: Option<u64>,
     max_source_file_bytes: Option<u64>,
+    // Control members (index.json / signature.json / capsule.toml) are the only
+    // members read WHOLE into memory — they are parsed and signed byte-for-byte,
+    // so there is no streaming form of "parse this JSON". The format sets no size
+    // limit on them, which makes an unbounded read an importer-side DoS surface
+    // rather than a format question. Enforced against staged bytes BEFORE the
+    // full read; exceeding it is resource_budget_exceeded, never capsule_invalid.
+    // source.tar.zst is not covered — it has the max_source_* fields above.
+    max_control_member_bytes: Option<u64>,
 }
 
 struct CapsuleTrustPolicy {
@@ -544,6 +552,17 @@ exactly the sense this section defines, so a bundle that trips one is
 a streaming pre-scan *before* that pipeline is entered, and reclassifies the
 pipeline's own cap-exceeded errors when they fire anyway; see
 `crates/capsule/src/import_bundle/source_policy.rs`.
+
+This applies on **both** sides of the derivation, not only on ingest. The
+importer re-archives the manifest-substituted tree through
+`materialize_source_archive`, which applies its own fixed caps (50 MiB per
+file, 50 000 files, 250 MiB uncompressed, 100 MiB compressed) to a tree the
+ingest-side pre-scan never saw — the outer `capsule.toml` is not part of the
+source archive it measured. A small, policy-conforming source archive whose
+manifest-substituted form crosses one of those caps is therefore
+`resource_budget_exceeded` too. That side is classified by error **variant**
+rather than by message, because `SourceMaterializeError` keeps size caps,
+admissibility violations, and I/O in distinct variants.
 
 ## Golden vectors
 
