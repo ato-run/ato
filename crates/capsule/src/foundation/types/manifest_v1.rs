@@ -177,6 +177,13 @@ pub struct CapsuleManifestV1 {
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+
+    /// `[outputs]` — declared Materialization output contracts. Additive:
+    /// absent means snapshot-only. A `dist/` directory never selects the
+    /// static web lane on its own; only an authored `[outputs.static_web]`
+    /// section declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<OutputsV1>,
 }
 
 pub const SOURCE_FILTER_POLICY_VERSION_V1: &str = "ato-source-filter/v1";
@@ -330,6 +337,95 @@ pub struct BuildV1 {
 pub struct BuildStepV1 {
     /// Exact argv. No implicit shell.
     pub command: Vec<String>,
+}
+
+/// `[outputs]` — the Materialization output contracts an author declares.
+///
+/// The presence of a built directory (e.g. a Vite `dist/`) never selects an
+/// output lane; only an authored section here does. Absent `[outputs]` keeps
+/// today's snapshot-only behavior unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputsV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_web: Option<StaticWebOutputV1>,
+}
+
+/// `[outputs.static_web]` — an explicit Static Web Materialization contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticWebOutputV1 {
+    /// Non-empty relative path to the built static output root inside the
+    /// guest image (e.g. `dist` or `srv/app/dist`). Validated at Build
+    /// Attempt time against the built image; parse-time only checks path shape.
+    pub root: String,
+    /// Entry document, normalized relative to `root` (e.g. `index.html`).
+    pub entry_path: String,
+    /// Whether unknown GET paths fall back to the entry document (SPA).
+    #[serde(default = "default_spa_fallback")]
+    pub spa_fallback: bool,
+    /// Exact public HTTPS/WSS origins the built app may connect to. Sorted
+    /// ASCII order, no duplicates. Frame ancestors are fixed by the v1
+    /// contract and are not authorable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_src: Vec<String>,
+}
+
+fn default_spa_fallback() -> bool {
+    true
+}
+
+impl StaticWebOutputV1 {
+    /// Validates the authored static web output contract. The existence of
+    /// `root`/`entry_path` inside a built image is deliberately NOT checked
+    /// here — that is a Build Attempt-time fact, resolved against the built
+    /// image by the producer.
+    pub fn validate(&self) -> Result<(), ManifestV1Error> {
+        validate_static_web_root(&self.root)?;
+        validate_source_relative_path("outputs.static_web.entry_path", &self.entry_path, false)?;
+        for origin in &self.connect_src {
+            crate::contract::static_web_manifest::validate_connect_source(origin).map_err(
+                |error| ManifestV1Error::Invalid {
+                    field: "outputs.static_web.connect_src[]",
+                    reason: format!("{origin:?} is not a public https/wss origin: {error}"),
+                },
+            )?;
+        }
+        let mut sorted = self.connect_src.clone();
+        sorted.sort_unstable();
+        if sorted != self.connect_src {
+            return Err(ManifestV1Error::Invalid {
+                field: "outputs.static_web.connect_src[]",
+                reason: "must be sorted in ASCII dictionary order without duplicates".to_string(),
+            });
+        }
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ManifestV1Error::Invalid {
+                field: "outputs.static_web.connect_src[]",
+                reason: "must not contain a duplicate origin".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_static_web_root(value: &str) -> Result<(), ManifestV1Error> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value.contains('\0')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field: "outputs.static_web.root",
+            reason:
+                "must be a non-empty relative path without '.', '..', empty segments, backslashes, or a leading slash"
+                    .to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -824,6 +920,14 @@ impl CapsuleManifestV1 {
                     field: "state.<name>.schema",
                 });
             }
+        }
+
+        if let Some(static_web) = self
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.static_web.as_ref())
+        {
+            static_web.validate()?;
         }
         Ok(())
     }
@@ -1801,6 +1905,120 @@ command = ["python"]
             ))
             .expect_err("unknown unified manifest field");
             assert!(matches!(error, ManifestV1Error::Toml(_)), "{error}");
+        }
+    }
+
+    #[test]
+    fn static_web_output_declares_the_lane_without_enabling_it_by_dist() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["npm", "run", "preview"]
+
+[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+spa_fallback = true
+connect_src = ["https://api.example.com", "wss://push.example.com"]
+"#,
+        )
+        .expect("explicit static web output parses");
+        let outputs = manifest.outputs.expect("outputs declared");
+        let static_web = outputs.static_web.expect("static web lane declared");
+        assert_eq!(static_web.root, "dist");
+        assert_eq!(static_web.entry_path, "index.html");
+        assert!(static_web.spa_fallback);
+        assert_eq!(
+            static_web.connect_src,
+            ["https://api.example.com", "wss://push.example.com"]
+        );
+
+        // Absent `[outputs.static_web]` keeps the snapshot-only default. The
+        // normalized digest must not change for an unmodified manifest.
+        let without = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["npm", "run", "preview"]
+"#,
+        )
+        .expect("snapshot-only manifest parses");
+        assert!(without.outputs.is_none());
+    }
+
+    #[test]
+    fn static_web_output_rejects_unsafe_or_unordered_contracts() {
+        for (toml, fragment) in [
+            (
+                r#"[outputs.static_web]
+root = "/absolute/dist"
+entry_path = "index.html""#,
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "../dist"
+entry_path = "index.html""#,
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "assets\\app.js""#,
+                "outputs.static_web.entry_path",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "assets/../app.js""#,
+                "outputs.static_web.entry_path",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["https://api.example.com", "http://insecure.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["wss://push.example.com", "https://api.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["https://api.example.com", "https://api.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
+        ] {
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+{toml}
+"#
+            ))
+            .expect_err("must refuse the invalid static web contract");
+            match error {
+                ManifestV1Error::Invalid { field, .. } => assert_eq!(field, fragment),
+                other => panic!("{other}"),
+            }
         }
     }
 }

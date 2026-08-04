@@ -434,6 +434,7 @@ pub fn to_capsule_manifest_v1(
         env: Default::default(),
         config: Default::default(),
         state: Default::default(),
+        outputs: Default::default(),
     })
 }
 
