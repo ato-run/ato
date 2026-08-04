@@ -140,9 +140,52 @@ pub struct AuthoringWork {
     pub classified_state_diff: Option<ClassifiedStateDiffV1>,
     #[serde(default)]
     pub ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
+    /// The immutable Build Config Revision this claim is bound to. Present on
+    /// revision-bound operations (clean_replay / ready_state_seal); the API
+    /// includes these plan fields so the builder can act on the exact plan the
+    /// attempt was enqueued under. The underscore-prefixed ones are parsed for
+    /// the wire contract only (the static-web emit seam consumes
+    /// `effective_build_plan` and `plan_digest`).
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub build_config_revision_id: Option<String>,
+    #[serde(default)]
+    pub _source_build_attempt_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub build_attempt_number: Option<u32>,
+    #[serde(default)]
+    pub _authoring_toml: Option<String>,
+    #[serde(default)]
+    pub _authoring_toml_digest: Option<String>,
+    /// The effective build plan (JSON) the attempt was enqueued under. Contains
+    /// the optional `static_web_output` section when the author declared one.
+    #[serde(default)]
+    #[allow(dead_code)] // read by `static_web_output_plan` (the emit seam) and the claim tests
+    pub effective_build_plan: Option<serde_json::Value>,
+    #[serde(default)]
+    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub plan_digest: Option<String>,
     pub lease_token: AuthoringLeaseToken,
     pub lease_expires_at: String,
     pub trace_id: String,
+}
+
+impl AuthoringWork {
+    /// The explicitly declared Static Web output plan for this claim, when the
+    /// saved Build Config Revision declared one. `None` ⇒ snapshot-only.
+    /// A declared section that fails validation is an error here (the API and
+    /// the builder agree the section is authoritative; disagreement is a
+    /// configuration failure, never a silent fallback).
+    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub fn static_web_output_plan(
+        &self,
+    ) -> Result<Option<snapshot_builder::static_web_output::StaticWebOutputPlan>, String> {
+        snapshot_builder::static_web_output::StaticWebOutputPlan::from_effective_build_plan_json(
+            self.effective_build_plan.as_ref(),
+        )
+        .map_err(|error| format!("claim static web output plan: {error}"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1593,6 +1636,90 @@ mod tests {
         .expect("setup claim");
 
         assert_eq!(work.worker_claim_id, None);
+    }
+
+    #[test]
+    fn static_web_plan_is_absent_without_a_declared_section() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_01KYN2Z",
+            "authoring_session_id": "auth_01KYN2Z",
+            "capsule_revision_id": "caprev_01KYN2Z",
+            "source_revision_id": "srev_01KYN2Z",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_01KYN2Z",
+                "source_materialization_id": "smat_01KYN2Z",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_01KYN2Z.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "effective_build_plan": {
+                "schema": "ato.effective-build-plan/v1",
+                "steps": []
+            },
+            "plan_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "build_config_revision_id": "bcrev_01KYN2Z",
+            "build_attempt_number": 3,
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_01KYN2Z"
+        }))
+        .expect("clean_replay claim with a plan parses");
+
+        // The plan fields the API sends now parse (deny_unknown_fields fix).
+        assert_eq!(work.build_config_revision_id.as_deref(), Some("bcrev_01KYN2Z"));
+        assert_eq!(work.build_attempt_number, Some(3));
+        assert_eq!(work.plan_digest.as_deref(), Some(
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        ));
+        // No [outputs.static_web] ⇒ snapshot-only.
+        assert!(work.static_web_output_plan().expect("parses").is_none());
+    }
+
+    #[test]
+    fn static_web_plan_is_present_only_for_an_explicit_declaration() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_02",
+            "authoring_session_id": "auth_02",
+            "capsule_revision_id": "caprev_02",
+            "source_revision_id": "srev_02",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_02",
+                "source_materialization_id": "smat_02",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_02.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "effective_build_plan": {
+                "schema": "ato.effective-build-plan/v1",
+                "static_web_output": {
+                    "schema": "ato.static-web-output-plan/v1",
+                    "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_output_root": "app/dist",
+                    "entry_path": "index.html",
+                    "spa_fallback": true,
+                    "connect_src": [],
+                    "producer_contract": "ato.static-web-producer/v1",
+                }
+            },
+            "plan_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "build_config_revision_id": "bcrev_02",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_02"
+        }))
+        .expect("declared claim parses");
+
+        let plan = work
+            .static_web_output_plan()
+            .expect("plan parses")
+            .expect("static web section declared");
+        assert_eq!(plan.materialization_id, "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(plan.image_output_root.to_string_lossy(), "app/dist");
+        assert_eq!(plan.entry_path, "index.html");
     }
 
     #[test]

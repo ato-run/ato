@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use capsule::contract::static_web_manifest::{
     StaticWebSecurityV1, validate_connect_source, validate_relative_path,
 };
@@ -52,6 +52,62 @@ impl StaticWebOutputPlan {
 
     pub fn security(&self) -> Result<StaticWebSecurityV1> {
         StaticWebSecurityV1::producer_policy(self.connect_src.clone()).map_err(anyhow::Error::from)
+    }
+
+    /// Parse the API's `effective_build_plan.static_web_output` claim section.
+    ///
+    /// Returns `Ok(None)` when the plan has no `static_web_output` (the
+    /// snapshot-only lane — a complete no-op). The `materialization_id` is
+    /// always API-decided and arrives with the plan; this producer never mints
+    /// one. The `image_output_root` from the plan is used verbatim (the API
+    /// derives it from the authored `root` + the guest workdir).
+    pub fn from_effective_build_plan_json(
+        effective_build_plan: Option<&serde_json::Value>,
+    ) -> Result<Option<StaticWebOutputPlan>> {
+        let Some(plan) = effective_build_plan else {
+            return Ok(None);
+        };
+        let Some(section) = plan.get("static_web_output") else {
+            return Ok(None);
+        };
+        let materialization_id = section
+            .get("materialization_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("static_web_output.materialization_id missing from the claim plan"))?
+            .to_string();
+        let image_output_root = section
+            .get("image_output_root")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("static_web_output.image_output_root missing from the claim plan"))?
+            .to_string();
+        let entry_path = section
+            .get("entry_path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("static_web_output.entry_path missing from the claim plan"))?
+            .to_string();
+        let spa_fallback = section
+            .get("spa_fallback")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| anyhow!("static_web_output.spa_fallback missing from the claim plan"))?;
+        let connect_src = section
+            .get("connect_src")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let plan = StaticWebOutputPlan {
+            materialization_id,
+            image_output_root: PathBuf::from(image_output_root),
+            entry_path,
+            spa_fallback,
+            connect_src,
+        };
+        plan.validate()?;
+        Ok(Some(plan))
     }
 }
 
@@ -214,6 +270,55 @@ mod tests {
         explicit.validate().unwrap();
         explicit.image_output_root = PathBuf::from("../dist");
         assert!(explicit.validate().is_err());
+    }
+
+    #[test]
+    fn claim_plan_parses_only_an_explicit_static_web_section() {
+        // Absent section ⇒ snapshot-only no-op.
+        assert!(StaticWebOutputPlan::from_effective_build_plan_json(None).unwrap().is_none());
+        assert!(StaticWebOutputPlan::from_effective_build_plan_json(
+            Some(&serde_json::json!({ "schema": "ato.effective-build-plan/v1" }))
+        )
+        .unwrap()
+        .is_none());
+
+        // Explicit declaration ⇒ a validated plan with the API-decided id.
+        let plan = StaticWebOutputPlan::from_effective_build_plan_json(Some(&serde_json::json!({
+            "schema": "ato.effective-build-plan/v1",
+            "static_web_output": {
+                "schema": "ato.static-web-output-plan/v1",
+                "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "image_output_root": "app/dist",
+                "entry_path": "index.html",
+                "spa_fallback": true,
+                "connect_src": ["https://api.example.com"],
+                "producer_contract": "ato.static-web-producer/v1",
+            }
+        })))
+        .expect("parses");
+        let plan = plan.expect("static web section present");
+        assert_eq!(plan.materialization_id, "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(plan.image_output_root, PathBuf::from("app/dist"));
+        assert_eq!(plan.entry_path, "index.html");
+        assert!(plan.spa_fallback);
+        assert_eq!(plan.connect_src, ["https://api.example.com"]);
+
+        // A declared section with an unsafe root is refused, not silently
+        // accepted into the snapshot lane.
+        let unsafe_plan = StaticWebOutputPlan::from_effective_build_plan_json(Some(
+            &serde_json::json!({
+                "schema": "ato.effective-build-plan/v1",
+                "static_web_output": {
+                    "schema": "ato.static-web-output-plan/v1",
+                    "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_output_root": "../dist",
+                    "entry_path": "index.html",
+                    "spa_fallback": true,
+                    "connect_src": [],
+                }
+            }),
+        ));
+        assert!(unsafe_plan.is_err());
     }
 
     #[cfg(unix)]
