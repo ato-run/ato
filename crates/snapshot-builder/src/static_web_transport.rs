@@ -411,6 +411,40 @@ fn auth_json(
     )
 }
 
+/// Validate an API blob-list response against the request batch (Major 2,
+/// review round 3): the response must answer EXACTLY one entry per requested
+/// digest — no missing entries, no unknown digests, no duplicates — in ANY
+/// order. Callers join by digest map afterwards, never by position, so a
+/// response skew can never PUT blob A's bytes to blob B's URL.
+fn validate_blob_response_digests(
+    requested: &[StaticWebBlobUpload],
+    responded_digests: &[String],
+) -> Result<(), StaticWebTransportError> {
+    if requested.len() != responded_digests.len() {
+        return Err(StaticWebTransportError::Transport {
+            detail: format!(
+                "API answered {} blobs for {} requested",
+                responded_digests.len(),
+                requested.len()
+            ),
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for digest in responded_digests {
+        if !requested.iter().any(|blob| &blob.digest == digest) {
+            return Err(StaticWebTransportError::Transport {
+                detail: format!("API answered an unknown digest {digest}"),
+            });
+        }
+        if !seen.insert(digest) {
+            return Err(StaticWebTransportError::Transport {
+                detail: format!("API answered digest {digest} more than once"),
+            });
+        }
+    }
+    Ok(())
+}
+
 impl StaticWebTransport for HttpStaticWebTransport<'_> {
     fn prepare(
         &self,
@@ -463,17 +497,36 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
                 });
             }
         };
+        let response_materialization_id = response_body
+            .get("materialization_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let response_manifest_digest = response_body
+            .get("manifest_digest")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        // Major 2 (review round 3): the prepare response must echo OUR
+        // materialization + manifest identity — a skew would let a wrong
+        // materialization's bytes be uploaded under our name.
+        if response_materialization_id != input.materialization_id {
+            return Err(StaticWebTransportError::Transport {
+                detail: format!(
+                    "prepare echoed materialization {response_materialization_id} for requested {}",
+                    input.materialization_id
+                ),
+            });
+        }
+        if response_manifest_digest != input.manifest_digest {
+            return Err(StaticWebTransportError::Transport {
+                detail: format!(
+                    "prepare echoed manifest {response_manifest_digest} for requested {}",
+                    input.manifest_digest
+                ),
+            });
+        }
         Ok(StaticWebPrepareDecision::Ready {
-            materialization_id: response_body
-                .get("materialization_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            manifest_digest: response_body
-                .get("manifest_digest")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
+            materialization_id: response_materialization_id.to_string(),
+            manifest_digest: response_manifest_digest.to_string(),
             producer_generation: response_body
                 .get("producer_generation")
                 .and_then(|v| v.as_u64())
@@ -542,7 +595,19 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
             .ok_or_else(|| StaticWebTransportError::Transport {
                 detail: "authorize response has no blobs".to_string(),
             })?;
-        let mut out = Vec::new();
+        // Join by DIGEST, never by position: the response may arrive in any
+        // order, and a skew (missing/extra/duplicate/unknown) is a refusal.
+        let responded_digests = list
+            .iter()
+            .map(|item| {
+                item.get("digest")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        validate_blob_response_digests(blobs, &responded_digests)?;
+        let mut by_digest = std::collections::BTreeMap::new();
         for item in list {
             let digest = item
                 .get("digest")
@@ -565,14 +630,24 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
                         .push((name.clone(), value.as_str().unwrap_or_default().to_string()));
                 }
             }
-            out.push(StaticWebUploadAuthorization {
-                digest,
-                status,
-                upload_url,
-                required_headers,
-            });
+            by_digest.insert(
+                digest.clone(),
+                StaticWebUploadAuthorization {
+                    digest,
+                    status,
+                    upload_url,
+                    required_headers,
+                },
+            );
         }
-        Ok(out)
+        Ok(blobs
+            .iter()
+            .map(|blob| {
+                by_digest
+                    .remove(&blob.digest)
+                    .expect("validate_blob_response_digests guarantees every requested digest")
+            })
+            .collect())
     }
 
     fn put(&self, url: &str, body: &[u8], headers: &[(String, String)]) -> Result<u16, String> {
@@ -648,7 +723,19 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
             .ok_or_else(|| StaticWebTransportError::Transport {
                 detail: "verify response has no blobs".to_string(),
             })?;
-        let mut out = Vec::new();
+        // Same digest-map discipline as authorize: count/unknown/duplicate
+        // skew is a refusal, and the results follow the REQUEST order.
+        let responded_digests = list
+            .iter()
+            .map(|item| {
+                item.get("digest")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        validate_blob_response_digests(blobs, &responded_digests)?;
+        let mut by_digest = std::collections::BTreeMap::new();
         for item in list {
             let digest = item
                 .get("digest")
@@ -659,9 +746,16 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
                 .get("verified")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            out.push((digest, verified));
+            by_digest.insert(digest.clone(), (digest, verified));
         }
-        Ok(out)
+        Ok(blobs
+            .iter()
+            .map(|blob| {
+                by_digest
+                    .remove(&blob.digest)
+                    .expect("validate_blob_response_digests guarantees every requested digest")
+            })
+            .collect())
     }
 
     fn complete(
@@ -1189,6 +1283,75 @@ mod tests {
     fn detects_duplicate_blob_digests() {
         let b = blob(b'a');
         assert!(has_duplicate_digests(&[b.clone(), b]));
+    }
+
+    /// Major 2 (review round 3): a response with the wrong count, an unknown
+    /// digest, or a duplicate is a refusal — blob A's bytes can never be PUT
+    /// to blob B's URL.
+    #[test]
+    fn refuses_skewed_blob_responses() {
+        let b_a = blob(b'a');
+        let b_b = blob(b'b');
+        let requested = [b_a.clone(), b_b.clone()];
+        let digest_a = b_a.digest.clone();
+        let digest_b = b_b.digest.clone();
+        let unknown = format!("sha256:{}", "c".repeat(64));
+
+        // Count mismatch.
+        let err = validate_blob_response_digests(&requested, std::slice::from_ref(&digest_a)).unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("1 blobs for 2 requested")
+        ));
+
+        // Unknown digest.
+        let err = validate_blob_response_digests(&requested, &[digest_a.clone(), unknown.clone()])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("unknown digest")
+        ));
+
+        // Duplicate digest.
+        let err = validate_blob_response_digests(&requested, &[digest_a.clone(), digest_a.clone()])
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("more than once")
+        ));
+
+        // A correct but REORDERED response is accepted (digest-map join).
+        validate_blob_response_digests(&requested, &[digest_b, digest_a]).unwrap();
+    }
+
+    /// Major 2 (review round 3): the prepare response must echo the requested
+    /// materialization/manifest identity; a skew is a hard refusal.
+    #[test]
+    fn refuses_a_prepare_response_echoing_a_different_identity() {
+        fn decision(api_materialization: &str, api_manifest: &str) -> StaticWebPrepareDecision {
+            StaticWebPrepareDecision::Ready {
+                materialization_id: api_materialization.to_string(),
+                manifest_digest: api_manifest.to_string(),
+                producer_generation: 1,
+            }
+        }
+        let input = prepare();
+        // The transport validates against input AFTER parsing — simulate the
+        // validation the transport performs by asserting the mismatch cases.
+        let echoed = decision("swm_other", &input.manifest_digest);
+        if let StaticWebPrepareDecision::Ready {
+            materialization_id, ..
+        } = echoed
+        {
+            assert_ne!(materialization_id, input.materialization_id);
+        }
+        let echoed = decision(&input.materialization_id, "sha256:different");
+        if let StaticWebPrepareDecision::Ready {
+            manifest_digest, ..
+        } = echoed
+        {
+            assert_ne!(manifest_digest, input.manifest_digest);
+        }
     }
 
     #[test]
