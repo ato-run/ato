@@ -2,7 +2,9 @@
   "schema": "ato.static-web-manifest/v1",
   "materialization_id": "mat_fixture",
   "entry_path": "index.html",
-  "routing": { "spa_fallback": true },
+  "routing": {
+    "spa_fallback": true
+  },
   "files": {
     "index.html": {
       "blob": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -26,7 +28,15 @@
     }
   },
   "security": {
-    "connect_src": ["https://api.example.com:8443", "wss://socket.example.net"],
-    "frame_ancestors": ["https://ato.run", "https://app.ato.run", "https://staging.ato.run"]
+    "connect_src": [
+      "https://api.example.com:8443",
+      "wss://socket.example.net"
+    ],
+    "frame_ancestors": [
+      "https://ato.run",
+      "https://app.ato.run",
+      "https://staging.store.ato.run",
+      "https://stg-app.ato.run"
+    ]
   }
 }

@@ -1,7 +1,22 @@
 [
   [],
-  ["https://ato.run"],
-  ["https://app.ato.run", "https://ato.run", "https://staging.ato.run"],
-  ["https://ato.run", "https://app.ato.run", "https://example.com"],
-  ["https://ato.run", "https://app.ato.run", "https://staging.ato.run", "https://example.com"]
+  [
+    "https://ato.run"
+  ],
+  [
+    "https://app.ato.run",
+    "https://ato.run",
+    "https://staging.store.ato.run"
+  ],
+  [
+    "https://ato.run",
+    "https://app.ato.run",
+    "https://example.com"
+  ],
+  [
+    "https://ato.run",
+    "https://app.ato.run",
+    "https://staging.store.ato.run",
+    "https://example.com"
+  ]
 ]

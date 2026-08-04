@@ -134,11 +134,43 @@ pub fn extract_static_web_output(
     plan: &StaticWebOutputPlan,
 ) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
+    // The source must be reached through REAL directories only. `symlink_metadata`
+    // on the final component does not protect against an intermediate symlink
+    // (e.g. `image_root/srv -> /host-sensitive` with root `srv/app/dist`): the
+    // joined path resolves through it and `copy_tree_no_links` only inspects the
+    // resolved subtree. Every component is therefore checked, then the canonical
+    // source must remain strictly beneath the canonical image root.
+    let canonical_image_root = fs::canonicalize(image_root)
+        .with_context(|| format!("canonicalize static web image root {}", image_root.display()))?;
     let source = image_root.join(&plan.image_output_root);
+    for component in plan.image_output_root.components() {
+        let current = source
+            .components()
+            .take_while(|c| *c != component)
+            .collect::<PathBuf>();
+        let step = current.join(component.as_os_str());
+        let meta = fs::symlink_metadata(&step)
+            .with_context(|| format!("read static web image component {}", step.display()))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!(
+                "static web image output path traverses a symlink or non-directory: {}",
+                step.display()
+            );
+        }
+    }
     let source_meta = fs::symlink_metadata(&source)
         .with_context(|| format!("read static web image output {}", source.display()))?;
     if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
         bail!("static web image output must be a real directory");
+    }
+    let canonical_source = fs::canonicalize(&source)
+        .with_context(|| format!("canonicalize static web image output {}", source.display()))?;
+    if !canonical_source.starts_with(&canonical_image_root) {
+        bail!(
+            "static web image output escapes the image root: {} not under {}",
+            canonical_source.display(),
+            canonical_image_root.display()
+        );
     }
 
     let workspace = tempfile::Builder::new()
@@ -146,11 +178,21 @@ pub fn extract_static_web_output(
         .tempdir()
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
-    copy_tree_no_links(&source, &output_root)?;
+    // Re-verify containment inside the copy as well, so a symlink swap between
+    // the checks above and the copy cannot smuggle a file from outside the
+    // image root into the immutable bundle.
+    copy_tree_no_links(&source, &output_root, &canonical_image_root)?;
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
         output_root,
     })
+}
+
+/// Whether `path` (which must already be canonicalized by the caller) is
+/// strictly inside `canonical_root`. `starts_with` on Path is component-wise,
+/// so a sibling that merely shares a string prefix cannot pass.
+fn is_beneath(canonical_path: &Path, canonical_root: &Path) -> bool {
+    canonical_path != canonical_root && canonical_path.starts_with(canonical_root)
 }
 
 fn validate_output_root(path: &Path) -> Result<()> {
@@ -170,7 +212,7 @@ fn has_duplicates(values: &[String]) -> bool {
     values.iter().any(|value| !unique.insert(value))
 }
 
-fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("create extracted output {}", destination.display()))?;
     let mut entries = fs::read_dir(source)
@@ -190,8 +232,19 @@ fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
                 source_path.display()
             );
         }
+        // TOCTOU guard: a component swapped to a symlink AFTER the type check
+        // above would resolve outside the image root when canonicalized. Verify
+        // the canonicalized entry remains beneath the canonical image root.
+        let canonical_entry = fs::canonicalize(&source_path)
+            .with_context(|| format!("canonicalize static output entry {}", source_path.display()))?;
+        if !is_beneath(&canonical_entry, canonical_root) {
+            bail!(
+                "static output entry escapes the image root: {}",
+                source_path.display()
+            );
+        }
         if file_type.is_dir() {
-            copy_tree_no_links(&source_path, &destination_path)?;
+            copy_tree_no_links(&source_path, &destination_path, canonical_root)?;
         } else if file_type.is_file() {
             reject_hard_link(&fs::metadata(&source_path)?, &source_path)?;
             fs::copy(&source_path, &destination_path).with_context(|| {
@@ -329,6 +382,79 @@ mod tests {
         fs::create_dir_all(&output).unwrap();
         fs::write(output.join("index.html"), "built").unwrap();
         fs::hard_link(output.join("index.html"), output.join("duplicate.html")).unwrap();
+        assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_an_intermediate_symlink_escaping_the_image_root() {
+        // `image_root/srv` is a symlink to a directory OUTSIDE the image root;
+        // `image_output_root = srv/app/dist` would resolve through it and copy
+        // host files into the bundle if only the final component were checked.
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("app/dist")).unwrap();
+        fs::write(outside.path().join("app/dist/index.html"), "host-secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), image.path().join("srv")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("srv/app/dist");
+        assert!(
+            extract_static_web_output(image.path(), &escaping).is_err(),
+            "intermediate symlink must not resolve outside the image root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_an_absolute_intermediate_symlink() {
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        // Absolute symlink target — still outside the image root.
+        std::os::unix::fs::symlink(outside.path(), image.path().join("dist")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("dist");
+        assert!(extract_static_web_output(image.path(), &escaping).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_relative_intermediate_symlink_escaping_with_parent() {
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        // `srv -> ../<outside-name>` resolves out of the image root via `..`.
+        let outside_name = outside
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        std::os::unix::fs::symlink(format!("../{outside_name}"), image.path().join("srv"))
+            .unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("srv/dist");
+        assert!(extract_static_web_output(image.path(), &escaping).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_symlink_inside_the_output_tree() {
+        // A symlink BELOW the selected output root is also refused (no links
+        // anywhere in the closure).
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "host-secret").unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("index.html"), "built").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), output.join("leak.txt"))
+            .unwrap();
         assert!(extract_static_web_output(image.path(), &plan()).is_err());
     }
 }

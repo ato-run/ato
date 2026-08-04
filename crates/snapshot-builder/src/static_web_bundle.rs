@@ -6,7 +6,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -86,10 +85,14 @@ pub fn produce_static_web_bundle(
         if relative.ends_with(".map") {
             bail!("source maps are not publishable static web output: {relative}");
         }
-        let metadata = fs::metadata(&source)
-            .with_context(|| format!("read static web file metadata {}", source.display()))?;
-        reject_hard_link(&metadata, &source)?;
-        let size = metadata.len();
+        // Open ONCE and derive size from the SAME descriptor that produces the
+        // hashed bytes. `metadata.len()` before a separate read can disagree
+        // with what was actually hashed if the file changes between the two
+        // calls; a bounded read plus a post-read fstat makes the manifest size,
+        // the receipt size, and the blob bytes one fact. `take(MAX_FILE_SIZE+1)`
+        // also bounds builder memory and refuses growth past the limit.
+        let (bytes, size) = read_regular_file_bounded(&source, MAX_FILE_SIZE)?;
+        reject_hard_link(&fs::metadata(&source)?, &source)?;
         if size > MAX_FILE_SIZE {
             bail!("static web file exceeds {MAX_FILE_SIZE} bytes: {relative}");
         }
@@ -99,7 +102,6 @@ pub fn produce_static_web_bundle(
         if total_bytes > MAX_TOTAL_SIZE {
             bail!("static web output exceeds {MAX_TOTAL_SIZE} bytes");
         }
-        let bytes = read_regular_file(&source)?;
         if !no_secret_scan::blob_is_clean(&bytes, runtime_secret_canaries) {
             bail!("static web output failed the runtime secret canary scan: {relative}");
         }
@@ -235,13 +237,69 @@ fn collect_files(
     Ok(())
 }
 
-fn read_regular_file(path: &Path) -> Result<Vec<u8>> {
+/// Read a regular file with a hard size bound, returning the bytes AND the
+/// size measured from the SAME descriptor that was read.
+///
+/// The read is capped at `max_size + 1` so an oversized or growing file cannot
+/// consume unbounded builder memory. After the read, the file is re-stated and
+/// must report the SAME size as the descriptor's original length — a file that
+/// changed mid-read (TOCTOU) is refused rather than hashed inconsistently.
+/// On Unix the post-read stat goes through the open descriptor (`fstat`), so
+/// the check is immune to the path being replaced after open.
+#[cfg(unix)]
+fn read_regular_file_bounded(path: &Path, max_size: u64) -> Result<(Vec<u8>, u64)> {
+    use std::io::Read as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("open static web file {}", path.display()))?;
+    let before = file
+        .metadata()
+        .with_context(|| format!("fstat static web file {}", path.display()))?;
+    let before_size = before.len();
+    let mut bytes = Vec::with_capacity(usize::try_from(before_size.min(max_size)).unwrap_or(0));
+    (&file)
+        .take(max_size + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read static web file {}", path.display()))?;
+    let after = file
+        .metadata()
+        .with_context(|| format!("fstat static web file after read {}", path.display()))?;
+    if after.len() != before_size || after.ino() != before.ino() {
+        bail!(
+            "static web file changed while being read: {}",
+            path.display()
+        );
+    }
+    Ok((bytes, before_size))
+}
+
+#[cfg(not(unix))]
+fn read_regular_file_bounded(path: &Path, max_size: u64) -> Result<(Vec<u8>, u64)> {
+    use std::io::Read as _;
+
     let mut file =
         fs::File::open(path).with_context(|| format!("open static web file {}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
+    let before_size = file
+        .metadata()
+        .with_context(|| format!("stat static web file {}", path.display()))?
+        .len();
+    let mut bytes = Vec::with_capacity(usize::try_from(before_size.min(max_size)).unwrap_or(0));
+    (&file)
+        .take(max_size + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("read static web file {}", path.display()))?;
-    Ok(bytes)
+    let after_size = file
+        .metadata()
+        .with_context(|| format!("stat static web file after read {}", path.display()))?
+        .len();
+    if after_size != before_size {
+        bail!(
+            "static web file changed while being read: {}",
+            path.display()
+        );
+    }
+    Ok((bytes, before_size))
 }
 
 #[cfg(unix)]
@@ -368,6 +426,46 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_file_that_exceeds_the_single_file_limit() {
+        let image = fixture_root();
+        fs::write(
+            image.path().join("dist/index.html"),
+            vec![b'x'; (MAX_FILE_SIZE + 1) as usize],
+        )
+        .unwrap();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        assert!(
+            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds")
+        );
+    }
+
+    #[test]
+    fn rejects_a_manifest_with_the_same_blob_at_two_sizes() {
+        let image = fixture_root();
+        fs::write(image.path().join("dist/index.html"), "built").unwrap();
+        fs::write(image.path().join("dist/a.js"), "aaaa").unwrap();
+        fs::write(image.path().join("dist/b.js"), "bbbbbb").unwrap();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let produced =
+            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
+                .unwrap();
+        let mut manifest: capsule::contract::static_web_manifest::StaticWebManifestV1 =
+            serde_json::from_slice(&produced.manifest_bytes).unwrap();
+        // Point both JS files at the SAME blob with DIFFERENT sizes — the R2
+        // object has one size, so the manifest must refuse it.
+        let blob = manifest.files["a.js"].blob.clone();
+        manifest.files.get_mut("b.js").unwrap().blob = blob;
+        manifest.files.get_mut("b.js").unwrap().size =
+            manifest.files["a.js"].size + 1;
+        assert!(manifest.validate().is_err());
+    }
+
+    #[test]
     fn rejects_unsafe_closure_members() {
         let image = fixture_root();
         #[cfg(unix)]
@@ -384,10 +482,10 @@ mod tests {
         assert_eq!(
             host_label(
                 'p',
-                "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2"
+                "sha256:c61c17155f2594c1c32fda225bb5c552d611f5c916b95e904f55afa6b7b69543"
             )
             .unwrap(),
-            "p-nv35hwtqtjly43ky6uguxd4m6xcu4ilyeaecc5u27mbujheonora"
+            "p-yyobofk7ewkmdqzp3irfxnofkllbd5ojc24v5ecpkwx2nn5wsvbq"
         );
     }
 }
