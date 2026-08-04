@@ -2980,6 +2980,7 @@ docker build -q -t "$TAG" "$BUILD" >/dev/null
         // script byte-identical to the pre-ato#1024/#1026 template.
         extra_mounts: String::new(),
         extra_prelaunch: String::new(),
+        export_to: None,
     })
 }
 
@@ -3119,6 +3120,13 @@ pub(crate) struct PackScriptInputs<'a> {
     /// its emitted script byte-identical); content is generated, never a
     /// user-controlled literal.
     pub extra_prelaunch: String,
+    /// When set, the exported container tree (`$BUILD/rootfs`) is ALSO copied
+    /// (via tar, so the copy is atomic and symlink-safe) to this host path
+    /// BEFORE the cleanup trap removes `$BUILD`. Used by the Static Web lane to
+    /// extract a declared output tree from the built image without re-running
+    /// the container. The destination parent must exist; the destination
+    /// itself must NOT exist.
+    pub export_to: Option<String>,
 }
 
 /// The bash pipeline that turns an app image into a read-only-bootable ext4:
@@ -3176,6 +3184,7 @@ MNT=$(mktemp -d)
 mount -o loop "$ATO_OUT" "$MNT"
 cp -a "$BUILD/rootfs/." "$MNT/"
 sync; umount "$MNT"
+{export_copy}
 # MNT/BUILD are removed by the EXIT trap (also on any failure above).
 "#,
         tag_init = i.tag_init,
@@ -3189,6 +3198,14 @@ sync; umount "$MNT"
         size = i.size_mib,
         extra_mounts = i.extra_mounts,
         extra_prelaunch = i.extra_prelaunch,
+        export_copy = i.export_to.as_deref().map_or_else(String::new, |dest| {
+            // `cp -a` would follow nothing (it copies the tree as-is), but a
+            // tree COPY done while the source is quiescent is what the static
+            // web extractor needs; tar keeps ownership/modes and is atomic at
+            // the destination. Quoted: `dest` is a builder-generated absolute
+            // path, never a user literal.
+            format!("tar -C \"$BUILD/rootfs\" -cf - . | tar -C {dest:?} -xf -")
+        }),
     )
 }
 

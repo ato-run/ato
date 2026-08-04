@@ -5197,6 +5197,54 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
         std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
             .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
+        // ── Static Web emission (vertical slice, PR 4 call site). ──
+        // The built image's filesystem was exported to `<work_root>/guest-rootfs`
+        // during the v1 build; if the saved Build Config Revision declared
+        // [outputs.static_web], extract the declared output, produce the
+        // immutable bundle, and upload it through the API. Absent declaration →
+        // complete no-op. A DECLARED output that fails is a build failure —
+        // never a silent fallback to the snapshot lane.
+        {
+            let exported_root = jobdir.join("v1-work/guest-rootfs");
+            let bundle_dir = jobdir.join("static-web-bundle-v1");
+            std::fs::create_dir_all(&bundle_dir)
+                .map_err(|error| format!("create static web bundle dir: {error}"))?;
+            let plan = self
+                .work
+                .static_web_output_plan()
+                .map_err(|error| format!("resolve static web output plan: {error}"))?;
+            if plan.is_some() {
+                let canaries: Vec<&[u8]> = live_secret_canaries(self.cfg);
+                let transport = snapshot_builder::static_web_transport::HttpStaticWebTransport {
+                    api_url: &self.cfg.api_url,
+                    token: &self.cfg.token,
+                    agent_id: &self.cfg.agent_id,
+                };
+                let context = snapshot_builder::static_web_emit::StaticWebEmitContext {
+                    image_root: &exported_root,
+                    destination_parent: &bundle_dir,
+                    runtime_secret_canaries: &canaries,
+                    job_id: &self.work.work_id,
+                    build_config_revision_id: self
+                        .work
+                        .build_config_revision_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            "static web output declared without a Build Config Revision".to_string()
+                        })?,
+                    plan_digest: self.work.plan_digest.as_deref().ok_or_else(|| {
+                        "static web output declared without a plan digest".to_string()
+                    })?,
+                    agent_id: &self.cfg.agent_id,
+                    transport: &transport,
+                };
+                snapshot_builder::static_web_emit::emit_static_web_if_declared(
+                    self.work.effective_build_plan.as_ref(),
+                    &context,
+                )
+                .map_err(|error| format!("static web emission failed: {error}"))?;
+            }
+        }
         persist_clean_replay_artifact(
             &jobdir,
             &CleanReplayBuilderArtifact {

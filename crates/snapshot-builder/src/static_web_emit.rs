@@ -295,4 +295,54 @@ mod tests {
         assert_eq!(*transport.completes.borrow(), 1);
         assert!(parent.path().join("static-web-bundle-v1/manifest.json").exists());
     }
+
+    /// The exact shape the clean_replay call site feeds: the v1 build exported
+    /// the guest filesystem to `<work_root>/guest-rootfs`, the work's
+    /// `effective_build_plan` carries the declared section, and the work carries
+    /// the revision id + plan digest. This is the PR 4 production reachability
+    /// test at the seam the real build exercises (the Docker/Firecracker
+    /// harness itself is the rollout E2E; everything downstream of the exported
+    /// tree is covered here).
+    #[test]
+    fn call_site_shape_emits_from_a_guest_rootfs_tree() {
+        let jobdir = tempfile::tempdir().unwrap();
+        let exported = jobdir.path().join("v1-work/guest-rootfs");
+        std::fs::create_dir_all(exported.join("app/dist/assets")).unwrap();
+        std::fs::write(exported.join("app/dist/index.html"), "<main>ok</main>").unwrap();
+        std::fs::write(exported.join("app/dist/assets/app.js"), "console.log('ok')").unwrap();
+        let bundle_dir = jobdir.path().join("static-web-bundle-v1");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+
+        let transport = RecordingTransport::default();
+        let context = StaticWebEmitContext {
+            image_root: &exported,
+            destination_parent: &bundle_dir,
+            runtime_secret_canaries: &[],
+            job_id: "ajob_1",
+            build_config_revision_id: "bcrev_1",
+            plan_digest: "sha256:abc",
+            agent_id: "builder_1",
+            transport: &transport,
+        };
+        let result = emit_static_web_if_declared(
+            Some(&serde_json::json!({
+                "schema": "ato.effective-build-plan/v1",
+                "static_web_output": {
+                    "schema": "ato.static-web-output-plan/v1",
+                    "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_output_root": "app/dist",
+                    "entry_path": "index.html",
+                    "spa_fallback": true,
+                    "connect_src": [],
+                    "producer_contract": "ato.static-web-producer/v1",
+                }
+            })),
+            &context,
+        )
+        .unwrap();
+        assert!(matches!(result, StaticWebEmit::Emitted { .. }));
+        assert_eq!(*transport.prepares.borrow(), 1);
+        assert_eq!(*transport.completes.borrow(), 1);
+        assert!(bundle_dir.join("static-web-bundle-v1/manifest.json").exists());
+    }
 }
