@@ -618,7 +618,6 @@ pub(crate) fn imported_pack_script(
         size_mib,
         extra_mounts,
         extra_prelaunch,
-        export_to: None,
     })
 }
 

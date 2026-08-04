@@ -1073,6 +1073,13 @@ fn derive_job_spec(
 struct ProducedBuild {
     /// The bootable ext4 rootfs bytes.
     rootfs: Vec<u8>,
+    /// The exported guest filesystem tree (`<work_root>/guest-rootfs`) the
+    /// v1 lane wrote before packing. Present ONLY for the v1 build lane, which
+    /// exports natively (the exporter is a required producer step); the legacy
+    /// recipe/import lanes leave it None (their tree is a build-script temp).
+    /// The Static Web emit consumes this tree when the plan declares an
+    /// output — it never guesses a path.
+    exported_guest_rootfs: Option<PathBuf>,
     port: u16,
     healthcheck: String,
     /// Fed to `BuildReadyStateInput.execution_id` (recipe: the declared execution
@@ -1360,6 +1367,7 @@ fn produce_recipe_build(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
         execution_id: declared_execution_id,
@@ -1730,6 +1738,7 @@ fn produce_import_build(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.plan.port,
         healthcheck,
         execution_id,
@@ -1849,6 +1858,7 @@ fn produce_oci_image_import(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.plan.port,
         healthcheck: outcome
             .plan
@@ -1952,6 +1962,7 @@ fn produce_compose_import(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.public_port,
         healthcheck: outcome
             .public_readiness_http_path
@@ -3532,6 +3543,10 @@ fn produce_pinned_v1_build(
 
     Ok(ProducedBuild {
         rootfs,
+        // The v1 producer exported the guest filesystem to
+        // `<work_root>/guest-rootfs` before packing (that is the seam the
+        // Static Web lane extracts from). The tree is not deleted by packing.
+        exported_guest_rootfs: Some(work_root.join("guest-rootfs")),
         port: outcome.port,
         // A v1 manifest authors no readiness path — `[web]` is a port and a
         // bind address. `/` is the probe, and `synthesized_probe` says so
@@ -5198,14 +5213,18 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
             .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
         // ── Static Web emission (vertical slice, PR 4 call site). ──
-        // The built image's filesystem was exported to `<work_root>/guest-rootfs`
-        // during the v1 build; if the saved Build Config Revision declared
-        // [outputs.static_web], extract the declared output, produce the
-        // immutable bundle, and upload it through the API. Absent declaration →
-        // complete no-op. A DECLARED output that fails is a build failure —
-        // never a silent fallback to the snapshot lane.
+        // The v1 producer exported the guest filesystem to
+        // `produced.exported_guest_rootfs` (a required producer step). If the
+        // saved Build Config Revision declared [outputs.static_web], extract
+        // the declared output from THAT tree, produce the immutable bundle,
+        // and upload it through the API. Absent declaration → complete no-op.
+        // A DECLARED output that fails is a build failure — never a silent
+        // fallback to the snapshot lane.
         {
-            let exported_root = jobdir.join("v1-work/guest-rootfs");
+            let exported_root = produced.exported_guest_rootfs.clone().ok_or_else(|| {
+                "static web output declared but the build lane produced no exported guest rootfs"
+                    .to_string()
+            })?;
             let bundle_dir = jobdir.join("static-web-bundle-v1");
             std::fs::create_dir_all(&bundle_dir)
                 .map_err(|error| format!("create static web bundle dir: {error}"))?;

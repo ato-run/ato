@@ -143,18 +143,18 @@ pub fn extract_static_web_output(
     let canonical_image_root = fs::canonicalize(image_root)
         .with_context(|| format!("canonicalize static web image root {}", image_root.display()))?;
     let source = image_root.join(&plan.image_output_root);
+    // Walk the components IN ORDER, accumulating the prefix: `a/a/dist` must
+    // check `image_root/a` AND `image_root/a/a` AND `image_root/a/a/dist` —
+    // a take_while on the first matching component would skip the second `a`.
+    let mut current = image_root.to_path_buf();
     for component in plan.image_output_root.components() {
-        let current = source
-            .components()
-            .take_while(|c| *c != component)
-            .collect::<PathBuf>();
-        let step = current.join(component.as_os_str());
-        let meta = fs::symlink_metadata(&step)
-            .with_context(|| format!("read static web image component {}", step.display()))?;
+        current.push(component.as_os_str());
+        let meta = fs::symlink_metadata(&current)
+            .with_context(|| format!("read static web image component {}", current.display()))?;
         if meta.file_type().is_symlink() || !meta.is_dir() {
             bail!(
                 "static web image output path traverses a symlink or non-directory: {}",
-                step.display()
+                current.display()
             );
         }
     }
@@ -456,5 +456,27 @@ mod tests {
         std::os::unix::fs::symlink(outside.path().join("secret.txt"), output.join("leak.txt"))
             .unwrap();
         assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_checks_every_duplicate_named_component_in_order() {
+        // `a/a/dist`: the FIRST `a` is a real dir but the SECOND `a` is a
+        // symlink to outside. A take_while over the first matching component
+        // would skip the second `a`; the accumulated in-order walk must refuse.
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        let first_a = image.path().join("a");
+        fs::create_dir_all(&first_a).unwrap();
+        std::os::unix::fs::symlink(outside.path(), first_a.join("a")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("a/a/dist");
+        assert!(
+            extract_static_web_output(image.path(), &escaping).is_err(),
+            "the second 'a' component is a symlink and must be refused"
+        );
     }
 }
