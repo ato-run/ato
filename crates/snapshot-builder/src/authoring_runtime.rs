@@ -198,6 +198,12 @@ struct ClaimResponse {
 struct ClaimRequest<'a> {
     builder_id: &'a str,
     supported_operations: &'a [&'a str],
+    /// Capability advertisement (vertical slice). The API only emits the
+    /// build-plan extension fields (`effective_build_plan`, plan digest,
+    /// authored TOML, revision binding) to a builder that lists
+    /// `static-web-bundle-v1`; a legacy builder must keep receiving the
+    /// byte-compatible claim it can parse.
+    supported_features: &'a [&'a str],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -273,6 +279,16 @@ pub struct AuthoringApiClient<'a> {
 
 impl AuthoringApiClient<'_> {
     pub fn claim(&self, supported_operations: &[&str]) -> Result<Option<AuthoringWork>, String> {
+        self.claim_with_features(supported_operations, &["static-web-bundle-v1"])
+    }
+
+    /// Claim with an explicit capability set. Split from [`Self::claim`] so
+    /// tests can prove a capability-less claim receives the legacy payload.
+    pub fn claim_with_features(
+        &self,
+        supported_operations: &[&str],
+        supported_features: &[&str],
+    ) -> Result<Option<AuthoringWork>, String> {
         let response = ureq::post(&format!(
             "{}{AUTHORING_BASE_PATH}/claim",
             self.api_url.trim_end_matches('/')
@@ -282,6 +298,7 @@ impl AuthoringApiClient<'_> {
             serde_json::to_value(ClaimRequest {
                 builder_id: self.builder_id,
                 supported_operations,
+                supported_features,
             })
             .map_err(|error| format!("encode authoring claim: {error}"))?,
         )
@@ -1586,6 +1603,47 @@ pub fn render_inferred_capsule_toml(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_request_advertises_the_static_web_capability() {
+        let request = ClaimRequest {
+            builder_id: "builder_1",
+            supported_operations: &["clean_replay"],
+            supported_features: &["static-web-bundle-v1"],
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(value["supported_features"], serde_json::json!(["static-web-bundle-v1"]));
+    }
+
+    #[test]
+    fn legacy_claim_shape_still_parses_without_plan_extension_fields() {
+        // The API gates the plan-extension fields behind the capability. This
+        // is the EXACT legacy claim shape (no effective_build_plan / plan
+        // digest / authored TOML / revision binding), which must keep parsing
+        // so an old builder + new API rollout cannot break existing builds.
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_legacy",
+            "authoring_session_id": "auth_legacy",
+            "capsule_revision_id": "caprev_legacy",
+            "source_revision_id": "srev_legacy",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_legacy",
+                "source_materialization_id": "smat_legacy",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_legacy.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_legacy"
+        }))
+        .expect("legacy claim parses");
+        assert!(work.effective_build_plan.is_none());
+        assert!(work.plan_digest.is_none());
+        assert!(work.static_web_output_plan().expect("parses").is_none());
+    }
 
     #[test]
     fn authoring_job_claim_accepts_worker_fencing_generation() {
