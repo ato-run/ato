@@ -344,6 +344,78 @@ fn writer_output_is_byte_identical_for_the_same_input_and_signer() {
     );
 }
 
+/// The streaming entry point and the convenience wrapper must be the same
+/// writer, not two writers that happen to agree today — the wrapper delegates,
+/// and this is what proves the delegation was not quietly forked.
+#[test]
+fn streaming_and_buffered_writers_agree_byte_for_byte() {
+    let source = baseline_source_archive();
+    let buffered = bundle_from(OUTER_MANIFEST, &source);
+
+    let mut streamed = Vec::new();
+    let receipt = write_capsule_bundle_v3_to(
+        &mut streamed,
+        OUTER_MANIFEST.as_bytes(),
+        Cursor::new(source.clone()),
+        ClaimedIssuer::LocalAuthor,
+        &signer(),
+    )
+    .expect("streaming write");
+
+    assert_eq!(
+        streamed, buffered,
+        "the two writers must emit the same bytes"
+    );
+    assert_eq!(receipt.bundle_digest, Sha256Digest::of_bytes(&buffered));
+    assert_eq!(receipt.bundle_size_bytes, buffered.len() as u64);
+
+    // The receipt's index digest is the value signature.json commits to, so a
+    // streaming writer learns the signing target without re-reading its output.
+    let envelope = verify_local(&streamed).expect("the streamed bundle verifies");
+    assert_eq!(envelope.bundle_digest(), receipt.bundle_digest);
+}
+
+/// The derivation re-asserts the source member's digest by streaming rather than
+/// reading it whole. Same value, or the precondition moved when the code did.
+#[test]
+fn streamed_source_digest_reverification_matches_a_whole_file_read() {
+    let source = baseline_source_archive();
+    let import = import_local(&bundle_from(OUTER_MANIFEST, &source)).expect("import");
+    assert_eq!(
+        import.source_archive().encoded_digest(),
+        &Sha256Digest::of_bytes(&source),
+        "the streamed re-verification must agree with hashing the whole member"
+    );
+}
+
+/// RFC §"Container layout" says deterministic USTAR. `Header::new_gnu` writes
+/// `"ustar "` / `" \0"` and would contradict it, so the magic and version bytes
+/// of every member header are pinned here — this is the assertion that keeps the
+/// contract and the writer from drifting apart a second time.
+#[test]
+fn writer_emits_ustar_magic_and_version() {
+    const MAGIC: std::ops::Range<usize> = 257..263;
+    const VERSION: std::ops::Range<usize> = 263..265;
+
+    let bundle = baseline_bundle();
+    let mut archive = tar::Archive::new(Cursor::new(bundle));
+    let mut seen = 0;
+    for entry in archive.entries().expect("entries") {
+        let entry = entry.expect("entry");
+        let header = entry.header().as_bytes();
+        assert_eq!(
+            &header[MAGIC], b"ustar\0",
+            "member headers must carry the USTAR magic, not GNU's \"ustar \""
+        );
+        assert_eq!(
+            &header[VERSION], b"00",
+            "member headers must carry the USTAR version, not GNU's \" \\0\""
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, 4, "a v3 bundle carries exactly four members");
+}
+
 #[test]
 fn writer_emits_exactly_four_members_in_ascending_byte_order() {
     let bundle = baseline_bundle();
@@ -1320,6 +1392,263 @@ fn declared_size_is_never_used_to_preallocate() {
     assert_index_vector_rejected("astronomically large declared size", |value| {
         value["members"][0]["size_bytes"] = json!("99999999999999999999999999999999");
     });
+}
+
+// ── Blocker 1: importer policy vs. the format's own (absent) limits ──────────
+
+/// A source archive large enough to cross a small configured policy limit while
+/// staying far under the SSOT's fixed production caps — so the same bytes can
+/// prove both halves of the contract.
+fn oversized_source_archive() -> Vec<u8> {
+    // Incompressible-ish content, so the compressed member is also comfortably
+    // over a small compressed limit.
+    let filler: String = (0..4096u32)
+        .map(|value| ((value % 251) as u8) as char)
+        .collect();
+    let files: Vec<(String, String)> = (0..8)
+        .map(|index| (format!("big/file_{index}.txt"), filler.clone()))
+        .collect();
+    let borrowed: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_str()))
+        .collect();
+    source_archive(&borrowed)
+}
+
+fn import_with_policy(
+    bundle: &[u8],
+    policy: CapsuleImportPolicy,
+) -> Result<VerifiedCapsuleImport, CapsuleImportError> {
+    let envelope = verify_capsule_envelope(
+        Cursor::new(bundle.to_vec()),
+        local_context(),
+        &permissive_local_policy(),
+        &policy,
+    )?;
+    derive_imported_capsule(envelope)
+}
+
+/// RFC §"Resource policy": exceeding an importer limit is NOT `capsule_invalid`.
+/// Each source dimension gets its own case, because each is enforced at a
+/// different point in the pre-scan and a single case would leave three untested.
+#[test]
+fn source_over_an_importer_policy_limit_is_a_budget_refusal_not_invalidity() {
+    let bundle = bundle_from(OUTER_MANIFEST, &oversized_source_archive());
+
+    let cases: Vec<(&str, CapsuleImportPolicy)> = vec![
+        (
+            "compressed",
+            CapsuleImportPolicy {
+                max_source_compressed_bytes: Some(64),
+                ..CapsuleImportPolicy::default()
+            },
+        ),
+        (
+            "expanded",
+            CapsuleImportPolicy {
+                max_source_expanded_bytes: Some(1024),
+                ..CapsuleImportPolicy::default()
+            },
+        ),
+        (
+            "file count",
+            CapsuleImportPolicy {
+                max_source_file_count: Some(2),
+                ..CapsuleImportPolicy::default()
+            },
+        ),
+        (
+            "per-file size",
+            CapsuleImportPolicy {
+                max_source_file_bytes: Some(16),
+                ..CapsuleImportPolicy::default()
+            },
+        ),
+    ];
+
+    for (label, policy) in cases {
+        match import_with_policy(&bundle, policy) {
+            Err(CapsuleImportError::ResourceBudgetExceeded(message)) => {
+                assert!(
+                    message.contains("not malformed"),
+                    "{label}: the refusal must say the bundle is still valid, got {message}"
+                );
+            }
+            other => panic!("{label}: expected ResourceBudgetExceeded, got {other:?}"),
+        }
+    }
+}
+
+/// The other half of the same claim: with no limit configured, the identical
+/// bundle imports. The format imposes nothing; only policy does.
+#[test]
+fn the_same_oversized_source_imports_when_no_policy_limit_is_configured() {
+    let bundle = bundle_from(OUTER_MANIFEST, &oversized_source_archive());
+    let import = import_with_policy(&bundle, CapsuleImportPolicy::unbounded())
+        .expect("a format-valid bundle imports when the importer bounds nothing");
+    assert!(
+        import
+            .capsule_program_id()
+            .to_string()
+            .starts_with("blake3:")
+    );
+}
+
+/// And the line the reclassification must not blur: a source member that is not
+/// a well-formed archive is still `capsule_invalid`, under both a bounded and an
+/// unbounded policy — the classification must follow the actual failure, not
+/// whichever code path happened to run first.
+#[test]
+fn a_malformed_source_archive_is_still_capsule_invalid_under_any_policy() {
+    let truncated = {
+        let mut bytes = baseline_source_archive();
+        bytes.truncate(bytes.len() / 2);
+        bytes
+    };
+    for (label, policy) in [
+        ("unbounded", CapsuleImportPolicy::unbounded()),
+        (
+            "bounded",
+            CapsuleImportPolicy {
+                max_source_expanded_bytes: Some(64 * 1024 * 1024),
+                max_source_file_count: Some(1000),
+                ..CapsuleImportPolicy::default()
+            },
+        ),
+    ] {
+        let bundle = bundle_from(OUTER_MANIFEST, &truncated);
+        match import_with_policy(&bundle, policy) {
+            Err(CapsuleImportError::CapsuleInvalid(_)) => {}
+            other => panic!("{label}: expected CapsuleInvalid, got {other:?}"),
+        }
+    }
+}
+
+/// Derivation's temporary storage is charged too, not just outer staging: a
+/// budget that comfortably covers the four outer members must still refuse when
+/// the extraction and re-archive work is accounted for.
+#[test]
+fn derivation_temporary_storage_is_charged_against_the_budget() {
+    let source = oversized_source_archive();
+    let bundle = bundle_from(OUTER_MANIFEST, &source);
+    // Enough for every outer member (so verify_capsule_envelope passes) but far
+    // less than the expanded tree the derivation is about to write.
+    let budget = (bundle.len() as u64) + 1024;
+
+    let envelope = verify_capsule_envelope(
+        Cursor::new(bundle),
+        local_context(),
+        &permissive_local_policy(),
+        &CapsuleImportPolicy {
+            temporary_storage_budget: Some(budget),
+            ..CapsuleImportPolicy::default()
+        },
+    )
+    .expect("outer staging fits the budget");
+
+    match derive_imported_capsule(envelope) {
+        Err(CapsuleImportError::ResourceBudgetExceeded(_)) => {}
+        other => panic!("expected the derivation to exhaust the budget, got {other:?}"),
+    }
+}
+
+// ── Blocker 2: the verified source archive survives derivation ───────────────
+
+#[test]
+fn verified_source_archive_carries_the_already_verified_digest_and_size() {
+    let source = baseline_source_archive();
+    let bundle = bundle_from(OUTER_MANIFEST, &source);
+
+    // What verify_capsule_envelope itself checked against index.json.
+    let envelope = verify_local(&bundle).expect("envelope verifies");
+    let declared = envelope.index().source_member().sha256;
+    let declared_size = envelope
+        .index()
+        .source_member()
+        .size_bytes
+        .as_str()
+        .to_string();
+
+    let import = derive_imported_capsule(envelope).expect("import");
+    let evidence = import.source_archive();
+    assert_eq!(
+        evidence.encoded_digest(),
+        &declared,
+        "the evidence must be the digest already verified, not a fresh one"
+    );
+    assert_eq!(evidence.encoded_size().to_string(), declared_size);
+    // ...and it is genuinely the archive the bundle carried.
+    assert_eq!(evidence.encoded_digest(), &Sha256Digest::of_bytes(&source));
+    assert_eq!(evidence.encoded_size(), source.len() as u64);
+}
+
+#[test]
+fn verified_source_archive_open_yields_exactly_the_verified_bytes() {
+    use std::io::Read as _;
+
+    let source = baseline_source_archive();
+    let import = import_local(&bundle_from(OUTER_MANIFEST, &source)).expect("import");
+    let evidence = import.source_archive();
+
+    let mut bytes = Vec::new();
+    evidence
+        .open()
+        .expect("open the verified archive")
+        .read_to_end(&mut bytes)
+        .expect("read the verified archive");
+
+    assert_eq!(bytes, source, "open() must hand back the original bytes");
+    assert_eq!(&Sha256Digest::of_bytes(&bytes), evidence.encoded_digest());
+    assert_eq!(bytes.len() as u64, evidence.encoded_size());
+}
+
+#[test]
+fn verified_source_archive_reports_the_projections_own_tree_digest() {
+    let import = import_local(&baseline_bundle()).expect("import");
+    let tree_digest = import.source_archive().source_tree_digest().to_string();
+    assert!(
+        tree_digest.starts_with("sha256:"),
+        "the tree digest must be the SSOT's ProgramSourceDigest, got {tree_digest}"
+    );
+
+    // The inner control files must not move it, exactly as they must not move
+    // capsule_program_id — same reuse, same guarantee.
+    let with_inner = import_local(&bundle_from(
+        OUTER_MANIFEST,
+        &source_archive_with(&[("capsule.lock", "{}\n")]),
+    ))
+    .expect("import");
+    assert_eq!(
+        with_inner.source_archive().source_tree_digest().to_string(),
+        tree_digest
+    );
+}
+
+#[test]
+fn the_verified_archive_survives_into_workspace_and_dies_with_it() {
+    let import = import_local(&baseline_bundle()).expect("import");
+    let staging_root = import
+        .source_archive()
+        .staging_root_for_test()
+        .to_path_buf();
+    let digest = *import.source_archive().encoded_digest();
+    assert!(staging_root.exists());
+
+    // into_workspace() is the ordinary install hand-off; the evidence must not be
+    // dropped on the floor there.
+    let workspace = import.into_workspace();
+    assert!(
+        staging_root.exists(),
+        "the staged archive must outlive the transition to a workspace"
+    );
+    assert_eq!(workspace.source_archive().encoded_digest(), &digest);
+    assert!(workspace.source_archive().open().is_ok());
+
+    drop(workspace);
+    assert!(
+        !staging_root.exists(),
+        "the staged archive must be removed when its owner is dropped"
+    );
 }
 
 #[test]

@@ -134,9 +134,18 @@ impl StagedMember {
 pub(crate) struct StagedOuterMembers {
     _staging: TempDir,
     members: BTreeMap<&'static str, StagedMember>,
+    /// Bytes charged against the policy so far, carried forward so the later
+    /// derivation continues one running total rather than starting a fresh,
+    /// unrelated budget for the same import.
+    staged_total: u64,
 }
 
 impl StagedOuterMembers {
+    /// The running policy charge this staging already accrued.
+    pub(crate) fn staged_total(&self) -> u64 {
+        self.staged_total
+    }
+
     pub(crate) fn member(&self, path: &str) -> &StagedMember {
         self.members
             .get(path)
@@ -257,6 +266,7 @@ pub(crate) fn stage_v3_outer_members<R: Read>(
     Ok(StagedOuterMembers {
         _staging: staging,
         members,
+        staged_total,
     })
 }
 
@@ -316,6 +326,32 @@ fn stage_one_member<R: Read>(
         digest: Sha256Digest::from_raw(hasher.finalize().into()),
         size,
     })
+}
+
+/// SHA-256 a file by streaming it in fixed-size chunks.
+///
+/// Deliberately not `fs::read` + hash: the source archive is the one member with
+/// no bound on its size, so reading it whole to hash it would make peak memory a
+/// function of untrusted input. The buffer is a fixed 64 KiB regardless.
+///
+/// # Errors
+///
+/// [`CapsuleImportError::Io`] on a read failure.
+pub(crate) fn hash_file_stream(path: &Path) -> Result<Sha256Digest, CapsuleImportError> {
+    let mut file = File::open(path)
+        .map_err(|source| CapsuleImportError::io("open a staged member for hashing", source))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|source| CapsuleImportError::io("read a staged member for hashing", source))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(Sha256Digest::from_raw(hasher.finalize().into()))
 }
 
 /// SHA-256 the entire byte stream, then rewind it.

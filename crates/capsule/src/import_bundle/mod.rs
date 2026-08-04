@@ -2,7 +2,8 @@
 //!
 //! Normative specification: `docs/rfcs/draft/CAPSULE_FORMAT_V3.md`. This module
 //! is Slice 1 of that RFC: the reader, verifier, writer, and trust model for a
-//! `.capsule` container whose outer PAX TAR holds exactly four members —
+//! `.capsule` container whose outer deterministic USTAR TAR holds exactly four
+//! members —
 //!
 //! ```text
 //! .capsule (v3)
@@ -47,6 +48,7 @@ mod index;
 mod policy;
 mod reader;
 mod signature;
+mod source_policy;
 mod trust;
 mod verify;
 mod writer;
@@ -73,9 +75,12 @@ pub use trust::{
 };
 pub use verify::{
     ImportedCapsuleWorkspace, VerifiedCapsuleEnvelope, VerifiedCapsuleImport,
-    derive_imported_capsule, verify_capsule_envelope,
+    VerifiedImportedSourceArchive, derive_imported_capsule, verify_capsule_envelope,
 };
-pub use writer::{CapsuleBundleWriteInput, write_capsule_bundle_v3};
+pub use writer::{
+    CapsuleBundleWriteInput, CapsuleBundleWriteReceipt, write_capsule_bundle_v3,
+    write_capsule_bundle_v3_to,
+};
 
 /// Why an import was refused.
 ///
