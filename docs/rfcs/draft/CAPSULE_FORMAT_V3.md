@@ -41,8 +41,22 @@ import use case; `packers/capsule.rs` is not modified by this RFC.
 └── source.tar.zst        # existing ato.source-archive/v1 encoding
 ```
 
-Outer container is an uncompressed PAX TAR, consistent with the existing v2
-writer. **Exact allowlist** — each of the four entries above appears exactly
+Outer container is an uncompressed, deterministic **USTAR** TAR: every member
+header carries the POSIX.1-1988 magic/version pair (`"ustar\0"` / `"00"`), a
+fixed `0o644` mode, a fixed mtime of `0`, and uid/gid `0`. An earlier revision
+of this document said "PAX TAR, consistent with the existing v2 writer"; that
+was wrong both about what this format needs and about what its writer emits.
+USTAR is sufficient because all four member paths are short, ASCII, and carry
+no metadata a USTAR header cannot express, so no PAX extended-header record
+and no GNU long-name record is ever emitted — and a container that never needs
+those is better specified as the narrower format, since a reader then has one
+header shape to accept rather than three. GNU-format headers (`"ustar "` /
+`" \0"`) do **not** satisfy this even for these simple entries: the magic and
+version bytes differ. `writer_emits_ustar_magic_and_version` in
+`crates/capsule/src/import_bundle/tests.rs` pins those exact bytes so the code
+and this document cannot drift apart again.
+
+**Exact allowlist** — each of the four entries above appears exactly
 once; any other outer entry (including a `README.md`, a stray `capsule.lock`,
 or a second `capsule.toml`) is rejected. Path traversal (`..`), absolute
 paths, symlinks, hardlinks, device files, and FIFOs are rejected for every
@@ -500,6 +514,12 @@ struct CapsuleImportPolicy {
     temporary_storage_budget: Option<u64>,
     available_disk_bytes: Option<u64>,
     max_concurrent_imports: Option<u32>,
+    // Source-archive dimensions. All Option, all IMPORTER policy: a bundle
+    // exceeding any of them is resource_budget_exceeded, never capsule_invalid.
+    max_source_compressed_bytes: Option<u64>,
+    max_source_expanded_bytes: Option<u64>,
+    max_source_file_count: Option<u64>,
+    max_source_file_bytes: Option<u64>,
 }
 
 struct CapsuleTrustPolicy {
@@ -513,6 +533,17 @@ based on a declared `size_bytes`, and enforces `CapsuleImportPolicy` limits
 incrementally as bytes are processed, so a bundle that lies about its own
 size in `index.json` is caught by the digest/size mismatch check
 (`capsule_invalid`), not by an allocation failure.
+
+An implementation that reaches this format through an existing pipeline with
+its **own** fixed caps — as the Rust importer does, via
+`program_source_projection`'s production `MAX_COMPRESSED_BYTES` /
+`MAX_UNCOMPRESSED_BYTES` / `MAX_FILE_SIZE_BYTES` / `MAX_FILE_COUNT` — MUST NOT
+let those caps surface as `capsule_invalid`. They are implementation policy in
+exactly the sense this section defines, so a bundle that trips one is
+`resource_budget_exceeded`. The Rust importer enforces its configured policy in
+a streaming pre-scan *before* that pipeline is entered, and reclassifies the
+pipeline's own cap-exceeded errors when they fire anyway; see
+`crates/capsule/src/import_bundle/source_policy.rs`.
 
 ## Golden vectors
 

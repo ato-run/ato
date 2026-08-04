@@ -19,9 +19,32 @@ use super::CapsuleImportError;
 
 /// An importer's implementation-defined budget. All fields are optional; `None`
 /// means "this importer does not bound that dimension".
+///
+/// # These are importer policy, never format limits
+///
+/// Every `max_source_*` field below is **this importer's** choice, not something
+/// the v3 format says about a bundle. A bundle that exceeds one of them is a
+/// perfectly valid v3 bundle that this importer declined to process: the outcome
+/// is [`CapsuleImportError::ResourceBudgetExceeded`] (or
+/// [`CapsuleImportError::InsufficientLocalStorage`]), and **never**
+/// [`CapsuleImportError::CapsuleInvalid`]. The distinction is load-bearing: only
+/// `capsule_invalid` means the artifact is permanently bad, so collapsing the two
+/// would make a bundle that merely needs a bigger worker look like a corrupt one.
+///
+/// Leaving them all `None` means the format imposes no source-size limit of its
+/// own — which is exactly what RFC §"Resource policy (not a format limit)"
+/// requires. (The *existing* `program_source_projection` SSOT still applies its
+/// own fixed production caps further down; see
+/// [`super::source_policy`] for how those are kept from masquerading as format
+/// invalidity.)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CapsuleImportPolicy {
-    /// Ceiling on bytes this import may stage in temporary storage.
+    /// Ceiling on cumulative bytes this import may write to temporary storage.
+    ///
+    /// Cumulative, not peak: bytes stay charged after the directory holding them
+    /// is removed. A budget is a "how much work will this cost" bound, and a
+    /// peak-tracking version would need every SSOT call to report when its own
+    /// transient copies are released.
     pub temporary_storage_budget: Option<u64>,
     /// The caller's measurement of free disk. Staging beyond it is an
     /// [`CapsuleImportError::InsufficientLocalStorage`], not a budget refusal —
@@ -29,6 +52,23 @@ pub struct CapsuleImportPolicy {
     pub available_disk_bytes: Option<u64>,
     /// Ceiling on simultaneous in-flight imports in this process.
     pub max_concurrent_imports: Option<u32>,
+    /// Ceiling on the compressed size of the `source.tar.zst` member.
+    ///
+    /// Importer policy, not a format limit — see the type-level note.
+    pub max_source_compressed_bytes: Option<u64>,
+    /// Ceiling on the source archive's *expanded* size, enforced incrementally
+    /// against bytes actually decompressed — never from a declared header size.
+    ///
+    /// Importer policy, not a format limit — see the type-level note.
+    pub max_source_expanded_bytes: Option<u64>,
+    /// Ceiling on the number of regular files inside the source archive.
+    ///
+    /// Importer policy, not a format limit — see the type-level note.
+    pub max_source_file_count: Option<u64>,
+    /// Ceiling on any single file inside the source archive.
+    ///
+    /// Importer policy, not a format limit — see the type-level note.
+    pub max_source_file_bytes: Option<u64>,
 }
 
 impl CapsuleImportPolicy {
@@ -37,6 +77,44 @@ impl CapsuleImportPolicy {
     #[must_use]
     pub fn unbounded() -> Self {
         Self::default()
+    }
+
+    /// Whether any dimension this module can measure is actually bounded.
+    ///
+    /// The source-archive pre-scan (see [`super::source_policy`]) costs one
+    /// extra streaming decompression pass, so a policy that bounds nothing skips
+    /// it entirely: there would be no limit for the measurement to serve.
+    /// `max_concurrent_imports` is excluded deliberately — it is settled before
+    /// any disk is touched and needs no measurement.
+    pub(crate) fn bounds_measurable_resources(&self) -> bool {
+        self.temporary_storage_budget.is_some()
+            || self.available_disk_bytes.is_some()
+            || self.max_source_compressed_bytes.is_some()
+            || self.max_source_expanded_bytes.is_some()
+            || self.max_source_file_count.is_some()
+            || self.max_source_file_bytes.is_some()
+    }
+
+    /// Refuse a source archive whose compressed member exceeds this policy.
+    ///
+    /// # Errors
+    ///
+    /// [`CapsuleImportError::ResourceBudgetExceeded`] — a policy refusal, never a
+    /// statement about the bundle's validity.
+    pub(crate) fn check_source_compressed_bytes(
+        &self,
+        compressed_bytes: u64,
+    ) -> Result<(), CapsuleImportError> {
+        if let Some(limit) = self.max_source_compressed_bytes
+            && compressed_bytes > limit
+        {
+            return Err(CapsuleImportError::ResourceBudgetExceeded(format!(
+                "the bundle's source archive is {compressed_bytes} compressed bytes, over this \
+                 importer's {limit}-byte source-archive policy limit; the bundle itself is not \
+                 malformed"
+            )));
+        }
+        Ok(())
     }
 
     /// Charge `additional` newly staged bytes against a running total.
