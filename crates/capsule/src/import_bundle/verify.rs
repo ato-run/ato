@@ -54,9 +54,12 @@ use super::reader::{
     classify_bundle_format, hash_file_stream, hash_whole_stream, stage_v3_outer_members,
 };
 use super::signature::{CapsuleIndexSignatureV1, ClaimedIssuer, DidKey, parse_signature_json};
-use super::source_policy::{classify_projection_error, measure_source_archive, measure_tree_bytes};
+use super::source_policy::{
+    classify_projection_error, classify_source_materialize_error, classify_tree_hash_error,
+    measure_source_archive, measure_tree_bytes,
+};
 use super::trust::{CapsuleImportContext, CapsuleTrustPolicy, SignerTrust};
-use crate::blob::materialize_source_archive;
+use crate::blob::{materialize_source_archive, materialized_source_tree_hash};
 use crate::capsule_program_contract::{
     CapsuleProgramId, ProgramSourceDigest, derive_capsule_program_contract,
 };
@@ -335,8 +338,44 @@ fn enforce_trust(
 /// Nothing on this type is recomputed. [`Self::encoded_digest`] and
 /// [`Self::encoded_size`] are the values `verify_capsule_envelope` measured while
 /// streaming the member into staging and then compared against `index.json` —
-/// threaded through, not re-derived. [`Self::source_tree_digest`] is the
-/// [`ProgramSourceDigest`] the existing SSOT minted during this same derivation.
+/// threaded through, not re-derived. [`Self::source_tree_digest`] and
+/// [`Self::program_source_digest`] are both minted by the existing SSOT during
+/// this same derivation.
+///
+/// # Two digests, deliberately
+///
+/// These are different values and the difference is load-bearing:
+///
+/// ```text
+/// source_tree_digest    A1v2 materialized_source_tree_hash of the ENTIRE extracted
+///                       source.tar.zst, taken before the outer manifest is
+///                       substituted in — i.e. the archive exactly as it was signed
+/// program_source_digest A1 digest of the Program Source Projection: control files
+///                       (capsule.toml / capsule.lock / ato.lock.json) excluded and
+///                       the outer manifest authoritative
+/// ```
+///
+/// They coincide only for an archive that carries no root control file at all.
+/// Any archive with an inner `capsule.toml` / `capsule.lock` / `ato.lock.json` —
+/// which the RFC explicitly admits as valid, and which several golden vectors
+/// deliberately exercise — makes them diverge.
+///
+/// The registration slice (B1) records a Source Revision / Source Materialization
+/// against the *full, unmodified* tree, because that is what the archive's own
+/// content identity is and what `source_materializations.source_tree_digest`
+/// already means everywhere else in this system (see
+/// `crates/snapshot/src/source_materialization.rs`, which populates that column
+/// from `MaterializedSource::materialized_source_tree_hash`). Naming the
+/// projection digest `source_tree_digest` here would have handed B1 a value that
+/// silently disagrees with every other row spelled the same way. So this accessor
+/// keeps the name and now carries the value the name means everywhere else, and
+/// the projection digest is spelled after its own type,
+/// [`ProgramSourceDigest`].
+///
+/// Both are the same *type*: [`ProgramSourceDigest`] is the A1 `sha256:<64 hex>`
+/// digest, and `materialized_source_tree_hash` returns that verbatim spelling —
+/// so the type is reused rather than a parallel newtype invented for a digest
+/// computed by the same algorithm over a different input set.
 ///
 /// The staged file is **moved** here, not copied: this value owns the staging
 /// directory the member already lived in, so [`Self::open`] hands back a
@@ -349,6 +388,7 @@ pub struct VerifiedImportedSourceArchive {
     encoded_digest: Sha256Digest,
     encoded_size: u64,
     source_tree_digest: ProgramSourceDigest,
+    program_source_digest: ProgramSourceDigest,
     /// Held, never read: staging is still on disk for as long as this value
     /// lives, so the importer's concurrency slot must cover that too.
     _import_slot: ImportSlot,
@@ -362,6 +402,7 @@ impl std::fmt::Debug for VerifiedImportedSourceArchive {
             .field("encoded_digest", &self.encoded_digest)
             .field("encoded_size", &self.encoded_size)
             .field("source_tree_digest", &self.source_tree_digest)
+            .field("program_source_digest", &self.program_source_digest)
             .finish_non_exhaustive()
     }
 }
@@ -380,11 +421,29 @@ impl VerifiedImportedSourceArchive {
         self.encoded_size
     }
 
-    /// The A1 digest of the control-file-excluded source projection, minted by
-    /// the existing SSOT during this derivation.
+    /// The A1v2 digest of the **entire** extracted source archive, taken before
+    /// the outer manifest was substituted in and before any control file was
+    /// excluded.
+    ///
+    /// This is `materialized_source_tree_hash` of the archive exactly as signed —
+    /// the value a Source Revision / Source Materialization is registered
+    /// against. It is **not** the same as [`Self::program_source_digest`] for any
+    /// archive carrying a root `capsule.toml`, `capsule.lock`, or
+    /// `ato.lock.json`; see the type-level note for why the two are kept apart.
     #[must_use]
     pub fn source_tree_digest(&self) -> &ProgramSourceDigest {
         &self.source_tree_digest
+    }
+
+    /// The A1 digest of the control-file-excluded Program Source Projection, as
+    /// minted by the existing SSOT during this derivation.
+    ///
+    /// This is the digest `capsule_program_id` is derived from, so it is
+    /// invariant across every inner-control-file shape the RFC admits — which is
+    /// precisely why it cannot stand in for [`Self::source_tree_digest`].
+    #[must_use]
+    pub fn program_source_digest(&self) -> &ProgramSourceDigest {
+        &self.program_source_digest
     }
 
     /// A read-only handle to the exact verified archive bytes on disk.
@@ -553,6 +612,7 @@ impl ImportedCapsuleWorkspace {
 /// 1. re-verify the source member's digest (precondition re-assert)
 /// 2. extract source.tar.zst into private staging
 /// 3. existing ato.source-archive/v1 admissibility runs during that extraction
+/// 3b. take the FULL-tree A1v2 digest, while the tree is still the signed archive
 /// 4. identify root control files: capsule.toml, capsule.lock, ato.lock.json
 /// 5. exclude them from the projection input set
 /// 6. parse and normalize the OUTER capsule.toml
@@ -665,6 +725,18 @@ pub fn derive_imported_capsule(
     extract_source_archive(&source_member_path, extracted.path())
         .map_err(|error| classify_projection_error(&error))?;
 
+    // 3b. The FULL-tree identity, taken here and nowhere else: this is the last
+    //     moment the extracted tree is still the archive that was signed. One
+    //     line further down the outer manifest is written over the root, and from
+    //     then on every digest available — including the SSOT's own
+    //     `MaterializedSource::materialized_source_tree_hash` for the re-archive —
+    //     describes the substituted tree, not the delivered one. B1 registers a
+    //     Source Revision against the delivered archive, so it needs this value.
+    let source_tree_digest = materialized_source_tree_hash(extracted.path())
+        .map_err(|error| classify_tree_hash_error(&error))?;
+    let source_tree_digest = ProgramSourceDigest::parse(&source_tree_digest)
+        .map_err(|error| CapsuleImportError::invalid(error.to_string()))?;
+
     // 4-6. Outer-manifest authority. Writing the outer bytes over the extracted
     //      root's `capsule.toml` is what makes "outer wins" structural rather
     //      than conditional: absent, malformed, or merely different, the inner
@@ -681,8 +753,14 @@ pub fn derive_imported_capsule(
     let rebuilt = TempDir::new()
         .map_err(|source| CapsuleImportError::io("create the re-archive staging dir", source))?;
     let rebuilt_archive = rebuilt.path().join("source.tar.zst");
+    // Classified by variant, not by message: this call has its own fixed caps
+    // (per-file, file-count, uncompressed, compressed) applied to the
+    // *manifest-substituted* tree, which no earlier check on this path ever saw.
+    // Collapsing them all to CapsuleInvalid would report a merely-large derived
+    // tree as a malformed bundle — the same inversion RFC §"Resource policy"
+    // forbids on the ingest side.
     materialize_source_archive(extracted.path(), &rebuilt_archive)
-        .map_err(|error| CapsuleImportError::invalid(error.to_string()))?;
+        .map_err(|error| classify_source_materialize_error(&error))?;
 
     // Everything below this line consumes temp space inside the SSOT. See the
     // accounting note above for exactly which copies are charged and why the
@@ -729,7 +807,8 @@ pub fn derive_imported_capsule(
             staged,
             encoded_digest,
             encoded_size,
-            source_tree_digest: materialized.contract.digest,
+            source_tree_digest,
+            program_source_digest: materialized.contract.digest,
             _import_slot: import_slot,
         },
     })

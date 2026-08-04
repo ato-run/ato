@@ -69,6 +69,26 @@ pub struct CapsuleImportPolicy {
     ///
     /// Importer policy, not a format limit — see the type-level note.
     pub max_source_file_bytes: Option<u64>,
+    /// Ceiling on any single **control member** — `index.json`,
+    /// `signature.json`, `capsule.toml` — as staged.
+    ///
+    /// Importer policy, not a format limit: the v3 format sets no bound on a
+    /// control member's size, and a bundle over this limit is
+    /// [`CapsuleImportError::ResourceBudgetExceeded`], never
+    /// [`CapsuleImportError::CapsuleInvalid`].
+    ///
+    /// It exists because those three members are the only ones read *whole* into
+    /// memory — they are parsed, digested, and signed byte-for-byte, so there is
+    /// no streaming form of "parse this JSON". Without a bound, an oversized
+    /// control member is an unbounded allocation driven by untrusted input, which
+    /// is a denial-of-service surface entirely separate from the question of
+    /// whether the bundle is well-formed. The limit is therefore checked against
+    /// bytes **as they are staged**, before the full read is ever attempted (see
+    /// [`super::reader::stage_v3_outer_members`]).
+    ///
+    /// `source.tar.zst` is deliberately **not** covered: it is never read whole,
+    /// and it has its own dedicated `max_source_*` fields above.
+    pub max_control_member_bytes: Option<u64>,
 }
 
 impl CapsuleImportPolicy {
@@ -85,7 +105,11 @@ impl CapsuleImportPolicy {
     /// extra streaming decompression pass, so a policy that bounds nothing skips
     /// it entirely: there would be no limit for the measurement to serve.
     /// `max_concurrent_imports` is excluded deliberately — it is settled before
-    /// any disk is touched and needs no measurement.
+    /// any disk is touched and needs no measurement. So is
+    /// `max_control_member_bytes`: it is enforced from the outer staging loop's
+    /// own byte counter, which runs regardless, and buying a whole extra
+    /// decompression pass over the *source* archive to serve a limit that never
+    /// applies to it would be pure waste.
     pub(crate) fn bounds_measurable_resources(&self) -> bool {
         self.temporary_storage_budget.is_some()
             || self.available_disk_bytes.is_some()
@@ -112,6 +136,34 @@ impl CapsuleImportPolicy {
                 "the bundle's source archive is {compressed_bytes} compressed bytes, over this \
                  importer's {limit}-byte source-archive policy limit; the bundle itself is not \
                  malformed"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuse a control member that has already staged more bytes than policy
+    /// allows.
+    ///
+    /// Called with the running byte count *during* staging, so the refusal lands
+    /// before the member is fully written and long before anything reads it whole
+    /// — which is the entire point of the limit.
+    ///
+    /// # Errors
+    ///
+    /// [`CapsuleImportError::ResourceBudgetExceeded`] — a policy refusal, never a
+    /// statement about the bundle's validity.
+    pub(crate) fn check_control_member_bytes(
+        &self,
+        member: &str,
+        staged_bytes: u64,
+    ) -> Result<(), CapsuleImportError> {
+        if let Some(limit) = self.max_control_member_bytes
+            && staged_bytes > limit
+        {
+            return Err(CapsuleImportError::ResourceBudgetExceeded(format!(
+                "the bundle's {member} member is over this importer's {limit}-byte \
+                 control-member policy limit; the v3 format sets no size limit on a control \
+                 member, so the bundle itself is not malformed"
             )));
         }
         Ok(())

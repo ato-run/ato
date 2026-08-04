@@ -241,10 +241,16 @@ pub(crate) fn stage_v3_outer_members<R: Read>(
             )));
         }
 
+        // `source.tar.zst` is the one member never read whole, and it has its own
+        // dedicated `max_source_*` policy fields; the other three are parsed in
+        // memory and so are the ones `max_control_member_bytes` bounds.
+        let control_member = (name != super::index::SOURCE_MEMBER_PATH).then_some(name);
+
         let staged = stage_one_member(
             &mut entry,
             staging.path().join(name).as_path(),
             policy,
+            control_member,
             &mut staged_total,
         )?;
         members.insert(name, staged);
@@ -293,10 +299,19 @@ fn reject_trailing_bytes_in_name_field(
 /// The declared header size is never consulted for allocation — the buffer is a
 /// fixed 64 KiB — so a member that lies about its size is caught later by the
 /// digest/size comparison rather than here by an allocation failure.
+///
+/// `control_member` names the member when it is one of the three that are later
+/// read whole (`index.json`, `signature.json`, `capsule.toml`). Its
+/// `max_control_member_bytes` limit is enforced against the **running observed
+/// byte count** inside the copy loop, so an oversized control member is refused
+/// while it is still streaming — before it is fully staged, and therefore
+/// unavoidably before any [`StagedMember::read_bytes`] or parse could allocate
+/// for it. The declared header size plays no part here either.
 fn stage_one_member<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     destination: &Path,
     policy: &CapsuleImportPolicy,
+    control_member: Option<&str>,
     staged_total: &mut u64,
 ) -> Result<StagedMember, CapsuleImportError> {
     let mut file = File::create(destination)
@@ -313,10 +328,13 @@ fn stage_one_member<R: Read>(
             break;
         }
         policy.charge_staged_bytes(staged_total, read as u64)?;
+        size += read as u64;
+        if let Some(member) = control_member {
+            policy.check_control_member_bytes(member, size)?;
+        }
         hasher.update(&buffer[..read]);
         file.write_all(&buffer[..read])
             .map_err(|source| CapsuleImportError::io("stage an outer member's bytes", source))?;
-        size += read as u64;
     }
     file.flush()
         .map_err(|source| CapsuleImportError::io("flush a staged outer member", source))?;
