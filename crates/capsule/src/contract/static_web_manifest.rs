@@ -465,23 +465,25 @@ mod tests {
         // Reuse the entry blob at a SECOND path with a DIFFERENT size — the
         // R2 object has one size, so the disagreement must be refused.
         let blob = manifest.files["index.html"].blob.clone();
-        manifest
-            .files
-            .insert("duplicate.html".to_string(), StaticWebFileV1 {
+        manifest.files.insert(
+            "duplicate.html".to_string(),
+            StaticWebFileV1 {
                 blob: blob.clone(),
                 size: manifest.files["index.html"].size + 1,
                 media_type: "text/html; charset=utf-8".to_string(),
-            });
+            },
+        );
         assert!(manifest.validate().is_err());
 
         // The SAME size at both paths is fine (dedup).
-        manifest
-            .files
-            .insert("duplicate.html".to_string(), StaticWebFileV1 {
+        manifest.files.insert(
+            "duplicate.html".to_string(),
+            StaticWebFileV1 {
                 blob,
                 size: manifest.files["index.html"].size,
                 media_type: "text/html; charset=utf-8".to_string(),
-            });
+            },
+        );
         assert!(manifest.validate().is_ok());
     }
 }

@@ -251,8 +251,8 @@ fn read_regular_file_bounded(path: &Path, max_size: u64) -> Result<(Vec<u8>, u64
     use std::io::Read as _;
     use std::os::unix::fs::MetadataExt as _;
 
-    let file = fs::File::open(path)
-        .with_context(|| format!("open static web file {}", path.display()))?;
+    let file =
+        fs::File::open(path).with_context(|| format!("open static web file {}", path.display()))?;
     let before = file
         .metadata()
         .with_context(|| format!("fstat static web file {}", path.display()))?;
@@ -460,8 +460,7 @@ mod tests {
         // object has one size, so the manifest must refuse it.
         let blob = manifest.files["a.js"].blob.clone();
         manifest.files.get_mut("b.js").unwrap().blob = blob;
-        manifest.files.get_mut("b.js").unwrap().size =
-            manifest.files["a.js"].size + 1;
+        manifest.files.get_mut("b.js").unwrap().size = manifest.files["a.js"].size + 1;
         assert!(manifest.validate().is_err());
     }
 

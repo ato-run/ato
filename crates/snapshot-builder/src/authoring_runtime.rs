@@ -147,12 +147,14 @@ pub struct AuthoringWork {
     /// the wire contract only (the static-web emit seam consumes
     /// `effective_build_plan` and `plan_digest`).
     #[serde(default)]
-    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub build_config_revision_id: Option<String>,
     #[serde(default)]
     pub _source_build_attempt_id: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub build_attempt_number: Option<u32>,
     #[serde(default)]
     pub _authoring_toml: Option<String>,
@@ -164,7 +166,8 @@ pub struct AuthoringWork {
     #[allow(dead_code)] // read by `static_web_output_plan` (the emit seam) and the claim tests
     pub effective_build_plan: Option<serde_json::Value>,
     #[serde(default)]
-    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub plan_digest: Option<String>,
     pub lease_token: AuthoringLeaseToken,
     pub lease_expires_at: String,
@@ -1612,7 +1615,10 @@ mod tests {
             supported_features: &["static-web-bundle-v1"],
         };
         let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value["supported_features"], serde_json::json!(["static-web-bundle-v1"]));
+        assert_eq!(
+            value["supported_features"],
+            serde_json::json!(["static-web-bundle-v1"])
+        );
     }
 
     #[test]
@@ -1726,11 +1732,15 @@ mod tests {
         .expect("clean_replay claim with a plan parses");
 
         // The plan fields the API sends now parse (deny_unknown_fields fix).
-        assert_eq!(work.build_config_revision_id.as_deref(), Some("bcrev_01KYN2Z"));
+        assert_eq!(
+            work.build_config_revision_id.as_deref(),
+            Some("bcrev_01KYN2Z")
+        );
         assert_eq!(work.build_attempt_number, Some(3));
-        assert_eq!(work.plan_digest.as_deref(), Some(
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-        ));
+        assert_eq!(
+            work.plan_digest.as_deref(),
+            Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
         // No [outputs.static_web] ⇒ snapshot-only.
         assert!(work.static_web_output_plan().expect("parses").is_none());
     }
@@ -1775,7 +1785,10 @@ mod tests {
             .static_web_output_plan()
             .expect("plan parses")
             .expect("static web section declared");
-        assert_eq!(plan.materialization_id, "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            plan.materialization_id,
+            "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(plan.image_output_root.to_string_lossy(), "app/dist");
         assert_eq!(plan.entry_path, "index.html");
     }

@@ -17,19 +17,16 @@
 
 use std::path::Path;
 
-use crate::static_web_bundle::{
-    produce_static_web_bundle, ProducedStaticWebBundle,
+use crate::static_web_bundle::{ProducedStaticWebBundle, produce_static_web_bundle};
+use crate::static_web_output::{
+    ExtractedStaticWebOutput, StaticWebOutputPlan, extract_static_web_output,
 };
-use crate::static_web_output::{ExtractedStaticWebOutput, StaticWebOutputPlan, extract_static_web_output};
 use crate::static_web_transport::{
     StaticWebBlobUpload, StaticWebPrepare, StaticWebTransport, transport_static_web_bundle,
 };
 
 /// The upload step collects the immutable blobs from the produced bundle.
-pub fn bundle_blobs(
-    bundle: &ProducedStaticWebBundle,
-    blob_dir: &Path,
-) -> Vec<StaticWebBlobUpload> {
+pub fn bundle_blobs(bundle: &ProducedStaticWebBundle, blob_dir: &Path) -> Vec<StaticWebBlobUpload> {
     bundle
         .receipt
         .blobs
@@ -48,7 +45,10 @@ pub enum StaticWebEmit {
     /// No declared plan — the snapshot lane proceeds unchanged.
     Skipped,
     /// Declared + produced + uploaded; `materialization_id` names it.
-    Emitted { materialization_id: String, manifest_digest: String },
+    Emitted {
+        materialization_id: String,
+        manifest_digest: String,
+    },
 }
 
 /// The per-build context a static web emission runs under.
@@ -64,6 +64,7 @@ pub struct StaticWebEmitContext<'a> {
     pub build_config_revision_id: &'a str,
     pub plan_digest: &'a str,
     pub agent_id: &'a str,
+    pub worker_claim_id: &'a str,
     pub transport: &'a dyn StaticWebTransport,
 }
 
@@ -73,8 +74,7 @@ pub fn emit_static_web_if_declared(
     effective_build_plan: Option<&serde_json::Value>,
     context: &StaticWebEmitContext<'_>,
 ) -> anyhow::Result<StaticWebEmit> {
-    let Some(plan) =
-        StaticWebOutputPlan::from_effective_build_plan_json(effective_build_plan)?
+    let Some(plan) = StaticWebOutputPlan::from_effective_build_plan_json(effective_build_plan)?
     else {
         // No declaration: snapshot-only, complete no-op.
         return Ok(StaticWebEmit::Skipped);
@@ -100,6 +100,7 @@ pub fn emit_static_web(
 
     let prepare = StaticWebPrepare {
         agent_id: context.agent_id.to_string(),
+        worker_claim_id: context.worker_claim_id.to_string(),
         materialization_id: plan.materialization_id.clone(),
         build_config_revision_id: context.build_config_revision_id.to_string(),
         expected_plan_digest: context.plan_digest.to_string(),
@@ -126,9 +127,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::static_web_transport::{
-        StaticWebUploadAuthorization, StaticWebBlobUpload,
-    };
+    use crate::static_web_transport::{StaticWebBlobUpload, StaticWebUploadAuthorization};
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -142,20 +141,30 @@ mod tests {
             &self,
             _job_id: &str,
             _input: &StaticWebPrepare,
-        ) -> Result<super::super::static_web_transport::StaticWebPrepareDecision, super::super::static_web_transport::StaticWebTransportError> {
+        ) -> Result<
+            super::super::static_web_transport::StaticWebPrepareDecision,
+            super::super::static_web_transport::StaticWebTransportError,
+        > {
             *self.prepares.borrow_mut() += 1;
-            Ok(super::super::static_web_transport::StaticWebPrepareDecision::Ready {
-                materialization_id: "swm_test".to_string(),
-                manifest_digest: format!("sha256:{}", "a".repeat(64)),
-            })
+            Ok(
+                super::super::static_web_transport::StaticWebPrepareDecision::Ready {
+                    materialization_id: "swm_test".to_string(),
+                    manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                    producer_generation: 1,
+                },
+            )
         }
 
         fn authorize_uploads(
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
             blobs: &[StaticWebBlobUpload],
-        ) -> Result<Vec<StaticWebUploadAuthorization>, super::super::static_web_transport::StaticWebTransportError> {
+        ) -> Result<
+            Vec<StaticWebUploadAuthorization>,
+            super::super::static_web_transport::StaticWebTransportError,
+        > {
             Ok(blobs
                 .iter()
                 .map(|blob| StaticWebUploadAuthorization {
@@ -183,8 +192,10 @@ mod tests {
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
             blobs: &[StaticWebBlobUpload],
-        ) -> Result<Vec<(String, bool)>, super::super::static_web_transport::StaticWebTransportError> {
+        ) -> Result<Vec<(String, bool)>, super::super::static_web_transport::StaticWebTransportError>
+        {
             Ok(blobs.iter().map(|b| (b.digest.clone(), true)).collect())
         }
 
@@ -192,6 +203,7 @@ mod tests {
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
         ) -> Result<(), super::super::static_web_transport::StaticWebTransportError> {
             *self.completes.borrow_mut() += 1;
             Ok(())
@@ -217,7 +229,11 @@ mod tests {
         let image = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(image.path().join("app/dist/assets")).unwrap();
         std::fs::write(image.path().join("app/dist/index.html"), "<main>ok</main>").unwrap();
-        std::fs::write(image.path().join("app/dist/assets/app.js"), "console.log('ok')").unwrap();
+        std::fs::write(
+            image.path().join("app/dist/assets/app.js"),
+            "console.log('ok')",
+        )
+        .unwrap();
         image
     }
 
@@ -234,6 +250,7 @@ mod tests {
             build_config_revision_id: "bcrev_1",
             plan_digest: "sha256:abc",
             agent_id: "builder_1",
+            worker_claim_id: "abclaim_01234567890123456789012345",
             transport: &transport,
         };
         let result = emit_static_web_if_declared(
@@ -261,10 +278,14 @@ mod tests {
             build_config_revision_id: "bcrev_1",
             plan_digest: "sha256:abc",
             agent_id: "builder_1",
+            worker_claim_id: "abclaim_01234567890123456789012345",
             transport: &transport,
         };
         let err = emit_static_web_if_declared(Some(&declared_plan_json()), &context).unwrap_err();
-        assert!(err.to_string().contains("STATIC_WEB_OUTPUT_MISSING"), "{err}");
+        assert!(
+            err.to_string().contains("STATIC_WEB_OUTPUT_MISSING"),
+            "{err}"
+        );
         assert_eq!(*transport.prepares.borrow(), 0);
     }
 
@@ -281,19 +302,31 @@ mod tests {
             build_config_revision_id: "bcrev_1",
             plan_digest: "sha256:abc",
             agent_id: "builder_1",
+            worker_claim_id: "abclaim_01234567890123456789012345",
             transport: &transport,
         };
         let result = emit_static_web_if_declared(Some(&declared_plan_json()), &context).unwrap();
         match result {
-            StaticWebEmit::Emitted { materialization_id, manifest_digest } => {
-                assert_eq!(materialization_id, "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            StaticWebEmit::Emitted {
+                materialization_id,
+                manifest_digest,
+            } => {
+                assert_eq!(
+                    materialization_id,
+                    "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                );
                 assert!(manifest_digest.starts_with("sha256:"));
             }
             other => panic!("expected Emitted, got {other:?}"),
         }
         assert_eq!(*transport.prepares.borrow(), 1);
         assert_eq!(*transport.completes.borrow(), 1);
-        assert!(parent.path().join("static-web-bundle-v1/manifest.json").exists());
+        assert!(
+            parent
+                .path()
+                .join("static-web-bundle-v1/manifest.json")
+                .exists()
+        );
     }
 
     /// The exact shape the clean_replay call site feeds: the v1 build exported
@@ -322,6 +355,7 @@ mod tests {
             build_config_revision_id: "bcrev_1",
             plan_digest: "sha256:abc",
             agent_id: "builder_1",
+            worker_claim_id: "abclaim_01234567890123456789012345",
             transport: &transport,
         };
         let result = emit_static_web_if_declared(
@@ -343,6 +377,10 @@ mod tests {
         assert!(matches!(result, StaticWebEmit::Emitted { .. }));
         assert_eq!(*transport.prepares.borrow(), 1);
         assert_eq!(*transport.completes.borrow(), 1);
-        assert!(bundle_dir.join("static-web-bundle-v1/manifest.json").exists());
+        assert!(
+            bundle_dir
+                .join("static-web-bundle-v1/manifest.json")
+                .exists()
+        );
     }
 }

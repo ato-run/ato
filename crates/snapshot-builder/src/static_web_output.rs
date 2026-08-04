@@ -73,12 +73,16 @@ impl StaticWebOutputPlan {
         let materialization_id = section
             .get("materialization_id")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow!("static_web_output.materialization_id missing from the claim plan"))?
+            .ok_or_else(|| {
+                anyhow!("static_web_output.materialization_id missing from the claim plan")
+            })?
             .to_string();
         let image_output_root = section
             .get("image_output_root")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow!("static_web_output.image_output_root missing from the claim plan"))?
+            .ok_or_else(|| {
+                anyhow!("static_web_output.image_output_root missing from the claim plan")
+            })?
             .to_string();
         let entry_path = section
             .get("entry_path")
@@ -140,8 +144,12 @@ pub fn extract_static_web_output(
     // joined path resolves through it and `copy_tree_no_links` only inspects the
     // resolved subtree. Every component is therefore checked, then the canonical
     // source must remain strictly beneath the canonical image root.
-    let canonical_image_root = fs::canonicalize(image_root)
-        .with_context(|| format!("canonicalize static web image root {}", image_root.display()))?;
+    let canonical_image_root = fs::canonicalize(image_root).with_context(|| {
+        format!(
+            "canonicalize static web image root {}",
+            image_root.display()
+        )
+    })?;
     let source = image_root.join(&plan.image_output_root);
     // Walk the components IN ORDER, accumulating the prefix: `a/a/dist` must
     // check `image_root/a` AND `image_root/a/a` AND `image_root/a/a/dist` —
@@ -235,8 +243,9 @@ fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) 
         // TOCTOU guard: a component swapped to a symlink AFTER the type check
         // above would resolve outside the image root when canonicalized. Verify
         // the canonicalized entry remains beneath the canonical image root.
-        let canonical_entry = fs::canonicalize(&source_path)
-            .with_context(|| format!("canonicalize static output entry {}", source_path.display()))?;
+        let canonical_entry = fs::canonicalize(&source_path).with_context(|| {
+            format!("canonicalize static output entry {}", source_path.display())
+        })?;
         if !is_beneath(&canonical_entry, canonical_root) {
             bail!(
                 "static output entry escapes the image root: {}",
@@ -328,12 +337,18 @@ mod tests {
     #[test]
     fn claim_plan_parses_only_an_explicit_static_web_section() {
         // Absent section ⇒ snapshot-only no-op.
-        assert!(StaticWebOutputPlan::from_effective_build_plan_json(None).unwrap().is_none());
-        assert!(StaticWebOutputPlan::from_effective_build_plan_json(
-            Some(&serde_json::json!({ "schema": "ato.effective-build-plan/v1" }))
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            StaticWebOutputPlan::from_effective_build_plan_json(None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            StaticWebOutputPlan::from_effective_build_plan_json(Some(
+                &serde_json::json!({ "schema": "ato.effective-build-plan/v1" })
+            ))
+            .unwrap()
+            .is_none()
+        );
 
         // Explicit declaration ⇒ a validated plan with the API-decided id.
         let plan = StaticWebOutputPlan::from_effective_build_plan_json(Some(&serde_json::json!({
@@ -350,7 +365,10 @@ mod tests {
         })))
         .expect("parses");
         let plan = plan.expect("static web section present");
-        assert_eq!(plan.materialization_id, "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(
+            plan.materialization_id,
+            "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(plan.image_output_root, PathBuf::from("app/dist"));
         assert_eq!(plan.entry_path, "index.html");
         assert!(plan.spa_fallback);
@@ -434,8 +452,7 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        std::os::unix::fs::symlink(format!("../{outside_name}"), image.path().join("srv"))
-            .unwrap();
+        std::os::unix::fs::symlink(format!("../{outside_name}"), image.path().join("srv")).unwrap();
 
         let mut escaping = plan();
         escaping.image_output_root = PathBuf::from("srv/dist");

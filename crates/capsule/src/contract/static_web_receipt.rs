@@ -159,9 +159,7 @@ impl StaticWebBundleReceiptV1 {
             match expected.entry(file.blob.clone()) {
                 std::collections::btree_map::Entry::Occupied(mut occupied) => {
                     if *occupied.get() != file.size {
-                        return Err(StaticWebReceiptError::ManifestMismatch(
-                            "blob size",
-                        ));
+                        return Err(StaticWebReceiptError::ManifestMismatch("blob size"));
                     }
                     occupied.insert(file.size);
                 }

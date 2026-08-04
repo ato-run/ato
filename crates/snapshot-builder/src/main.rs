@@ -5238,6 +5238,12 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                     api_url: &self.cfg.api_url,
                     token: &self.cfg.token,
                     agent_id: &self.cfg.agent_id,
+                    worker_claim_id: self
+                        .work
+                        .worker_claim_id
+                        .as_deref()
+                        .unwrap_or(&self.work.work_id),
+                    lease_token: self.work.lease_token.expose(),
                 };
                 let context = snapshot_builder::static_web_emit::StaticWebEmitContext {
                     image_root: &exported_root,
@@ -5255,6 +5261,11 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                         "static web output declared without a plan digest".to_string()
                     })?,
                     agent_id: &self.cfg.agent_id,
+                    worker_claim_id: self
+                        .work
+                        .worker_claim_id
+                        .as_deref()
+                        .unwrap_or(&self.work.work_id),
                     transport: &transport,
                 };
                 snapshot_builder::static_web_emit::emit_static_web_if_declared(

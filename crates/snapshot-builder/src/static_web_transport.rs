@@ -19,6 +19,13 @@
 //! The builder does NOT hash R2 bytes back; "verified" here means the API
 //! HEAD-checked existence/size/metadata. See the API contract for the evidence
 //! model's exact wording.
+//!
+//! Job ownership is proven with the SAME authoring lease the builder already
+//! carries for its clean-replay work: the lease token travels in the
+//! `x-ato-authoring-lease-token` header (never a body field, never logged,
+//! never persisted), together with `agent_id` + `worker_claim_id` in every
+//! body. The `producer_generation` returned by prepare must be echoed on every
+//! later call — a stale generation from a retired job is refused by the API.
 
 use std::collections::BTreeSet;
 
@@ -28,6 +35,8 @@ pub const MAX_BLOB_BATCH: usize = 64;
 pub const DEFAULT_UPLOAD_CONCURRENCY: usize = 8;
 /// How many times an individual transfer attempt is retried (fresh URL each).
 pub const MAX_TRANSFER_ATTEMPTS: u32 = 3;
+/// The authoring lease header, byte-identical with the API's authoring routes.
+pub const AUTHORING_LEASE_HEADER: &str = "x-ato-authoring-lease-token";
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum StaticWebTransportError {
@@ -66,10 +75,7 @@ impl fmt::Debug for StaticWebUploadAuthorization {
         f.debug_struct("StaticWebUploadAuthorization")
             .field("digest", &self.digest)
             .field("status", &self.status)
-            .field(
-                "upload_url",
-                &self.upload_url.as_deref().map(redact_url),
-            )
+            .field("upload_url", &self.upload_url.as_deref().map(redact_url))
             .field("required_headers", &self.required_headers)
             .finish()
     }
@@ -94,18 +100,19 @@ pub trait StaticWebTransport {
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
         blobs: &[StaticWebBlobUpload],
     ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError>;
 
     /// PUT one blob to one URL (the caller only passes the URL it was granted).
-    fn put(&self, url: &str, body: &[u8], headers: &[(String, String)])
-        -> Result<u16, String>;
+    fn put(&self, url: &str, body: &[u8], headers: &[(String, String)]) -> Result<u16, String>;
 
     /// Ask the API to verify (HEAD-check) a batch of blobs.
     fn verify_uploads(
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
         blobs: &[StaticWebBlobUpload],
     ) -> Result<Vec<(String, bool)>, StaticWebTransportError>;
 
@@ -114,6 +121,7 @@ pub trait StaticWebTransport {
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
     ) -> Result<(), StaticWebTransportError>;
 }
 
@@ -121,6 +129,7 @@ pub trait StaticWebTransport {
 #[derive(Debug, Clone)]
 pub struct StaticWebPrepare {
     pub agent_id: String,
+    pub worker_claim_id: String,
     pub materialization_id: String,
     pub build_config_revision_id: String,
     pub expected_plan_digest: String,
@@ -133,7 +142,11 @@ pub struct StaticWebPrepare {
 /// The API's prepare decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaticWebPrepareDecision {
-    Ready { materialization_id: String, manifest_digest: String },
+    Ready {
+        materialization_id: String,
+        manifest_digest: String,
+        producer_generation: u64,
+    },
     Conflicted(String),
 }
 
@@ -141,10 +154,12 @@ pub enum StaticWebPrepareDecision {
 ///
 ///   1. `prepare` (validates + persists the materialization and immutable
 ///      manifest/receipt),
-///   2. batch `authorize_uploads`, skipping anything already present,
-///   3. parallel `put` (fresh authorization per retry),
-///   4. `verify_uploads`,
-///   5. `complete`.
+///   2. batch `authorize_uploads` over the WHOLE batch,
+///   3. parallel `put` for everything that needs an upload,
+///   4. `verify_uploads` over the WHOLE batch again — including blobs the API
+///      answered `already_present` — so a dedup-only batch still converges and
+///      a re-verified object is HEAD-checked once more (Blocker 3),
+///   5. `complete` with the `producer_generation` prepare returned.
 ///
 /// The local blobs are kept until completion is accepted — deleting them on the
 /// first transfer error would make the retry impossible.
@@ -155,17 +170,15 @@ pub fn transport_static_web_bundle(
     blobs: &[StaticWebBlobUpload],
 ) -> Result<(), StaticWebTransportError> {
     let decision = transport.prepare(job_id, prepare)?;
-    match decision {
-        StaticWebPrepareDecision::Ready { materialization_id, .. } => {
-            let _ = materialization_id;
-        }
+    let producer_generation = match decision {
+        StaticWebPrepareDecision::Ready {
+            producer_generation,
+            ..
+        } => producer_generation,
         StaticWebPrepareDecision::Conflicted(code) => {
-            return Err(StaticWebTransportError::Refused {
-                code,
-                status: 409,
-            });
+            return Err(StaticWebTransportError::Refused { code, status: 409 });
         }
-    }
+    };
 
     let mut remaining = blobs.to_vec();
     while !remaining.is_empty() {
@@ -176,8 +189,12 @@ pub fn transport_static_web_bundle(
             .collect::<Vec<_>>();
         remaining.drain(..batch.len());
 
-        let authorizations =
-            transport.authorize_uploads(job_id, &prepare.materialization_id, &batch)?;
+        let authorizations = transport.authorize_uploads(
+            job_id,
+            &prepare.materialization_id,
+            producer_generation,
+            &batch,
+        )?;
         let mut to_upload = Vec::new();
         for (blob, authorization) in batch.iter().zip(authorizations.iter()) {
             match authorization.status.as_str() {
@@ -188,7 +205,11 @@ pub fn transport_static_web_bundle(
                             detail: "API granted an upload without a URL".to_string(),
                         }
                     })?;
-                    to_upload.push((blob.clone(), url.to_string(), authorization.required_headers.clone()));
+                    to_upload.push((
+                        blob.clone(),
+                        url.to_string(),
+                        authorization.required_headers.clone(),
+                    ));
                 }
                 other => {
                     return Err(StaticWebTransportError::Refused {
@@ -200,15 +221,25 @@ pub fn transport_static_web_bundle(
         }
 
         // Parallel upload, fresh URL per retry.
-        let results = upload_batch_parallel(transport, job_id, &prepare.materialization_id, &to_upload);
+        let results = upload_batch_parallel(
+            transport,
+            job_id,
+            &prepare.materialization_id,
+            producer_generation,
+            &to_upload,
+        );
         for result in results {
             result?;
         }
 
+        // Verify the WHOLE batch — uploaded AND already_present alike. The API
+        // refuses an empty verify request, and a dedup-only batch must still
+        // re-confirm the present objects before complete.
         let verified = transport.verify_uploads(
             job_id,
             &prepare.materialization_id,
-            &to_upload.iter().map(|(blob, _, _)| blob.clone()).collect::<Vec<_>>(),
+            producer_generation,
+            &batch,
         )?;
         if verified.iter().any(|(_, ok)| !ok) {
             return Err(StaticWebTransportError::Refused {
@@ -218,7 +249,7 @@ pub fn transport_static_web_bundle(
         }
     }
 
-    transport.complete(job_id, &prepare.materialization_id)
+    transport.complete(job_id, &prepare.materialization_id, producer_generation)
 }
 
 /// One blob to upload, with its granted URL and mandatory metadata headers.
@@ -230,6 +261,7 @@ fn upload_batch_parallel(
     transport: &dyn StaticWebTransport,
     job_id: &str,
     materialization_id: &str,
+    producer_generation: u64,
     to_upload: &[UploadTarget],
 ) -> Vec<Result<(), StaticWebTransportError>> {
     let mut results = Vec::new();
@@ -237,11 +269,23 @@ fn upload_batch_parallel(
     for entry in to_upload {
         pool.push(entry.clone());
         if pool.len() >= DEFAULT_UPLOAD_CONCURRENCY {
-            results.push(upload_one(transport, job_id, materialization_id, pool.remove(0)));
+            results.push(upload_one(
+                transport,
+                job_id,
+                materialization_id,
+                producer_generation,
+                pool.remove(0),
+            ));
         }
     }
     for entry in pool {
-        results.push(upload_one(transport, job_id, materialization_id, entry));
+        results.push(upload_one(
+            transport,
+            job_id,
+            materialization_id,
+            producer_generation,
+            entry,
+        ));
     }
     results
 }
@@ -250,17 +294,17 @@ fn upload_one(
     transport: &dyn StaticWebTransport,
     job_id: &str,
     materialization_id: &str,
+    producer_generation: u64,
     entry: UploadTarget,
 ) -> Result<(), StaticWebTransportError> {
     let (blob, first_url, headers) = entry;
     let mut url = first_url;
     let mut last_status = 0_u16;
     for attempt in 1..=MAX_TRANSFER_ATTEMPTS {
-        let body = std::fs::read(&blob.local_path).map_err(|e| {
-            StaticWebTransportError::Transport {
+        let body =
+            std::fs::read(&blob.local_path).map_err(|e| StaticWebTransportError::Transport {
                 detail: format!("read blob {}: {e}", blob.digest),
-            }
-        })?;
+            })?;
         if body.len() as u64 != blob.size_bytes {
             return Err(StaticWebTransportError::Transport {
                 detail: format!(
@@ -294,6 +338,7 @@ fn upload_one(
             let reauth = transport.authorize_uploads(
                 job_id,
                 materialization_id,
+                producer_generation,
                 std::slice::from_ref(&blob),
             );
             match reauth {
@@ -330,6 +375,40 @@ pub struct HttpStaticWebTransport<'a> {
     pub api_url: &'a str,
     pub token: &'a str,
     pub agent_id: &'a str,
+    pub worker_claim_id: &'a str,
+    /// The clean-replay authoring lease token (header-only on the wire).
+    pub lease_token: &'a str,
+}
+
+fn common_headers(token: &str, lease_token: &str) -> Vec<(String, String)> {
+    vec![
+        ("authorization".to_string(), format!("Bearer {token}")),
+        (AUTHORING_LEASE_HEADER.to_string(), lease_token.to_string()),
+    ]
+}
+
+fn auth_json(
+    token: &str,
+    lease_token: &str,
+    agent_id: &str,
+    worker_claim_id: &str,
+    body: serde_json::Value,
+) -> (Vec<(String, String)>, serde_json::Value) {
+    let mut json = serde_json::Map::new();
+    json.insert("agent_id".to_string(), serde_json::json!(agent_id));
+    json.insert(
+        "worker_claim_id".to_string(),
+        serde_json::json!(worker_claim_id),
+    );
+    if let Some(inner) = body.as_object() {
+        for (key, value) in inner {
+            json.insert(key.clone(), value.clone());
+        }
+    }
+    (
+        common_headers(token, lease_token),
+        serde_json::Value::Object(json),
+    )
 }
 
 impl StaticWebTransport for HttpStaticWebTransport<'_> {
@@ -338,25 +417,35 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
         job_id: &str,
         input: &StaticWebPrepare,
     ) -> Result<StaticWebPrepareDecision, StaticWebTransportError> {
-        let response = ureq::post(&format!(
+        let (headers, body) = auth_json(
+            self.token,
+            self.lease_token,
+            self.agent_id,
+            self.worker_claim_id,
+            serde_json::json!({
+                "materialization_id": input.materialization_id,
+                "build_config_revision_id": input.build_config_revision_id,
+                "expected_plan_digest": input.expected_plan_digest,
+                "manifest_base64": input.manifest_base64,
+                "receipt_base64": input.receipt_base64,
+                "manifest_digest": input.manifest_digest,
+                "receipt_digest": input.receipt_digest,
+            }),
+        );
+        let mut request = ureq::post(&format!(
             "{}/v1/static-web/jobs/{job_id}/prepare",
             self.api_url
-        ))
-        .set("authorization", &format!("Bearer {}", self.token))
-        .send_json(ureq::json!({
-            "agent_id": self.agent_id,
-            "materialization_id": input.materialization_id,
-            "build_config_revision_id": input.build_config_revision_id,
-            "expected_plan_digest": input.expected_plan_digest,
-            "manifest_base64": input.manifest_base64,
-            "receipt_base64": input.receipt_base64,
-            "manifest_digest": input.manifest_digest,
-            "receipt_digest": input.receipt_digest,
-        }));
-        let body: serde_json::Value = match response {
-            Ok(r) => r.into_json().map_err(|e| StaticWebTransportError::Transport {
-                detail: format!("{e}"),
-            })?,
+        ));
+        for (name, value) in &headers {
+            request = request.set(name, value);
+        }
+        let response = request.send_json(body);
+        let response_body: serde_json::Value = match response {
+            Ok(r) => r
+                .into_json()
+                .map_err(|e| StaticWebTransportError::Transport {
+                    detail: format!("{e}"),
+                })?,
             Err(ureq::Error::Status(status, r)) => {
                 let text = r.into_string().unwrap_or_default();
                 let code = serde_json::from_str::<serde_json::Value>(&text)
@@ -375,16 +464,20 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
             }
         };
         Ok(StaticWebPrepareDecision::Ready {
-            materialization_id: body
+            materialization_id: response_body
                 .get("materialization_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            manifest_digest: body
+            manifest_digest: response_body
                 .get("manifest_digest")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            producer_generation: response_body
+                .get("producer_generation")
+                .and_then(|v| v.as_u64())
+                .unwrap_or_default(),
         })
     }
 
@@ -392,30 +485,43 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
         blobs: &[StaticWebBlobUpload],
     ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
         let payload = blobs
             .iter()
             .map(|blob| {
-                ureq::json!({
+                serde_json::json!({
                     "digest": blob.digest,
                     "size_bytes": blob.size_bytes,
                 })
             })
             .collect::<Vec<_>>();
-        let response = ureq::post(&format!(
+        let (headers, body) = auth_json(
+            self.token,
+            self.lease_token,
+            self.agent_id,
+            self.worker_claim_id,
+            serde_json::json!({
+                "producer_generation": producer_generation,
+                "materialization_id": materialization_id,
+                "blobs": payload,
+            }),
+        );
+        let mut request = ureq::post(&format!(
             "{}/v1/static-web/jobs/{job_id}/blobs/upload-authorizations",
             self.api_url
-        ))
-        .set("authorization", &format!("Bearer {}", self.token))
-        .send_json(ureq::json!({
-            "materialization_id": materialization_id,
-            "blobs": payload,
-        }));
+        ));
+        for (name, value) in &headers {
+            request = request.set(name, value);
+        }
+        let response = request.send_json(body);
         let body: serde_json::Value = match response {
-            Ok(r) => r.into_json().map_err(|e| StaticWebTransportError::Transport {
-                detail: format!("{e}"),
-            })?,
+            Ok(r) => r
+                .into_json()
+                .map_err(|e| StaticWebTransportError::Transport {
+                    detail: format!("{e}"),
+                })?,
             Err(ureq::Error::Status(status, r)) => {
                 let text = r.into_string().unwrap_or_default();
                 let code = serde_json::from_str::<serde_json::Value>(&text)
@@ -448,11 +554,15 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let upload_url = item.get("upload_url").and_then(|v| v.as_str()).map(String::from);
+            let upload_url = item
+                .get("upload_url")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let mut required_headers = Vec::new();
             if let Some(headers) = item.get("required_headers").and_then(|v| v.as_object()) {
                 for (name, value) in headers {
-                    required_headers.push((name.clone(), value.as_str().unwrap_or_default().to_string()));
+                    required_headers
+                        .push((name.clone(), value.as_str().unwrap_or_default().to_string()));
                 }
             }
             out.push(StaticWebUploadAuthorization {
@@ -465,12 +575,7 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
         Ok(out)
     }
 
-    fn put(
-        &self,
-        url: &str,
-        body: &[u8],
-        headers: &[(String, String)],
-    ) -> Result<u16, String> {
+    fn put(&self, url: &str, body: &[u8], headers: &[(String, String)]) -> Result<u16, String> {
         let mut request = ureq::put(url);
         for (name, value) in headers {
             request = request.set(name, value);
@@ -486,30 +591,43 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
         blobs: &[StaticWebBlobUpload],
     ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
         let payload = blobs
             .iter()
             .map(|blob| {
-                ureq::json!({
+                serde_json::json!({
                     "digest": blob.digest,
                     "size_bytes": blob.size_bytes,
                 })
             })
             .collect::<Vec<_>>();
-        let response = ureq::post(&format!(
+        let (headers, body) = auth_json(
+            self.token,
+            self.lease_token,
+            self.agent_id,
+            self.worker_claim_id,
+            serde_json::json!({
+                "producer_generation": producer_generation,
+                "materialization_id": materialization_id,
+                "blobs": payload,
+            }),
+        );
+        let mut request = ureq::post(&format!(
             "{}/v1/static-web/jobs/{job_id}/blobs/verify",
             self.api_url
-        ))
-        .set("authorization", &format!("Bearer {}", self.token))
-        .send_json(ureq::json!({
-            "materialization_id": materialization_id,
-            "blobs": payload,
-        }));
+        ));
+        for (name, value) in &headers {
+            request = request.set(name, value);
+        }
+        let response = request.send_json(body);
         let body: serde_json::Value = match response {
-            Ok(r) => r.into_json().map_err(|e| StaticWebTransportError::Transport {
-                detail: format!("{e}"),
-            })?,
+            Ok(r) => r
+                .into_json()
+                .map_err(|e| StaticWebTransportError::Transport {
+                    detail: format!("{e}"),
+                })?,
             Err(ureq::Error::Status(status, r)) => {
                 let text = r.into_string().unwrap_or_default();
                 let code = serde_json::from_str::<serde_json::Value>(&text)
@@ -550,17 +668,26 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
         &self,
         job_id: &str,
         materialization_id: &str,
+        producer_generation: u64,
     ) -> Result<(), StaticWebTransportError> {
-        let response = ureq::post(&format!(
+        let (headers, body) = auth_json(
+            self.token,
+            self.lease_token,
+            self.agent_id,
+            self.worker_claim_id,
+            serde_json::json!({
+                "producer_generation": producer_generation,
+                "materialization_id": materialization_id,
+            }),
+        );
+        let mut request = ureq::post(&format!(
             "{}/v1/static-web/jobs/{job_id}/complete",
             self.api_url
-        ))
-        .set("authorization", &format!("Bearer {}", self.token))
-        .send_json(ureq::json!({
-            "agent_id": self.agent_id,
-            "materialization_id": materialization_id,
-        }));
-        match response {
+        ));
+        for (name, value) in &headers {
+            request = request.set(name, value);
+        }
+        match request.send_json(body) {
             Ok(_) => Ok(()),
             Err(ureq::Error::Status(status, r)) => {
                 let text = r.into_string().unwrap_or_default();
@@ -596,6 +723,7 @@ mod tests {
         puts: RefCell<Vec<(String, Vec<u8>)>>,
         prepare_calls: RefCell<u32>,
         complete_calls: RefCell<u32>,
+        verify_batches: RefCell<Vec<usize>>,
     }
 
     impl StaticWebTransport for FakeTransport {
@@ -608,6 +736,7 @@ mod tests {
             Ok(StaticWebPrepareDecision::Ready {
                 materialization_id: "swm_test".to_string(),
                 manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                producer_generation: 1,
             })
         }
 
@@ -615,6 +744,7 @@ mod tests {
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
             blobs: &[StaticWebBlobUpload],
         ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
             let mut out = Vec::new();
@@ -626,7 +756,10 @@ mod tests {
                     status: "upload".to_string(),
                     upload_url: Some(format!("https://r2.test/{key}?X-Amz-Signature=x")),
                     required_headers: vec![
-                        ("x-amz-meta-schema".to_string(), "ato.static-blob/v1".to_string()),
+                        (
+                            "x-amz-meta-schema".to_string(),
+                            "ato.static-blob/v1".to_string(),
+                        ),
                         ("x-amz-meta-sha256".to_string(), blob.digest.clone()),
                     ],
                 });
@@ -641,7 +774,9 @@ mod tests {
             _headers: &[(String, String)],
         ) -> Result<u16, String> {
             self.put_urls.borrow_mut().push(url.to_string());
-            self.puts.borrow_mut().push((url.to_string(), body.to_vec()));
+            self.puts
+                .borrow_mut()
+                .push((url.to_string(), body.to_vec()));
             Ok(200)
         }
 
@@ -649,8 +784,10 @@ mod tests {
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
             blobs: &[StaticWebBlobUpload],
         ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
+            self.verify_batches.borrow_mut().push(blobs.len());
             Ok(blobs
                 .iter()
                 .map(|blob| (blob.digest.clone(), true))
@@ -661,6 +798,7 @@ mod tests {
             &self,
             _job_id: &str,
             _materialization_id: &str,
+            _producer_generation: u64,
         ) -> Result<(), StaticWebTransportError> {
             *self.complete_calls.borrow_mut() += 1;
             Ok(())
@@ -679,6 +817,20 @@ mod tests {
         }
     }
 
+    fn prepare() -> StaticWebPrepare {
+        StaticWebPrepare {
+            agent_id: "builder_1".to_string(),
+            worker_claim_id: "abclaim_01234567890123456789012345".to_string(),
+            materialization_id: "swm_test".to_string(),
+            build_config_revision_id: "bcrev_1".to_string(),
+            expected_plan_digest: format!("sha256:{}", "d".repeat(64)),
+            manifest_base64: "bWFuaWZlc3Q=".to_string(),
+            receipt_base64: "cmVjZWlwdA==".to_string(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            receipt_digest: format!("sha256:{}", "b".repeat(64)),
+        }
+    }
+
     #[test]
     fn redact_url_removes_the_query_bearer() {
         assert_eq!(
@@ -692,17 +844,7 @@ mod tests {
     fn transports_prepare_upload_verify_complete_and_never_names_objects() {
         let transport = FakeTransport::default();
         let blobs = vec![blob(b'a'), blob(b'b')];
-        let prepare = StaticWebPrepare {
-            agent_id: "builder_1".to_string(),
-            materialization_id: "swm_test".to_string(),
-            build_config_revision_id: "bcrev_1".to_string(),
-            expected_plan_digest: format!("sha256:{}", "d".repeat(64)),
-            manifest_base64: "bWFuaWZlc3Q=".to_string(),
-            receipt_base64: "cmVjZWlwdA==".to_string(),
-            manifest_digest: format!("sha256:{}", "a".repeat(64)),
-            receipt_digest: format!("sha256:{}", "b".repeat(64)),
-        };
-        transport_static_web_bundle(&transport, "job_1", &prepare, &blobs).unwrap();
+        transport_static_web_bundle(&transport, "job_1", &prepare(), &blobs).unwrap();
         assert_eq!(*transport.prepare_calls.borrow(), 1);
         assert_eq!(*transport.complete_calls.borrow(), 1);
         assert_eq!(transport.puts.borrow().len(), 2);
@@ -710,19 +852,208 @@ mod tests {
         for key in transport.authorized_keys.borrow().iter() {
             assert!(key.starts_with("static/v1/blobs/sha256/"));
         }
-        // Put bodies match the local blobs.
-        for (digest, body) in transport.puts.borrow().iter() {
-            assert_eq!(body.len(), 16);
-            let _ = digest;
-        }
+        // The FULL batch is verified, not just the uploaded slice.
+        assert_eq!(*transport.verify_batches.borrow(), vec![2]);
         // The debug form never shows a full URL.
-        let debug = format!("{:?}", StaticWebUploadAuthorization {
-            digest: "sha256:abc".to_string(),
-            status: "upload".to_string(),
-            upload_url: Some("https://r2.test/secret?X-Amz-Signature=leak".to_string()),
-            required_headers: vec![],
-        });
+        let debug = format!(
+            "{:?}",
+            StaticWebUploadAuthorization {
+                digest: "sha256:abc".to_string(),
+                status: "upload".to_string(),
+                upload_url: Some("https://r2.test/secret?X-Amz-Signature=leak".to_string()),
+                required_headers: vec![],
+            }
+        );
         assert!(!debug.contains("leak"));
+    }
+
+    /// Blocker 3: when the API answers `already_present` for the WHOLE batch,
+    /// the builder uploads nothing but still VERIFIES the full batch — an
+    /// empty verify request would be refused by the API.
+    #[test]
+    fn a_dedup_only_batch_verifies_the_full_batch_and_completes() {
+        struct DedupTransport;
+        impl StaticWebTransport for DedupTransport {
+            fn prepare(
+                &self,
+                _job_id: &str,
+                _input: &StaticWebPrepare,
+            ) -> Result<StaticWebPrepareDecision, StaticWebTransportError> {
+                Ok(StaticWebPrepareDecision::Ready {
+                    materialization_id: "swm_test".to_string(),
+                    manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                    producer_generation: 1,
+                })
+            }
+            fn authorize_uploads(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+                _producer_generation: u64,
+                blobs: &[StaticWebBlobUpload],
+            ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
+                Ok(blobs
+                    .iter()
+                    .map(|blob| StaticWebUploadAuthorization {
+                        digest: blob.digest.clone(),
+                        status: "already_present".to_string(),
+                        upload_url: None,
+                        required_headers: vec![],
+                    })
+                    .collect())
+            }
+            fn put(
+                &self,
+                _url: &str,
+                _body: &[u8],
+                _headers: &[(String, String)],
+            ) -> Result<u16, String> {
+                unreachable!("no upload is granted in a dedup-only batch")
+            }
+            fn verify_uploads(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+                _producer_generation: u64,
+                blobs: &[StaticWebBlobUpload],
+            ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
+                assert_eq!(blobs.len(), 2, "verify must carry the WHOLE batch");
+                Ok(blobs.iter().map(|b| (b.digest.clone(), true)).collect())
+            }
+            fn complete(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+                _producer_generation: u64,
+            ) -> Result<(), StaticWebTransportError> {
+                Ok(())
+            }
+        }
+        let blobs = vec![blob(b'a'), blob(b'b')];
+        transport_static_web_bundle(&DedupTransport, "job_1", &prepare(), &blobs).unwrap();
+    }
+
+    /// Blocker 1 + Blocker 5: the wire shapes the Rust transport emits match
+    /// the Hono route schemas byte-for-byte — `agent_id`, `worker_claim_id`,
+    /// the lease header, and the generation echo on every call. This test
+    /// mirrors the API's zod `.strict()` contract so a drift in either side
+    /// fails HERE, not in the E2E.
+    #[test]
+    fn wire_shapes_match_the_api_contract() {
+        // The exact zod contract from static_web_artifacts.ts (mirrored):
+        //   prepare: agent_id, worker_claim_id, materialization_id,
+        //            build_config_revision_id, expected_plan_digest,
+        //            manifest_base64, receipt_base64, manifest_digest,
+        //            receipt_digest — .strict()
+        //   blob batch: agent_id, worker_claim_id, producer_generation,
+        //               materialization_id, blobs[{digest, size_bytes}] —
+        //               .strict()
+        //   complete: agent_id, worker_claim_id, producer_generation,
+        //             materialization_id — .strict()
+        fn assert_strict_shape(body: &serde_json::Value, expected: &[&str]) {
+            let object = body.as_object().expect("body must be a JSON object");
+            let mut keys = object.keys().cloned().collect::<Vec<_>>();
+            keys.sort();
+            let mut expected = expected.to_vec();
+            expected.sort();
+            assert_eq!(
+                keys, expected,
+                "body must match the .strict() schema exactly"
+            );
+        }
+
+        let transport = HttpStaticWebTransport {
+            api_url: "https://api.test",
+            token: "builder-token",
+            agent_id: "builder_1",
+            worker_claim_id: "abclaim_01234567890123456789012345",
+            lease_token: "lease-token-value",
+        };
+        let (headers, prepare_body) = auth_json(
+            transport.token,
+            transport.lease_token,
+            transport.agent_id,
+            transport.worker_claim_id,
+            serde_json::json!({
+                "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "build_config_revision_id": "bcrev_1",
+                "expected_plan_digest": format!("sha256:{}", "d".repeat(64)),
+                "manifest_base64": "bWFuaWZlc3Q=",
+                "receipt_base64": "cmVjZWlwdA==",
+                "manifest_digest": format!("sha256:{}", "a".repeat(64)),
+                "receipt_digest": format!("sha256:{}", "b".repeat(64)),
+            }),
+        );
+        assert!(
+            headers
+                .iter()
+                .any(|(n, v)| n == AUTHORING_LEASE_HEADER && v == "lease-token-value")
+        );
+        assert!(headers.iter().any(|(n, _)| n == "authorization"));
+        assert_strict_shape(
+            &prepare_body,
+            &[
+                "agent_id",
+                "worker_claim_id",
+                "materialization_id",
+                "build_config_revision_id",
+                "expected_plan_digest",
+                "manifest_base64",
+                "receipt_base64",
+                "manifest_digest",
+                "receipt_digest",
+            ],
+        );
+        assert!(prepare_body["agent_id"] == "builder_1");
+        assert!(prepare_body["worker_claim_id"] == "abclaim_01234567890123456789012345");
+
+        let (_, batch_body) = auth_json(
+            transport.token,
+            transport.lease_token,
+            transport.agent_id,
+            transport.worker_claim_id,
+            serde_json::json!({
+                "producer_generation": 3,
+                "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "blobs": [ { "digest": format!("sha256:{}", "a".repeat(64)), "size_bytes": 42 } ],
+            }),
+        );
+        assert_strict_shape(
+            &batch_body,
+            &[
+                "agent_id",
+                "worker_claim_id",
+                "producer_generation",
+                "materialization_id",
+                "blobs",
+            ],
+        );
+        assert_eq!(batch_body["producer_generation"], 3);
+        assert_eq!(
+            batch_body["blobs"][0]["digest"],
+            format!("sha256:{}", "a".repeat(64))
+        );
+        assert_eq!(batch_body["blobs"][0]["size_bytes"], 42);
+
+        let (_, complete_body) = auth_json(
+            transport.token,
+            transport.lease_token,
+            transport.agent_id,
+            transport.worker_claim_id,
+            serde_json::json!({
+                "producer_generation": 3,
+                "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }),
+        );
+        assert_strict_shape(
+            &complete_body,
+            &[
+                "agent_id",
+                "worker_claim_id",
+                "producer_generation",
+                "materialization_id",
+            ],
+        );
     }
 
     #[test]
@@ -741,12 +1072,14 @@ mod tests {
                 Ok(StaticWebPrepareDecision::Ready {
                     materialization_id: "swm_test".to_string(),
                     manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                    producer_generation: 1,
                 })
             }
             fn authorize_uploads(
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
                 blobs: &[StaticWebBlobUpload],
             ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
                 Ok(blobs
@@ -774,6 +1107,7 @@ mod tests {
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
                 blobs: &[StaticWebBlobUpload],
             ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
                 Ok(blobs
@@ -785,22 +1119,13 @@ mod tests {
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
             ) -> Result<(), StaticWebTransportError> {
                 Ok(())
             }
         }
-        let prepare = StaticWebPrepare {
-            agent_id: "builder_1".to_string(),
-            materialization_id: "swm_test".to_string(),
-            build_config_revision_id: "bcrev_1".to_string(),
-            expected_plan_digest: format!("sha256:{}", "d".repeat(64)),
-            manifest_base64: "bWFuaWZlc3Q=".to_string(),
-            receipt_base64: "cmVjZWlwdA==".to_string(),
-            manifest_digest: format!("sha256:{}", "a".repeat(64)),
-            receipt_digest: format!("sha256:{}", "b".repeat(64)),
-        };
         let blobs = vec![blob(b'a')];
-        transport_static_web_bundle(&PreconditionTransport, "job_1", &prepare, &blobs).unwrap();
+        transport_static_web_bundle(&PreconditionTransport, "job_1", &prepare(), &blobs).unwrap();
     }
 
     #[test]
@@ -812,12 +1137,15 @@ mod tests {
                 _job_id: &str,
                 _input: &StaticWebPrepare,
             ) -> Result<StaticWebPrepareDecision, StaticWebTransportError> {
-                Ok(StaticWebPrepareDecision::Conflicted("STATIC_WEB_ID_CONFLICT".to_string()))
+                Ok(StaticWebPrepareDecision::Conflicted(
+                    "STATIC_WEB_ID_CONFLICT".to_string(),
+                ))
             }
             fn authorize_uploads(
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
                 _blobs: &[StaticWebBlobUpload],
             ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
                 Ok(vec![])
@@ -834,6 +1162,7 @@ mod tests {
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
                 _blobs: &[StaticWebBlobUpload],
             ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
                 Ok(vec![])
@@ -842,21 +1171,13 @@ mod tests {
                 &self,
                 _job_id: &str,
                 _materialization_id: &str,
+                _producer_generation: u64,
             ) -> Result<(), StaticWebTransportError> {
                 Ok(())
             }
         }
-        let prepare = StaticWebPrepare {
-            agent_id: "builder_1".to_string(),
-            materialization_id: "swm_test".to_string(),
-            build_config_revision_id: "bcrev_1".to_string(),
-            expected_plan_digest: format!("sha256:{}", "d".repeat(64)),
-            manifest_base64: "bWFuaWZlc3Q=".to_string(),
-            receipt_base64: "cmVjZWlwdA==".to_string(),
-            manifest_digest: format!("sha256:{}", "a".repeat(64)),
-            receipt_digest: format!("sha256:{}", "b".repeat(64)),
-        };
-        let err = transport_static_web_bundle(&ConflictTransport, "job_1", &prepare, &[]).unwrap_err();
+        let err =
+            transport_static_web_bundle(&ConflictTransport, "job_1", &prepare(), &[]).unwrap_err();
         assert!(matches!(
             err,
             StaticWebTransportError::Refused { code, status: 409 }
