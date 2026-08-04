@@ -62,6 +62,14 @@ pub use contract::setup_journal;
 pub use contract::snapshot_manifest;
 pub use contract::tools;
 
+// ── Layer 2b: Import bundle (Capsule Bundle Format v3) ────────────────────
+//
+// The v3 source-only `.capsule` reader / verifier / writer. Sits above
+// `contract` (it calls the program-identity SSOT) and below routing/install,
+// which it deliberately does not touch. Spec:
+// `docs/rfcs/draft/CAPSULE_FORMAT_V3.md`.
+pub mod import_bundle;
+
 // ── Layer 3: Routing ──────────────────────────────────────────────────────
 pub mod routing;
 pub use routing::discovery;

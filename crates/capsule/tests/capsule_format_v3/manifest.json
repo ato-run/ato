@@ -1,0 +1,365 @@
+{
+  "invalid": [
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-duplicate-member.capsule",
+      "note": "index.json appears twice in the outer TAR",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-extra-member.capsule",
+      "note": "a fifth outer member outside the exact-four allowlist",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-missing-signature.capsule",
+      "note": "signature.json absent; v3 has no degrade-to-unsigned path",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-path-traversal.capsule",
+      "note": "outer member named ../capsule.toml",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-absolute-path.capsule",
+      "note": "outer member named /capsule.toml",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-dot-slash-alias.capsule",
+      "note": "outer member named ./capsule.toml",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-backslash-alias.capsule",
+      "note": "outer member named .\\capsule.toml",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-nul-in-name-field.capsule",
+      "note": "outer member whose TAR name field carries bytes after its NUL terminator",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-symlink-member.capsule",
+      "note": "capsule.toml is a symlink",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-hardlink-member.capsule",
+      "note": "capsule.toml is a hardlink",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-device-member.capsule",
+      "note": "capsule.toml is a character device",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-fifo-member.capsule",
+      "note": "capsule.toml is a FIFO",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "outer-directory-member.capsule",
+      "note": "capsule.toml is a directory entry",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "not_v3_bundle",
+      "file": "v2-shaped-no-index.capsule",
+      "note": "no root index.json: hand off to the v2 reader, never parse as v3",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "not_v3_bundle",
+      "file": "v2-shaped-missing-member.capsule",
+      "note": "a v2 archive missing a required v2 member; still v2's question, not v3's",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-wrong-schema.capsule",
+      "note": "index.json declares an unknown schema",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-role-lock.capsule",
+      "note": "a role:\"lock\" member; v1 carries no lock",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-unknown-role.capsule",
+      "note": "an unknown role value",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-wrong-member-path.capsule",
+      "note": "the manifest member declares a path v1 does not fix it to",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-wrong-media-type.capsule",
+      "note": "the manifest member declares the wrong media type",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-unknown-top-level-field.capsule",
+      "note": "an unknown top-level field",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-unknown-member-field.capsule",
+      "note": "an unknown per-member field",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-uppercase-digest-hex.capsule",
+      "note": "a sha256 spelled with uppercase hex",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-member-digest-mismatch.capsule",
+      "note": "a declared sha256 that does not match the member bytes",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-member-size-mismatch.capsule",
+      "note": "a declared size_bytes that does not match the member bytes",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-leading-zero-size.capsule",
+      "note": "size_bytes with a leading zero",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-numeric-size.capsule",
+      "note": "size_bytes as a JSON number rather than a decimal string",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-members-out-of-order.capsule",
+      "note": "members not in ascending UTF-8 byte order of path",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-duplicate-member-path.capsule",
+      "note": "two members declaring the same path under different roles",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-not-jcs.capsule",
+      "note": "index.json bytes are pretty-printed, not the JCS canonicalization of their own content",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-duplicate-json-key-top-level.capsule",
+      "note": "index.json repeats a top-level key",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "index-duplicate-json-key-member.capsule",
+      "note": "index.json repeats a key inside one member object",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "manifest-member-tampered.capsule",
+      "note": "capsule.toml bytes altered post-signing with index.json untouched: a member digest mismatch, caught before signature verification",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-wrong-schema.capsule",
+      "note": "signature.json declares an unknown schema",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-wrong-algorithm-case.capsule",
+      "note": "algorithm spelled \"Ed25519\"",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-other-algorithm.capsule",
+      "note": "a non-ed25519 algorithm",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-invalid-did-key.capsule",
+      "note": "key_id is not a canonical did:key",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-unknown-field.capsule",
+      "note": "an unknown top-level field (previous_key, which Slice 1 has no field for)",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-padded-base64.capsule",
+      "note": "signature encoded with base64url padding",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-standard-base64.capsule",
+      "note": "signature encoded with the standard (non-url) base64 alphabet",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-wrong-length.capsule",
+      "note": "signature decodes to 32 bytes rather than 64",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-index-digest-mismatch.capsule",
+      "note": "index_digest does not match index.json's bytes",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-uppercase-index-digest.capsule",
+      "note": "index_digest spelled with uppercase hex",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-forged-bytes.capsule",
+      "note": "structurally perfect signature bytes that do not verify",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "signature_invalid",
+      "file": "signature-duplicate-json-key.capsule",
+      "note": "signature.json repeats a key",
+      "stage": "envelope"
+    },
+    {
+      "context": "store",
+      "expected_error": "untrusted_signer",
+      "file": "claimed-issuer-ato-store-unpinned-key.capsule",
+      "note": "claimed_issuer says ato-store but the signing key matches no pin for the declared origin; must resolve to untrusted_key",
+      "stage": "envelope"
+    },
+    {
+      "context": "local",
+      "expected_error": "capsule_invalid",
+      "file": "inner-split-brain-locks.capsule",
+      "note": "the source archive carries both capsule.lock and ato.lock.json at its root",
+      "stage": "derivation"
+    }
+  ],
+  "valid": [
+    {
+      "file": "baseline.capsule",
+      "note": "source archive with no inner control files at all",
+      "same_program_id_as": "baseline.capsule"
+    },
+    {
+      "file": "inner-manifest-absent.capsule",
+      "note": "no inner capsule.toml; the outer manifest applies regardless",
+      "same_program_id_as": "baseline.capsule"
+    },
+    {
+      "file": "inner-manifest-differs.capsule",
+      "note": "inner capsule.toml disagrees with the outer one; outer wins",
+      "same_program_id_as": "baseline.capsule"
+    },
+    {
+      "file": "inner-manifest-malformed.capsule",
+      "note": "inner capsule.toml is unparseable; excluded by name, never parsed",
+      "same_program_id_as": "baseline.capsule"
+    },
+    {
+      "file": "inner-capsule-lock.capsule",
+      "note": "inner capsule.lock alone; excluded from the projection",
+      "same_program_id_as": "baseline.capsule"
+    },
+    {
+      "file": "inner-ato-lock-json.capsule",
+      "note": "inner ato.lock.json alone; excluded from the projection",
+      "same_program_id_as": "baseline.capsule"
+    }
+  ]
+}
