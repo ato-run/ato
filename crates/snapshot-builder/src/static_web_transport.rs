@@ -445,6 +445,58 @@ fn validate_blob_response_digests(
     Ok(())
 }
 
+/// Parse the prepare response JSON and validate its identity against the
+/// REQUEST (Major 2, review rounds 3+4): the API must echo OUR
+/// materialization + manifest identity, and a `producer_generation` must be
+/// present and non-zero. A skew in any of these is a hard refusal — a wrong
+/// echo would let one materialization's bytes be uploaded under another's
+/// name, and a missing/zero generation could not fence later calls. This is
+/// the REAL parser the HTTP transport runs every response through (extracted
+/// so the mismatch cases are exercised without a live server).
+fn parse_prepare_response(
+    response_body: &serde_json::Value,
+    input: &StaticWebPrepare,
+) -> Result<StaticWebPrepareDecision, StaticWebTransportError> {
+    let response_materialization_id = response_body
+        .get("materialization_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let response_manifest_digest = response_body
+        .get("manifest_digest")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if response_materialization_id != input.materialization_id {
+        return Err(StaticWebTransportError::Transport {
+            detail: format!(
+                "prepare echoed materialization {response_materialization_id} for requested {}",
+                input.materialization_id
+            ),
+        });
+    }
+    if response_manifest_digest != input.manifest_digest {
+        return Err(StaticWebTransportError::Transport {
+            detail: format!(
+                "prepare echoed manifest {response_manifest_digest} for requested {}",
+                input.manifest_digest
+            ),
+        });
+    }
+    let producer_generation = response_body
+        .get("producer_generation")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_default();
+    if producer_generation == 0 {
+        return Err(StaticWebTransportError::Transport {
+            detail: "prepare response carried no producer_generation".to_string(),
+        });
+    }
+    Ok(StaticWebPrepareDecision::Ready {
+        materialization_id: response_materialization_id.to_string(),
+        manifest_digest: response_manifest_digest.to_string(),
+        producer_generation,
+    })
+}
+
 impl StaticWebTransport for HttpStaticWebTransport<'_> {
     fn prepare(
         &self,
@@ -497,41 +549,7 @@ impl StaticWebTransport for HttpStaticWebTransport<'_> {
                 });
             }
         };
-        let response_materialization_id = response_body
-            .get("materialization_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        let response_manifest_digest = response_body
-            .get("manifest_digest")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        // Major 2 (review round 3): the prepare response must echo OUR
-        // materialization + manifest identity — a skew would let a wrong
-        // materialization's bytes be uploaded under our name.
-        if response_materialization_id != input.materialization_id {
-            return Err(StaticWebTransportError::Transport {
-                detail: format!(
-                    "prepare echoed materialization {response_materialization_id} for requested {}",
-                    input.materialization_id
-                ),
-            });
-        }
-        if response_manifest_digest != input.manifest_digest {
-            return Err(StaticWebTransportError::Transport {
-                detail: format!(
-                    "prepare echoed manifest {response_manifest_digest} for requested {}",
-                    input.manifest_digest
-                ),
-            });
-        }
-        Ok(StaticWebPrepareDecision::Ready {
-            materialization_id: response_materialization_id.to_string(),
-            manifest_digest: response_manifest_digest.to_string(),
-            producer_generation: response_body
-                .get("producer_generation")
-                .and_then(|v| v.as_u64())
-                .unwrap_or_default(),
-        })
+        parse_prepare_response(&response_body, input)
     }
 
     fn authorize_uploads(
@@ -1298,7 +1316,8 @@ mod tests {
         let unknown = format!("sha256:{}", "c".repeat(64));
 
         // Count mismatch.
-        let err = validate_blob_response_digests(&requested, std::slice::from_ref(&digest_a)).unwrap_err();
+        let err = validate_blob_response_digests(&requested, std::slice::from_ref(&digest_a))
+            .unwrap_err();
         assert!(matches!(
             err,
             StaticWebTransportError::Transport { detail } if detail.contains("1 blobs for 2 requested")
@@ -1324,34 +1343,73 @@ mod tests {
         validate_blob_response_digests(&requested, &[digest_b, digest_a]).unwrap();
     }
 
-    /// Major 2 (review round 3): the prepare response must echo the requested
-    /// materialization/manifest identity; a skew is a hard refusal.
+    /// Major 2 (review rounds 3+4): the prepare response is parsed through the
+    /// REAL `parse_prepare_response` path — a wrong materialization echo, a
+    /// wrong manifest echo, a missing generation, and a zero generation are
+    /// all actual refusals, not hand-built decisions.
     #[test]
-    fn refuses_a_prepare_response_echoing_a_different_identity() {
-        fn decision(api_materialization: &str, api_manifest: &str) -> StaticWebPrepareDecision {
-            StaticWebPrepareDecision::Ready {
-                materialization_id: api_materialization.to_string(),
-                manifest_digest: api_manifest.to_string(),
-                producer_generation: 1,
-            }
-        }
+    fn refuses_prepare_responses_that_do_not_match_the_request() {
         let input = prepare();
-        // The transport validates against input AFTER parsing — simulate the
-        // validation the transport performs by asserting the mismatch cases.
-        let echoed = decision("swm_other", &input.manifest_digest);
-        if let StaticWebPrepareDecision::Ready {
-            materialization_id, ..
-        } = echoed
-        {
-            assert_ne!(materialization_id, input.materialization_id);
-        }
-        let echoed = decision(&input.materialization_id, "sha256:different");
-        if let StaticWebPrepareDecision::Ready {
-            manifest_digest, ..
-        } = echoed
-        {
-            assert_ne!(manifest_digest, input.manifest_digest);
-        }
+        let ok = serde_json::json!({
+            "materialization_id": input.materialization_id,
+            "manifest_digest": input.manifest_digest,
+            "producer_generation": 1,
+            "status": "ready",
+        });
+        assert!(matches!(
+            parse_prepare_response(&ok, &input),
+            Ok(StaticWebPrepareDecision::Ready {
+                producer_generation: 1,
+                ..
+            })
+        ));
+
+        // Different materialization_id.
+        let wrong_materialization = serde_json::json!({
+            "materialization_id": "swm_other",
+            "manifest_digest": input.manifest_digest,
+            "producer_generation": 1,
+        });
+        let err = parse_prepare_response(&wrong_materialization, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("echoed materialization swm_other")
+        ));
+
+        // Different manifest_digest.
+        let wrong_manifest = serde_json::json!({
+            "materialization_id": input.materialization_id,
+            "manifest_digest": "sha256:different",
+            "producer_generation": 1,
+        });
+        let err = parse_prepare_response(&wrong_manifest, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("echoed manifest")
+        ));
+
+        // Missing producer_generation.
+        let missing_generation = serde_json::json!({
+            "materialization_id": input.materialization_id,
+            "manifest_digest": input.manifest_digest,
+        });
+        let err = parse_prepare_response(&missing_generation, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("no producer_generation")
+        ));
+
+        // producer_generation = 0.
+        let zero_generation = serde_json::json!({
+            "materialization_id": input.materialization_id,
+            "manifest_digest": input.manifest_digest,
+            "producer_generation": 0,
+        });
+        let err = parse_prepare_response(&zero_generation, &input).unwrap_err();
+        assert!(matches!(
+            err,
+            StaticWebTransportError::Transport { detail } if detail.contains("no producer_generation")
+        ));
     }
 
     #[test]
