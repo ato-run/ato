@@ -273,6 +273,13 @@ fn upload_one(
         }
         match transport.put(&url, &body, &headers) {
             Ok(status) if (200..300).contains(&status) => return Ok(()),
+            // 412 Precondition Failed from the create-only PUT means the
+            // digest-derived key ALREADY EXISTS (a previous attempt, possibly
+            // by a crashed earlier run, landed the bytes before verify). This
+            // is NOT a failure to retry — the object is present and the flow
+            // converges by proceeding to VERIFY, which HEAD-checks size +
+            // metadata and fails closed if the existing bytes disagree.
+            Ok(412) => return Ok(()),
             Ok(status) => {
                 last_status = status;
             }
@@ -716,6 +723,84 @@ mod tests {
             required_headers: vec![],
         });
         assert!(!debug.contains("leak"));
+    }
+
+    #[test]
+    fn a_412_create_only_put_converges_through_verify_instead_of_retrying() {
+        // A transport whose PUT always answers 412 (the key already exists —
+        // e.g. a crashed earlier run landed the bytes before verify). The flow
+        // must treat that as "object present" and converge via verify, NOT
+        // spin the retry budget and fail.
+        struct PreconditionTransport;
+        impl StaticWebTransport for PreconditionTransport {
+            fn prepare(
+                &self,
+                _job_id: &str,
+                _input: &StaticWebPrepare,
+            ) -> Result<StaticWebPrepareDecision, StaticWebTransportError> {
+                Ok(StaticWebPrepareDecision::Ready {
+                    materialization_id: "swm_test".to_string(),
+                    manifest_digest: format!("sha256:{}", "a".repeat(64)),
+                })
+            }
+            fn authorize_uploads(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+                blobs: &[StaticWebBlobUpload],
+            ) -> Result<Vec<StaticWebUploadAuthorization>, StaticWebTransportError> {
+                Ok(blobs
+                    .iter()
+                    .map(|blob| StaticWebUploadAuthorization {
+                        digest: blob.digest.clone(),
+                        status: "upload".to_string(),
+                        upload_url: Some(format!(
+                            "https://r2.test/static/v1/blobs/sha256/{}?X-Amz-Signature=x",
+                            &blob.digest["sha256:".len()..]
+                        )),
+                        required_headers: vec![],
+                    })
+                    .collect())
+            }
+            fn put(
+                &self,
+                _url: &str,
+                _body: &[u8],
+                _headers: &[(String, String)],
+            ) -> Result<u16, String> {
+                Ok(412)
+            }
+            fn verify_uploads(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+                blobs: &[StaticWebBlobUpload],
+            ) -> Result<Vec<(String, bool)>, StaticWebTransportError> {
+                Ok(blobs
+                    .iter()
+                    .map(|blob| (blob.digest.clone(), true))
+                    .collect())
+            }
+            fn complete(
+                &self,
+                _job_id: &str,
+                _materialization_id: &str,
+            ) -> Result<(), StaticWebTransportError> {
+                Ok(())
+            }
+        }
+        let prepare = StaticWebPrepare {
+            agent_id: "builder_1".to_string(),
+            materialization_id: "swm_test".to_string(),
+            build_config_revision_id: "bcrev_1".to_string(),
+            expected_plan_digest: format!("sha256:{}", "d".repeat(64)),
+            manifest_base64: "bWFuaWZlc3Q=".to_string(),
+            receipt_base64: "cmVjZWlwdA==".to_string(),
+            manifest_digest: format!("sha256:{}", "a".repeat(64)),
+            receipt_digest: format!("sha256:{}", "b".repeat(64)),
+        };
+        let blobs = vec![blob(b'a')];
+        transport_static_web_bundle(&PreconditionTransport, "job_1", &prepare, &blobs).unwrap();
     }
 
     #[test]

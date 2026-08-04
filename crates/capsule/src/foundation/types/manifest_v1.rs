@@ -414,6 +414,7 @@ fn validate_static_web_root(value: &str) -> Result<(), ManifestV1Error> {
         || value.starts_with('/')
         || value.contains('\\')
         || value.contains('\0')
+        || value.contains('%')
         || value
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
@@ -421,7 +422,7 @@ fn validate_static_web_root(value: &str) -> Result<(), ManifestV1Error> {
         return Err(ManifestV1Error::Invalid {
             field: "outputs.static_web.root",
             reason:
-                "must be a non-empty relative path without '.', '..', empty segments, backslashes, or a leading slash"
+                "must be a non-empty relative path without '.', '..', empty segments, backslashes, percent signs, or a leading slash"
                     .to_string(),
         });
     }
@@ -550,13 +551,14 @@ fn validate_source_relative_path(
         || value.ends_with('/')
         || value.contains('\\')
         || value.contains('\0')
+        || value.contains('%')
         || value
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
         return Err(ManifestV1Error::Invalid {
             field,
-            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, or a leading slash".to_string(),
+            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, percent signs, or a leading slash".to_string(),
         });
     }
     Ok(())
@@ -1967,6 +1969,18 @@ entry_path = "index.html""#,
 root = "../dist"
 entry_path = "index.html""#,
                 "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist%2fescaped"
+entry_path = "index.html""#,
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index%2f.html""#,
+                "outputs.static_web.entry_path",
             ),
             (
                 r#"[outputs.static_web]
