@@ -27,6 +27,12 @@ The producer emits `static-web-bundle-v1/` with:
 - `receipt.json`: manifest identity, environment labels, R2 object keys, and blob metadata;
 - `blobs/sha256/<hex>`: immutable SHA-256 identity blobs.
 
+The `p-*` and `s-*` labels are derived from the digest of the complete
+canonical manifest, not a digest of static file content. In particular,
+`materialization_id` is part of that manifest: changing it changes canonical
+bytes, the manifest digest, and both host labels. Sharing content-addressed
+blobs does not imply sharing a public deployment host.
+
 R2 publication is intentionally out of scope. A later API/control-plane PR may
 upload the exact files and create mutable deployment records only after durable
 artifact registration. The VM Snapshot path remains a separate output boundary;
