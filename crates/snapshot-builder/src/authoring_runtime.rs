@@ -150,15 +150,23 @@ pub struct AuthoringWork {
     #[allow(dead_code)]
     // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub build_config_revision_id: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "source_build_attempt_id",
+        alias = "_source_build_attempt_id"
+    )]
     pub _source_build_attempt_id: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub build_attempt_number: Option<u32>,
-    #[serde(default)]
+    #[serde(default, rename = "authoring_toml", alias = "_authoring_toml")]
     pub _authoring_toml: Option<String>,
-    #[serde(default)]
+    #[serde(
+        default,
+        rename = "authoring_toml_digest",
+        alias = "_authoring_toml_digest"
+    )]
     pub _authoring_toml_digest: Option<String>,
     /// The effective build plan (JSON) the attempt was enqueued under. Contains
     /// the optional `static_web_output` section when the author declared one.
@@ -1649,6 +1657,45 @@ mod tests {
         assert!(work.effective_build_plan.is_none());
         assert!(work.plan_digest.is_none());
         assert!(work.static_web_output_plan().expect("parses").is_none());
+    }
+
+    #[test]
+    fn current_api_plan_extension_field_names_parse() {
+        // The API sends the public wire names, while the Rust fields retain
+        // underscore prefixes to make their intentionally narrow use obvious.
+        // Keep the old spellings as aliases during the rollout, but exercise
+        // the exact current API response so deny_unknown_fields cannot strand
+        // a static-web-capable builder at claim time.
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_current_wire",
+            "authoring_session_id": "auth_current_wire",
+            "capsule_revision_id": "caprev_current_wire",
+            "source_revision_id": "srev_current_wire",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_current_wire",
+                "source_materialization_id": "smat_current_wire",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_current_wire.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "build_config_revision_id": "bcrev_current_wire",
+            "source_build_attempt_id": "build_current_wire",
+            "authoring_toml": "schema_version = \\\"1\\\"",
+            "authoring_toml_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_current_wire"
+        }))
+        .expect("current API plan extension parses");
+
+        assert_eq!(work._source_build_attempt_id.as_deref(), Some("build_current_wire"));
+        assert_eq!(work._authoring_toml.as_deref(), Some("schema_version = \\\"1\\\""));
+        assert_eq!(
+            work._authoring_toml_digest.as_deref(),
+            Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
     }
 
     #[test]
