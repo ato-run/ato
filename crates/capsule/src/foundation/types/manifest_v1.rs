@@ -953,11 +953,16 @@ impl CapsuleManifestV1 {
             .build
             .as_ref()
             .is_some_and(|build| !build.steps.is_empty())
+            && self
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.static_web.as_ref())
+                .is_none()
         {
             return Err(ManifestV1Error::Unsupported {
                 feature: "[[build.steps]]",
-                why: "a build output has no name and no guest placement in this build, so its \
-                      projection could not be committed",
+                why: "this build has no declared guest output root, so its projection could not \
+                      be committed",
             });
         }
         if !self.state.is_empty() {
@@ -1427,18 +1432,12 @@ snapshot = "exclude"
     /// and not a parse error either, because these are perfectly good capsules.
     #[test]
     fn features_outside_the_step_four_subset_are_refused_by_name() {
-        let cases: [(&str, &str); 3] = [
+        let cases: [(&str, &str); 2] = [
             (
                 r#"
 [tools]
 python = "3.12""#,
                 "[tools]",
-            ),
-            (
-                r#"
-[[build.steps]]
-command = ["make"]"#,
-                "[[build.steps]]",
             ),
             (
                 r#"
@@ -1480,6 +1479,39 @@ command = ["true"]
                 other => panic!("expected Unsupported({feature}), got {other}"),
             }
         }
+    }
+
+    #[test]
+    fn static_web_output_places_build_steps_in_the_interactive_subset() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "static-demo"
+version = "0.1.0"
+
+[[build.steps]]
+command = ["sh", "-c", "mkdir -p dist && cp index.html dist/"]
+
+[run]
+command = ["python3", "-m", "http.server", "8000"]
+
+[web]
+port = 8000
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["true"]
+
+[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+"#,
+        )
+        .expect("valid static web manifest");
+
+        manifest
+            .validate_for_interactive_capture()
+            .expect("the declared static output places the build result");
     }
 
     /// A variable is a VALUE or a NAME, never both.
