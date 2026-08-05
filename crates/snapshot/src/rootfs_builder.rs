@@ -676,6 +676,9 @@ pub struct RootfsBuildSpecV1 {
     pub runtime: RuntimeKind,
     pub base_image: String,
     pub install_cmd: Option<String>,
+    /// Authored `[[build.steps]]` argv, executed in order while assembling the
+    /// immutable guest image. Docker's JSON-form RUN preserves every boundary.
+    pub build_commands: Vec<Vec<String>>,
     /// argv the runtime prepends to the authored command.
     ///
     /// Nothing for every family in the Step-4 subset, and that is a measurement
@@ -698,9 +701,9 @@ pub struct RootfsBuildSpecV1 {
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
 ///
-/// Fail-closed on everything the Step-4 subset does not cover — the subset gate
-/// runs first, so a manifest with `[tools]`, `[[build.steps]]` or `[state.*]`
-/// never reaches the runtime detection below.
+/// Fail-closed on everything the Step-4 subset does not cover. The subset gate
+/// runs first; authored build steps reach this lane only when a static output
+/// contract makes their immutable result part of the declared materialization.
 pub fn derive_build_spec_v1(
     m: &capsule::types::manifest_v1::CapsuleManifestV1,
     probe: &SourceProbe,
@@ -770,6 +773,17 @@ pub fn derive_build_spec_v1(
         runtime,
         base_image,
         install_cmd,
+        build_commands: m
+            .build
+            .as_ref()
+            .map(|build| {
+                build
+                    .steps
+                    .iter()
+                    .map(|step| step.command.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
@@ -820,6 +834,17 @@ pub(crate) fn assemble_app_image_script_v1(
     tool: &str,
 ) -> String {
     let install_q = shell_single_quote(spec.install_cmd.as_deref().unwrap_or("true"));
+    let build_steps = spec
+        .build_commands
+        .iter()
+        .map(|command| {
+            format!(
+                "RUN {}",
+                serde_json::to_string(command).expect("a string argv always serializes")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     // The projection goes in a SUBDIRECTORY of the build context, and the
     // generated Dockerfile sits beside it rather than inside it.
     //
@@ -848,6 +873,7 @@ FROM {base}
 WORKDIR {workdir}
 COPY src/. {workdir}/
 RUN /bin/sh -lc {install_q}
+{build_steps}
 DOCKER
 {tool} build -t "$ATO_IMAGE" "$BUILD" >/dev/null
 "#,
@@ -855,6 +881,7 @@ DOCKER
         base = pinned_base_ref,
         workdir = V1_GUEST_WORKING_DIRECTORY,
         install_q = install_q,
+        build_steps = build_steps,
     )
 }
 
@@ -3440,6 +3467,43 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         )
         .expect("derives");
         assert_eq!(spec.runtime, RuntimeKind::StaticWeb);
+    }
+
+    #[test]
+    fn static_web_build_steps_run_as_exact_argv_in_the_guest_image() {
+        let manifest = V1_MINIMAL.replace(
+            "[run]",
+            r#"[[build.steps]]
+command = ["sh", "-c", "mkdir -p dist && cp index.html dist/"]
+
+[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+
+[run]"#,
+        );
+        let spec = derive_build_spec_v1(
+            &v1(&manifest),
+            &SourceProbe {
+                has_index_html: true,
+                ..SourceProbe::default()
+            },
+        )
+        .expect("static output build derives");
+
+        assert_eq!(
+            spec.build_commands,
+            vec![vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "mkdir -p dist && cp index.html dist/".to_string(),
+            ]]
+        );
+        let script = assemble_app_image_script_v1(&spec, PINNED_BASE, "docker");
+        assert!(
+            script.contains(r#"RUN ["sh","-c","mkdir -p dist && cp index.html dist/"]"#),
+            "{script}"
+        );
     }
 
     /// ato-api#443/#1221: `swagger-api/swagger-editor` pinned at
