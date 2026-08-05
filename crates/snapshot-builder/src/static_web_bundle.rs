@@ -324,8 +324,13 @@ fn media_type_for(path: &str) -> Option<&'static str> {
     match extension {
         "js" | "mjs" => Some("application/javascript; charset=utf-8"),
         "json" => Some("application/json; charset=utf-8"),
+        "webmanifest" => Some("application/manifest+json; charset=utf-8"),
         "wasm" => Some("application/wasm"),
         "bin" => Some("application/octet-stream"),
+        "eot" => Some("application/vnd.ms-fontobject"),
+        "otf" => Some("font/otf"),
+        "ttf" => Some("font/ttf"),
+        "woff" => Some("font/woff"),
         "woff2" => Some("font/woff2"),
         "avif" => Some("image/avif"),
         "gif" => Some("image/gif"),
@@ -427,9 +432,18 @@ mod tests {
     }
 
     #[test]
-    fn publishes_favicon_ico_with_an_allowed_media_type() {
+    fn publishes_common_manifest_icon_and_font_media_types() {
         let image = fixture_root();
-        fs::write(image.path().join("dist/favicon.ico"), b"icon").unwrap();
+        for (path, bytes) in [
+            ("favicon.ico", b"icon".as_slice()),
+            ("manifest.webmanifest", b"{}".as_slice()),
+            ("font.eot", b"eot".as_slice()),
+            ("font.otf", b"otf".as_slice()),
+            ("font.ttf", b"ttf".as_slice()),
+            ("font.woff", b"woff".as_slice()),
+        ] {
+            fs::write(image.path().join("dist").join(path), bytes).unwrap();
+        }
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let parent = tempfile::tempdir().unwrap();
         let produced =
@@ -438,6 +452,17 @@ mod tests {
         let manifest: capsule::contract::static_web_manifest::StaticWebManifestV1 =
             serde_json::from_slice(&produced.manifest_bytes).unwrap();
         assert_eq!(manifest.files["favicon.ico"].media_type, "image/x-icon");
+        assert_eq!(
+            manifest.files["manifest.webmanifest"].media_type,
+            "application/manifest+json; charset=utf-8"
+        );
+        assert_eq!(
+            manifest.files["font.eot"].media_type,
+            "application/vnd.ms-fontobject"
+        );
+        assert_eq!(manifest.files["font.otf"].media_type, "font/otf");
+        assert_eq!(manifest.files["font.ttf"].media_type, "font/ttf");
+        assert_eq!(manifest.files["font.woff"].media_type, "font/woff");
     }
 
     #[test]

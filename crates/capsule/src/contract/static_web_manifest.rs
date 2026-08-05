@@ -189,8 +189,13 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
         media_type,
         "application/javascript; charset=utf-8"
             | "application/json; charset=utf-8"
+            | "application/manifest+json; charset=utf-8"
             | "application/wasm"
             | "application/octet-stream"
+            | "application/vnd.ms-fontobject"
+            | "font/otf"
+            | "font/ttf"
+            | "font/woff"
             | "font/woff2"
             | "image/avif"
             | "image/gif"
