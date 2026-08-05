@@ -36,15 +36,16 @@ base64 = "0.22"
 libc = "0.2"
 ed25519-dalek = "2.0"
 serde_jcs = "0.1"
+unicode-normalization = "0.1"
 # v1 intake refusals (`v1_intake::V1IntakeRefusal`) are a typed enum rather than
 # this file's usual `(stage, reason)` tuple: each variant is a distinct thing
 # wrong with the world that a test asserts on by shape, and the operator's next
 # action differs between them. Same 2.0 the rest of the workspace pins
 # (capsule/snapshot/cli).
 thiserror = "2.0"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 # Re-declare `snapshot` with the non-default `test-support` feature so the
 # HoldPhase unit tests (crate::hold_phase) can mint a
 # `VerifiedRunningSnapshotEligibility` via `for_test`/`analyze_for_test` to seed
