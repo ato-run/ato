@@ -194,6 +194,7 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
             | "font/woff2"
             | "image/avif"
             | "image/gif"
+            | "image/x-icon"
             | "image/jpeg"
             | "image/png"
             | "image/svg+xml"

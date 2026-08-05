@@ -329,6 +329,7 @@ fn media_type_for(path: &str) -> Option<&'static str> {
         "woff2" => Some("font/woff2"),
         "avif" => Some("image/avif"),
         "gif" => Some("image/gif"),
+        "ico" => Some("image/x-icon"),
         "jpg" | "jpeg" => Some("image/jpeg"),
         "png" => Some("image/png"),
         "svg" => Some("image/svg+xml"),
@@ -423,6 +424,20 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn publishes_favicon_ico_with_an_allowed_media_type() {
+        let image = fixture_root();
+        fs::write(image.path().join("dist/favicon.ico"), b"icon").unwrap();
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let produced =
+            produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
+                .unwrap();
+        let manifest: capsule::contract::static_web_manifest::StaticWebManifestV1 =
+            serde_json::from_slice(&produced.manifest_bytes).unwrap();
+        assert_eq!(manifest.files["favicon.ico"].media_type, "image/x-icon");
     }
 
     #[test]
