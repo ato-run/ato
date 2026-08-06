@@ -142,38 +142,47 @@ pub struct AuthoringWork {
     pub classified_state_diff: Option<ClassifiedStateDiffV1>,
     #[serde(default)]
     pub ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
-    // ── `static-web-bundle-v1` claim extension ─────────────────────────────
-    //
-    // Emitted by the API only to a builder that advertised the
-    // `static-web-bundle-v1` capability, and only on build-operation claims
-    // bound to a Build Config Revision. All optional: a claim without them is
-    // the snapshot-compute lane, byte-identical to the legacy shape.
+    /// The immutable Build Config Revision this claim is bound to. Present on
+    /// revision-bound operations (clean_replay / ready_state_seal); the API
+    /// includes these plan fields so the builder can act on the exact plan the
+    /// attempt was enqueued under. The underscore-prefixed ones are parsed for
+    /// the wire contract only (the static-web emit seam consumes
+    /// `effective_build_plan` and `plan_digest`).
     #[serde(default)]
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub build_config_revision_id: Option<String>,
+    #[serde(
+        default,
+        rename = "source_build_attempt_id",
+        alias = "_source_build_attempt_id"
+    )]
+    pub _source_build_attempt_id: Option<String>,
     #[serde(default)]
-    #[serde(rename = "source_build_attempt_id")]
-    pub _source_build_attempt_id: Option<serde_json::Value>,
-    #[serde(default)]
-    #[serde(rename = "build_attempt_number")]
-    pub _build_attempt_number: Option<serde_json::Value>,
-    #[serde(default)]
-    #[serde(rename = "authoring_toml")]
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub build_attempt_number: Option<u32>,
+    #[serde(default, rename = "authoring_toml", alias = "_authoring_toml")]
     pub _authoring_toml: Option<String>,
-    /// The API's effective build plan. Its `static_web_output` section carries
-    /// the server-derived materialization id the producer uses verbatim.
+    #[serde(
+        default,
+        rename = "authoring_toml_digest",
+        alias = "_authoring_toml_digest"
+    )]
+    pub _authoring_toml_digest: Option<String>,
+    /// The effective build plan (JSON) the attempt was enqueued under. Contains
+    /// the optional `static_web_output` section when the author declared one.
     #[serde(default)]
+    #[allow(dead_code)] // read by `static_web_output_plan` (the emit seam) and the claim tests
     pub effective_build_plan: Option<serde_json::Value>,
     #[serde(default)]
+    #[allow(dead_code)]
+    // consumed by the static-web emit seam (image-export integration) and the claim tests
     pub plan_digest: Option<String>,
-    #[serde(default)]
-    #[serde(rename = "authoring_toml_digest")]
-    pub _authoring_toml_digest: Option<serde_json::Value>,
-    #[serde(default)]
-    #[serde(rename = "static_web_output")]
-    pub _static_web_output: Option<serde_json::Value>,
-    /// The resolved Publication Lane for this Build Config Revision. Parsed
-    /// tolerantly — an absent or unrecognized value is the snapshot-compute
-    /// lane, never an error, so lane resolution stays server-owned.
+    /// The resolved Publication Lane for this Build Config Revision
+    /// (Publication Lane contract v1). Parsed tolerantly — an absent or
+    /// unrecognized value is the snapshot-compute lane, never an error, so
+    /// lane resolution stays server-owned.
     #[serde(default)]
     pub publication: Option<ClaimPublication>,
     pub lease_token: AuthoringLeaseToken,
@@ -194,12 +203,29 @@ pub struct ClaimPublication {
 
 impl AuthoringWork {
     /// Whether this claim's Build Config Revision resolved to the Static Web
-    /// Publication Lane.
+    /// Publication Lane. The server is the only lane authority; a declared
+    /// output section alone never selects the lane.
     pub fn is_static_web_lane(&self) -> bool {
         self.publication
             .as_ref()
             .and_then(|publication| publication.resolved_publication_lane.as_deref())
             == Some("static_web")
+    }
+
+
+    /// The explicitly declared Static Web output plan for this claim, when the
+    /// saved Build Config Revision declared one. `None` ⇒ snapshot-only.
+    /// A declared section that fails validation is an error here (the API and
+    /// the builder agree the section is authoritative; disagreement is a
+    /// configuration failure, never a silent fallback).
+    #[allow(dead_code)] // consumed by the static-web emit seam (image-export integration) and the claim tests
+    pub fn static_web_output_plan(
+        &self,
+    ) -> Result<Option<snapshot_builder::static_web_output::StaticWebOutputPlan>, String> {
+        snapshot_builder::static_web_output::StaticWebOutputPlan::from_effective_build_plan_json(
+            self.effective_build_plan.as_ref(),
+        )
+        .map_err(|error| format!("claim static web output plan: {error}"))
     }
 }
 
@@ -213,9 +239,11 @@ struct ClaimResponse {
 struct ClaimRequest<'a> {
     builder_id: &'a str,
     supported_operations: &'a [&'a str],
-    /// Capability advertisement. Rollout is builder-first: advertising
-    /// `static-web-bundle-v1` is what lets the API attach the plan-extension
-    /// fields to a claim without breaking older builders.
+    /// Capability advertisement (vertical slice). The API only emits the
+    /// build-plan extension fields (`effective_build_plan`, plan digest,
+    /// authored TOML, revision binding) to a builder that lists
+    /// `static-web-bundle-v1`; a legacy builder must keep receiving the
+    /// byte-compatible claim it can parse.
     supported_features: &'a [&'a str],
 }
 
@@ -292,6 +320,16 @@ pub struct AuthoringApiClient<'a> {
 
 impl AuthoringApiClient<'_> {
     pub fn claim(&self, supported_operations: &[&str]) -> Result<Option<AuthoringWork>, String> {
+        self.claim_with_features(supported_operations, &["static-web-bundle-v1"])
+    }
+
+    /// Claim with an explicit capability set. Split from [`Self::claim`] so
+    /// tests can prove a capability-less claim receives the legacy payload.
+    pub fn claim_with_features(
+        &self,
+        supported_operations: &[&str],
+        supported_features: &[&str],
+    ) -> Result<Option<AuthoringWork>, String> {
         let response = ureq::post(&format!(
             "{}{AUTHORING_BASE_PATH}/claim",
             self.api_url.trim_end_matches('/')
@@ -301,7 +339,7 @@ impl AuthoringApiClient<'_> {
             serde_json::to_value(ClaimRequest {
                 builder_id: self.builder_id,
                 supported_operations,
-                supported_features: &["static-web-bundle-v1"],
+                supported_features,
             })
             .map_err(|error| format!("encode authoring claim: {error}"))?,
         )
@@ -1499,7 +1537,7 @@ pub fn resolve_authoring_recipe(
         // The generated manifest keeps its run command; `[outputs.static_web]`
         // is additive, and re-validation below keeps the declaration inside
         // the same constraints an authored one must satisfy.
-        parsed.outputs.static_web = Some(static_web);
+        parsed.outputs.get_or_insert_with(Default::default).static_web = Some(static_web);
         parsed
             .validate()
             .map_err(|error| format!("validate inferred [outputs.static_web]: {error}"))?;
@@ -1733,6 +1771,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claim_request_advertises_the_static_web_capability() {
+        let request = ClaimRequest {
+            builder_id: "builder_1",
+            supported_operations: &["clean_replay"],
+            supported_features: &["static-web-bundle-v1"],
+        };
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["supported_features"],
+            serde_json::json!(["static-web-bundle-v1"])
+        );
+    }
+
+    #[test]
+    fn legacy_claim_shape_still_parses_without_plan_extension_fields() {
+        // The API gates the plan-extension fields behind the capability. This
+        // is the EXACT legacy claim shape (no effective_build_plan / plan
+        // digest / authored TOML / revision binding), which must keep parsing
+        // so an old builder + new API rollout cannot break existing builds.
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_legacy",
+            "authoring_session_id": "auth_legacy",
+            "capsule_revision_id": "caprev_legacy",
+            "source_revision_id": "srev_legacy",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_legacy",
+                "source_materialization_id": "smat_legacy",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_legacy.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_legacy"
+        }))
+        .expect("legacy claim parses");
+        assert!(work.effective_build_plan.is_none());
+        assert!(work.plan_digest.is_none());
+        assert!(work.static_web_output_plan().expect("parses").is_none());
+    }
+
+    #[test]
+    fn current_api_plan_extension_field_names_parse() {
+        // The API sends the public wire names, while the Rust fields retain
+        // underscore prefixes to make their intentionally narrow use obvious.
+        // Keep the old spellings as aliases during the rollout, but exercise
+        // the exact current API response so deny_unknown_fields cannot strand
+        // a static-web-capable builder at claim time.
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_current_wire",
+            "authoring_session_id": "auth_current_wire",
+            "capsule_revision_id": "caprev_current_wire",
+            "source_revision_id": "srev_current_wire",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_current_wire",
+                "source_materialization_id": "smat_current_wire",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_current_wire.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "build_config_revision_id": "bcrev_current_wire",
+            "source_build_attempt_id": "build_current_wire",
+            "authoring_toml": "schema_version = \\\"1\\\"",
+            "authoring_toml_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_current_wire"
+        }))
+        .expect("current API plan extension parses");
+
+        assert_eq!(work._source_build_attempt_id.as_deref(), Some("build_current_wire"));
+        assert_eq!(work._authoring_toml.as_deref(), Some("schema_version = \\\"1\\\""));
+        assert_eq!(
+            work._authoring_toml_digest.as_deref(),
+            Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+    }
+
+    #[test]
     fn authoring_job_claim_accepts_worker_fencing_generation() {
         let work: AuthoringWork = serde_json::from_value(serde_json::json!({
             "kind": "clean_replay",
@@ -1781,6 +1902,97 @@ mod tests {
         .expect("setup claim");
 
         assert_eq!(work.worker_claim_id, None);
+    }
+
+    #[test]
+    fn static_web_plan_is_absent_without_a_declared_section() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_01KYN2Z",
+            "authoring_session_id": "auth_01KYN2Z",
+            "capsule_revision_id": "caprev_01KYN2Z",
+            "source_revision_id": "srev_01KYN2Z",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_01KYN2Z",
+                "source_materialization_id": "smat_01KYN2Z",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_01KYN2Z.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "effective_build_plan": {
+                "schema": "ato.effective-build-plan/v1",
+                "steps": []
+            },
+            "plan_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "build_config_revision_id": "bcrev_01KYN2Z",
+            "build_attempt_number": 3,
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_01KYN2Z"
+        }))
+        .expect("clean_replay claim with a plan parses");
+
+        // The plan fields the API sends now parse (deny_unknown_fields fix).
+        assert_eq!(
+            work.build_config_revision_id.as_deref(),
+            Some("bcrev_01KYN2Z")
+        );
+        assert_eq!(work.build_attempt_number, Some(3));
+        assert_eq!(
+            work.plan_digest.as_deref(),
+            Some("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+        );
+        // No [outputs.static_web] ⇒ snapshot-only.
+        assert!(work.static_web_output_plan().expect("parses").is_none());
+    }
+
+    #[test]
+    fn static_web_plan_is_present_only_for_an_explicit_declaration() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "clean_replay",
+            "work_id": "ajob_02",
+            "authoring_session_id": "auth_02",
+            "capsule_revision_id": "caprev_02",
+            "source_revision_id": "srev_02",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_02",
+                "source_materialization_id": "smat_02",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_02.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "effective_build_plan": {
+                "schema": "ato.effective-build-plan/v1",
+                "static_web_output": {
+                    "schema": "ato.static-web-output-plan/v1",
+                    "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_output_root": "app/dist",
+                    "entry_path": "index.html",
+                    "spa_fallback": true,
+                    "connect_src": [],
+                    "producer_contract": "ato.static-web-producer/v1",
+                }
+            },
+            "plan_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "build_config_revision_id": "bcrev_02",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_02"
+        }))
+        .expect("declared claim parses");
+
+        let plan = work
+            .static_web_output_plan()
+            .expect("plan parses")
+            .expect("static web section declared");
+        assert_eq!(
+            plan.materialization_id,
+            "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(plan.image_output_root.to_string_lossy(), "app/dist");
+        assert_eq!(plan.entry_path, "index.html");
     }
 
     #[test]

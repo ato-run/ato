@@ -161,7 +161,11 @@ pub fn produce_and_register_static_web(
             format!("re-parse the Effective Manifest: {error}"),
         )
     })?;
-    let declared = manifest.outputs.static_web.as_ref().ok_or_else(|| {
+    let declared = manifest
+        .outputs
+        .as_ref()
+        .and_then(|outputs| outputs.static_web.as_ref())
+        .ok_or_else(|| {
         StaticWebLaneFailure::new(
             STATIC_WEB_OUTPUT_MISSING,
             "the static_web lane requires an [outputs.static_web] declaration in the \

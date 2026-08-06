@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use capsule::contract::static_web_manifest::{
     StaticWebSecurityV1, validate_connect_source, validate_relative_path,
 };
@@ -53,6 +53,66 @@ impl StaticWebOutputPlan {
     pub fn security(&self) -> Result<StaticWebSecurityV1> {
         StaticWebSecurityV1::producer_policy(self.connect_src.clone()).map_err(anyhow::Error::from)
     }
+
+    /// Parse the API's `effective_build_plan.static_web_output` claim section.
+    ///
+    /// Returns `Ok(None)` when the plan has no `static_web_output` (the
+    /// snapshot-only lane — a complete no-op). The `materialization_id` is
+    /// always API-decided and arrives with the plan; this producer never mints
+    /// one. The `image_output_root` from the plan is used verbatim (the API
+    /// derives it from the authored `root` + the guest workdir).
+    pub fn from_effective_build_plan_json(
+        effective_build_plan: Option<&serde_json::Value>,
+    ) -> Result<Option<StaticWebOutputPlan>> {
+        let Some(plan) = effective_build_plan else {
+            return Ok(None);
+        };
+        let Some(section) = plan.get("static_web_output") else {
+            return Ok(None);
+        };
+        let materialization_id = section
+            .get("materialization_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                anyhow!("static_web_output.materialization_id missing from the claim plan")
+            })?
+            .to_string();
+        let image_output_root = section
+            .get("image_output_root")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                anyhow!("static_web_output.image_output_root missing from the claim plan")
+            })?
+            .to_string();
+        let entry_path = section
+            .get("entry_path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("static_web_output.entry_path missing from the claim plan"))?
+            .to_string();
+        let spa_fallback = section
+            .get("spa_fallback")
+            .and_then(|value| value.as_bool())
+            .ok_or_else(|| anyhow!("static_web_output.spa_fallback missing from the claim plan"))?;
+        let connect_src = section
+            .get("connect_src")
+            .and_then(|value| value.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let plan = StaticWebOutputPlan {
+            materialization_id,
+            image_output_root: PathBuf::from(image_output_root),
+            entry_path,
+            spa_fallback,
+            connect_src,
+        };
+        plan.validate()?;
+        Ok(Some(plan))
+    }
 }
 
 /// A temporary, independent copy of built static output. Dropping this value
@@ -78,11 +138,47 @@ pub fn extract_static_web_output(
     plan: &StaticWebOutputPlan,
 ) -> Result<ExtractedStaticWebOutput> {
     plan.validate()?;
+    // The source must be reached through REAL directories only. `symlink_metadata`
+    // on the final component does not protect against an intermediate symlink
+    // (e.g. `image_root/srv -> /host-sensitive` with root `srv/app/dist`): the
+    // joined path resolves through it and `copy_tree_no_links` only inspects the
+    // resolved subtree. Every component is therefore checked, then the canonical
+    // source must remain strictly beneath the canonical image root.
+    let canonical_image_root = fs::canonicalize(image_root).with_context(|| {
+        format!(
+            "canonicalize static web image root {}",
+            image_root.display()
+        )
+    })?;
     let source = image_root.join(&plan.image_output_root);
+    // Walk the components IN ORDER, accumulating the prefix: `a/a/dist` must
+    // check `image_root/a` AND `image_root/a/a` AND `image_root/a/a/dist` —
+    // a take_while on the first matching component would skip the second `a`.
+    let mut current = image_root.to_path_buf();
+    for component in plan.image_output_root.components() {
+        current.push(component.as_os_str());
+        let meta = fs::symlink_metadata(&current)
+            .with_context(|| format!("read static web image component {}", current.display()))?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            bail!(
+                "static web image output path traverses a symlink or non-directory: {}",
+                current.display()
+            );
+        }
+    }
     let source_meta = fs::symlink_metadata(&source)
         .with_context(|| format!("read static web image output {}", source.display()))?;
     if source_meta.file_type().is_symlink() || !source_meta.is_dir() {
         bail!("static web image output must be a real directory");
+    }
+    let canonical_source = fs::canonicalize(&source)
+        .with_context(|| format!("canonicalize static web image output {}", source.display()))?;
+    if !canonical_source.starts_with(&canonical_image_root) {
+        bail!(
+            "static web image output escapes the image root: {} not under {}",
+            canonical_source.display(),
+            canonical_image_root.display()
+        );
     }
 
     let workspace = tempfile::Builder::new()
@@ -90,11 +186,21 @@ pub fn extract_static_web_output(
         .tempdir()
         .context("create static web extraction workspace")?;
     let output_root = workspace.path().join("output");
-    copy_tree_no_links(&source, &output_root)?;
+    // Re-verify containment inside the copy as well, so a symlink swap between
+    // the checks above and the copy cannot smuggle a file from outside the
+    // image root into the immutable bundle.
+    copy_tree_no_links(&source, &output_root, &canonical_image_root)?;
     Ok(ExtractedStaticWebOutput {
         _workspace: workspace,
         output_root,
     })
+}
+
+/// Whether `path` (which must already be canonicalized by the caller) is
+/// strictly inside `canonical_root`. `starts_with` on Path is component-wise,
+/// so a sibling that merely shares a string prefix cannot pass.
+fn is_beneath(canonical_path: &Path, canonical_root: &Path) -> bool {
+    canonical_path != canonical_root && canonical_path.starts_with(canonical_root)
 }
 
 fn validate_output_root(path: &Path) -> Result<()> {
@@ -114,7 +220,7 @@ fn has_duplicates(values: &[String]) -> bool {
     values.iter().any(|value| !unique.insert(value))
 }
 
-fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
+fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("create extracted output {}", destination.display()))?;
     let mut entries = fs::read_dir(source)
@@ -134,8 +240,20 @@ fn copy_tree_no_links(source: &Path, destination: &Path) -> Result<()> {
                 source_path.display()
             );
         }
+        // TOCTOU guard: a component swapped to a symlink AFTER the type check
+        // above would resolve outside the image root when canonicalized. Verify
+        // the canonicalized entry remains beneath the canonical image root.
+        let canonical_entry = fs::canonicalize(&source_path).with_context(|| {
+            format!("canonicalize static output entry {}", source_path.display())
+        })?;
+        if !is_beneath(&canonical_entry, canonical_root) {
+            bail!(
+                "static output entry escapes the image root: {}",
+                source_path.display()
+            );
+        }
         if file_type.is_dir() {
-            copy_tree_no_links(&source_path, &destination_path)?;
+            copy_tree_no_links(&source_path, &destination_path, canonical_root)?;
         } else if file_type.is_file() {
             reject_hard_link(&fs::metadata(&source_path)?, &source_path)?;
             fs::copy(&source_path, &destination_path).with_context(|| {
@@ -216,6 +334,64 @@ mod tests {
         assert!(explicit.validate().is_err());
     }
 
+    #[test]
+    fn claim_plan_parses_only_an_explicit_static_web_section() {
+        // Absent section ⇒ snapshot-only no-op.
+        assert!(
+            StaticWebOutputPlan::from_effective_build_plan_json(None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            StaticWebOutputPlan::from_effective_build_plan_json(Some(
+                &serde_json::json!({ "schema": "ato.effective-build-plan/v1" })
+            ))
+            .unwrap()
+            .is_none()
+        );
+
+        // Explicit declaration ⇒ a validated plan with the API-decided id.
+        let plan = StaticWebOutputPlan::from_effective_build_plan_json(Some(&serde_json::json!({
+            "schema": "ato.effective-build-plan/v1",
+            "static_web_output": {
+                "schema": "ato.static-web-output-plan/v1",
+                "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "image_output_root": "app/dist",
+                "entry_path": "index.html",
+                "spa_fallback": true,
+                "connect_src": ["https://api.example.com"],
+                "producer_contract": "ato.static-web-producer/v1",
+            }
+        })))
+        .expect("parses");
+        let plan = plan.expect("static web section present");
+        assert_eq!(
+            plan.materialization_id,
+            "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        assert_eq!(plan.image_output_root, PathBuf::from("app/dist"));
+        assert_eq!(plan.entry_path, "index.html");
+        assert!(plan.spa_fallback);
+        assert_eq!(plan.connect_src, ["https://api.example.com"]);
+
+        // A declared section with an unsafe root is refused, not silently
+        // accepted into the snapshot lane.
+        let unsafe_plan = StaticWebOutputPlan::from_effective_build_plan_json(Some(
+            &serde_json::json!({
+                "schema": "ato.effective-build-plan/v1",
+                "static_web_output": {
+                    "schema": "ato.static-web-output-plan/v1",
+                    "materialization_id": "swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "image_output_root": "../dist",
+                    "entry_path": "index.html",
+                    "spa_fallback": true,
+                    "connect_src": [],
+                }
+            }),
+        ));
+        assert!(unsafe_plan.is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn extraction_rejects_hard_linked_closure_members() {
@@ -225,5 +401,99 @@ mod tests {
         fs::write(output.join("index.html"), "built").unwrap();
         fs::hard_link(output.join("index.html"), output.join("duplicate.html")).unwrap();
         assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_an_intermediate_symlink_escaping_the_image_root() {
+        // `image_root/srv` is a symlink to a directory OUTSIDE the image root;
+        // `image_output_root = srv/app/dist` would resolve through it and copy
+        // host files into the bundle if only the final component were checked.
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("app/dist")).unwrap();
+        fs::write(outside.path().join("app/dist/index.html"), "host-secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), image.path().join("srv")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("srv/app/dist");
+        assert!(
+            extract_static_web_output(image.path(), &escaping).is_err(),
+            "intermediate symlink must not resolve outside the image root"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_an_absolute_intermediate_symlink() {
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        // Absolute symlink target — still outside the image root.
+        std::os::unix::fs::symlink(outside.path(), image.path().join("dist")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("dist");
+        assert!(extract_static_web_output(image.path(), &escaping).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_relative_intermediate_symlink_escaping_with_parent() {
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        // `srv -> ../<outside-name>` resolves out of the image root via `..`.
+        let outside_name = outside
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        std::os::unix::fs::symlink(format!("../{outside_name}"), image.path().join("srv")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("srv/dist");
+        assert!(extract_static_web_output(image.path(), &escaping).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_symlink_inside_the_output_tree() {
+        // A symlink BELOW the selected output root is also refused (no links
+        // anywhere in the closure).
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "host-secret").unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("index.html"), "built").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), output.join("leak.txt"))
+            .unwrap();
+        assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_checks_every_duplicate_named_component_in_order() {
+        // `a/a/dist`: the FIRST `a` is a real dir but the SECOND `a` is a
+        // symlink to outside. A take_while over the first matching component
+        // would skip the second `a`; the accumulated in-order walk must refuse.
+        let image = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(outside.path().join("dist")).unwrap();
+        fs::write(outside.path().join("dist/index.html"), "host-secret").unwrap();
+        let first_a = image.path().join("a");
+        fs::create_dir_all(&first_a).unwrap();
+        std::os::unix::fs::symlink(outside.path(), first_a.join("a")).unwrap();
+
+        let mut escaping = plan();
+        escaping.image_output_root = PathBuf::from("a/a/dist");
+        assert!(
+            extract_static_web_output(image.path(), &escaping).is_err(),
+            "the second 'a' component is a symlink and must be refused"
+        );
     }
 }

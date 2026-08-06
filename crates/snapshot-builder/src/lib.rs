@@ -6,4 +6,6 @@
 //! artifact without changing how the Vite image is built.
 
 pub mod static_web_bundle;
+pub mod static_web_emit;
 pub mod static_web_output;
+pub mod static_web_transport;

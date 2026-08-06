@@ -152,7 +152,21 @@ impl StaticWebBundleReceiptV1 {
         }
         let mut expected = BTreeMap::new();
         for file in manifest.files.values() {
-            expected.entry(file.blob.clone()).or_insert(file.size);
+            // One digest may back many paths (dedup), but a manifest with the
+            // SAME digest at DIFFERENT sizes is invalid — the manifest itself
+            // now refuses it; the receipt re-checks rather than trusting the
+            // first occurrence (`or_insert` would hide the disagreement).
+            match expected.entry(file.blob.clone()) {
+                std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                    if *occupied.get() != file.size {
+                        return Err(StaticWebReceiptError::ManifestMismatch("blob size"));
+                    }
+                    occupied.insert(file.size);
+                }
+                std::collections::btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(file.size);
+                }
+            }
         }
         if self.blobs.len() != expected.len() {
             return Err(StaticWebReceiptError::ManifestMismatch("blob count"));
@@ -254,7 +268,7 @@ mod tests {
         );
         assert_eq!(
             receipt.digest().unwrap(),
-            "sha256:a4b55b08a80fd3bf503be9948cd091d2a9c555b68e244147e5b78c9e6b5063d1"
+            "sha256:3d96b63e679b1ab1321041a2c2c79f81c00149720efada2fa6fd4098738d64e3"
         );
     }
 

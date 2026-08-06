@@ -160,13 +160,6 @@ pub struct CapsuleManifestV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebV1>,
 
-    /// `[outputs]` — declared build outputs. `run` and `outputs.static_web`
-    /// COEXIST: a run command alone never forces the compute lane, and a
-    /// static declaration never removes the run command. Omitted entirely when
-    /// empty so pre-outputs manifests round-trip byte-identically.
-    #[serde(default, skip_serializing_if = "OutputsV1::is_empty")]
-    pub outputs: OutputsV1,
-
     /// `[seal_at]` — the acceptance program. Required to capture interactively;
     /// see [`Self::validate_for_interactive_capture`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +177,13 @@ pub struct CapsuleManifestV1 {
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+
+    /// `[outputs]` — declared Materialization output contracts. Additive:
+    /// absent means snapshot-only. A `dist/` directory never selects the
+    /// static web lane on its own; only an authored `[outputs.static_web]`
+    /// section declares it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<OutputsV1>,
 }
 
 pub const SOURCE_FILTER_POLICY_VERSION_V1: &str = "ato-source-filter/v1";
@@ -339,6 +339,96 @@ pub struct BuildStepV1 {
     pub command: Vec<String>,
 }
 
+/// `[outputs]` — the Materialization output contracts an author declares.
+///
+/// The presence of a built directory (e.g. a Vite `dist/`) never selects an
+/// output lane; only an authored section here does. Absent `[outputs]` keeps
+/// today's snapshot-only behavior unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputsV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_web: Option<StaticWebOutputV1>,
+}
+
+/// `[outputs.static_web]` — an explicit Static Web Materialization contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticWebOutputV1 {
+    /// Non-empty relative path to the built static output root inside the
+    /// guest image (e.g. `dist` or `srv/app/dist`). Validated at Build
+    /// Attempt time against the built image; parse-time only checks path shape.
+    pub root: String,
+    /// Entry document, normalized relative to `root` (e.g. `index.html`).
+    pub entry_path: String,
+    /// Whether unknown GET paths fall back to the entry document (SPA).
+    #[serde(default = "default_spa_fallback")]
+    pub spa_fallback: bool,
+    /// Exact public HTTPS/WSS origins the built app may connect to. Sorted
+    /// ASCII order, no duplicates. Frame ancestors are fixed by the v1
+    /// contract and are not authorable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_src: Vec<String>,
+}
+
+fn default_spa_fallback() -> bool {
+    true
+}
+
+impl StaticWebOutputV1 {
+    /// Validates the authored static web output contract. The existence of
+    /// `root`/`entry_path` inside a built image is deliberately NOT checked
+    /// here — that is a Build Attempt-time fact, resolved against the built
+    /// image by the producer.
+    pub fn validate(&self) -> Result<(), ManifestV1Error> {
+        validate_static_web_root(&self.root)?;
+        validate_source_relative_path("outputs.static_web.entry_path", &self.entry_path, false)?;
+        for origin in &self.connect_src {
+            crate::contract::static_web_manifest::validate_connect_source(origin).map_err(
+                |error| ManifestV1Error::Invalid {
+                    field: "outputs.static_web.connect_src[]",
+                    reason: format!("{origin:?} is not a public https/wss origin: {error}"),
+                },
+            )?;
+        }
+        let mut sorted = self.connect_src.clone();
+        sorted.sort_unstable();
+        if sorted != self.connect_src {
+            return Err(ManifestV1Error::Invalid {
+                field: "outputs.static_web.connect_src[]",
+                reason: "must be sorted in ASCII dictionary order without duplicates".to_string(),
+            });
+        }
+        if sorted.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ManifestV1Error::Invalid {
+                field: "outputs.static_web.connect_src[]",
+                reason: "must not contain a duplicate origin".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_static_web_root(value: &str) -> Result<(), ManifestV1Error> {
+    if value.is_empty()
+        || value.starts_with('/')
+        || value.contains('\\')
+        || value.contains('\0')
+        || value.contains('%')
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(ManifestV1Error::Invalid {
+            field: "outputs.static_web.root",
+            reason:
+                "must be a non-empty relative path without '.', '..', empty segments, backslashes, percent signs, or a leading slash"
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunV1 {
@@ -357,48 +447,6 @@ pub struct WebV1 {
     pub port: u16,
     pub bind: String,
 }
-
-/// `[outputs]`. A container rather than a bare option so future output kinds
-/// extend one table instead of growing sibling top-level sections.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OutputsV1 {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub static_web: Option<StaticWebOutputV1>,
-}
-
-impl OutputsV1 {
-    pub fn is_empty(&self) -> bool {
-        self.static_web.is_none()
-    }
-}
-
-/// `[outputs.static_web]` — the Publication Lane declaration. Constraints must
-/// match the wizard API's `staticWebOutputSchema`
-/// (`ato-api/src/services/submission_wizard/unified_manifest.ts`): normalized
-/// relative paths without `'.'`/`'..'`/empty segments, backslashes, `%`, NUL,
-/// or a leading slash; `connect_src` is ASCII-sorted, duplicate-free public
-/// https/wss origins, at most [`MAX_STATIC_WEB_CONNECT_SRC_V1`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StaticWebOutputV1 {
-    /// Built output directory, relative to the built workspace root. `"."`
-    /// means the workspace root itself (a dependency-free static site).
-    pub root: String,
-    /// Entry document inside `root`.
-    pub entry_path: String,
-    #[serde(default = "default_spa_fallback")]
-    pub spa_fallback: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub connect_src: Vec<String>,
-}
-
-fn default_spa_fallback() -> bool {
-    true
-}
-
-pub const MAX_STATIC_WEB_CONNECT_SRC_V1: usize = 64;
-pub const MAX_STATIC_WEB_PATH_BYTES_V1: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -503,51 +551,17 @@ fn validate_source_relative_path(
         || value.ends_with('/')
         || value.contains('\\')
         || value.contains('\0')
+        || value.contains('%')
         || value
             .split('/')
             .any(|segment| segment.is_empty() || segment == "." || segment == "..")
     {
         return Err(ManifestV1Error::Invalid {
             field,
-            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, or a leading slash".to_string(),
+            reason: "must be a normalized source-relative path without '.', '..', empty segments, backslashes, percent signs, or a leading slash".to_string(),
         });
     }
     Ok(())
-}
-
-/// One path rule for `[outputs.static_web]`, delegated to the delivery
-/// contract's validator so the authoring surface and the produced Static Web
-/// Manifest can never disagree about what a safe relative path is. The extra
-/// `%` refusal and the byte ceiling mirror the wizard API's zod schema.
-fn validate_static_web_output_path(
-    field: &'static str,
-    value: &str,
-    allow_root: bool,
-) -> Result<(), ManifestV1Error> {
-    if allow_root && value == "." {
-        return Ok(());
-    }
-    if value.len() > MAX_STATIC_WEB_PATH_BYTES_V1 {
-        return Err(ManifestV1Error::Invalid {
-            field,
-            reason: format!(
-                "is {} bytes; the limit is {MAX_STATIC_WEB_PATH_BYTES_V1}",
-                value.len()
-            ),
-        });
-    }
-    if value.contains('%') {
-        return Err(ManifestV1Error::Invalid {
-            field,
-            reason: "must not contain a percent sign".to_string(),
-        });
-    }
-    crate::contract::static_web_manifest::validate_relative_path(value).map_err(|error| {
-        ManifestV1Error::Invalid {
-            field,
-            reason: error.to_string(),
-        }
-    })
 }
 
 fn validate_ignore_pattern(pattern: &str) -> Result<(), ManifestV1Error> {
@@ -823,49 +837,6 @@ impl CapsuleManifestV1 {
             }
         }
 
-        if let Some(static_web) = &self.outputs.static_web {
-            validate_static_web_output_path(
-                "outputs.static_web.root",
-                &static_web.root,
-                /* allow_root */ true,
-            )?;
-            validate_static_web_output_path(
-                "outputs.static_web.entry_path",
-                &static_web.entry_path,
-                /* allow_root */ false,
-            )?;
-            if static_web.connect_src.len() > MAX_STATIC_WEB_CONNECT_SRC_V1 {
-                return Err(ManifestV1Error::Invalid {
-                    field: "outputs.static_web.connect_src",
-                    reason: format!(
-                        "contains {} origins; the limit is {MAX_STATIC_WEB_CONNECT_SRC_V1}",
-                        static_web.connect_src.len()
-                    ),
-                });
-            }
-            for origin in &static_web.connect_src {
-                crate::contract::static_web_manifest::validate_connect_source(origin).map_err(
-                    |error| ManifestV1Error::Invalid {
-                        field: "outputs.static_web.connect_src[]",
-                        reason: error.to_string(),
-                    },
-                )?;
-            }
-            // The single accepted spelling is the canonical one — same rule as
-            // the static-web delivery manifest's `security.connect_src`.
-            if static_web
-                .connect_src
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-            {
-                return Err(ManifestV1Error::Invalid {
-                    field: "outputs.static_web.connect_src",
-                    reason: "must be sorted in ASCII dictionary order without duplicates"
-                        .to_string(),
-                });
-            }
-        }
-
         if let Some(seal_at) = &self.seal_at {
             validate_argv("seal_at.command", &seal_at.command)?;
             match seal_at.timeout_seconds {
@@ -952,6 +923,14 @@ impl CapsuleManifestV1 {
                 });
             }
         }
+
+        if let Some(static_web) = self
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.static_web.as_ref())
+        {
+            static_web.validate()?;
+        }
         Ok(())
     }
 
@@ -974,11 +953,16 @@ impl CapsuleManifestV1 {
             .build
             .as_ref()
             .is_some_and(|build| !build.steps.is_empty())
+            && self
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.static_web.as_ref())
+                .is_none()
         {
             return Err(ManifestV1Error::Unsupported {
                 feature: "[[build.steps]]",
-                why: "a build output has no name and no guest placement in this build, so its \
-                      projection could not be committed",
+                why: "this build has no declared guest output root, so its projection could not \
+                      be committed",
             });
         }
         if !self.state.is_empty() {
@@ -1448,18 +1432,12 @@ snapshot = "exclude"
     /// and not a parse error either, because these are perfectly good capsules.
     #[test]
     fn features_outside_the_step_four_subset_are_refused_by_name() {
-        let cases: [(&str, &str); 3] = [
+        let cases: [(&str, &str); 2] = [
             (
                 r#"
 [tools]
 python = "3.12""#,
                 "[tools]",
-            ),
-            (
-                r#"
-[[build.steps]]
-command = ["make"]"#,
-                "[[build.steps]]",
             ),
             (
                 r#"
@@ -1501,6 +1479,39 @@ command = ["true"]
                 other => panic!("expected Unsupported({feature}), got {other}"),
             }
         }
+    }
+
+    #[test]
+    fn static_web_output_places_build_steps_in_the_interactive_subset() {
+        let manifest = parse(
+            r#"
+schema_version = "1"
+name = "static-demo"
+version = "0.1.0"
+
+[[build.steps]]
+command = ["sh", "-c", "mkdir -p dist && cp index.html dist/"]
+
+[run]
+command = ["python3", "-m", "http.server", "8000"]
+
+[web]
+port = 8000
+bind = "0.0.0.0"
+
+[seal_at]
+command = ["true"]
+
+[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+"#,
+        )
+        .expect("valid static web manifest");
+
+        manifest
+            .validate_for_interactive_capture()
+            .expect("the declared static output places the build result");
     }
 
     /// A variable is a VALUE or a NAME, never both.
@@ -1931,88 +1942,129 @@ command = ["python"]
         }
     }
 
-    fn with_static_web(body: &str) -> String {
-        format!(
+    #[test]
+    fn static_web_output_declares_the_lane_without_enabling_it_by_dist() {
+        let manifest = parse(
             r#"
 schema_version = "1"
 name = "demo"
 version = "0.1.0"
 
 [run]
-command = ["python3", "-m", "http.server", "8000"]
+command = ["npm", "run", "preview"]
 
 [outputs.static_web]
-{body}
-"#
-        )
-    }
-
-    #[test]
-    fn static_web_outputs_round_trip_and_default_spa_fallback() {
-        let manifest = parse(&with_static_web(
-            r#"root = "dist"
+root = "dist"
 entry_path = "index.html"
-connect_src = ["https://api.example.com", "wss://live.example.com"]"#,
-        ))
-        .expect("parses");
-        let static_web = manifest.outputs.static_web.as_ref().expect("declared");
+spa_fallback = true
+connect_src = ["https://api.example.com", "wss://push.example.com"]
+"#,
+        )
+        .expect("explicit static web output parses");
+        let outputs = manifest.outputs.expect("outputs declared");
+        let static_web = outputs.static_web.expect("static web lane declared");
         assert_eq!(static_web.root, "dist");
         assert_eq!(static_web.entry_path, "index.html");
-        assert!(static_web.spa_fallback, "defaults to true");
-        let serialized = toml::to_string(&manifest).expect("serializes");
-        let reparsed = parse(&serialized).expect("round-trips");
-        assert_eq!(reparsed, manifest);
-    }
-
-    #[test]
-    fn manifests_without_outputs_serialize_without_an_outputs_table() {
-        let manifest = parse(MINIMAL).expect("parses");
-        assert!(manifest.outputs.is_empty());
-        let serialized = toml::to_string(&manifest).expect("serializes");
-        assert!(
-            !serialized.contains("outputs"),
-            "absent outputs must not appear: {serialized}"
+        assert!(static_web.spa_fallback);
+        assert_eq!(
+            static_web.connect_src,
+            ["https://api.example.com", "wss://push.example.com"]
         );
-        assert_eq!(parse(&serialized).expect("round-trips"), manifest);
+
+        // Absent `[outputs.static_web]` keeps the snapshot-only default. The
+        // normalized digest must not change for an unmodified manifest.
+        let without = parse(
+            r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["npm", "run", "preview"]
+"#,
+        )
+        .expect("snapshot-only manifest parses");
+        assert!(without.outputs.is_none());
     }
 
     #[test]
-    fn static_web_root_may_name_the_workspace_root_but_entry_may_not() {
-        let manifest = parse(&with_static_web(
-            r#"root = "."
+    fn static_web_output_rejects_unsafe_or_unordered_contracts() {
+        for (toml, fragment) in [
+            (
+                r#"[outputs.static_web]
+root = "/absolute/dist"
 entry_path = "index.html""#,
-        ))
-        .expect("root '.' is the built workspace root");
-        assert_eq!(manifest.outputs.static_web.unwrap().root, ".");
-        parse(&with_static_web(
-            r#"root = "."
-entry_path = ".""#,
-        ))
-        .expect_err("entry_path must name a file");
-    }
-
-    #[test]
-    fn static_web_outputs_reject_unsafe_paths_and_origins() {
-        for body in [
-            // Absolute, traversing, or percent-carrying paths.
-            "root = \"/dist\"\nentry_path = \"index.html\"",
-            "root = \"../dist\"\nentry_path = \"index.html\"",
-            "root = \"dist\"\nentry_path = \"a/../index.html\"",
-            "root = \"di%73t\"\nentry_path = \"index.html\"",
-            "root = \"dist\"\nentry_path = \"index%2Ehtml\"",
-            "root = \"dist\"\nentry_path = \"assets\\\\index.html\"",
-            // Unsorted, duplicate, or non-public connect_src.
-            "root = \"dist\"\nentry_path = \"index.html\"\nconnect_src = [\"wss://b.example.com\", \"https://a.example.com\"]",
-            "root = \"dist\"\nentry_path = \"index.html\"\nconnect_src = [\"https://a.example.com\", \"https://a.example.com\"]",
-            "root = \"dist\"\nentry_path = \"index.html\"\nconnect_src = [\"http://a.example.com\"]",
-            "root = \"dist\"\nentry_path = \"index.html\"\nconnect_src = [\"https://localhost\"]",
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "../dist"
+entry_path = "index.html""#,
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist%2fescaped"
+entry_path = "index.html""#,
+                "outputs.static_web.root",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index%2f.html""#,
+                "outputs.static_web.entry_path",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "assets\\app.js""#,
+                "outputs.static_web.entry_path",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "assets/../app.js""#,
+                "outputs.static_web.entry_path",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["https://api.example.com", "http://insecure.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["wss://push.example.com", "https://api.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
+            (
+                r#"[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+connect_src = ["https://api.example.com", "https://api.example.com"]"#,
+                "outputs.static_web.connect_src[]",
+            ),
         ] {
-            parse(&with_static_web(body)).expect_err(body);
+            let error = parse(&format!(
+                r#"
+schema_version = "1"
+name = "demo"
+version = "0.1.0"
+
+[run]
+command = ["python"]
+
+{toml}
+"#
+            ))
+            .expect_err("must refuse the invalid static web contract");
+            match error {
+                ManifestV1Error::Invalid { field, .. } => assert_eq!(field, fragment),
+                other => panic!("{other}"),
+            }
         }
-        // Unknown fields under [outputs] are refused like everywhere else.
-        parse(&with_static_web(
-            "root = \"dist\"\nentry_path = \"index.html\"\nfallback = true",
-        ))
-        .expect_err("unknown static_web field");
     }
 }

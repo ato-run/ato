@@ -17,10 +17,17 @@ use url::Url;
 pub const STATIC_WEB_MANIFEST_V1_SCHEMA: &str = "ato.static-web-manifest/v1";
 
 /// The only embedding origins v1 recognizes, in the only permitted order.
+///
+/// Production embeds from the Store apex and the PWA. Staging embeds from the
+/// staging Store custom domain (`staging.store.ato.run`); `stg-app.ato.run`
+/// is the staging PWA. `staging.ato.run` is NOT included — it has no DNS
+/// record (ato-api staging config) and a frame-ancestor that can never frame
+/// is a false promise in the policy.
 pub const STATIC_WEB_FRAME_ANCESTORS_V1: &[&str] = &[
     "https://ato.run",
     "https://app.ato.run",
-    "https://staging.ato.run",
+    "https://staging.store.ato.run",
+    "https://stg-app.ato.run",
 ];
 const MAX_SAFE_JSON_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_FILE_COUNT: usize = 10_000;
@@ -122,11 +129,22 @@ impl StaticWebManifestV1 {
             return Err(StaticWebManifestError::MissingEntry);
         }
         let mut total_size = 0_u64;
+        // One blob digest may back many paths (dedup), but every occurrence
+        // must agree on size: the R2 object has ONE size, so a disagreement
+        // would leave some path serving a 404 at the data plane.
+        let mut digest_size = std::collections::BTreeMap::new();
         for (path, file) in &self.files {
             validate_relative_path(path)?;
             validate_blob(&file.blob)?;
             if file.size > MAX_FILE_SIZE || file.size > MAX_SAFE_JSON_INTEGER {
                 return Err(StaticWebManifestError::ClosureLimit);
+            }
+            if let Some(previous) = digest_size.get(&file.blob) {
+                if *previous != file.size {
+                    return Err(StaticWebManifestError::InvalidBlob);
+                }
+            } else {
+                digest_size.insert(file.blob.clone(), file.size);
             }
             total_size = total_size
                 .checked_add(file.size)
@@ -155,6 +173,7 @@ pub fn validate_relative_path(path: &str) -> Result<(), StaticWebManifestError> 
         || path.starts_with('/')
         || path.contains('\\')
         || path.contains('\0')
+        || path.contains('%')
         || path != path.nfc().collect::<String>()
         || path
             .split('/')
@@ -170,11 +189,17 @@ pub fn is_allowed_media_type(media_type: &str) -> bool {
         media_type,
         "application/javascript; charset=utf-8"
             | "application/json; charset=utf-8"
+            | "application/manifest+json; charset=utf-8"
             | "application/wasm"
             | "application/octet-stream"
+            | "application/vnd.ms-fontobject"
+            | "font/otf"
+            | "font/ttf"
+            | "font/woff"
             | "font/woff2"
             | "image/avif"
             | "image/gif"
+            | "image/x-icon"
             | "image/jpeg"
             | "image/png"
             | "image/svg+xml"
@@ -378,7 +403,7 @@ mod tests {
         assert_eq!(canonical, expected.trim_end_matches('\n').as_bytes());
         assert_eq!(
             format!("sha256:{:x}", sha2::Sha256::digest(&canonical)),
-            "sha256:6d77d3da709a578e6d58f50d4b8f8cf5c54e2178200821769afb03449c8e6ba2"
+            "sha256:c61c17155f2594c1c32fda225bb5c552d611f5c916b95e904f55afa6b7b69543"
         );
     }
 
@@ -409,6 +434,16 @@ mod tests {
             "./index.html",
             "cafe\u{301}.txt",
             "nul\0.txt",
+            // Percent-encoded traversal / separators: the worker decodes up to
+            // 8 layers, so ANY literal `%` in a v1 path is refused producer-side
+            // to keep the producer and consumer contract identical.
+            "assets/foo%2fbar.js",
+            "assets/foo%2Fbar.js",
+            "assets/foo%5cbar.js",
+            "assets/foo%00bar.js",
+            "assets/foo%252fbar.js",
+            "assets/100%.txt",
+            "assets/%2e%2e/escape.js",
         ] {
             assert!(validate_relative_path(path).is_err(), "{path:?}");
         }
@@ -425,5 +460,36 @@ mod tests {
         manifest.security.connect_src.reverse();
         manifest.security.frame_ancestors.pop();
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn the_same_blob_digest_must_agree_on_size_everywhere() {
+        let mut manifest: StaticWebManifestV1 = serde_json::from_str(include_str!(
+            "../../tests/fixtures/static-web-manifest-jcs-v1/input.json"
+        ))
+        .unwrap();
+        // Reuse the entry blob at a SECOND path with a DIFFERENT size — the
+        // R2 object has one size, so the disagreement must be refused.
+        let blob = manifest.files["index.html"].blob.clone();
+        manifest.files.insert(
+            "duplicate.html".to_string(),
+            StaticWebFileV1 {
+                blob: blob.clone(),
+                size: manifest.files["index.html"].size + 1,
+                media_type: "text/html; charset=utf-8".to_string(),
+            },
+        );
+        assert!(manifest.validate().is_err());
+
+        // The SAME size at both paths is fine (dedup).
+        manifest.files.insert(
+            "duplicate.html".to_string(),
+            StaticWebFileV1 {
+                blob,
+                size: manifest.files["index.html"].size,
+                media_type: "text/html; charset=utf-8".to_string(),
+            },
+        );
+        assert!(manifest.validate().is_ok());
     }
 }

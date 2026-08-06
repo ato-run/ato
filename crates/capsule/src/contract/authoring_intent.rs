@@ -329,6 +329,14 @@ pub fn draft_from_capsule_manifest_v1(
                 .collect()
         })
         .unwrap_or_default();
+    let build_output_roots = manifest
+        .outputs
+        .as_ref()
+        .and_then(|outputs| outputs.static_web.as_ref())
+        .map(|static_web| WorkspacePathV1::parse(&static_web.root))
+        .transpose()?
+        .into_iter()
+        .collect();
     let bindings = manifest
         .config
         .iter()
@@ -358,7 +366,7 @@ pub fn draft_from_capsule_manifest_v1(
         build_steps,
         launch: command(&manifest.run.command),
         readiness,
-        build_output_roots: Vec::new(),
+        build_output_roots,
         bindings,
         unresolved: Vec::new(),
     };
@@ -719,6 +727,32 @@ command = ["node", "verify.js"]
                 path: "/".to_string(),
                 timeout_seconds: 60,
             }
+        );
+    }
+
+    #[test]
+    fn static_web_output_root_is_identity_bearing() {
+        let manifest = CapsuleManifestV1::from_toml(
+            r#"
+schema_version = "1"
+name = "example"
+version = "1.0.0"
+[run]
+command = ["python3", "-m", "http.server", "8000"]
+[web]
+port = 8000
+bind = "0.0.0.0"
+[outputs.static_web]
+root = "dist"
+entry_path = "index.html"
+"#,
+        )
+        .expect("manifest");
+
+        let draft = draft_from_capsule_manifest_v1(&manifest).expect("draft");
+        assert_eq!(
+            draft.build_output_roots,
+            vec![WorkspacePathV1::parse("dist").expect("path")]
         );
     }
 

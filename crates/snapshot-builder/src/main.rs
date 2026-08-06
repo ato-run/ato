@@ -1074,6 +1074,13 @@ fn derive_job_spec(
 struct ProducedBuild {
     /// The bootable ext4 rootfs bytes.
     rootfs: Vec<u8>,
+    /// The exported guest filesystem tree (`<work_root>/guest-rootfs`) the
+    /// v1 lane wrote before packing. Present ONLY for the v1 build lane, which
+    /// exports natively (the exporter is a required producer step); the legacy
+    /// recipe/import lanes leave it None (their tree is a build-script temp).
+    /// The Static Web emit consumes this tree when the plan declares an
+    /// output — it never guesses a path.
+    exported_guest_rootfs: Option<PathBuf>,
     port: u16,
     healthcheck: String,
     /// Fed to `BuildReadyStateInput.execution_id` (recipe: the declared execution
@@ -1361,6 +1368,7 @@ fn produce_recipe_build(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: spec.port,
         healthcheck: spec.healthcheck.clone(),
         execution_id: declared_execution_id,
@@ -1731,6 +1739,7 @@ fn produce_import_build(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.plan.port,
         healthcheck,
         execution_id,
@@ -1850,6 +1859,7 @@ fn produce_oci_image_import(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.plan.port,
         healthcheck: outcome
             .plan
@@ -1953,6 +1963,7 @@ fn produce_compose_import(
 
     Ok(ProducedBuild {
         rootfs,
+        exported_guest_rootfs: None,
         port: outcome.public_port,
         healthcheck: outcome
             .public_readiness_http_path
@@ -3533,6 +3544,10 @@ fn produce_pinned_v1_build(
 
     Ok(ProducedBuild {
         rootfs,
+        // The v1 producer exported the guest filesystem to
+        // `<work_root>/guest-rootfs` before packing (that is the seam the
+        // Static Web lane extracts from). The tree is not deleted by packing.
+        exported_guest_rootfs: Some(work_root.join("guest-rootfs")),
         port: outcome.port,
         // A v1 manifest authors no readiness path — `[web]` is a port and a
         // bind address. `/` is the probe, and `synthesized_probe` says so
@@ -5198,6 +5213,69 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
         let rootfs_digest = format!("blake3:{}", blake3::hash(&produced.rootfs).to_hex());
         std::fs::write(jobdir.join("clean-rootfs.img"), &produced.rootfs)
             .map_err(|error| format!("persist Clean Replay rootfs: {error}"))?;
+        // ── Static Web emission (vertical slice, PR 4 call site). ──
+        // The v1 producer exported the guest filesystem to
+        // `produced.exported_guest_rootfs` (a required producer step). If the
+        // saved Build Config Revision declared [outputs.static_web], extract
+        // the declared output from THAT tree, produce the immutable bundle,
+        // and upload it through the API. Absent declaration → complete no-op.
+        // A DECLARED output that fails is a build failure — never a silent
+        // fallback to the snapshot lane.
+        {
+            let exported_root = produced.exported_guest_rootfs.clone().ok_or_else(|| {
+                "static web output declared but the build lane produced no exported guest rootfs"
+                    .to_string()
+            })?;
+            let bundle_dir = jobdir.join("static-web-bundle-v1");
+            std::fs::create_dir_all(&bundle_dir)
+                .map_err(|error| format!("create static web bundle dir: {error}"))?;
+            let plan = self
+                .work
+                .static_web_output_plan()
+                .map_err(|error| format!("resolve static web output plan: {error}"))?;
+            if plan.is_some() {
+                let canaries: Vec<&[u8]> = live_secret_canaries(self.cfg);
+                let transport = snapshot_builder::static_web_transport::HttpStaticWebTransport {
+                    api_url: &self.cfg.api_url,
+                    token: &self.cfg.token,
+                    agent_id: &self.cfg.agent_id,
+                    worker_claim_id: self
+                        .work
+                        .worker_claim_id
+                        .as_deref()
+                        .unwrap_or(&self.work.work_id),
+                    lease_token: self.work.lease_token.expose(),
+                };
+                let context = snapshot_builder::static_web_emit::StaticWebEmitContext {
+                    image_root: &exported_root,
+                    destination_parent: &bundle_dir,
+                    runtime_secret_canaries: &canaries,
+                    job_id: &self.work.work_id,
+                    build_config_revision_id: self
+                        .work
+                        .build_config_revision_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            "static web output declared without a Build Config Revision".to_string()
+                        })?,
+                    plan_digest: self.work.plan_digest.as_deref().ok_or_else(|| {
+                        "static web output declared without a plan digest".to_string()
+                    })?,
+                    agent_id: &self.cfg.agent_id,
+                    worker_claim_id: self
+                        .work
+                        .worker_claim_id
+                        .as_deref()
+                        .unwrap_or(&self.work.work_id),
+                    transport: &transport,
+                };
+                snapshot_builder::static_web_emit::emit_static_web_if_declared(
+                    self.work.effective_build_plan.as_ref(),
+                    &context,
+                )
+                .map_err(|error| format!("static web emission failed: {error}"))?;
+            }
+        }
         persist_clean_replay_artifact(
             &jobdir,
             &CleanReplayBuilderArtifact {
