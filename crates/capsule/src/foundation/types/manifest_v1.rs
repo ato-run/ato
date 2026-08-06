@@ -127,6 +127,22 @@ pub fn require_manifest_v1(schema_version: &str) -> Result<(), ManifestV1Error> 
 }
 
 /// A v1 `capsule.toml`.
+#[cfg(test)]
+mod static_web_root_dot_tests {
+    use super::validate_static_web_root;
+
+    #[test]
+    fn whole_string_dot_is_the_source_root_but_dot_segments_stay_invalid() {
+        assert!(validate_static_web_root(".").is_ok());
+        for invalid in ["./dist", "dist/.", "..", "a/../b", "/dist", "di%73t", ""] {
+            assert!(
+                validate_static_web_root(invalid).is_err(),
+                "must reject {invalid:?}"
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapsuleManifestV1 {
@@ -410,6 +426,14 @@ impl StaticWebOutputV1 {
 }
 
 fn validate_static_web_root(value: &str) -> Result<(), ManifestV1Error> {
+    // The exact value "." means "the source root itself" — the detector emits
+    // it for dependency-free static repos (a root index.html with no build).
+    // Only the WHOLE string is allowed; "." as a path SEGMENT stays rejected.
+    // Must match the API's zod schema byte-for-byte
+    // (apps/ato-api .. unified_manifest.ts staticWebOutputSchema.root).
+    if value == "." {
+        return Ok(());
+    }
     if value.is_empty()
         || value.starts_with('/')
         || value.contains('\\')
