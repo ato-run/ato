@@ -114,6 +114,7 @@ mod hold_phase;
 /// from it. The states are types, so an unverified path cannot reach the build.
 mod source_archive_download;
 mod source_archive_upload;
+mod static_web_producer;
 mod upload;
 /// ADR-015 slice 7A — the gate a v1 `ato build` output passes before any later
 /// phase may act on it: trusted-load the lock, re-derive the Execution
@@ -5249,6 +5250,31 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
             .map_err(|error| format!("Clean Replay readiness: {error}"))?;
         guest.release();
 
+        // Static Web Publication Lane: when the claim's Build Config Revision
+        // resolved to `static_web`, this build attempt succeeds ONLY if the
+        // declared output also materialized. Runs after the readiness proof so
+        // an unbootable build never uploads a bundle; a retried attempt
+        // re-derives the same materialization id and the registry's idempotent
+        // prepare/complete absorbs it.
+        if self.work.is_static_web_lane() {
+            let exported_guest_rootfs = jobdir.join("v1-work").join("guest-rootfs");
+            let bundle_parent = jobdir.join("static-web");
+            let canaries = live_secret_canaries(self.cfg);
+            static_web_producer::produce_and_register_static_web(
+                &static_web_producer::StaticWebLaneInputs {
+                    api_url: &self.cfg.api_url,
+                    builder_token: &self.cfg.token,
+                    agent_id: &self.cfg.agent_id,
+                    work: self.work,
+                    effective_manifest_toml: &generated_manifest,
+                    exported_guest_rootfs: &exported_guest_rootfs,
+                    bundle_parent: &bundle_parent,
+                    runtime_secret_canaries: &canaries,
+                },
+            )
+            .map_err(|failure| format!("static_web: {}: {}", failure.code, failure.detail))?;
+        }
+
         let completed_at = chrono::Utc::now();
         let expires_at = completed_at + chrono::Duration::minutes(15);
         let materialization_inputs_digest = digest_authoring_parts(
@@ -5884,6 +5910,14 @@ fn authoring_failure_code<'a>(fallback: &'a str, reason: &str) -> &'a str {
         ("SCREENSHOT_DECODE_FAILED", "screenshot_decode_failed"),
     ] {
         if reason.contains(marker) {
+            return code;
+        }
+    }
+    // Static Web producer failures carry the Publication Lane contract's
+    // structured code in the reason ("static_web: <code>: <detail>"); surface
+    // that code instead of the generic per-operation fallback.
+    for code in static_web_producer::STATIC_WEB_FAILURE_CODES {
+        if reason.contains(code) {
             return code;
         }
     }

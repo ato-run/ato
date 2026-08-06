@@ -430,6 +430,9 @@ pub fn to_capsule_manifest_v1(
             }
             _ => None,
         },
+        // The intent subset carries no output declaration; a detector that
+        // emits `[outputs.static_web]` sets it on the rendered manifest.
+        outputs: Default::default(),
         seal_at: Some(seal_at),
         env: Default::default(),
         config: Default::default(),

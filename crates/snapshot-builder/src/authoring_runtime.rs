@@ -15,7 +15,9 @@ use capsule::authoring_intent::{
     ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
     normalize_program_intent, to_capsule_manifest_v1,
 };
-use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StoreMetadataV1};
+use capsule::types::manifest_v1::{
+    MetadataAssetsV1, SealAtV1, StaticWebOutputV1, StoreMetadataV1,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use snapshot::archive_only_build::ArchiveOnlyBuildInput;
 use snapshot::authoring_evidence::{
@@ -140,9 +142,64 @@ pub struct AuthoringWork {
     pub classified_state_diff: Option<ClassifiedStateDiffV1>,
     #[serde(default)]
     pub ready_state_seal_receipt: Option<ReadyStateSealReceiptV1>,
+    // ── `static-web-bundle-v1` claim extension ─────────────────────────────
+    //
+    // Emitted by the API only to a builder that advertised the
+    // `static-web-bundle-v1` capability, and only on build-operation claims
+    // bound to a Build Config Revision. All optional: a claim without them is
+    // the snapshot-compute lane, byte-identical to the legacy shape.
+    #[serde(default)]
+    pub build_config_revision_id: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "source_build_attempt_id")]
+    pub _source_build_attempt_id: Option<serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "build_attempt_number")]
+    pub _build_attempt_number: Option<serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "authoring_toml")]
+    pub _authoring_toml: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "effective_build_plan")]
+    pub _effective_build_plan: Option<serde_json::Value>,
+    #[serde(default)]
+    pub plan_digest: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "authoring_toml_digest")]
+    pub _authoring_toml_digest: Option<serde_json::Value>,
+    #[serde(default)]
+    #[serde(rename = "static_web_output")]
+    pub _static_web_output: Option<serde_json::Value>,
+    /// The resolved Publication Lane for this Build Config Revision. Parsed
+    /// tolerantly — an absent or unrecognized value is the snapshot-compute
+    /// lane, never an error, so lane resolution stays server-owned.
+    #[serde(default)]
+    pub publication: Option<ClaimPublication>,
     pub lease_token: AuthoringLeaseToken,
     pub lease_expires_at: String,
     pub trace_id: String,
+}
+
+/// Deliberately NOT `deny_unknown_fields`: the lane classification is
+/// server-owned advisory data and must stay forward-extensible.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ClaimPublication {
+    #[serde(default)]
+    pub resolved_publication_lane: Option<String>,
+    #[serde(default)]
+    #[serde(rename = "classification")]
+    pub _classification: Option<serde_json::Value>,
+}
+
+impl AuthoringWork {
+    /// Whether this claim's Build Config Revision resolved to the Static Web
+    /// Publication Lane.
+    pub fn is_static_web_lane(&self) -> bool {
+        self.publication
+            .as_ref()
+            .and_then(|publication| publication.resolved_publication_lane.as_deref())
+            == Some("static_web")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,6 +212,10 @@ struct ClaimResponse {
 struct ClaimRequest<'a> {
     builder_id: &'a str,
     supported_operations: &'a [&'a str],
+    /// Capability advertisement. Rollout is builder-first: advertising
+    /// `static-web-bundle-v1` is what lets the API attach the plan-extension
+    /// fields to a claim without breaking older builders.
+    supported_features: &'a [&'a str],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -239,6 +300,7 @@ impl AuthoringApiClient<'_> {
             serde_json::to_value(ClaimRequest {
                 builder_id: self.builder_id,
                 supported_operations,
+                supported_features: &["static-web-bundle-v1"],
             })
             .map_err(|error| format!("encode authoring claim: {error}"))?,
         )
@@ -1166,6 +1228,118 @@ fn infer_vite_production_launch(
     })
 }
 
+/// Infer a `[outputs.static_web]` declaration for a HIGH-CONFIDENCE static
+/// repository, or `None` (the snapshot-compute fallback).
+///
+/// Fail-closed by design, mirroring the Publication Lane contract:
+/// - a root `index.html` with no package manager and no server entrypoint
+///   (`server.py`/`app.py`/`server.js`) is static served from the workspace
+///   root — the generated `http.server` run command COEXISTS with the output;
+/// - a Vite package whose `build`/`preview` scripts are plainly `vite build` /
+///   `vite preview` (the same gate as [`infer_vite_production_launch`], whose
+///   image-build-time prebuild is what materializes the output directory)
+///   declares the framework output dir: `build.outDir` when it is a literal
+///   string in `vite.config.*`, `dist` when no override exists, and NOTHING
+///   when an override is present but not a readable literal;
+/// - everything else — server frameworks in the dependency set, dev-server
+///   launches, Deno, undecidable configs — emits no declaration. The mere
+///   existence of `dist//build//index.html` never flips a repo static.
+pub fn infer_static_web_outputs(source_root: &Path) -> Option<StaticWebOutputV1> {
+    if source_root.join("deno.json").is_file() {
+        return None;
+    }
+    if source_root.join("package.json").is_file() {
+        return infer_vite_static_web_outputs(source_root);
+    }
+    if !source_root.join("index.html").is_file() {
+        return None;
+    }
+    const SERVER_ENTRYPOINTS: &[&str] = &["server.py", "app.py", "server.js"];
+    if SERVER_ENTRYPOINTS
+        .iter()
+        .any(|entry| source_root.join(entry).is_file())
+    {
+        return None;
+    }
+    Some(StaticWebOutputV1 {
+        root: ".".to_string(),
+        entry_path: "index.html".to_string(),
+        spa_fallback: true,
+        connect_src: Vec::new(),
+    })
+}
+
+fn infer_vite_static_web_outputs(source_root: &Path) -> Option<StaticWebOutputV1> {
+    let package_json: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(source_root.join("package.json")).ok()?).ok()?;
+    let package_manager = resolve_launch_package_manager(source_root, &package_json).ok()?;
+    // Only the production `vite build`+`vite preview` shape is static-positive:
+    // it is the exact shape whose output dir the image build materializes (see
+    // `rootfs_builder::vite_production_prebuild_cmd`). A dev-server launch
+    // ships the unbundled module graph and stays compute.
+    infer_vite_production_launch(&package_json, package_manager)?;
+    const SERVER_FRAMEWORKS: &[&str] = &[
+        "express",
+        "fastify",
+        "koa",
+        "@hapi/hapi",
+        "next",
+        "nuxt",
+        "@remix-run/node",
+        "@sveltejs/kit",
+        "socket.io",
+        "ws",
+    ];
+    for section in ["dependencies", "devDependencies"] {
+        if let Some(dependencies) = package_json
+            .get(section)
+            .and_then(serde_json::Value::as_object)
+            && SERVER_FRAMEWORKS
+                .iter()
+                .any(|name| dependencies.contains_key(*name))
+        {
+            return None;
+        }
+    }
+    let root = vite_out_dir(source_root)?;
+    Some(StaticWebOutputV1 {
+        root,
+        entry_path: "index.html".to_string(),
+        spa_fallback: true,
+        connect_src: Vec::new(),
+    })
+}
+
+/// The Vite output directory: `dist` unless `vite.config.*` overrides
+/// `build.outDir`, and only a LITERAL string override is honored. An override
+/// this cheap read cannot resolve (an expression, a variable) returns `None`
+/// so the caller emits no declaration rather than a wrong one.
+fn vite_out_dir(source_root: &Path) -> Option<String> {
+    let config = ["vite.config.ts", "vite.config.js", "vite.config.mts", "vite.config.mjs"]
+        .iter()
+        .map(|name| source_root.join(name))
+        .find(|path| path.is_file());
+    let Some(config) = config else {
+        // No config file at all still means the Vite default output dir.
+        return Some("dist".to_string());
+    };
+    let text = std::fs::read_to_string(&config).ok()?;
+    let Some(index) = text.find("outDir") else {
+        return Some("dist".to_string());
+    };
+    let rest = text[index + "outDir".len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let body = &rest[1..];
+    let literal = body.split(quote).next()?;
+    // A second `outDir` occurrence is ambiguous — refuse to guess.
+    if text[index + "outDir".len()..].contains("outDir") {
+        return None;
+    }
+    capsule::contract::static_web_manifest::validate_relative_path(literal).ok()?;
+    Some(literal.to_string())
+}
+
 /// Decide which package manager launches the app, preferring the explicit
 /// Corepack `packageManager` declaration and otherwise inferring from
 /// whichever single lockfile is present. No lockfile defaults to `npm`
@@ -1241,6 +1415,9 @@ pub fn resolve_authoring_recipe(
     source_root: &Path,
     work: &AuthoringWork,
 ) -> Result<(NormalizedProgramIntentEnvelopeV1, String), String> {
+    // Auto lane inference happens ONLY when there is no authored capsule.toml
+    // and no manual overlay — an author-owned manifest is never rewritten.
+    let mut inferred_static_web: Option<StaticWebOutputV1> = None;
     let (origin_manifest, preserve_exact_bytes, merge_store_draft) = if let Some(overlay) =
         &work.source_overlay
     {
@@ -1310,12 +1487,22 @@ pub fn resolve_authoring_recipe(
             (capsule_toml, true, true)
         } else {
             let normalized = infer_authoring_intent(source_root)?;
+            inferred_static_web = infer_static_web_outputs(source_root);
             (render_inferred_capsule_toml(&normalized)?, false, true)
         }
     };
 
     let mut parsed = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&origin_manifest)
         .map_err(|error| format!("validate Effective capsule.toml: {error}"))?;
+    if let Some(static_web) = inferred_static_web {
+        // The generated manifest keeps its run command; `[outputs.static_web]`
+        // is additive, and re-validation below keeps the declaration inside
+        // the same constraints an authored one must satisfy.
+        parsed.outputs.static_web = Some(static_web);
+        parsed
+            .validate()
+            .map_err(|error| format!("validate inferred [outputs.static_web]: {error}"))?;
+    }
     let effective_manifest =
         if let Some(metadata) = work.store_metadata.as_ref().filter(|_| merge_store_draft) {
             parsed.name = metadata.name.clone();
@@ -1749,6 +1936,92 @@ mod tests {
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.web.expect("surface").port, 8000);
+    }
+
+    #[test]
+    fn static_web_outputs_are_inferred_for_a_dependency_free_static_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<canvas></canvas>").expect("fixture");
+        let outputs = infer_static_web_outputs(root.path()).expect("static");
+        assert_eq!(outputs.root, ".");
+        assert_eq!(outputs.entry_path, "index.html");
+        assert!(outputs.spa_fallback);
+        assert!(outputs.connect_src.is_empty());
+    }
+
+    #[test]
+    fn static_web_outputs_are_withheld_on_server_signals() {
+        for server_entry in ["server.py", "app.py", "server.js"] {
+            let root = tempfile::tempdir().expect("tempdir");
+            std::fs::write(root.path().join("index.html"), "<div></div>").expect("fixture");
+            std::fs::write(root.path().join(server_entry), "serve()").expect("server");
+            assert!(
+                infer_static_web_outputs(root.path()).is_none(),
+                "{server_entry} must force the compute lane"
+            );
+        }
+        // No index.html at all — nothing to declare.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("README.md"), "docs").expect("fixture");
+        assert!(infer_static_web_outputs(root.path()).is_none());
+    }
+
+    fn vite_fixture(config: Option<&str>) -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"dev":"vite","build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("lockfile");
+        if let Some(config) = config {
+            std::fs::write(root.path().join("vite.config.ts"), config).expect("config");
+        }
+        root
+    }
+
+    #[test]
+    fn vite_production_shape_declares_the_framework_output_dir() {
+        let default_out = vite_fixture(Some("export default { plugins: [] }\n"));
+        assert_eq!(
+            infer_static_web_outputs(default_out.path()).expect("static").root,
+            "dist"
+        );
+        let no_config = vite_fixture(None);
+        assert_eq!(
+            infer_static_web_outputs(no_config.path()).expect("static").root,
+            "dist"
+        );
+        let overridden = vite_fixture(Some(
+            "export default { build: { outDir: \"public/site\" } }\n",
+        ));
+        assert_eq!(
+            infer_static_web_outputs(overridden.path()).expect("static").root,
+            "public/site"
+        );
+    }
+
+    #[test]
+    fn undecidable_or_server_positive_vite_packages_stay_compute() {
+        // outDir override this lane cannot read as a literal → no declaration.
+        let dynamic = vite_fixture(Some("export default { build: { outDir: mode } }\n"));
+        assert!(infer_static_web_outputs(dynamic.path()).is_none());
+        // A server framework in the dependency set → no declaration.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"name":"demo","dependencies":{"express":"^4"},"scripts":{"build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("package");
+        assert!(infer_static_web_outputs(root.path()).is_none());
+        // A dev-server-only script shape (no plain build+preview) → compute.
+        let dev_only = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dev_only.path().join("package.json"),
+            r#"{"name":"demo","scripts":{"dev":"vite"}}"#,
+        )
+        .expect("package");
+        assert!(infer_static_web_outputs(dev_only.path()).is_none());
     }
 
     #[test]
