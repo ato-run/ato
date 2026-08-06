@@ -98,6 +98,33 @@ pub fn derive_materialization_id(build_config_revision_id: &str) -> Result<Strin
     Ok(format!("swm_{}", &label["p-".len()..]))
 }
 
+/// The registry's `^swm_[a-z2-7]{52}$` shape.
+fn is_registry_materialization_id(value: &str) -> bool {
+    value.strip_prefix("swm_").is_some_and(|body| {
+        body.len() == 52
+            && body
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte))
+    })
+}
+
+/// The server-derived materialization id embedded in the claim's effective
+/// build plan (`effective_build_plan.static_web_output.materialization_id`).
+/// Only a registry-shaped value is honored; anything else falls back to the
+/// local derivation rather than sending an id prepare would refuse.
+fn claim_materialization_id(work: &AuthoringWork) -> Option<String> {
+    plan_materialization_id(work.effective_build_plan.as_ref())
+}
+
+fn plan_materialization_id(plan: Option<&serde_json::Value>) -> Option<String> {
+    plan?
+        .get("static_web_output")?
+        .get("materialization_id")?
+        .as_str()
+        .filter(|value| is_registry_materialization_id(value))
+        .map(str::to_owned)
+}
+
 /// Produce the bundle from the built guest filesystem and drive
 /// prepare → upload-authorizations → PUT → verify → complete.
 pub fn produce_and_register_static_web(
@@ -142,13 +169,20 @@ pub fn produce_and_register_static_web(
         )
     })?;
 
-    let materialization_id =
-        derive_materialization_id(build_config_revision_id).map_err(|error| {
+    // The claim's plan-embedded id (server-derived, deterministic per Build
+    // Config Revision) is used verbatim when present, so the registry row and
+    // the effective build plan name the SAME materialization; the local
+    // derivation covers a claim whose plan carries none. Both are stable per
+    // bcrev, which is what the registry's idempotent prepare/complete keys on.
+    let materialization_id = match claim_materialization_id(inputs.work) {
+        Some(id) => id,
+        None => derive_materialization_id(build_config_revision_id).map_err(|error| {
             StaticWebLaneFailure::new(
                 STATIC_WEB_PREPARE_FAILED,
                 format!("derive materialization id: {error}"),
             )
-        })?;
+        })?,
+    };
 
     // ── Locate the declared root inside the exported guest workspace.
     let image_output_root = if declared.root == "." {
@@ -573,6 +607,26 @@ mod tests {
             body.bytes()
                 .all(|byte| byte.is_ascii_lowercase() || (b'2'..=b'7').contains(&byte)),
             "{one} must match ^swm_[a-z2-7]{{52}}$"
+        );
+    }
+
+    #[test]
+    fn plan_embedded_materialization_id_is_used_only_when_registry_shaped() {
+        let valid = derive_materialization_id("bcrev_01KYN2ZEXAMPLE").expect("derives");
+        let plan = serde_json::json!({
+            "static_web_output": { "materialization_id": valid }
+        });
+        assert_eq!(plan_materialization_id(Some(&plan)).as_deref(), Some(valid.as_str()));
+        for bogus in ["swm-not-base32", "swm_TOOSHORT", "mat_fixture", ""] {
+            let plan = serde_json::json!({
+                "static_web_output": { "materialization_id": bogus }
+            });
+            assert_eq!(plan_materialization_id(Some(&plan)), None, "{bogus:?}");
+        }
+        assert_eq!(plan_materialization_id(None), None);
+        assert_eq!(
+            plan_materialization_id(Some(&serde_json::json!({}))),
+            None
         );
     }
 

@@ -159,9 +159,10 @@ pub struct AuthoringWork {
     #[serde(default)]
     #[serde(rename = "authoring_toml")]
     pub _authoring_toml: Option<String>,
+    /// The API's effective build plan. Its `static_web_output` section carries
+    /// the server-derived materialization id the producer uses verbatim.
     #[serde(default)]
-    #[serde(rename = "effective_build_plan")]
-    pub _effective_build_plan: Option<serde_json::Value>,
+    pub effective_build_plan: Option<serde_json::Value>,
     #[serde(default)]
     pub plan_digest: Option<String>,
     #[serde(default)]
