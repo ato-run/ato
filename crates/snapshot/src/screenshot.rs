@@ -698,13 +698,6 @@ fn encode_if_within_cap(path: &Path) -> Option<String> {
         eprintln!("[screenshot] skip: empty output file at {path:?}");
         return None;
     }
-    if meta.len() > MAX_PNG_BYTES {
-        eprintln!(
-            "[screenshot] skip: capture is {} bytes, over the {MAX_PNG_BYTES}-byte cap",
-            meta.len()
-        );
-        return None;
-    }
     let bytes = match std::fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -716,12 +709,100 @@ fn encode_if_within_cap(path: &Path) -> Option<String> {
         eprintln!("[screenshot] skip: output at {path:?} is not a PNG");
         return None;
     }
+    let bytes = if bytes.len() as u64 > MAX_PNG_BYTES {
+        // Visually rich pages (WebGL games and the like) produce PNGs that
+        // exceed the ack payload cap at full size. Rather than dropping the
+        // capture entirely — which fails the whole Ready-State Seal for the
+        // exact apps whose screenshots matter most — downscale and re-encode
+        // until it fits. Only a floor-width still-oversized capture is skipped.
+        match shrink_png_to_cap(&bytes) {
+            Some(shrunk) => shrunk,
+            None => {
+                eprintln!(
+                    "[screenshot] skip: capture is {} bytes, over the {MAX_PNG_BYTES}-byte cap even after downscaling",
+                    bytes.len()
+                );
+                return None;
+            }
+        }
+    } else {
+        bytes
+    };
     Some(BASE64.encode(&bytes))
+}
+
+/// Minimum width the downscaler will go to before giving up. Below this the
+/// screenshot stops being useful as publish evidence.
+const MIN_SHRINK_WIDTH: u32 = 640;
+
+/// Downscale an oversized PNG in ×0.8 steps until it fits `MAX_PNG_BYTES`.
+/// Returns `None` when even the floor-width re-encode is still over the cap
+/// (or the PNG cannot be decoded) — the caller keeps its skip behavior.
+fn shrink_png_to_cap(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut img = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).ok()?;
+    loop {
+        let (w, h) = (img.width(), img.height());
+        let next_w = ((w as f64) * 0.8) as u32;
+        if next_w < MIN_SHRINK_WIDTH {
+            return None;
+        }
+        let next_h = ((h as u64 * next_w as u64) / w as u64).max(1) as u32;
+        img = img.resize_exact(next_w, next_h, image::imageops::FilterType::Triangle);
+        let mut out = Vec::new();
+        if img
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .is_err()
+        {
+            return None;
+        }
+        if out.len() as u64 <= MAX_PNG_BYTES {
+            eprintln!(
+                "[screenshot] downscaled oversized capture to {next_w}x{next_h} ({} bytes)",
+                out.len()
+            );
+            return Some(out);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shrink_png_to_cap_fits_a_noisy_capture_under_the_cap() {
+        // Deterministic noise compresses badly: a 1280x800 RGB noise PNG is
+        // well over MAX_PNG_BYTES, like a real WebGL-game capture.
+        // Structured detail + mild noise, like a real game frame — pure
+        // noise would (correctly) never fit the cap at any useful size.
+        let mut img = image::RgbImage::new(1280, 800);
+        let mut state: u32 = 0x2545_F491;
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let n = ((state >> 24) & 0x0f) as u8;
+            let base = ((x / 8 + y / 8) % 255) as u8;
+            *pixel = image::Rgb([base.wrapping_add(n), base.wrapping_add(n / 2), n]);
+        }
+        let mut oversized = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut oversized),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        assert!(oversized.len() as u64 > MAX_PNG_BYTES, "fixture must exceed the cap");
+
+        let shrunk = shrink_png_to_cap(&oversized).expect("noise capture must shrink under the cap");
+        assert!(shrunk.len() as u64 <= MAX_PNG_BYTES);
+        let decoded =
+            image::load_from_memory_with_format(&shrunk, image::ImageFormat::Png).unwrap();
+        assert!(decoded.width() >= MIN_SHRINK_WIDTH);
+    }
+
+    #[test]
+    fn shrink_png_to_cap_rejects_undecodable_bytes() {
+        assert!(shrink_png_to_cap(b"not a png").is_none());
+    }
 
     #[cfg(unix)]
     use std::sync::Mutex;
