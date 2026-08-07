@@ -85,6 +85,16 @@ pub fn produce_static_web_bundle(
         if relative.ends_with(".map") {
             bail!("source maps are not publishable static web output: {relative}");
         }
+        // Repository housekeeping is not web output. When the declared root is
+        // the source root itself (`root = "."`, the dependency-free static
+        // case), the tree carries .gitignore, .github/, LICENSE and friends;
+        // failing the whole bundle on them made every plain static repo
+        // unpublishable. They are EXCLUDED rather than served: a hidden entry
+        // has no place on a public edge surface, and an unknown media type on
+        // a real asset still fails loudly below.
+        if is_repository_housekeeping(&relative) {
+            continue;
+        }
         // Open ONCE and derive size from the SAME descriptor that produces the
         // hashed bytes. `metadata.len()` before a separate read can disagree
         // with what was actually hashed if the file changes between the two
@@ -319,6 +329,22 @@ fn reject_hard_link(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Repository metadata that must never reach the edge: any dot-prefixed path
+/// segment (`.gitignore`, `.github/workflows/ci.yml`, `.DS_Store`) and the
+/// extension-less legal/readme files every repo ships. Deliberately narrow —
+/// anything else with an unrecognized media type is still a hard failure, so
+/// a genuinely unservable asset is never silently dropped from the site.
+fn is_repository_housekeeping(relative: &str) -> bool {
+    if relative.split('/').any(|segment| segment.starts_with('.')) {
+        return true;
+    }
+    const EXTENSIONLESS_METADATA: [&str; 7] = [
+        "LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "CHANGELOG", "Makefile",
+    ];
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    !name.contains('.') && EXTENSIONLESS_METADATA.contains(&name)
+}
+
 fn media_type_for(path: &str) -> Option<&'static str> {
     let extension = Path::new(path).extension()?.to_str()?;
     match extension {
@@ -342,6 +368,24 @@ fn media_type_for(path: &str) -> Option<&'static str> {
         "css" => Some("text/css; charset=utf-8"),
         "html" | "htm" => Some("text/html; charset=utf-8"),
         "txt" => Some("text/plain; charset=utf-8"),
+        // Inert media that real static sites ship and the edge must serve:
+        // docs alongside the app, and the audio/video a browser game needs.
+        // Every entry is non-executable — the restriction that matters is
+        // that unknown extensions still fail loudly.
+        "md" => Some("text/markdown; charset=utf-8"),
+        "csv" => Some("text/csv; charset=utf-8"),
+        "xml" => Some("application/xml; charset=utf-8"),
+        "pdf" => Some("application/pdf"),
+        "map" => None,
+        "mp3" => Some("audio/mpeg"),
+        "ogg" | "oga" => Some("audio/ogg"),
+        "wav" => Some("audio/wav"),
+        "m4a" => Some("audio/mp4"),
+        "flac" => Some("audio/flac"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "glb" => Some("model/gltf-binary"),
+        "gltf" => Some("model/gltf+json"),
         _ => None,
     }
 }
@@ -526,5 +570,44 @@ mod tests {
             .unwrap(),
             "p-yyobofk7ewkmdqzp3irfxnofkllbd5ojc24v5ecpkwx2nn5wsvbq"
         );
+    }
+}
+
+#[cfg(test)]
+mod housekeeping_tests {
+    use super::is_repository_housekeeping;
+
+    #[test]
+    fn dot_prefixed_paths_never_reach_the_edge() {
+        for path in [
+            ".gitignore",
+            ".DS_Store",
+            ".github/workflows/ci.yml",
+            "assets/.keep",
+            ".well-known/security.txt",
+        ] {
+            assert!(is_repository_housekeeping(path), "must exclude {path}");
+        }
+    }
+
+    #[test]
+    fn extensionless_repo_metadata_is_excluded() {
+        for path in ["LICENSE", "COPYING", "docs/AUTHORS", "Makefile"] {
+            assert!(is_repository_housekeeping(path), "must exclude {path}");
+        }
+    }
+
+    #[test]
+    fn real_site_content_is_never_excluded() {
+        for path in [
+            "index.html",
+            "style.css",
+            "js/app.js",
+            "README.md",
+            "meta/apple-touch-icon.png",
+            "favicon.ico",
+        ] {
+            assert!(!is_repository_housekeeping(path), "must keep {path}");
+        }
     }
 }
