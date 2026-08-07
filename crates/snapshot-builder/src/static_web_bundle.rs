@@ -330,19 +330,21 @@ fn reject_hard_link(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
 }
 
 /// Repository metadata that must never reach the edge: any dot-prefixed path
-/// segment (`.gitignore`, `.github/workflows/ci.yml`, `.DS_Store`) and the
-/// extension-less legal/readme files every repo ships. Deliberately narrow —
-/// anything else with an unrecognized media type is still a hard failure, so
-/// a genuinely unservable asset is never silently dropped from the site.
+/// segment (`.gitignore`, `.github/workflows/ci.yml`, `.DS_Store`) and any
+/// extension-less file (`LICENSE`, `Makefile`, `Rakefile`, `Dockerfile`).
+/// Everything else keeps its media-type requirement, so a real asset with an
+/// unrecognized extension still fails loudly instead of vanishing.
 fn is_repository_housekeeping(relative: &str) -> bool {
     if relative.split('/').any(|segment| segment.starts_with('.')) {
         return true;
     }
-    const EXTENSIONLESS_METADATA: [&str; 7] = [
-        "LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS", "CHANGELOG", "Makefile",
-    ];
+    // Anything with no extension at all: LICENSE, Makefile, Rakefile,
+    // Dockerfile, Procfile, CNAME … Web content is addressed by extension, so
+    // an extension-less file is repository tooling, and the edge has no media
+    // type to serve it under anyway. Enumerating names was tried first and
+    // fell over on the second real repository (2048's Rakefile).
     let name = relative.rsplit('/').next().unwrap_or(relative);
-    !name.contains('.') && EXTENSIONLESS_METADATA.contains(&name)
+    !name.contains('.')
 }
 
 fn media_type_for(path: &str) -> Option<&'static str> {
@@ -592,7 +594,7 @@ mod housekeeping_tests {
 
     #[test]
     fn extensionless_repo_metadata_is_excluded() {
-        for path in ["LICENSE", "COPYING", "docs/AUTHORS", "Makefile"] {
+        for path in ["LICENSE", "COPYING", "docs/AUTHORS", "Makefile", "Rakefile", "Dockerfile", "CNAME"] {
             assert!(is_repository_housekeeping(path), "must exclude {path}");
         }
     }
