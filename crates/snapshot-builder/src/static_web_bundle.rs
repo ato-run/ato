@@ -82,13 +82,12 @@ pub fn produce_static_web_bundle(
             .ok_or_else(|| anyhow::anyhow!("static web path is not UTF-8: {}", source.display()))?
             .replace(std::path::MAIN_SEPARATOR, "/");
         validate_relative_path(&relative).map_err(anyhow::Error::from)?;
-        if relative.ends_with(".map") {
-            bail!("source maps are not publishable static web output: {relative}");
-        }
         // A repository is not a build output. When the declared root is the
         // source root itself (`root = "."`, the dependency-free static case)
-        // the tree also carries everything that produced the site.
-        if !is_publishable_web_file(&relative) {
+        // the tree also carries everything that produced the site — including
+        // source maps, which are simply not publishable and are skipped like
+        // every other non-web file.
+        if relative.ends_with(".map") || !is_publishable_web_file(&relative) {
             continue;
         }
         // Open ONCE and derive size from the SAME descriptor that produces the
@@ -446,11 +445,16 @@ mod tests {
         fs::write(image.path().join("dist/assets/app.js.map"), "{}").unwrap();
         let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
         let parent = tempfile::tempdir().unwrap();
-        assert!(
+        // Source maps are simply not publishable: skipped, never bundled.
+        let bundle =
             produce_static_web_bundle(&plan(), extracted.output_root(), parent.path(), &[])
-                .unwrap_err()
-                .to_string()
-                .contains("source maps")
+                .unwrap();
+        assert!(!bundle.receipt.blobs.is_empty());
+        assert!(
+            String::from_utf8(bundle.manifest_bytes.clone())
+                .unwrap()
+                .find("app.js.map")
+                .is_none()
         );
 
         fs::remove_file(image.path().join("dist/assets/app.js.map")).unwrap();
