@@ -1068,7 +1068,9 @@ pub fn infer_authoring_intent(
     // must never be routed into the dependency-free static-file path below —
     // that would silently skip dependency install and the app's own start
     // script (ato-api#443).
-    if source_root.join("package.json").is_file() {
+    if source_root.join("package.json").is_file()
+        && !static_site_with_tooling_only(source_root)
+    {
         return infer_package_managed_intent(source_root);
     }
     if !source_root.join("index.html").is_file() {
@@ -1122,6 +1124,39 @@ pub fn infer_authoring_intent(
 /// framework even reads a port argument. Any other shape (missing script,
 /// shell operators, an unrecognized dev-server binary, an ambiguous set of
 /// lockfiles) fails closed to manual setup rather than assume.
+/// A repository that ships a root `index.html` and a `package.json` declaring
+/// NO server script is a static site that merely uses npm for tooling
+/// (linters, electron packaging, asset pipelines) — not a package-managed
+/// application. Routing it into the package-managed path fails detection
+/// outright ("requires scripts.start or scripts.dev"), which is what blocked
+/// gridgarden / flexboxfroggy / clumsy-bird / jspaint from ever publishing.
+///
+/// The #443 rule this narrows still holds for every app it was written for: a
+/// bundler-served app declares `start` or `dev`, so it keeps taking the
+/// package-managed path. Only the combination "root index.html AND no serving
+/// script at all" falls through to dependency-free static inference.
+fn static_site_with_tooling_only(source_root: &Path) -> bool {
+    if !source_root.join("index.html").is_file() {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(source_root.join("package.json")) else {
+        return false;
+    };
+    let Ok(package_json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let has_serving_script = package_json
+        .get("scripts")
+        .and_then(serde_json::Value::as_object)
+        .map(|scripts| {
+            ["start", "dev", "serve", "preview"]
+                .iter()
+                .any(|name| scripts.contains_key(*name))
+        })
+        .unwrap_or(false);
+    !has_serving_script
+}
+
 fn infer_package_managed_intent(
     source_root: &Path,
 ) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
@@ -2697,5 +2732,67 @@ timeout_seconds = 30
             replay_capsule_toml(&work, &normalized).expect("replay manifest"),
             capsule_toml
         );
+    }
+}
+
+#[cfg(test)]
+mod static_tooling_precedence_tests {
+    use super::static_site_with_tooling_only;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn repo(index: bool, package: Option<&str>) -> TempDir {
+        let dir = TempDir::new().expect("tempdir");
+        if index {
+            fs::write(dir.path().join("index.html"), "<h1>hi</h1>").expect("index");
+        }
+        if let Some(json) = package {
+            fs::write(dir.path().join("package.json"), json).expect("package");
+        }
+        dir
+    }
+
+    #[test]
+    fn tooling_only_package_json_with_root_index_is_static() {
+        // gridgarden / flexboxfroggy / clumsy-bird: scripts is empty.
+        let dir = repo(true, Some(r#"{"name":"x","scripts":{}}"#));
+        assert!(static_site_with_tooling_only(dir.path()));
+        // jspaint: only electron packaging scripts, nothing that serves.
+        let dir = repo(
+            true,
+            Some(r#"{"name":"x","scripts":{"electron:start":"electron .","release":"gh release"}}"#),
+        );
+        assert!(static_site_with_tooling_only(dir.path()));
+        // No scripts key at all.
+        let dir = repo(true, Some(r#"{"name":"x"}"#));
+        assert!(static_site_with_tooling_only(dir.path()));
+    }
+
+    #[test]
+    fn a_serving_script_keeps_the_package_managed_path() {
+        for scripts in [
+            r#"{"start":"vite"}"#,
+            r#"{"dev":"vite"}"#,
+            r#"{"serve":"http-server"}"#,
+            r#"{"preview":"vite preview"}"#,
+        ] {
+            let dir = repo(true, Some(&format!(r#"{{"name":"x","scripts":{scripts}}}"#)));
+            assert!(
+                !static_site_with_tooling_only(dir.path()),
+                "must stay package-managed for {scripts}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_root_index_html_it_is_never_static() {
+        let dir = repo(false, Some(r#"{"name":"x","scripts":{}}"#));
+        assert!(!static_site_with_tooling_only(dir.path()));
+    }
+
+    #[test]
+    fn an_unreadable_or_malformed_package_json_fails_closed() {
+        let dir = repo(true, Some("{not json"));
+        assert!(!static_site_with_tooling_only(dir.path()));
     }
 }
