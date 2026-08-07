@@ -373,24 +373,12 @@ fn media_type_for(path: &str) -> Option<&'static str> {
         "css" => Some("text/css; charset=utf-8"),
         "html" | "htm" => Some("text/html; charset=utf-8"),
         "txt" => Some("text/plain; charset=utf-8"),
-        // Inert media that real static sites ship and the edge must serve:
-        // docs alongside the app, and the audio/video a browser game needs.
-        // Every entry is non-executable — the restriction that matters is
-        // that unknown extensions still fail loudly.
-        "md" => Some("text/markdown; charset=utf-8"),
-        "csv" => Some("text/csv; charset=utf-8"),
-        "xml" => Some("application/xml; charset=utf-8"),
-        "pdf" => Some("application/pdf"),
-        "map" => None,
-        "mp3" => Some("audio/mpeg"),
-        "ogg" | "oga" => Some("audio/ogg"),
-        "wav" => Some("audio/wav"),
-        "m4a" => Some("audio/mp4"),
-        "flac" => Some("audio/flac"),
-        "mp4" | "m4v" => Some("video/mp4"),
-        "webm" => Some("video/webm"),
-        "glb" => Some("model/gltf-binary"),
-        "gltf" => Some("model/gltf+json"),
+        // The v1 manifest allowlist (capsule::contract::static_web_manifest::
+        // is_allowed_media_type) is a FROZEN contract shared with ato-api,
+        // ato-edge and ato-usercontent-static — this table must stay a subset
+        // of it. Audio, video, markdown and PDF are therefore NOT publishable
+        // in v1: adding them here alone produces a bundle the manifest
+        // validator rejects. They belong in a coordinated v2.
         _ => None,
     }
 }
@@ -588,10 +576,8 @@ mod publishable_web_file_tests {
             "index.html",
             "style/main.css",
             "js/application.js",
-            "README.md",
             "favicon.ico",
             "meta/apple-touch-icon.png",
-            "audio/hit.mp3",
         ] {
             assert!(is_publishable_web_file(path), "must publish {path}");
         }
@@ -614,6 +600,8 @@ mod publishable_web_file_tests {
             "style/helpers.scss",
             "src/app.ts",
             "Gemfile.lock",
+            "README.md",
+            "audio/hit.mp3",
         ] {
             assert!(!is_publishable_web_file(path), "must exclude {path}");
         }
