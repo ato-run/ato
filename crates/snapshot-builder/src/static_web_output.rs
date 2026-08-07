@@ -273,14 +273,38 @@ fn copy_tree_entries(
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let source_path = entry.path();
+        // `node_modules` is a dependency-provisioning artifact (the Node
+        // recipe installs it INTO the image), never static site content —
+        // bundling it would ship thousands of package files and its
+        // tool-generated dangling links (.vite, .bin). System exclusion,
+        // same spirit as the source-filter policy's .git exclusion.
+        if entry.file_name() == "node_modules" {
+            continue;
+        }
         let destination_path = destination.join(entry.file_name());
         // Canonicalize FIRST: this both resolves a symlink to its real target
         // and is the TOCTOU guard (a component swapped to a link after any
         // earlier check resolves outside the image root here). A link cycle
         // surfaces as an ELOOP error and fails closed.
-        let canonical_entry = fs::canonicalize(&source_path).with_context(|| {
-            format!("canonicalize static output entry {}", source_path.display())
-        })?;
+        let canonical_entry = match fs::canonicalize(&source_path) {
+            Ok(path) => path,
+            // A DANGLING link materializes nothing and can leak nothing —
+            // skip it (tooling litters them, e.g. node_modules/.vite-style
+            // caches elsewhere in the tree). Every other failure, including
+            // ELOOP on a link cycle, stays fail-closed.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!(
+                    "[static-web] skip dangling link in output: {}",
+                    source_path.display()
+                );
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("canonicalize static output entry {}", source_path.display())
+                });
+            }
+        };
         if !is_beneath(&canonical_entry, canonical_root) {
             bail!(
                 "static output entry escapes the image root: {}",
@@ -544,6 +568,24 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_skips_node_modules_and_dangling_links() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("node_modules/pkg")).unwrap();
+        fs::write(output.join("index.html"), "built").unwrap();
+        fs::write(output.join("node_modules/pkg/index.js"), "dep").unwrap();
+        // Dangling link, like node_modules/.vite left by tooling.
+        std::os::unix::fs::symlink("no-such-target", output.join("stale-link")).unwrap();
+
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let root = extracted.output_root();
+        assert!(root.join("index.html").is_file());
+        assert!(!root.join("node_modules").exists());
+        assert!(!root.join("stale-link").exists());
     }
 
     #[cfg(unix)]
