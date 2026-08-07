@@ -221,6 +221,49 @@ fn has_duplicates(values: &[String]) -> bool {
 }
 
 fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) -> Result<()> {
+    let mut visited = std::collections::BTreeSet::new();
+    copy_tree_resolving_links(source, destination, canonical_root, &mut visited)
+}
+
+/// Copy the output tree while MATERIALIZING symlinks whose canonical target
+/// stays inside the image root (real repos carry internal links — first hit:
+/// jspaint's `lib/tracky-mouse/website/core`, a directory link to a sibling
+/// that is ALSO walked via its real path). A link resolving outside the root
+/// still fails closed exactly like before. Two disjoint paths reaching the
+/// same directory are fine (the bundle's blobs are content-addressed); only a
+/// link back to a directory still on the CURRENT recursion stack — a true
+/// cycle, which would recurse forever — fails closed. `visited` holds the
+/// canonical directories of the active stack (inserted on entry, removed on
+/// exit). The extracted tree never contains a link.
+fn copy_tree_resolving_links(
+    source: &Path,
+    destination: &Path,
+    canonical_root: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
+    let canonical_source = fs::canonicalize(source).with_context(|| {
+        format!(
+            "canonicalize static output directory {}",
+            source.display()
+        )
+    })?;
+    if !visited.insert(canonical_source.clone()) {
+        bail!(
+            "static output contains a symlink cycle: {}",
+            source.display()
+        );
+    }
+    let result = copy_tree_entries(source, destination, canonical_root, visited);
+    visited.remove(&canonical_source);
+    result
+}
+
+fn copy_tree_entries(
+    source: &Path,
+    destination: &Path,
+    canonical_root: &Path,
+    visited: &mut std::collections::BTreeSet<PathBuf>,
+) -> Result<()> {
     fs::create_dir_all(destination)
         .with_context(|| format!("create extracted output {}", destination.display()))?;
     let mut entries = fs::read_dir(source)
@@ -231,18 +274,10 @@ fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) 
     for entry in entries {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("read file type {}", source_path.display()))?;
-        if file_type.is_symlink() {
-            bail!(
-                "static output contains a symlink: {}",
-                source_path.display()
-            );
-        }
-        // TOCTOU guard: a component swapped to a symlink AFTER the type check
-        // above would resolve outside the image root when canonicalized. Verify
-        // the canonicalized entry remains beneath the canonical image root.
+        // Canonicalize FIRST: this both resolves a symlink to its real target
+        // and is the TOCTOU guard (a component swapped to a link after any
+        // earlier check resolves outside the image root here). A link cycle
+        // surfaces as an ELOOP error and fails closed.
         let canonical_entry = fs::canonicalize(&source_path).with_context(|| {
             format!("canonicalize static output entry {}", source_path.display())
         })?;
@@ -252,11 +287,19 @@ fn copy_tree_no_links(source: &Path, destination: &Path, canonical_root: &Path) 
                 source_path.display()
             );
         }
+        let file_type = fs::metadata(&canonical_entry)
+            .with_context(|| format!("read file type {}", source_path.display()))?
+            .file_type();
         if file_type.is_dir() {
-            copy_tree_no_links(&source_path, &destination_path, canonical_root)?;
+            copy_tree_resolving_links(
+                &canonical_entry,
+                &destination_path,
+                canonical_root,
+                visited,
+            )?;
         } else if file_type.is_file() {
-            reject_hard_link(&fs::metadata(&source_path)?, &source_path)?;
-            fs::copy(&source_path, &destination_path).with_context(|| {
+            reject_hard_link(&fs::metadata(&canonical_entry)?, &source_path)?;
+            fs::copy(&canonical_entry, &destination_path).with_context(|| {
                 format!(
                     "copy static output {} to {}",
                     source_path.display(),
@@ -462,8 +505,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn extraction_rejects_a_symlink_inside_the_output_tree() {
-        // A symlink BELOW the selected output root is also refused (no links
-        // anywhere in the closure).
+        // A symlink BELOW the selected output root whose target ESCAPES the
+        // image root is refused (internal links are materialized instead —
+        // see the tests below).
         let image = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("secret.txt"), "host-secret").unwrap();
@@ -472,6 +516,45 @@ mod tests {
         fs::write(output.join("index.html"), "built").unwrap();
         std::os::unix::fs::symlink(outside.path().join("secret.txt"), output.join("leak.txt"))
             .unwrap();
+        assert!(extract_static_web_output(image.path(), &plan()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_materializes_internal_symlinks() {
+        // A link whose canonical target stays INSIDE the image root is
+        // materialized as real content (jspaint-style internal links), for
+        // both a file link and a directory link.
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("core")).unwrap();
+        fs::write(output.join("index.html"), "built").unwrap();
+        fs::write(output.join("core/engine.js"), "js").unwrap();
+        std::os::unix::fs::symlink("index.html", output.join("home.html")).unwrap();
+        std::os::unix::fs::symlink(output.join("core"), output.join("lib-core")).unwrap();
+
+        let extracted = extract_static_web_output(image.path(), &plan()).unwrap();
+        let root = extracted.output_root();
+        assert_eq!(fs::read_to_string(root.join("home.html")).unwrap(), "built");
+        assert_eq!(
+            fs::read_to_string(root.join("lib-core/engine.js")).unwrap(),
+            "js"
+        );
+        assert!(!fs::symlink_metadata(root.join("home.html"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_a_directory_symlink_cycle() {
+        let image = tempfile::tempdir().unwrap();
+        let output = image.path().join("srv/app/dist");
+        fs::create_dir_all(output.join("sub")).unwrap();
+        fs::write(output.join("index.html"), "built").unwrap();
+        // sub/loop -> dist: revisits an already-copied directory.
+        std::os::unix::fs::symlink(&output, output.join("sub/loop")).unwrap();
         assert!(extract_static_web_output(image.path(), &plan()).is_err());
     }
 

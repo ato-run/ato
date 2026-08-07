@@ -543,13 +543,25 @@ mod tests {
 
     #[test]
     fn rejects_unsafe_closure_members() {
+        // An INTERNAL link is materialized (not a closure risk); only a link
+        // whose target escapes the image root stays refused.
         let image = fixture_root();
         #[cfg(unix)]
-        std::os::unix::fs::symlink("index.html", image.path().join("dist/link.html")).unwrap();
-        #[cfg(unix)]
         {
+            std::os::unix::fs::symlink("index.html", image.path().join("dist/link.html"))
+                .unwrap();
             let extracted = extract_static_web_output(image.path(), &plan());
-            assert!(extracted.is_err());
+            assert!(extracted.is_ok(), "internal link must be materialized");
+
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("secret.txt"), "host-secret").unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.txt"),
+                image.path().join("dist/leak.html"),
+            )
+            .unwrap();
+            let escaping = extract_static_web_output(image.path(), &plan());
+            assert!(escaping.is_err(), "escaping link must be refused");
         }
     }
 
