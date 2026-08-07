@@ -85,14 +85,10 @@ pub fn produce_static_web_bundle(
         if relative.ends_with(".map") {
             bail!("source maps are not publishable static web output: {relative}");
         }
-        // Repository housekeeping is not web output. When the declared root is
-        // the source root itself (`root = "."`, the dependency-free static
-        // case), the tree carries .gitignore, .github/, LICENSE and friends;
-        // failing the whole bundle on them made every plain static repo
-        // unpublishable. They are EXCLUDED rather than served: a hidden entry
-        // has no place on a public edge surface, and an unknown media type on
-        // a real asset still fails loudly below.
-        if is_repository_housekeeping(&relative) {
+        // A repository is not a build output. When the declared root is the
+        // source root itself (`root = "."`, the dependency-free static case)
+        // the tree also carries everything that produced the site.
+        if !is_publishable_web_file(&relative) {
             continue;
         }
         // Open ONCE and derive size from the SAME descriptor that produces the
@@ -329,22 +325,29 @@ fn reject_hard_link(_metadata: &fs::Metadata, _path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Repository metadata that must never reach the edge: any dot-prefixed path
-/// segment (`.gitignore`, `.github/workflows/ci.yml`, `.DS_Store`) and any
-/// extension-less file (`LICENSE`, `Makefile`, `Rakefile`, `Dockerfile`).
-/// Everything else keeps its media-type requirement, so a real asset with an
-/// unrecognized extension still fails loudly instead of vanishing.
-fn is_repository_housekeeping(relative: &str) -> bool {
+/// The bundle carries exactly what the edge can serve.
+///
+/// The media-type table IS the definition of publishable web content: without
+/// an entry there is no `Content-Type` to serve the file under, so the edge
+/// could not deliver it even if it were included. Everything else — hidden
+/// entries (`.gitignore`, `.github/`), extension-less tooling (`LICENSE`,
+/// `Rakefile`, `Dockerfile`) and the sources a site is built FROM
+/// (`style/helpers.scss`) — is excluded from the bundle.
+///
+/// This started as an enumerate-and-fail rule, which is what a build output
+/// directory deserves. Three consecutive real repositories disproved it for
+/// `root = "."`: 2048 alone failed on `.gitignore`, then `Rakefile`, then
+/// `style/helpers.scss`. Refusing to publish a working site because it keeps
+/// its Sass next to its CSS is the wrong trade; an unservable file simply is
+/// not part of the site.
+///
+/// Source maps stay a hard failure (handled by the caller) — they are
+/// servable, which is exactly why they must not be published by accident.
+fn is_publishable_web_file(relative: &str) -> bool {
     if relative.split('/').any(|segment| segment.starts_with('.')) {
-        return true;
+        return false;
     }
-    // Anything with no extension at all: LICENSE, Makefile, Rakefile,
-    // Dockerfile, Procfile, CNAME … Web content is addressed by extension, so
-    // an extension-less file is repository tooling, and the edge has no media
-    // type to serve it under anyway. Enumerating names was tried first and
-    // fell over on the second real repository (2048's Rakefile).
-    let name = relative.rsplit('/').next().unwrap_or(relative);
-    !name.contains('.')
+    media_type_for(relative).is_some()
 }
 
 fn media_type_for(path: &str) -> Option<&'static str> {
@@ -576,40 +579,43 @@ mod tests {
 }
 
 #[cfg(test)]
-mod housekeeping_tests {
-    use super::is_repository_housekeeping;
+mod publishable_web_file_tests {
+    use super::is_publishable_web_file;
 
     #[test]
-    fn dot_prefixed_paths_never_reach_the_edge() {
-        for path in [
-            ".gitignore",
-            ".DS_Store",
-            ".github/workflows/ci.yml",
-            "assets/.keep",
-            ".well-known/security.txt",
-        ] {
-            assert!(is_repository_housekeeping(path), "must exclude {path}");
-        }
-    }
-
-    #[test]
-    fn extensionless_repo_metadata_is_excluded() {
-        for path in ["LICENSE", "COPYING", "docs/AUTHORS", "Makefile", "Rakefile", "Dockerfile", "CNAME"] {
-            assert!(is_repository_housekeeping(path), "must exclude {path}");
-        }
-    }
-
-    #[test]
-    fn real_site_content_is_never_excluded() {
+    fn real_site_content_is_published() {
         for path in [
             "index.html",
-            "style.css",
-            "js/app.js",
+            "style/main.css",
+            "js/application.js",
             "README.md",
-            "meta/apple-touch-icon.png",
             "favicon.ico",
+            "meta/apple-touch-icon.png",
+            "audio/hit.mp3",
         ] {
-            assert!(!is_repository_housekeeping(path), "must keep {path}");
+            assert!(is_publishable_web_file(path), "must publish {path}");
+        }
+    }
+
+    #[test]
+    fn hidden_entries_never_reach_the_edge() {
+        for path in [".gitignore", ".github/workflows/ci.yml", "assets/.keep"] {
+            assert!(!is_publishable_web_file(path), "must exclude {path}");
+        }
+    }
+
+    #[test]
+    fn tooling_and_sources_are_not_web_content() {
+        for path in [
+            "LICENSE",
+            "Rakefile",
+            "Makefile",
+            "Dockerfile",
+            "style/helpers.scss",
+            "src/app.ts",
+            "Gemfile.lock",
+        ] {
+            assert!(!is_publishable_web_file(path), "must exclude {path}");
         }
     }
 }
