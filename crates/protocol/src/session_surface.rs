@@ -47,10 +47,11 @@ pub enum SessionSurfaceKind {
 /// so admitting the kind here would advertise a lane that does not exist and
 /// move the failure from submission time to capture time.
 ///
-/// Widening this slice is how Pixel is turned on. The envelope, the descriptor,
-/// the access rules and the client renderer are all already pixel-capable, so
-/// nothing else in the contract changes when it is.
-pub const V1_SUBMISSION_SURFACE_KINDS: &[SessionSurfaceKind] = &[SessionSurfaceKind::Web];
+/// Terminal is admitted only after its PTY builder, guest broker, authenticated
+/// runner gateway, API projection, and PWA renderer are present end to end.
+/// Pixel remains outside until its recipe lane has the equivalent producer.
+pub const V1_SUBMISSION_SURFACE_KINDS: &[SessionSurfaceKind] =
+    &[SessionSurfaceKind::Web, SessionSurfaceKind::Terminal];
 
 /// Narrows a negotiated surface kind to the submission subset, or refuses.
 ///

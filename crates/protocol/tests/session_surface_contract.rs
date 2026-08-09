@@ -417,10 +417,13 @@ fn pixel_stream_is_refused_by_the_v1_submission_subset() {
     );
 }
 
-/// A reserved-but-unimplemented kind is refused.
+/// Terminal is published only after its producer and runtime path are wired.
 #[test]
-fn terminal_is_refused_by_the_v1_submission_subset() {
-    assert!(v1_submission_surface_kind(SessionSurfaceKind::Terminal).is_err());
+fn terminal_is_admitted_by_the_v1_submission_subset() {
+    assert_eq!(
+        v1_submission_surface_kind(SessionSurfaceKind::Terminal),
+        Ok(SessionSurfaceKind::Terminal)
+    );
 }
 
 /// The fail-closed arm: a kind this build cannot even name is refused.
