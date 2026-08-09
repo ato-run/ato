@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(unix)]
+use std::fs::File;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -9,6 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -157,6 +161,10 @@ struct StderrTailCapture {
 impl StderrTailCapture {
     fn from_child(child: &mut Child) -> Option<Self> {
         let reader = child.stderr.take()?;
+        Some(Self::from_reader(reader))
+    }
+
+    fn from_reader(reader: impl Read + Send + 'static) -> Self {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let buffer_ref = Arc::clone(&buffer);
         let (done_tx, done_rx) = mpsc::channel();
@@ -182,11 +190,11 @@ impl StderrTailCapture {
             }
             let _ = done_tx.send(());
         });
-        Some(Self {
+        Self {
             buffer,
             done_rx,
             join_handle: Some(join_handle),
-        })
+        }
     }
 
     fn snapshot(&self) -> String {
@@ -279,11 +287,17 @@ pub fn run_capsule_smoke(
     let isolated_env = prepare_isolated_host_environment(extract_dir.path())?;
     prepare_smoke_working_directory(extract_dir.path(), &service, &isolated_env)?;
 
-    let mut child =
-        spawn_main_service(extract_dir.path(), &service, &isolated_env).map_err(|err| {
-            SmokeFailureReport::new(SmokeFailureClass::SpawnFailed, err.to_string(), "", None)
-        })?;
-    let mut stderr_capture = StderrTailCapture::from_child(&mut child);
+    let use_terminal_pty = target_uses_terminal_surface(&manifest_raw, target_label);
+    let (mut child, pty_capture) = spawn_main_service(
+        extract_dir.path(),
+        &service,
+        &isolated_env,
+        use_terminal_pty,
+    )
+    .map_err(|err| {
+        SmokeFailureReport::new(SmokeFailureClass::SpawnFailed, err.to_string(), "", None)
+    })?;
+    let mut stderr_capture = pty_capture.or_else(|| StderrTailCapture::from_child(&mut child));
     let startup_timeout = Duration::from_millis(options.startup_timeout_ms);
     let deadline = Instant::now() + startup_timeout;
 
@@ -622,7 +636,8 @@ fn spawn_main_service(
     root: &Path,
     service: &MainService,
     isolated_env: &HostIsolationContext,
-) -> std::io::Result<Child> {
+    use_terminal_pty: bool,
+) -> std::io::Result<(Child, Option<StderrTailCapture>)> {
     smoke_shell_preflight(
         &service.executable,
         crate::shell_support::host_posix_shell_available(),
@@ -649,24 +664,56 @@ fn spawn_main_service(
         .collect::<Vec<_>>();
     cmd.args(args);
     cmd.current_dir(&cwd_path);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    let mut pty_master = None;
+    #[cfg(unix)]
+    let mut pty_slave_fd = None;
+    if use_terminal_pty {
+        #[cfg(unix)]
+        {
+            let (master, slave) = open_smoke_pty(80, 24)?;
+            pty_slave_fd = Some(slave.as_raw_fd());
+            cmd.stdin(Stdio::from(slave.try_clone()?));
+            cmd.stdout(Stdio::from(slave.try_clone()?));
+            cmd.stderr(Stdio::from(slave));
+            cmd.env("TERM", "xterm-256color");
+            pty_master = Some(master);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Terminal Surface smoke tests require PTY support",
+            ));
+        }
+    } else {
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::piped());
+    }
     apply_isolated_command_env(&mut cmd, root, service, isolated_env);
     cmd.env("COREPACK_ENABLE_STRICT", "0");
     cmd.env("npm_config_manage_package_manager_versions", "false");
 
     #[cfg(unix)]
     unsafe {
-        cmd.pre_exec(|| {
-            if libc::setpgid(0, 0) != 0 {
+        cmd.pre_exec(move || {
+            if let Some(slave_fd) = pty_slave_fd {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            } else if libc::setpgid(0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
     }
 
-    cmd.spawn().map_err(|e| {
+    let child = cmd.spawn().map_err(|e| {
         // Defense in depth: if the preflight passed but the spawn still can't
         // find a shell executable (PATH race, broken Git Bash install), upgrade
         // the file-not-found failure to the same marker-tagged message so it
@@ -689,7 +736,50 @@ fn spawn_main_service(
                 executable.display()
             ),
         )
-    })
+    })?;
+    #[cfg(unix)]
+    let capture = pty_master.map(StderrTailCapture::from_reader);
+    #[cfg(not(unix))]
+    let capture = None;
+    Ok((child, capture))
+}
+
+fn target_uses_terminal_surface(manifest: &toml::Value, target_label: &str) -> bool {
+    manifest
+        .get("targets")
+        .and_then(toml::Value::as_table)
+        .and_then(|targets| targets.get(target_label))
+        .and_then(toml::Value::as_table)
+        .and_then(|target| target.get("surface"))
+        .and_then(toml::Value::as_table)
+        .and_then(|surface| surface.get("kind"))
+        .and_then(toml::Value::as_str)
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("terminal"))
+}
+
+#[cfg(unix)]
+fn open_smoke_pty(cols: u16, rows: u16) -> std::io::Result<(File, File)> {
+    let mut master: RawFd = -1;
+    let mut slave: RawFd = -1;
+    let mut size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    if unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    } < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) })
 }
 
 fn prepare_smoke_working_directory(
@@ -1212,6 +1302,44 @@ entrypoint = "main.py"
         let opts = parse_smoke_options(&manifest, "cli").unwrap();
         assert_eq!(opts.startup_timeout_ms, DEFAULT_STARTUP_TIMEOUT_MS);
         assert!(opts.check_commands.is_empty());
+    }
+
+    #[test]
+    fn detects_terminal_surface_smoke_mode() {
+        let manifest: toml::Value = toml::from_str(
+            r#"
+[targets.terminal]
+runtime = "source"
+entrypoint = "main.py"
+
+[targets.terminal.surface]
+kind = "terminal"
+profiles = ["ato.terminal-surface.v1"]
+"#,
+        )
+        .unwrap();
+
+        assert!(target_uses_terminal_surface(&manifest, "terminal"));
+        assert!(!target_uses_terminal_surface(&manifest, "missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_smoke_pty_has_requested_size() {
+        let (_master, slave) = open_smoke_pty(120, 40).expect("open PTY");
+        assert_eq!(unsafe { libc::isatty(slave.as_raw_fd()) }, 1);
+
+        let mut size = libc::winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCGWINSZ, &mut size) },
+            0
+        );
+        assert_eq!((size.ws_col, size.ws_row), (120, 40));
     }
 
     #[test]

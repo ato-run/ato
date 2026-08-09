@@ -49,7 +49,7 @@ def on_interrupt(_signal, _frame):
 
 
 threading.Thread(
-    target=http.server.ThreadingHTTPServer(("0.0.0.0", 8080), Health).serve_forever,
+    target=http.server.ThreadingHTTPServer(("0.0.0.0", 18080), Health).serve_forever,
     daemon=True,
 ).start()
 signal.signal(signal.SIGWINCH, on_resize)
