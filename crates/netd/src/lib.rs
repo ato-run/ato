@@ -15,3 +15,7 @@ pub mod pixel_gateway;
 pub mod rfb_probe;
 pub mod server;
 pub mod state;
+pub mod surface_authorization;
+pub mod surface_websocket_auth;
+#[cfg(unix)]
+pub mod terminal_gateway;

@@ -5,20 +5,24 @@
 //! been authorized, then relays binary messages to a private RFB TCP endpoint.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::BTreeSet,
     net::SocketAddr,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{SinkExt, StreamExt};
-use http::{
-    HeaderValue, StatusCode,
-    header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL},
+pub use crate::surface_authorization::{
+    AuthorizedSurfaceAccess, SurfaceAccessAuthorizer, SurfaceAuthorizationError,
+    SurfaceGatewayScope as PixelGatewayScope,
 };
+pub use crate::surface_websocket_auth::SURFACE_ASSERTION_HEADER;
+use crate::surface_websocket_auth::{
+    SurfaceHandshakeAuthorizer, is_normalized_allowed_origin, new_consumed_surface_grants,
+};
+use futures_util::{SinkExt, StreamExt};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -27,56 +31,16 @@ use tokio::{
     task::JoinHandle,
     time::sleep,
 };
-use tokio_tungstenite::{
-    accept_hdr_async_with_config,
-    tungstenite::{
-        Message,
-        handshake::server::{Callback, ErrorResponse, Request, Response},
-    },
-};
-use url::Url;
+use tokio_tungstenite::{accept_hdr_async_with_config, tungstenite::Message};
 
 /// Header carrying the API-to-runner assertion. Browser credentials are never
 /// forwarded to the private RFB endpoint.
-pub const SURFACE_ASSERTION_HEADER: &str = "x-ato-surface-assertion";
-
 const RFB_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_CLIENT_MESSAGE_BYTES: usize = 1024 * 1024;
 const OUTBOUND_QUEUE_DEPTH: usize = 8;
-const MAX_CONSUMED_GRANTS: usize = 4096;
 const RFB_CLIENT_HANDSHAKE_BYTES: usize = 14;
 const MAX_TRACKED_CLIENT_MESSAGE_BYTES: usize = MAX_CLIENT_MESSAGE_BYTES;
 const PRIVATE_RFB_CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Immutable identity used to scope every access grant accepted by a gateway.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PixelGatewayScope {
-    pub session_id: String,
-    pub surface_id: String,
-}
-
-/// Result of validating a session-bound internal assertion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizedSurfaceAccess {
-    pub principal: String,
-    /// Unique assertion identifier (`jti`). A gateway consumes it once.
-    pub grant_id: String,
-}
-
-/// Intentionally opaque authorization failure so assertion contents never
-/// appear in logs or client responses.
-#[derive(Debug, Clone, Copy, Error)]
-#[error("surface assertion rejected")]
-pub struct SurfaceAuthorizationError;
-
-/// Boundary implemented by the runner's assertion verifier.
-pub trait SurfaceAccessAuthorizer: Send + Sync + 'static {
-    fn authorize(
-        &self,
-        assertion: &str,
-        scope: &PixelGatewayScope,
-    ) -> Result<AuthorizedSurfaceAccess, SurfaceAuthorizationError>;
-}
 
 /// Configuration for one session-owned pixel gateway.
 #[derive(Debug, Clone)]
@@ -86,28 +50,6 @@ pub struct PixelGatewayConfig {
     pub private_rfb_connect_timeout: Duration,
     pub scope: PixelGatewayScope,
     pub allowed_origins: BTreeSet<String>,
-}
-
-fn is_normalized_allowed_origin(origin: &str) -> bool {
-    let Ok(url) = Url::parse(origin) else {
-        return false;
-    };
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.origin().ascii_serialization() != origin
-    {
-        return false;
-    }
-    let loopback_host = url.host_str().is_some_and(|host| {
-        host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback())
-    });
-    url.scheme() == "https" || (url.scheme() == "http" && loopback_host)
 }
 
 fn is_private_rfb_address(address: SocketAddr) -> bool {
@@ -249,7 +191,7 @@ async fn run_gateway(
     mut cancel_rx: watch::Receiver<bool>,
     last_input_activity_unix_millis: Arc<AtomicU64>,
 ) -> Result<(), PixelGatewayError> {
-    let consumed_grants = Arc::new(Mutex::new(HashSet::<String>::new()));
+    let consumed_grants = new_consumed_surface_grants();
     let mut connections = tokio::task::JoinSet::new();
 
     loop {
@@ -289,15 +231,17 @@ async fn serve_pixel_connection(
     stream: TcpStream,
     config: PixelGatewayConfig,
     authorizer: Arc<dyn SurfaceAccessAuthorizer>,
-    consumed_grants: Arc<Mutex<HashSet<String>>>,
+    consumed_grants: crate::surface_websocket_auth::ConsumedSurfaceGrants,
     last_input_activity_unix_millis: Arc<AtomicU64>,
 ) -> Result<(), PixelGatewayError> {
-    let callback = HandshakeAuthorizer {
-        allowed_origins: config.allowed_origins.clone(),
-        scope: config.scope.clone(),
+    let callback = SurfaceHandshakeAuthorizer::new(
+        config.allowed_origins.clone(),
+        config.scope.clone(),
         authorizer,
         consumed_grants,
-    };
+        "binary",
+        false,
+    );
     let ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
         .max_message_size(Some(MAX_CLIENT_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_CLIENT_MESSAGE_BYTES));
@@ -449,112 +393,6 @@ fn now_unix_millis() -> u64 {
         .map_or(0, |duration| duration.as_millis() as u64)
 }
 
-struct HandshakeAuthorizer {
-    allowed_origins: BTreeSet<String>,
-    scope: PixelGatewayScope,
-    authorizer: Arc<dyn SurfaceAccessAuthorizer>,
-    consumed_grants: Arc<Mutex<HashSet<String>>>,
-}
-
-impl Callback for HandshakeAuthorizer {
-    fn on_request(
-        self,
-        request: &Request,
-        mut response: Response,
-    ) -> Result<Response, ErrorResponse> {
-        authorize_upgrade(
-            request,
-            &self.allowed_origins,
-            &self.scope,
-            self.authorizer.as_ref(),
-            &self.consumed_grants,
-        )
-        .map_err(UpgradeRejection::into_response)?;
-
-        if offered_binary_subprotocol(request) {
-            response
-                .headers_mut()
-                .insert(SEC_WEBSOCKET_PROTOCOL, HeaderValue::from_static("binary"));
-        }
-        Ok(response)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum UpgradeRejection {
-    Unauthorized,
-    Forbidden,
-    Internal,
-}
-
-impl UpgradeRejection {
-    fn into_response(self) -> ErrorResponse {
-        let status = match self {
-            Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        rejection(status)
-    }
-}
-
-fn authorize_upgrade(
-    request: &Request,
-    allowed_origins: &BTreeSet<String>,
-    scope: &PixelGatewayScope,
-    authorizer: &dyn SurfaceAccessAuthorizer,
-    consumed_grants: &Mutex<HashSet<String>>,
-) -> Result<(), UpgradeRejection> {
-    let origin = request
-        .headers()
-        .get(ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(UpgradeRejection::Forbidden)?;
-    if !allowed_origins.contains(origin) {
-        return Err(UpgradeRejection::Forbidden);
-    }
-
-    let assertion = request
-        .headers()
-        .get(SURFACE_ASSERTION_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .ok_or(UpgradeRejection::Unauthorized)?;
-    let access = authorizer
-        .authorize(assertion, scope)
-        .map_err(|_| UpgradeRejection::Unauthorized)?;
-    if access.grant_id.trim().is_empty() || access.principal.trim().is_empty() {
-        return Err(UpgradeRejection::Unauthorized);
-    }
-
-    let mut consumed = consumed_grants
-        .lock()
-        .map_err(|_| UpgradeRejection::Internal)?;
-    if consumed.contains(&access.grant_id) {
-        return Err(UpgradeRejection::Unauthorized);
-    }
-    if consumed.len() >= MAX_CONSUMED_GRANTS {
-        return Err(UpgradeRejection::Internal);
-    }
-    consumed.insert(access.grant_id);
-    Ok(())
-}
-
-fn offered_binary_subprotocol(request: &Request) -> bool {
-    request
-        .headers()
-        .get(SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|part| part.trim() == "binary"))
-}
-
-fn rejection(status: StatusCode) -> ErrorResponse {
-    http::Response::builder()
-        .status(status)
-        .header("cache-control", "no-store")
-        .body(None)
-        .unwrap_or_else(|_| http::Response::new(None))
-}
-
 async fn relay_rfb<S>(
     websocket: tokio_tungstenite::WebSocketStream<S>,
     rfb: TcpStream,
@@ -634,10 +472,15 @@ mod tests {
     use std::time::Duration;
 
     use futures_util::{SinkExt, StreamExt};
-    use http::HeaderValue;
+    use http::{
+        HeaderValue, StatusCode,
+        header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL},
+    };
     use tokio_tungstenite::{
         connect_async,
-        tungstenite::{Error as WebSocketError, Message, client::IntoClientRequest},
+        tungstenite::{
+            Error as WebSocketError, Message, client::IntoClientRequest, handshake::client::Request,
+        },
     };
 
     use super::*;
