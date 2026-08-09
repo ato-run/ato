@@ -445,6 +445,7 @@ pub fn derive_imported_service_plan_with_mounts(
         volumes: Vec::new(),
     };
     let supervisor = SupervisorBuildSpec {
+        stdio_mode: crate::rootfs_builder::SupervisorStdioMode::Log,
         binding_names,
         env_map: bindings_env,
         services: Some(vec![service]),

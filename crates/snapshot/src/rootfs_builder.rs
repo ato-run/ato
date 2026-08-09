@@ -27,6 +27,7 @@ use capsule::foundation::types::manifest::{
 use capsule::foundation::types::manifest::DEFAULT_STATE_VOLUME_SIZE_MB;
 use capsule::foundation::types::ready_state::SecretDelivery;
 use protocol::binding_lease::BindingName;
+use protocol::session_surface::SessionSurfaceKind;
 use serde::Serialize;
 
 use crate::state_volume::{drive_id as state_drive_id, volume_label};
@@ -91,6 +92,10 @@ impl SourceProbe {
 /// guest-agent reads at exec. Non-secret; safe in a receipt.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SupervisorBuildSpec {
+    /// How the guest connects the declared workload's stdio. Terminal surfaces
+    /// require a controlling PTY; every existing artifact keeps the log mode.
+    #[serde(default, skip_serializing_if = "SupervisorStdioMode::is_log")]
+    pub stdio_mode: SupervisorStdioMode,
     /// The binding names the guest-agent requires before it starts the workload(s)
     /// (the run gate delivers a lease per name). = the declared `[secrets.*]` names.
     pub binding_names: Vec<String>,
@@ -119,6 +124,20 @@ pub struct SupervisorBuildSpec {
     /// receipt and hashed into the artifact identity (spec, not value).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub generated_bindings: Vec<GeneratedBindingBuildSpec>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisorStdioMode {
+    #[default]
+    Log,
+    Pty,
+}
+
+impl SupervisorStdioMode {
+    fn is_log(&self) -> bool {
+        *self == Self::Log
+    }
 }
 
 /// Phase 7 (generated internal bindings): one `[generated_bindings.<name>]`
@@ -1255,7 +1274,13 @@ pub fn derive_supervisor_build_spec(
     // A supervisor build is warranted by EITHER an env-delivery secret (the
     // binding-lease path) OR a Phase 7 generated internal binding (the guest
     // generates + injects the value at run) — both need the guest-agent as init.
-    if m.secrets.is_empty() && m.generated_bindings.is_empty() {
+    let terminal_surface = m
+        .resolve_default_target()
+        .map_err(|error| error.to_string())?
+        .surface
+        .as_ref()
+        .is_some_and(|surface| surface.kind == SessionSurfaceKind::Terminal);
+    if m.secrets.is_empty() && m.generated_bindings.is_empty() && !terminal_surface {
         return Err(
             "supervisor build requires at least one [secrets.*] (delivery = \"env\") or \
              [generated_bindings.*]"
@@ -1328,6 +1353,16 @@ pub fn derive_supervisor_build_spec(
     // MULTI-service supervisor build; otherwise keep the legacy single-service
     // shape (`services = None` → byte-identical emitted supervisor.json).
     let mut services = derive_supervisor_services(m, &env_map, spec.port)?;
+    if terminal_surface
+        && services
+            .as_ref()
+            .is_some_and(|services| services.len() != 1 || services[0].run_once)
+    {
+        return Err(
+            "terminal surface v1 requires exactly one long-running service; multi-service and run_once workloads are unsupported"
+                .into(),
+        );
+    }
 
     // v1.5 per-service secret scoping (ato#982): in a MULTI-service build a secret
     // reaches only the service(s) that named it. Fail-closed: every REQUIRED secret
@@ -1367,6 +1402,11 @@ pub fn derive_supervisor_build_spec(
         .as_ref()
         .and_then(|svcs| svcs.iter().find(|s| s.public).map(|s| s.name.clone()));
     spec.supervisor = Some(SupervisorBuildSpec {
+        stdio_mode: if terminal_surface {
+            SupervisorStdioMode::Pty
+        } else {
+            SupervisorStdioMode::Log
+        },
         binding_names,
         env_map,
         services,
@@ -1505,7 +1545,7 @@ fn build_supervisor_json(
     port: u16,
     start_cmd: &str,
 ) -> serde_json::Value {
-    match &sup.services {
+    let mut value = match &sup.services {
         Some(services) => {
             // Phase 6 (service DAG): which declared services are one-shot tasks —
             // a dependent WAITS FOR EXIT 0 of a run_once dep (depends_on_success),
@@ -1599,7 +1639,11 @@ fn build_supervisor_json(
             emit_generated_bindings(&mut obj, sup);
             obj
         }
+    };
+    if sup.stdio_mode == SupervisorStdioMode::Pty {
+        value["stdio_mode"] = serde_json::json!("pty");
     }
+    value
 }
 
 /// Phase 7 (generated internal bindings): emit the value-free `generated_bindings`
@@ -3980,6 +4024,48 @@ readiness_probe = { http_get = "/health" }
             "{}\n[secrets.openai_api_key]\nrequired = true\nenv = \"OPENAI_API_KEY\"\n",
             base_toml()
         )
+    }
+
+    fn terminal_toml() -> String {
+        format!(
+            "{}\n[targets.app.surface]\nkind = \"terminal\"\nprofiles = [\"ato.terminal-surface.v1\"]\n",
+            base_toml()
+        )
+    }
+
+    #[test]
+    fn terminal_surface_builds_a_single_service_pty_supervisor() {
+        let spec = derive_supervisor_build_spec(&parse(&terminal_toml()), &probe_python())
+            .expect("terminal supervisor spec");
+        let supervisor = spec.supervisor.as_ref().expect("supervisor present");
+        assert_eq!(supervisor.stdio_mode, SupervisorStdioMode::Pty);
+        assert!(supervisor.binding_names.is_empty());
+        assert_eq!(
+            build_supervisor_json(supervisor, spec.port, &spec.start_cmd)["stdio_mode"],
+            "pty"
+        );
+    }
+
+    #[test]
+    fn terminal_surface_rejects_multiple_services() {
+        let manifest = terminal_toml().replace(
+            "[targets.app.surface]",
+            r#"[services.one]
+entrypoint = "one"
+[services.one.network]
+publish = true
+
+[services.two]
+entrypoint = "two"
+
+[targets.app.surface]"#,
+        );
+        let error = derive_supervisor_build_spec(&parse(&manifest), &probe_python())
+            .expect_err("terminal v1 must stay single-service");
+        assert!(
+            error.contains("exactly one long-running service"),
+            "{error}"
+        );
     }
 
     #[test]
