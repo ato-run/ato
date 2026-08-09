@@ -62,5 +62,6 @@ pub mod net;
 pub mod placement;
 pub mod runtime_control_events;
 pub mod session_surface;
+pub mod terminal_surface;
 
 pub use error::{Result, WireError};
