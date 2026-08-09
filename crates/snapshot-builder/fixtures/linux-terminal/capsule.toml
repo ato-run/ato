@@ -1,6 +1,6 @@
 schema_version = "0.3"
 name = "ato-linux-terminal-fixture"
-version = "0.1.0"
+version = "0.1.1"
 type = "app"
 default_target = "terminal"
 
@@ -8,8 +8,8 @@ default_target = "terminal"
 runtime = "source"
 language = "python"
 run = "python3 terminal_fixture.py"
-port = 8080
-readiness_probe = { http_get = "/health" }
+port = 18080
+readiness_probe = { http_get = "/health", port = "18080" }
 
 [targets.terminal.surface]
 kind = "terminal"
