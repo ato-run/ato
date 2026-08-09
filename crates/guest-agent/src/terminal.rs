@@ -239,7 +239,7 @@ impl Workload for PtyChildWorkload {
                 if libc::setsid() < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 Ok(())
