@@ -24,6 +24,8 @@ use protocol::binding_lease::{BindingLeaseId, BindingName};
 /// that bind `127.0.0.1` inside the guest.
 pub mod relay;
 pub mod supervisor;
+pub mod terminal;
+pub mod terminal_vsock;
 pub mod tmpfs;
 pub mod volume_mount;
 pub mod vsock;

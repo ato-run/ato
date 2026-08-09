@@ -6,8 +6,9 @@
 //! responses back. Two transports, identical framing:
 //!
 //! - `ATO_GUEST_AGENT_MODE=stdio` (default): over stdin/stdout (tests + the smoke).
-//! - `ATO_GUEST_AGENT_MODE=vsock` (PR B): AF_VSOCK listener on
-//!   `ATO_GUEST_AGENT_VSOCK_PORT` (default 1025) — the host connects through
+//! - `ATO_GUEST_AGENT_MODE=vsock` (PR B): AF_VSOCK control listener on
+//!   `ATO_GUEST_AGENT_VSOCK_PORT` (default 1025), plus the opt-in Terminal
+//!   Surface stream on port 1026 — the host connects through
 //!   Firecracker's vsock UDS. This is the production guest transport.
 //!
 //! v1.2 (supervisor mode): when `/etc/ato/supervisor.json` is present, the agent
@@ -23,8 +24,10 @@ use std::io::{BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use guest_agent::supervisor::{
-    ChildWorkload, Supervisor, SupervisorConfig, Workload, bindings_root, config_path,
+    ChildWorkload, StdioMode, Supervisor, SupervisorConfig, Workload, bindings_root, config_path,
 };
+use guest_agent::terminal::{GuestWorkload, PtyChildWorkload, TerminalBrokerState};
+use guest_agent::terminal_vsock::{DEFAULT_TERMINAL_VSOCK_PORT, serve_terminal_vsock};
 use guest_agent::volume_mount::{
     RealVolumeMounter, VolumeMounter, VolumeSpec, mount_all_volumes, unmount_all_volumes,
 };
@@ -368,6 +371,8 @@ fn main() -> std::io::Result<()> {
     // Supervisor: present only when /etc/ato/supervisor.json exists. A malformed
     // config for a supervisor capsule fails closed (the agent exits) rather than
     // launching the workload unbound.
+    let terminal_state = std::sync::Arc::new(TerminalBrokerState::default());
+    let mut terminal_enabled = false;
     let (supervisor, volumes) = match SupervisorConfig::load(&config_path()) {
         Ok(Some(cfg)) => {
             // v1.6 (ato#983) Slice 3 revision: mounting durable state does
@@ -381,8 +386,20 @@ fn main() -> std::io::Result<()> {
             // secrets. `cfg.volumes` is only carried through here so the
             // runtime knows what to mount WHEN that arrives.
             let volumes = cfg.volumes.clone();
+            terminal_enabled = cfg.stdio_mode == StdioMode::Pty;
+            let workload_state = std::sync::Arc::clone(&terminal_state);
+            let stdio_mode = cfg.stdio_mode;
             (
-                Some(Supervisor::new(cfg, root.clone(), ChildWorkload::default)),
+                Some(Supervisor::new(
+                    cfg,
+                    root.clone(),
+                    move || match stdio_mode {
+                        StdioMode::Log => GuestWorkload::Log(ChildWorkload::default()),
+                        StdioMode::Pty => GuestWorkload::Pty(PtyChildWorkload::new(
+                            std::sync::Arc::clone(&workload_state),
+                        )),
+                    },
+                )),
                 volumes,
             )
         }
@@ -428,6 +445,18 @@ fn main() -> std::io::Result<()> {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(DEFAULT_VSOCK_PORT);
             eprintln!("ato-guest-agent: vsock listening on port {port}");
+            if terminal_enabled {
+                let state = std::sync::Arc::clone(&terminal_state);
+                let terminal_port = std::env::var("ATO_GUEST_AGENT_TERMINAL_VSOCK_PORT")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(DEFAULT_TERMINAL_VSOCK_PORT);
+                std::thread::spawn(move || {
+                    if let Err(error) = serve_terminal_vsock(terminal_port, state) {
+                        eprintln!("ato-guest-agent: terminal vsock failed: {error}");
+                    }
+                });
+            }
             serve_vsock(port, |line| runtime.dispatch(line))
         }
         other => {
@@ -503,6 +532,7 @@ mod tests {
         let spy = SpyWorkload::default();
         let state = spy.0.clone();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["/app/serve".into()],
             cwd: "/".into(),
             base_env: BTreeMap::new(),
@@ -581,6 +611,7 @@ mod tests {
         let spy = SpyWorkload::default();
         let state = spy.0.clone();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -649,6 +680,7 @@ mod tests {
             size_mb: 64,
         }];
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
