@@ -4431,7 +4431,7 @@ fn process_authoring_preview(
             store: &store,
             capsule_manifest_hash: artifact.capsule_manifest_hash.clone(),
             runner_class: None,
-            surface_requirement: None,
+            surface_requirement: artifact.surface_requirement.clone(),
             layers: BuildLayers {
                 rootfs,
                 runtime: None,
@@ -4453,7 +4453,7 @@ fn process_authoring_preview(
             sanitizer_contract: SanitizerContract::default(),
             declared_secret_markers: Vec::new(),
             execution_id: Some(artifact.execution_id.clone()),
-            supervisor: None,
+            supervisor: clean_replay_supervisor(artifact.surface_requirement.as_ref()),
         })
         .map_err(|error| fail("preview", format!("boot Build Attempt artifact: {error}")))?;
     let workload_addr = guest.workload_addr();
@@ -5032,6 +5032,18 @@ struct CleanReplayBuilderArtifact {
     execution_id: String,
     port: u16,
     healthcheck: String,
+    /// The immutable presentation requirement used for the successful Clean
+    /// Replay. Preview and Seal must carry it into their Ready-State manifests.
+    #[serde(default)]
+    surface_requirement: Option<SessionSurfaceRequirement>,
+}
+
+fn clean_replay_supervisor(
+    surface_requirement: Option<&SessionSurfaceRequirement>,
+) -> Option<SupervisorBindings> {
+    surface_requirement
+        .is_some_and(|requirement| requirement.kind == SessionSurfaceKind::Terminal)
+        .then(SupervisorBindings::default)
 }
 
 fn authoring_work_directory(root: &Path, kind: &str, id: &str) -> Result<PathBuf, String> {
@@ -5245,6 +5257,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 execution_id: produced.execution_id.clone(),
                 port: produced.port,
                 healthcheck: produced.healthcheck.clone(),
+                surface_requirement: produced.surface_requirement.clone(),
             },
         )?;
         let execution_contract_digest = produced.execution_id.clone();
@@ -5667,7 +5680,7 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
                 store: &store,
                 capsule_manifest_hash: artifact.capsule_manifest_hash.clone(),
                 runner_class: None,
-                surface_requirement: None,
+                surface_requirement: artifact.surface_requirement.clone(),
                 layers: BuildLayers {
                     rootfs,
                     runtime: None,
@@ -5689,7 +5702,7 @@ impl snapshot::authoring_evidence::ReadyStateSealAdapter for BuilderReadyStateSe
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: Vec::new(),
                 execution_id: Some(artifact.execution_id.clone()),
-                supervisor: None,
+                supervisor: clean_replay_supervisor(artifact.surface_requirement.as_ref()),
             })
             .map_err(|error| format!("boot clean artifact for Seal: {error}"))?;
         let captured = match guest.capture_candidate() {
@@ -6024,6 +6037,45 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clean_replay_artifact_preserves_terminal_surface_for_seal() {
+        let surface_requirement: SessionSurfaceRequirement =
+            serde_json::from_value(serde_json::json!({
+                "kind": "terminal",
+                "profiles": ["ato.terminal-surface.v1"]
+            }))
+            .expect("terminal surface requirement");
+        let artifact = CleanReplayBuilderArtifact {
+            schema: CLEAN_REPLAY_ARTIFACT_SCHEMA.to_string(),
+            build_attempt_id: "attempt-1".into(),
+            authoring_session_id: "authoring-1".into(),
+            build_config_revision_id: "revision-1".into(),
+            authoring_toml_digest: "sha256:toml".into(),
+            plan_digest: "sha256:plan".into(),
+            source_closure_id: "closure-1".into(),
+            program_intent_digest: "blake3:intent".into(),
+            resolution_lock_digest: "blake3:lock".into(),
+            execution_contract_jcs: "{}".into(),
+            clean_replay_receipt_digest: Some("blake3:receipt".into()),
+            rootfs_digest: "blake3:rootfs".into(),
+            capsule_manifest_hash: "blake3:manifest".into(),
+            execution_id: "blake3:execution".into(),
+            port: 18080,
+            healthcheck: "/".into(),
+            surface_requirement: Some(surface_requirement.clone()),
+        };
+
+        let encoded = serde_jcs::to_vec(&artifact).expect("encode artifact");
+        let decoded: CleanReplayBuilderArtifact =
+            serde_json::from_slice(&encoded).expect("decode artifact");
+
+        assert_eq!(decoded.surface_requirement, Some(surface_requirement));
+        assert_eq!(
+            clean_replay_supervisor(decoded.surface_requirement.as_ref()),
+            Some(SupervisorBindings::default())
+        );
+    }
 
     #[test]
     fn authoring_detection_prefers_repository_capsule_toml_over_static_inference() {
