@@ -10,7 +10,7 @@ import threading
 
 class Health(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != "/health":
+        if self.path not in ("/", "/health"):
             self.send_response(404)
             self.end_headers()
             return

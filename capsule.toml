@@ -1,16 +1,18 @@
-schema_version = "0.3"
+schema_version = "1"
 name = "ato-linux-terminal-fixture"
-version = "0.1.1"
-type = "app"
-default_target = "terminal"
+version = "0.1.2"
 
-[targets.terminal]
-runtime = "source"
-language = "python"
-run = "python3 terminal_fixture.py"
+[run]
+command = ["python3", "terminal_fixture.py"]
+
+[web]
 port = 18080
-readiness_probe = { http_get = "/health", port = "18080" }
+bind = "0.0.0.0"
 
-[targets.terminal.surface]
+[surface]
 kind = "terminal"
 profiles = ["ato.terminal-surface.v1"]
+
+[seal_at]
+command = ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=10).read()"]
+timeout_seconds = 30
