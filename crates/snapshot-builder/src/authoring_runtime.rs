@@ -153,7 +153,10 @@ struct ClaimResponse {
 struct ClaimRequest<'a> {
     builder_id: &'a str,
     supported_operations: &'a [&'a str],
+    supported_features: &'a [&'a str],
 }
+
+const SUPPORTED_AUTHORING_FEATURES: &[&str] = &["static-web-bundle-v1"];
 
 #[derive(Debug, Deserialize)]
 pub struct BuildEventAppendAck {
@@ -179,6 +182,7 @@ impl AuthoringApiClient<'_> {
             serde_json::to_value(ClaimRequest {
                 builder_id: self.builder_id,
                 supported_operations,
+                supported_features: SUPPORTED_AUTHORING_FEATURES,
             })
             .map_err(|error| format!("encode authoring claim: {error}"))?,
         )
@@ -1024,6 +1028,21 @@ pub fn validate_build_contract(work: &AuthoringWork) -> Result<ValidatedBuildCon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claim_advertises_immutable_build_plan_support() {
+        let payload = serde_json::to_value(ClaimRequest {
+            builder_id: "builder_test",
+            supported_operations: &["setup", "clean_replay"],
+            supported_features: SUPPORTED_AUTHORING_FEATURES,
+        })
+        .expect("claim payload");
+
+        assert_eq!(
+            payload["supported_features"],
+            serde_json::json!(["static-web-bundle-v1"])
+        );
+    }
 
     #[test]
     fn effective_plan_digest_matches_the_api_fixed_jcs_fixture() {
