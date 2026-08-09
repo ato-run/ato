@@ -1539,6 +1539,14 @@ struct SupervisorDrive {
     placeholder_values: Vec<String>,
 }
 
+/// Whether a supervisor carries restore-time state and therefore requires the
+/// workload-idle capture lifecycle. An empty supervisor is only a control-plane
+/// transport (for example Terminal Surface PTY over vsock), so running capture
+/// remains valid when the hold reproduces the supervisor boot contract.
+fn supervisor_requires_workload_idle(supervisor: &SupervisorBindings) -> bool {
+    !supervisor.binding_names.is_empty() || !supervisor.state_volumes.is_empty()
+}
+
 impl SupervisorDrive {
     /// Parse + validate every binding name and mint one placeholder lease per name.
     /// Fail-closed on an invalid name (the #961 emission gate should make this
@@ -1791,6 +1799,11 @@ pub struct HeldGuest<'a> {
     build_dir: PathBuf,
     rootfs_path: PathBuf,
     rootfs_blob: BlobManifest,
+    /// Present for a zero-binding, zero-volume supervisor (for example a
+    /// Terminal Surface guest-agent). It carries no placeholder values, but it
+    /// must be retained so the held capture records the same page-hygiene and
+    /// supervisor receipt as the automatic seal path.
+    supervisor_drive: Option<SupervisorDrive>,
     vmstate_path: PathBuf,
     mem_path: PathBuf,
     port: u16,
@@ -1879,10 +1892,7 @@ impl<'a> HeldGuest<'a> {
                 self.rootfs_blob.clone(),
                 &captured.vmstate,
                 &captured.mem,
-                // A `running` hold never delivers placeholders (a supervisor
-                // capsule is refused at `boot_and_hold`), so there is no
-                // supervisor drive and no placeholder-hygiene receipt to record.
-                None,
+                self.supervisor_drive.as_ref(),
                 // The screenshot captured while booting this held guest.
                 self.screenshot_png_base64.clone(),
             )
@@ -2119,7 +2129,7 @@ impl FirecrackerBackend {
         // `workload_idle` exists to prevent. `workload_idle` is a separate
         // lifecycle (#1093), so until it lands this is a refusal, never a fallback.
         //
-        // BOTH halves of `SupervisorBindings` gate this, because they are
+        // BOTH state-bearing halves of `SupervisorBindings` gate this, because they are
         // independent: `binding_names` is the placeholder/secret channel, while
         // `state_volumes` is durable per-owner storage attached as drives. A
         // ZERO-binding supervisor WITH state volumes is a real, supported build
@@ -2127,17 +2137,16 @@ impl FirecrackerBackend {
         // state drives — the workload would come up against storage that simply
         // is not attached. Durable state is restore-time state by v1.6's rule, so
         // §8.3 puts it on the `workload_idle` side too.
-        // The predicate is `supervisor.is_some()`, not a field enumeration. A
-        // supervisor capsule with neither bindings nor volumes still diverges
-        // from `build_ready_state` in ways this path does not reproduce: the
-        // build hard-refuses any supervisor when `!vsock_enabled()`, and it
-        // passes `Some(drive)` into the boot so the page-hygiene kernel cmdline
-        // is ON and the manifest carries a `SupervisorBuildReceipt`. A hold that
-        // admitted it would seal a candidate of the SAME capsule under a
-        // different cmdline and with that receipt missing. Enumerating fields
-        // here would keep re-opening that gap every time a field is added —
-        // which is exactly how the `state_volumes` hole got in.
-        if input.supervisor.is_some() {
+        // A zero-binding, zero-volume supervisor is not workload_idle: it carries
+        // no restore-time state. The hold reproduces build_ready_state for that
+        // case below by requiring vsock, using a SupervisorDrive during boot,
+        // enabling the page-hygiene cmdline, and retaining the drive for the
+        // SupervisorBuildReceipt emitted at capture.
+        if input
+            .supervisor
+            .as_ref()
+            .is_some_and(supervisor_requires_workload_idle)
+        {
             return Err(self.backend_err(
                 "interactive hold requires the `running` capture policy, but this capsule \
                  has a supervisor (bindings and/or durable state volumes) and therefore \
@@ -2146,6 +2155,17 @@ impl FirecrackerBackend {
                  restore-time state is not attached.",
             ));
         }
+        let supervisor_drive = match &input.supervisor {
+            Some(sup) => {
+                if !vsock_enabled() {
+                    return Err(self.backend_err(
+                        "supervisor hold requires the vsock binding channel (set ATO_FC_VSOCK=1)",
+                    ));
+                }
+                Some(SupervisorDrive::prepare(sup).map_err(|e| self.backend_err(e))?)
+            }
+            None => None,
+        };
         crate::seal::preflight_gate(
             &input.layers.rootfs,
             input.layers.runtime.as_deref(),
@@ -2181,8 +2201,8 @@ impl FirecrackerBackend {
         let port = hc_port(&input.restore_contract, self.config.healthcheck_port);
         let health_path = hc_path(&input.restore_contract, &self.config.healthcheck_path);
 
-        // No supervisor ⇒ no durable state volumes to prepare (the refusal above
-        // is what guarantees that), so the hold has no volume locks to hold.
+        // No workload-idle supervisor reaches here, so there are no durable state
+        // volumes to prepare and the hold has no volume locks to retain.
         let network_ports = network_ports(&input.restore_contract, port)
             .map_err(|error| self.backend_err(error))?;
         self.net_up(&network_ports)?;
@@ -2192,7 +2212,7 @@ impl FirecrackerBackend {
             &build_dir,
             &rootfs_path,
             &[],
-            None,
+            supervisor_drive.as_ref(),
             port,
             &health_path,
         );
@@ -2217,6 +2237,7 @@ impl FirecrackerBackend {
             build_dir,
             rootfs_path,
             rootfs_blob,
+            supervisor_drive,
             port,
             // Best-effort build-time screenshot captured during boot (before the
             // guest was handed back live); carried until this hold's candidate is
@@ -4179,6 +4200,25 @@ mod tests {
             !backend.lock_path().exists(),
             "a refused hold must not leave the slot lock behind"
         );
+    }
+
+    #[test]
+    fn zero_state_supervisor_remains_running_capture_eligible() {
+        assert!(!supervisor_requires_workload_idle(
+            &SupervisorBindings::default()
+        ));
+        assert!(supervisor_requires_workload_idle(&SupervisorBindings {
+            binding_names: vec!["api_key".to_string()],
+            ..Default::default()
+        }));
+        assert!(supervisor_requires_workload_idle(&SupervisorBindings {
+            state_volumes: vec![crate::state_volume::DurableVolumeSpec {
+                state_name: "data".to_string(),
+                size_mb: 64,
+            }],
+            state_owner_scope: Some("owner/capsule".to_string()),
+            ..Default::default()
+        }));
     }
 
     // ── v1.2 PR 3d: supervisor build drive ────────────────────────────────────
