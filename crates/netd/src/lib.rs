@@ -19,3 +19,5 @@ pub mod surface_authorization;
 pub mod surface_websocket_auth;
 #[cfg(unix)]
 pub mod terminal_gateway;
+#[cfg(unix)]
+pub mod terminal_probe;

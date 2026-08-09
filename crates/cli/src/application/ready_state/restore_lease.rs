@@ -345,19 +345,34 @@ pub(crate) fn parse_restore_snapshot_command(
     })
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SurfaceRuntimeSupport {
+    pub pixel_stream: bool,
+    pub terminal: bool,
+}
+
 fn local_runner_surface_capabilities(
-    pixel_surface_enabled: bool,
+    support: SurfaceRuntimeSupport,
 ) -> RunnerSessionSurfaceCapabilities {
     let mut supported = vec![SupportedSessionSurface {
         kind: SessionSurfaceKind::Web,
         profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
         transports: Some(vec![SessionSurfaceTransport::Https]),
     }];
-    if pixel_surface_enabled {
+    if support.pixel_stream {
         supported.push(SupportedSessionSurface {
             kind: SessionSurfaceKind::PixelStream,
             profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
             transports: Some(vec![SessionSurfaceTransport::RfbWebsocket]),
+        });
+    }
+    if support.terminal {
+        supported.push(SupportedSessionSurface {
+            kind: SessionSurfaceKind::Terminal,
+            profiles: Some(vec![
+                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+            ]),
+            transports: Some(vec![SessionSurfaceTransport::TerminalWebsocket]),
         });
     }
     RunnerSessionSurfaceCapabilities {
@@ -368,7 +383,7 @@ fn local_runner_surface_capabilities(
 fn verify_surface_negotiation(
     manifest: &ReadyStateManifest,
     cmd: &RestoreSnapshotCommand,
-    pixel_surface_enabled: bool,
+    support: SurfaceRuntimeSupport,
 ) -> std::result::Result<(), String> {
     if let Some(requirement) = &manifest.surface_requirement {
         requirement
@@ -424,7 +439,7 @@ fn verify_surface_negotiation(
         &ClientSessionSurfaceCapabilities {
             accepted_session_surfaces: Some(accepted),
         },
-        &local_runner_surface_capabilities(pixel_surface_enabled),
+        &local_runner_surface_capabilities(support),
     )
     .map_err(|error| format!("runner surface renegotiation failed: {error}"))?;
     let claimed = descriptor
@@ -898,18 +913,18 @@ pub(crate) fn load_and_verify_manifest(
         manifest_json,
         cmd,
         supervisor_enabled,
-        false,
+        SurfaceRuntimeSupport::default(),
     )
 }
 
 /// Same artifact gate as [`load_and_verify_manifest`], with the runner's live
-/// Pixel capability made explicit. The caller must pass true only when the
-/// configured gateway and Linux/x86_64 Ready-State path are both operational.
+/// live surface capabilities made explicit. A caller may set a field only when
+/// the configured gateway and Ready-State path are both operational.
 pub(crate) fn load_and_verify_manifest_with_surface_capabilities(
     manifest_json: &Path,
     cmd: &RestoreSnapshotCommand,
     supervisor_enabled: bool,
-    pixel_surface_enabled: bool,
+    support: SurfaceRuntimeSupport,
 ) -> std::result::Result<(ReadyStateManifest, RestoreArtifactClass), (String, String)> {
     let err = |m: String| ("artifact_verification_failed".to_string(), m);
     let bytes = std::fs::read(manifest_json)
@@ -954,7 +969,7 @@ pub(crate) fn load_and_verify_manifest_with_surface_capabilities(
             )));
         }
     }
-    verify_surface_negotiation(&manifest, cmd, pixel_surface_enabled).map_err(err)?;
+    verify_surface_negotiation(&manifest, cmd, support).map_err(err)?;
     let class = classify_restore_artifact(&manifest, cmd.with_bindings, supervisor_enabled)?;
     Ok((manifest, class))
 }
@@ -1074,6 +1089,13 @@ pub(crate) fn load_verified_v1_artifact(
 mod tests {
     use super::*;
 
+    fn surface_support(pixel_stream: bool, terminal: bool) -> SurfaceRuntimeSupport {
+        SurfaceRuntimeSupport {
+            pixel_stream,
+            terminal,
+        }
+    }
+
     fn cmd_json(over: serde_json::Value) -> serde_json::Value {
         let mut base = serde_json::json!({
             "kind": "restore_snapshot",
@@ -1137,6 +1159,32 @@ mod tests {
             }
         })))
         .expect("valid explicit Pixel surface")
+    }
+
+    fn explicit_terminal_surface_command() -> RestoreSnapshotCommand {
+        parse_restore_snapshot_command(&cmd_json(serde_json::json!({
+            "surface_contract_version": "1",
+            "session_id": "session-terminal-1",
+            "accepted_session_surfaces": [{
+                "kind": "terminal",
+                "profiles": ["ato.terminal-surface.v1"]
+            }],
+            "session_surface": {
+                "kind": "terminal",
+                "profile": "ato.terminal-surface.v1",
+                "surface_id": "surface-terminal-1",
+                "transport": "terminal_websocket",
+                "capabilities": {
+                    "input": true,
+                    "resize": true,
+                    "clipboard": false,
+                    "file_transfer": false,
+                    "recording": false,
+                    "encoding": "utf-8"
+                }
+            }
+        })))
+        .expect("valid explicit Terminal surface")
     }
 
     #[test]
@@ -1220,7 +1268,7 @@ mod tests {
         let manifest = manifest_with(None, false);
         let command = explicit_web_surface_command();
 
-        verify_surface_negotiation(&manifest, &command, false)
+        verify_surface_negotiation(&manifest, &command, surface_support(false, false))
             .expect("legacy Web artifact must remain compatible with a canonical Web lease");
     }
 
@@ -1229,7 +1277,7 @@ mod tests {
         let manifest = manifest_with(None, false);
         let command = explicit_pixel_surface_command();
 
-        let error = verify_surface_negotiation(&manifest, &command, true)
+        let error = verify_surface_negotiation(&manifest, &command, surface_support(true, false))
             .expect_err("legacy artifact must not inherit a Pixel requirement");
 
         assert!(error.contains("only an explicit Web surface"), "{error}");
@@ -1241,10 +1289,32 @@ mod tests {
         let mut command = explicit_web_surface_command();
         command.session_surface = Some(SessionSurfaceDescriptor::Unknown);
 
-        let error = verify_surface_negotiation(&manifest, &command, false)
+        let error = verify_surface_negotiation(&manifest, &command, surface_support(false, false))
             .expect_err("legacy artifact must not inherit an unknown requirement");
 
         assert!(error.contains("only an explicit Web surface"), "{error}");
+    }
+
+    #[test]
+    fn terminal_artifact_requires_terminal_runtime_support() {
+        let mut manifest = manifest_with(None, false);
+        manifest.surface_requirement = Some(SessionSurfaceRequirement {
+            kind: SessionSurfaceKind::Terminal,
+            profiles: Some(vec![
+                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+            ]),
+        });
+        let command = explicit_terminal_surface_command();
+
+        let error = verify_surface_negotiation(
+            &manifest,
+            &command,
+            surface_support(false, false),
+        )
+        .expect_err("a runner without Terminal must fail closed");
+        assert!(error.contains("renegotiation"), "{error}");
+        verify_surface_negotiation(&manifest, &command, surface_support(false, true))
+            .expect("Terminal-capable runner accepts the exact v1 descriptor");
     }
 
     #[test]
@@ -1785,12 +1855,21 @@ mod tests {
             },
             capabilities: Default::default(),
         });
-        let disabled =
-            load_and_verify_manifest_with_surface_capabilities(&mpath, &pixel, false, false)
-                .expect_err("disabled local gateway must not advertise Pixel");
+        let disabled = load_and_verify_manifest_with_surface_capabilities(
+            &mpath,
+            &pixel,
+            false,
+            surface_support(false, false),
+        )
+        .expect_err("disabled local gateway must not advertise Pixel");
         assert!(disabled.1.contains("runner"), "{}", disabled.1);
-        load_and_verify_manifest_with_surface_capabilities(&mpath, &pixel, false, true)
-            .expect("matching explicit pixel negotiation");
+        load_and_verify_manifest_with_surface_capabilities(
+            &mpath,
+            &pixel,
+            false,
+            surface_support(true, false),
+        )
+        .expect("matching explicit pixel negotiation");
 
         let mut client_mismatch = pixel.clone();
         client_mismatch.accepted_session_surfaces = Some(vec![AcceptedSessionSurface {
@@ -1801,7 +1880,7 @@ mod tests {
             &mpath,
             &client_mismatch,
             false,
-            true,
+            surface_support(true, false),
         )
         .expect_err("client mismatch must fail before restore");
         assert!(mismatch.1.contains("renegotiation"), "{}", mismatch.1);
@@ -1811,9 +1890,13 @@ mod tests {
         omitted.surface_contract_version = None;
         omitted.session_id = None;
         omitted.accepted_session_surfaces = None;
-        let missing =
-            load_and_verify_manifest_with_surface_capabilities(&mpath, &omitted, false, true)
-                .expect_err("pixel artifact must never use legacy Web omission");
+        let missing = load_and_verify_manifest_with_surface_capabilities(
+            &mpath,
+            &omitted,
+            false,
+            surface_support(true, false),
+        )
+        .expect_err("pixel artifact must never use legacy Web omission");
         assert!(
             missing.1.contains("omitted session_surface"),
             "{}",
