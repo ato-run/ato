@@ -429,6 +429,7 @@ pub fn to_capsule_manifest_v1(
             }
             _ => None,
         },
+        surface: None,
         seal_at: Some(seal_at),
         env: Default::default(),
         config: Default::default(),

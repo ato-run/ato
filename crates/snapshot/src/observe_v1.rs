@@ -39,6 +39,7 @@ use capsule::types::manifest_v1::{CapsuleManifestV1, ConfigKindV1};
 /// makes.
 ///
 pub const WEB_SURFACE_PROTOCOL: &str = "ato.web-surface.v1";
+pub const TERMINAL_SURFACE_PROTOCOL: &str = "ato.terminal-surface.v1";
 
 /// Everything measured about one concrete build.
 ///
@@ -140,25 +141,30 @@ pub fn observe_v1(build: V1BuildObservation<'_>) -> Result<ExecutionObservationV
     let required = names_where(true);
     let optional = names_where(false);
 
-    let guest_surface = build
-        .manifest
-        .web
-        .as_ref()
-        .map(|web| -> Result<GuestSurfaceContract> {
+    let guest_surface = match (build.manifest.web.as_ref(), build.manifest.surface.as_ref()) {
+        (Some(_), Some(surface))
+            if surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal =>
+        {
             Ok(GuestSurfaceContract {
-                bind_address: web.bind.clone(),
-                protocol: WEB_SURFACE_PROTOCOL.to_string(),
-                port: Some(
-                    std::num::NonZeroU16::new(web.port)
-                        .context("web.port is validated non-zero by the manifest")?,
-                ),
-                // Omitted: the subset refuses a capsule that would need one
-                // (ADR-015 §6.2), so an empty set here is the truth.
+                bind_address: "vsock".to_string(),
+                protocol: TERMINAL_SURFACE_PROTOCOL.to_string(),
+                port: None,
                 features: Vec::new(),
             })
-        })
-        .transpose()?
-        .context("the Step-4 subset requires a [web] surface")?;
+        }
+        (Some(web), None) => Ok(GuestSurfaceContract {
+            bind_address: web.bind.clone(),
+            protocol: WEB_SURFACE_PROTOCOL.to_string(),
+            port: Some(
+                std::num::NonZeroU16::new(web.port)
+                    .context("web.port is validated non-zero by the manifest")?,
+            ),
+            features: Vec::new(),
+        }),
+        _ => Err(anyhow::anyhow!(
+            "the Step-4 subset requires a supported guest surface"
+        )),
+    }?;
 
     let writable_paths = SEALED_WRITABLE_PATHS
         .iter()
