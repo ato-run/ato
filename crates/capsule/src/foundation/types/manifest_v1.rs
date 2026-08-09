@@ -70,6 +70,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
+use protocol::session_surface::{SessionSurfaceKind, SessionSurfaceRequirement};
+
 /// The only schema version that may mint an Execution Identity.
 pub const MANIFEST_SCHEMA_V1: &str = "1";
 
@@ -160,6 +162,12 @@ pub struct CapsuleManifestV1 {
     /// `[web]` — the guest-facing surface, when the capsule serves one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebV1>,
+
+    /// Browser-facing Session Surface. Omitted means the existing Web surface;
+    /// Terminal must be declared explicitly and still uses `[web]` for the
+    /// workload's health endpoint during build and restore verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SessionSurfaceRequirement>,
 
     /// `[seal_at]` — the acceptance program. Required to capture interactively;
     /// see [`Self::validate_for_interactive_capture`].
@@ -809,6 +817,21 @@ impl CapsuleManifestV1 {
             }
         }
 
+        if let Some(surface) = &self.surface {
+            surface
+                .validate()
+                .map_err(|error| ManifestV1Error::Invalid {
+                    field: "surface",
+                    reason: error.to_string(),
+                })?;
+            if surface.kind != SessionSurfaceKind::Terminal {
+                return Err(ManifestV1Error::Unsupported {
+                    feature: "[surface]",
+                    why: "the v1 authoring subset accepts only an explicit Terminal surface; Web remains the default",
+                });
+            }
+        }
+
         if let Some(seal_at) = &self.seal_at {
             validate_argv("seal_at.command", &seal_at.command)?;
             match seal_at.timeout_seconds {
@@ -986,6 +1009,20 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/health"]
         manifest
             .validate_for_interactive_capture()
             .expect("qualifies for the Step-4 subset");
+    }
+
+    #[test]
+    fn an_explicit_terminal_surface_parses_and_qualifies() {
+        let terminal = MINIMAL.replace(
+            "[seal_at]",
+            "[surface]\nkind = \"terminal\"\nprofiles = [\"ato.terminal-surface.v1\"]\n\n[seal_at]",
+        );
+        let manifest = parse(&terminal).expect("Terminal v1 parses");
+
+        manifest
+            .validate_for_interactive_capture()
+            .expect("Terminal v1 qualifies");
+        assert_eq!(manifest.surface.unwrap().kind, SessionSurfaceKind::Terminal);
     }
 
     /// The command is an argv, and argument boundaries survive verbatim —

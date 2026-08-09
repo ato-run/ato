@@ -3160,6 +3160,29 @@ fn produce_pinned_v1_build(
         &String::from_utf8_lossy(&manifest_bytes),
     )
     .map_err(|e| fail("manifest", e.to_string()))?;
+    let terminal_surface = manifest.surface.as_ref().is_some_and(|surface| {
+        surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+    });
+    if terminal_surface {
+        if !supervisor_builds_enabled() {
+            return Err(fail(
+                "eligibility",
+                "Terminal authoring requires ATO_BUILDER_SUPERVISOR=1".to_string(),
+            ));
+        }
+        if std::env::var_os("ATO_GUEST_AGENT_BIN").is_none() {
+            return Err(fail(
+                "eligibility",
+                "Terminal authoring requires ATO_GUEST_AGENT_BIN".to_string(),
+            ));
+        }
+        if !builder_vsock_enabled() {
+            return Err(fail(
+                "eligibility",
+                "Terminal authoring requires ATO_FC_VSOCK=1".to_string(),
+            ));
+        }
+    }
     // The authored `[seal_at]`, validated by the SAME function the v0.3 lane
     // uses so both refuse the same argv — and validated BEFORE a rootfs is
     // built, so an authoring typo does not cost a full build.
@@ -3268,14 +3291,18 @@ fn produce_pinned_v1_build(
         // read out of the lock's stored field.
         execution_id: built.execution_id().as_str().to_string(),
         capsule_manifest_hash: format!("blake3:{}", blake3::hash(&manifest_bytes).to_hex()),
-        // The v1 subset has no surface requirement to seal, and the pixel lane
-        // is a different job kind entirely.
-        surface_requirement: None,
+        surface_requirement: manifest.surface.clone(),
         endpoints: Vec::new(),
         // The §7 subset refuses `launch.secret_bindings`, so a pinned v1 build
         // that reached here has none. Not "none found" — none representable.
-        supervisor: None,
-        supervisor_ack: None,
+        supervisor: terminal_surface.then(|| SupervisorBindings {
+            binding_names: Vec::new(),
+            state_volumes: Vec::new(),
+            state_owner_scope: None,
+        }),
+        supervisor_ack: terminal_surface.then(|| SupervisorAck {
+            binding_names: Vec::new(),
+        }),
         manifest_source: "pinned_v1_capsule_toml".to_string(),
         synthesized_probe: true,
         declared_command: outcome.authored_argv.join(" "),
@@ -4176,26 +4203,12 @@ fn process_authoring_setup(
         &inference_root,
     )
     .map_err(|error| fail("detect", format!("extract source for inference: {error}")))?;
-    let authored_toml = work.source_overlay.as_ref().and_then(|overlay| {
-        let manifest = overlay.get("manifest")?;
-        manifest.get("base_manifest_digest")?;
-        (manifest.get("kind")?.as_str()? == "capsule_toml")
-            .then(|| manifest.get("capsule_toml")?.as_str())
-            .flatten()
-    });
-    let (origin, generated_manifest) = match authored_toml {
-        Some(capsule_toml) => ("manual_setup", capsule_toml.to_string()),
-        None => {
-            let normalized = authoring_runtime::infer_static_web_intent(&inference_root)
-                .map_err(|error| fail("detect", error))?;
-            let generated = authoring_runtime::render_static_web_capsule_toml(&normalized)
-                .map_err(|error| fail("detect", error))?;
-            let effective =
-                authoring_runtime::merge_store_metadata(&generated, work.store_metadata.as_ref())
-                    .map_err(|error| fail("detect", error))?;
-            ("inferred", effective)
-        }
-    };
+    let (origin, generated_manifest, detector) = select_authoring_manifest(
+        &inference_root,
+        work.source_overlay.as_ref(),
+        work.store_metadata.as_ref(),
+    )
+    .map_err(|error| fail("detect", error.to_string()))?;
     let normalized = authoring_runtime::normalize_capsule_toml(&generated_manifest)
         .map_err(|error| fail("detect", error))?;
     let manifest = capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&generated_manifest)
@@ -4208,14 +4221,6 @@ fn process_authoring_setup(
         &snapshot::rootfs_builder::SourceProbe::scan(&inference_root),
     )
     .map_err(|error| fail("detect", error))?;
-    let detector = (origin == "inferred").then(|| authoring_runtime::DetectorProvenance {
-        producer: "Static Web detector",
-        inputs: if inference_root.join("index.html").is_file() {
-            vec!["index.html".to_string()]
-        } else {
-            vec!["public/index.html".to_string()]
-        },
-    });
     client
         .mark_setup_detected(
             work,
@@ -4235,6 +4240,50 @@ fn process_authoring_setup(
         work.authoring_session_id, work.trace_id
     );
     Ok(())
+}
+
+fn select_authoring_manifest(
+    source_root: &Path,
+    source_overlay: Option<&serde_json::Value>,
+    store_metadata: Option<&authoring_runtime::AuthoringStoreMetadata>,
+) -> Result<(
+    &'static str,
+    String,
+    Option<authoring_runtime::DetectorProvenance<'static>>,
+)> {
+    let authored_toml = source_overlay.and_then(|overlay| {
+        let manifest = overlay.get("manifest")?;
+        manifest.get("base_manifest_digest")?;
+        (manifest.get("kind")?.as_str()? == "capsule_toml")
+            .then(|| manifest.get("capsule_toml")?.as_str())
+            .flatten()
+    });
+    if let Some(capsule_toml) = authored_toml {
+        return Ok(("manual_setup", capsule_toml.to_string(), None));
+    }
+
+    let repository_manifest = source_root.join("capsule.toml");
+    if repository_manifest.is_file() {
+        let capsule_toml = std::fs::read_to_string(&repository_manifest)
+            .map_err(|error| anyhow!("read repository capsule.toml: {error}"))?;
+        return Ok(("existing_config", capsule_toml, None));
+    }
+
+    let normalized =
+        authoring_runtime::infer_static_web_intent(source_root).map_err(|error| anyhow!(error))?;
+    let generated = authoring_runtime::render_static_web_capsule_toml(&normalized)
+        .map_err(|error| anyhow!(error))?;
+    let effective = authoring_runtime::merge_store_metadata(&generated, store_metadata)
+        .map_err(|error| anyhow!(error))?;
+    let detector = authoring_runtime::DetectorProvenance {
+        producer: "Static Web detector",
+        inputs: if source_root.join("index.html").is_file() {
+            vec!["index.html".to_string()]
+        } else {
+            vec!["public/index.html".to_string()]
+        },
+    };
+    Ok(("inferred", effective, Some(detector)))
 }
 
 fn process_authoring_preview(
@@ -5193,7 +5242,7 @@ impl snapshot::authoring_evidence::CleanReplayAdapter for BuilderCleanReplayAdap
                 sanitizer_contract: SanitizerContract::default(),
                 declared_secret_markers: Vec::new(),
                 execution_id: Some(execution_contract_digest.clone()),
-                supervisor: None,
+                supervisor: produced.supervisor,
             })
             .map_err(|error| {
                 let detail = format!("Clean Replay readiness: {error}");
@@ -5928,6 +5977,40 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoring_detection_prefers_repository_capsule_toml_over_static_inference() {
+        let source = tempfile::tempdir().expect("source");
+        let authored = r#"schema_version = "1"
+name = "terminal"
+version = "0.1.0"
+
+[run]
+command = ["python3", "terminal.py"]
+
+[web]
+port = 18080
+bind = "0.0.0.0"
+
+[surface]
+kind = "terminal"
+profiles = ["ato.terminal-surface.v1"]
+
+[seal_at]
+command = ["python3", "-c", "raise SystemExit(0)"]
+"#;
+        std::fs::write(source.path().join("capsule.toml"), authored)
+            .expect("write repository capsule.toml");
+
+        let (origin, selected, detector) =
+            select_authoring_manifest(source.path(), None, None).expect("select manifest");
+
+        assert_eq!(origin, "existing_config");
+        assert_eq!(selected.as_str(), authored);
+        assert!(detector.is_none());
+        authoring_runtime::normalize_capsule_toml(&selected)
+            .expect("normalize committed terminal manifest");
+    }
 
     #[test]
     fn local_artifact_location_uses_the_persisted_directory_namespace() {
