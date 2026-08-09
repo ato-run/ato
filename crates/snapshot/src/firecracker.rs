@@ -1645,6 +1645,18 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+// A signal may interrupt the blocking read while Firecracker is writing a
+// large memory snapshot. EINTR is not a transport failure: the socket and VMM
+// remain valid, so retry the read just as `write_all` does for writes.
+fn read_retry_interrupted(reader: &mut impl Read, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match reader.read(buf) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => return result,
+        }
+    }
+}
+
 // Firecracker's own API is a Unix socket (it does not run on Windows at all);
 // the non-unix stub exists only so the crate compiles cross-platform, matching
 // `ensure_private_dir`'s established fail-closed-at-runtime pattern above.
@@ -1688,7 +1700,7 @@ fn fc_request(
         if let Some(p) = find_subslice(&buf, b"\r\n\r\n") {
             break p + 4;
         }
-        let n = stream.read(&mut tmp)?;
+        let n = read_retry_interrupted(&mut stream, &mut tmp)?;
         if n == 0 {
             break buf.len();
         }
@@ -1715,7 +1727,7 @@ fn fc_request(
         .unwrap_or(0);
     // 2) read exactly the declared body, then stop (don't wait for close).
     while buf.len() < header_end + content_length {
-        let n = stream.read(&mut tmp)?;
+        let n = read_retry_interrupted(&mut stream, &mut tmp)?;
         if n == 0 {
             break;
         }
@@ -3519,6 +3531,34 @@ fn json_str_array(s: &str, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct InterruptedOnceReader {
+        interrupted: bool,
+        bytes: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl Read for InterruptedOnceReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            self.bytes.read(buf)
+        }
+    }
+
+    #[test]
+    fn firecracker_api_read_retries_interrupted_syscalls() {
+        let mut reader = InterruptedOnceReader {
+            interrupted: false,
+            bytes: std::io::Cursor::new(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec()),
+        };
+        let mut buf = [0_u8; 64];
+
+        let read = read_retry_interrupted(&mut reader, &mut buf).unwrap();
+
+        assert_eq!(&buf[..read], b"HTTP/1.1 204 No Content\r\n\r\n");
+    }
 
     #[test]
     fn snapshot_create_uses_a_longer_bounded_api_timeout() {
