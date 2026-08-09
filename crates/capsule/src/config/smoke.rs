@@ -703,7 +703,7 @@ fn spawn_main_service(
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                if libc::ioctl(slave_fd, libc::TIOCSCTTY as _, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
             } else if libc::setpgid(0, 0) != 0 {
