@@ -97,6 +97,14 @@ const FC_API_READ_TIMEOUT: Duration = Duration::from_secs(15);
 // 15-second control-plane budget, so keep this operation bounded separately.
 const FC_SNAPSHOT_CREATE_READ_TIMEOUT: Duration = Duration::from_secs(120);
 
+fn should_capture_browser_screenshot(
+    surface: Option<&protocol::session_surface::SessionSurfaceRequirement>,
+) -> bool {
+    !surface.is_some_and(|requirement| {
+        requirement.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+    })
+}
+
 fn fc_api_read_timeout(method: &str, path: &str) -> Duration {
     if method == "PUT" && path == "/snapshot/create" {
         FC_SNAPSHOT_CREATE_READ_TIMEOUT
@@ -2086,9 +2094,15 @@ impl FirecrackerBackend {
             // build — `capture_best_effort` never returns an `Err`, and any
             // `probe_addr` error is logged and treated the same as "no browser
             // found" (`None`).
-            match self.probe_addr(port) {
-                Ok(addr) => screenshot_png_base64 = crate::screenshot::capture_best_effort(addr),
-                Err(e) => eprintln!("[screenshot] skip: could not resolve guest address: {e}"),
+            if should_capture_browser_screenshot(input.surface_requirement.as_ref()) {
+                match self.probe_addr(port) {
+                    Ok(addr) => {
+                        screenshot_png_base64 = crate::screenshot::capture_best_effort(addr)
+                    }
+                    Err(e) => eprintln!("[screenshot] skip: could not resolve guest address: {e}"),
+                }
+            } else {
+                eprintln!("[screenshot] skip: Terminal Surface has no browser-rendered app view");
             }
             // Warm the user-facing first-screen paths into guest memory BEFORE
             // the Pause+Snapshot, so the sealed image already carries template
@@ -4219,6 +4233,24 @@ mod tests {
             state_owner_scope: Some("owner/capsule".to_string()),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn terminal_surface_skips_browser_screenshot_probe() {
+        let terminal = protocol::session_surface::SessionSurfaceRequirement {
+            kind: protocol::session_surface::SessionSurfaceKind::Terminal,
+            profiles: Some(vec![
+                protocol::session_surface::TERMINAL_SURFACE_PROFILE.to_string(),
+            ]),
+        };
+        let web = protocol::session_surface::SessionSurfaceRequirement {
+            kind: protocol::session_surface::SessionSurfaceKind::Web,
+            profiles: None,
+        };
+
+        assert!(!should_capture_browser_screenshot(Some(&terminal)));
+        assert!(should_capture_browser_screenshot(Some(&web)));
+        assert!(should_capture_browser_screenshot(None));
     }
 
     // ── v1.2 PR 3d: supervisor build drive ────────────────────────────────────
