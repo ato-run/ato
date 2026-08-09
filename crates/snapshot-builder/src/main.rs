@@ -1015,14 +1015,22 @@ fn derive_job_spec(
     // manifests down the v1 path built an artifact whose vsock binding channel
     // had no supervisor_build ack — the runner then (correctly) refused to
     // restore the inconsistent artifact (caught by KVM acceptance Test I).
-    if manifest.secrets.is_empty() && manifest.generated_bindings.is_empty() {
+    let terminal_surface = manifest
+        .resolve_default_target()
+        .map_err(|error| fail(error.to_string()))?
+        .surface
+        .as_ref()
+        .is_some_and(|surface| {
+            surface.kind == protocol::session_surface::SessionSurfaceKind::Terminal
+        });
+    if manifest.secrets.is_empty() && manifest.generated_bindings.is_empty() && !terminal_surface {
         // v1 no-binding path, byte-for-byte unchanged (it also rejects any stray
         // bindings/external/GPU itself).
         return derive_build_spec(manifest, probe).map_err(fail);
     }
     if !supervisor_enabled {
         return Err(fail(
-            "capsule declares [secrets.*] or [generated_bindings.*]: supervisor builds are \
+            "capsule requires a supervisor ([secrets.*], [generated_bindings.*], or terminal surface): supervisor builds are \
              disabled on this builder (operator opt-in: ATO_BUILDER_SUPERVISOR=1)"
                 .into(),
         ));
