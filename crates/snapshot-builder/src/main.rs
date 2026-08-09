@@ -4213,7 +4213,9 @@ fn process_authoring_setup(
     work: &authoring_runtime::AuthoringWork,
 ) -> std::result::Result<(), (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
-    if work.setup_mode.as_deref() == Some("preview") {
+    if work.purpose.as_deref() == Some("preview")
+        || (work.purpose.is_none() && work.setup_mode.as_deref() == Some("preview"))
+    {
         return process_authoring_preview(cfg, backend, client, work);
     }
     if work.setup_mode.as_deref() != Some("suggested") {
