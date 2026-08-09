@@ -472,6 +472,10 @@ pub struct RootfsBuildSpecV1 {
     /// authored `[run] command`.
     pub resolved_argv: Vec<String>,
     pub port: u16,
+    /// Terminal authoring uses the same guest-agent PTY supervisor as the v0.3
+    /// build lane. None preserves the existing direct Web init byte-for-byte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<SupervisorBuildSpec>,
 }
 
 /// Derive a v1 rootfs spec from the authored manifest and a source probe.
@@ -514,12 +518,38 @@ pub fn derive_build_spec_v1(
     // Measured, not assumed: none of the three families in the Step-4 subset
     // wraps the authored argv — the generated init execs it directly.
     let runtime_invocation_prefix = ObservedInvocationPrefix::observed_none();
-    let resolved_argv = runtime_invocation_prefix
+    let resolved_argv: Vec<String> = runtime_invocation_prefix
         .words()
         .iter()
         .chain(authored.iter())
         .cloned()
         .collect();
+
+    let terminal_surface = m
+        .surface
+        .as_ref()
+        .is_some_and(|surface| surface.kind == SessionSurfaceKind::Terminal);
+    let supervisor = terminal_surface.then(|| SupervisorBuildSpec {
+        stdio_mode: SupervisorStdioMode::Pty,
+        binding_names: Vec::new(),
+        env_map: BTreeMap::new(),
+        services: Some(vec![ServiceBuildSpec {
+            name: "terminal".to_string(),
+            run_once: false,
+            cmd: resolved_argv.clone(),
+            cwd: V1_GUEST_WORKING_DIRECTORY.to_string(),
+            base_env: m.env.clone(),
+            env_map: BTreeMap::new(),
+            public: true,
+            depends_on: Vec::new(),
+            aliases: Vec::new(),
+            readiness_http_path: Some("/".to_string()),
+            port: Some(web.port),
+            volumes: Vec::new(),
+        }]),
+        public_service: Some("terminal".to_string()),
+        generated_bindings: Vec::new(),
+    });
 
     Ok(RootfsBuildSpecV1 {
         runtime,
@@ -543,6 +573,7 @@ pub fn derive_build_spec_v1(
         runtime_invocation_prefix,
         resolved_argv,
         port: web.port,
+        supervisor,
     })
 }
 
@@ -716,6 +747,36 @@ pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str
         .iter()
         .map(|(name, value)| format!("export {name}={}\n", shell_single_quote(value)))
         .collect::<String>();
+    let (supervisor_prep, launch) = match spec.supervisor.as_ref() {
+        None => (String::new(), launch_argv_line(&spec.resolved_argv)),
+        Some(supervisor) => {
+            let config = build_supervisor_json(supervisor, spec.port, "");
+            let config_json =
+                serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".to_string());
+            let arguments = supervisor
+                .binding_names
+                .iter()
+                .map(|name| shell_single_quote(name))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let prep = format!(
+                r#": "${{ATO_GUEST_AGENT_BIN:?ATO_GUEST_AGENT_BIN must point to the guest-agent binary for a Terminal surface}}"
+mkdir -p "$ATO_ROOTFS/usr/local/bin" "$ATO_ROOTFS/etc/ato" "$ATO_ROOTFS/run/ato/bindings"
+cp "$ATO_GUEST_AGENT_BIN" "$ATO_ROOTFS/usr/local/bin/ato-guest-agent"
+chmod 0755 "$ATO_ROOTFS/usr/local/bin/ato-guest-agent"
+cat > "$ATO_ROOTFS/etc/ato/supervisor.json" <<'ATOSUPERVISORJSON'
+{config_json}
+ATOSUPERVISORJSON
+"#,
+            );
+            let launch = format!(
+                "mkdir -p /run/ato/bindings\n\
+                 export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\n\
+                 /usr/local/bin/ato-guest-agent {arguments} 2>&1 | tee /tmp/agent.log > /dev/console &"
+            );
+            (prep, launch)
+        }
+    };
     format!(
         r#"set -euo pipefail
 TAG="$ATO_IMAGE"
@@ -728,6 +789,7 @@ trap cleanup EXIT
 CID=$({tool} create "$TAG")
 {tool} export "$CID" | tar -x -C "$ATO_ROOTFS"
 {tool} rm -f "$CID" >/dev/null; CID=""
+{supervisor_prep}
 # Read-only-bootable init (matches benchmarks/ready-state/build_rootfs_ro.sh): mount the
 # pseudo + tmpfs filesystems, then run the capsule start command in the background
 # (serves port {port}) and keep PID 1 alive. QUOTED heredoc: each argv word is
@@ -754,7 +816,8 @@ chmod +x "$ATO_ROOTFS/sbin/init"
 find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
 "#,
         tool = tool,
-        launch = launch_argv_line(&spec.resolved_argv),
+        launch = launch,
+        supervisor_prep = supervisor_prep,
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
@@ -2987,6 +3050,27 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
             spec.install_cmd, None,
             "v1 must not infer hidden install RUNs"
         );
+        assert!(spec.supervisor.is_none());
+    }
+
+    #[test]
+    fn a_v1_terminal_surface_stages_an_exact_argv_pty_supervisor() {
+        let manifest = V1_MINIMAL.replace(
+            "[seal_at]",
+            "[surface]\nkind = \"terminal\"\nprofiles = [\"ato.terminal-surface.v1\"]\n\n[seal_at]",
+        );
+        let spec = derive_build_spec_v1(&v1(&manifest), &python_probe()).expect("derives");
+        let supervisor = spec.supervisor.as_ref().expect("terminal supervisor");
+
+        assert_eq!(supervisor.stdio_mode, SupervisorStdioMode::Pty);
+        assert_eq!(
+            supervisor.services.as_ref().unwrap()[0].cmd,
+            spec.resolved_argv
+        );
+        let export = export_guest_rootfs_script_v1(&spec, "docker");
+        assert!(export.contains("ATO_GUEST_AGENT_BIN"));
+        assert!(export.contains("ato-guest-agent"));
+        assert!(export.contains("\"stdio_mode\": \"pty\""));
     }
 
     #[test]
