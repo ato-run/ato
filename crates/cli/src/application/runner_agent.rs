@@ -122,12 +122,14 @@ pub const ENV_RUNNER_ID: &str = "ATO_RUNNER_ID";
 pub const ENV_RUNNER_DISPLAY_NAME: &str = "ATO_RUNNER_DISPLAY_NAME";
 pub const ENV_SURFACE_ASSERTION_KEYS_JSON: &str = "ATO_SURFACE_ASSERTION_KEYS_JSON";
 pub const ENV_SURFACE_ALLOWED_ORIGINS_JSON: &str = "ATO_SURFACE_ALLOWED_ORIGINS_JSON";
+pub const ENV_TERMINAL_SURFACE_ENABLED: &str = "ATO_TERMINAL_SURFACE_ENABLED";
 
 #[derive(Clone)]
 struct SurfaceGatewayRuntime {
-    authorizer: Arc<dyn netd::pixel_gateway::SurfaceAccessAuthorizer>,
+    authorizer: Arc<dyn netd::surface_authorization::SurfaceAccessAuthorizer>,
     assertion_keyring: Arc<netd::pixel_authorization::SurfaceAssertionKeyring>,
     allowed_origins: BTreeSet<String>,
+    support: crate::application::ready_state::restore_lease::SurfaceRuntimeSupport,
 }
 
 fn normalize_surface_origin(value: &str) -> Result<String> {
@@ -192,6 +194,7 @@ fn load_surface_gateway_runtime() -> Result<Option<SurfaceGatewayRuntime>> {
         )),
         assertion_keyring: keyring,
         allowed_origins,
+        support: Default::default(),
     }))
 }
 
@@ -254,11 +257,11 @@ pub fn collect_capabilities() -> Vec<String> {
 }
 
 fn advertised_session_surfaces_for(
-    pixel_surface_enabled: bool,
+    support: crate::application::ready_state::restore_lease::SurfaceRuntimeSupport,
 ) -> Vec<protocol::session_surface::SupportedSessionSurface> {
     use protocol::session_surface::{
         PIXEL_STREAM_PROFILE, SessionSurfaceKind, SessionSurfaceTransport, SupportedSessionSurface,
-        WEB_SURFACE_PROFILE,
+        TERMINAL_SURFACE_PROFILE, WEB_SURFACE_PROFILE,
     };
 
     let mut surfaces = vec![SupportedSessionSurface {
@@ -266,11 +269,18 @@ fn advertised_session_surfaces_for(
         profiles: Some(vec![WEB_SURFACE_PROFILE.to_string()]),
         transports: Some(vec![SessionSurfaceTransport::Https]),
     }];
-    if pixel_surface_enabled {
+    if support.pixel_stream {
         surfaces.push(SupportedSessionSurface {
             kind: SessionSurfaceKind::PixelStream,
             profiles: Some(vec![PIXEL_STREAM_PROFILE.to_string()]),
             transports: Some(vec![SessionSurfaceTransport::RfbWebsocket]),
+        });
+    }
+    if support.terminal {
+        surfaces.push(SupportedSessionSurface {
+            kind: SessionSurfaceKind::Terminal,
+            profiles: Some(vec![TERMINAL_SURFACE_PROFILE.to_string()]),
+            transports: Some(vec![SessionSurfaceTransport::TerminalWebsocket]),
         });
     }
     surfaces
@@ -357,7 +367,7 @@ pub fn build_heartbeat_body(
     arch: &str,
     max_slots: usize,
     active_slots: usize,
-    pixel_surface_enabled: bool,
+    surface_support: crate::application::ready_state::restore_lease::SurfaceRuntimeSupport,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
         "capabilities": capabilities,
@@ -370,7 +380,7 @@ pub fn build_heartbeat_body(
         // passthrough exists for codec on the control-plane side, so omitting
         // this field is never safe once that gate is live — always send it.
         "supported_snapshot_codecs": advertised_snapshot_codecs(),
-        "supported_session_surfaces": advertised_session_surfaces_for(pixel_surface_enabled),
+        "supported_session_surfaces": advertised_session_surfaces_for(surface_support),
         "os": os,
         "arch": arch,
         "agent_version": agent_version(),
@@ -863,14 +873,26 @@ pub async fn run_serve(
         && std::env::consts::OS == "linux"
         && std::env::consts::ARCH == "x86_64"
         && ready_state_restore_ready();
+    let terminal_surface_enabled = configured_surface_gateway.is_some()
+        && std::env::consts::OS == "linux"
+        && std::env::consts::ARCH == "x86_64"
+        && ready_state_restore_ready()
+        && crate::application::ready_state::flags::selected_backend_id().as_deref()
+            == Some(snapshot::FIRECRACKER_BACKEND_ID)
+        && std::env::var(ENV_TERMINAL_SURFACE_ENABLED).ok().as_deref() == Some("1");
+    let surface_support = crate::application::ready_state::restore_lease::SurfaceRuntimeSupport {
+        pixel_stream: pixel_surface_enabled,
+        terminal: terminal_surface_enabled,
+    };
     // Keep the value handed to lease tasks identical to what this runner
     // advertises. A configured keyring alone must not make an unsupported host
     // capable of accepting a pixel lease during its defence-in-depth recheck.
-    let surface_gateway = if pixel_surface_enabled {
-        configured_surface_gateway
-    } else {
-        None
-    };
+    let surface_gateway = configured_surface_gateway
+        .map(|mut runtime| {
+            runtime.support = surface_support;
+            runtime
+        })
+        .filter(|_| pixel_surface_enabled || terminal_surface_enabled);
 
     if let Some(requested) = display_name.as_deref()
         && requested != creds.display_name
@@ -954,7 +976,7 @@ pub async fn run_serve(
             &arch,
             pool.capacity(),
             pool.active(),
-            pixel_surface_enabled,
+            surface_support,
         );
         match send_heartbeat_once(
             &client,
@@ -3356,6 +3378,8 @@ async fn stop_proxy(handle: Option<tokio::task::JoinHandle<()>>) -> bool {
 enum RestoreGatewayHandle {
     Http(tokio::task::JoinHandle<()>),
     Pixel(netd::pixel_gateway::PixelGatewayHandle),
+    #[cfg(unix)]
+    Terminal(netd::terminal_gateway::TerminalGatewayHandle),
 }
 
 impl RestoreGatewayHandle {
@@ -3363,6 +3387,8 @@ impl RestoreGatewayHandle {
         match self {
             Self::Http(_) => None,
             Self::Pixel(handle) => Some(handle.last_input_activity_unix_millis()),
+            #[cfg(unix)]
+            Self::Terminal(handle) => Some(handle.last_input_activity_unix_millis()),
         }
     }
 }
@@ -3372,6 +3398,13 @@ async fn stop_restore_gateway(handle: Option<RestoreGatewayHandle>) -> bool {
         None => true,
         Some(RestoreGatewayHandle::Http(handle)) => stop_proxy(Some(handle)).await,
         Some(RestoreGatewayHandle::Pixel(handle)) => {
+            matches!(
+                tokio::time::timeout(STOP_PROXY_GRACE, handle.stop()).await,
+                Ok(Ok(()))
+            )
+        }
+        #[cfg(unix)]
+        Some(RestoreGatewayHandle::Terminal(handle)) => {
             matches!(
                 tokio::time::timeout(STOP_PROXY_GRACE, handle.stop()).await,
                 Ok(Ok(()))
@@ -4294,7 +4327,12 @@ async fn handle_restore_snapshot_lease(
             return;
         }
     };
-    let pixel_surface_enabled = surface_gateway.is_some();
+    let surface_support = surface_gateway
+        .as_ref()
+        .map(|runtime| runtime.support)
+        .unwrap_or_default();
+    let pixel_surface_enabled = surface_support.pixel_stream;
+    let terminal_surface_enabled = surface_support.terminal;
     let selected_pixel_surface = cmd.session_surface.as_ref().is_some_and(|descriptor| {
         descriptor.kind() == protocol::session_surface::SessionSurfaceKind::PixelStream
     });
@@ -4307,6 +4345,22 @@ async fn handle_restore_snapshot_lease(
             slot,
             "surface_unavailable",
             "pixel_stream is not enabled on this runner".to_string(),
+        )
+        .await;
+        return;
+    }
+    let selected_terminal_surface = cmd.session_surface.as_ref().is_some_and(|descriptor| {
+        descriptor.kind() == protocol::session_surface::SessionSurfaceKind::Terminal
+    });
+    if selected_terminal_surface && !terminal_surface_enabled {
+        fail(
+            client,
+            api_base,
+            runner_token,
+            &lease_id,
+            slot,
+            "surface_unavailable",
+            "terminal is not enabled on this runner".to_string(),
         )
         .await;
         return;
@@ -4398,7 +4452,7 @@ async fn handle_restore_snapshot_lease(
         &paths.manifest_json,
         &cmd,
         runner_supervisor_enabled(),
-        pixel_surface_enabled,
+        surface_support,
     ) {
         Ok(m) => m,
         Err((code, message)) => {
@@ -4936,6 +4990,109 @@ async fn handle_restore_snapshot_lease(
                 .await;
                 return;
             }
+        }
+    } else if selected_terminal_surface {
+        #[cfg(unix)]
+        {
+            let setup = async {
+                let public_ready_url = candidate
+                    .as_deref()
+                    .context("terminal requires a configured public runner URL")?;
+                let runtime = surface_gateway
+                    .as_ref()
+                    .context("terminal gateway runtime is not configured")?;
+                let session_id = cmd
+                    .session_id
+                    .as_ref()
+                    .context("terminal lease is missing session_id")?;
+                let surface_id = cmd
+                    .session_surface
+                    .as_ref()
+                    .and_then(|descriptor| descriptor.surface_id())
+                    .context("terminal lease is missing surface_id")?;
+                let vsock_uds = session
+                    .vsock_uds
+                    .clone()
+                    .context("terminal session exposes no Firecracker vsock UDS")?;
+                let scope = netd::surface_authorization::SurfaceGatewayScope {
+                    session_id: session_id.clone(),
+                    surface_id: surface_id.to_string(),
+                };
+                let probe_origin = runtime
+                    .allowed_origins
+                    .iter()
+                    .next()
+                    .context("terminal gateway has no allowed probe origin")?;
+                let assertion = runtime
+                    .assertion_keyring
+                    .issue_readiness_assertion(&scope)
+                    .context("issue one-time terminal readiness assertion")?;
+                let handle = netd::terminal_probe::start_ready_terminal_gateway(
+                    netd::terminal_gateway::TerminalGatewayConfig {
+                        listen_addr: resolve_socket_addr(&slot.proxy_listen).await?,
+                        firecracker_vsock_uds: vsock_uds,
+                        guest_connect_timeout: Duration::from_millis(surface_ready_timeout_ms),
+                        scope,
+                        allowed_origins: runtime.allowed_origins.clone(),
+                    },
+                    Arc::clone(&runtime.authorizer),
+                    netd::terminal_probe::TerminalGatewayProbeRequest::new(
+                        public_ready_url,
+                        probe_origin,
+                        assertion.as_str(),
+                    ),
+                    Duration::from_millis(surface_ready_timeout_ms),
+                )
+                .await
+                .context("authenticated public terminal path did not become interactive")?;
+                Ok::<_, anyhow::Error>(handle)
+            }
+            .await;
+
+            match setup {
+                Ok(handle) => {
+                    println!(
+                        "🖥️  restore lease {lease_id}: slot {} terminal gateway {} -> guest vsock {}",
+                        slot.index,
+                        handle.local_addr(),
+                        netd::terminal_gateway::GUEST_TERMINAL_VSOCK_PORT,
+                    );
+                    prof_parts.push("terminal_public_ready=1".to_string());
+                    (Some(RestoreGatewayHandle::Terminal(handle)), Some(true))
+                }
+                Err(err) => {
+                    eprintln!(
+                        "⚠️  restore lease {lease_id}: terminal readiness failed: {}",
+                        scrub_secrets(&format!("{err:#}"))
+                    );
+                    if let Some((uds, _)) = supervisor_bind {
+                        let scrub =
+                            tokio::task::spawn_blocking(move || stop_scrub_over_vsock(&uds)).await;
+                        if let Ok(Err(error)) = scrub {
+                            eprintln!(
+                                "⚠️  restore lease {lease_id}: binding scrub failed: {}",
+                                scrub_secrets(&format!("{error:#}"))
+                            );
+                        }
+                    }
+                    let _ = teardown(backend.as_ref(), session);
+                    fail(
+                        client,
+                        api_base,
+                        runner_token,
+                        &lease_id,
+                        slot,
+                        "surface_not_ready",
+                        format!("{err:#}"),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            unreachable!("terminal support is never advertised without Unix Firecracker vsock")
         }
     } else {
         match (candidate.as_deref(), workload_addr.as_deref()) {
@@ -5744,6 +5901,11 @@ async fn handle_claimed_lease(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn no_surface_support() -> crate::application::ready_state::restore_lease::SurfaceRuntimeSupport
+    {
+        crate::application::ready_state::restore_lease::SurfaceRuntimeSupport::default()
+    }
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -5901,7 +6063,8 @@ mod tests {
     #[test]
     fn heartbeat_body_includes_public_base_url_only_when_configured() {
         let caps = vec!["linux".to_string()];
-        let without = build_heartbeat_body(&caps, None, "linux", "aarch64", 1, 0, false);
+        let without =
+            build_heartbeat_body(&caps, None, "linux", "aarch64", 1, 0, no_surface_support());
         assert!(
             without.get("public_base_url").is_none(),
             "absent public_base_url must not be sent (null would clear it server-side)"
@@ -5913,7 +6076,7 @@ mod tests {
             "aarch64",
             3,
             1,
-            false,
+            no_surface_support(),
         );
         assert_eq!(
             with["public_base_url"].as_str(),
@@ -5926,9 +6089,51 @@ mod tests {
 
     #[test]
     fn heartbeat_body_reports_agent_version() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, no_surface_support());
         assert_eq!(body["agent_version"].as_str(), Some(agent_version()));
         assert_eq!(agent_version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn heartbeat_advertises_terminal_only_when_runtime_support_is_ready() {
+        let enabled = build_heartbeat_body(
+            &[],
+            Some("https://runner.example"),
+            "linux",
+            "x86_64",
+            1,
+            0,
+            crate::application::ready_state::restore_lease::SurfaceRuntimeSupport {
+                pixel_stream: false,
+                terminal: true,
+            },
+        );
+        let surfaces = enabled["supported_session_surfaces"]
+            .as_array()
+            .expect("supported surfaces");
+        let terminal = surfaces
+            .iter()
+            .find(|surface| surface["kind"] == "terminal")
+            .expect("terminal capability");
+        assert_eq!(terminal["profiles"][0], "ato.terminal-surface.v1");
+        assert_eq!(terminal["transports"][0], "terminal_websocket");
+
+        let disabled = build_heartbeat_body(
+            &[],
+            Some("https://runner.example"),
+            "linux",
+            "x86_64",
+            1,
+            0,
+            no_surface_support(),
+        );
+        assert!(
+            disabled["supported_session_surfaces"]
+                .as_array()
+                .expect("supported surfaces")
+                .iter()
+                .all(|surface| surface["kind"] != "terminal")
+        );
     }
 
     #[test]
@@ -6222,7 +6427,7 @@ mod tests {
 
     #[test]
     fn heartbeat_advertises_supported_lease_kinds() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, no_surface_support());
         let kinds: Vec<&str> = body["supported_lease_kinds"]
             .as_array()
             .expect("supported_lease_kinds is an array")
@@ -6243,7 +6448,7 @@ mod tests {
 
     #[test]
     fn heartbeat_advertises_supported_snapshot_codecs_field() {
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, no_surface_support());
         assert!(
             body["supported_snapshot_codecs"].is_array(),
             "supported_snapshot_codecs must always be present (no legacy passthrough for codec)"
@@ -7863,7 +8068,7 @@ mod tests {
             "aarch64",
             1,
             0,
-            false,
+            no_surface_support(),
         );
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
@@ -7900,7 +8105,7 @@ mod tests {
             "{\"error\":\"runner_revoked\",\"message\":\"This runner was revoked\"}",
         );
         let client = reqwest::Client::new();
-        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, false);
+        let body = build_heartbeat_body(&[], None, "linux", "aarch64", 1, 0, no_surface_support());
         let outcome =
             send_heartbeat_once(&client, &base, "01TEST", "ato_rnr_test-token", &body).await;
         let _ = server.join();
