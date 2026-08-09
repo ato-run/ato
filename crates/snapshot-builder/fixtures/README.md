@@ -12,3 +12,7 @@ explicit readiness_probe — it seals only through bare-.py normalization + prob
 `linux-x11-pixel/` is the Dockerfile-import fixture for the authenticated
 pixel-stream slice. Its own README documents the explicit private-RFB endpoint
 and PID + WM_CLASS + mapped-window + framebuffer readiness gate.
+
+`linux-terminal/` is the deterministic Terminal Surface v1 recipe fixture. One
+stdlib Python workload exposes build readiness on `/health` while its controlling
+PTY exercises ANSI rendering, keyboard echo, resize/SIGWINCH, Ctrl+C, and clean exit.
