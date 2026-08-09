@@ -3128,15 +3128,33 @@ fn produce_pinned_v1_build(
     //    the immutable closure from the API receipt.
     let generated_archive_path = jobdir.join("generated-source-overlay.tar.zst");
     let (build_input, build_archive_path) = match generated_manifest {
-        Some(generated_manifest) => (
-            materialize_generated_manifest_overlay(
-                &workspace,
-                input,
-                generated_manifest,
-                &generated_archive_path,
-            )?,
-            generated_archive_path,
-        ),
+        Some(generated_manifest) => {
+            let source_manifest_path = workspace.join("capsule.toml");
+            if source_manifest_path.is_file() {
+                let source_manifest =
+                    std::fs::read_to_string(&source_manifest_path).map_err(|e| {
+                        fail("manifest", format!("read pinned source capsule.toml: {e}"))
+                    })?;
+                if source_manifest != generated_manifest {
+                    return Err(fail(
+                        "manifest",
+                        "immutable authoring_toml differs from the pinned source capsule.toml"
+                            .to_string(),
+                    ));
+                }
+                (input.clone(), verified.path().to_path_buf())
+            } else {
+                (
+                    materialize_generated_manifest_overlay(
+                        &workspace,
+                        input,
+                        generated_manifest,
+                        &generated_archive_path,
+                    )?,
+                    generated_archive_path,
+                )
+            }
+        }
         None => (input.clone(), verified.path().to_path_buf()),
     };
 
