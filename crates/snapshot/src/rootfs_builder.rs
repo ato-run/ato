@@ -747,8 +747,12 @@ pub(crate) fn export_guest_rootfs_script_v1(spec: &RootfsBuildSpecV1, tool: &str
         .iter()
         .map(|(name, value)| format!("export {name}={}\n", shell_single_quote(value)))
         .collect::<String>();
-    let (supervisor_prep, launch) = match spec.supervisor.as_ref() {
-        None => (String::new(), launch_argv_line(&spec.resolved_argv)),
+    let (supervisor_prep, supervisor_device_mounts, launch) = match spec.supervisor.as_ref() {
+        None => (
+            String::new(),
+            String::new(),
+            launch_argv_line(&spec.resolved_argv),
+        ),
         Some(supervisor) => {
             let config = build_supervisor_json(supervisor, spec.port, "");
             let config_json =
@@ -774,7 +778,12 @@ ATOSUPERVISORJSON
                  export ATO_GUEST_AGENT_MODE=vsock ATO_GUEST_AGENT_VSOCK_PORT=1025 ATO_BINDINGS_ROOT=/run/ato/bindings\n\
                  /usr/local/bin/ato-guest-agent {arguments} 2>&1 | tee /tmp/agent.log > /dev/console &"
             );
-            (prep, launch)
+            (
+                prep,
+                "mkdir -p /dev/pts\nmount -t devpts devpts /dev/pts 2>/dev/null\nln -sf pts/ptmx /dev/ptmx\n"
+                    .to_string(),
+                launch,
+            )
         }
     };
     format!(
@@ -802,7 +811,7 @@ export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 {authored_environment}mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mount -t tmpfs tmpfs /tmp 2>/dev/null
+{supervisor_device_mounts}mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 cd {init_cwd}
@@ -818,6 +827,7 @@ find "$ATO_ROOTFS" -exec touch -h -d @{epoch} {{}} +
         tool = tool,
         launch = launch,
         supervisor_prep = supervisor_prep,
+        supervisor_device_mounts = supervisor_device_mounts,
         init_cwd = V1_GUEST_WORKING_DIRECTORY,
         port = spec.port,
         epoch = V1_GUEST_IMAGE_EPOCH,
@@ -2934,6 +2944,11 @@ pub(crate) struct PackScriptInputs<'a> {
 /// to the pre-#994 single template) and `docker_import::rootfs` for the import
 /// assembly.
 pub(crate) fn rootfs_pack_script(i: &PackScriptInputs<'_>) -> String {
+    let supervisor_device_mounts = if i.agent_prep.trim().is_empty() {
+        ""
+    } else {
+        "mkdir -p /dev/pts\nmount -t devpts devpts /dev/pts 2>/dev/null\nln -sf pts/ptmx /dev/ptmx\n"
+    };
     format!(
         r#"set -euo pipefail
 {tag_init}
@@ -2967,7 +2982,7 @@ export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 mount -t proc proc /proc 2>/dev/null
 mount -t sysfs sysfs /sys 2>/dev/null
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
-mount -t tmpfs tmpfs /tmp 2>/dev/null
+{supervisor_device_mounts}mount -t tmpfs tmpfs /tmp 2>/dev/null
 mount -t tmpfs tmpfs /run 2>/dev/null
 mount -t tmpfs tmpfs /var/tmp 2>/dev/null
 {extra_mounts}cd {init_cwd}
@@ -2988,6 +3003,7 @@ sync; umount "$MNT"
         tool = i.tool,
         acquire = i.acquire,
         agent_prep = i.agent_prep,
+        supervisor_device_mounts = supervisor_device_mounts,
         launch = i.launch,
         init_cwd = i.init_cwd,
         port = i.port,
@@ -3071,6 +3087,10 @@ command = ["curl", "-fsS", "http://127.0.0.1:8080/"]
         assert!(export.contains("ATO_GUEST_AGENT_BIN"));
         assert!(export.contains("ato-guest-agent"));
         assert!(export.contains("\"stdio_mode\": \"pty\""));
+        assert!(
+            export.contains("mount -t devpts devpts /dev/pts"),
+            "PTY guests must mount devpts before guest-agent starts: {export}"
+        );
     }
 
     #[test]
@@ -4520,6 +4540,10 @@ entrypoint = "two"
         assert!(
             script.contains("ATO_GUEST_AGENT_MODE=vsock"),
             "agent runs in vsock mode"
+        );
+        assert!(
+            script.contains("mount -t devpts devpts /dev/pts"),
+            "supervisor guests must provide a usable PTY device namespace"
         );
         assert!(
             !script.contains("python3 app.py' >/tmp/app.log"),
