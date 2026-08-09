@@ -3013,19 +3013,38 @@ fn materialize_generated_manifest_overlay(
 ) -> std::result::Result<ArchiveOnlyBuildInput, (String, String)> {
     let fail = |stage: &str, reason: String| (stage.to_string(), reason);
     let manifest_path = workspace.join("capsule.toml");
-    let mut manifest = std::fs::OpenOptions::new()
+    match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&manifest_path)
-        .map_err(|error| {
-            fail(
+    {
+        Ok(mut manifest) => {
+            std::io::Write::write_all(&mut manifest, generated_manifest.as_bytes()).map_err(
+                |error| fail("manifest", format!("write generated capsule.toml: {error}")),
+            )?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read_to_string(&manifest_path).map_err(|read_error| {
+                fail(
+                    "manifest",
+                    format!("read existing capsule.toml before overlay: {read_error}"),
+                )
+            })?;
+            if existing != generated_manifest {
+                return Err(fail(
+                    "manifest",
+                    "generated setup refuses to replace a different existing capsule.toml"
+                        .to_string(),
+                ));
+            }
+        }
+        Err(error) => {
+            return Err(fail(
                 "manifest",
-                format!("generated setup refuses to replace an existing capsule.toml: {error}"),
-            )
-        })?;
-    std::io::Write::write_all(&mut manifest, generated_manifest.as_bytes())
-        .map_err(|error| fail("manifest", format!("write generated capsule.toml: {error}")))?;
-    drop(manifest);
+                format!("create generated capsule.toml overlay: {error}"),
+            ));
+        }
+    }
 
     let materialized =
         capsule::blob::materialize_source_archive(workspace, archive_path).map_err(|error| {
@@ -8451,6 +8470,39 @@ targets = ["web"]
         assert_eq!(
             std::fs::read(workspace.path().join("capsule.toml")).expect("read source declaration"),
             b"source declaration"
+        );
+    }
+
+    #[test]
+    fn generated_manifest_overlay_accepts_identical_source_declaration() {
+        let source = tempfile::tempdir().expect("source");
+        std::fs::write(source.path().join("capsule.toml"), b"same declaration")
+            .expect("write source declaration");
+        std::fs::write(source.path().join("app.py"), b"print('ready')")
+            .expect("write source program");
+        let raw_archive = source.path().join("raw-source.tar.zst");
+        let raw = capsule::blob::materialize_source_archive(source.path(), &raw_archive)
+            .expect("materialize raw source");
+        let input = pinned_input(&raw.source_archive_hash, &raw.materialized_source_tree_hash);
+        let overlay_archive = source.path().join("overlay.tar.zst");
+
+        let overlay_input = materialize_generated_manifest_overlay(
+            source.path(),
+            &input,
+            "same declaration",
+            &overlay_archive,
+        )
+        .expect("identical declaration is not an overwrite");
+
+        assert!(overlay_archive.is_file());
+        assert_eq!(
+            overlay_input.source_revision_id(),
+            input.source_revision_id()
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("capsule.toml"))
+                .expect("read source declaration"),
+            "same declaration"
         );
     }
 
