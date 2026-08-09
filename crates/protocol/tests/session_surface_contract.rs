@@ -45,6 +45,32 @@ fn web_surface() -> SessionSurface {
     }
 }
 
+fn terminal_surface() -> SessionSurface {
+    SessionSurface {
+        descriptor: SessionSurfaceDescriptor::Terminal {
+            profile: TERMINAL_SURFACE_PROFILE.to_string(),
+            surface_id: "surface-terminal".to_string(),
+            transport: SessionSurfaceTransport::TerminalWebsocket,
+            capabilities: BTreeMap::from([
+                ("input".to_string(), SurfaceCapabilityValue::Boolean(true)),
+                ("resize".to_string(), SurfaceCapabilityValue::Boolean(true)),
+                (
+                    "encoding".to_string(),
+                    SurfaceCapabilityValue::Text("utf-8".to_string()),
+                ),
+            ]),
+        },
+        access: SessionSurfaceAccess {
+            connect_url: "wss://session.example/surfaces/surface-terminal".to_string(),
+            auth_exchange_url: Some(
+                "https://session.example/surfaces/surface-terminal/auth".to_string(),
+            ),
+            expires_at: "2026-07-14T12:00:00Z".to_string(),
+            generation: 1,
+        },
+    }
+}
+
 #[test]
 fn pixel_surface_round_trips_with_the_v1_wire_shape() {
     let surface = pixel_surface();
@@ -85,6 +111,59 @@ fn authenticated_pixel_surface_requires_secure_access_and_exchange() {
             .validate()
             .expect_err("Pixel exchange must be secure"),
         SessionSurfaceContractError::PixelAuthExchangeMustUseHttps,
+    );
+}
+
+#[test]
+fn terminal_surface_round_trips_with_secure_same_host_access() {
+    let surface = terminal_surface();
+    surface.validate().expect("valid terminal surface");
+    let value = serde_json::to_value(&surface).expect("serialize terminal surface");
+    assert_eq!(value["descriptor"]["transport"], "terminal_websocket");
+    assert_eq!(
+        serde_json::from_value::<SessionSurface>(value).expect("parse terminal surface"),
+        surface
+    );
+}
+
+#[test]
+fn terminal_surface_rejects_insecure_missing_or_cross_host_access() {
+    let mut wrong_transport = terminal_surface();
+    if let SessionSurfaceDescriptor::Terminal { transport, .. } = &mut wrong_transport.descriptor {
+        *transport = SessionSurfaceTransport::RfbWebsocket;
+    }
+    assert_eq!(
+        wrong_transport.validate().expect_err("wrong transport"),
+        SessionSurfaceContractError::UnsupportedTransport
+    );
+
+    let mut insecure_socket = terminal_surface();
+    insecure_socket.access.connect_url = "ws://session.example/surface".to_string();
+    assert_eq!(
+        insecure_socket.validate().expect_err("insecure socket"),
+        SessionSurfaceContractError::TerminalAccessMustUseWss
+    );
+
+    let mut missing_exchange = terminal_surface();
+    missing_exchange.access.auth_exchange_url = None;
+    assert_eq!(
+        missing_exchange.validate().expect_err("missing exchange"),
+        SessionSurfaceContractError::TerminalAuthExchangeRequired
+    );
+
+    let mut insecure_exchange = terminal_surface();
+    insecure_exchange.access.auth_exchange_url =
+        Some("http://session.example/auth/exchange".to_string());
+    assert_eq!(
+        insecure_exchange.validate().expect_err("insecure exchange"),
+        SessionSurfaceContractError::TerminalAuthExchangeMustUseHttps
+    );
+
+    let mut other_host = terminal_surface();
+    other_host.access.auth_exchange_url = Some("https://other.example/auth/exchange".to_string());
+    assert_eq!(
+        other_host.validate().expect_err("cross-host exchange"),
+        SessionSurfaceContractError::TerminalAccessHostsMustMatch
     );
 }
 

@@ -586,21 +586,42 @@ impl SessionSurface {
     pub fn validate(&self) -> Result<(), SessionSurfaceContractError> {
         self.descriptor.validate()?;
         self.access.validate()?;
-        if matches!(
-            &self.descriptor,
-            SessionSurfaceDescriptor::PixelStream { .. }
-        ) {
-            if !self.access.connect_url.starts_with("wss://") {
-                return Err(SessionSurfaceContractError::PixelAccessMustUseWss);
-            }
-            let exchange = self
-                .access
-                .auth_exchange_url
-                .as_deref()
-                .ok_or(SessionSurfaceContractError::PixelAuthExchangeRequired)?;
-            if !exchange.starts_with("https://") {
-                return Err(SessionSurfaceContractError::PixelAuthExchangeMustUseHttps);
-            }
+        match &self.descriptor {
+            SessionSurfaceDescriptor::PixelStream { .. } => self.validate_authenticated_socket(
+                SessionSurfaceContractError::PixelAccessMustUseWss,
+                SessionSurfaceContractError::PixelAuthExchangeRequired,
+                SessionSurfaceContractError::PixelAuthExchangeMustUseHttps,
+                SessionSurfaceContractError::PixelAccessHostsMustMatch,
+            )?,
+            SessionSurfaceDescriptor::Terminal { .. } => self.validate_authenticated_socket(
+                SessionSurfaceContractError::TerminalAccessMustUseWss,
+                SessionSurfaceContractError::TerminalAuthExchangeRequired,
+                SessionSurfaceContractError::TerminalAuthExchangeMustUseHttps,
+                SessionSurfaceContractError::TerminalAccessHostsMustMatch,
+            )?,
+            SessionSurfaceDescriptor::Web { .. } | SessionSurfaceDescriptor::Unknown => {}
+        }
+        Ok(())
+    }
+
+    fn validate_authenticated_socket(
+        &self,
+        invalid_connect_scheme: SessionSurfaceContractError,
+        missing_exchange: SessionSurfaceContractError,
+        invalid_exchange_scheme: SessionSurfaceContractError,
+        host_mismatch: SessionSurfaceContractError,
+    ) -> Result<(), SessionSurfaceContractError> {
+        let connect_host =
+            absolute_url_host(&self.access.connect_url, "wss://").ok_or(invalid_connect_scheme)?;
+        let exchange = self
+            .access
+            .auth_exchange_url
+            .as_deref()
+            .ok_or(missing_exchange)?;
+        let exchange_host =
+            absolute_url_host(exchange, "https://").ok_or(invalid_exchange_scheme)?;
+        if connect_host != exchange_host {
+            return Err(host_mismatch);
         }
         Ok(())
     }
@@ -618,6 +639,19 @@ impl SessionSurface {
             app_expires_at: Some(self.access.expires_at.clone()),
         })
     }
+}
+
+/// Extracts a normalized authority from the two public URL forms used by the
+/// surface contract. This intentionally stays local so the protocol DAG root
+/// does not acquire a general URL/runtime dependency.
+fn absolute_url_host<'a>(value: &'a str, scheme: &str) -> Option<&'a str> {
+    let remainder = value.strip_prefix(scheme)?;
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() || authority.contains('@') || authority.contains('\\') {
+        return None;
+    }
+    Some(authority)
 }
 
 /// Canonical ready-envelope fields owned by the session-surface contract.
@@ -752,6 +786,16 @@ pub enum SessionSurfaceContractError {
     PixelAccessMustUseWss,
     #[error("Pixel auth_exchange_url must use https://")]
     PixelAuthExchangeMustUseHttps,
+    #[error("Pixel connect_url and auth_exchange_url must use the same host")]
+    PixelAccessHostsMustMatch,
+    #[error("authenticated Terminal access requires auth_exchange_url")]
+    TerminalAuthExchangeRequired,
+    #[error("Terminal connect_url must use wss://")]
+    TerminalAccessMustUseWss,
+    #[error("Terminal auth_exchange_url must use https://")]
+    TerminalAuthExchangeMustUseHttps,
+    #[error("Terminal connect_url and auth_exchange_url must use the same host")]
+    TerminalAccessHostsMustMatch,
     #[error("legacy app_url response is missing app_expires_at")]
     LegacyWebMissingExpiry,
     /// The surface is well-formed and describable, but no submission lane can
