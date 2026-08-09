@@ -6,6 +6,8 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "linux")]
 use protocol::terminal_surface::{
@@ -88,15 +90,38 @@ fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> i
     let mut output = attachment.master.try_clone()?;
     let output_writer = Arc::clone(&writer);
     let output_state = Arc::clone(&state);
-    std::thread::spawn(move || {
+    let connection_alive = Arc::new(AtomicBool::new(true));
+    let output_alive = Arc::clone(&connection_alive);
+    let output_thread = std::thread::spawn(move || {
         let mut buffer = vec![0u8; protocol::terminal_surface::MAX_TERMINAL_OUTPUT_CHUNK_BYTES];
-        while let Ok(count) = output.read(&mut buffer) {
+        while output_alive.load(Ordering::Acquire) {
+            let mut ready = libc::pollfd {
+                fd: output.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP,
+                revents: 0,
+            };
+            let polled = unsafe { libc::poll(&mut ready, 1, 100) };
+            if polled < 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            if polled == 0 {
+                continue;
+            }
+            let Ok(count) = output.read(&mut buffer) else {
+                break;
+            };
             if count == 0 {
                 break;
             }
             if write_frame(&output_writer, FRAME_OUTPUT, &buffer[..count]).is_err() {
                 return;
             }
+        }
+        if !output_alive.load(Ordering::Acquire) {
+            return;
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         let exit = loop {
@@ -136,30 +161,35 @@ fn serve_terminal_stream(mut stream: File, state: Arc<TerminalBrokerState>) -> i
     });
 
     let mut master_input = attachment.master.try_clone()?;
-    loop {
-        let (kind, payload) = read_frame(&mut stream)?;
-        match kind {
-            FRAME_INPUT if payload.len() <= MAX_TERMINAL_INPUT_FRAME_BYTES => {
-                master_input.write_all(&payload)?
-            }
-            FRAME_CONTROL if payload.len() <= MAX_TERMINAL_CONTROL_FRAME_BYTES => {
-                let control: TerminalClientControl = serde_json::from_slice(&payload)
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                control
-                    .validate()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-                if let TerminalClientControl::Resize { cols, rows } = control {
-                    state.resize(generation, cols, rows)?;
+    let input_result = (|| {
+        loop {
+            let (kind, payload) = read_frame(&mut stream)?;
+            match kind {
+                FRAME_INPUT if payload.len() <= MAX_TERMINAL_INPUT_FRAME_BYTES => {
+                    master_input.write_all(&payload)?
+                }
+                FRAME_CONTROL if payload.len() <= MAX_TERMINAL_CONTROL_FRAME_BYTES => {
+                    let control: TerminalClientControl = serde_json::from_slice(&payload)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    control
+                        .validate()
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+                    if let TerminalClientControl::Resize { cols, rows } = control {
+                        state.resize(generation, cols, rows)?;
+                    }
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid terminal frame",
+                    ));
                 }
             }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "invalid terminal frame",
-                ));
-            }
         }
-    }
+    })();
+    connection_alive.store(false, Ordering::Release);
+    let _ = output_thread.join();
+    input_result
 }
 
 #[cfg(target_os = "linux")]
