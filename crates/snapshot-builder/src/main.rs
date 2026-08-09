@@ -3127,7 +3127,7 @@ fn produce_pinned_v1_build(
     //    archive with capsule.toml, while its projected source identity remains
     //    the immutable closure from the API receipt.
     let generated_archive_path = jobdir.join("generated-source-overlay.tar.zst");
-    let (build_input, build_archive_path) = match generated_manifest {
+    let (build_input, build_archive_path, manifest_was_pinned_source) = match generated_manifest {
         Some(generated_manifest) => {
             let source_manifest_path = workspace.join("capsule.toml");
             if source_manifest_path.is_file() {
@@ -3142,7 +3142,7 @@ fn produce_pinned_v1_build(
                             .to_string(),
                     ));
                 }
-                (input.clone(), verified.path().to_path_buf())
+                (input.clone(), verified.path().to_path_buf(), true)
             } else {
                 (
                     materialize_generated_manifest_overlay(
@@ -3152,10 +3152,11 @@ fn produce_pinned_v1_build(
                         &generated_archive_path,
                     )?,
                     generated_archive_path,
+                    false,
                 )
             }
         }
-        None => (input.clone(), verified.path().to_path_buf()),
+        None => (input.clone(), verified.path().to_path_buf(), true),
     };
 
     // 3. The program-source identity this revision COMMITS, derived from the
@@ -3174,7 +3175,14 @@ fn produce_pinned_v1_build(
         acquired.materialized().contract.digest.bytes(),
     )
     .to_string();
-    if generated_manifest.is_some() {
+    // A config-less source has the same full-tree and program-source identity;
+    // prove that adding the generated control file did not change it. A pinned
+    // source manifest is intentionally excluded by the program-source
+    // projection, so those two digests differ by design. Its binding is instead
+    // proved by verified archive acquisition plus the exact authoring_toml byte
+    // comparison above; the final gate below still binds the producer output to
+    // the independently projected digest of those exact archive bytes.
+    if generated_manifest.is_some() && !manifest_was_pinned_source {
         refuse_source_revision_mismatch(
             input.source_revision_id(),
             input.expected_source_tree_digest(),
