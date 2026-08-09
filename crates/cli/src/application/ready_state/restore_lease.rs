@@ -1306,12 +1306,8 @@ mod tests {
         });
         let command = explicit_terminal_surface_command();
 
-        let error = verify_surface_negotiation(
-            &manifest,
-            &command,
-            surface_support(false, false),
-        )
-        .expect_err("a runner without Terminal must fail closed");
+        let error = verify_surface_negotiation(&manifest, &command, surface_support(false, false))
+            .expect_err("a runner without Terminal must fail closed");
         assert!(error.contains("renegotiation"), "{error}");
         verify_surface_negotiation(&manifest, &command, surface_support(false, true))
             .expect("Terminal-capable runner accepts the exact v1 descriptor");
