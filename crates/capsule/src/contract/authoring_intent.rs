@@ -342,8 +342,9 @@ pub fn draft_from_capsule_manifest_v1(
         })
         .collect();
     let readiness = match &manifest.web {
-        Some(web) => ReadinessIntentV1::Tcp {
+        Some(web) => ReadinessIntentV1::Http {
             port: web.port,
+            path: "/".to_string(),
             timeout_seconds: 60,
         },
         None => ReadinessIntentV1::ProcessRunning {
