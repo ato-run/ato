@@ -55,6 +55,14 @@ pub enum ServiceKind {
     RunOnce,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StdioMode {
+    #[default]
+    Log,
+    Pty,
+}
+
 /// Phase 6 (service DAG): WHEN a `run_once` task executes. A migration typically
 /// declares `["seal_once","restore"]` — bake the schema at seal, re-apply it on
 /// every restore. The supervisor runs a `run_once` only if the CURRENT phase is
@@ -273,6 +281,10 @@ pub fn materialize_generated_bindings(
 /// one shape must be present — see [`SupervisorConfig::services`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorConfig {
+    /// `pty` is reserved for a single interactive service selected by a
+    /// Terminal Surface. Existing artifacts default to per-service log files.
+    #[serde(default)]
+    pub stdio_mode: StdioMode,
     /// LEGACY single-service argv. Empty when `services` is used.
     #[serde(default)]
     pub cmd: Vec<String>,
@@ -476,6 +488,13 @@ impl SupervisorConfig {
             }
         }
         let services = self.services();
+        if self.stdio_mode == StdioMode::Pty
+            && (services.len() != 1 || services[0].kind != ServiceKind::Service)
+        {
+            return Err(
+                "supervisor.json: stdio_mode=pty requires exactly one long-running service".into(),
+            );
+        }
         if services.is_empty() {
             return Err("supervisor.json: no service (`cmd` and `services` both empty)".into());
         }
@@ -807,7 +826,7 @@ fn shell_single_quote(s: &str) -> String {
 /// The `sh -c` script that reads each secret from its tmpfs file into the env, then
 /// `exec`s the workload — so the value only ever materializes inside the child (which
 /// becomes the workload via exec), never in the agent. `cmd`/paths are shell-quoted.
-fn spawn_script(plan: &SpawnPlan) -> String {
+pub(crate) fn spawn_script_for_workload(plan: &SpawnPlan) -> String {
     let mut script = String::new();
     for (var, path) in &plan.secret_env {
         // export VAR="$(cat 'path')" — the value is read by the subshell, held only
@@ -834,6 +853,11 @@ fn spawn_script(plan: &SpawnPlan) -> String {
         }
     }
     script
+}
+
+#[cfg(test)]
+fn spawn_script(plan: &SpawnPlan) -> String {
+    spawn_script_for_workload(plan)
 }
 
 /// Phase 5: a POSIX-shell one-liner that enters a fresh MOUNT NAMESPACE, mounts the
@@ -947,7 +971,9 @@ impl Workload for ChildWorkload {
         } else {
             plan.cwd.as_str()
         };
-        c.arg("-c").arg(spawn_script(plan)).current_dir(outer_cwd);
+        c.arg("-c")
+            .arg(spawn_script_for_workload(plan))
+            .current_dir(outer_cwd);
         #[cfg(unix)]
         {
             // Own process group (pgid = child pid). The supervisor cmd is often a
@@ -1044,7 +1070,9 @@ impl Workload for ChildWorkload {
             return Err(std::io::Error::other("run_once cmd is empty"));
         }
         let mut c = std::process::Command::new("/bin/sh");
-        c.arg("-c").arg(spawn_script(plan)).current_dir(&plan.cwd);
+        c.arg("-c")
+            .arg(spawn_script_for_workload(plan))
+            .current_dir(&plan.cwd);
         #[cfg(unix)]
         {
             // Own process group, same as a service spawn: a run_once may itself be a
@@ -1634,6 +1662,31 @@ mod tests {
             )
             .is_err(),
             "invalid env var in a service rejected"
+        );
+    }
+
+    #[test]
+    fn pty_mode_is_backward_compatible_and_single_service_only() {
+        let legacy = SupervisorConfig::from_json(r#"{"cmd":["true"]}"#).unwrap();
+        assert_eq!(legacy.stdio_mode, StdioMode::Log);
+
+        let terminal = SupervisorConfig::from_json(
+            r#"{"stdio_mode":"pty","services":[{"name":"tui","cmd":["tui"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(terminal.stdio_mode, StdioMode::Pty);
+
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"stdio_mode":"pty","services":[{"name":"a","cmd":["a"]},{"name":"b","cmd":["b"]}]}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            SupervisorConfig::from_json(
+                r#"{"stdio_mode":"pty","services":[{"name":"task","cmd":["task"],"kind":"run_once","run_at":["run"]}]}"#,
+            )
+            .is_err()
         );
     }
 
@@ -2427,6 +2480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "openai", "sk-REAL-VALUE"); // the value must NOT enter the plan
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::from([("PORT".to_string(), "8080".to_string())]),
@@ -2566,6 +2620,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "openai", "sk-PLACEHOLDER");
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["python3".into(), "app.py".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -2605,6 +2660,7 @@ mod tests {
     fn stop_workload_on_a_never_started_supervisor_reports_not_running() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["true".into()],
             cwd: "/app".into(),
             base_env: BTreeMap::new(),
@@ -2629,6 +2685,7 @@ mod tests {
         let out = dir.path().join("seen.txt");
         write(dir.path(), "openai", "sk-CHILD-ONLY-VALUE");
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2671,6 +2728,7 @@ mod tests {
         // return within ~grace + reap via SIGKILL. `trap '' TERM` ignores SIGTERM.
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec![
                 "sh".into(),
                 "-c".into(),
@@ -2705,6 +2763,7 @@ mod tests {
         // A child that exits on SIGTERM is reaped well inside the grace window.
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["sleep".into(), "300".into()], // default SIGTERM disposition = terminate
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
@@ -2735,6 +2794,7 @@ mod tests {
         // dash/bash's exec optimization) keeps the sleeper as a grandchild.
         let dir = tempfile::tempdir().unwrap();
         let cfg = SupervisorConfig {
+            stdio_mode: StdioMode::Log,
             cmd: vec!["sh".into(), "-c".into(), "sleep 300; true".into()],
             cwd: "/tmp".into(),
             base_env: BTreeMap::new(),
