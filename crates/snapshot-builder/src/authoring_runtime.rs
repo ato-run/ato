@@ -101,6 +101,11 @@ pub struct AuthoringWork {
     pub previous_receipt_digest: Option<String>,
     #[serde(default)]
     pub setup_mode: Option<String>,
+    /// Control-plane setup intent. `detect` derives a Build Plan; `preview`
+    /// launches the exact successful Build Attempt. Kept separate from
+    /// `setup_mode`, which describes source-overlay provenance.
+    #[serde(default)]
+    pub purpose: Option<String>,
     #[serde(default)]
     pub source_overlay: Option<serde_json::Value>,
     #[serde(default)]
@@ -1115,6 +1120,34 @@ mod tests {
         .expect("setup claim");
 
         assert_eq!(work.worker_claim_id, None);
+    }
+
+    #[test]
+    fn setup_claim_keeps_preview_purpose_separate_from_overlay_mode() {
+        let work: AuthoringWork = serde_json::from_value(serde_json::json!({
+            "kind": "setup",
+            "work_id": "setup_preview",
+            "authoring_session_id": "auth_preview",
+            "capsule_revision_id": "caprev_preview",
+            "source_revision_id": "srev_preview",
+            "source_closure_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "pinned_source": {
+                "source_revision_id": "srev_preview",
+                "source_materialization_id": "smat_preview",
+                "source_archive_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "source_archive_object_key": "authoring/srev_preview.tar.gz",
+                "source_tree_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            "setup_mode": "manual",
+            "purpose": "preview",
+            "lease_token": "lease-token-with-at-least-thirty-two-bytes",
+            "lease_expires_at": "2026-07-29T00:00:00.000Z",
+            "trace_id": "trace_preview"
+        }))
+        .expect("preview setup claim");
+
+        assert_eq!(work.purpose.as_deref(), Some("preview"));
+        assert_eq!(work.setup_mode.as_deref(), Some("manual"));
     }
 
     #[test]
