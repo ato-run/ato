@@ -1196,10 +1196,19 @@ fn sha256_digest(bytes: &[u8]) -> String {
 
 fn effective_plan_digest(plan: &serde_json::Value) -> Result<String, String> {
     let mut execution_plan = plan.clone();
-    execution_plan
+    let execution_plan = execution_plan
         .as_object_mut()
-        .ok_or_else(|| "Effective Build Plan must be an object".to_string())?
-        .remove("identities");
+        .ok_or_else(|| "Effective Build Plan must be an object".to_string())?;
+    execution_plan.remove("identities");
+    // The API derives the materialization id from this digest. It is persisted
+    // on the final plan for the static producer, but cannot participate in
+    // the digest without making the identity circular.
+    if let Some(static_web_output) = execution_plan
+        .get_mut("static_web_output")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        static_web_output.remove("materialization_id");
+    }
     let canonical = serde_jcs::to_vec(&execution_plan)
         .map_err(|error| format!("canonicalize Effective Build Plan: {error}"))?;
     Ok(sha256_digest(&canonical))
@@ -1432,6 +1441,30 @@ mod tests {
         assert_eq!(
             effective_plan_digest(&fixture).expect("fixture digest"),
             "sha256:d7dd11c86d13078e2ad4a98fc6c1e908485c51c5c422ff4235ec56a7d2fc87eb"
+        );
+    }
+
+    #[test]
+    fn effective_plan_digest_excludes_derived_static_materialization_id() {
+        let base = serde_json::json!({
+            "schema": "ato.effective-build-plan/v1",
+            "identities": { "source_revision_id": "srev_fixture" },
+            "static_web_output": {
+                "schema": "ato.static-web-output-plan/v1",
+                "image_output_root": "app",
+                "entry_path": "index.html",
+                "spa_fallback": false,
+                "connect_src": [],
+                "producer_contract": "ato.static-web-producer/v1"
+            }
+        });
+        let mut persisted = base.clone();
+        persisted["static_web_output"]["materialization_id"] =
+            serde_json::json!("swm_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+
+        assert_eq!(
+            effective_plan_digest(&base).expect("base digest"),
+            effective_plan_digest(&persisted).expect("persisted digest"),
         );
     }
 
