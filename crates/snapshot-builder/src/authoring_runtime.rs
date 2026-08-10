@@ -1396,6 +1396,7 @@ pub fn validate_build_contract(work: &AuthoringWork) -> Result<ValidatedBuildCon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn claim_advertises_immutable_build_plan_support() {
@@ -1850,6 +1851,120 @@ mod tests {
         let error = node_toolchain_requirement(root.path(), &serde_json::json!({}))
             .expect_err("unsupported Node range");
         assert!(error.contains("does not select"));
+    }
+
+    #[test]
+    fn package_managed_static_fixtures_build_from_a_clean_source_tree() {
+        for (framework, dependency, build, entry, output) in [
+            ("vite", "vite", "vite build", "index.html", "dist"),
+            (
+                "cra",
+                "react-scripts",
+                "react-scripts build",
+                "public/index.html",
+                "build",
+            ),
+            (
+                "astro",
+                "astro",
+                "astro build",
+                "src/pages/index.astro",
+                "dist",
+            ),
+            (
+                "eleventy",
+                "@11ty/eleventy",
+                "eleventy",
+                "src/index.njk",
+                "_site",
+            ),
+        ] {
+            assert_clean_static_build("npm", framework, dependency, build, entry, output);
+        }
+        assert_clean_static_build("pnpm", "vite", "vite", "vite build", "index.html", "dist");
+    }
+
+    fn assert_clean_static_build(
+        package_manager: &str,
+        framework: &str,
+        dependency: &str,
+        build: &str,
+        entry: &str,
+        output: &str,
+    ) {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry_path = root.path().join(entry);
+        std::fs::create_dir_all(entry_path.parent().expect("entry parent")).expect("entry dir");
+        std::fs::write(&entry_path, "<main>source</main>").expect("entry");
+        if framework == "astro" {
+            std::fs::write(
+                root.path().join("astro.config.mjs"),
+                "export default { output: 'static' }",
+            )
+            .expect("astro config");
+        }
+        let binary = match framework {
+            "cra" => "react-scripts",
+            other => other,
+        };
+        write_local_static_framework(root.path(), dependency, binary, output);
+        let package = serde_json::json!({
+            "packageManager": format!("{package_manager}@10.0.0"),
+            "scripts": { "build": build },
+            "devDependencies": { dependency: "file:./fake-framework" },
+        });
+        std::fs::write(root.path().join("package.json"), package.to_string()).expect("package");
+        let lock = Command::new(package_manager)
+            .args(match package_manager {
+                "npm" => ["install", "--package-lock-only", "--ignore-scripts"].as_slice(),
+                "pnpm" => ["install", "--lockfile-only", "--ignore-scripts"].as_slice(),
+                _ => unreachable!("test uses npm or pnpm"),
+            })
+            .current_dir(root.path())
+            .status()
+            .expect("package manager available for integration test");
+        assert!(
+            lock.success(),
+            "{package_manager} should generate a local lockfile"
+        );
+        let node_modules = root.path().join("node_modules");
+        if node_modules.exists() {
+            std::fs::remove_dir_all(&node_modules).expect("remove installed dependencies");
+        }
+
+        let inferred = infer_static_web_intent(root.path()).expect("infer clean static build");
+        assert_eq!(inferred.intent.build_steps.len(), 2);
+        for step in &inferred.intent.build_steps {
+            let status = Command::new(&step.argv[0])
+                .args(&step.argv[1..])
+                .current_dir(root.path())
+                .status()
+                .expect("run inferred build step");
+            assert!(status.success(), "inferred {:?} must succeed", step.argv);
+        }
+        assert!(root.path().join(output).join("index.html").is_file());
+    }
+
+    fn write_local_static_framework(root: &Path, dependency: &str, binary: &str, output: &str) {
+        let framework = root.join("fake-framework");
+        std::fs::create_dir_all(&framework).expect("framework dir");
+        std::fs::write(
+            framework.join("package.json"),
+            serde_json::json!({
+                "name": dependency,
+                "version": "1.0.0",
+                "bin": { binary: "bin.js" },
+            })
+            .to_string(),
+        )
+        .expect("framework package");
+        std::fs::write(
+            framework.join("bin.js"),
+            format!(
+                "#!/usr/bin/env node\nconst fs = require('fs'); fs.mkdirSync('{output}', {{ recursive: true }}); fs.writeFileSync('{output}/index.html', '<main>built</main>');\n"
+            ),
+        )
+        .expect("framework binary");
     }
 
     #[test]
