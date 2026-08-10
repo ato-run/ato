@@ -68,6 +68,65 @@ pub struct StaticWebOutputIntentV1 {
     pub connect_src: Vec<String>,
 }
 
+/// Node releases the authoring builder can select without asking a later stage
+/// to reinterpret an npm-style range. Keep only exact versions in Program
+/// Intent so the rootfs image reference remains well-formed and reproducible.
+pub const SUPPORTED_AUTHORING_NODE_VERSIONS: &[&str] = &["20.18.3", "22.14.0"];
+
+/// Resolve the limited Node version syntax accepted by source inference to an
+/// exact supported release. This is deliberately pure: detector evidence is
+/// gathered outside this module, while both source inference and rootfs
+/// materialization can share the same interpretation.
+pub fn resolve_authoring_node_version(hint: &str) -> Result<&'static str, String> {
+    let hint = hint.trim();
+    if hint.is_empty() {
+        return Err("Node version hint is empty".to_string());
+    }
+    if matches!(hint, "lts/*" | "lts/-1") {
+        return Ok("22.14.0");
+    }
+    let normalized = hint.strip_prefix('v').unwrap_or(hint);
+    if let Some(version) = SUPPORTED_AUTHORING_NODE_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| *version == normalized)
+    {
+        return Ok(version);
+    }
+
+    let candidates = SUPPORTED_AUTHORING_NODE_VERSIONS
+        .iter()
+        .copied()
+        .filter(|version| node_version_satisfies(version, normalized))
+        .collect::<Vec<_>>();
+    candidates.last().copied().ok_or_else(|| {
+        format!("Node version hint {hint:?} does not select a supported Ato Node release")
+    })
+}
+
+fn node_version_satisfies(version: &str, hint: &str) -> bool {
+    let Some((major, minor, patch)) = parse_node_version(version) else {
+        return false;
+    };
+    match hint {
+        "20" => major == 20,
+        "22" => major == 22,
+        "^20" | "^20.0.0" => major == 20,
+        ">=22" => (major, minor, patch) >= (22, 0, 0),
+        ">=18 <23" => (major, minor, patch) >= (18, 0, 0) && major < 23,
+        _ => false,
+    }
+}
+
+fn parse_node_version(version: &str) -> Option<(u16, u16, u16)> {
+    let mut components = version.split('.').map(str::parse::<u16>);
+    Some((
+        components.next()?.ok()?,
+        components.next()?.ok()?,
+        components.next()?.ok()?,
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProgramCommandDraftV1 {
@@ -791,6 +850,21 @@ command = ["node", "verify.js"]
             resolution_lock_digest(br#"{"runtime":{"ref":"python:3.12"},"version":1}"#)
                 .expect("changed"),
         );
+    }
+
+    #[test]
+    fn node_version_hints_resolve_to_exact_supported_releases() {
+        for (hint, expected) in [
+            ("v22", "22.14.0"),
+            ("22.14.0", "22.14.0"),
+            (">=22", "22.14.0"),
+            ("^20", "20.18.3"),
+            (">=18 <23", "22.14.0"),
+            ("lts/*", "22.14.0"),
+        ] {
+            assert_eq!(resolve_authoring_node_version(hint), Ok(expected));
+        }
+        assert!(resolve_authoring_node_version(">=24").is_err());
     }
 
     #[test]

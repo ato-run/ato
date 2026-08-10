@@ -618,7 +618,7 @@ fn bounded_diagnostic(value: &str) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StaticWebCandidate {
-    build_command: Option<Vec<String>>,
+    build_commands: Vec<Vec<String>>,
     output_root: WorkspacePathV1,
     entry_path: WorkspacePathV1,
     toolchains: Vec<capsule::authoring_intent::ToolchainRequirementV1>,
@@ -643,7 +643,7 @@ pub fn infer_static_web_intent(
     source_root: &Path,
 ) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
     let StaticWebCandidate {
-        build_command,
+        build_commands,
         output_root,
         entry_path,
         toolchains,
@@ -653,7 +653,7 @@ pub fn infer_static_web_intent(
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
         origin: ProgramIntentOrigin::Inference,
         toolchains,
-        build_steps: build_command
+        build_steps: build_commands
             .into_iter()
             .map(|argv| ProgramCommandDraftV1::Argv {
                 argv,
@@ -708,7 +708,7 @@ fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, 
             );
         }
         return Ok(StaticWebCandidate {
-            build_command: None,
+            build_commands: Vec::new(),
             output_root: WorkspacePathV1::root(),
             entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
             toolchains: Vec::new(),
@@ -730,6 +730,11 @@ fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, 
             "package.json has no recognized static build; choose manual setup".to_string()
         })?;
     let framework = infer_static_build_framework(source_root, &package, build)?;
+    if command_overrides_static_output(build) {
+        return Err(
+            "static build command overrides its output directory; choose manual setup".to_string(),
+        );
+    }
     if scripts.is_some_and(|scripts| has_process_server_evidence(scripts, framework)) {
         return Err(
             "package.json declares a runtime server; static delivery was not inferred".to_string(),
@@ -742,10 +747,10 @@ fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, 
         StaticBuildFramework::Eleventy => ("_site", false),
     };
     Ok(StaticWebCandidate {
-        build_command: Some(package_manager_build_command(source_root, &package)?),
+        build_commands: package_manager_build_commands(source_root, &package)?,
         output_root: WorkspacePathV1::parse(output_root).map_err(|error| error.to_string())?,
         entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
-        toolchains: vec![node_toolchain_requirement(source_root, &package)],
+        toolchains: vec![node_toolchain_requirement(source_root, &package)?],
         spa_fallback,
     })
 }
@@ -881,10 +886,10 @@ fn has_vite_custom_out_dir(source_root: &Path) -> Result<bool, String> {
     .map(|configs| configs.iter().any(|config| config.contains("outDir")))
 }
 
-fn package_manager_build_command(
+fn package_manager_build_commands(
     source_root: &Path,
     package: &serde_json::Value,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<Vec<String>>, String> {
     let declared = package
         .get("packageManager")
         .and_then(serde_json::Value::as_str)
@@ -903,12 +908,43 @@ fn package_manager_build_command(
         }
         None => resolve_locked_package_manager(source_root)?,
     };
+    if !package_manager_lockfile_present(source_root, manager) {
+        return Err(format!(
+            "packageManager {manager:?} has no matching lockfile; choose manual setup"
+        ));
+    }
     Ok(match manager {
-        "npm" => vec!["npm".to_string(), "run".to_string(), "build".to_string()],
-        "pnpm" => vec!["pnpm".to_string(), "run".to_string(), "build".to_string()],
-        "yarn" => vec!["yarn".to_string(), "build".to_string()],
+        "npm" => vec![
+            vec!["npm".to_string(), "ci".to_string()],
+            vec!["npm".to_string(), "run".to_string(), "build".to_string()],
+        ],
+        "pnpm" => vec![
+            vec![
+                "pnpm".to_string(),
+                "install".to_string(),
+                "--frozen-lockfile".to_string(),
+            ],
+            vec!["pnpm".to_string(), "run".to_string(), "build".to_string()],
+        ],
+        "yarn" => vec![
+            vec![
+                "yarn".to_string(),
+                "install".to_string(),
+                "--frozen-lockfile".to_string(),
+            ],
+            vec!["yarn".to_string(), "build".to_string()],
+        ],
         _ => unreachable!("package manager was validated above"),
     })
+}
+
+fn package_manager_lockfile_present(source_root: &Path, manager: &str) -> bool {
+    match manager {
+        "npm" => source_root.join("package-lock.json").is_file(),
+        "pnpm" => source_root.join("pnpm-lock.yaml").is_file(),
+        "yarn" => source_root.join("yarn.lock").is_file(),
+        _ => false,
+    }
 }
 
 fn resolve_locked_package_manager(source_root: &Path) -> Result<&'static str, String> {
@@ -936,8 +972,8 @@ fn resolve_locked_package_manager(source_root: &Path) -> Result<&'static str, St
 fn node_toolchain_requirement(
     source_root: &Path,
     package: &serde_json::Value,
-) -> capsule::authoring_intent::ToolchainRequirementV1 {
-    let version_constraint = [".nvmrc", ".node-version"]
+) -> Result<capsule::authoring_intent::ToolchainRequirementV1, String> {
+    let hint = [".nvmrc", ".node-version"]
         .into_iter()
         .find_map(|name| std::fs::read_to_string(source_root.join(name)).ok())
         .map(|value| value.trim().to_string())
@@ -958,15 +994,30 @@ fn node_toolchain_requirement(
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .map(|value| value.trim_start_matches(['^', '~']).to_string())
+                .map(str::to_string)
         })
-        // Keep this in sync with the source-inference default until the resolver
-        // is extracted from the CLI crate into a shared capsule dependency.
-        .unwrap_or_else(|| "20".to_string());
-    capsule::authoring_intent::ToolchainRequirementV1 {
+        .unwrap_or_else(|| "lts/*".to_string());
+    let version_constraint = capsule::authoring_intent::resolve_authoring_node_version(&hint)
+        .map(str::to_string)
+        .map_err(|error| format!("{error}; choose manual setup"))?;
+    Ok(capsule::authoring_intent::ToolchainRequirementV1 {
         name: "node".to_string(),
         version_constraint,
-    }
+    })
+}
+
+fn command_overrides_static_output(command: &str) -> bool {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    words.iter().enumerate().any(|(index, word)| {
+        matches!(*word, "--outDir" | "--out-dir" | "--output" | "-o")
+            && words
+                .get(index + 1)
+                .is_some_and(|value| !value.starts_with('-'))
+            || word.starts_with("--outDir=")
+            || word.starts_with("--out-dir=")
+            || word.starts_with("--output=")
+            || (word.starts_with("-o") && word.len() > 2)
+    })
 }
 
 pub fn render_static_web_capsule_toml(
@@ -1538,6 +1589,10 @@ mod tests {
 
         assert_eq!(
             inferred.intent.build_steps[0].argv,
+            ["pnpm", "install", "--frozen-lockfile"]
+        );
+        assert_eq!(
+            inferred.intent.build_steps[1].argv,
             ["pnpm", "run", "build"]
         );
         assert_eq!(
@@ -1573,6 +1628,7 @@ mod tests {
             r#"{"scripts":{"build":"vite build","preview":"vite preview"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("package lock");
 
         let inferred = infer_static_web_intent(root.path()).expect("infer Vite");
 
@@ -1638,6 +1694,7 @@ mod tests {
                 .expect("astro page");
             }
             std::fs::write(root.path().join("package.json"), package).expect("package");
+            std::fs::write(root.path().join("package-lock.json"), "{}").expect("package lock");
 
             let inferred = infer_static_web_intent(root.path()).expect("infer static build");
 
@@ -1674,6 +1731,7 @@ mod tests {
             r#"{"scripts":{"start":"node server.js","build":"vite build"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("package lock");
 
         let error = infer_static_web_intent(root.path()).expect_err("server must remain compute");
 
@@ -1689,6 +1747,7 @@ mod tests {
             r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
         )
         .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("package lock");
         std::fs::write(
             root.path().join("vite.config.ts"),
             "export default { build: { outDir: 'web' } }",
@@ -1698,6 +1757,22 @@ mod tests {
         let error = infer_static_web_intent(root.path()).expect_err("custom output needs review");
 
         assert!(error.contains("outDir"));
+    }
+
+    #[test]
+    fn vite_build_command_output_override_requires_manual_review() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build --outDir web"},"devDependencies":{"vite":"6"},"packageManager":"npm@10"}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("package-lock.json"), "{}").expect("package lock");
+
+        let error = infer_static_web_intent(root.path()).expect_err("manual setup");
+
+        assert!(error.contains("overrides its output directory"));
     }
 
     #[test]
@@ -1727,10 +1802,15 @@ mod tests {
         )
         .expect("package");
         std::fs::write(root.path().join("pnpm-lock.yaml"), "stale").expect("stale lock");
+        std::fs::write(root.path().join("yarn.lock"), "lock").expect("yarn lock");
 
         let inferred = infer_static_web_intent(root.path()).expect("declared manager");
 
-        assert_eq!(inferred.intent.build_steps[0].argv, ["yarn", "build"]);
+        assert_eq!(
+            inferred.intent.build_steps[0].argv,
+            ["yarn", "install", "--frozen-lockfile"]
+        );
+        assert_eq!(inferred.intent.build_steps[1].argv, ["yarn", "build"]);
     }
 
     #[test]
@@ -1746,6 +1826,30 @@ mod tests {
         let error = infer_static_web_intent(root.path()).expect_err("Bun unsupported");
 
         assert!(error.contains("Bun"));
+    }
+
+    #[test]
+    fn static_build_resolves_node_evidence_to_an_exact_supported_release() {
+        for (file, package, expected) in [
+            (Some((".nvmrc", "v22")), r#"{}"#, "22.14.0"),
+            (Some((".node-version", "22.14.0")), r#"{}"#, "22.14.0"),
+            (None, r#"{"volta":{"node":"^20"}}"#, "20.18.3"),
+            (None, r#"{"engines":{"node":">=18 <23"}}"#, "22.14.0"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            let package: serde_json::Value =
+                serde_json::from_str(package).expect("package fragment");
+            if let Some((name, contents)) = file {
+                std::fs::write(root.path().join(name), contents).expect("version file");
+            }
+            let requirement = node_toolchain_requirement(root.path(), &package).expect("version");
+            assert_eq!(requirement.version_constraint, expected);
+        }
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join(".nvmrc"), ">=24").expect("version file");
+        let error = node_toolchain_requirement(root.path(), &serde_json::json!({}))
+            .expect_err("unsupported Node range");
+        assert!(error.contains("does not select"));
     }
 
     #[test]
