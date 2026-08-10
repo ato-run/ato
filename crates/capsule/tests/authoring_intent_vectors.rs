@@ -39,6 +39,7 @@ fn baseline_normalization_matches_shared_canonical_vector() {
             timeout_seconds: 60,
         },
         build_output_roots: vec![WorkspacePathV1::parse("dist").expect("path")],
+        static_web_output: None,
         bindings: Vec::new(),
         unresolved: Vec::new(),
     })

@@ -395,6 +395,7 @@ mod tests {
                 timeout_seconds: 60,
             },
             build_output_roots: Vec::new(),
+            static_web_output: None,
             bindings: Vec::new(),
             unresolved: Vec::new(),
         }

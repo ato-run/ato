@@ -961,6 +961,7 @@ mod tests {
                         timeout_seconds: 60,
                     },
                     build_output_roots: vec![WorkspacePathV1::parse("dist").expect("path")],
+                    static_web_output: None,
                     bindings: Vec::new(),
                 },
                 digest: digest('a'),

@@ -186,6 +186,12 @@ pub struct CapsuleManifestV1 {
     /// `[state.<name>]` — external state, fully declared.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, StateV1>,
+
+    /// `[outputs.static_web]` — a declared static delivery artifact. This is
+    /// an output contract, not a runtime selector: the source may still need a
+    /// Node toolchain to produce it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<OutputsV1>,
 }
 
 pub const SOURCE_FILTER_POLICY_VERSION_V1: &str = "ato-source-filter/v1";
@@ -351,6 +357,30 @@ pub struct BuildStepV1 {
 pub struct RunV1 {
     /// Exact argv. No implicit shell (RFC §6.1).
     pub command: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputsV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_web: Option<StaticWebOutputV1>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticWebOutputV1 {
+    /// Directory relative to the guest workdir produced by the declared build.
+    pub root: String,
+    /// File relative to `root` that receives the browser request at `/`.
+    pub entry_path: String,
+    #[serde(default = "default_static_web_spa_fallback")]
+    pub spa_fallback: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_src: Vec<String>,
+}
+
+fn default_static_web_spa_fallback() -> bool {
+    true
 }
 
 /// `[web]`. Both fields are authored — neither has a default.
@@ -814,6 +844,25 @@ impl CapsuleManifestV1 {
             }
             if web.bind.trim().is_empty() {
                 return Err(ManifestV1Error::Missing { field: "web.bind" });
+            }
+        }
+
+        if let Some(static_web) = self
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.static_web.as_ref())
+        {
+            validate_source_relative_path("outputs.static_web.root", &static_web.root, true)?;
+            validate_source_relative_path(
+                "outputs.static_web.entry_path",
+                &static_web.entry_path,
+                false,
+            )?;
+            if static_web.entry_path == "." {
+                return Err(ManifestV1Error::Invalid {
+                    field: "outputs.static_web.entry_path",
+                    reason: "must identify a file relative to outputs.static_web.root".to_string(),
+                });
             }
         }
 

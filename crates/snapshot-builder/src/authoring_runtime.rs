@@ -11,8 +11,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use capsule::authoring_intent::{
     NormalizedProgramIntentEnvelopeV1, ProgramCommandDraftV1, ProgramIntentDraftV1,
-    ProgramIntentOrigin, ReadinessIntentV1, WorkspacePathV1, draft_from_capsule_manifest_v1,
-    normalize_program_intent, to_capsule_manifest_v1,
+    ProgramIntentOrigin, ReadinessIntentV1, StaticWebOutputIntentV1, WorkspacePathV1,
+    draft_from_capsule_manifest_v1, normalize_program_intent, to_capsule_manifest_v1,
 };
 use capsule::types::manifest_v1::{MetadataAssetsV1, SealAtV1, StoreMetadataV1};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -616,22 +616,42 @@ fn bounded_diagnostic(value: &str) -> String {
         .collect()
 }
 
-/// Infer the narrow static-Web subset used by the first browser E2E.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaticWebCandidate {
+    build_command: Option<Vec<String>>,
+    output_root: WorkspacePathV1,
+    entry_path: WorkspacePathV1,
+    toolchains: Vec<capsule::authoring_intent::ToolchainRequirementV1>,
+}
+
+/// Infer a static delivery candidate from source evidence.
 ///
-/// The inference is intentionally source-based and fail-closed. A repository
-/// without a root `index.html` remains unresolved rather than being launched
-/// with a guessed framework command.
+/// Ecosystem evidence (a Node package manager, for example) is deliberately
+/// not delivery evidence. A Node/Vite project still produces a static output,
+/// while a Node server remains a process capsule. This detector only proposes
+/// a declared output; the static producer verifies the clean-build closure.
 pub fn infer_static_web_intent(
     source_root: &Path,
 ) -> Result<NormalizedProgramIntentEnvelopeV1, String> {
-    if !source_root.join("index.html").is_file() {
-        return Err("static Web inference requires a root index.html".to_string());
-    }
+    let StaticWebCandidate {
+        build_command,
+        output_root,
+        entry_path,
+        toolchains,
+    } = infer_static_web_candidate(source_root)?;
     normalize_program_intent(ProgramIntentDraftV1 {
         schema: capsule::authoring_intent::PROGRAM_INTENT_DRAFT_V1_SCHEMA.to_string(),
         origin: ProgramIntentOrigin::Inference,
-        toolchains: Vec::new(),
-        build_steps: Vec::new(),
+        toolchains,
+        build_steps: build_command
+            .into_iter()
+            .map(|argv| ProgramCommandDraftV1::Argv {
+                argv,
+                cwd: WorkspacePathV1::root(),
+                requested_environment: Vec::new(),
+                required_tools: Vec::new(),
+            })
+            .collect(),
         launch: ProgramCommandDraftV1::Argv {
             argv: vec![
                 "python3".to_string(),
@@ -650,11 +670,123 @@ pub fn infer_static_web_intent(
             path: "/".to_string(),
             timeout_seconds: 60,
         },
-        build_output_roots: Vec::new(),
+        build_output_roots: vec![output_root.clone()],
+        static_web_output: Some(StaticWebOutputIntentV1 {
+            root: output_root,
+            entry_path,
+            spa_fallback: true,
+            connect_src: Vec::new(),
+        }),
         bindings: Vec::new(),
         unresolved: Vec::new(),
     })
     .map_err(|error| error.to_string())
+}
+
+fn infer_static_web_candidate(source_root: &Path) -> Result<StaticWebCandidate, String> {
+    if !source_root.join("index.html").is_file() {
+        return Err("static Web inference requires a root index.html".to_string());
+    }
+    let package_path = source_root.join("package.json");
+    if !package_path.is_file() {
+        return Ok(StaticWebCandidate {
+            build_command: None,
+            output_root: WorkspacePathV1::root(),
+            entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
+            toolchains: Vec::new(),
+        });
+    }
+
+    let package = std::fs::read_to_string(&package_path)
+        .map_err(|error| format!("read package.json: {error}"))?;
+    let package: serde_json::Value =
+        serde_json::from_str(&package).map_err(|error| format!("parse package.json: {error}"))?;
+    let scripts = package
+        .get("scripts")
+        .and_then(serde_json::Value::as_object);
+    if scripts.is_some_and(has_process_server_evidence) {
+        return Err(
+            "package.json declares a runtime server; static delivery was not inferred".to_string(),
+        );
+    }
+
+    let build = scripts
+        .and_then(|scripts| scripts.get("build"))
+        .and_then(serde_json::Value::as_str);
+    let (output_root, known_static_build) = match build {
+        Some(command) if command_contains(command, &["vite", "build"]) => {
+            if has_vite_custom_out_dir(source_root)? {
+                return Err("Vite outDir is customized; choose static output manually".to_string());
+            }
+            ("dist", true)
+        }
+        Some(command) if command_contains(command, &["react-scripts", "build"]) => ("build", true),
+        Some(command) if command_contains(command, &["astro", "build"]) => ("dist", true),
+        Some(command) if command_contains(command, &["eleventy"]) => ("_site", true),
+        _ => (".", false),
+    };
+    let build_command = known_static_build.then(|| package_manager_build_command(source_root));
+    Ok(StaticWebCandidate {
+        build_command,
+        output_root: WorkspacePathV1::parse(output_root).map_err(|error| error.to_string())?,
+        entry_path: WorkspacePathV1::parse("index.html").map_err(|error| error.to_string())?,
+        toolchains: if known_static_build {
+            vec![capsule::authoring_intent::ToolchainRequirementV1 {
+                name: "node".to_string(),
+                version_constraint: "20".to_string(),
+            }]
+        } else {
+            Vec::new()
+        },
+    })
+}
+
+fn has_process_server_evidence(scripts: &serde_json::Map<String, serde_json::Value>) -> bool {
+    ["start", "dev"].into_iter().any(|name| {
+        scripts
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|command| {
+                !(command_contains(command, &["vite", "preview"])
+                    || command_contains(command, &["vite"]))
+            })
+    })
+}
+
+fn command_contains(command: &str, expected: &[&str]) -> bool {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    words
+        .windows(expected.len())
+        .any(|window| window == expected)
+}
+
+fn has_vite_custom_out_dir(source_root: &Path) -> Result<bool, String> {
+    [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mjs",
+        "vite.config.cjs",
+    ]
+    .into_iter()
+    .filter(|name| source_root.join(name).is_file())
+    .map(|name| {
+        std::fs::read_to_string(source_root.join(name))
+            .map_err(|error| format!("read {name}: {error}"))
+    })
+    .collect::<Result<Vec<_>, _>>()
+    .map(|configs| configs.iter().any(|config| config.contains("outDir")))
+}
+
+fn package_manager_build_command(source_root: &Path) -> Vec<String> {
+    if source_root.join("pnpm-lock.yaml").is_file() {
+        vec!["pnpm".to_string(), "run".to_string(), "build".to_string()]
+    } else if source_root.join("yarn.lock").is_file() {
+        vec!["yarn".to_string(), "build".to_string()]
+    } else if source_root.join("bun.lockb").is_file() || source_root.join("bun.lock").is_file() {
+        vec!["bun".to_string(), "run".to_string(), "build".to_string()]
+    } else {
+        vec!["npm".to_string(), "run".to_string(), "build".to_string()]
+    }
 }
 
 pub fn render_static_web_capsule_toml(
@@ -1186,8 +1318,147 @@ mod tests {
             capsule::types::manifest_v1::CapsuleManifestV1::from_toml(&manifest).expect("v1");
         assert_eq!(parsed.run.command, normalized.intent.launch.argv);
         assert_eq!(parsed.web.expect("surface").port, 8000);
+        let output = parsed
+            .outputs
+            .and_then(|outputs| outputs.static_web)
+            .expect("static output");
+        assert_eq!(output.root, ".");
+        assert_eq!(output.entry_path, "index.html");
         let authored = normalize_capsule_toml(&manifest).expect("normalize authored manifest");
         assert_eq!(authored.intent.launch.argv, normalized.intent.launch.argv);
+        assert_eq!(
+            authored.intent.static_web_output,
+            normalized.intent.static_web_output
+        );
+    }
+
+    #[test]
+    fn vite_build_only_inference_declares_static_dist_output() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"},"devDependencies":{"vite":"6"}}"#,
+        )
+        .expect("package");
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
+            .expect("lockfile");
+
+        let inferred = infer_static_web_intent(root.path()).expect("infer Vite");
+
+        assert_eq!(
+            inferred.intent.build_steps[0].argv,
+            ["pnpm", "run", "build"]
+        );
+        assert_eq!(
+            inferred
+                .intent
+                .static_web_output
+                .expect("output")
+                .root
+                .as_str(),
+            "dist"
+        );
+    }
+
+    #[test]
+    fn vite_preview_does_not_turn_a_static_build_into_compute() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build","preview":"vite preview"}}"#,
+        )
+        .expect("package");
+
+        let inferred = infer_static_web_intent(root.path()).expect("infer Vite");
+
+        assert_eq!(
+            inferred
+                .intent
+                .static_web_output
+                .expect("output")
+                .root
+                .as_str(),
+            "dist"
+        );
+    }
+
+    #[test]
+    fn package_without_scripts_and_with_a_root_entrypoint_is_static() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<main>static</main>").expect("index");
+        std::fs::write(root.path().join("package.json"), r#"{"name":"docs"}"#).expect("package");
+
+        let inferred = infer_static_web_intent(root.path()).expect("infer static package");
+
+        assert!(inferred.intent.build_steps.is_empty());
+    }
+
+    #[test]
+    fn known_static_build_tools_declare_their_expected_output_roots() {
+        for (script, expected_root) in [
+            ("react-scripts build", "build"),
+            ("astro build", "dist"),
+            ("eleventy", "_site"),
+        ] {
+            let root = tempfile::tempdir().expect("tempdir");
+            std::fs::write(root.path().join("index.html"), "<main>static</main>").expect("index");
+            std::fs::write(
+                root.path().join("package.json"),
+                format!(r#"{{"scripts":{{"build":"{script}"}}}}"#),
+            )
+            .expect("package");
+
+            let inferred = infer_static_web_intent(root.path()).expect("infer static build");
+
+            assert_eq!(
+                inferred
+                    .intent
+                    .static_web_output
+                    .expect("output")
+                    .root
+                    .as_str(),
+                expected_root
+            );
+        }
+    }
+
+    #[test]
+    fn node_server_evidence_refuses_static_even_when_a_stale_dist_exists() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::create_dir(root.path().join("dist")).expect("dist");
+        std::fs::write(root.path().join("dist/index.html"), "stale").expect("stale output");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"start":"node server.js","build":"vite build"}}"#,
+        )
+        .expect("package");
+
+        let error = infer_static_web_intent(root.path()).expect_err("server must remain compute");
+
+        assert!(error.contains("runtime server"));
+    }
+
+    #[test]
+    fn vite_with_a_custom_output_directory_requires_manual_review() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join("index.html"), "<div id=app></div>").expect("index");
+        std::fs::write(
+            root.path().join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .expect("package");
+        std::fs::write(
+            root.path().join("vite.config.ts"),
+            "export default { build: { outDir: 'web' } }",
+        )
+        .expect("config");
+
+        let error = infer_static_web_intent(root.path()).expect_err("custom output needs review");
+
+        assert!(error.contains("outDir"));
     }
 
     #[test]

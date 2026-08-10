@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::types::manifest_v1::{BuildStepV1, BuildV1, CapsuleManifestV1, ConfigKindV1, SealAtV1};
+use crate::types::manifest_v1::{
+    BuildStepV1, BuildV1, CapsuleManifestV1, ConfigKindV1, OutputsV1, SealAtV1, StaticWebOutputV1,
+};
 
 pub const PROGRAM_INTENT_DRAFT_V1_SCHEMA: &str = "ato.program-intent-draft/v1";
 pub const NORMALIZED_PROGRAM_INTENT_V1_SCHEMA: &str = "ato.normalized-program-intent/v1";
@@ -37,6 +39,8 @@ pub struct ProgramIntentDraftV1 {
     pub readiness: ReadinessIntentV1,
     #[serde(default)]
     pub build_output_roots: Vec<WorkspacePathV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_web_output: Option<StaticWebOutputIntentV1>,
     #[serde(default)]
     pub bindings: Vec<BindingRequirementV1>,
     #[serde(default)]
@@ -48,6 +52,19 @@ pub struct ProgramIntentDraftV1 {
 pub struct ToolchainRequirementV1 {
     pub name: String,
     pub version_constraint: String,
+}
+
+/// A static-Web delivery candidate. Its existence declares that the output is
+/// causally produced by the intent's build steps; it never infers static
+/// delivery from a pre-existing directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StaticWebOutputIntentV1 {
+    pub root: WorkspacePathV1,
+    pub entry_path: WorkspacePathV1,
+    pub spa_fallback: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connect_src: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,6 +182,8 @@ pub struct NormalizedProgramIntentV1 {
     pub launch: NormalizedProgramCommandV1,
     pub readiness: ReadinessIntentV1,
     pub build_output_roots: Vec<WorkspacePathV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_web_output: Option<StaticWebOutputIntentV1>,
     pub bindings: Vec<BindingRequirementV1>,
 }
 
@@ -252,6 +271,19 @@ pub fn normalize_program_intent(
             "build_output_roots".to_string(),
         ));
     }
+    if let Some(static_web_output) = &draft.static_web_output {
+        validate_workspace_path(static_web_output.root.as_str())?;
+        validate_workspace_path(static_web_output.entry_path.as_str())?;
+        if static_web_output.entry_path == WorkspacePathV1::root() {
+            return Err(ProgramIntentError::UnsafeWorkspacePath(
+                "static_web_output.entry_path must name a file".to_string(),
+            ));
+        }
+        if !output_roots.contains(&static_web_output.root) {
+            output_roots.push(static_web_output.root.clone());
+            output_roots.sort();
+        }
+    }
 
     let mut bindings = draft.bindings;
     for binding in &bindings {
@@ -269,6 +301,7 @@ pub fn normalize_program_intent(
         launch,
         readiness: draft.readiness,
         build_output_roots: output_roots,
+        static_web_output: draft.static_web_output,
         bindings,
     };
     let canonical = serde_jcs::to_vec(&intent)
@@ -358,7 +391,26 @@ pub fn draft_from_capsule_manifest_v1(
         build_steps,
         launch: command(&manifest.run.command),
         readiness,
-        build_output_roots: Vec::new(),
+        build_output_roots: manifest
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.static_web.as_ref())
+            .map(|output| WorkspacePathV1::parse(output.root.clone()).map(|root| vec![root]))
+            .transpose()?
+            .unwrap_or_default(),
+        static_web_output: manifest
+            .outputs
+            .as_ref()
+            .and_then(|outputs| outputs.static_web.as_ref())
+            .map(|output| {
+                Ok(StaticWebOutputIntentV1 {
+                    root: WorkspacePathV1::parse(output.root.clone())?,
+                    entry_path: WorkspacePathV1::parse(output.entry_path.clone())?,
+                    spa_fallback: output.spa_fallback,
+                    connect_src: output.connect_src.clone(),
+                })
+            })
+            .transpose()?,
         bindings,
         unresolved: Vec::new(),
     };
@@ -435,6 +487,17 @@ pub fn to_capsule_manifest_v1(
         env: Default::default(),
         config: Default::default(),
         state: Default::default(),
+        outputs: normalized
+            .static_web_output
+            .as_ref()
+            .map(|output| OutputsV1 {
+                static_web: Some(StaticWebOutputV1 {
+                    root: output.root.as_str().to_string(),
+                    entry_path: output.entry_path.as_str().to_string(),
+                    spa_fallback: output.spa_fallback,
+                    connect_src: output.connect_src.clone(),
+                }),
+            }),
     })
 }
 
@@ -626,6 +689,7 @@ mod tests {
                 timeout_seconds: 60,
             },
             build_output_roots: vec![WorkspacePathV1::parse("dist").expect("path")],
+            static_web_output: None,
             bindings: Vec::new(),
             unresolved: Vec::new(),
         }
